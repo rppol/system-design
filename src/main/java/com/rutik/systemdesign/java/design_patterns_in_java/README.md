@@ -1,0 +1,623 @@
+# Design Patterns in Java
+
+## 1. Concept Overview
+
+Design patterns are reusable solutions to commonly recurring software design problems. The Gang of Four (GoF) catalog from 1994 defines 23 patterns across three categories: Creational (object creation), Structural (composition), and Behavioral (communication). Java's standard library is itself a showcase of these patterns — `InputStream` hierarchy (Decorator), `Calendar.getInstance()` (Factory), `Comparable` (Strategy), `Thread` (Command), `Object.clone()` (Prototype).
+
+Beyond GoF, this module covers concurrency patterns specific to Java: Immutable Object, Producer-Consumer via `BlockingQueue`, Read-Write Lock, and Thread-Per-Message. Understanding where each pattern appears in the JDK ties abstract theory to working code engineers read every day.
+
+---
+
+## 2. Intuition
+
+> **One-line analogy**: Design patterns are named vocabulary for recurring design conversations — instead of explaining the whole mechanism, you say "use a Decorator here" and experienced engineers immediately understand the structure, intent, and tradeoffs.
+
+**Mental model**: Every pattern answers a specific question. Creational patterns answer "how do I create objects flexibly?" Structural patterns answer "how do I compose objects and classes?" Behavioral patterns answer "how do I assign responsibilities and coordinate communication?" The pattern name is a compression of all that context.
+
+**Why it matters**: Recognizing patterns in existing codebases speeds comprehension dramatically. Applying them correctly creates code that is open for extension but closed for modification (Open-Closed Principle). Misapplying them (Singleton where a value object suffices, Visitor for a 2-case switch) creates unnecessary complexity.
+
+**Key insight**: Java's most important patterns appear in interview questions disguised as API design questions. "Why does `InputStream` use that hierarchy?" (Decorator). "How does `Thread` implement Command?" (it is Command). "What's wrong with a non-enum Singleton?" (serialization, reflection, cloning all break it). Knowing the JDK patterns lets you answer these cold.
+
+---
+
+## 3. Core Principles
+
+- **Open-Closed Principle**: Code should be open for extension, closed for modification — patterns like Strategy and Decorator enable this.
+- **Favor composition over inheritance**: Decorator, Strategy, Composite all use composition rather than deep hierarchies.
+- **Program to interfaces**: All GoF patterns define relationships via abstractions, not concrete classes.
+- **Single Responsibility**: Each participant in a pattern has one well-defined role.
+- **Encapsulate what varies**: Factory encapsulates object creation. Strategy encapsulates algorithm. Builder encapsulates construction sequence.
+
+---
+
+## 4. Types / Architectures / Strategies
+
+### 4.1 Creational Patterns
+
+| Pattern | Intent | Java JDK Example |
+|---------|--------|-----------------|
+| Singleton | One instance per JVM | `Runtime.getRuntime()`, enum |
+| Factory Method | Subclass decides which class to instantiate | `Calendar.getInstance()`, `Iterator` |
+| Abstract Factory | Family of related objects without specifying concrete classes | `DocumentBuilderFactory` |
+| Builder | Construct complex objects step-by-step with validation | `StringBuilder`, `Stream.Builder` |
+| Prototype | Clone existing object | `Object.clone()`, copy constructors |
+
+### 4.2 Structural Patterns
+
+| Pattern | Intent | Java JDK Example |
+|---------|--------|-----------------|
+| Proxy | Surrogate/placeholder for another object | JDK dynamic proxy, Spring AOP |
+| Decorator | Wrap object to add behavior | `InputStream` chain, `Collections.unmodifiableList()` |
+| Adapter | Convert interface to another | `Arrays.asList()`, `InputStreamReader` |
+| Facade | Simplified interface to a subsystem | `Files.readString()`, `Executors.newFixedThreadPool()` |
+| Composite | Tree structure of uniform-interface objects | `File` (leaf + directory), Swing containers |
+| Flyweight | Share fine-grained objects | `Integer.valueOf()` cache, `String.intern()` |
+| Bridge | Separate abstraction from implementation | JDBC (Driver abstraction + concrete DB impl) |
+
+### 4.3 Behavioral Patterns
+
+| Pattern | Intent | Java JDK Example |
+|---------|--------|-----------------|
+| Strategy | Encapsulate interchangeable algorithms | `Comparator`, `Runnable` |
+| Command | Encapsulate request as object | `Runnable`, `Callable`, `ActionListener` |
+| Observer | Notify dependents of state change | `EventListener`, `Observable` (legacy) |
+| Template Method | Define algorithm skeleton; subclasses fill steps | `AbstractList`, `HttpServlet.service()` |
+| Iterator | Sequential access without exposing structure | `Iterator<T>`, `Iterable<T>` |
+| Chain of Responsibility | Pass request along handler chain | Servlet `Filter` chain, logging handlers |
+| State | Change behavior when state changes | `Thread` lifecycle states |
+| Visitor | Add operations to object hierarchy without modifying it | `Files.walkFileTree()` with `FileVisitor` |
+
+### 4.4 Concurrency Patterns
+
+| Pattern | Intent |
+|---------|--------|
+| Immutable Object | No state change after construction — zero synchronization needed |
+| Producer-Consumer | Decouple producers from consumers via `BlockingQueue` |
+| Read-Write Lock | Allow concurrent reads, exclusive writes via `ReentrantReadWriteLock` |
+| Thread-Per-Message | New thread (or virtual thread) for each task |
+| Active Object | Decouple method execution from invocation via `ExecutorService` |
+
+---
+
+## 5. Architecture Diagrams
+
+### Decorator Pattern — InputStream Chain
+```
+         InputStream (abstract)
+               |
+               | wraps
+               v
+     FileInputStream (concrete source)
+               |
+               | wraps
+               v
+   BufferedInputStream (adds 8KB buffer)
+               |
+               | wraps
+               v
+    DataInputStream (adds readInt(), readLong())
+
+new DataInputStream(
+    new BufferedInputStream(
+        new FileInputStream("data.bin")))
+
+Each decorator implements InputStream and delegates to the wrapped stream.
+Adding a new capability = write one new decorator class, no changes elsewhere.
+```
+
+### Proxy Pattern — JDK Dynamic Proxy
+```
+Client Code
+    |
+    | calls method on proxy (same interface)
+    v
+$Proxy0 (JVM-generated class)
+    implements UserService
+    |
+    | delegates to
+    v
+InvocationHandler.invoke(proxy, method, args)
+    |-- before: log, time, transaction start
+    |-- delegate: realUserService.findById(id)
+    |-- after: log result, commit transaction
+    v
+RealUserService.findById(id)
+
+JDK proxy works ONLY for interfaces.
+For class proxying: CGLIB generates a subclass.
+```
+
+### Observer Pattern
+```
+EventSource (Subject)
+    |-- List<EventListener> listeners
+    |-- addListener(l)
+    |-- removeListener(l)
+    |-- fireEvent(event) --> for each l: l.onEvent(event)
+
+Concrete implementations:
+  UserCreatedEvent --> UserAuditListener
+                   --> EmailNotificationListener
+                   --> MetricsListener
+
+Each listener knows nothing about other listeners.
+Source knows nothing about what listeners do with the event.
+```
+
+### Strategy Pattern with Enum
+```java
+enum SortStrategy implements Comparator<Person> {
+    BY_NAME    { public int compare(Person a, Person b) { return a.name().compareTo(b.name()); } },
+    BY_AGE     { public int compare(Person a, Person b) { return Integer.compare(a.age(), b.age()); } },
+    BY_SALARY  { public int compare(Person a, Person b) { return Double.compare(a.salary(), b.salary()); } };
+}
+// Switch strategy at runtime:  list.sort(SortStrategy.BY_AGE)
+// No if-else chain, easily extended by adding enum constant
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### Singleton — All Three Implementations
+
+```java
+// 1. Enum Singleton (BEST — Effective Java Item 3)
+public enum AppConfig {
+    INSTANCE;
+    private final Properties props = loadProperties();
+    public String get(String key) { return props.getProperty(key); }
+    private Properties loadProperties() { /* load from file */ return new Properties(); }
+}
+// Why best: serialization-safe (JVM handles enum serialization by name),
+// reflection-safe (cannot instantiate enum via reflection),
+// thread-safe (class initialization is thread-safe),
+// lazy-initialized (enum class loaded on first use),
+// zero boilerplate.
+
+// 2. Holder Idiom (lazy, thread-safe, no volatile)
+public class Service {
+    private Service() {}
+    private static class Holder {
+        static final Service INSTANCE = new Service();
+        // Class initialization: JVM guarantees thread-safe, at-most-once execution of <clinit>
+    }
+    public static Service getInstance() { return Holder.INSTANCE; }
+}
+// Lazy: Holder class is not loaded until getInstance() is first called.
+// Thread-safe: class initialization is single-threaded by JVM contract.
+// No synchronization overhead on the get path.
+
+// 3. Double-Checked Locking (volatile required)
+public class Service {
+    private static volatile Service instance;  // volatile is REQUIRED
+    private Service() {}
+    public static Service getInstance() {
+        if (instance == null) {                    // first check (no lock)
+            synchronized (Service.class) {
+                if (instance == null) {            // second check (with lock)
+                    instance = new Service();
+                }
+            }
+        }
+        return instance;
+    }
+}
+// Without volatile: JIT can reorder allocation so reference is visible before
+// constructor finishes. volatile write establishes happens-before.
+```
+
+### Builder Pattern — Fluent + Validation
+
+```java
+public class HttpRequest {
+    private final String url;
+    private final String method;
+    private final Map<String, String> headers;
+    private final String body;
+    private final int timeoutMs;
+
+    private HttpRequest(Builder b) {
+        this.url       = b.url;
+        this.method    = b.method;
+        this.headers   = Collections.unmodifiableMap(new HashMap<>(b.headers));
+        this.body      = b.body;
+        this.timeoutMs = b.timeoutMs;
+    }
+
+    public static class Builder {
+        private final String url;          // required
+        private String method = "GET";     // optional with default
+        private Map<String, String> headers = new HashMap<>();
+        private String body;
+        private int timeoutMs = 5000;
+
+        public Builder(String url) {
+            this.url = Objects.requireNonNull(url, "url required");
+        }
+
+        public Builder method(String m) { this.method = m; return this; }
+        public Builder header(String k, String v) { headers.put(k, v); return this; }
+        public Builder body(String b) { this.body = b; return this; }
+        public Builder timeoutMs(int t) { this.timeoutMs = t; return this; }
+
+        public HttpRequest build() {
+            // Validation in build(), not setters — all-or-nothing invariant check
+            if ("POST".equals(method) && body == null)
+                throw new IllegalStateException("POST requires a body");
+            if (timeoutMs <= 0)
+                throw new IllegalArgumentException("timeout must be positive");
+            return new HttpRequest(this);
+        }
+    }
+}
+
+// Usage:
+HttpRequest req = new HttpRequest.Builder("https://api.example.com/users")
+    .method("POST")
+    .header("Content-Type", "application/json")
+    .body("{\"name\":\"Alice\"}")
+    .timeoutMs(10_000)
+    .build();
+```
+
+### Proxy — JDK Dynamic Proxy vs CGLIB
+
+```java
+// JDK Dynamic Proxy: only for interfaces
+UserService proxy = (UserService) Proxy.newProxyInstance(
+    UserService.class.getClassLoader(),
+    new Class[]{UserService.class},
+    (proxyObj, method, args) -> {
+        long start = System.nanoTime();
+        try {
+            return method.invoke(realService, args);
+        } finally {
+            System.out.printf("%s took %dµs%n",
+                method.getName(), (System.nanoTime() - start) / 1000);
+        }
+    }
+);
+// Limitation: UserService must be an interface.
+
+// CGLIB: for concrete classes (Spring uses this when no interface)
+// Generates a SUBCLASS of the target class at runtime.
+// Limitation: cannot proxy final classes or final methods.
+// Spring @Configuration uses CGLIB to intercept @Bean method calls.
+
+// ByteBuddy: modern alternative, used by Mockito, Hibernate.
+```
+
+### Decorator vs Proxy — Key Difference
+
+```
+Decorator: adds NEW behavior; focus is on enriching.
+  new LoggingInputStream(new GZIPInputStream(new FileInputStream(...)))
+  -- each layer adds capability the next doesn't have
+
+Proxy: controls ACCESS to the real object; focus is on control.
+  new SecurityProxy(realService) -- checks permission before delegating
+  The proxy has the same interface; the decorator has a richer interface.
+
+Common confusion: both wrap an object.
+Key distinction: does the wrapper ADD capability or CONTROL access?
+```
+
+### Command Pattern — Runnable as Command
+
+```java
+// Runnable IS the Command pattern:
+// Command interface: Runnable (execute())
+// ConcreteCommand: lambda or method reference
+// Invoker: ExecutorService (calls execute() when appropriate)
+// Receiver: the actual logic inside the lambda
+
+ExecutorService executor = Executors.newFixedThreadPool(4);
+executor.submit(() -> processOrder(orderId));   // command encapsulates request
+executor.submit(() -> sendEmail(userId));
+
+// With Callable<V> (command that returns a result):
+Future<Report> reportFuture = executor.submit(() -> generateReport(dateRange));
+
+// Undo support via CommandHistory:
+interface Command {
+    void execute();
+    void undo();
+}
+
+class TextEditor {
+    private final Deque<Command> history = new ArrayDeque<>();
+
+    public void executeCommand(Command cmd) {
+        cmd.execute();
+        history.push(cmd);
+    }
+    public void undo() {
+        if (!history.isEmpty()) history.pop().undo();
+    }
+}
+```
+
+### Flyweight — String Pool and Integer Cache
+
+```java
+// String interning (Flyweight):
+String a = "hello";          // from string pool (literal)
+String b = "hello";          // same object from pool
+String c = new String("hello"); // NOT from pool — new object
+a == b   // true (same pool object)
+a == c   // false (different objects)
+a.equals(c) // true (same content)
+
+// Integer cache (-128 to 127):
+Integer x = 127;  // Integer.valueOf(127) — from cache
+Integer y = 127;  // same object
+x == y            // true (cached range)
+
+Integer p = 128;  // Integer.valueOf(128) — new object
+Integer q = 128;  // another new object
+p == q            // FALSE (outside cache range!)
+
+// Moral: NEVER use == for boxed Integer outside [-128, 127]
+// This is a classic interview trap.
+
+// Flyweight for custom objects:
+class FontFactory {
+    private static final Map<String, Font> cache = new HashMap<>();
+    public static Font getFont(String name) {
+        return cache.computeIfAbsent(name, Font::new);
+    }
+}
+```
+
+### Template Method vs Strategy
+
+```java
+// Template Method: algorithm skeleton in base class, steps overridden in subclass
+abstract class DataProcessor {
+    // Template method — FINAL: algorithm structure cannot be changed
+    public final void process(Path input, Path output) {
+        List<String> data = readData(input);     // step 1
+        List<String> filtered = filter(data);    // step 2 — abstract
+        List<String> transformed = transform(filtered); // step 3 — abstract
+        writeData(transformed, output);          // step 4
+    }
+
+    protected abstract List<String> filter(List<String> data);
+    protected abstract List<String> transform(List<String> data);
+
+    private List<String> readData(Path p) { /* ... */ return null; }
+    private void writeData(List<String> data, Path p) { /* ... */ }
+}
+
+// Strategy: algorithm is injected; no inheritance required
+class DataProcessor {
+    private final Predicate<String> filter;
+    private final Function<String, String> transformer;
+
+    DataProcessor(Predicate<String> filter, Function<String, String> transformer) {
+        this.filter = filter;
+        this.transformer = transformer;
+    }
+    // Strategy is more flexible: can change at runtime; easier to test
+}
+
+// Rule: Template Method = "how to reuse a fixed algorithm structure with variable steps"
+//       Strategy = "how to swap the entire algorithm at runtime"
+// Template Method uses inheritance; Strategy uses composition.
+```
+
+---
+
+## 7. Real-World Examples
+
+- **`InputStream` hierarchy**: Decorator. `FileInputStream` is the source; `BufferedInputStream`, `DataInputStream`, `CipherInputStream`, `GZIPInputStream` are all decorators. Chain them as needed.
+- **JDK `Proxy.newProxyInstance()`**: Dynamic Proxy. Powers Spring AOP, JPA lazy loading, mock frameworks (Mockito).
+- **`java.util.concurrent.Executors`**: Facade. `Executors.newFixedThreadPool(n)` hides `ThreadPoolExecutor` with `LinkedBlockingQueue` and `DefaultThreadFactory`.
+- **`String` pool + `Integer.valueOf()` cache**: Flyweight. Canonicalizes instances to save memory.
+- **`Runnable` / `Callable`**: Command. `ExecutorService.submit(callable)` decouples task definition from execution.
+- **`Comparator`**: Strategy. `list.sort(Comparator.comparing(Person::name))` injects the comparison algorithm.
+
+---
+
+## 8. Tradeoffs
+
+| Pattern | Benefit | Cost | When NOT to Use |
+|---------|---------|------|-----------------|
+| Singleton | Global shared state, controlled creation | Global state is hard to test; hidden dependencies | When testability matters — prefer dependency injection |
+| Builder | Readable construction, validates invariants | Extra classes/boilerplate | When object has 0-2 simple fields |
+| Decorator | Open-Closed, additive enrichment, no subclass explosion | Deep chains hard to debug | When just 1-2 variants needed |
+| Proxy | Transparent cross-cutting concerns | Reflection overhead per call | Performance-critical inner loops |
+| Strategy | Swap algorithms at runtime, testable | Extra interface/class | When only 1 algorithm ever exists |
+| Observer | Decouples event source from handler | Memory leaks if listeners not removed | When event cardinality is huge |
+
+---
+
+## 9. When to Use / When NOT to Use
+
+**Use Singleton** only when: truly one instance needed (config, registry, connection pool manager). Prefer enum singleton. Do NOT make services singletons — use dependency injection.
+
+**Use Builder** when: more than 3 constructor parameters, some optional, need invariant validation at build time. JavaBeans setters are not builders — they allow partially constructed invalid objects.
+
+**Use Decorator** when: you need to add behavior in combinations without subclass explosion. `n` behaviors → `n` decorators combinable in `2^n` ways vs `2^n` subclasses.
+
+**Use Proxy** when: you need transparent interception (logging, caching, auth, transactions) on an interface. Use CGLIB if the target is a concrete class.
+
+**Use Strategy** over Template Method when: you want composition-based extensibility, or when the algorithm needs to change per-instance at runtime, or when you want to test algorithms independently.
+
+---
+
+## 10. Common Pitfalls
+
+### War Story 1: Non-enum Singleton broken by serialization
+A team serialized their `Service` singleton (implementing `Serializable`) to a file cache. On deserialization, Java created a NEW instance — the "singleton" now had two instances in the JVM. This caused split-brain state: each instance maintained its own connection pool. **Fix**: Use enum singleton (JVM handles serialization of enums by name, returning the existing constant) or add `readResolve()`.
+
+### War Story 2: Observer listener leak
+An event bus held strong references to all registered `EventListener` objects. A GUI component registered itself as a listener but was never explicitly removed. The component was "closed" by the UI layer, but the event bus still held a strong reference — the component's entire object graph was retained in memory for the JVM lifetime. **Fix**: Use `WeakReference<EventListener>` in the listener list, or require explicit `removeListener()`. Java's `WeakHashMap` automates this pattern.
+
+### War Story 3: Decorator chain not closing correctly
+A developer stacked four `InputStream` decorators. The `close()` call was made only on the outermost decorator. The inner `FileInputStream` was left open (file descriptor leak). In Java 7+, all standard decorators delegate `close()` to the wrapped stream — but custom decorators may not. **Fix**: Always use `try-with-resources` on the outermost resource; verify custom decorators properly chain `close()`.
+
+### War Story 4: Builder not validating in build()
+A `Builder` was validated in each setter. A client set valid values individually but an invalid *combination* (e.g., `startDate` after `endDate`) was only detectable in `build()` when all values were present. The setters had no awareness of the other fields. **Fix**: Validate combinations ONLY in `build()` — don't validate individual fields in setters unless truly isolated; the whole point of Builder is deferred validation on the fully assembled object.
+
+---
+
+## 11. Technologies & Tools
+
+| Tool | Purpose |
+|------|---------|
+| `java.lang.reflect.Proxy` | JDK dynamic proxy (interface-only) |
+| CGLIB | Class-based proxy (subclass generation); used by Spring AOP |
+| ByteBuddy | Modern bytecode generation; used by Mockito, Hibernate |
+| `java.util.function.*` | Functional interfaces for Strategy, Command, Observer patterns |
+| `java.util.concurrent.BlockingQueue` | Foundation of Producer-Consumer pattern |
+| `javap -verbose` | Inspect bridge methods, synthetic members from proxy generation |
+
+---
+
+## 12. Interview Questions with Answers
+
+**Q1: What is the difference between JDK dynamic proxy and CGLIB?**
+JDK dynamic proxy works only for interfaces: it generates a class at runtime that implements the target interface and routes all calls to an `InvocationHandler`. CGLIB (Code Generation Library) works for concrete classes: it generates a subclass at runtime and overrides methods to route calls to an interceptor. Spring uses JDK proxy when the bean implements at least one interface; it falls back to CGLIB otherwise. Key limitation of CGLIB: cannot proxy `final` classes or `final` methods. ByteBuddy is the modern alternative, used by Mockito.
+
+**Q2: How does the Decorator pattern map to Java I/O streams?**
+`InputStream` is the abstract component. `FileInputStream` and `ByteArrayInputStream` are concrete components (sources). `FilterInputStream` is the abstract decorator — it holds a reference to a wrapped `InputStream` and delegates all methods to it. Concrete decorators like `BufferedInputStream` (adds 8KB buffer), `DataInputStream` (adds `readInt()`/`readLong()`), and `GZIPInputStream` each extend `FilterInputStream` and add one capability. The pattern enables arbitrary combination: `new DataInputStream(new GZIPInputStream(new BufferedInputStream(new FileInputStream("f.gz"))))`.
+
+**Q3: What is the difference between Strategy and Template Method?**
+Template Method uses inheritance: the base class defines the algorithm skeleton as a `final` method that calls abstract/overridable "steps." Subclasses override steps, not the algorithm. Strategy uses composition: the algorithm is encapsulated in a separate interface and injected. Template Method is simpler when the algorithm structure is fixed and you just want to vary specific steps. Strategy is more flexible: algorithms can change per-instance at runtime; strategies can be tested independently; classes using strategies can have multiple strategies. Effective Java prefers composition (Strategy) over inheritance (Template Method).
+
+**Q4: What is the difference between Factory Method and Abstract Factory?**
+Factory Method: a single factory method (usually abstract) that subclasses override to return different concrete products. "Which class to instantiate" is deferred to subclasses. Example: `Calendar.getInstance()` returns `GregorianCalendar` or Japanese calendar depending on locale. Abstract Factory: a factory interface/class that creates a *family* of related objects, ensuring they are compatible. Example: a `UIComponentFactory` with `createButton()`, `createTextField()`, `createDialog()` — one implementation for macOS, another for Windows. Use Factory Method when you need one product type with variant implementations; Abstract Factory when you need consistent families of multiple product types.
+
+**Q5: How does the Flyweight pattern appear in Java's String interning?**
+The String pool is a canonical registry of `String` objects. String literals are automatically interned — `"hello" == "hello"` is true because both refer to the same pooled instance. `String.intern()` manually adds a string to the pool. `Integer.valueOf()` implements Flyweight for integers in `[-128, 127]`: values in this range always return the same cached `Integer` object. The Flyweight pattern saves memory when many clients use identical fine-grained objects, at the cost of immutability (shared objects cannot be mutated per-client).
+
+**Q6: Why is the enum singleton considered the safest singleton implementation?**
+Enum singleton is safe from four singleton-breaking attacks: (1) Reflection — you cannot call `newInstance()` on an enum via reflection; the JVM throws `IllegalArgumentException`. (2) Serialization — enums serialize by name and deserialize by finding the existing constant; no new instance is created. (3) Cloning — `Enum` overrides `clone()` to throw `CloneNotSupportedException`. (4) Class loader — two different class loaders cannot produce two instances of the same enum. None of these protections hold for the `synchronized + volatile` DCL singleton, which can be broken by reflection (`setAccessible(true)`) and serialization.
+
+**Q7: How does the Command pattern relate to `Runnable` and `Callable`?**
+`Runnable` IS the Command pattern's command interface: `execute()` is `run()`. The concrete command is the lambda or anonymous class you create. The invoker is `ExecutorService` which calls `run()` at some future time, decoupling task creation from execution. `Callable<V>` extends this by making the command return a value (and declare checked exceptions). Command's "history/undo" capability is not in `Runnable` but can be added by wrapping commands in a custom class that also implements an `undo()` method.
+
+**Q8: Which GoF patterns appear prominently in the JDK?**
+Creational: Singleton (`Runtime.getRuntime()`, enums), Factory Method (`Calendar.getInstance()`, `Iterator` from `Iterable`), Builder (`StringBuilder`, `Stream.Builder`, `ProcessBuilder`). Structural: Decorator (`InputStream`/`OutputStream`/`Reader`/`Writer` chains), Proxy (JDK `Proxy`, JDBC connection wrappers), Adapter (`Arrays.asList()`, `InputStreamReader`), Flyweight (`String` pool, `Integer.valueOf()` cache), Facade (`Files`, `Executors`). Behavioral: Iterator (`java.util.Iterator`), Strategy (`Comparator`, `ThreadFactory`, `RejectedExecutionHandler`), Command (`Runnable`, `Callable`), Observer (`EventListener` hierarchy), Template Method (`AbstractList`, `HttpServlet.service()`).
+
+**Q9: What is the Producer-Consumer pattern and how does `BlockingQueue` implement it?**
+Producer-Consumer decouples the rate of production from the rate of consumption via a shared bounded buffer. `BlockingQueue` is the buffer: `put(item)` blocks when full; `take()` blocks when empty. This creates natural backpressure — producers slow down automatically when consumers can't keep up. Implementation: one or more producer threads call `queue.put(item)`, one or more consumer threads call `queue.take()`. No explicit `wait()`/`notify()` needed — `BlockingQueue` handles all synchronization. Use `ArrayBlockingQueue(capacity)` for bounded buffers, `LinkedTransferQueue` for high-throughput handoff.
+
+**Q10: When would you use Observer (event bus) vs reactive streams?**
+Observer (simple event bus): synchronous dispatch, simple listener interface, suitable for in-process events where listeners complete quickly. Works well for GUI events, domain events in a monolith. Reactive streams (`Flow`, RxJava, Project Reactor): asynchronous, backpressure-aware, composable operators (`map`, `filter`, `flatMap`). Use when: consumers can fall behind producers (need backpressure), operations are async (HTTP calls per event), or you need complex event transformations. Rule: if your observer callbacks are simple method calls and you don't need backpressure, stick with simple Observer; reactive is heavier machinery.
+
+**Q11: Why is the Visitor pattern rarely used in Java compared to Haskell/Scala pattern matching?**
+Visitor solves "add an operation to a type hierarchy without modifying each type." In Java, it requires an `accept(Visitor)` method on every node class and a concrete `Visitor` implementation for every type. Java 21's pattern matching for switch (`switch (shape) { case Circle c -> ...; case Rectangle r -> ...; }`) makes Visitor mostly obsolete for closed hierarchies: sealed classes + exhaustive switch expressions provide the same exhaustiveness guarantee with 80% less code. Visitor still has a place for open hierarchies (where you can't add `accept()` to library classes) and when operations are many and frequently added.
+
+**Q12: What is the Immutable Object concurrency pattern and why does it eliminate synchronization?**
+An immutable object has no mutable state after construction: all fields are `final`, no setters, all methods are pure functions that return new objects rather than modifying state. Because the object can never change, threads can share it freely without synchronization — there is no write that could conflict with a read, so the happens-before rules are irrelevant. Examples: `String`, `BigDecimal`, Java `record`s. Construction must be done carefully: all fields must be set before the reference escapes the constructor (`this` must not be passed to other threads inside the constructor).
+
+---
+
+## 13. Best Practices
+
+1. **Prefer enum singleton** for all singleton needs — it's the only one safe from reflection, serialization, and cloning attacks.
+2. **Use Builder for objects with 3+ parameters or optional fields** — it prevents invalid partially-constructed objects.
+3. **Validate combinations in `build()` not in setters** — setters have no knowledge of sibling fields.
+4. **Use JDK dynamic proxy for interface interception** — no external library needed; use ByteBuddy/CGLIB only if you must proxy concrete classes.
+5. **Make Decorator `close()` delegate to the wrapped resource** — otherwise the inner resource leaks.
+6. **Use `WeakReference<EventListener>` in event buses** — prevents Observer from causing memory leaks.
+7. **Prefer Strategy over Template Method** — composition is more testable and more flexible than inheritance.
+8. **Know the JDK examples for each pattern** — interviewers ask "where does X appear in the JDK?"
+9. **Do not confuse Decorator with Proxy** — Decorator enriches capability; Proxy controls access.
+10. **Use `BlockingQueue` for Producer-Consumer** — it handles all `wait()`/`notify()` synchronization correctly.
+
+---
+
+## 14. Case Study
+
+### Designing a Plugin-Based Report Engine
+
+**Problem**: A report engine that reads from multiple data sources (CSV, JSON, DB), applies different transformations (filter, aggregate, format), and outputs to multiple sinks (HTML, PDF, Kafka). The set of sources and sinks grows over time.
+
+**Pattern composition**:
+
+```java
+// Factory Method: create appropriate reader
+interface ReportReader {
+    List<Row> read(Path source);
+}
+class CsvReportReader  implements ReportReader { ... }
+class JsonReportReader implements ReportReader { ... }
+
+class ReportReaderFactory {
+    public static ReportReader create(String format) {
+        return switch (format) {
+            case "csv"  -> new CsvReportReader();
+            case "json" -> new JsonReportReader();
+            default -> throw new IllegalArgumentException("Unknown: " + format);
+        };
+    }
+}
+
+// Decorator: stack transformations on the reader
+interface RowTransformer {
+    List<Row> transform(List<Row> rows);
+}
+class FilterTransformer implements RowTransformer {
+    private final Predicate<Row> predicate;
+    FilterTransformer(Predicate<Row> p) { this.predicate = p; }
+    public List<Row> transform(List<Row> rows) {
+        return rows.stream().filter(predicate).collect(Collectors.toList());
+    }
+}
+class AggregateTransformer implements RowTransformer { ... }
+
+// Builder: assemble the report pipeline
+class ReportPipeline {
+    private final ReportReader reader;
+    private final List<RowTransformer> transformers;
+    private final ReportWriter writer;
+
+    private ReportPipeline(Builder b) {
+        this.reader = b.reader;
+        this.transformers = List.copyOf(b.transformers);
+        this.writer = b.writer;
+    }
+
+    public void execute(Path source, Path destination) {
+        List<Row> rows = reader.read(source);
+        for (RowTransformer t : transformers) rows = t.transform(rows);
+        writer.write(rows, destination);
+    }
+
+    static class Builder {
+        private ReportReader reader;
+        private final List<RowTransformer> transformers = new ArrayList<>();
+        private ReportWriter writer;
+
+        public Builder reader(ReportReader r) { this.reader = r; return this; }
+        public Builder transform(RowTransformer t) { transformers.add(t); return this; }
+        public Builder writer(ReportWriter w) { this.writer = w; return this; }
+        public ReportPipeline build() {
+            if (reader == null || writer == null)
+                throw new IllegalStateException("reader and writer required");
+            return new ReportPipeline(this);
+        }
+    }
+}
+
+// Usage:
+ReportPipeline pipeline = new ReportPipeline.Builder()
+    .reader(ReportReaderFactory.create("csv"))
+    .transform(new FilterTransformer(row -> row.get("status").equals("PAID")))
+    .transform(new AggregateTransformer("region", "amount"))
+    .writer(new HtmlReportWriter())
+    .build();
+pipeline.execute(Path.of("sales.csv"), Path.of("report.html"));
+```
+
+**Patterns used**:
+- Factory Method: `ReportReaderFactory.create(format)` — open for new formats without modifying the pipeline
+- Decorator chain: multiple `RowTransformer` stacked — each adds one transformation
+- Builder: `ReportPipeline.Builder` — defers validation, readable construction
+- Strategy: `Predicate<Row>` in `FilterTransformer` — injectable filter logic
+
+**Key insight**: Each pattern solves a specific extensibility axis. When you add a new data source, only `ReportReaderFactory` and a new class change. When you add a new transformation, only a new `RowTransformer` implementation is added. No existing code changes — Open-Closed Principle.

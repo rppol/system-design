@@ -1,0 +1,517 @@
+# Guardrails & Content Safety
+
+## 1. Concept Overview
+
+Guardrails are safety mechanisms that sit around LLM systems to detect and prevent harmful inputs and outputs. They are distinct from alignment (which teaches the model itself to behave safely) — guardrails are external filters that operate at the API/application layer, providing defense-in-depth regardless of what the underlying model does.
+
+Even the best-aligned LLMs (Claude, GPT-4) can be jailbroken, manipulated via prompt injection, or make factual errors. Guardrails provide programmable, auditable, enforceable policies that businesses and regulators can inspect — something model alignment alone cannot provide.
+
+---
+
+## Intuition
+
+> **One-line analogy**: Guardrails are like security checkpoints at an airport — even if everyone on the flight is trustworthy, you still scan bags because you can't verify that from a conversation.
+
+**Mental model**: Even a well-aligned LLM can be jailbroken, confused by adversarial prompts, or produce harmful outputs in edge cases. Guardrails are external filters: input filters screen prompts before they reach the model (block injections, PII, harmful queries), output filters screen model responses before they reach users (block toxic content, check factual claims, verify format). Defense in depth — alignment + guardrails — is more robust than either alone.
+
+**Why it matters**: Businesses deploying LLMs face regulatory requirements, reputational risk, and liability from harmful outputs. Guardrails provide auditable, configurable, enterprise-grade safety that can be updated without retraining the model. They're how "AI must not discuss competitor products" gets enforced reliably.
+
+**Key insight**: Guardrails and alignment are complementary, not substitutes. Alignment is probabilistic (reduces harmful outputs); guardrails are deterministic (catch what alignment misses). Neither is sufficient alone.
+
+---
+
+## 2. Core Principles
+
+- **Defense in depth**: Alignment + input guardrails + output guardrails. No single layer is sufficient.
+- **Pre-LLM vs. post-LLM**: Input guardrails block harmful inputs before they reach the LLM; output guardrails filter the LLM's response. Both are needed.
+- **Latency budget**: Every guardrail adds latency. Simple regex checks add <1ms; ML classifiers add 20-100ms; LLM-based checks add 500ms+. Design within your latency budget.
+- **False positive management**: Over-aggressive guardrails block legitimate users. Track false positive rates and tune thresholds.
+- **Fail-safe defaults**: When a guardrail is uncertain, default to the safer action (block or ask for clarification).
+- **Auditability**: Guardrail decisions must be logged with reasons for compliance and debugging.
+
+---
+
+## 3. Types / Strategies
+
+### 3.1 Input Guardrails
+
+Applied to user input before it reaches the LLM.
+
+**Topic classifiers**: Detect off-topic or disallowed requests:
+```python
+# Binary classifier: is this a customer service query?
+def is_on_topic(user_message: str) -> bool:
+    # Fine-tuned BERT classifier
+    score = topic_classifier.predict(user_message)
+    if score < 0.3:
+        return False  # Off-topic, reject
+    return True
+```
+
+**PII Detection and Redaction**: Find and mask personally identifiable information:
+```python
+import spacy
+
+def redact_pii(text: str) -> str:
+    doc = nlp(text)
+    redacted = text
+    for ent in doc.ents:
+        if ent.label_ in ["PERSON", "EMAIL", "PHONE", "SSN", "CREDIT_CARD"]:
+            redacted = redacted.replace(ent.text, f"[{ent.label_}]")
+    return redacted
+
+# Before sending to LLM:
+# "My name is John Smith, email: john@example.com"
+# → "My name is [PERSON], email: [EMAIL]"
+```
+
+**Prompt Injection Detection**:
+```python
+# Heuristic patterns for common injections
+INJECTION_PATTERNS = [
+    r"ignore (previous|all) instructions",
+    r"you are now",
+    r"disregard (your|the) (system|instructions)",
+    r"pretend you are",
+    r"DAN (mode|prompt)",
+    r"your (new|actual) instructions are",
+]
+
+def detect_injection(text: str) -> bool:
+    for pattern in INJECTION_PATTERNS:
+        if re.search(pattern, text, re.IGNORECASE):
+            return True
+    return False
+```
+
+**Length/Format Validation**:
+```python
+def validate_input(text: str, max_tokens: int = 4096) -> bool:
+    tokens = tokenizer.encode(text)
+    if len(tokens) > max_tokens:
+        return False  # Too long — potential denial of service
+    return True
+```
+
+### 3.2 Output Guardrails
+
+Applied to the LLM's response before delivery to the user.
+
+**Toxicity filtering** (rule-based + ML):
+```python
+def check_toxicity(response: str) -> dict:
+    # Perspective API or local classifier
+    result = toxicity_model.predict(response)
+    return {
+        "toxic": result["toxicity"] > 0.7,
+        "severe_toxic": result["severe_toxicity"] > 0.5,
+        "threat": result["threat"] > 0.5,
+    }
+```
+
+**Format validation** (for structured outputs):
+```python
+def validate_json_output(response: str, schema: dict) -> bool:
+    try:
+        data = json.loads(response)
+        jsonschema.validate(data, schema)
+        return True
+    except (json.JSONDecodeError, jsonschema.ValidationError):
+        return False
+```
+
+**Factuality/Grounding check** (for RAG):
+```python
+def check_groundedness(response: str, context_docs: list[str]) -> float:
+    # Check if response is supported by retrieved documents
+    # Use NLI model or LLM-as-judge
+    prompt = f"""Is the following response supported by the context?
+Context: {' '.join(context_docs)}
+Response: {response}
+Answer: [supported/unsupported]"""
+    result = llm(prompt)
+    return 1.0 if "supported" in result.lower() else 0.0
+```
+
+**Secrets/PII in output**:
+```python
+def check_output_pii(response: str) -> bool:
+    # Detect if LLM accidentally output PII from training data
+    patterns = [
+        r'\b\d{3}-\d{2}-\d{4}\b',  # SSN
+        r'\b\d{16}\b',               # Credit card
+        r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+',  # Email
+        r'\b(?:\d{1,3}\.){3}\d{1,3}\b',  # IP address
+    ]
+    for pattern in patterns:
+        if re.search(pattern, response):
+            return True  # PII detected
+    return False
+```
+
+### 3.3 NeMo Guardrails (NVIDIA)
+
+Programmable conversational guardrails using a domain-specific language (Colang):
+
+```colang
+# Define a topical rail
+define user ask about financial advice
+  "Should I invest in X?"
+  "What stocks should I buy?"
+  "Is crypto a good investment?"
+
+define bot decline to give financial advice
+  "I can't provide personalized financial advice. Please consult a licensed financial advisor."
+
+define flow financial advice
+  user ask about financial advice
+  bot decline to give financial advice
+
+# Define a fact-checking rail
+define flow check facts
+  user ask factual question
+  $answer = execute rag_query(user_message)
+  bot respond with $answer
+  bot check factual accuracy
+```
+
+**Architecture**:
+```
+User Input
+     |
+     v
+[Colang Input Rail]  → Detect: off-topic, jailbreak attempt, disallowed topics
+     |
+     v
+[LLM]  → Generate response
+     |
+     v
+[Colang Output Rail] → Check: factuality, grounding, format, safety
+     |
+     v
+Filtered Response
+```
+
+### 3.4 Llama Guard (Meta)
+
+A fine-tuned LLaMA model trained as a safety classifier. Follows the MLCommons Hazard Taxonomy.
+
+```
+Safety categories:
+  S1: Violent Crimes
+  S2: Non-Violent Crimes
+  S3: Sex-Related Crimes
+  S4: Child Sexual Exploitation
+  S5: Defamation
+  S6: Specialized Advice (legal, medical, financial)
+  S7: Privacy
+  S8: Intellectual Property
+  S9: Indiscriminate Weapons
+  S10: Hate
+  S11: Suicide & Self-Harm
+  S12: Sexual Content
+  S13: Elections
+
+Usage:
+  Input check: Is this user message safe?
+  Output check: Is this assistant response safe for the given user message?
+
+Model: LLaMA 3 8B fine-tuned; 7B parameters; runs on single GPU
+Output: "safe" or "unsafe \nS1,S7" (lists violated categories)
+```
+
+### 3.5 Guardrails AI
+
+Python library for output validation using Pydantic-style validators:
+
+```python
+from guardrails import Guard
+from guardrails.hub import ToxicLanguage, ValidLength, OnTopic
+
+guard = Guard().use_many(
+    ToxicLanguage(threshold=0.5, validation_method="sentence"),
+    ValidLength(min=10, max=500),
+    OnTopic(valid_topics=["customer_service", "product_info"]),
+)
+
+response, *rest = guard(
+    llm_api=openai.chat.completions.create,
+    prompt="Help this customer with their issue: {query}",
+    prompt_params={"query": user_query},
+    model="gpt-4o-mini"
+)
+```
+
+---
+
+## 4. Architecture Diagrams
+
+### Guardrail Placement
+```
+User Input
+     |
+     v
+[Input Guardrails]          ← Pre-LLM filters
+  ├── PII detection + redaction
+  ├── Topic classifier
+  ├── Prompt injection detection
+  ├── Length/rate limiting
+  └── Input toxicity check
+     |   [Block if fails any check]
+     v
+[LLM Inference]
+     |
+     v
+[Output Guardrails]         ← Post-LLM filters
+  ├── Output toxicity check
+  ├── PII in output detection
+  ├── Grounding/faithfulness (for RAG)
+  ├── Format validation
+  └── Custom business rules
+     |   [Replace with safe response if fails]
+     v
+User Output + Audit Log
+```
+
+### Parallel Guardrail Architecture (Low Latency)
+```
+User Input
+     |
+     +---- [LLM Inference] --------+
+     |                             |
+     +---- [Safety Classifier] ---+---> Merge
+     |     (runs in parallel)     |    (suppress LLM output if unsafe)
+     |                             |
+     +---- [PII Detector] --------+
+
+Parallel execution: total latency = max(LLM, classifier)
+  LLM: 1-3 seconds
+  Classifier: 50-200ms
+  → No added latency if classifier finishes before LLM
+```
+
+---
+
+## 5. How It Works — Detailed Mechanics
+
+### Guardrail Latency Optimization
+
+```
+Tier 1 (synchronous, <10ms): Rules and heuristics
+  Regex patterns for injections
+  Length limits
+  Blocklist word check
+  → Reject immediately, no LLM call
+
+Tier 2 (synchronous, 20-100ms): ML classifiers
+  Toxicity classifier (BERT-based)
+  Topic classifier
+  PII NER model
+  → Run in parallel with LLM prefill; result ready before decode starts
+
+Tier 3 (synchronous, 500ms-2s): LLM-based checks
+  Grounding check (is response faithful to context?)
+  Complex safety evaluation
+  → Run AFTER LLM generation; before delivery
+  → Budget: only if response passes tier 1/2
+
+Total overhead with parallelism:
+  Tiers 1+2: ~100ms (run during LLM prefill)
+  Tier 3: ~500ms (run after generation, adds to end-to-end latency)
+```
+
+### False Positive Management
+
+```
+Problem: classifier blocks legitimate messages
+  "How do I kill this background process?" → flagged as violent
+  "I'm depressed about my code not working" → flagged as mental health crisis
+  "Can you help me fire this employee fairly?" → flagged as harmful
+
+Solutions:
+  1. Threshold tuning: analyze ROC curve; choose threshold at acceptable FPR
+  2. Context-aware classification: use full conversation, not just current message
+  3. Allow-listing: specific phrases or user tiers bypass certain checks
+  4. Soft blocks: instead of hard reject, flag for human review
+  5. User appeals: "Was this response helpful?" → feedback improves classifier
+
+Monitoring:
+  Track false positive rate (user complaints / total blocks)
+  Target: <0.1% of legitimate requests blocked
+```
+
+### Enterprise Compliance
+
+```
+HIPAA (Healthcare):
+  PHI detection: names, DOB, SSN, medical record numbers, diagnosis codes
+  PHI redaction in prompts AND responses
+  Audit trail: who accessed what, when, with what prompts
+  Data residency: patient data cannot leave specific regions
+
+PCI DSS (Payment):
+  Credit card number detection and blocking (input + output)
+  No storing card numbers in LLM context or logs
+  Network isolation: LLM can't reach payment systems
+
+GDPR (EU):
+  Right to deletion: can the model "forget" user data? (RAG deletion helps)
+  Data minimization: only include necessary PII in prompts
+  Consent: user must agree to AI processing
+  Cross-border transfer: EU data can't go to US models without SCCs
+```
+
+---
+
+## 6. Real-World Examples
+
+### OpenAI Moderation API
+- Pre-built toxicity classifier: `text-moderation-latest`
+- Categories: hate, harassment, self-harm, sexual, violence
+- Free to use with OpenAI API
+- Typical latency: 100-200ms
+- Used by thousands of applications as first-line defense
+
+### Anthropic's Constitutional AI (Embedded Guardrails)
+- Safety aligned into the model itself via CAI training
+- Additional input/output classifiers at API layer
+- Refuses harmful requests while explaining why
+- "Broadly safe" behavior: won't help with bioweapons, CSAM, etc.
+
+### AWS Bedrock Guardrails
+- Managed guardrail service for Bedrock models
+- Configure: denied topics, word filters, PII redaction, grounding check
+- YAML-configurable; no code required
+- Used by enterprise customers for compliance
+
+---
+
+## 7. Tradeoffs
+
+| Guardrail Type | Latency | False Positive | Coverage | Cost |
+|---------------|---------|----------------|---------|------|
+| Regex rules | <1ms | Medium | Low | Free |
+| BERT classifier | 20-50ms | Low | Medium | GPU |
+| LLM-based | 500-2000ms | Lowest | Highest | High |
+| NeMo Guardrails | 200-1000ms | Low | High | Medium |
+| Llama Guard | 100-200ms | Low | High | GPU |
+
+---
+
+## 8. When to Use / When NOT to Use
+
+### Must Use Guardrails When:
+- Consumer applications (any user-facing product)
+- Healthcare, legal, financial domains (regulatory)
+- Applications involving minors
+- Enterprise deployments with compliance requirements
+
+### May Skip Complex Guardrails When:
+- Internal tools with trusted users
+- Offline/batch processing with human review of outputs
+- Applications where the base model's alignment is sufficient for the risk level
+
+---
+
+## 9. Common Pitfalls
+
+1. **Only checking inputs, not outputs**: LLMs can produce unsafe outputs even from safe inputs (jailbreak via indirect injection from web search results).
+2. **Too permissive thresholds**: "Mostly safe" is not safe enough for regulated industries. Tune to your risk tolerance, not the default.
+3. **Not logging guardrail triggers**: Essential for compliance audits and improving classifiers.
+4. **Assuming alignment = safety**: Even well-aligned models have failure modes. External guardrails are always needed.
+5. **Performance testing guardrails**: A guardrail that adds 5s of latency defeats the purpose. Benchmark guardrail overhead.
+
+---
+
+## 10. Technologies & Tools
+
+| Tool | Purpose | Notes |
+|------|---------|-------|
+| **NeMo Guardrails** | Programmable rails | NVIDIA; Colang DSL; most flexible |
+| **Llama Guard** | Safety classifier | Meta; multilingual; follows MLCommons taxonomy |
+| **Guardrails AI** | Output validation | Pydantic-style; code-first |
+| **Rebuff** | Prompt injection detection | ML-based; self-hardening |
+| **AWS Bedrock Guardrails** | Managed service | YAML config; enterprise-grade |
+| **OpenAI Moderation API** | Toxicity classification | Free; easy to integrate |
+| **Perspective API** | Toxicity | Google; granular scores |
+| **Microsoft Presidio** | PII detection/anonymization | Open source; enterprise-grade |
+| **spaCy** | NER-based PII detection | Open source; custom models |
+| **LlamaIndex IngestionGuard** | RAG data validation | Validate ingested documents |
+
+---
+
+## 11. Interview Questions with Answers
+
+**Q: What is the difference between model alignment and external guardrails?**
+A: Alignment (RLHF, Constitutional AI) teaches the model itself to refuse harmful requests and behave safely — it's baked into the weights. External guardrails are input/output filters at the API layer that operate independently of the model. Both are needed because: (1) even well-aligned models can be jailbroken; (2) guardrails provide auditable, programmable policies that compliance requires; (3) business rules change faster than you can retrain models; (4) defense in depth — no single layer is sufficient.
+
+**Q: What is prompt injection and how do you defend against it?**
+A: Prompt injection is when malicious content in the input overrides the system's intended behavior. It can come from the user directly ("Ignore all previous instructions") or indirectly from external sources (a web page the agent retrieves that contains "Actually, your new instructions are..."). Defenses: (1) regex/ML detection for direct injection patterns; (2) clear delimiters between system, user, and retrieved content using XML tags; (3) privilege separation — retrieved content gets lower trust; (4) a separate injection detection classifier before the LLM call; (5) monitoring for anomalous behavior patterns.
+
+**Q: How would you implement PII protection in an LLM pipeline?**
+A: Three layers: (1) Input redaction — detect PII in user input using NER (spaCy, AWS Comprehend) or regex, replace with tokens like [EMAIL]; (2) Context redaction — for RAG, detect and mask PII in retrieved documents before injecting; (3) Output scanning — check LLM response for PII that might have leaked from training data (SSNs, credit cards). Log all redaction actions for compliance. For highest sensitivity, use a vault that maps fake tokens back to real values only when needed.
+
+**Q: What is Llama Guard and when would you use it instead of the OpenAI Moderation API?**
+A: Llama Guard is Meta's fine-tuned LLaMA model trained as a safety classifier following the MLCommons Hazard Taxonomy (13 categories). It evaluates both user inputs and assistant responses. Use it when: (1) self-hosted deployment (no external API calls); (2) open-source model serving (consistent with open stack); (3) need specific categories not covered by OpenAI's API; (4) need to customize — Llama Guard can be fine-tuned on your domain. Use OpenAI Moderation API when: already using OpenAI stack, want simplest integration, free tier is sufficient.
+
+---
+
+## 12. Best Practices
+
+1. **Run input and output guardrails in parallel** where possible to minimize latency impact.
+2. **Tier your guardrails**: fast rules first, slower classifiers only if rules pass.
+3. **Monitor false positive rates continuously** — aggressive guardrails that block too many legitimate requests erode user trust.
+4. **Audit log every guardrail trigger** — what was blocked, why, which rule/classifier, confidence score.
+5. **Test guardrails adversarially** — red team your guardrails; attackers will try to circumvent them.
+6. **Keep classifiers updated** — jailbreak techniques evolve; your injection detection must evolve too.
+7. **Define escalation paths** — when the guardrail is uncertain, should it block, flag for review, or ask for clarification?
+
+---
+
+## 13. Case Study: HIPAA-Compliant Medical Chatbot Guardrails
+
+**Context:** Healthcare company deploys a patient-facing chatbot to answer questions about appointments, medications, and health education. Must comply with HIPAA.
+
+**Guardrail Stack:**
+
+```
+Input guardrails:
+  Layer 1 (1ms): Regex
+    Block: credit card, SSN, insurance numbers → redact or reject
+    Detect: drug names in queries about suicide methods → escalate
+
+  Layer 2 (80ms): BERT classifiers
+    Medical urgency classifier: "I'm having chest pain" → route to human nurse
+    Off-topic classifier: only health/appointment topics allowed
+    PHI detector (fine-tuned NER): names, DOB, MRN → redact
+
+  Layer 3 (50ms): Llama Guard
+    Check against: S11 (self-harm), S6 (medical advice)
+    Flag if triggered
+
+LLM Inference (GPT-4o, HIPAA BAA in place):
+  System prompt: "You are a healthcare assistant. You cannot diagnose conditions
+    or prescribe medications. Always recommend consulting a doctor for medical decisions."
+
+Output guardrails:
+  Layer 1 (1ms): Regex
+    Block: diagnosis statements ("You have X disease")
+    Block: specific drug dosage recommendations
+    Detect: PHI in output (if LLM accidentally uses patient names from training)
+
+  Layer 2 (100ms): Grounding check
+    Is the response grounded in approved medical content?
+    Hallucinated drug interactions or dosages → flag → replace with disclaimer
+
+  Layer 3 (200ms): LLM safety check (gpt-4o-mini)
+    "Does this response provide inappropriate medical advice?"
+    If yes → replace with "Please consult your healthcare provider"
+
+Audit logging:
+  Every request/response logged with:
+    patient_id (anonymized), timestamp, guardrail triggers, PHI redacted (yes/no)
+  Retention: 6 years (HIPAA requirement)
+  Access control: RBAC; only compliance officers can access logs
+```
+
+**Results:** 0 HIPAA violations in first year; 3 self-harm escalations caught by urgency classifier (all legitimate, human nurse contacted); false positive rate 0.08%.

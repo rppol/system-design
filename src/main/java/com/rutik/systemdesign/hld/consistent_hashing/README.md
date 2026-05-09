@@ -1,0 +1,738 @@
+# Consistent Hashing — High-Level Design
+
+## Table of Contents
+1. [Overview and Motivation](#overview-and-motivation)
+2. [The Problem with Naive Modulo Hashing](#the-problem-with-naive-modulo-hashing)
+3. [The Consistent Hashing Solution](#the-consistent-hashing-solution)
+4. [The Hash Ring](#the-hash-ring)
+5. [Adding and Removing Nodes](#adding-and-removing-nodes)
+6. [Virtual Nodes (Vnodes)](#virtual-nodes-vnodes)
+7. [Rebalancing](#rebalancing)
+8. [The Hotspot Problem](#the-hotspot-problem)
+9. [Implementation](#implementation)
+10. [Real-World Systems](#real-world-systems)
+11. [Consistent Hashing vs Rendezvous Hashing](#consistent-hashing-vs-rendezvous-hashing)
+12. [Tradeoffs and Considerations](#tradeoffs-and-considerations)
+13. [Best Practices](#best-practices)
+14. [Case Study: Distributed Cache](#case-study-distributed-cache)
+15. [Interview Questions](#interview-questions)
+
+---
+
+## Intuition
+
+> **One-line analogy**: Consistent hashing is like arranging restaurants around a circular city map — when a new restaurant opens (node added), only nearby customers need to change their favorite restaurant, not everyone in the city.
+
+**Mental model**: Naive hashing assigns each key to server `key % N`. When you add a server (N → N+1), every key remaps — massive cache misses and data rebalancing. Consistent hashing maps both keys and servers onto a ring. Each key goes to the nearest server clockwise. Adding a server only moves keys between the new server and its neighbor — only 1/N fraction of keys are affected. Virtual nodes ensure even distribution even with heterogeneous servers.
+
+**Why it matters**: Consistent hashing enables adding/removing cache nodes (or distributed storage nodes) with minimal disruption. It's used in Cassandra, DynamoDB, Memcached, and CDN routing. Without it, horizontal scaling of caches and distributed storage would cause thundering herds of cache misses on every topology change.
+
+**Key insight**: Virtual nodes (each physical server maps to V points on the ring) solve the load imbalance problem — without them, inconsistent key distribution between servers wastes capacity on some nodes and overloads others.
+
+---
+
+## Overview and Motivation
+
+**Consistent hashing** is a distributed hashing technique that minimizes the number of keys that need to be remapped when the number of nodes in a distributed system changes (nodes added or removed).
+
+It is a foundational algorithm in:
+- Distributed caches (Memcached, Redis Cluster)
+- Distributed databases (Amazon Dynamo, Apache Cassandra, Riak)
+- Load balancers
+- Content delivery networks
+
+The core insight: by mapping both nodes and keys to the same circular space, only a small fraction of keys need to be moved when nodes join or leave.
+
+---
+
+## The Problem with Naive Modulo Hashing
+
+### How naive hashing works:
+
+Given N servers, assign a key to server `i` using:
+
+```
+server_index = hash(key) % N
+```
+
+### Example with 3 servers:
+
+```
+Keys: A, B, C, D, E, F, G, H
+
+hash(A) = 10 --> 10 % 3 = 1 --> Server 1
+hash(B) = 20 --> 20 % 3 = 2 --> Server 2
+hash(C) = 30 --> 30 % 3 = 0 --> Server 0
+hash(D) = 40 --> 40 % 3 = 1 --> Server 1
+hash(E) = 50 --> 50 % 3 = 2 --> Server 2
+```
+
+### What happens when you add a 4th server?
+
+```
+hash(A) = 10 --> 10 % 4 = 2 --> Server 2  (MOVED from Server 1)
+hash(B) = 20 --> 20 % 4 = 0 --> Server 0  (MOVED from Server 2)
+hash(C) = 30 --> 30 % 4 = 2 --> Server 2  (MOVED from Server 0)
+hash(D) = 40 --> 40 % 4 = 0 --> Server 0  (MOVED from Server 1)
+hash(E) = 50 --> 50 % 4 = 2 --> Server 2  (MOVED from Server 2, stayed!)
+```
+
+**Nearly all keys are remapped.** In a distributed cache with millions of keys, this means:
+- A thundering herd of cache misses simultaneously.
+- All traffic hits the backend databases at once.
+- Potential system-wide outage during scaling events.
+
+### The magnitude of the problem:
+
+When going from N to N+1 servers, fraction of keys moved = `N/(N+1)`.
+
+| Before → After | Keys remapped |
+|----------------|---------------|
+| 3 → 4 servers  | ~75%          |
+| 9 → 10 servers | ~90%          |
+| 99 → 100 servers | ~99%        |
+
+As the system grows, adding one server displaces almost all keys. This is catastrophic for any system relying on data locality.
+
+---
+
+## The Consistent Hashing Solution
+
+Consistent hashing maps both **nodes** and **keys** to the same circular hash space (the ring). When nodes change, only keys that were mapped to the affected arc of the ring need to move.
+
+### Core property:
+
+When going from N to N+1 servers, only `1/(N+1)` of keys need to move — the theoretically optimal amount.
+
+| Before → After | Keys remapped (consistent hashing) | Keys remapped (modulo) |
+|----------------|------------------------------------|------------------------|
+| 3 → 4 servers  | ~25%                               | ~75%                   |
+| 9 → 10 servers | ~10%                               | ~90%                   |
+| 99 → 100 servers | ~1%                              | ~99%                   |
+
+---
+
+## The Hash Ring
+
+### How it works:
+
+1. Define a hash space from `0` to `2^32 - 1` (or `2^64 - 1`), arranged as a circle.
+2. Hash each node's identifier (IP address, hostname) and place it on the ring.
+3. For each key, compute `hash(key)` and find the first node clockwise from that position.
+
+### Visual representation:
+
+```
+                      0
+                   /     \
+              2^32/4       |
+                /          |
+               /    Ring   |
+              /            |
+           Node A (h=90)   Node B (h=200)
+            /                    \
+           /                      \
+   Key K3 (h=80)         Key K1 (h=210)
+   --> goes to Node A     --> goes to Node B
+          \                       /
+           \                     /
+            Node D (h=300)  Node C (h=250)
+                \               /
+                 \             /
+                  \           /
+            Key K2 (h=280)
+            --> goes to Node D
+                  2^32
+```
+
+### Step-by-step lookup:
+
+```
+Ring positions (sorted):
+  Node A: 90
+  Node B: 200
+  Node C: 250
+  Node D: 300
+
+Lookup key K1 with hash 210:
+  Scan clockwise from 210...
+  Next node at 250 = Node C
+  --> K1 maps to Node C
+
+Lookup key K2 with hash 280:
+  Scan clockwise from 280...
+  Next node at 300 = Node D
+  --> K2 maps to Node D
+
+Lookup key K3 with hash 320 (wraps around to 90):
+  Scan clockwise from 320...
+  No nodes from 320 to 2^32, wrap to 0...
+  First node at 90 = Node A
+  --> K3 maps to Node A
+```
+
+---
+
+## Adding and Removing Nodes
+
+### Adding a node:
+
+Only keys in the arc immediately counter-clockwise of the new node need to move.
+
+```
+Before (3 nodes):
+  0 ----[A:100]----[B:200]----[C:300]---- 2^32 (wraps)
+  Keys in range (300, 100] --> A
+  Keys in range (100, 200] --> B
+  Keys in range (200, 300] --> C
+
+Add Node D at position 150:
+  0 ----[A:100]----[D:150]----[B:200]----[C:300]---- 2^32
+  Keys in range (300, 100] --> A  (unchanged)
+  Keys in range (100, 150] --> D  (NEW: previously went to B)
+  Keys in range (150, 200] --> B  (reduced range for B)
+  Keys in range (200, 300] --> C  (unchanged)
+
+Only keys in range (100, 150] need to migrate from B to D.
+That is roughly 1/4 of B's previous keys, or 1/(N+1) total keys.
+```
+
+### Removing a node (failure or decommission):
+
+Only keys that were mapped to the removed node need to move — to the next node clockwise.
+
+```
+Remove Node B at position 200:
+  0 ----[A:100]----[C:300]---- 2^32
+
+  Keys previously going to B (range 100-200) now go to C.
+  Only B's keys are affected; A's and C's existing keys are untouched.
+```
+
+### Visual:
+
+```
+BEFORE removing Node B:
+
+       A           B           C
+    (pos:100)   (pos:200)   (pos:300)
+       |     <B>    |     <B>    |
+  ...--+---+---+---+---+---+---+--...
+          K1  K2   K3  K4
+
+
+AFTER removing Node B:
+
+       A                   C
+    (pos:100)           (pos:300)
+       |          <C>          |
+  ...--+---+---+---+---+---+---+--...
+          K1  K2   K3  K4
+               ^---^---- K2, K3 now go to C
+```
+
+---
+
+## Virtual Nodes (Vnodes)
+
+### The problem with few physical nodes:
+
+With only a few nodes, placing them on the ring by hashing their ID leads to uneven distribution. One node might own 60% of the ring while another owns 5%.
+
+```
+Uneven distribution (3 physical nodes):
+
+             0
+          /     \
+   Node C        Node A
+  (owns 60%)    (owns 25%)
+          \     /
+          Node B
+         (owns 15%)
+```
+
+This leads to uneven load — some servers handle much more traffic and store more data.
+
+### Virtual nodes solution:
+
+Each physical node is represented by **multiple virtual nodes** on the ring. The virtual nodes are distributed across the ring, so each physical node owns many small, spread-out arcs rather than one large arc.
+
+```
+Physical nodes: A, B, C
+Virtual nodes per physical node: 3 each
+
+Ring positions (sorted):
+  A_1:  45     B_1:  90     C_1: 130
+  A_2: 180     B_2: 220     C_2: 270
+  A_3: 310     B_3: 340     C_3: 380
+
+Each arc between adjacent vnodes is owned by the
+physical node the vnode belongs to:
+  (380, 45]  --> A (A_1)
+  (45,  90]  --> B (B_1)
+  (90, 130]  --> C (C_1)
+  (130, 180] --> A (A_2)
+  (180, 220] --> B (B_2)
+  (220, 270] --> C (C_2)
+  (270, 310] --> A (A_3)
+  (310, 340] --> B (B_3)
+  (340, 380] --> C (C_3)
+```
+
+Physical node ownership becomes roughly equal (each owns ~1/3 of the ring).
+
+### Visual comparison:
+
+```
+WITHOUT vnodes (uneven):
+Ring: ----[A]----------[B]--[C]----[A]----...
+           ^big arc         ^tiny arcs
+
+WITH vnodes (even):
+Ring: -[A1]-[B1]-[C1]-[A2]-[B2]-[C2]-[A3]-[B3]-[C3]-...
+       ^equal arcs, each physical node gets ~equal share
+```
+
+### Configuring vnode count:
+
+- **Amazon Dynamo**: 150 virtual nodes per physical node.
+- **Apache Cassandra**: configurable, default 256 vnodes per node.
+- **More vnodes**: better load balance, but more overhead (ring size, rebalancing tracking).
+- **Fewer vnodes**: less overhead, but uneven distribution.
+
+Rule of thumb: 100–200 vnodes per physical node is a good default.
+
+### Effect of vnode count on distribution:
+
+```
+Standard deviation of load across nodes (lower = more balanced):
+
+Vnodes/node:  1      10     100    256
+Std Dev:      45%    15%    5%     3%
+```
+
+---
+
+## Rebalancing
+
+When the ring topology changes (node added/removed), only a subset of keys need to migrate.
+
+### Migration process on node addition:
+
+```
+1. New node N announces itself with position P on ring.
+2. Predecessor node (the one immediately counter-clockwise of P) identifies
+   keys in range (predecessor_of_N, P] that it currently owns.
+3. These keys are transferred to N.
+4. Once transfer is complete, N begins serving requests for those keys.
+5. Old node deletes the transferred keys (or lazily, after TTL).
+```
+
+### Migration with vnodes:
+
+With vnodes, a new physical node places V virtual nodes on the ring. Each vnode receives keys from a different predecessor. Data migration happens from V different source nodes in parallel.
+
+```
+New node with 3 vnodes:
+
+  Vnode A_1 at 150 receives keys from B_2 (predecessor range 100-150)
+  Vnode A_2 at 250 receives keys from C_1 (predecessor range 200-250)
+  Vnode A_3 at 350 receives keys from D_3 (predecessor range 320-350)
+
+Migration is parallelized across 3 source nodes.
+```
+
+This is a significant advantage: migration bandwidth is distributed across many nodes rather than one overloaded source.
+
+---
+
+## The Hotspot Problem
+
+### What is a hotspot?
+
+A hotspot occurs when a disproportionate amount of traffic goes to a single node, typically because:
+1. Key distribution is skewed (a few keys are extremely popular — "celebrity" keys).
+2. The hash function distributes keys unevenly.
+3. A single node has too large an arc on the ring.
+
+### Solutions:
+
+**1. Key hashing with salt (address popularity skew)**
+
+For extremely popular keys (e.g., `celebrity_user_123`), append a random suffix before hashing:
+```
+shard_key = hash("celebrity_user_123_" + random_suffix(0, num_shards))
+```
+This spreads a single logical key across multiple physical shards. Requires the application to know how many shards and scatter-gather reads.
+
+**2. Virtual nodes (address ring arc imbalance)**
+
+More vnodes = smaller, more even arcs. Reduces the probability of any single physical node owning an outsized arc.
+
+**3. Request rate limiting per key**
+
+At the application layer, rate-limit requests for known hot keys and serve from an in-process cache.
+
+**4. Dedicated hot key handling**
+
+Detect hot keys dynamically (e.g., keys with > 1000 req/sec). Route them to a dedicated tier of nodes rather than the general ring.
+
+---
+
+## Implementation
+
+### Data structure: Sorted Map (TreeMap)
+
+The ring is implemented as a sorted map from integer position to node identifier. A `TreeMap` in Java (or `SortedDict` / bisect in Python) provides O(log N) lookup via binary search.
+
+### Java Pseudocode
+
+```java
+import java.util.TreeMap;
+import java.security.MessageDigest;
+
+public class ConsistentHash<T> {
+
+    // The ring: position -> node
+    private final TreeMap<Long, T> ring = new TreeMap<>();
+    private final int numVirtualNodes;
+
+    public ConsistentHash(int numVirtualNodes) {
+        this.numVirtualNodes = numVirtualNodes;
+    }
+
+    // Add a physical node to the ring
+    public void addNode(T node) {
+        for (int i = 0; i < numVirtualNodes; i++) {
+            // Hash "node_i" to get the position on the ring
+            long position = hash(node.toString() + "#" + i);
+            ring.put(position, node);
+        }
+    }
+
+    // Remove a physical node from the ring
+    public void removeNode(T node) {
+        for (int i = 0; i < numVirtualNodes; i++) {
+            long position = hash(node.toString() + "#" + i);
+            ring.remove(position);
+        }
+    }
+
+    // Get the node responsible for a given key
+    public T getNode(String key) {
+        if (ring.isEmpty()) return null;
+
+        long position = hash(key);
+
+        // Find the first node at or after this position (clockwise)
+        Map.Entry<Long, T> entry = ring.ceilingEntry(position);
+
+        // If none found, wrap around to the first node
+        if (entry == null) {
+            entry = ring.firstEntry();
+        }
+
+        return entry.getValue();
+    }
+
+    // MD5-based hash function returning a long
+    private long hash(String key) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(key.getBytes("UTF-8"));
+            // Take first 8 bytes as a long
+            long h = 0;
+            for (int i = 0; i < 8; i++) {
+                h = (h << 8) | (digest[i] & 0xFF);
+            }
+            return h;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+}
+```
+
+### Time Complexities
+
+| Operation           | Time Complexity     | Notes                                       |
+|---------------------|---------------------|---------------------------------------------|
+| `addNode`           | O(V log(N*V))       | V virtual nodes inserted, each O(log ring)  |
+| `removeNode`        | O(V log(N*V))       | V virtual nodes removed                     |
+| `getNode` (lookup)  | O(log(N*V))         | Binary search on sorted ring                |
+| Space               | O(N * V)            | N physical nodes, V vnodes each             |
+
+Where N = number of physical nodes, V = vnodes per physical node.
+
+### Python Pseudocode
+
+```python
+import hashlib
+import bisect
+
+class ConsistentHashRing:
+    def __init__(self, nodes=None, num_vnodes=150):
+        self.num_vnodes = num_vnodes
+        self.ring = {}          # position -> node_id
+        self.sorted_positions = []  # sorted list of positions
+
+        if nodes:
+            for node in nodes:
+                self.add_node(node)
+
+    def _hash(self, key: str) -> int:
+        return int(hashlib.md5(key.encode()).hexdigest(), 16)
+
+    def add_node(self, node: str):
+        for i in range(self.num_vnodes):
+            pos = self._hash(f"{node}#{i}")
+            self.ring[pos] = node
+            bisect.insort(self.sorted_positions, pos)
+
+    def remove_node(self, node: str):
+        for i in range(self.num_vnodes):
+            pos = self._hash(f"{node}#{i}")
+            del self.ring[pos]
+            self.sorted_positions.remove(pos)
+
+    def get_node(self, key: str) -> str:
+        if not self.ring:
+            return None
+        pos = self._hash(key)
+        idx = bisect.bisect(self.sorted_positions, pos)
+        # Wrap around
+        idx = idx % len(self.sorted_positions)
+        return self.ring[self.sorted_positions[idx]]
+```
+
+---
+
+## Real-World Systems
+
+### Amazon Dynamo (2007 Paper)
+
+The original paper that popularized consistent hashing for distributed databases. Key design choices:
+- Each node is assigned 150 virtual nodes on the ring.
+- Replication factor of 3: a key is stored on the node responsible for it plus the next 2 nodes clockwise (preference list).
+- Nodes detect ring membership changes via a gossip protocol.
+- Eventual consistency with vector clocks for conflict resolution.
+
+The Dynamo paper is one of the most influential system design papers. DynamoDB, Cassandra, and Riak all derive from its ideas.
+
+### Apache Cassandra
+
+Cassandra uses consistent hashing with configurable vnodes (default: 256 per node). Key choices:
+- Uses Murmur3 hash function for better distribution than MD5.
+- Token assignment is managed by the Cassandra cluster itself (vnodes).
+- Replication factor (RF) configurable per keyspace; keys replicate to RF consecutive ring owners.
+- Gossip protocol for node discovery and ring state propagation.
+
+```
+Cassandra ring with RF=3:
+
+Ring: [A]--[B]--[C]--[D]--[E]
+Key K maps to node B.
+With RF=3: K is stored on B, C, and D.
+If B fails, reads/writes go to C and D (quorum).
+```
+
+### Memcached (libketama)
+
+Memcached does not have built-in consistent hashing — it is implemented in the client library. The most popular implementation is **ketama**, developed at Last.fm.
+
+- Maps each server to 160 virtual nodes on the ring.
+- When a server is added or removed, only ~1/N of keys miss (go to the wrong server) rather than all of them.
+- This dramatically reduces cache miss spikes during cluster changes.
+
+### Riak
+
+Riak is a distributed key-value store based on the Dynamo paper. It uses a fixed ring of **160-bit hash space** divided into **2^10 = 1024 equal partitions**. Physical nodes are assigned partitions round-robin. Adding a node reassigns a proportional number of partitions to the new node.
+
+### Redis Cluster
+
+Redis Cluster uses a hybrid approach: a fixed set of **16384 hash slots** (not a continuous ring). Each node is responsible for a range of slots. Keys are mapped to slots via `CRC16(key) % 16384`. This is simpler than a full consistent hash ring but achieves similar properties.
+
+---
+
+## Consistent Hashing vs Rendezvous Hashing
+
+**Rendezvous hashing** (also called highest random weight hashing) is an alternative algorithm that achieves the same minimal disruption property.
+
+### How Rendezvous Hashing works:
+
+For each key K, compute a score for every node N: `score(K, N) = hash(K + N)`. Assign K to the node with the highest score.
+
+```python
+def get_node_rendezvous(key, nodes):
+    scores = {node: hash(key + node) for node in nodes}
+    return max(scores, key=scores.get)
+```
+
+### Comparison:
+
+| Dimension                  | Consistent Hashing (Ring)          | Rendezvous Hashing                  |
+|----------------------------|------------------------------------|-------------------------------------|
+| Disruption on node change  | O(1/N) keys move                   | O(1/N) keys move                    |
+| Lookup time                | O(log N) (sorted ring)             | O(N) (score all nodes)              |
+| Memory                     | O(N * V) for vnodes                | O(N) just store node list           |
+| Load balancing             | Requires vnodes for even dist.     | Naturally even without vnodes       |
+| Weighted nodes             | Proportional vnode count           | Weighted scores, natural            |
+| Replicas                   | Next K nodes clockwise             | Top K highest-scoring nodes         |
+| Suitability                | Very large N (1000+ nodes), caches | Small-medium N, CDN routing         |
+
+Rendezvous hashing has better natural load balance but O(N) lookup cost makes it impractical for very large node sets. Consistent hashing with vnodes is preferred for distributed databases and caches.
+
+---
+
+## Tradeoffs and Considerations
+
+| Consideration               | Notes                                                                      |
+|-----------------------------|----------------------------------------------------------------------------|
+| Vnode count vs overhead     | More vnodes = better balance, more ring management cost                    |
+| Hash function choice        | MD5 is common but Murmur3/xxHash are faster and better distributed         |
+| Replication complexity      | Replication across ring adds complexity; prefer next-K-nodes strategy      |
+| Hot key handling            | Consistent hashing does not solve popularity skew; need separate mechanism |
+| Node heterogeneity          | Assign proportional vnodes to more powerful nodes for weighted distribution|
+| Ring gossip convergence     | In large clusters, membership changes take time to propagate via gossip    |
+| Split brain                 | Ring partitions (network splits) require a separate quorum mechanism       |
+| Adding many nodes at once   | Gradual addition is safer than adding 50% new nodes simultaneously        |
+
+---
+
+## Best Practices
+
+### Vnode Count
+Use 150–256 virtual nodes per physical node. More than 256 provides diminishing returns on distribution while increasing ring management overhead. Tune based on the actual standard deviation of key distribution observed in production.
+
+### Replication Factor
+Set replication factor (RF) to 3 for production systems. RF=3 tolerates 2 simultaneous node failures while still achieving a read/write quorum of 2. Never use RF=1 in production.
+
+### Hash Function
+Prefer Murmur3 or xxHash over MD5 or SHA-1. They are faster (critical in high-throughput lookups), have better avalanche properties, and are deterministic across platforms.
+
+### Monitoring
+- **Ring balance**: monitor the percentage of ring owned by each physical node. Alert if any node owns more than `2x * (1/N)` of the ring.
+- **Key distribution**: track actual request/storage distribution across nodes. Imbalance in keys does not always match ring imbalance (hot keys).
+- **Rebalancing duration**: track how long node additions take to complete data migration. Long migrations can cause degraded performance.
+
+### Heterogeneous Hardware
+If nodes have different capacities (e.g., 32 GB vs 64 GB RAM), assign proportionally more vnodes to larger nodes:
+```
+32 GB node: 100 vnodes
+64 GB node: 200 vnodes
+96 GB node: 300 vnodes
+```
+This naturally routes proportionally more traffic to larger nodes.
+
+### Graceful Node Removal
+Before decommissioning a node, first transfer its data to its successor(s). Then remove the node from the ring. This prevents a period where data is unavailable. Most production systems (Cassandra, Dynamo) support this as a first-class decommission operation.
+
+---
+
+## Cross-Perspective: LLD Connections
+
+**LLD View — Design Patterns That Implement Consistent Hashing**
+
+- **Strategy** — The hash function (MD5, SHA-1, xxHash, MurmurHash) is a Strategy: the ring uses a `HashFunction` interface, making it straightforward to swap algorithms without rebuilding the ring data structure.
+- **Iterator** — Finding the responsible node for a key iterates clockwise around the virtual node ring until reaching the first node at or after the hash position — a custom Iterator over a `TreeMap<Long, Node>` sorted by hash position.
+- **Singleton** — The hash ring is typically a Singleton: one shared ring instance manages all node-to-key mappings, updated via node join/leave events from the cluster coordinator (ZooKeeper, etcd).
+
+---
+
+## Case Study: Distributed Cache
+
+### Context
+A social media platform has a large distributed Memcached cluster for caching user profile data. The cluster starts with 8 nodes handling 500,000 cache lookups/sec. Due to user growth, the team needs to add 4 new nodes.
+
+### Problem with Naive Hashing (Before Consistent Hashing)
+
+Adding 4 nodes changes N from 8 to 12. With modulo hashing:
+```
+Fraction of keys remapped = 8/12 = ~67%
+```
+500,000 * 0.67 = 335,000 cache misses/sec suddenly hit the database.
+The database handles ~50,000 queries/sec. Instant overload, cascading failure.
+
+### Solution with Consistent Hashing
+
+```
+Initial state: 8 nodes, ~160 vnodes each (1280 total)
+
+Ring:
+  [C1_1]-[C2_1]-[C3_1]-[C4_1]-[C5_1]-[C6_1]-[C7_1]-[C8_1]
+  [C1_2]-[C2_2]-[C3_2]-...(160 vnodes per node)
+
+Add Node C9 (with 160 vnodes):
+  Each vnode of C9 takes ownership from its predecessor.
+  Expected fraction moved: 1/(8+1) = ~11%
+
+500,000 * 0.11 = 55,000 cache misses/sec
+Database comfortably handles this with headroom.
+```
+
+### Migration procedure:
+
+```
+Step 1: Provision new node C9, not yet on ring.
+Step 2: Announce C9 to ring management service.
+Step 3: For each of C9's 160 vnodes at position P:
+         - Predecessor node identifies keys in (pred_pos, P]
+         - These keys are replicated to C9
+Step 4: Once replication is verified for all vnodes,
+         C9 is marked active in the ring.
+Step 5: Client libraries update their ring view via gossip.
+Step 6: Predecessor nodes delete migrated keys lazily (or on TTL).
+```
+
+### Outcome:
+
+```
+Before add: 8 nodes, ~62,500 keys/node (avg), cache hit rate 95%
+During add:  cache hit rate drops to ~89% for ~30 seconds (migration window)
+After add:  9 nodes, ~55,556 keys/node (avg), cache hit rate returns to 95%
+
+Database load during migration: +55,000 QPS (within capacity)
+Database load with modulo hash: +335,000 QPS (OVERLOAD)
+```
+
+Adding new nodes in groups of 1–2 at a time, with monitoring between each addition, is the safe operational practice.
+
+---
+
+## Interview Questions
+
+**Q1: What is the problem with using `hash(key) % N` for distributed systems?**
+When N changes (node added or removed), nearly all keys remap to different nodes (up to `(N-1)/N` fraction). For a distributed cache this means a thundering herd of cache misses simultaneously hitting the backend database, causing overload and cascading failures.
+
+**Q2: How does consistent hashing solve the remapping problem?**
+Both nodes and keys are mapped to the same circular hash space. A key is assigned to the first node clockwise from its hash position. When a node is added, only keys in the arc immediately preceding it move (to the new node). When a node is removed, only its keys move (to the next node). Total disruption is O(1/N) — the theoretical minimum.
+
+**Q3: What happens when a node is added to a consistent hash ring?**
+The new node's position on the ring is determined by hashing its ID. It takes ownership of keys in the arc between its predecessor and its position. Only those keys need to migrate from the predecessor to the new node. All other nodes are unaffected.
+
+**Q4: What are virtual nodes and why are they needed?**
+Virtual nodes (vnodes) are multiple positions on the ring assigned to each physical node. With only a few physical nodes, the ring arc sizes are highly uneven due to hash collisions — one node might own 60% of the ring. Vnodes distribute each physical node's ownership across many small arcs, resulting in even load distribution. Amazon Dynamo uses 150 vnodes per physical node.
+
+**Q5: What is the time complexity of a lookup in a consistent hash ring?**
+O(log(N * V)) where N is the number of physical nodes and V is the number of virtual nodes per physical node. The ring is a sorted data structure (TreeMap / sorted array); lookup uses binary search to find the first node at or after the key's hash position.
+
+**Q6: How do you handle replication in consistent hashing?**
+The standard approach (used by Dynamo, Cassandra) is to store copies on the next R nodes clockwise from the primary node, forming a "preference list." For a key mapping to node A, with RF=3, the key is also stored on nodes B and C (next two clockwise). Reads and writes require a quorum (typically RF/2 + 1 nodes).
+
+**Q7: What is a hotspot in consistent hashing and how do you mitigate it?**
+A hotspot occurs when a single node receives disproportionate traffic, either due to uneven ring arc sizes (mitigated by vnodes) or because certain keys are much more popular than others (popularity skew). For popular keys, solutions include: key splitting (appending a shard suffix), maintaining a dedicated hot-key cache tier, or application-level rate limiting.
+
+**Q8: How does consistent hashing compare to Rendezvous hashing?**
+Both achieve O(1/N) key disruption on node changes. Rendezvous hashing has better natural load balance without needing vnodes, but has O(N) lookup cost (must score all nodes per key). Consistent hashing with vnodes has O(log N) lookup and is preferred for large clusters. Rendezvous hashing suits CDN routing where N is small.
+
+**Q9: Why does Cassandra use Murmur3 instead of MD5 for hashing?**
+Murmur3 is significantly faster than MD5 (no cryptographic overhead), has better avalanche properties (small key changes produce very different hashes), and produces a more uniform distribution across the hash space. MD5 has measurable clustering bias that leads to uneven partition assignment. SHA-1/SHA-256 are even slower and unnecessary since cryptographic security is not needed.
+
+**Q10: How do you handle heterogeneous nodes (different hardware capacities) in a consistent hash ring?**
+Assign vnodes proportionally to the node's capacity. A node with 2x the RAM and CPU receives 2x the number of virtual nodes, so it naturally owns twice the arc space and handles twice the traffic. This is supported natively in Cassandra via manual token assignment or proportional vnode allocation.
+
+**Q11: How would you implement a consistent hash ring in production? What monitoring would you set up?**
+Implement using a TreeMap keyed by hash position. Monitor: (a) arc size per physical node — alert if any node owns more than 2x its fair share; (b) actual request distribution vs expected distribution; (c) rebalancing duration when nodes join/leave; (d) key migration throughput. Use Murmur3, 150–256 vnodes, and test ring balance distribution before deploying to production.
+
+**Q12: What happens during a network partition in a consistent hash ring?**
+Consistent hashing defines data placement but not consistency guarantees. During a partition, different nodes may disagree on ring membership. Systems like Dynamo/Cassandra use gossip protocols for eventual membership convergence and quorum reads/writes to tolerate node unavailability. The ring itself does not provide consistency — the application layer (quorum, vector clocks, conflict resolution) handles split-brain scenarios.
