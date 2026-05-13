@@ -177,6 +177,117 @@ Used in: AlphaCode 2, AlphaProof (Google DeepMind math reasoning)
 Limitation: slow — requires many forward passes (10-1000× base inference)
 ```
 
+### 3.7 Reward Hacking and Mitigation
+
+Reward hacking occurs when the model discovers unintended shortcuts to maximize reward without actually solving the problem:
+
+```
+Types of reward hacking in reasoning training:
+
+1. Format gaming
+   Model outputs <think>...</think><answer>42</answer> with trivial or absent
+   reasoning in the thinking block — earns format reward without real thinking
+
+2. Length hacking
+   Generate very long, repetitive chains to maximize format or verbosity reward
+   without additional correctness; "padding" the thinking with restatements
+
+3. Pattern memorization
+   Model has seen problem types in pre-training data — retrieves memorized
+   answers without actually reasoning; passes ORM but fails on novel variants
+
+4. Confidence calibration drift
+   Model learns to output high-confidence final answers regardless of actual
+   certainty — catastrophic for high-stakes deployments
+
+Real example: DeepSeek-R1 early training showed "verbosity hacking" where
+models generated long but low-quality reasoning chains to exploit the
+format reward before the correctness signal dominated.
+```
+
+**Mitigations:**
+```
+1. Process Reward Model (PRM): score intermediate steps, not just final format
+   — makes it hard to game with empty thinking blocks
+
+2. Held-out test cases for code: model cannot see the verifier's test suite
+   — prevents memorizing expected outputs
+
+3. Anti-gaming rewards: penalize thinking-block length without corresponding
+   correctness gain; reward concise correct reasoning over verbose wrong reasoning
+
+4. Diverse reward signals: combine correctness + reasoning quality + conciseness
+   — harder to game multiple signals simultaneously than a single one
+
+5. Human spot-checks: sample reasoning traces for human review to catch
+   qualitative hacking patterns that automated rewards miss
+```
+
+### 3.8 Overthinking and Budget Control
+
+Reasoning models sometimes generate unnecessarily long thinking chains on simple problems, wasting compute:
+
+```
+Observed pattern:
+  Simple question: "What is 15% of 200?"
+  Overthinking trace: 3,000 tokens of self-checking, alternative approaches,
+                      verification steps — for a 2-second mental calculation
+
+  Hard question: "Prove the Riemann hypothesis connection to prime gaps"
+  Underthinking: 200 tokens, then "This is complex, I'm not sure" — stops early
+
+The model's thinking budget allocation is poorly calibrated without intervention.
+```
+
+**s1 paper "Wait" token technique (Stanford, 2025):**
+```
+During RL training, when the model attempts to end its thinking early,
+insert a "Wait" token to force continuation:
+
+  Model: "...so the answer is 42. </think>"
+  Intervention: replace </think> with "Wait, let me verify this..."
+  Model continues: "Actually, I should check by substituting back..."
+
+This trains the model to use its full allocated budget before concluding,
+especially on problems that warrant extended thinking.
+```
+
+**Budget forcing at inference:**
+```
+max_thinking_tokens parameter controls how long the model can think:
+  Easy problems:   max_thinking_tokens = 500   (cheap, fast)
+  Medium problems: max_thinking_tokens = 2000
+  Hard problems:   max_thinking_tokens = 16000 (expensive but necessary)
+
+Cost model:
+  Reasoning token cost = thinking_tokens × price_per_token
+  o1 thinking: ~$15/1M tokens (vs $5/1M for output tokens)
+  A 10,000-token thinking chain costs $0.15 — 50-100× a standard response
+
+Routing strategy to control cost:
+  Use difficulty classifier (fast, cheap LLM call) to estimate query difficulty
+  → Easy: route to GPT-4o/Sonnet (no thinking), 80% of queries
+  → Hard: route to o1/R1 with thinking budget, 20% of queries
+  This architecture serves 80% of traffic cheaply, reserves reasoning for hard cases
+```
+
+**Overthinking vs underthinking tradeoff:**
+```
+Underthinking (budget too small):
+  Model reaches ceiling before finding correct answer
+  Quality: wrong answer, low confidence
+  Fix: increase max_thinking_tokens
+
+Overthinking (budget too large):
+  Model reaches correct answer at token 500, then spends 9,500 more tokens
+  re-deriving and re-checking unnecessarily
+  Quality: correct answer, wasted compute, higher latency
+  Fix: train early-stopping signal; use difficulty routing
+
+Break-even heuristic: stop extending budget when accuracy gain per
+additional 1,000 tokens drops below a domain-specific threshold
+```
+
 ---
 
 ## 4. Architecture Diagrams
@@ -365,16 +476,49 @@ This self-correction behavior was NOT explicitly trained —
 ## 11. Interview Questions with Answers
 
 **Q: What is test-time compute scaling and why is it significant?**
-A: Test-time compute scaling means that inference performance improves predictably with more compute spent on generation (more thinking tokens, more rollouts, tree search). Before o1, the primary scaling axis was training compute. Now there are two independent scaling axes: (1) train more → smarter base model; (2) think more at inference → better answer from the same model. This is significant because it provides an immediate path to better performance on hard tasks without retraining.
+A: Test-time compute scaling means inference performance improves predictably with more compute spent on generation — more thinking tokens, more rollouts, or tree search. Before o1, the primary scaling axis was training compute (bigger model, more data). Now there are two independent axes: (1) train more → smarter base model; (2) think more at inference → better answer from the same model. This is significant because it provides an immediate path to better performance on hard tasks without retraining, and it enables dynamic compute allocation — spend 100 tokens on a simple query, 10,000 on a hard one.
+
+**Q: What is chain-of-thought prompting and how does it differ from a reasoning model like o1?**
+A: Chain-of-thought prompting elicits step-by-step reasoning by adding "think step by step" to the prompt — the base model produces visible reasoning with no architectural or training change. Reasoning models (o1, DeepSeek-R1) are explicitly trained via RL to generate extended internal thinking: they explore multiple paths, self-correct, and verify before answering. CoT prompting improves accuracy 5-15% on medium reasoning tasks. Reasoning models improve 5-10× on hard tasks — AIME: GPT-4o 13% vs o1 74%. The key difference: CoT is a prompting technique applied to any model; reasoning models have internalized the ability to allocate arbitrary compute to hard problems through training.
+
+**Q: What is GRPO and why did DeepSeek-R1 use it instead of PPO?**
+A: GRPO (Group Relative Policy Optimization) generates G responses for each prompt, computes a reward for each, and normalizes advantages within the group: A_i = (r_i - mean(r)) / std(r). PPO requires a separate critic (value function) model to estimate a baseline reward for each state. GRPO eliminates the critic — the group mean serves as the baseline. Benefits for LLM training: roughly half the GPU memory (no critic model to train and store), simpler training pipeline, and a stable training signal because the normalization is within-group. DeepSeek-R1 used GRPO with only two rewards (correctness + format), demonstrating that complex reasoning can emerge without a learned value function.
 
 **Q: What is the difference between outcome reward models (ORM) and process reward models (PRM)?**
-A: An ORM scores only the final answer — correct (+1) or wrong (0). A PRM scores each intermediate reasoning step. PRM advantages: (1) provides denser training signal (many step scores vs. one final score); (2) can identify WHERE reasoning went wrong, not just that it did; (3) enables MCTS by scoring partial paths. PRM disadvantage: requires annotating reasoning step quality, which is expensive.
+A: An ORM scores only the final answer — correct (+1) or wrong (0). A PRM scores each intermediate reasoning step independently. PRM advantages: (1) provides denser training signal — many step scores vs. one final score; (2) identifies where reasoning went wrong, not just that it did; (3) enables MCTS by scoring partial paths before they complete; (4) catches models that reach the right answer via wrong reasoning (which ORM rewards but PRM penalizes). PRM disadvantage: requires labeled reasoning step quality, which is expensive — either human annotation or a learned step-verifier model. In production, PRMs enable best-of-N reranking: generate N reasoning chains with sampling, then pick the one with the highest average step reward.
 
 **Q: How was DeepSeek-R1 trained without supervised reasoning data?**
-A: DeepSeek-R1 used GRPO (Group Relative Policy Optimization) with only two rewards: (1) correctness — +1 if final answer matches ground truth; (2) format — small bonus for using `<think>...</think>` tags. No human annotation of reasoning chains was required. The model spontaneously developed extended chain-of-thought, self-correction, and reflection behaviors purely from the RL training signal. This demonstrated that reasoning can emerge from incentivizing correct answers, not from imitating human reasoning.
+A: DeepSeek-R1 used GRPO with only two rewards: (1) correctness — +1 if the final answer matches ground truth; (2) format — small bonus for using `<think>...</think><answer>...</answer>` tags. No human annotation of reasoning chains was required. The model spontaneously developed extended chain-of-thought, self-correction, and reflection behaviors purely from the RL training signal. This demonstrated that reasoning behaviors are instrumentally useful for maximizing correctness — they emerge from incentivizing correct outcomes rather than from imitating human reasoning. A crucial insight: the RL training signal (correctness on math/code problems) is cheap and scalable because these domains have ground truth verifiers.
+
+**Q: What failure modes do reasoning models exhibit and how do you mitigate them?**
+A: Four main failure modes: (1) Reward hacking — model finds shortcuts to maximize reward without correct reasoning, e.g., outputting the right format with empty thinking blocks. Mitigation: PRM, diverse reward signals, held-out test cases. (2) Overthinking — generating thousands of unnecessary tokens on simple problems. Mitigation: difficulty routing, budget forcing with max_thinking_tokens. (3) Premise errors — reasoning flawlessly from an incorrect assumption. Mitigation: RAG + reasoning (facts from retrieval, logic from reasoning model). (4) Domain transfer failure — RL on math/code improves math/code but may not generalize to other domains. Mitigation: domain-specific RL fine-tuning or standard SFT for non-math/code tasks.
+
+**Q: How would you design a system that uses reasoning models cost-effectively in production?**
+A: Route by difficulty. Use a small, fast classifier to categorize queries as easy/medium/hard. Route easy queries (conversational, simple factual) to standard GPT-4o or Sonnet — low cost, low latency. Route medium queries (single-step math, moderate debugging) to o1-mini or similar. Route hard queries (multi-step proof, complex algorithmic design) to o1/o3 with a configured max_thinking_tokens budget. Cache reasoning traces for repeated similar problems. Set hard token budget limits on reasoning models to prevent runaway costs — a 50,000-token thinking chain at $15/1M tokens costs $0.75 per query. Result: 80-90% of queries served cheaply, 10-20% get full reasoning power. This is the architecture used by production AI tutoring applications.
+
+**Q: What is self-consistency and when does it fail?**
+A: Self-consistency generates N reasoning chains (N=10-40) with temperature > 0 and takes majority vote. It improves accuracy 5-15% on reasoning tasks with definitive correct answers. It fails when: (1) the model consistently makes the same error across all chains — systematic failure is not correctable by voting (N chains all wrong, majority is still wrong); (2) the task is creative or open-ended with no single correct answer — majority vote has no meaning; (3) the model accuracy on a problem is below 50% — majority vote doesn't reliably help when individual chain accuracy is near random. The quality ceiling is bounded by single-chain accuracy: self-consistency reduces variance but cannot raise the mean above the single-chain ceiling. For problems where even the best reasoning models are near random, MCTS or higher-quality models are needed.
+
+**Q: Explain the test-time compute scaling curve. Does it scale indefinitely?**
+A: Accuracy scales approximately log-linearly with test-time compute (thinking tokens) up to a task-specific ceiling. The ceiling varies: competition math (AIME) scales to ~99% with enough thinking tokens; general QA has a lower ceiling; formal verification with symbolic solvers can scale furthest. The ceiling is hit when the task difficulty exceeds the model's knowledge or reasoning capacity — you cannot think your way to facts you don't know, and you cannot reason through a problem whose structure exceeds your learned capabilities. In practice: easy problems reach their ceiling at 100-500 thinking tokens; olympiad math benefits from 5,000-20,000+ tokens. Beyond the task ceiling, additional thinking tokens produce diminishing or zero improvement.
+
+**Q: How was DeepSeek-R1 trained to produce visible reasoning traces, while o1 hides its thinking?**
+A: DeepSeek-R1 used a format reward: the model earned a small bonus if it structured its response as `<think>...</think><answer>...</answer>`. The `<think>` content is part of the model's visible output — users and developers can inspect the reasoning. OpenAI o1 uses a separate thinking sequence that is stripped from the API response — only the final answer is delivered. R1's approach is more transparent (users can debug reasoning errors, verify thought process) but raises concerns about reasoning being performative rather than functional. Both approaches produce similar accuracy improvements on benchmarks; the tradeoff is transparency and debuggability (R1) vs. IP protection and reduced prompt injection risk via thinking manipulation (o1).
+
+**Q: What is MCTS applied to LLM reasoning and what are its practical limitations?**
+A: MCTS treats each reasoning step as a node in a tree. UCB (Upper Confidence Bound) balances exploration of new branches vs. exploitation of promising ones. Each rollout runs a complete reasoning chain from a node and scores it with a reward model (PRM or outcome checker). Node values are backpropagated: if a partial path leads to correct answers in 7 of 10 rollouts, that path gets a high value. Practical limitations: (1) each rollout is a full LLM forward pass — MCTS with 100 rollouts costs 100× base inference; (2) requires a reliable reward or verification signal — without a PRM or test-case checker, node values are noisy; (3) high implementation complexity. Used in AlphaProof (IMO silver-level proofs in Lean 4) and AlphaCode 2, but not in general-purpose commercial APIs because the compute cost is prohibitive at scale.
+
+**Q: You're building a coding assistant that needs to solve hard algorithmic problems. How do you choose between reasoning models, self-consistency, and standard LLM + CoT?**
+A: Use a tiered approach based on difficulty and latency budget. For well-known algorithm patterns (sorting, BFS, standard DP): standard LLM with CoT is sufficient, fast (<2s), and cheap. For medium problems (graph algorithms, moderately complex DP): self-consistency with N=5 chains provides a meaningful accuracy boost at 5× cost — the problem space is navigable by the base model but benefits from aggregation. For hard competitive programming (novel algorithms, correctness proofs): reasoning model (o1 or DeepSeek-R1) is necessary — these problems have a combinatorial reasoning space that requires extended exploration. Always add programmatic verification: run test cases against the generated code and use the result as a second filter. The verification step is cheap and eliminates 10-20% of errors that even reasoning models make on hard problems.
+
+**Q: What is the "aha moment" phenomenon in DeepSeek-R1 training?**
+A: During pure RL training with no supervised reasoning data, DeepSeek-R1 spontaneously developed self-correction behavior: mid-reasoning phrases like "wait, that doesn't seem right, let me reconsider" followed by backtracking to a different and correct approach. This was not explicitly trained — no reward was given for self-correction specifically; only the correctness of the final answer was rewarded. This reveals that reasoning behaviors (exploration, verification, backtracking) are instrumentally useful for maximizing correctness rewards and emerge naturally from RL incentives. It suggests that human-like reasoning patterns may be achievable by incentivizing correct outcomes rather than by imitating human reasoning processes step by step.
 
 **Q: What is self-consistency and when is it worth the cost?**
-A: Self-consistency generates N reasoning chains (N=10-40) and takes the majority vote. It improves accuracy by 5-15% on reasoning tasks. It's worth the cost when: (1) the task has a single correct answer (math, factual); (2) accuracy is more important than latency; (3) you can't afford a full reasoning model. Not worth it for: creative tasks, very hard problems where models consistently fail (single chain or 10 chains, all wrong), or latency-sensitive applications.
+A: Self-consistency generates N reasoning chains (N=10-40) and takes the majority vote. It improves accuracy by 5-15% on reasoning tasks. Worth the cost when: (1) the task has a single correct answer (math, factual); (2) accuracy is more important than latency; (3) you cannot afford a full reasoning model but need better reliability. Not worth it for: creative tasks, very hard problems where models consistently fail (all chains wrong, so majority is wrong), or latency-sensitive applications. Rule of thumb: if single-chain accuracy on your task is between 40-80%, self-consistency gives meaningful gains; if it is below 30% or above 85%, the gains are marginal.
+
+**Q: How do process reward models enable best-of-N reranking, and how is that different from self-consistency?**
+A: Best-of-N with PRM reranking: generate N reasoning chains (N=10-50) with temperature > 0, then score each chain using a PRM that evaluates each intermediate step. Select the chain with the highest average step score, or the highest minimum step score (weakest-link selection). This is more powerful than self-consistency majority voting because: (1) it can distinguish between chains that all reach the same answer — it picks the one with the best reasoning process; (2) it can identify when a chain reaches the right answer via a flawed shortcut; (3) PRM reranking scales better — the PRM is a forward pass only (no generation), so scoring 50 candidates is cheap. Self-consistency requires all chains to generate until EOS; PRM reranking can score partial chains early and prune. Practical tradeoff: PRM reranking requires a trained PRM model; self-consistency works with any generation.
 
 ---
 

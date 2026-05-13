@@ -136,6 +136,114 @@ LLaMA 3 70B worked example:
 
 This is why KV cache is the **primary memory bottleneck** in production LLM serving, not model weights.
 
+### 3.4 Continuous Batching (PagedAttention)
+
+**Problem with naive batching:**
+```
+Request A: input=100 tokens, output=50 tokens  → done at step 50
+Request B: input=200 tokens, output=500 tokens → done at step 500
+
+Naive batch: A and B together from step 1 to step 500
+  A is done at step 50 but GPU keeps allocating memory for it until B finishes
+  New Request C can't start until the batch finishes
+```
+
+**Continuous batching (used by vLLM):**
+```
+Step 1-50:  Process [A, B] together
+Step 50:    A finishes → immediately add Request C to the batch
+Step 51+:   Process [B, C] together
+No wasted compute; new requests fill slots as old ones complete
+```
+
+**PagedAttention** (vLLM innovation):
+```
+KV cache is managed like OS virtual memory
+Physical GPU memory divided into "blocks" (pages)
+  Each block: 16 contiguous tokens × KV tensors for all layers
+  Block size tunable (default: 16 tokens)
+
+Logical blocks assigned on demand as sequence grows
+Non-contiguous physical memory → contiguous logical view
+Benefits:
+  - Near-zero KV cache fragmentation
+  - Share KV cache across parallel sampling (same prefix → same blocks)
+  - Enable preemption: swap out KV cache to CPU when GPU full
+```
+
+### 3.5 Speculative Decoding
+
+Use a small draft model to speculatively generate multiple tokens; verify with large model in parallel:
+
+```
+Large model: LLaMA 3 70B (target)
+Small model: LLaMA 3 8B (draft)
+
+Step 1: Draft model generates K tokens speculatively (fast)
+  Draft: ["Paris", "is", "the", "capital", "city"]
+
+Step 2: Large model verifies all K tokens in ONE forward pass
+  (Can verify K tokens in parallel because it's a prefill pass)
+  Target: ["Paris", "is", "the", "capital"] ✓ ✓ ✓ ✓, "city" ✗ → "of"
+
+Step 3: Accept all matching prefix tokens; reject first mismatch
+  Accepted: ["Paris", "is", "the", "capital"] = 4 tokens per round
+  Generated: "of" (from target)
+  Net: 4-5 tokens generated per large model forward pass (vs. 1)
+
+Speedup: 2-3× if draft and target agree often (same distribution)
+Best for: long outputs with predictable structure (code, boilerplate)
+```
+
+**Acceptance rate math and break-even analysis:**
+```
+Let α = per-token acceptance probability (probability draft token matches target)
+
+Expected accepted tokens per round (K draft tokens):
+  E[accepted] = (1 - α^(K+1)) / (1 - α)   for geometric distribution approximation
+
+  K=4 draft tokens:
+    α = 0.90 → E[accepted] = 3.52 → ~3.5× speedup per target pass
+    α = 0.75 → E[accepted] = 2.63 → ~2.6× speedup
+    α = 0.60 → E[accepted] = 2.07 → ~2.1× speedup
+    α = 0.50 → E[accepted] = 1.69 → ~1.7× speedup
+
+  Overhead: draft model adds ~10-15% latency per step (small model, fast)
+  Break-even: α ≈ 0.45 for K=4 (below this, draft overhead exceeds gains)
+
+When acceptance rate is low (α < 0.5):
+  Cause 1: draft model too different from target (different training, different size)
+  Cause 2: creative/open-ended generation — high entropy, target and draft diverge
+  Cause 3: long context with many rare tokens — draft model not calibrated for context
+  Fix: use a draft model from the same model family (LLaMA 3 8B → LLaMA 3 70B)
+       or use self-speculative decoding (early layers as draft, later layers as target)
+
+Practical deployment:
+  Code generation: α ≈ 0.75-0.90 (highly structured, predictable) → use speculative
+  Chat responses:  α ≈ 0.60-0.75 (semi-predictable) → marginal benefit
+  Creative writing: α ≈ 0.40-0.55 (high entropy) → usually not worth overhead
+```
+
+### 3.6 Flash Attention
+
+Reorders attention computation to be memory-bandwidth efficient:
+
+```
+Standard attention:
+  1. Compute Q×Kᵀ → store [seq × seq] matrix in HBM (slow)
+  2. Compute softmax → read/write HBM (slow)
+  3. Compute attention × V → read/write HBM (slow)
+
+Flash Attention:
+  Divide Q, K, V into tiles that fit in SRAM (fast)
+  Compute attention in a single fused kernel, never writing full matrix to HBM
+  Use online softmax algorithm to accumulate results across tiles
+
+Memory: O(n) instead of O(n²)
+Speed: 2-4× faster for long sequences (memory bandwidth is the bottleneck)
+Flash Attention 2 (2023): 2× faster than Flash Attention 1
+Flash Attention 3 (2024): further optimizations for H100
+```
 ### 3.7 Q/K/V Roles During Inference
 
 Understanding why the KV cache exists requires understanding what happens to Q, K, V during decode:
@@ -261,84 +369,131 @@ Request resumed by loading blocks back to GPU
 Priority: preempt requests with most remaining to generate (LRU policy)
 ```
 
-### 3.4 Continuous Batching (PagedAttention)
+### 3.11 Chunked Prefill
 
-**Problem with naive batching:**
-```
-Request A: input=100 tokens, output=50 tokens  → done at step 50
-Request B: input=200 tokens, output=500 tokens → done at step 500
-
-Naive batch: A and B together from step 1 to step 500
-  A is done at step 50 but GPU keeps allocating memory for it until B finishes
-  New Request C can't start until the batch finishes
-```
-
-**Continuous batching (used by vLLM):**
-```
-Step 1-50:  Process [A, B] together
-Step 50:    A finishes → immediately add Request C to the batch
-Step 51+:   Process [B, C] together
-No wasted compute; new requests fill slots as old ones complete
-```
-
-**PagedAttention** (vLLM innovation):
-```
-KV cache is managed like OS virtual memory
-Physical GPU memory divided into "blocks" (pages)
-  Each block: 16 contiguous tokens × KV tensors for all layers
-  Block size tunable (default: 16 tokens)
-
-Logical blocks assigned on demand as sequence grows
-Non-contiguous physical memory → contiguous logical view
-Benefits:
-  - Near-zero KV cache fragmentation
-  - Share KV cache across parallel sampling (same prefix → same blocks)
-  - Enable preemption: swap out KV cache to CPU when GPU full
-```
-
-### 3.5 Speculative Decoding
-
-Use a small draft model to speculatively generate multiple tokens; verify with large model in parallel:
+**Problem:** A single long-context prefill (e.g., 32K tokens of a RAG document) monopolizes the GPU for 1-2 seconds. During this time, all ongoing decode-phase requests stall — their TPOT spikes from 30ms to 2,000ms, which is visible to users as a freeze.
 
 ```
-Large model: LLaMA 3 70B (target)
-Small model: LLaMA 3 8B (draft)
-
-Step 1: Draft model generates K tokens speculatively (fast)
-  Draft: ["Paris", "is", "the", "capital", "city"]
-
-Step 2: Large model verifies all K tokens in ONE forward pass
-  (Can verify K tokens in parallel because it's a prefill pass)
-  Target: ["Paris", "is", "the", "capital"] ✓ ✓ ✓ ✓, "city" ✗ → "of"
-
-Step 3: Accept all matching prefix tokens; reject first mismatch
-  Accepted: ["Paris", "is", "the", "capital"] = 4 tokens per round
-  Generated: "of" (from target)
-  Net: 4-5 tokens generated per large model forward pass (vs. 1)
-
-Speedup: 2-3× if draft and target agree often (same distribution)
-Best for: long outputs with predictable structure (code, boilerplate)
+Without chunked prefill:
+  Time  0ms: Long prefill request arrives (32K tokens)
+  Time  0ms - 1800ms: GPU 100% occupied doing prefill for this ONE request
+  Time  0ms - 1800ms: ALL other decode requests frozen (TPOT = ∞ during this window)
+  Time 1800ms: Prefill done; other requests resume
+  User B experience: "why did the response freeze for 2 seconds?"
 ```
 
-### 3.6 Flash Attention
-
-Reorders attention computation to be memory-bandwidth efficient:
+**Solution:** Split the prefill into chunks, interleave with decode steps:
 
 ```
-Standard attention:
-  1. Compute Q×Kᵀ → store [seq × seq] matrix in HBM (slow)
-  2. Compute softmax → read/write HBM (slow)
-  3. Compute attention × V → read/write HBM (slow)
+With chunked prefill (chunk_size = 512 tokens):
+  Step 1: Prefill chunk 0 (tokens 0-511) + decode for users B, C, D
+  Step 2: Prefill chunk 1 (tokens 512-1023) + decode for users B, C, D
+  Step 3: Prefill chunk 2 (tokens 1024-1535) + decode for users B, C, D
+  ...
+  Step 63: Last prefill chunk + decode for users B, C, D
 
-Flash Attention:
-  Divide Q, K, V into tiles that fit in SRAM (fast)
-  Compute attention in a single fused kernel, never writing full matrix to HBM
-  Use online softmax algorithm to accumulate results across tiles
+GPU time is shared: long prefill takes the same total compute, but spreads
+its impact across many steps, keeping decode TPOT stable for other users.
+```
 
-Memory: O(n) instead of O(n²)
-Speed: 2-4× faster for long sequences (memory bandwidth is the bottleneck)
-Flash Attention 2 (2023): 2× faster than Flash Attention 1
-Flash Attention 3 (2024): further optimizations for H100
+**Impact on key metrics:**
+```
+Concurrent decode TPOT:
+  Without chunking: spikes 10-50× during long prefill (unacceptable)
+  With chunking: increases 5-15% (acceptable overhead)
+
+Long prefill TTFT:
+  Without chunking: ~1800ms (0 decode competition)
+  With chunking: ~2000ms (10% overhead from interleaving)
+
+Net: small TTFT regression for one user, massive TPOT improvement for all others
+```
+
+**vLLM configuration:**
+```yaml
+vllm serve llama3-70b \
+  --enable-chunked-prefill \
+  --max-num-batched-tokens 512   # chunk size
+```
+
+Chunked prefill is enabled by default in vLLM >= 0.4.0 for models above 7B. SGLang also implements chunked prefill with similar semantics.
+
+### 3.12 Request Scheduling Strategies
+
+How requests are ordered and batched determines both average and tail latency:
+
+**FCFS (First Come First Served):**
+```
+Requests processed in arrival order.
+Problem: Head-of-line blocking — one 32K-token request arriving first
+         delays all subsequent short requests behind it.
+Queue: [32K request] → [100-token request] → [200-token request]
+       The 100-token request waits behind the 32K one.
+Advantage: Simple; fair; no estimation needed.
+```
+
+**Shortest Job First (SJF) / Shortest Remaining Time:**
+```
+Estimate output length (using input length as proxy) and prioritize shorter jobs.
+Problem: Requires length estimation; can starve long requests under heavy load.
+Use: Minimizes average TTFT at cost of potential starvation.
+```
+
+**Priority Queues (SLA-tier routing):**
+```
+Premium tier: queue priority = 10 (always served next)
+Standard tier: queue priority = 5
+Batch tier:    queue priority = 1 (accept high latency for low cost)
+
+Implementation: weighted fair queuing across priority levels
+Result: premium users experience near-zero queue time; batch users deferred to idle periods
+```
+
+**Length-Bucketing (padding reduction):**
+```
+Group incoming requests by similar input length (±20% of each other):
+  Bucket A: 50-60 tokens     → batch these together
+  Bucket B: 200-240 tokens   → batch these together
+  Bucket C: 1000-1200 tokens → batch these together
+
+Without bucketing: batch of [50, 1200, 200, 60] tokens
+  → pad ALL to 1200 tokens → 75% of compute is wasted on padding
+
+With bucketing: [50, 60] batched together → minimal padding
+                [200] served separately → no padding waste
+Result: 15-25% throughput improvement on heterogeneous workloads
+```
+
+**Preemption (vLLM):**
+```
+When GPU KV cache is full, a new high-priority request cannot start.
+Options:
+  1. Swap: move lowest-priority request's KV blocks to CPU RAM (high latency to resume)
+  2. Recompute: drop preempted request's KV blocks; recompute prefill when resumed
+                (fast resume start, but wastes the prefill compute already done)
+  3. Queue: reject new request if KV cache full (simplest, but poor user experience)
+
+vLLM default: swap to CPU. Recompute is better when prefill is cheap (short inputs).
+```
+
+**Production systems combine all strategies:**
+```
+Incoming request
+    |
+    v
+[Priority classifier] → premium | standard | batch tier
+    |
+    v
+[Length estimator] → assign to length bucket
+    |
+    v
+[Chunked prefill scheduler] → interleave with ongoing decode
+    |
+    v
+[KV cache monitor] → if > 90% full → preempt lowest priority
+    |
+    v
+[Continuous batching] → add to active batch at next iteration boundary
 ```
 
 ---
@@ -377,7 +532,7 @@ With speculative decoding:
 
 ## 5. How It Works — Detailed Mechanics
 
-### Memory Bandwidth Bottleneck
+### Memory Bandwidth Bottleneck and Arithmetic Intensity
 
 ```
 During decoding, each step requires:
@@ -393,6 +548,34 @@ Time to compute: 140B FLOPs / 312 TFLOPS = 0.45ms
 → GPU is starved for data, not compute
 → Solution: better batching (amortize weight loading across more requests)
 → Solution: quantization (load less data per weight)
+```
+
+**Roofline model — batch size as the crossover lever:**
+```
+Arithmetic intensity = FLOPs / bytes_loaded
+
+Decode (batch_size = 1):
+  FLOPs:  2 × 70B = 140B per token
+  Bytes:  140GB weights (BF16)
+  Intensity: 140B / 140G = 1 FLOP/byte  ← deeply memory-bandwidth-bound
+
+Decode (batch_size = 64):
+  FLOPs:  64 × 140B = 8.96T
+  Bytes:  140GB weights (shared across batch) + KV cache
+  Intensity: ~64 FLOPs/byte
+
+Decode (batch_size = 160):
+  Intensity: ~160 FLOPs/byte
+
+A100 hardware ridge point: 312 TFLOPS / 2 TB/s = 156 FLOPs/byte
+→ Batch size ~156 is the crossover from memory-bound to compute-bound
+
+Implication:
+  - At batch=1 (single user): GPU compute is 99.7% idle, waiting for data
+  - At batch=156: compute and memory are balanced — maximum efficiency
+  - Beyond batch=156: compute becomes the bottleneck (diminishing returns on batching)
+  - KV cache grows with batch and context → practical limit is usually KV OOM before
+    the compute crossover is reached
 ```
 
 ### Latency vs Throughput Optimization
@@ -492,17 +675,50 @@ Optimize for throughput (many users):
 
 ## 11. Interview Questions with Answers
 
+**Q: Why is LLM decode memory-bandwidth-bound rather than compute-bound? What does this mean for optimization?**
+A: During decode, each token generation requires loading all model weights from HBM. For a 70B BF16 model that is 140GB of data. An A100 loads this in 70ms (140GB / 2TB/s bandwidth) but computes it in 0.45ms (140B FLOPs / 312 TFLOPS). The GPU's compute units are idle 99.7% of the time waiting for data. The primary optimization lever is therefore reducing data movement: quantization (load INT4 instead of BF16, 4× fewer bytes), batching (amortize the 140GB weight load across many requests so each request "pays" 1/N of the bandwidth cost), and KV cache efficiency (fewer KV bytes transferred per step). Compute-bound optimizations like better algorithms have near-zero impact on memory-bandwidth-bound workloads.
+
 **Q: What is the KV cache and why is it important?**
-A: The KV cache stores the key and value tensors computed for each token during the prefill phase. During decoding, each new token only needs to compute its own query, then attend to all cached K, V tensors. Without KV cache, you'd recompute K and V for all past tokens at every decoding step — O(n²) work for a length-n response. With KV cache, it's O(n) total. The trade-off: KV cache consumes significant GPU memory (hundreds of GB for large models serving long contexts).
+A: The KV cache stores the key and value tensors computed for each token during the prefill phase. During decoding, each new token only needs to compute its own query, then attend to all cached K, V tensors. Without KV cache, you'd recompute K and V for all past tokens at every decoding step — O(n²) work for a length-n response. With KV cache, it's O(n) total. The trade-off: KV cache consumes significant GPU memory (320KB per token for LLaMA 3 70B in BF16; at 8K context and 100 concurrent users, that is 256GB just for KV — more than the model weights).
+
+**Q: What is the difference between TTFT and TPOT, and how do you optimize each independently?**
+A: TTFT (Time To First Token) is the prefill time — dominated by input length and the GPU's prefill throughput. TPOT (Time Per Output Token) is the decode time per token — dominated by model size, batch size, and memory bandwidth. Optimize TTFT: reduce input length (summarize long contexts before passing), use chunked prefill (share GPU time between prefill and ongoing decode), or route long-context requests to dedicated prefill hardware. Optimize TPOT: increase batch size (amortize memory bandwidth cost across more requests), use quantization (load fewer bytes per token), and use speculative decoding (generate multiple tokens per large model pass). In chat applications, TTFT under 1s is critical for perceived responsiveness; TPOT of 20-50ms/token is generally acceptable.
+
+**Q: What is chunked prefill and when is it critical?**
+A: Chunked prefill splits a long prefill (e.g., 32K tokens from a RAG document) into smaller chunks (e.g., 512 tokens each) that interleave with decode steps for other concurrent requests. Without chunking, a single 32K-token prefill monopolizes the GPU for roughly 1-2 seconds, causing TPOT for all concurrent users to spike during that window. With chunking, the GPU alternates between prefill chunks and decode steps, keeping TPOT stable for ongoing users. Critical when: serving high-concurrency workloads with mixed context lengths, especially in RAG systems where documents are 4K+ tokens. The long-prefill user sees about 10-15% higher TTFT; all other users see stable TPOT. Implemented in vLLM >= 0.4.0 and SGLang.
 
 **Q: What is the difference between prefill and decode phases?**
-A: Prefill processes all input tokens in parallel in one forward pass — it's compute-bound (similar to training). Decode generates one output token at a time, attending to all previous tokens (cached in KV) — it's memory-bandwidth-bound (loading weights dominates). Prefill latency ≈ proportional to input length; decode latency ≈ proportional to output length × TPOT. For large inputs, prefill dominates total latency (TTFT); for long outputs, decoding dominates.
+A: Prefill processes all input tokens in parallel in one forward pass — it is compute-bound (similar to training) because all tokens are processed simultaneously. Decode generates one output token at a time, attending to all previous tokens via the KV cache — it is memory-bandwidth-bound because loading model weights dominates. Prefill latency is proportional to input length; decode latency is proportional to output length × TPOT. For large inputs, prefill dominates total latency (TTFT); for long outputs, decoding dominates total wall-clock time.
+
+**Q: How does temperature affect output quality and when should it be set to zero?**
+A: Temperature scales logits before softmax: logits_scaled = logits / T. T=0 (greedy) always picks the highest-probability token — deterministic, coherent, but can be repetitive and may miss valid alternatives at branching points. T=1 samples from the raw model distribution. T>1 flattens the distribution (more random, potentially incoherent). T<1 sharpens it (more conservative). Use T=0 for: factual Q&A, structured JSON extraction, code generation where correctness is binary, any task requiring reproducibility. Use T=0.7-1.0 for: creative writing, brainstorming, conversational chat where diversity adds value. Rule of thumb: when there is one right answer, use T=0; when diversity is valuable and quality tolerates variation, use T=0.7-1.0.
+
+**Q: Compare top-k, top-p (nucleus), and min-p sampling. Which performs best in practice?**
+A: Top-k keeps exactly k tokens regardless of probability gaps — poor when the true distribution has 3 dominant tokens (wastes budget on long tail) or 100 plausible tokens (k=50 misses valid options). Top-p dynamically chooses the smallest set of tokens with cumulative probability >= p — adaptive, but can include very low-probability tokens when the distribution is flat. Min-p keeps tokens with probability >= min_p × max_token_probability — scales the threshold relative to the most likely token, naturally handling both peaked and flat distributions. With min_p=0.05: in a peaked distribution, only the top 2-3 tokens survive; in a flat distribution, a wider set survives proportionally. Min-p tends to outperform top-p on creative tasks empirically and is the default in many llama.cpp builds. Top-p with p=0.9 remains the most widely used default in production APIs.
+
+**Q: Explain PagedAttention. What problem does it solve that continuous batching alone does not?**
+A: Continuous batching solves GPU utilization — requests fill slots as others complete, eliminating idle time between requests. PagedAttention solves KV cache memory fragmentation within the GPU. Without paging, each sequence pre-allocates a contiguous memory block for max_seq_len tokens — a sequence using 1,024 of 4,096 allocated tokens wastes 75%. At high concurrency, this fragmentation can waste 60-80% of KV cache memory, limiting the number of concurrent users. PagedAttention manages KV cache like OS virtual memory: fixed-size physical blocks (default 16 tokens), allocated on demand, non-contiguous in physical memory, shared across sequences with the same prefix via copy-on-write. Fragmentation drops to below 4%. The combined effect of continuous batching plus PagedAttention is the 24× throughput improvement reported in the vLLM paper vs. HuggingFace naive serving.
+
+**Q: How does speculative decoding maintain output distribution equivalence with the target model?**
+A: The draft model generates K tokens with its own distribution p_draft. The target model verifies each draft token t_i and accepts with probability min(1, p_target(t_i) / p_draft(t_i)). If the draft token is very likely under the target model, it is accepted with high probability. If rejected, a correction token is sampled from the residual distribution max(0, p_target - p_draft) normalized, guaranteeing the final output matches exactly what the target model would have produced independently. This acceptance-rejection scheme is mathematically proven to produce the identical distribution as pure target model decoding — there is no quality tradeoff, only a throughput benefit. The speedup comes solely from fewer serial target model passes.
 
 **Q: How does speculative decoding work and what are its requirements?**
-A: A small draft model quickly generates K tokens. The large target model verifies all K tokens in a single forward pass (parallel, like prefill). Tokens matching the draft are accepted; at the first mismatch, the target's token replaces the draft's, and the process restarts. Requirements: (1) draft and target must share the same tokenizer; (2) same distribution (similar models); (3) acceptance rate must be high enough for speedup (>70% is typical target). Best speedup on predictable outputs (code, structured text): 2-3×.
+A: A small draft model quickly generates K tokens. The large target model verifies all K tokens in a single forward pass (parallel, like prefill). Tokens matching the draft distribution are accepted; at the first rejection, the target's correction token is used and the process restarts. Requirements: (1) draft and target must share the same tokenizer; (2) draft must approximate the target's distribution well (similar model family) for high acceptance rate; (3) acceptance rate must exceed roughly 0.5 for K=4 to break even on overhead. Best speedup on predictable outputs (code, boilerplate, structured text): 2-3×. Falls below break-even for creative writing where the draft and target diverge frequently.
+
+**Q: What is prompt caching (Anthropic-style) and how does it differ from vLLM's prefix caching?**
+A: Anthropic prompt caching: the user explicitly marks cache breakpoints in the API request using `cache_control: {type: "ephemeral"}`. The server stores KV tensors for the marked prefix and reuses them for subsequent requests within a ~5-minute TTL. Benefit: 90% cost reduction on cached tokens, approximately 10% latency reduction. vLLM prefix caching and SGLang RadixAttention: automatic and fine-grained — the inference engine maintains a radix tree of KV blocks indexed by token sequences; any matching prefix automatically reuses cached blocks without user annotation. vLLM's approach is transparent to users and works at block granularity (16 tokens per block); Anthropic's requires explicit API integration. Use Anthropic-style caching for shared system prompts in production APIs. Use RadixAttention for inference engines serving structured workloads like multi-turn chat with common prefixes or RAG with shared document context.
+
+**Q: A production LLM service is experiencing high P99 latency but median latency is fine. What are the likely causes?**
+A: P99 latency outliers typically come from three sources: (1) Long prefill blocking short requests — one 32K-token request monopolizes the GPU for seconds while short requests queue behind it. Diagnose: plot TTFT distribution against input length; outlier TTFT values correlate with long inputs. Fix: chunked prefill, request timeout limits. (2) KV cache pressure causing preemption — when GPU KV cache fills, vLLM preempts low-priority requests (swaps to CPU), then resumes — causing latency spikes. Diagnose: monitor vLLM's `gpu_cache_usage_perc` metric; P99 spikes correlate with cache usage approaching 100%. Fix: reduce max concurrent requests or add KV cache quantization. (3) HBM bandwidth saturation at high batch sizes — too many concurrent decode requests causes memory bandwidth contention. Fix: reduce batch size ceiling and accept lower throughput.
+
+**Q: What is the KV cache memory formula for LLaMA 3 70B at 100 concurrent users with 8K context?**
+A: Per-token KV cache = 2 (K+V) × num_layers × num_kv_heads × head_dim × bytes = 2 × 80 × 8 × 128 × 2 = 327,680 bytes ≈ 320KB per token. At 8K context with 100 concurrent users = 819,200 total tokens. Total KV cache = 320KB × 819,200 ≈ 256GB. An H100 has 80GB HBM — this scenario requires more than 3 H100s just for KV cache, before counting model weights (140GB in BF16, requiring 2 H100s). Practical solution: INT8 KV quantization (halves KV to 128GB) plus 2× H100 tensor parallel for model weights, limiting active concurrency to roughly 30-40 users at full 8K context. This arithmetic is what drives production capacity planning and the decision to use GQA (fewer KV heads) in model architecture.
+
+**Q: What is beam search and why is it rarely used in production LLM serving?**
+A: Beam search maintains k candidate sequences simultaneously, expanding each at every step and keeping the k highest-probability partial sequences. It guarantees a higher-probability final sequence than greedy decoding. Problems for production: (1) k× KV cache memory — beam width 5 needs 5× the KV cache of greedy; (2) k× compute per step; (3) empirically produces lower-quality outputs than sampling for open-ended generation — beam search tends toward repetitive, high-confidence but generic text; (4) incompatible with continuous batching because all k beams must complete together, holding a GPU slot until the longest beam finishes. Reserved for: offline batch translation, speech recognition transcription, or structured generation where maximizing sequence log-probability is the correct objective and memory is not a constraint.
 
 **Q: What is continuous batching and why does it improve throughput?**
-A: Naive batching waits for all requests in a batch to complete before accepting new ones. Short requests finish early but hold their GPU slot until the longest request completes. Continuous batching adds new requests to the batch as soon as any request finishes — "iteration-level scheduling." This dramatically improves GPU utilization because the GPU is never waiting for slow requests to finish before starting fast new ones. vLLM's implementation showed up to 24× throughput improvement.
+A: Naive batching waits for all requests in a batch to complete before accepting new ones. Short requests finish early but hold their GPU slot until the longest request in the batch completes. Continuous batching (iteration-level scheduling) adds new requests to the batch as soon as any request finishes. This eliminates the GPU idle time caused by waiting for slow requests before starting fast new ones. For a realistic workload with output lengths ranging from 50 to 2,000 tokens, continuous batching increases GPU utilization from roughly 30% to 90%, which translates to the 24× throughput improvement vLLM demonstrated over HuggingFace's generate() API.
 
 ---
 
