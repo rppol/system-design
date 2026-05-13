@@ -395,19 +395,29 @@ Strategy 4: Long context models
 ## 11. Interview Questions with Answers
 
 **Q: What is RAG and why is it preferred over fine-tuning for knowledge-intensive tasks?**
-A: RAG (Retrieval-Augmented Generation) retrieves relevant documents at query time and injects them into the LLM's context. It's preferred for knowledge-intensive tasks because: (1) knowledge changes frequently — RAG serves fresh data; (2) private data can't be in training data; (3) source attribution is built-in; (4) no training cycle needed. Fine-tuning teaches the model *style* and *behavior*, not knowledge — RAG handles the knowledge.
-
-**Q: How would you choose the right chunk size for a RAG system?**
-A: Depends on the task. For precise Q&A (specific facts), smaller chunks (100-300 tokens) work better — embeddings represent specific information. For multi-hop reasoning or summarization, larger chunks (500-1000 tokens) preserve context. Key factors: (1) What's the granularity of questions? (2) How dense is the text? (3) What's the context window budget? Always test empirically on your data with your retrieval model.
-
-**Q: What is hybrid search and why does it outperform dense-only retrieval?**
-A: Hybrid search combines dense (vector) retrieval and sparse (BM25/keyword) retrieval. Dense retrieval handles semantic similarity — paraphrased queries find semantically similar documents even with different words. BM25 handles exact keyword matching — rare proper nouns, product IDs, and technical terms match exactly. They complement each other: combining via RRF (Reciprocal Rank Fusion) consistently outperforms either alone by 5-15% recall.
-
-**Q: What is a cross-encoder reranker and when should you use it?**
-A: A cross-encoder takes the query and a candidate document together as a single input and outputs a relevance score. This joint encoding is much more accurate than comparing separately embedded vectors (bi-encoder). Use reranking as a second stage: bi-encoder retrieves top-100 candidates (fast), cross-encoder reranks to top-5 (slow but accurate). Adds ~50-100ms but significantly improves precision.
+A: RAG (Retrieval-Augmented Generation) retrieves relevant documents at query time and injects them into the LLM's context. It's preferred for knowledge-intensive tasks because: (1) knowledge changes frequently — RAG serves fresh data; (2) private data can't be in training data; (3) source attribution is built-in; (4) no training cycle needed. Fine-tuning teaches the model style and behavior, not knowledge — RAG handles the knowledge.
 
 **Q: How do you handle questions that span multiple documents?**
-A: Multi-hop retrieval: (1) Decompose the question into sub-questions; (2) retrieve and answer each sub-question; (3) combine sub-answers for the final answer. Alternative: retrieve top-K documents, use long-context LLM to synthesize across all of them. For structured queries across many documents, use a map-reduce approach: answer the question for each document independently, then combine. This is the "multi-doc summarization" or "map-reduce" RAG pattern.
+A: Multi-hop retrieval: (1) Decompose the question into sub-questions; (2) retrieve and answer each sub-question; (3) combine sub-answers for the final answer. Alternative: retrieve top-K documents, use long-context LLM to synthesize across all of them. For structured queries across many documents, use a map-reduce approach: answer the question for each document independently, then combine. This is the map-reduce RAG pattern. For complex multi-hop questions where sub-questions can't be known upfront, use agentic RAG (see advanced_rag/agentic_rag.md).
+
+**Q: What are the top three RAG failure modes and how do you diagnose them?**
+A: Three primary failure modes: (1) Retrieval failure — the right document was never retrieved. Diagnose: measure context recall@K on a labeled test set. Fix: better chunking, hybrid retrieval, reranking. (2) Context not grounded — retrieved documents don't actually contain the answer. Diagnose: measure context precision@K. Fix: metadata filtering, chunk size reduction. (3) Generation failure — the right context was retrieved but the LLM generated an incorrect or hallucinated answer. Diagnose: measure faithfulness (RAGAS). Fix: system prompt with "say I don't know," better context ordering. Attribute failures to components using RAGAS metrics separately — don't assume the LLM is the problem when retrieval is the bottleneck.
+
+**Q: What is the minimal viable RAG stack for a production system?**
+A: Minimum viable production RAG: (1) Document parsing — Unstructured.io or PyMuPDF for PDFs; (2) Chunking — sentence-boundary, 300-500 tokens, 50-token overlap; (3) Embedding — BAAI/bge-base-en-v1.5 (self-hosted) or text-embedding-3-small (API); (4) Vector DB — Qdrant (self-hosted) or Pinecone (managed); (5) Retrieval — hybrid (dense + BM25) via Weaviate or Qdrant hybrid; (6) Reranker — BGE-reranker-base; (7) Generation — GPT-4o or Claude with system prompt requiring source attribution and "I don't know" fallback. This stack achieves 85%+ accuracy on well-scoped document corpora.
+
+---
+
+## Component Deep-Dives
+
+Each RAG component has a comprehensive standalone reference with 10+ senior-AI-engineer-level Q&As:
+
+| Component | File | Key Topics |
+|-----------|------|-----------|
+| Chunking Strategies | [chunking_strategies.md](chunking_strategies.md) | Fixed-size, semantic, hierarchical; overlap; chunk-size selection |
+| Retrieval Methods | [retrieval_methods.md](retrieval_methods.md) | Dense (bi-encoder + HNSW), sparse (BM25), hybrid (RRF), metadata filtering |
+| Reranking | [reranking.md](reranking.md) | Cross-encoder architecture, ColBERT, BGE-reranker, Cohere Rerank |
+| Embedding Models | [embedding_models.md](embedding_models.md) | Sentence-Transformers, BGE, OpenAI Ada, MTEB, domain fine-tuning |
 
 ---
 

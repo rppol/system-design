@@ -377,20 +377,31 @@ model = get_peft_model(base_model, lora_config)
 
 ## 11. Interview Questions with Answers
 
-**Q: What is LoRA and why is it efficient?**
-A: LoRA (Low-Rank Adaptation) adds trainable low-rank matrices ΔW = B×A to frozen pre-trained weights. Instead of updating all d×k = billions of parameters, it updates only d×r + r×k = much fewer parameters (where r << min(d,k)). This works because weight updates during fine-tuning have low intrinsic rank — they can be approximated with a low-rank decomposition. LoRA achieves 90%+ of full fine-tune quality with 0.1% of trainable parameters.
-
-**Q: What is the difference between LoRA and full fine-tuning?**
-A: Full fine-tuning updates all model parameters; LoRA freezes them and trains small adapter matrices instead. Full fine-tuning: requires the same memory as pre-training, higher risk of catastrophic forgetting, best final quality. LoRA: trains 100-1000x fewer parameters, fits on 1-2 GPUs for 7B models, comparable quality for most tasks, adapters can be swapped at runtime.
-
-**Q: What is QLoRA and how does it work?**
-A: QLoRA combines two techniques: quantize the base model to 4-bit NF4 precision (saving 4x memory), then train LoRA adapters in BF16 (maintaining training quality). A 7B model that requires 28GB in LoRA requires only 6GB with QLoRA — enabling fine-tuning on a single 8GB GPU. The quantization introduces ~1-2% quality degradation.
-
 **Q: When should you fine-tune vs. just use prompting?**
 A: Fine-tune when: you need consistent output format, the task is highly repetitive at scale (cost justifies training), latency matters (fine-tuned 7B beats prompted 70B), or privacy requires not sending data to external APIs. Use prompting when: rapid iteration needed, task variety is high, dataset is too small, or the base model already handles the task adequately.
 
-**Q: What is catastrophic forgetting and how do you prevent it?**
-A: Catastrophic forgetting occurs when fine-tuning on new data causes the model to "forget" previously learned capabilities. Prevention: (1) Use LoRA/PEFT — frozen base weights can't forget; (2) Low learning rate (1e-5 to 1e-4); (3) Mix original data with fine-tuning data (replay); (4) Few epochs (1-3); (5) Evaluate on general benchmarks throughout training and stop if regression detected.
+**Q: What are the key differences between full fine-tuning and PEFT methods?**
+A: Full fine-tuning updates all model parameters — provides maximum quality but requires the same memory as pre-training (~56GB for 7B). PEFT trains 0.1-1% of parameters while freezing the rest — reduces training memory to 6-16GB for 7B models with only 1-3% quality loss. PEFT also reduces catastrophic forgetting risk (frozen weights preserve general knowledge) and enables modular multi-task adapters. For most production fine-tuning, LoRA r=16 is the right default.
+
+**Q: How does fine-tuning differ from RAG for adding domain knowledge?**
+A: Fine-tuning bakes knowledge into model weights at training time — static, but fast at inference. RAG injects knowledge dynamically at query time — always current, but adds retrieval latency and cost per query. Fine-tuning is better when: knowledge is stable, the same information is queried millions of times (amortize training cost), or latency prohibits context injection. RAG is better when: knowledge changes frequently, private documents are added continuously, or source attribution is required. Fine-tuning cannot access documents it hasn't seen; RAG can answer about documents added yesterday.
+
+**Q: What is the PEFT landscape — what methods exist and when do you choose each?**
+A: Main PEFT methods: LoRA (low-rank decomposition, merges cleanly, default choice), QLoRA (LoRA + 4-bit quantization for memory-constrained training), adapter layers (insert bottleneck modules, always-on inference overhead), prefix tuning (learn soft key/value prefixes, works well at large scale), prompt tuning (learn soft input tokens, only viable above 10B parameters), BitFit (train only biases, very limited quality), DoRA (magnitude+direction decomposition, better quality at same rank as LoRA). See peft_methods.md for the full comparison table.
+
+---
+
+## Method Deep-Dives
+
+Each fine-tuning method has a comprehensive standalone reference with 10+ senior-AI-engineer-level Q&As:
+
+| Method | File | Key Topics |
+|--------|------|-----------|
+| LoRA | [lora.md](lora.md) | Low-rank decomposition math, rank selection, alpha, target modules, merge |
+| QLoRA | [qlora.md](qlora.md) | NF4 4-bit quantization, double quantization, paged Adam, memory layout |
+| Instruction Tuning | [instruction_tuning.md](instruction_tuning.md) | (instruction, response) pairs, label masking, prompt templates, data curation |
+| Domain Adaptation | [domain_adaptation.md](domain_adaptation.md) | Continued pre-training, domain-then-instruct pipeline, catastrophic forgetting |
+| PEFT Methods | [peft_methods.md](peft_methods.md) | Adapter layers, prefix tuning, prompt tuning, BitFit, DoRA, comparison table |
 
 ---
 

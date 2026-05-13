@@ -386,17 +386,32 @@ result = evaluate(dataset, metrics=[faithfulness, answer_relevancy, ...])
 
 ## 11. Interview Questions with Answers
 
-**Q: What is HyDE and when would you use it?**
-A: HyDE (Hypothetical Document Embeddings) generates a hypothetical answer to the query using an LLM, then embeds that hypothetical answer for retrieval. This works because the hypothetical answer is in "document space" — it resembles how the real answer would appear in documents, bridging the vocabulary gap between queries (terse, question-like) and documents (verbose, declarative). Best for domains where query phrasing differs significantly from document phrasing (academic papers, legal text). Avoid when the LLM might generate a factually wrong hypothesis that leads retrieval astray.
-
-**Q: What is Graph RAG and what problem does it solve?**
-A: Graph RAG builds a knowledge graph from documents with entities and relationships, then clusters it into communities with LLM-generated summaries. Standard RAG struggles with "global" queries that span many documents ("What are the major themes in this corpus?") — no single chunk contains the answer. Graph RAG handles this by querying community summaries that capture themes across many documents. Tradeoff: expensive indexing (entity extraction + community summarization) and longer query latency.
-
 **Q: How do you evaluate a RAG system?**
 A: Evaluate two independent components: (1) Retrieval quality: context recall (did we retrieve all relevant docs?), context precision (fraction of retrieved docs that are relevant). (2) Generation quality: faithfulness (does the answer contradict retrieved context?), answer relevance (does the answer address the question?). Use frameworks like RAGAS or TruLens. Build a golden test set with hand-curated (question, context, answer) triples. Track all four metrics separately so you can diagnose whether failures are retrieval failures or generation failures.
 
-**Q: When would you choose agentic RAG over standard RAG?**
-A: Agentic RAG (iterative retrieval with LLM deciding what to retrieve next) is worth the added complexity when: (1) queries are multi-hop and require chaining multiple retrievals; (2) it's unclear upfront what sub-questions need answering; (3) initial retrieval often returns irrelevant results that require refinement. The cost is 5-10× latency and complexity. Start with standard RAG and measure accuracy first; only add agentic retrieval when standard RAG fails on your specific query distribution.
+**Q: When should you apply advanced RAG vs. standard RAG?**
+A: Start with standard RAG and evaluate accuracy on a labeled query set. Apply advanced techniques only when standard RAG falls below your accuracy target. Multi-query or HyDE are low-cost additions (1-2 extra LLM calls, 10-30% recall improvement). Agentic RAG adds 5-30× latency but handles multi-hop queries. Graph RAG requires expensive indexing ($10-100/1M tokens) but unlocks global/thematic queries. Choose the lowest-complexity technique that achieves your accuracy goal.
+
+**Q: What are the four RAGAS metrics and what does each measure?**
+A: Context recall — fraction of ground-truth relevant information that was retrieved; measures retrieval completeness. Context precision — fraction of retrieved content that is actually relevant; measures retrieval focus. Faithfulness — fraction of answer statements supported by the retrieved context; measures hallucination rate. Answer relevance — how directly the answer addresses the question; measures response quality. Faithfulness can be measured without ground-truth answers (compare answer to retrieved context); context recall requires ground-truth (what should have been retrieved). Diagnose: if faithfulness is low → LLM hallucination problem; if context recall is low → retrieval problem.
+
+**Q: How does the complexity-latency-quality tradeoff differ across advanced RAG strategies?**
+A: Multi-query and HyDE: 1.5-2× latency, 10-30% recall improvement, low complexity — best starting point. Agentic RAG: 5-30× latency, significant accuracy gain on multi-hop queries, high complexity — justified for research/analyst workflows. Graph RAG: 100× indexing cost, 10× query latency, major quality gain on thematic/global queries, very high complexity — justified only for large stable corpora where global queries are critical. Self-RAG: requires fine-tuning, adaptive latency, strong faithfulness — justified when faithfulness is the top priority.
+
+---
+
+## Strategy Deep-Dives
+
+Each strategy has a comprehensive standalone reference with 10+ senior-AI-engineer-level Q&As:
+
+| Strategy | File | Key Topics |
+|---------|------|-----------|
+| Query Transformation | [query_transformation.md](query_transformation.md) | Query rewriting, HyDE, multi-query expansion, step-back prompting |
+| Agentic RAG | [agentic_rag.md](agentic_rag.md) | Iterative retrieval, sufficiency checks, FLARE, loop prevention |
+| Graph RAG | [graph_rag.md](graph_rag.md) | Entity/relation extraction, Leiden clustering, community summaries, global vs local |
+| Multimodal RAG | [multimodal_rag.md](multimodal_rag.md) | PDF tables/charts, CLIP embeddings, vision-LLM descriptions |
+| Self-RAG | [self_rag.md](self_rag.md) | Fine-tuned reflection tokens, adaptive retrieval, faithfulness checking |
+| Corrective RAG | [corrective_rag.md](corrective_rag.md) | Relevance scoring, web-search fallback, CRAG vs Self-RAG |
 
 ---
 
