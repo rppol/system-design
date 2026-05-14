@@ -1,0 +1,461 @@
+# Agent Memory
+
+## Concept Overview
+
+Agent memory encompasses all mechanisms by which an LLM agent stores and retrieves information across the span of a task and across sessions. Without memory, every agent invocation starts blank — no knowledge of past user preferences, prior task outcomes, or accumulated domain knowledge. Memory is what makes an agent feel coherent and capable over time rather than amnesiac.
+
+Memory for LLM agents has four distinct types, each with different storage mechanisms, retrieval characteristics, and use cases. Managing memory efficiently — knowing what to store, how to retrieve it, and when to evict it — is one of the primary engineering challenges in production agentic systems.
+
+---
+
+## Intuition
+
+> **One-line analogy**: Agent memory is like a researcher's notebook system — sticky notes on the desk for the current task (working memory), a notebook for recent meetings (episodic), a reference library for domain facts (semantic), and personal shorthand for well-practiced procedures (procedural).
+
+**Mental model**: The context window is a desk with limited space. Long conversations and accumulated tool results fill it up. Evicting older content saves space but loses information. MemGPT solves this like an OS: the context window is RAM; external databases are disk; the agent itself manages paging — deciding what to move to disk (store externally) and what to load from disk (retrieve). This OS metaphor clarifies why memory management for agents is structurally similar to memory management in operating systems.
+
+**Why it matters**: A 128K context window seems large until you account for a system prompt (2K), conversation history (50K), and multiple tool results (10K each). After ~10 tool calls in a long session, the context is full. Without memory management, either the agent crashes (context overflow) or loses critical earlier information (truncation).
+
+**Key insight**: The context window is the agent's working memory, and it is finite. All non-trivial agents need some mechanism to handle context overflow — whether compression, summarization, or retrieval-augmented memory injection.
+
+---
+
+## Core Principles
+
+- **Four memory types**: working (in-context), episodic (event records), semantic (factual knowledge), procedural (skill templates). Each has different access patterns and lifetimes.
+- **Memory is not infinite context**: even with 1M-token context windows, filling context with everything is wasteful and degrading to reasoning quality.
+- **Retrieval over full injection**: for long-term memory, retrieve only what's relevant to the current step — don't inject the entire memory into context.
+- **Eviction must be principled**: FIFO eviction loses important information randomly; importance-based or recency-weighted eviction is better.
+- **Token budgets drive architecture decisions**: every memory retrieval and injection has a token cost; model this explicitly.
+
+---
+
+## How It Works — Detailed Mechanics
+
+### The Four Memory Types
+
+```
+1. WORKING MEMORY (In-Context)
+   Storage: current context window
+   Capacity: 8K-2M tokens (model-dependent)
+   Latency: 0ms (already in context)
+   Persistence: session only (cleared when context resets)
+   Contents: system prompt, conversation history, tool call/results, scratch notes
+   Use: everything the agent is currently reasoning about
+
+2. EPISODIC MEMORY (Event Store)
+   Storage: external database (vector DB, key-value store, relational DB)
+   Capacity: unlimited
+   Latency: 10-100ms retrieval
+   Persistence: permanent across sessions
+   Contents: past conversations, task outcomes, user interactions, observations
+   Example: "On 2025-05-01, user asked about Python asyncio and preferred
+             simple examples over complex ones"
+   Retrieval: semantic similarity to current query
+
+3. SEMANTIC MEMORY (Knowledge Store)
+   Storage: vector DB + optional knowledge graph
+   Capacity: unlimited
+   Latency: 20-200ms retrieval
+   Persistence: permanent; updated when new facts are learned
+   Contents: facts about the world, domain knowledge, user profile
+   Example: "User works at Anthropic, prefers TypeScript, has senior-level experience"
+   Retrieval: semantic similarity or graph traversal
+
+4. PROCEDURAL MEMORY (Skill Store)
+   Storage: vector DB or code/template library
+   Capacity: unlimited
+   Latency: 20-100ms retrieval
+   Persistence: permanent; grows with experience
+   Contents: successful tool call patterns, solution templates, code snippets
+   Example: "When debugging Python import errors, the sequence is:
+             1) check __init__.py, 2) verify sys.path, 3) check venv activation"
+   Retrieval: semantic similarity to current task type
+```
+
+### MemGPT Architecture
+
+MemGPT (Packer et al., 2023) treats the LLM context window like OS RAM with virtual memory:
+
+```
+MemGPT OS-Style Memory Layout:
+
+                     Context Window (128K tokens = "RAM")
+┌─────────────────────────────────────────────────────────────────────┐
+│ CORE MEMORY (always in context)                                     │
+│   Persona: "You are a helpful assistant named Lena..."              │
+│   Human profile: "User is Alice, software engineer, prefers Python" │
+│   System state: current task, goals, constraints                    │
+├─────────────────────────────────────────────────────────────────────┤
+│ RECALL STORAGE (recent messages — FIFO, most recent N messages)     │
+│   [conv_turn_89] [conv_turn_90] ... [conv_turn_100]                 │
+├─────────────────────────────────────────────────────────────────────┤
+│ ARCHIVAL STORAGE SNIPPETS (retrieved on demand)                     │
+│   [retrieved_memory_1] [retrieved_memory_2]                         │
+└─────────────────────────────────────────────────────────────────────┘
+              ↑ retrieve                      ↓ archive
+┌─────────────────────────────────────────────────────────────────────┐
+│ ARCHIVAL STORAGE ("Disk" — external vector DB)                      │
+│   All past conversations, compressed summaries, learned facts        │
+│   Thousands of entries; not in context unless retrieved             │
+└─────────────────────────────────────────────────────────────────────┘
+
+MemGPT's key innovation: the model itself decides when to archive
+(move from context to external storage) and when to retrieve
+(load from external storage into context). These are tool calls:
+
+memory_append(content) → writes to archival storage
+memory_search(query)   → retrieves relevant archival content into context
+```
+
+### Context Compression Strategies
+
+```python
+# Strategy 1: Summarize-and-Replace
+# When context exceeds threshold, summarize oldest N messages
+
+def compress_context(messages: list[dict], threshold_tokens: int = 100000) -> list[dict]:
+    if count_tokens(messages) < threshold_tokens:
+        return messages
+
+    # Keep first message (system prompt) and last K messages
+    system = messages[0]
+    recent = messages[-10:]          # always keep 10 most recent
+    middle = messages[1:-10]         # compress the middle
+
+    summary = llm.invoke([
+        SystemMessage("Summarize the following conversation turns concisely, "
+                      "preserving all decisions, facts, and key information:"),
+        HumanMessage(format_messages(middle))
+    ]).content
+
+    compressed = [
+        system,
+        {"role": "system", "content": f"[CONVERSATION SUMMARY]: {summary}"},
+        *recent
+    ]
+    print(f"Compressed {count_tokens(middle)} tokens → {count_tokens([summary])} tokens")
+    return compressed
+
+# Strategy 2: Sliding Window
+# Simple: keep only the last N tokens of conversation
+
+def sliding_window(messages: list[dict], max_tokens: int = 80000) -> list[dict]:
+    result = [messages[0]]  # always keep system prompt
+    budget = max_tokens - count_tokens([messages[0]])
+
+    # Add messages from most recent, working backwards
+    for msg in reversed(messages[1:]):
+        msg_tokens = count_tokens([msg])
+        if budget - msg_tokens > 0:
+            result.insert(1, msg)
+            budget -= msg_tokens
+        else:
+            break
+
+    return result
+
+# Strategy 3: Hierarchical Summary
+# Maintain multi-level summaries: session summary → task summary → step summary
+
+class HierarchicalMemory:
+    def __init__(self):
+        self.step_summaries = []      # fine-grained: 1 per step
+        self.task_summary = ""        # medium: 1 per major task phase
+        self.session_summary = ""     # coarse: entire session
+
+    def add_step(self, step_content: str):
+        summary = self.llm.summarize(step_content, max_words=30)
+        self.step_summaries.append(summary)
+
+        # Every 10 steps: condense into task summary
+        if len(self.step_summaries) % 10 == 0:
+            self.task_summary = self.llm.summarize(
+                "\n".join(self.step_summaries[-10:]), max_words=100
+            )
+
+    def get_context_injection(self) -> str:
+        """Return compact memory representation for injection into context."""
+        return f"Session context: {self.session_summary}\n" \
+               f"Recent task: {self.task_summary}\n" \
+               f"Last 3 steps: {'; '.join(self.step_summaries[-3:])}"
+```
+
+### Token Budget Management
+
+```python
+# Concrete token cost model (GPT-4o as of 2025)
+# Input: $5.00/1M tokens   Output: $15.00/1M tokens
+
+MODEL_INPUT_PRICE_PER_TOKEN = 5.00 / 1_000_000    # $0.000005/token
+MODEL_OUTPUT_PRICE_PER_TOKEN = 15.00 / 1_000_000  # $0.000015/token
+
+# Context window: 128,000 tokens
+# Full context fill cost: 128K × $0.000005 = $0.64 per call (input only)
+# 10 calls with full context: $6.40
+
+# Memory-efficient agent loop with budget tracking
+class BudgetedAgentMemory:
+    def __init__(self, token_budget: int = 50000):
+        self.token_budget = token_budget          # per-step allocation
+        self.total_tokens_used = 0
+        self.cost_usd = 0.0
+
+    def build_context(self, task: str, recent_history: list,
+                      retrieved_memories: list) -> list[dict]:
+        """Build context within token budget."""
+        context = []
+        budget_remaining = self.token_budget
+
+        # System prompt: ~1K tokens — always include
+        system = build_system_prompt(task)
+        context.append(system)
+        budget_remaining -= count_tokens([system])
+
+        # Recent history: ~2K tokens per turn
+        for msg in reversed(recent_history):
+            msg_tokens = count_tokens([msg])
+            if budget_remaining - msg_tokens > 5000:  # reserve 5K for generation
+                context.insert(1, msg)
+                budget_remaining -= msg_tokens
+            else:
+                break
+
+        # Retrieved memories: inject up to 5K tokens
+        memory_budget = min(5000, budget_remaining - 5000)
+        for memory in retrieved_memories:
+            mem_tokens = count_tokens([memory])
+            if memory_budget - mem_tokens > 0:
+                context.append(memory)
+                memory_budget -= mem_tokens
+
+        return context
+
+    def record_usage(self, input_tokens: int, output_tokens: int):
+        self.total_tokens_used += input_tokens + output_tokens
+        self.cost_usd += (input_tokens * MODEL_INPUT_PRICE_PER_TOKEN +
+                          output_tokens * MODEL_OUTPUT_PRICE_PER_TOKEN)
+```
+
+### Mem0: Production Memory Library
+
+```python
+from mem0 import Memory
+
+# Mem0 provides automatic memory extraction and retrieval
+m = Memory()
+
+# Store a conversation — Mem0 extracts facts automatically
+messages = [
+    {"role": "user", "content": "I'm working on a Python FastAPI project"},
+    {"role": "assistant", "content": "Great! I'll help with FastAPI."},
+    {"role": "user", "content": "I prefer async endpoints"}
+]
+m.add(messages, user_id="alice")
+# Mem0 extracts: "User Alice works on Python FastAPI, prefers async endpoints"
+# Stored in vector DB with user_id metadata
+
+# Retrieve relevant memories for next session
+query = "Help me with my web project"
+memories = m.search(query, user_id="alice")
+# Returns: ["User works on Python FastAPI", "User prefers async endpoints"]
+
+# Inject into new conversation
+context = f"Relevant user context: {'; '.join(memories)}\n\n{user_query}"
+```
+
+### FIFO vs Importance-Based Eviction
+
+```
+FIFO (First In, First Out):
+  Evict oldest messages first
+  Simple to implement; O(1) per eviction
+  Problem: evicts critical early information (task description,
+           important constraints stated at conversation start)
+  Use when: conversation is uniformly important throughout
+
+Importance-Based Eviction:
+  Score each message/memory by importance:
+    - Explicit facts stated by user: high importance
+    - Tool call results with actionable data: medium-high
+    - Casual conversational turns: low
+    - Error messages already resolved: low
+  Evict lowest-importance first
+  Score update: message importance increases if later messages reference it
+  Problem: scoring requires LLM call or complex heuristics
+  Use when: conversation has heterogeneous information density
+
+Recency-Weighted:
+  Importance decays over time but spikes for recently referenced items
+  Similar to OS LRU (Least Recently Used) page replacement
+  Good balance: recent relevance + importance score
+  Practical: LangMem uses this approach
+```
+
+---
+
+## Architecture Diagrams
+
+### Agent Memory System
+
+```
+                    ┌────────────────────────────────────┐
+                    │         CONTEXT WINDOW              │
+                    │   (128K tokens = working memory)    │
+                    │                                     │
+                    │  System Prompt         ~2K tokens   │
+                    │  Recent History       ~30K tokens   │
+                    │  Retrieved Memories    ~5K tokens   │
+                    │  Current Tool Results ~10K tokens   │
+                    │  [Available for generation] ~80K    │
+                    └─────────────┬──────────────────────┘
+                                  │ archive/retrieve
+         ┌────────────────────────┼────────────────────────┐
+         │                        │                         │
+         ▼                        ▼                         ▼
+┌────────────────┐   ┌────────────────────┐   ┌───────────────────┐
+│ EPISODIC STORE │   │   SEMANTIC STORE   │   │ PROCEDURAL STORE  │
+│ (vector DB)    │   │   (vector DB +     │   │ (vector DB)       │
+│                │   │    knowledge graph)│   │                   │
+│ Past events:   │   │ Facts:             │   │ Skill templates:  │
+│ - conversations│   │ - user preferences │   │ - search patterns │
+│ - outcomes     │   │ - domain knowledge │   │ - code templates  │
+│ - observations │   │ - entity facts     │   │ - debug sequences │
+│                │   │                   │   │                   │
+│ Retrieved by:  │   │ Retrieved by:      │   │ Retrieved by:     │
+│ temporal query │   │ semantic similarity│   │ task similarity   │
+│ event type     │   │ entity lookup      │   │                   │
+└────────────────┘   └────────────────────┘   └───────────────────┘
+```
+
+---
+
+## Real-World Examples
+
+### ChatGPT Memory (OpenAI, 2024)
+
+- Users can enable persistent memory across sessions
+- OpenAI extracts facts from conversations: "User is a vegetarian", "User's name is Alex"
+- Facts stored server-side; injected into future conversations automatically
+- Users can view, edit, and delete stored memories
+- Implementation: semantic extraction + fact store; ~10-20 facts per user in context
+
+### Claude Projects (Anthropic, 2024)
+
+- Project context: files, instructions, conversation history scoped to a project
+- Custom instructions per project persist across all conversations in that project
+- Conversation history in project: last N turns retained
+- Use case: a coding project always has access to the codebase README and coding conventions
+
+### Replit Ghostwriter Agent Memory
+
+- Codebase index: all files embedded; retrieved on demand per query
+- User preferences: preferred libraries, code style extracted from recent edits
+- Error patterns: common errors and their fixes stored; retrieved when similar error seen
+- Session memory: conversation with the user cleared between sessions; codebase index persists
+
+---
+
+## Tradeoffs
+
+| Memory Type | Latency | Storage Cost | Retrieval Quality | Best For |
+|-------------|---------|-------------|-------------------|---------|
+| Working (in-context) | 0ms | High (per token) | Perfect | Current task context |
+| Episodic (vector DB) | 20-100ms | Low | Good (semantic) | Past interactions |
+| Semantic (knowledge base) | 20-200ms | Low | Good | Domain facts |
+| Procedural (templates) | 20-100ms | Low | Good | Skill retrieval |
+
+| Compression Strategy | Quality | Cost | Latency | Complexity |
+|---------------------|---------|------|---------|------------|
+| Sliding window | Low (loses context) | Lowest | 0ms | Trivial |
+| Summarize-and-replace | Medium | Low | 200-500ms | Low |
+| Hierarchical summary | High | Medium | 300-800ms | Medium |
+| MemGPT-style paging | Highest | High | 50-200ms | High |
+
+---
+
+## When to Use / When NOT to Use
+
+### Multi-Session Memory is Essential When:
+- User has persistent preferences that improve quality (coding style, domain expertise)
+- Tasks span multiple sessions (long research project, ongoing work relationship)
+- The application's value proposition depends on personalization
+
+### Keep It Simple (Working Memory Only) When:
+- Single-session use cases (one-off queries, batch processing)
+- Task is self-contained within one context window
+- Privacy requirements prohibit persistent storage
+- Performance requirements can't afford retrieval latency
+
+---
+
+## Common Pitfalls
+
+1. **Memory injection without relevance filtering**: Injecting all memories regardless of relevance bloats context and degrades reasoning. Always retrieve top-K by semantic similarity, never inject everything.
+
+2. **FIFO eviction in long conversations**: Evicting the earliest messages removes the task description and user constraints — the most important information. Implement importance scoring or at minimum always pin the first 2-3 turns.
+
+3. **Missing memory write operations**: Developers implement memory retrieval but forget to write back new facts learned during a session. After each conversation, extract and store important facts explicitly.
+
+4. **Token budget ignored**: A team adds 5 memory retrieval sources each injecting 2K tokens — context is 90% memory injection, leaving little room for the actual conversation. Model and enforce token budgets per memory source.
+
+5. **Stale semantic memory**: User preferences change (they switched from Python to TypeScript); old memories contradict new behavior. Add `last_updated` timestamps and recency weighting; allow users to explicitly override or delete memories.
+
+---
+
+## Technologies & Tools
+
+| Tool | Purpose | Notes |
+|------|---------|-------|
+| **Mem0** | Automatic memory extraction | Extracts + stores facts from conversations |
+| **LangMem** | LangChain memory integration | Recency + importance weighting |
+| **MemGPT / Letta** | OS-style memory management | Self-managed context paging |
+| **Zep** | Conversational memory store | Graph-based; entity extraction |
+| **OpenAI Memory** | Managed memory (ChatGPT) | Server-side; consumer-facing |
+| **Pinecone / Qdrant / Weaviate** | Vector stores for memory | Storage backend for episodic/semantic |
+| **LangGraph checkpointing** | Session state persistence | Saves graph state between runs |
+
+---
+
+## Interview Questions with Answers
+
+**Q: What are the four types of agent memory and what is each used for?**
+A: Working memory: the current context window — everything the agent can see right now; limited to the context window size (typically 128K-200K tokens); cleared between sessions. Episodic memory: a record of past events and interactions stored in an external database; retrieved by semantic similarity or temporal query; enables the agent to remember what happened in past conversations. Semantic memory: factual knowledge about the world and the user stored in a knowledge base; includes user preferences, domain facts, entity information; retrieved by semantic similarity. Procedural memory: templates and patterns for successful task execution — successful code patterns, search strategies, debug sequences; retrieved when a similar task type is encountered.
+
+**Q: What is the MemGPT architecture and how does it solve context overflow?**
+A: MemGPT (Memory GPTs) treats the context window like OS RAM with virtual memory. The model maintains a fixed core memory (always in context: persona, user profile, current task). Recent conversation is in recall storage (last N turns in context, FIFO). Older content is in archival storage (external vector database). The novel part: the model itself manages paging — it calls `memory_append(content)` to archive information and `memory_search(query)` to retrieve relevant content from the archive. This enables effectively unlimited conversation length because the model actively manages what stays in "RAM" based on current relevance. Cost: additional tool call overhead per turn; retrieval latency 20-100ms per search.
+
+**Q: What is the difference between summarize-and-replace and sliding window for context compression?**
+A: Sliding window simply drops the oldest messages when the context overflows — fast but loses information without any synthesis. Summarize-and-replace uses an LLM call to compress old messages into a summary before evicting them — slower (200-500ms extra) but preserves the key information from compressed turns as a compact summary injected back into context. Sliding window is appropriate when: conversation turns are roughly equal in importance, budget is tight, or latency is critical. Summarize-and-replace is appropriate when: early turns contain important context (task constraints, user decisions) that must not be lost, and a 500ms compression overhead is acceptable.
+
+**Q: How do you implement semantic memory for a user's long-term preferences?**
+A: After each conversation, extract user-stated preferences via an LLM call: "Extract any explicit user preferences, constraints, or facts stated in this conversation as structured JSON." Store each extracted fact in a vector database with user_id metadata and a timestamp. At the start of each new conversation, run a semantic search against the user's memory using the current query: `memories = vector_db.search(query, filter={"user_id": user_id}, top_k=5)`. Inject the top-K results into the system prompt: "Known user preferences: [memories]." Add recency weighting to prefer recent facts over stale ones. Provide a mechanism for users to view, edit, and delete their stored memories for privacy compliance.
+
+**Q: How does token budget affect memory architecture decisions?**
+A: Token budget is the primary constraint driving every memory decision. At $5/1M input tokens (GPT-4o): a 128K context filled completely costs $0.64/call. Run 10 agents simultaneously making 20 calls each = $128/run — unsustainable. Token budget forces: (1) selective memory injection — retrieve top-K by relevance, not all memories; (2) summarization before storage — store 50-word summaries, not raw 500-word exchanges; (3) tiered memory — not all memory types need injection every call; (4) model routing — use cheaper models for memory-heavy steps. Rule of thumb: allocate ~20% of context to memory injection (semantic + episodic), 30% to conversation history, 50% to current task context and tool results.
+
+**Q: What is the "lost in the middle" problem and how does it affect memory injection?**
+A: LLM attention degrades for information placed in the middle of a long context — models tend to focus on the beginning (recency to the system prompt) and the end (recency to the current query). Information placed in the middle of a 100K context window is recalled less reliably. For memory injection: place the most critical memories at the END of the system context (just before the conversation begins) rather than the middle. Structure injected memory as a concise summary immediately preceding the conversation history, not buried in a long system prompt. Avoid injecting large blocks of memory that push the current task far from the beginning or end of context.
+
+**Q: How do you handle memory for a multi-agent system where multiple agents need shared facts?**
+A: Use a centralized memory service all agents can read from and write to. Architecture: (1) Shared vector database as the episodic/semantic memory backend — all agents query the same store with their user_id or task_id; (2) Write-back protocol: after each agent completes a step, it writes a structured summary of what it learned to the shared store; (3) Memory coordinator: in complex systems, a dedicated memory agent handles all read/write operations to prevent conflicts (two agents simultaneously updating the same fact); (4) Versioning: facts in shared memory have a version number; concurrent updates use optimistic locking. Individual working memory (the agent's own context window) is private; episodic/semantic memory is shared at the task level.
+
+**Q: What is Mem0 and how does it differ from building memory with raw vector databases?**
+A: Mem0 is a memory management library that handles the full lifecycle: extraction (LLM call to extract facts from conversations), storage (vector DB backend), retrieval (semantic search with user/session scoping), deduplication (merges new facts with existing ones rather than creating duplicates), and deletion. Using a raw vector database requires building all these yourself: writing extraction prompts, handling duplicates, implementing relevance scoring, managing metadata. Mem0's key advantage is automatic fact extraction — you pass a conversation and it identifies what's worth remembering without you specifying it. The trade-off: Mem0 adds an extraction LLM call per conversation turn, costing ~100-300 extra tokens per turn.
+
+**Q: When is it better to not use external memory and just extend the context window?**
+A: For single-session, bounded tasks (coding a specific feature, answering a research question), extending the context window is simpler, lower latency (no retrieval), and higher fidelity (no information loss from summarization). External memory only provides value when: (a) the session spans multiple separate conversations; (b) the relevant history exceeds the context window; (c) the agent should personalize based on accumulated knowledge across many users or tasks. For tasks that complete in under 100K tokens in a single session, just use a large context window. External memory adds implementation complexity, latency, and potential for retrieval misses — worth it only for long-horizon or multi-session use cases.
+
+**Q: How do you evaluate whether your memory system is working correctly?**
+A: Three metrics: (1) Recall accuracy: plant a specific fact in session N (e.g., "My name is Alice"); in session N+5, ask "What is my name?" — check if the agent correctly recalls it; (2) Precision (relevance): measure what fraction of retrieved memories are actually relevant to the current query — track with human evaluation or LLM-as-judge; (3) Context utilization: measure tokens used for memory injection vs. actual information referenced in the final response — high injection with low reference = wasted tokens. For production: instrument memory hit rate (fraction of queries where memory retrieval finds relevant content), memory write rate (facts extracted per conversation), and memory eviction rate. Low hit rate suggests retrieval quality problem; zero write rate suggests extraction is failing.
+
+---
+
+## Best Practices
+
+1. **Classify memory by type before storing**: episodic (event), semantic (fact), procedural (pattern) — store in separate collections with appropriate metadata for targeted retrieval.
+2. **Always pin the system prompt and task description**: never evict the initial context that defines the agent's role and current goal, regardless of eviction policy.
+3. **Budget tokens for memory injection**: allocate a maximum token budget per memory type (e.g., 2K for episodic, 2K for semantic); enforce it programmatically before injection.
+4. **Implement memory write-back explicitly**: don't rely on automatic extraction; after key interactions, explicitly call the memory store with extracted facts.
+5. **Add timestamps to all stored memories**: enables recency weighting, stale memory detection, and GDPR-compliant deletion by time range.
+6. **Test memory retrieval quality separately**: write unit tests that store known facts and verify retrieval — memory bugs are subtle and often surface only in production when quality degrades.

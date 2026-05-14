@@ -5,7 +5,7 @@
 A comprehensive system design study repository covering:
 - **LLD** — Design patterns (GoF), SOLID, anti-patterns
 - **HLD** — Distributed system concepts (CAP, caching, queues, sharding, etc.) + case studies
-- **LLM** — Complete LLM engineering guide (27+ modules, 7 case studies)
+- **LLM** — Complete LLM engineering guide (28 modules, 7 case studies, 31 deep-dive sub-files across 5 topics)
 - **Java** — Pure Java senior-engineer + interview prep guide (17 modules, 4 case studies)
 - **Spring** — Spring Framework senior-engineer + interview prep guide (23 modules, 5 case studies)
 
@@ -110,6 +110,47 @@ When covering a Spring feature, note the version:
 
 ---
 
+## LLM Section Module List
+
+Current modules under `src/main/java/com/rutik/systemdesign/llm/`:
+
+| Module Directory | Topic | Sub-files |
+|-----------------|-------|-----------|
+| `foundations_and_architecture/` | Transformers, self-attention, scaling laws, GPT vs BERT | — |
+| `tokenization_and_embeddings/` | BPE, WordPiece, SentencePiece, vocabulary design | — |
+| `embeddings_and_similarity_search/` | Sentence embeddings, HNSW, IVF, Matryoshka, FAISS | — |
+| `pre_training/` | CLM, MLM, data curation, training dynamics, compute | — |
+| `training_infrastructure/` | Distributed training, tensor/pipeline parallelism, ZeRO, FSDP | — |
+| `synthetic_data_generation/` | Self-Instruct, Evol-Instruct, quality filtering, LIMA | — |
+| `fine_tuning/` | LoRA, QLoRA, PEFT, instruction tuning, domain adaptation | lora, qlora, peft_methods, instruction_tuning, domain_adaptation |
+| `alignment_and_rlhf/` | RLHF, DPO, Constitutional AI, ORPO, KTO, reward models | — |
+| `prompt_engineering/` | CoT, few-shot, ReAct, structured outputs, system prompts | — |
+| `rag_fundamentals/` | Chunking, vector DBs, retrieval, reranking, hybrid search | chunking_strategies, embedding_models, retrieval_methods, reranking |
+| `advanced_rag/` | Agentic RAG, Graph RAG, multimodal RAG, evaluation | agentic_rag, corrective_rag, graph_rag, multimodal_rag, query_transformation, self_rag |
+| `reasoning_models/` | o1/o3, test-time compute, MCTS, DeepSeek-R1, PRM/ORM | — |
+| `code_generation/` | FIM, CodeLLaMA, Copilot architecture, SWE-bench, code agents | — |
+| `agents_and_tool_use/` | Function calling, ReAct, plan-and-execute, memory systems | function_calling_and_tool_design, react_and_reasoning_patterns, plan_and_execute, agent_memory, computer_use_and_browser_agents, agent_evaluation_and_benchmarking |
+| `agentic_frameworks/` | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, SK, Haystack, DSPy | langchain_and_lcel, langgraph, llamaindex, crewai, autogen, semantic_kernel, haystack, dspy, framework_observability, structured_outputs_and_instructor |
+| `multi_agent_systems/` | Orchestrator pattern, debate, ChatDev, MetaGPT, Swarm | — |
+| `inference_and_decoding/` | Sampling, KV cache, speculative decoding, continuous batching | — |
+| `inference_engines/` | vLLM, TensorRT-LLM, llama.cpp, SGLang, Ollama, TGI | — |
+| `optimization_and_quantization/` | GPTQ, AWQ, Flash Attention, MoE, pruning, distillation | — |
+| `deployment_and_mlops/` | Serving, GPU cost, monitoring, routing, edge deployment | — |
+| `guardrails_and_content_safety/` | NeMo Guardrails, Llama Guard, input/output filters | — |
+| `safety_and_alignment/` | Jailbreaking, prompt injection, hallucination, bias, red teaming | — |
+| `evaluation_and_benchmarks/` | MMLU, HumanEval, LLM-as-judge, Chatbot Arena, RAGAs | — |
+| `multimodal_models/` | VLMs, vision encoders, diffusion, speech, video | — |
+| `context_windows_and_long_context/` | RoPE, ALiBi, YaRN, long context vs RAG | — |
+| `ai_applications/` | Healthcare, legal, finance, education, customer support | — |
+| `llm_ecosystem_and_landscape/` | Model families, licensing, cost analysis, timeline | — |
+| `vllm_deep_dive/` | PagedAttention, continuous batching, prefix caching, TP/PP | — |
+
+Case studies in `llm/case_studies/`: design_chatgpt, design_copilot, design_rag_pipeline, design_ai_search_engine, design_llm_gateway, design_ai_coding_assistant, design_customer_support_bot.
+
+Master index: `llm/README.md` (topics table + Sub-Files Index section).
+
+---
+
 ## Java Section Module List
 
 Current modules under `src/main/java/com/rutik/systemdesign/java/`:
@@ -180,6 +221,13 @@ Case studies in `spring/case_studies/`: multitenant API, event-driven microservi
 4. Update the section's master `README.md` (the index file for that section)
 5. Update the root `README.md` table
 
+### Adding an LLM sub-file (deep-dive within an existing topic):
+- Create `src/main/java/com/rutik/systemdesign/llm/<topic>/<subtopic>.md`
+- Follow the 14-section template; minimum 15 Q&As
+- Update the topic's own `README.md` to add a "Deep Dive Files" table at the top linking to the new file
+- Update `llm/README.md`: note the sub-file count in the topic's table row, add the file to the Sub-Files Index section
+- Update the LLM module table in `CLAUDE.md` (add to Sub-files column)
+
 ### Adding a Spring module specifically:
 - Add a row to the module table in `spring/README.md`
 - Place it in the correct phase in the phase diagram
@@ -200,6 +248,7 @@ Case studies in `spring/case_studies/`: multitenant API, event-driven microservi
 |------|---------|
 | `llm/foundations_and_architecture/README.md` | Gold standard 14-section format |
 | `llm/rag_fundamentals/README.md` | Second format reference |
+| `llm/agentic_frameworks/langchain_and_lcel.md` | Example deep-dive sub-file (15+ Q&As, full 14-section) |
 | `java/README.md` | Java section master index |
 | `java/concurrency/README.md` | Example of 15+ Q&A deep module |
 | `java/collections_internals/README.md` | Example of 12+ Q&A module |

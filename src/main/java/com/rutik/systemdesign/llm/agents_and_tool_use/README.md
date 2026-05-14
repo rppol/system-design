@@ -157,6 +157,22 @@ Common tools given to agents:
 | LLM sub-calls | Summarizer, translator | Specialized sub-tasks |
 | Vector DB | Retrieval, storage | Long-term memory |
 
+### 3.6 Multi-Agent Systems
+
+Multiple specialized agents collaborate to tackle tasks that exceed any single agent's context or capability. An orchestrator decomposes the task, dispatches to specialized workers, and assembles results. Enables parallelism and specialization but requires careful failure isolation and inter-agent communication protocols. See [Multi-Agent Systems](../multi_agent_systems/README.md) for patterns (orchestrator-worker, debate, blackboard, Swarm) and full implementation.
+
+### 3.7 Agent Safety & Guardrails
+
+Guardrails are external safety layers that sit around agents: input filters (PII detection, injection detection), output filters (toxicity, grounding checks), and runtime constraints (rate limits, step budgets). Critical for production deployments, especially in regulated domains. Agents create unique guardrail challenges: indirect prompt injection via tool results and multi-turn jailbreak attacks. See [Guardrails & Content Safety](../guardrails_and_content_safety/README.md) for full coverage.
+
+### 3.8 Code Agents
+
+Agents specialized for software engineering tasks: writing, executing, debugging, and iterating on code. The execution loop is tighter than standard ReAct — the primary tool is a code sandbox; feedback is structured (test results, stack traces); termination is programmatic (tests pass). Powers tools like Claude Code, Devin, Cursor Composer, and SWE-agent. See [Code Generation](../code_generation/README.md) for evaluation benchmarks (SWE-bench), security considerations, and architecture.
+
+### 3.9 Agentic Frameworks
+
+LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, and Semantic Kernel provide reusable abstractions for agent loops, tool management, memory, and multi-agent coordination. Framework choice matters: LangGraph for complex stateful workflows; LlamaIndex for data-heavy RAG agents; CrewAI for quick role-based crews. See [Agentic Frameworks](../agentic_frameworks/README.md) for framework comparison and when to build custom.
+
 ---
 
 ## 4. Architecture Diagrams
@@ -383,6 +399,10 @@ System Prompt Structure for Agents:
 | **Modal** | Serverless agent execution | Scale agent workloads |
 | **Tool-augmented LLM guide** | Best practices | Anthropic's tool use cookbook |
 | **Mem0** | Agent memory | Long-term memory for agents |
+| **browser-use** | Web agent library | Python; Playwright + LLM; accessibility tree |
+| **Anthropic Computer Use API** | Screen-based agent | Screenshot + action loop; claude-3-5-sonnet |
+| **GAIA benchmark** | Agent evaluation | 466 tasks; tool-use reasoning; 3 difficulty levels |
+| **SWE-bench** | Code agent evaluation | 2294 real GitHub issues; automated test scoring |
 
 ---
 
@@ -399,6 +419,54 @@ A: (1) Hard iteration limit — stop after N steps (typically 10-20) and return 
 
 **Q: What is the difference between working memory and long-term memory for agents?**
 A: Working memory is the agent's context window — everything in the current conversation. It's fast (no retrieval) but limited (128K tokens max) and volatile (cleared between sessions). Long-term memory stores information in external databases (vector store, key-value store) and is retrieved as needed. It's persistent, unlimited, but requires retrieval latency. Agents need both: working memory for the current task, long-term memory for user preferences, past outcomes, and domain knowledge.
+
+**Q: What are parallel tool calls and when should you use them?**
+A: Parallel tool calls allow the model to emit multiple tool call requests in a single response, which your application executes simultaneously. Use them when the calls are logically independent — their inputs don't depend on each other's outputs. Example: fetching weather for Paris and Tokyo in one round-trip instead of two sequential calls. Speedup: N× for N independent calls (latency = max(call_1, call_2, ...) rather than sum). Avoid parallel calls when one call's result determines the next call's arguments (sequential dependency).
+
+**Q: How do you design tool descriptions to minimize incorrect tool selection?**
+A: Tool descriptions are a form of prompting that directly governs selection accuracy. Include four elements in every description: (1) what the tool does (mechanism); (2) trigger condition — "call this when the user asks about X"; (3) exclusion — "do NOT use for Y, use Z tool instead" to disambiguate similar tools; (4) a concrete example. Bad: "Gets data." Good: "Retrieves current stock prices for publicly traded companies. Call this when the user asks about current price or market cap. Do NOT use for historical prices — use get_historical_prices instead."
+
+**Q: What is the cost model for an agentic system — what drives token usage?**
+A: Token cost = sum over all LLM calls of (input_tokens × input_price + output_tokens × output_price). What drives input token growth: (1) accumulated conversation history and tool results — each step adds 500-2000 tokens; (2) large tool responses — a 5KB JSON API response can cost $0.025 in input tokens at GPT-4o pricing; (3) context repetition — the system prompt is re-sent on every call. Cost drivers by example: a 15-step agent at 3K tokens/step (input) × $5/1M = $0.225 total. Mitigations: truncate tool results to 500 words, compress old conversation history, route simple steps to cheaper models.
+
+**Q: How do you implement human-in-the-loop in a production agent?**
+A: LangGraph provides `interrupt_before` and `interrupt_after` node hooks that pause graph execution and surface state to a human. The agent state is persisted via a checkpointer; the graph resumes when the human approves via `graph.update_state()`. Design: classify actions by risk (low/medium/high); only interrupt for high-risk actions (irreversible writes, external sends, large purchases). Surface the pending action with its reasoning context in a UI or Slack message; require explicit approval. Pattern: pause before any `send_email`, `delete_file`, `make_payment` node — never let these execute autonomously.
+
+**Q: What is the difference between a tool call error and a reasoning error?**
+A: A tool call error is an execution failure: the tool was correctly identified and its arguments were correctly formed, but the call failed (network timeout, API 404, rate limit). The model can recover by retrying, using a different tool, or acknowledging the limitation. A reasoning error is a logical failure: the model selected the wrong tool, formed incorrect arguments, or reached a wrong conclusion from correct observations. Reasoning errors are harder to detect and fix — they don't produce exceptions. Detection: tool call errors show up in tool result status fields; reasoning errors require trajectory evaluation (did the agent's Thoughts follow logically from Observations?).
+
+**Q: When would you NOT use an agent, even though you could?**
+A: (1) Task is a single LLM call — no tool needed; adding an agent loop adds latency and complexity for no benefit; (2) The tool sequence is always the same (retrieve → generate) — a fixed chain is faster, cheaper, and more reliable; (3) Latency is critical — agent loops add N × LLM latency; if you need <500ms response, use a single call; (4) Safety requirements prohibit autonomous action — medical diagnosis, legal advice, financial decisions should never be made without human review; (5) The task is easily verifiable in one step — if you can write a unit test for the correct output of a single LLM call, an agent is overkill.
+
+**Q: How do you handle a tool that returns inconsistent or malformed results?**
+A: Three-layer strategy: (1) Input validation — validate tool result schema before injecting into context; if malformed, inject a structured error message instead of the raw broken response; (2) Retry with modified prompt — on first malformed result, retry the tool call once with additional formatting guidance in the prompt ("return only valid JSON with these exact fields"); (3) Fallback — if the tool consistently returns garbage, inject an error observation: "This tool is returning unreliable data. Try an alternative approach." The key is never injecting malformed JSON or HTML directly into context — it corrupts the model's reasoning about subsequent steps.
+
+**Q: What metrics do you track for a production agent in steady state?**
+A: Core: (1) task success rate — binary or LLM-scored; alert if drops >5% (rolling 7-day); (2) cost per task — $/task; alert if exceeds budget threshold; (3) P95 latency — wall time; alert on SLA breach; (4) step count per task — rising count indicates quality degradation or inefficiency; (5) tool error rate — fraction of tool calls returning errors. Supporting: human escalation rate (for HITL agents), token usage per step, retry rate. Set alert thresholds during a 2-week baseline period then alert on >2 standard deviation shifts. LLM judge on 5% of production traces gives qualitative quality signal without evaluating every call.
+
+---
+
+## Strategy Deep-Dives
+
+In-depth coverage of specific agent topics. Each file follows the standard module format with 10+ interview Q&As.
+
+| Topic | File | Key Coverage |
+|-------|------|-------------|
+| Function Calling & Tool Design | [function_calling_and_tool_design.md](./function_calling_and_tool_design.md) | Tool spec format, strict mode, parallel calls, result injection, tool versioning |
+| ReAct & Reasoning Patterns | [react_and_reasoning_patterns.md](./react_and_reasoning_patterns.md) | ReAct loop, Reflexion, Tree of Thoughts, self-consistency, scratchpad |
+| Plan and Execute | [plan_and_execute.md](./plan_and_execute.md) | Two-phase planning, replanning triggers, HTN decomposition, LangGraph P&E |
+| Agent Memory | [agent_memory.md](./agent_memory.md) | 4 memory types, MemGPT paging, context compression, token budgets, Mem0 |
+| Agent Evaluation & Benchmarking | [agent_evaluation_and_benchmarking.md](./agent_evaluation_and_benchmarking.md) | GAIA, SWE-bench, AgentBench, trajectory eval, LLM-as-judge, cost metrics |
+| Computer Use & Browser Agents | [computer_use_and_browser_agents.md](./computer_use_and_browser_agents.md) | Anthropic Computer Use, browser-use, Playwright, vision+action loop, grounding |
+
+Related standalone modules:
+
+| Topic | Module | Key Coverage |
+|-------|--------|-------------|
+| Multi-Agent Systems | [../multi_agent_systems/README.md](../multi_agent_systems/README.md) | Orchestrator-worker, debate, blackboard, ChatDev, MetaGPT, Swarm |
+| Guardrails & Content Safety | [../guardrails_and_content_safety/README.md](../guardrails_and_content_safety/README.md) | Input/output filters, NeMo, Llama Guard, prompt injection, HIPAA/PCI |
+| Code Generation | [../code_generation/README.md](../code_generation/README.md) | FIM, SWE-bench, security risks, hallucinated APIs, code agents |
+| Agentic Frameworks | [../agentic_frameworks/README.md](../agentic_frameworks/README.md) | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, LCEL, observability |
 
 ---
 

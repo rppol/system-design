@@ -18,7 +18,7 @@ A comprehensive, one-stop reference for understanding everything about Large Lan
 
 ## What This Section Covers
 
-This section is organized into **27 topic directories** plus **7 real-world case studies**, covering the full LLM lifecycle:
+This section is organized into **28 topic directories** plus **7 real-world case studies**, covering the full LLM lifecycle. Five topics have **deep-dive sub-files** (see the Sub-Files Index below):
 
 - How models are built (architecture, tokenization, pre-training, fine-tuning, alignment)
 - How to use models effectively (prompting, RAG, reasoning, code generation)
@@ -39,15 +39,15 @@ This section is organized into **27 topic directories** plus **7 real-world case
 | 4 | [Pre-Training](pre_training/README.md) | CLM, MLM, data curation, training dynamics, compute | Advanced |
 | 5 | [Training Infrastructure](training_infrastructure/README.md) | Distributed training, tensor/pipeline parallelism, ZeRO, FSDP | Advanced |
 | 6 | [Synthetic Data Generation](synthetic_data_generation/README.md) | Self-Instruct, Evol-Instruct, quality filtering, LIMA | Intermediate |
-| 7 | [Fine-Tuning](fine_tuning/README.md) | LoRA, QLoRA, PEFT, instruction tuning, domain adaptation | Intermediate |
+| 7 | [Fine-Tuning](fine_tuning/README.md) | LoRA, QLoRA, PEFT, instruction tuning, domain adaptation — with 5 deep-dive sub-files | Intermediate |
 | 8 | [Alignment & RLHF](alignment_and_rlhf/README.md) | RLHF, DPO, Constitutional AI, ORPO, KTO, reward models | Advanced |
 | 9 | [Prompt Engineering](prompt_engineering/README.md) | CoT, few-shot, ReAct, structured outputs, system prompts | Beginner |
-| 10 | [RAG Fundamentals](rag_fundamentals/README.md) | Chunking, vector DBs, retrieval, reranking, hybrid search | Intermediate |
-| 11 | [Advanced RAG](advanced_rag/README.md) | Agentic RAG, Graph RAG, multi-modal RAG, evaluation | Advanced |
+| 10 | [RAG Fundamentals](rag_fundamentals/README.md) | Chunking, vector DBs, retrieval, reranking, hybrid search — with 4 deep-dive sub-files | Intermediate |
+| 11 | [Advanced RAG](advanced_rag/README.md) | Agentic RAG, Graph RAG, multi-modal RAG, evaluation — with 6 deep-dive sub-files | Advanced |
 | 12 | [Reasoning Models](reasoning_models/README.md) | o1/o3, test-time compute, MCTS, DeepSeek-R1, PRM/ORM | Advanced |
 | 13 | [Code Generation](code_generation/README.md) | FIM, CodeLLaMA, Copilot architecture, SWE-bench, code agents | Intermediate |
-| 14 | [Agents & Tool Use](agents_and_tool_use/README.md) | Function calling, ReAct, plan-and-execute, memory systems | Intermediate |
-| 15 | [Agentic Frameworks](agentic_frameworks/README.md) | LangChain, LangGraph, CrewAI, AutoGen, Semantic Kernel | Intermediate |
+| 14 | [Agents & Tool Use](agents_and_tool_use/README.md) | Function calling, ReAct, plan-and-execute, memory systems — with 6 deep-dive sub-files | Intermediate |
+| 15 | [Agentic Frameworks](agentic_frameworks/README.md) | LangChain/LCEL, LangGraph, LlamaIndex, CrewAI, AutoGen, Semantic Kernel, Haystack, DSPy, observability, structured outputs — with 10 deep-dive sub-files | Intermediate |
 | 16 | [Multi-Agent Systems](multi_agent_systems/README.md) | Orchestrator pattern, debate, ChatDev, MetaGPT, Swarm | Advanced |
 | 17 | [Inference & Decoding](inference_and_decoding/README.md) | Sampling, KV cache, speculative decoding, continuous batching | Advanced |
 | 18 | [Inference Engines](inference_engines/README.md) | vLLM, TensorRT-LLM, llama.cpp, SGLang, Ollama, TGI | Intermediate |
@@ -61,6 +61,63 @@ This section is organized into **27 topic directories** plus **7 real-world case
 | 26 | [AI Applications](ai_applications/README.md) | Healthcare, legal, finance, education, customer support | Beginner |
 | 27 | [LLM Ecosystem & Landscape](llm_ecosystem_and_landscape/README.md) | Model families, licensing, cost analysis, timeline | Beginner |
 | 28 | [vLLM Deep Dive](vllm_deep_dive/README.md) | PagedAttention, continuous batching, prefix caching, speculative decoding, quantization, TP/PP, LoRA, structured output | Advanced |
+
+---
+
+## Sub-Files Index
+
+Topics marked with sub-files above contain individual deep-dive files in addition to their README. Each sub-file follows the full 14-section module template with 15+ interview Q&As.
+
+### Fine-Tuning (`fine_tuning/`)
+| File | Topic |
+|------|-------|
+| [lora.md](fine_tuning/lora.md) | Low-Rank Adaptation — rank decomposition, merging, adapter placement |
+| [qlora.md](fine_tuning/qlora.md) | QLoRA — 4-bit NF4 quantization, double quantization, paged optimizers |
+| [peft_methods.md](fine_tuning/peft_methods.md) | PEFT survey — LoRA, prefix tuning, prompt tuning, IA3, adapters |
+| [instruction_tuning.md](fine_tuning/instruction_tuning.md) | Instruction tuning — FLAN, Alpaca, dataset curation, format design |
+| [domain_adaptation.md](fine_tuning/domain_adaptation.md) | Domain adaptation — continued pre-training vs SFT, catastrophic forgetting |
+
+### RAG Fundamentals (`rag_fundamentals/`)
+| File | Topic |
+|------|-------|
+| [chunking_strategies.md](rag_fundamentals/chunking_strategies.md) | Chunking — fixed-size, sentence, semantic, recursive, late chunking |
+| [embedding_models.md](rag_fundamentals/embedding_models.md) | Embedding models — dense vs sparse, BGE, E5, Matryoshka, fine-tuning |
+| [retrieval_methods.md](rag_fundamentals/retrieval_methods.md) | Retrieval — BM25, vector search, hybrid, SPLADE, ColBERT |
+| [reranking.md](rag_fundamentals/reranking.md) | Reranking — cross-encoders, Cohere Rerank, RRF, LLM-as-reranker |
+
+### Advanced RAG (`advanced_rag/`)
+| File | Topic |
+|------|-------|
+| [agentic_rag.md](advanced_rag/agentic_rag.md) | Agentic RAG — iterative retrieval, tool-augmented RAG, self-reflection |
+| [corrective_rag.md](advanced_rag/corrective_rag.md) | CRAG — relevance grading, web fallback, knowledge refinement |
+| [graph_rag.md](advanced_rag/graph_rag.md) | Graph RAG — knowledge graphs, community summaries, global search |
+| [multimodal_rag.md](advanced_rag/multimodal_rag.md) | Multimodal RAG — image + text retrieval, ColPali, late interaction |
+| [query_transformation.md](advanced_rag/query_transformation.md) | Query transformation — HyDE, step-back, multi-query, decomposition |
+| [self_rag.md](advanced_rag/self_rag.md) | Self-RAG — retrieve/generate/critique tokens, adaptive retrieval |
+
+### Agents & Tool Use (`agents_and_tool_use/`)
+| File | Topic |
+|------|-------|
+| [function_calling_and_tool_design.md](agents_and_tool_use/function_calling_and_tool_design.md) | Function calling — OpenAI/Anthropic tool use, schema design, parallel calls |
+| [react_and_reasoning_patterns.md](agents_and_tool_use/react_and_reasoning_patterns.md) | ReAct — Thought/Action/Observation loop, chain-of-thought integration |
+| [plan_and_execute.md](agents_and_tool_use/plan_and_execute.md) | Plan-and-execute — task decomposition, replanning, subgoal tracking |
+| [agent_memory.md](agents_and_tool_use/agent_memory.md) | Agent memory — short-term, long-term, episodic, semantic, working memory |
+| [computer_use_and_browser_agents.md](agents_and_tool_use/computer_use_and_browser_agents.md) | Computer use — Anthropic CUA, browser automation, screen understanding |
+| [agent_evaluation_and_benchmarking.md](agents_and_tool_use/agent_evaluation_and_benchmarking.md) | Agent eval — SWE-bench, GAIA, WebArena, trajectory evaluation |
+
+### Agentic Frameworks (`agentic_frameworks/`)
+| File | Topic |
+|------|-------|
+| [langchain_and_lcel.md](agentic_frameworks/langchain_and_lcel.md) | LangChain — Runnable protocol, LCEL pipe composition, RAG chains, LangSmith |
+| [langgraph.md](agentic_frameworks/langgraph.md) | LangGraph — StateGraph, TypedDict state, checkpointing, human-in-the-loop |
+| [llamaindex.md](agentic_frameworks/llamaindex.md) | LlamaIndex — node parsers, index types, sentence window, sub-question engine |
+| [crewai.md](agentic_frameworks/crewai.md) | CrewAI — agent roles/goals, Task delegation, sequential vs hierarchical process |
+| [autogen.md](agentic_frameworks/autogen.md) | AutoGen — ConversableAgent, code execution loop, GroupChat, human_input_mode |
+| [semantic_kernel.md](agentic_frameworks/semantic_kernel.md) | Semantic Kernel — Kernel, plugins, planners, Kernel filters, enterprise patterns |
+| [haystack.md](agentic_frameworks/haystack.md) | Haystack — typed pipeline DAG, document stores, hybrid retrieval, serialization |
+| [dspy.md](agentic_frameworks/dspy.md) | DSPy — signatures, modules, optimizers (BootstrapFewShot, MIPRO), compilation |
+| [framework_observability.md](agentic_frameworks/framework_observability.md) | Observability — LangSmith, Langfuse, OpenTelemetry, cost tracking, LLM-as-judge |
+| [structured_outputs_and_instructor.md](agentic_frameworks/structured_outputs_and_instructor.md) | Structured outputs — Instructor, Pydantic extraction, native structured outputs |
 
 ---
 
