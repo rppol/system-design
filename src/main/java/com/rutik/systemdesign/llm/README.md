@@ -50,17 +50,17 @@ This section is organized into **28 topic directories** plus **7 real-world case
 | 15 | [Agentic Frameworks](agentic_frameworks/README.md) | LangChain/LCEL, LangGraph, LlamaIndex, CrewAI, AutoGen, Semantic Kernel, Haystack, DSPy, observability, structured outputs — with 10 deep-dive sub-files | Intermediate |
 | 16 | [Multi-Agent Systems](multi_agent_systems/README.md) | Orchestrator pattern, debate, ChatDev, MetaGPT, Swarm | Advanced |
 | 17 | [Inference & Decoding](inference_and_decoding/README.md) | Sampling, KV cache, speculative decoding, continuous batching | Advanced |
-| 18 | [Inference Engines](inference_engines/README.md) | vLLM, TensorRT-LLM, llama.cpp, SGLang, Ollama, TGI | Intermediate |
-| 19 | [Optimization & Quantization](optimization_and_quantization/README.md) | GPTQ, AWQ, Flash Attention, MoE, pruning, distillation | Advanced |
-| 20 | [Deployment & MLOps](deployment_and_mlops/README.md) | Serving, GPU cost, monitoring, routing, edge deployment | Intermediate |
-| 21 | [Guardrails & Content Safety](guardrails_and_content_safety/README.md) | NeMo Guardrails, Llama Guard, input/output filters | Intermediate |
-| 22 | [Safety & Alignment](safety_and_alignment/README.md) | Jailbreaking, prompt injection, hallucination, bias, red teaming | Intermediate |
+| 18 | [Context Windows & Long Context](context_windows_and_long_context/README.md) | RoPE, ALiBi, YaRN, long context vs RAG, positional encoding | Advanced |
+| 19 | [Inference Engines](inference_engines/README.md) | vLLM, TensorRT-LLM, llama.cpp, SGLang, Ollama, TGI | Intermediate |
+| 20 | [vLLM Deep Dive](vllm_deep_dive/README.md) | PagedAttention, continuous batching, prefix caching, speculative decoding, quantization, TP/PP, LoRA, structured output | Advanced |
+| 21 | [Optimization & Quantization](optimization_and_quantization/README.md) | GPTQ, AWQ, Flash Attention, MoE, pruning, distillation | Advanced |
+| 22 | [Deployment & MLOps](deployment_and_mlops/README.md) | Serving, GPU cost, monitoring, routing, edge deployment | Intermediate |
 | 23 | [Evaluation & Benchmarks](evaluation_and_benchmarks/README.md) | MMLU, HumanEval, LLM-as-judge, Chatbot Arena, RAGAs | Intermediate |
-| 24 | [Multimodal Models](multimodal_models/README.md) | VLMs, vision encoders, diffusion, speech, video | Advanced |
-| 25 | [Context Windows & Long Context](context_windows_and_long_context/README.md) | RoPE, ALiBi, YaRN, long context vs RAG, positional encoding | Advanced |
-| 26 | [AI Applications](ai_applications/README.md) | Healthcare, legal, finance, education, customer support | Beginner |
-| 27 | [LLM Ecosystem & Landscape](llm_ecosystem_and_landscape/README.md) | Model families, licensing, cost analysis, timeline | Beginner |
-| 28 | [vLLM Deep Dive](vllm_deep_dive/README.md) | PagedAttention, continuous batching, prefix caching, speculative decoding, quantization, TP/PP, LoRA, structured output | Advanced |
+| 24 | [Guardrails & Content Safety](guardrails_and_content_safety/README.md) | NeMo Guardrails, Llama Guard, input/output filters | Intermediate |
+| 25 | [Safety & Alignment](safety_and_alignment/README.md) | Jailbreaking, prompt injection, hallucination, bias, red teaming | Intermediate |
+| 26 | [Multimodal Models](multimodal_models/README.md) | VLMs, vision encoders, diffusion, speech, video | Advanced |
+| 27 | [AI Applications](ai_applications/README.md) | Healthcare, legal, finance, education, customer support | Beginner |
+| 28 | [LLM Ecosystem & Landscape](llm_ecosystem_and_landscape/README.md) | Model families, licensing, cost analysis, timeline | Beginner |
 
 ---
 
@@ -149,15 +149,15 @@ Build autonomous systems that take actions, use tools, and coordinate with other
 
 ### Phase 5 — Production
 ```
-Inference & Decoding  -->  Inference Engines  -->  vLLM Deep Dive  -->  Optimization & Quantization  -->  Deployment & MLOps  -->  Guardrails
+Inference & Decoding  -->  Context Windows & Long Context  -->  Inference Engines  -->  vLLM Deep Dive  -->  Optimization & Quantization  -->  Deployment & MLOps  -->  Evaluation & Benchmarks  -->  Guardrails & Content Safety
 ```
-Deploy LLMs efficiently, cheaply, and safely.
+Deploy LLMs efficiently, cheaply, and safely. Understand context mechanics before diving into engines; evaluate before hardening with guardrails.
 
 ### Phase 6 — Advanced Topics
 ```
-Safety & Alignment  -->  Evaluation & Benchmarks  -->  Multimodal Models  -->  Context Windows  -->  AI Applications  -->  Ecosystem
+Safety & Alignment  -->  Multimodal Models  -->  AI Applications  -->  LLM Ecosystem & Landscape
 ```
-Broaden understanding of safety, evaluation, and the full landscape.
+Broaden understanding of safety, multimodal capabilities, domain applications, and the full landscape.
 
 ---
 
