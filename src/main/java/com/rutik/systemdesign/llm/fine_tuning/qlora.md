@@ -361,6 +361,21 @@ A: QLoRA and GPTQ are both 4-bit quantization techniques but designed for differ
 **Q: How does Unsloth improve QLoRA training efficiency?**
 A: Unsloth (Tim Dettmers' recommended library for QLoRA training) achieves 2× faster training and 70% less VRAM through four optimizations: (1) Custom triton kernels for fused quantized matmul operations — avoids the standard BitsAndBytes NF4-to-BF16 dequantization path, replacing it with fused kernels that compute directly without creating temporary BF16 tensors; (2) Optimized backward pass — rewrites gradient computation for LoRA adapters to avoid redundant operations; (3) Custom FlashAttention implementation for quantized attention weights; (4) Memory-efficient sequence packing. Result: on a 16GB GPU, Unsloth can train a 7B model with longer sequences than standard PEFT+BitsAndBytes, and finishes in half the wall-clock time. Recommended for any production QLoRA pipeline.
 
+**Q: What is the difference between NF4 and INT4 quantization for LLM weights, and why does it matter?**
+A: NF4 (NormalFloat4) is information-theoretically optimal for normally distributed data, while INT4 uses uniform level spacing regardless of the data distribution. INT4 divides the weight value range into 16 equal intervals. LLM pre-trained weights cluster near zero following approximately N(0, 1) after per-block normalization, meaning uniform INT4 wastes most of its 16 levels on the extremes where very few weights exist, while allocating only a few levels to the dense zero-region. NF4 assigns levels at the quantiles of a standard normal distribution — each of the 16 levels captures equal probability mass, so more levels are near zero where weights actually cluster. The practical impact: NF4 introduces approximately 0.5-1% less quantization error than INT4 at 4-bit precision, translating to 0.3-0.7% better downstream task quality. Always specify `bnb_4bit_quant_type="nf4"` in BitsAndBytesConfig; the default in some older versions was INT4, which produces meaningfully worse results.
+
+**Q: How does double quantization work and what is its memory overhead?**
+A: Standard NF4 quantization normalizes each block of 64 weights using a BF16 scaling factor before mapping to NF4 levels. These scaling factors themselves occupy 2 bytes (BF16) per block of 64 weights, which is 2/64 = 3.1% overhead on top of the 4-bit weights. Double quantization eliminates most of this overhead by quantizing the scaling factors themselves to 8-bit floating point, grouping them into super-blocks of 256 scaling factors each with one FP32 scale. The resulting overhead is (256 × 1 byte [8-bit scale] + 4 bytes [FP32 super-scale]) / (256 × 64 × 0.5 bytes [4-bit weights]) ≈ 0.4% — a reduction from 3.1% to 0.4%. The memory saving is approximately 0.37 bits per parameter, totaling roughly 325MB for a 7B model. Double quantization adds negligible compute overhead because scaling factor dequantization is a tiny fraction of total forward-pass compute. Enable it with `bnb_4bit_use_double_quant=True`.
+
+**Q: When does the paged optimizer actually trigger and what is its performance cost?**
+A: The paged optimizer triggers when GPU memory is under pressure during the optimizer update step, which happens after each gradient accumulation cycle. Peak memory moments occur when: (1) the optimizer simultaneously holds gradients, parameters, and both Adam momentum states (m and v); (2) long sequences create large activation tensors before gradient checkpointing discards them. When GPU memory drops below a CUDA-configured threshold, the paged optimizer spills the least-recently-used optimizer state tensors to CPU RAM via the CUDA unified memory mechanism. Each spill-and-restore cycle costs approximately 10-30ms of PCIe transfer time (at 16 GB/s PCIe 4.0 bandwidth, 160MB of optimizer states transfers in ~10ms). In typical QLoRA runs on tight hardware (16GB GPU), paging triggers a few times per epoch, adding roughly 5-10% total training time overhead. The alternative — OOM crash terminating training — makes this overhead completely acceptable. Use `optim="paged_adamw_8bit"` to activate both paging and 8-bit optimizer state quantization simultaneously.
+
+**Q: What is the quality gap between QLoRA and full fine-tuning, and when does it widen?**
+A: QLoRA achieves 95-99% of full fine-tuning quality on most standard NLP benchmarks, including instruction following, summarization, and conversational tasks. The original QLoRA paper demonstrated Guanaco 65B (QLoRA fine-tuned) at 99.3% of ChatGPT quality on MT-Bench. The quality gap widens in three specific scenarios. First, tasks requiring precise numerical reasoning (arithmetic, unit conversion, financial calculations) show 3-5% larger gaps because quantization noise accumulates across the multiple forward passes needed for chain-of-thought reasoning. Second, very long context tasks (8K+ tokens) show larger gaps because quantization error in early attention layers propagates and compounds across many transformer layers with extended sequences. Third, structured output tasks with strict formatting (code generation, JSON schemas, SQL) show 1-3% larger gaps because consistent symbol placement requires fine-grained weight precision that NF4 rounding partially degrades. For most production applications outside these categories, the gap is imperceptible to end users.
+
+**Q: How do you diagnose and fix 4-bit training instability in QLoRA?**
+A: Training instability in QLoRA manifests as loss spikes (sudden jumps of 0.5-2.0 in training loss followed by partial or no recovery) or divergence (loss trend consistently increasing after the first few hundred steps). Diagnosis: enable per-layer gradient norm logging and identify which layers produce abnormally large gradients immediately before loss spikes — these are typically the layers where NF4 quantization error is highest relative to the weight magnitude. The most reliable fixes: (1) enable double quantization (`bnb_4bit_use_double_quant=True`) — double quantization reduces the quantization constants' error, which is the most common source of instability; (2) reduce the learning rate by 2-3× (from 2e-4 to 7e-5) — lower LR gives the adapter more time to compensate for quantization noise in the base model; (3) use `bf16=True` with `tf32=False` to ensure full BF16 precision in adapter computations; (4) lower the gradient clipping threshold from 1.0 to 0.3, which prevents single large gradient steps from destabilizing the adapter. If instability persists after these changes, the model has quantization sensitivity in critical layers — switch to 8-bit quantization (`load_in_8bit=True`) or standard BF16 LoRA if the hardware permits.
+
 ---
 
 ## 11. Best Practices
@@ -372,3 +387,126 @@ A: Unsloth (Tim Dettmers' recommended library for QLoRA training) achieves 2× f
 5. **Use effective batch ≥ 32** — compensate for small physical batch with gradient accumulation (gradient_accumulation_steps = 32 / batch_size).
 6. **Benchmark with Unsloth before committing to cloud hardware** — QLoRA memory requirements vary by sequence length; measure empirically on your data before choosing GPU type.
 7. **Export via merge-then-requantize** — merge QLoRA adapter to BF16 first, then re-quantize with GPTQ or AWQ for inference deployment; cleaner and more widely compatible.
+
+---
+
+## 12. Case Study: Fine-Tuning LLaMA 3 70B on a Single A100 80GB with QLoRA
+
+**Problem Statement**: A legal-tech company needs to fine-tune LLaMA 3 70B to perform contract clause classification and risk summarization. The 70B parameter scale is required because smaller models (7B, 13B) produce unacceptable hallucination rates on legal terminology. Standard LoRA on a 70B model requires ~140GB GPU memory (70B params × 2 bytes BF16), which means at least two A100 80GB GPUs. Budget and infrastructure constraints limit the training run to a single A100 80GB (80GB VRAM). The task: classify contract clauses into 47 categories and generate a one-paragraph risk summary for each clause.
+
+**Architecture Overview**:
+```
+Single A100 80GB Training Setup:
+
+GPU Memory Layout (peak ~48GB):
++------------------------------------------+
+| 70B Base Model Weights (NF4 4-bit)       |  ~35GB (70B × 0.5 bytes)
++------------------------------------------+
+| NF4 Scaling Factors (double-quantized)   |  ~700MB
++------------------------------------------+
+| LoRA Adapter A matrices (BF16)           |  ~200MB (r=16, all-attn)
+| LoRA Adapter B matrices (BF16)           |  ~200MB
++------------------------------------------+
+| Adapter Gradients (BF16)                 |  ~400MB
++------------------------------------------+
+| PagedAdamW8bit Optimizer States          |  ~800MB (8-bit, pageable)
++------------------------------------------+
+| Activations (gradient checkpointing)     |  ~2-3GB
++------------------------------------------+
+| Input batch + misc buffers               |  ~500MB
++------------------------------------------+
+TOTAL PEAK: ~40-42GB (well within 80GB)
+
+Post-training Export:
+  Adapter (BF16, ~400MB) ──> merge onto BF16 base (CPU, 140GB RAM) ──> GPTQ 4-bit ──> deploy
+```
+
+**Key Design Decisions**:
+1. NF4 4-bit with double quantization reduces 70B model from 140GB (BF16) to ~35GB — the only configuration that fits on a single A100 80GB with room for gradients and activations.
+2. Gradient checkpointing mandatory: without it, 70B model activations at sequence length 1024 would consume 18-24GB, causing OOM even with quantized weights.
+3. Rank r=16 targeting all attention projections (q_proj, k_proj, v_proj, o_proj) only — not FFN — because the 47-category classification task is a behavior change (output structure) rather than new knowledge injection; keeping FFN frozen also reduces adapter memory.
+4. Effective batch size of 32 via gradient accumulation (batch_size=2, accumulation_steps=16) — physical batch size limited to 2 by activation memory at sequence length 512.
+5. Merge-then-GPTQ export strategy: merge adapter to BF16 on a CPU instance with 256GB RAM, then re-quantize to GPTQ 4-bit for production inference on a single A100; avoids runtime dependency on BitsAndBytes at inference.
+
+**Implementation**:
+```python
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig, TrainingArguments
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from trl import SFTTrainer
+import torch
+
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_use_double_quant=True,    # saves ~700MB on 70B model
+)
+
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Meta-Llama-3-70B-Instruct",
+    quantization_config=bnb_config,
+    device_map="auto"
+)
+
+model.gradient_checkpointing_enable()
+model = prepare_model_for_kbit_training(model)
+
+lora_config = LoraConfig(
+    r=16,
+    lora_alpha=32,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM"
+)
+model = get_peft_model(model, lora_config)
+# Trainable: ~83M / 70,000M = 0.12%
+
+training_args = TrainingArguments(
+    output_dir="./legal70b_qlora",
+    per_device_train_batch_size=2,
+    gradient_accumulation_steps=16,  # effective batch = 32
+    num_train_epochs=3,
+    learning_rate=1e-4,              # conservative LR for 70B quantized base
+    lr_scheduler_type="cosine",
+    warmup_ratio=0.05,
+    optim="paged_adamw_8bit",
+    bf16=True,
+    gradient_clipping=0.5,           # tighter clipping for stability
+    logging_steps=25,
+    evaluation_strategy="steps",
+    eval_steps=100,
+    max_seq_length=512
+)
+
+trainer = SFTTrainer(
+    model=model,
+    train_dataset=train_dataset,
+    eval_dataset=eval_dataset,
+    args=training_args
+)
+trainer.train()
+model.save_pretrained("./legal70b_adapter")
+
+# Post-training export (run on CPU instance with 256GB RAM):
+# base = AutoModelForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-70B-Instruct")
+# peft_model = PeftModel.from_pretrained(base, "./legal70b_adapter")
+# merged = peft_model.merge_and_unload()
+# merged.save_pretrained("./legal70b_merged_bf16")
+# # Then quantize with AutoGPTQ for production deployment
+```
+
+**Results**:
+- Peak GPU memory during training: 41.3GB (within 80GB budget with comfortable headroom)
+- Training time: 14 hours for 3 epochs on 8,000 training examples (512 tokens each)
+- Training cost: ~$42 at A100 cloud rates ($3/hr)
+- Clause classification accuracy: 89.2% on 47-category holdout set
+- Risk summary quality (human evaluation): 4.2/5.0 average score (vs. 3.1/5.0 for 13B model)
+- Quality vs. hypothetical full fine-tune (estimated): ~2% gap on classification accuracy (89.2% vs. estimated 91%)
+- Paged optimizer triggered: 23 times across the full training run; added approximately 8 minutes total overhead
+
+**Tradeoffs and Alternatives**:
+- Standard LoRA on 70B (BF16) was impossible on a single A100 80GB — would require 140GB weight memory alone, far exceeding 80GB.
+- Two-GPU LoRA (BF16 with model parallelism) was evaluated: achieves ~91% classification accuracy (vs. 89.2% QLoRA) but doubles infrastructure cost and requires NVLink for efficient gradient synchronization.
+- 13B model with full fine-tuning (alternative that fits on single A100): achieved only 81% classification accuracy — the 70B QLoRA model provides an 8-percentage-point improvement critical for this legal application.
+- 8-bit quantization (bitsandbytes load_in_8bit) would reduce memory from 35GB to ~70GB for 70B model (8 bits × 70B / 8 = 70GB) — still too large for a single 80GB A100 when combined with adapter gradients and activations.

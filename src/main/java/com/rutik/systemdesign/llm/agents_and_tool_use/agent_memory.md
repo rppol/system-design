@@ -449,6 +449,21 @@ A: For single-session, bounded tasks (coding a specific feature, answering a res
 **Q: How do you evaluate whether your memory system is working correctly?**
 A: Three metrics: (1) Recall accuracy: plant a specific fact in session N (e.g., "My name is Alice"); in session N+5, ask "What is my name?" — check if the agent correctly recalls it; (2) Precision (relevance): measure what fraction of retrieved memories are actually relevant to the current query — track with human evaluation or LLM-as-judge; (3) Context utilization: measure tokens used for memory injection vs. actual information referenced in the final response — high injection with low reference = wasted tokens. For production: instrument memory hit rate (fraction of queries where memory retrieval finds relevant content), memory write rate (facts extracted per conversation), and memory eviction rate. Low hit rate suggests retrieval quality problem; zero write rate suggests extraction is failing.
 
+**Q: How do you architect working memory vs. long-term memory in a production agent?**
+A: Working memory is the active context window — all information the agent can see right now. It is fast (zero retrieval latency), temporary (cleared when the session ends), and expensive (every token costs money per call). Long-term memory is an external store — vector database, relational DB, or key-value store. It is slower (10-100ms retrieval), persistent across sessions, and cheap (storage cost is negligible vs. compute). The architectural interface between the two is the retrieval gateway: at the start of each session, retrieve the top-K most relevant long-term memories and inject them into working memory. At the end of each session, extract new facts from the conversation and write them to long-term storage. Design rule: working memory is the agent's desk; long-term memory is the filing cabinet. Only bring files to the desk when they are needed for the current task.
+
+**Q: How do you balance recency, importance, and similarity in memory retrieval?**
+A: A production memory retrieval system should score candidate memories on three axes and combine them: (1) Similarity — cosine similarity between the current query embedding and the memory embedding; the primary signal for relevance; (2) Recency — an exponential decay function: `recency_score = exp(-lambda * days_since_stored)` where lambda = 0.1 gives memories from 7 days ago a score of ~0.5; prevents the agent from always retrieving the same old high-similarity memories; (3) Importance — a pre-computed score assigned at write time based on the type of fact: user-stated explicit preferences (high), casual mentions (low), critical decisions (high), resolved errors (low). Combined score: `final = 0.5 * similarity + 0.3 * recency + 0.2 * importance`. Tune weights based on your application: a personal assistant benefits from high recency weight; a knowledge base benefits from high similarity weight.
+
+**Q: What memory compression strategies work for long conversations?**
+A: Three practical strategies in increasing sophistication: (1) Sliding window with system prompt pinning — keep the last N turns plus always pin the first 2-3 turns (which contain task context and user constraints); fast, zero LLM cost, but loses middle conversation context; (2) Summarize-and-replace — when the context exceeds a threshold (e.g., 80K tokens), call an LLM to compress the middle 70% into a 500-token summary and replace it; costs one extra LLM call but preserves key information; (3) Hierarchical chunking — maintain summaries at multiple granularities: per-turn summary (30 words), per-task-phase summary (100 words), session summary (200 words); inject the appropriate granularity based on how far back the information is. In production, a 10-step agent task generates ~15K tokens of intermediate context; summarize-and-replace brings this down to ~2K while retaining all key facts for the synthesis step.
+
+**Q: How do you persist agent memory across sessions in a multi-user system?**
+A: Cross-session memory requires: (1) user scoping — every memory is tagged with `user_id` (or `session_id` for anonymous users); retrieval always filters by `user_id` to prevent cross-user leakage; (2) persistence layer — a vector database (Pinecone, Qdrant, pgvector) stores memory embeddings; a relational table stores metadata (user_id, content, created_at, importance, source_session_id); (3) session boundary triggers — at conversation end, an extraction job runs: summarize the session, extract facts, write to the persistent store; at session start, retrieve top-K memories and inject into the system prompt; (4) versioning — when a user states a fact that contradicts an existing memory ("I switched from Python to Go"), mark the old memory as `superseded` and create a new one; never delete the old one (audit trail); (5) TTL and deletion — honor user deletion requests by removing the vector and the metadata row; GDPR requires this within 30 days of request. LangGraph checkpointing + a vector store is the most common production pattern for this.
+
+**Q: What privacy concerns arise with agent memory and how do you address them?**
+A: Agent memory creates persistent profiles of user behavior, preferences, and sensitive disclosures. Key risks: (1) accidental storage of sensitive data — a user mentions their salary, medical condition, or password in passing; the extraction LLM stores it as a "fact"; mitigation: add a classifier to the extraction step that blocks storage of PII categories (financial, medical, credential data) and flags them for review rather than auto-storing; (2) cross-user data leakage — a bug in user_id scoping causes Alice's memories to be retrieved for Bob; mitigation: row-level security in the database enforced at query time, not just application level; (3) right to erasure — GDPR Article 17 requires full deletion within 30 days; ensure deletion cascades across all storage layers (vector index, relational metadata, backup snapshots); (4) purpose limitation — memories collected for task A should not be used for task B without consent; scope memories by application context. Best practice: give users a memory management UI showing all stored facts, with the ability to edit or delete individual entries.
+
 ---
 
 ## Best Practices
@@ -459,3 +474,208 @@ A: Three metrics: (1) Recall accuracy: plant a specific fact in session N (e.g.,
 4. **Implement memory write-back explicitly**: don't rely on automatic extraction; after key interactions, explicitly call the memory store with extracted facts.
 5. **Add timestamps to all stored memories**: enables recency weighting, stale memory detection, and GDPR-compliant deletion by time range.
 6. **Test memory retrieval quality separately**: write unit tests that store known facts and verify retrieval — memory bugs are subtle and often surface only in production when quality degrades.
+
+---
+
+## 14. Case Study: Personalized Learning Tutor with Episodic Memory
+
+**Problem Statement**: Build an AI tutor for a K-12 EdTech platform serving 80,000 students. Each student has a different subject level, learning pace, and common mistake patterns. Without memory, every tutoring session starts fresh — the tutor re-explains concepts the student has already mastered and misses areas where they consistently struggle. The goal: a tutor that remembers across sessions and adapts its teaching strategy to each student.
+
+**Architecture Overview**:
+
+```
+Student Session Start
+      |
+      v
+┌──────────────────────────────────────────────────────────────┐
+│  MEMORY RETRIEVAL GATEWAY                                    │
+│                                                              │
+│  student_id = "stu_4821"                                     │
+│  subject = "algebra"                                         │
+│                                                              │
+│  Query 1: episodic_search("recent struggles", top_k=5)      │
+│    → ["Struggled with quadratic equations 2025-05-10",       │
+│        "Confused by negative exponents 2025-05-08"]          │
+│                                                              │
+│  Query 2: semantic_search("learning_style", exact_match)     │
+│    → "Prefers visual examples over symbolic notation"        │
+│                                                              │
+│  Query 3: procedural_search("effective_approaches", top_k=3) │
+│    → ["Worked problems step-by-step with student",           │
+│        "Used pizza fractions analogy successfully"]          │
+│                                                              │
+│  Inject top-K memories into system prompt                    │
+└──────────────────────────────────────────────────────────────┘
+      |
+      v
+┌──────────────────────────────────────────────────────────────┐
+│  TUTORING SESSION (GPT-4o)                                   │
+│  System: [student profile + memory injection]                │
+│  Conversation: multi-turn tutoring interaction               │
+│  Tools: submit_problem, check_answer, show_hint, grade_work  │
+└──────────────────────────────────────────────────────────────┘
+      |
+      v
+┌──────────────────────────────────────────────────────────────┐
+│  SESSION END: MEMORY EXTRACTION                              │
+│                                                              │
+│  Extract from session:                                       │
+│  - New struggles: {"topic": "factoring trinomials",          │
+│                    "error_type": "sign_error", "count": 3}   │
+│  - Mastery updates: {"topic": "linear equations",            │
+│                      "status": "mastered"}                   │
+│  - Effective strategies: {"approach": "colored highlighting  │
+│                            for terms worked well"}           │
+│  - Session quality: {"engagement": 0.8, "problems_done": 12} │
+│                                                              │
+│  Write to: episodic_store, semantic_store, procedural_store  │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Key Design Decisions**:
+
+1. Three separate memory stores per student: episodic (session events and mistake logs), semantic (student profile: grade level, learning style, mastery map), and procedural (teaching strategies that worked for this student). Each store is queried independently with a topic-specific query at session start — this avoids polluting algebra retrieval with history facts.
+
+2. Importance-weighted storage: not all session events are stored. Only events meeting an importance threshold are written: a single mistake is low importance; the same type of mistake appearing 3+ times in one session is high importance and written as a persistent pattern. This prevents the episodic store from filling with noise.
+
+3. Mastery map as semantic memory: a JSON object per student per subject tracks mastery level (0.0-1.0) for each topic. Updated at session end: `mastery["quadratic_equations"] = 0.35 (↑ from 0.20)`. Retrieved as a single structured document rather than a semantic search — direct key lookup, not cosine similarity. This avoids retrieval misses on short topic names.
+
+4. Privacy-first design: student memory is scoped by `(student_id, subject)`. No cross-student retrieval is possible at the database query level (row-level security). Sensitive observations (family context, emotional state) are flagged during extraction and routed to a human review queue rather than stored automatically.
+
+5. Memory compression for long-term students: after 6 months, episodic memories older than 30 days are compressed: an LLM summarizes the previous month's sessions into a 100-word "learning phase summary." This keeps the episodic store bounded even for students using the platform for years.
+
+**Implementation**:
+
+```python
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Optional
+import numpy as np
+
+@dataclass
+class StudentMemory:
+    student_id: str
+    subject: str
+    mastery_map: dict[str, float]      # topic → 0.0-1.0
+    learning_style: str
+    episodic_events: list[dict]        # recent struggle/success events
+    effective_strategies: list[str]   # teaching approaches that worked
+
+class TutorMemorySystem:
+    def __init__(self, vector_db, relational_db):
+        self.vdb = vector_db
+        self.rdb = relational_db
+
+    def retrieve_for_session(self, student_id: str, subject: str,
+                              current_topic: str) -> StudentMemory:
+        """Retrieve all memory types before a tutoring session."""
+
+        # Semantic: student profile + mastery map (exact lookup, no embedding search)
+        profile = self.rdb.get_student_profile(student_id, subject)
+        mastery_map = profile["mastery_map"]
+        learning_style = profile["learning_style"]
+
+        # Episodic: recent struggles relevant to current topic
+        struggle_query = f"student struggles with {current_topic} {subject}"
+        recent_struggles = self.vdb.search(
+            query=struggle_query,
+            filter={"student_id": student_id, "type": "struggle",
+                    "created_at": {"gte": (datetime.now() - timedelta(days=30)).isoformat()}},
+            top_k=5
+        )
+
+        # Procedural: effective strategies for this student's profile
+        strategy_query = f"effective teaching {learning_style} {subject}"
+        strategies = self.vdb.search(
+            query=strategy_query,
+            filter={"student_id": student_id, "type": "strategy"},
+            top_k=3
+        )
+
+        return StudentMemory(
+            student_id=student_id,
+            subject=subject,
+            mastery_map=mastery_map,
+            learning_style=learning_style,
+            episodic_events=[e["content"] for e in recent_struggles],
+            effective_strategies=[s["content"] for s in strategies]
+        )
+
+    def build_system_prompt(self, memory: StudentMemory, topic: str) -> str:
+        weak_topics = [t for t, m in memory.mastery_map.items() if m < 0.4]
+        mastered_topics = [t for t, m in memory.mastery_map.items() if m > 0.8]
+
+        return f"""You are a personalized math tutor for a student.
+
+Student profile:
+- Learning style: {memory.learning_style}
+- Mastered topics (do not re-teach): {', '.join(mastered_topics)}
+- Weak topics (extra care needed): {', '.join(weak_topics)}
+
+Recent struggles to watch for:
+{chr(10).join(f'- {e}' for e in memory.episodic_events)}
+
+Teaching strategies that have worked well with this student:
+{chr(10).join(f'- {s}' for s in memory.effective_strategies)}
+
+Today's topic: {topic}
+Adapt your explanations to the student's learning style.
+If you observe new struggle patterns, they will be recorded for next session."""
+
+    def extract_and_store_session(self, student_id: str, subject: str,
+                                   session_transcript: str):
+        """Extract learnable facts from a completed session and persist them."""
+
+        # LLM extraction call
+        extraction_prompt = f"""Analyze this tutoring session transcript and extract:
+1. Topics the student struggled with (3+ mistakes of same type = pattern)
+2. Topics newly mastered (correct on first attempt, no hints needed)
+3. Teaching approaches that were effective (student said "oh I get it now" or similar)
+4. Student engagement level (0.0-1.0)
+
+Return as structured JSON. Omit sensitive personal information.
+
+Transcript: {session_transcript[:4000]}  # truncate for cost control
+"""
+        extracted = llm.invoke(extraction_prompt, response_format={"type": "json_object"})
+        data = json.loads(extracted)
+
+        # Write episodic: only high-importance struggles
+        for struggle in data.get("struggles", []):
+            if struggle["mistake_count"] >= 3:  # importance threshold
+                self.vdb.upsert(
+                    text=f"Struggled with {struggle['topic']}: {struggle['error_type']}",
+                    metadata={
+                        "student_id": student_id, "type": "struggle",
+                        "topic": struggle["topic"], "created_at": datetime.now().isoformat(),
+                        "importance": min(1.0, struggle["mistake_count"] / 10)
+                    }
+                )
+
+        # Write semantic: update mastery map
+        for mastery in data.get("mastery_updates", []):
+            self.rdb.update_mastery(student_id, subject,
+                                    mastery["topic"], mastery["new_level"])
+
+        # Write procedural: effective strategies
+        for strategy in data.get("effective_strategies", []):
+            self.vdb.upsert(
+                text=strategy,
+                metadata={"student_id": student_id, "type": "strategy",
+                           "created_at": datetime.now().isoformat(), "importance": 0.7}
+            )
+```
+
+**Results**:
+
+- Session personalization score (LLM judge on rubric): 4.1/5.0 vs. 2.8/5.0 without memory
+- Problem completion rate per session: 12.3 vs. 8.7 (no memory) — memory prevents re-teaching mastered content
+- Student retention (30-day active rate): 67% vs. 54% in A/B test against memoryless tutor
+- Memory retrieval latency: 85ms P95 (acceptable for session-start, not per-turn)
+- False positive memory writes (sensitive PII stored despite filter): 0.08% — reviewed weekly by trust & safety team
+
+**Tradeoffs and Alternatives**:
+
+- Full conversation history injection (no retrieval) was prototyped: worked well for students with <5 sessions (context fits in window) but became prohibitively expensive at 50+ sessions ($1.20/session vs. $0.18 with retrieval).
+- Single vector store (no memory type separation) was tried: retrieval quality was poor because algebra struggle events competed with learning style facts in the same index. Separating episodic, semantic, and procedural stores improved retrieval precision from 71% to 89%.
+- Opt-in memory was considered: initial testing showed students and parents trusted the product more when memory was opt-in with a visible memory dashboard, despite slightly lower engagement when memory was disabled. The opt-in dashboard is now standard.

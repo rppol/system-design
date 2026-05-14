@@ -542,6 +542,9 @@ Three-level versioning: (1) Schema versioning — use versioned Pydantic models 
 **Q: How do you extract structured data from PDFs and images (multimodal)?**
 Use GPT-4o Vision or Claude 3.5 Sonnet (both multimodal). Pass the image as a base64-encoded data URL in the messages. Instructor works identically — the model processes the image and extracts according to the schema. Pattern: encode PDF page as PNG → send to multimodal LLM with extraction schema → get structured output. LlamaParse is a managed alternative for complex PDFs with tables. Performance: vision extraction is slower (2-5s per page) and more expensive than text extraction; cache extracted results and only re-extract when the document changes.
 
+**Q: How do you handle schema evolution when your structured output format changes in production?**
+Schema evolution requires backward-compatible changes to avoid breaking existing consumers. Strategies: (1) add new optional fields with defaults — existing consumers ignore them; (2) never remove or rename required fields in the same version; (3) version your schemas (v1, v2) and support both during migration; (4) use Pydantic's model validators to transform v1 responses into v2 format. For Instructor specifically: maintain separate Pydantic models per version and route based on client version header. Test schema changes against a replay dataset of 100+ real queries to verify the model can still generate valid outputs with the new schema — schema changes that the model struggles with cause silent quality regression.
+
 ---
 
 ## 13. Best Practices

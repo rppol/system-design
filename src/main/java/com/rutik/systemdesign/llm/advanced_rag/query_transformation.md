@@ -358,9 +358,24 @@ A: Query transformations improve semantic similarity-based retrieval but don't a
 **Q: What are the cost implications of query transformation at production scale?**
 A: At 10,000 queries/day, each transformation adds one LLM call. With GPT-4o-mini at $0.00015/1K tokens and 500-token transformation prompts, rewriting costs ~$0.075/day per technique — negligible. At 1M queries/day, rewriting costs ~$7.50/day — still cheap. Multi-query at 4 variants costs 4× more ($30/day at 1M queries). The dominant cost at scale is usually the retrieval and reranking, not the transformation LLM call. Use a small fast model (gpt-4o-mini, claude-haiku) for transformations; save the capable model for final generation.
 
+**Q: What are HyDE's specific failure modes and how do you detect them in production?**
+A: HyDE fails in three distinct ways. First, the hallucinated hypothesis misleads retrieval: the LLM generates a confident but factually wrong hypothetical answer; retrieval finds documents matching the wrong hypothesis; the final answer cites plausible-sounding but incorrect sources. This is the most dangerous failure because it is silent — the system appears to work. Detection: on your eval set, compare HyDE recall against direct-embedding recall; any queries where HyDE recall is lower indicate hypothesis-driven misdirection. Second, distributional mismatch: the hypothetical answer's style or length differs significantly from corpus documents (e.g., conversational hypothesis vs. formal legal text), causing poor embedding alignment. Third, recency blindness: for recent events or rapidly changing data, the LLM's parametric knowledge generates an outdated hypothetical, steering retrieval to outdated documents. Mitigation for all three: classify queries by type (factual, conceptual, procedural, recent-event) and disable HyDE for types where it underperforms on your eval set.
+
+**Q: How do you apply query decomposition to complex comparative questions with multiple conditions?**
+A: Comparative questions like "Which of our products had both above-average margin AND declining customer satisfaction in Q3?" require decomposition into at least three sub-queries: (1) "What is average product margin?", (2) "Which products had above-average margin in Q3?", (3) "Which products had declining customer satisfaction in Q3?" — then an intersection step. The decomposition strategy is: identify the logical structure (AND, OR, greater-than, trend comparisons); generate one sub-query per condition; retrieve and answer each independently; then synthesize with the LLM by providing all sub-answers and asking for the final intersection or comparison. The decomposition LLM must produce executable sub-questions, not vague paraphrases. Validate decomposition quality by checking that answering all sub-questions in sequence is logically sufficient to answer the original question.
+
+**Q: How do you measure the end-to-end impact of query transformation on RAG quality, accounting for both retrieval and generation?**
+A: Measuring only retrieval recall misses generation-level impacts. A complete measurement protocol: (1) Retrieval recall@K: fraction of expected documents in top-K, with and without transformation — measures retrieval improvement. (2) Context precision: fraction of retrieved documents that are actually relevant — transformation should improve precision by filtering noise, but multi-query can hurt precision by adding tangential documents. (3) Answer accuracy: correctness of final answers on a labeled QA set — the ultimate measure; sometimes better retrieval recall doesn't improve answer accuracy if the LLM was already finding the key facts. (4) Faithfulness: does the answer cite the retrieved context accurately? — important if transformation changes what's retrieved. Run a statistical significance test (McNemar's test for accuracy, Wilcoxon for continuous metrics) on at least 200 labeled examples before claiming a transformation technique improves quality.
+
+**Q: What is the cost-benefit analysis for adding query transformation (one extra LLM call per query) vs. improving the embedding model or retrieval system?**
+A: Query transformation costs one small LLM call per query (~0.5-2 cents per 1000 queries with gpt-4o-mini) and typically improves recall by 15-30% for ambiguous queries. Embedding model improvements (switching from ada-002 to text-embedding-3-large) improve recall by 5-15% with zero per-query cost but a one-time re-indexing cost. Reranker addition improves precision by 20-30% with 50-100ms latency and 1-5 cents per 1000 queries. The cost-benefit hierarchy for most systems: (1) improve chunking strategy (zero cost, often 10-20% recall improvement); (2) add a reranker (low cost, high precision improvement); (3) upgrade embedding model (one-time re-indexing cost); (4) add query transformation (ongoing LLM call cost, justified for conversational or ambiguous query distributions). Query transformation is high-leverage for systems with highly variable query phrasing but is unnecessary if queries are already well-structured.
+
+**Q: When does query transformation hurt retrieval performance, and what are the warning signs?**
+A: Query transformation degrades performance in four scenarios. First, over-transformation of precise queries: a well-formed technical query like "What is the difference between TCP and UDP?" paraphrased to "Compare network transport protocols" becomes less specific and retrieves less relevant documents. Second, HyDE on out-of-distribution topics: the LLM generates a confident but wrong hypothetical for topics it doesn't know well, steering retrieval in the wrong direction. Third, multi-query drift: LLM-generated variants may introduce tangential topics not in the original query, adding noise to the retrieved set. Fourth, decomposition mistakes: wrong decomposition of a complex query creates sub-questions that don't collectively cover the original intent. Warning signs in production: recall@10 drops after transformation is enabled (compare with an A/B test); answer relevance scores decrease; users provide more negative feedback after transformation rollout. If recall drops even by 2%, investigate which query types are being hurt.
+
 ---
 
-## 11. Best Practices
+## 12. Best Practices
 
 1. **Measure first** — run retrieval with and without each transformation on a labeled eval set before deploying. A transformation that doesn't improve recall@10 won't help production.
 2. **Use a cheap model for transformation** — GPT-4o-mini or claude-haiku-4-5 is sufficient for query rewriting and multi-query expansion; save stronger models for generation.
@@ -369,3 +384,143 @@ A: At 10,000 queries/day, each transformation adds one LLM call. With GPT-4o-min
 5. **Cache transformed queries** — many users ask the same questions; cache (raw_query → transformed_queries) with a 1-24 hour TTL.
 6. **Preserve proper nouns and numbers in rewriting** — query rewriters can paraphrase away specificity ("AWS Lambda" → "serverless functions"); enforce that entities and numbers survive transformation.
 7. **Evaluate HyDE independently per query type** — HyDE performs differently on factual vs. conceptual vs. procedural queries; do not apply uniformly without per-type evaluation.
+
+---
+
+## 13. Case Study: Query Transformation for a Technical Support System
+
+**Problem Statement**: A SaaS company operates a technical support system serving 45,000 enterprise customers. The knowledge base contains 28,000 support articles, API documentation, release notes, and internal troubleshooting runbooks. Customers open support tickets ranging from precise technical questions ("Error code E_AUTH_403 when calling /v2/tokens endpoint") to vague problem descriptions ("My integration stopped working after the update"). The baseline RAG system had a first-response resolution rate of 31% — 69% of auto-generated responses required human agent follow-up, a significant cost driver. The core problem was vocabulary mismatch: customer language ("integration stopped working") vs. documentation language ("OAuth token refresh failure after API version migration").
+
+**Architecture Overview**:
+```
+Customer Support Ticket (raw text)
+    |
+    v
+[Query Classifier]
+  Features: query length, presence of error codes, product-specific terms
+  Output: {type: "precise_technical" | "vague_symptom" | "how_to" | "multi_issue"}
+    |
+    +-- precise_technical -------> [Direct Retrieval]
+    |   (error codes, exact       No transformation needed; query is already
+    |    API method names)        in document vocabulary
+    |                              → top-5 → Rerank → Generate
+    |
+    +-- vague_symptom -----------> [Query Rewriting + HyDE Cascade]
+    |   ("my integration          Step 1: Rewrite to technical language
+    |    stopped working")        "Customer reports authentication failure
+    |                              after API version migration; OAuth token
+    |                              refresh returning 403 error"
+    |                             Step 2: HyDE generation
+    |                              "When OAuth token refresh fails with 403
+    |                               after a version migration, common causes
+    |                               include: expired client credentials,
+    |                               deprecated grant types, missing scope
+    |                               parameters..."
+    |                             Step 3: Embed HyDE text → retrieve
+    |                              → top-10 → Rerank → Generate
+    |
+    +-- how_to ------------------> [Multi-Query Expansion]
+    |   ("How do I configure      Generate 4 variants:
+    |    SSO with SAML?")         1. "SAML SSO configuration guide"
+    |                             2. "Single Sign-On SAML setup steps"
+    |                             3. "SAML assertion configuration parameters"
+    |                             4. "SSO integration SAML metadata"
+    |                             Retrieve 20 per variant → merge → dedup
+    |                              → top-10 → Rerank → Generate
+    |
+    +-- multi_issue -------------> [Query Decomposition]
+        ("I can't log in AND       Sub-Q1: "Login authentication failure"
+         my API calls are slow")   Sub-Q2: "API response time degradation"
+                                   Answer each independently
+                                    → Synthesize combined response
+
+    [All paths] → Reranker (Cohere Rerank API) → Top-5 → GPT-4o → Response
+                                                             |
+                                                   [Resolution Classifier]
+                                                   "Is this response likely to
+                                                    resolve the issue? YES/NO"
+                                                             |
+                                               +-- YES --> Send to customer
+                                               +-- NO  --> Escalate to human agent
+```
+
+**Key Design Decisions**:
+1. Query type classifier drives transformation strategy — applying HyDE to a precise error-code query degrades retrieval (the hypothetical answer may introduce unrelated terminology); the classifier routes each query type to its optimal transformation.
+2. Two-stage vague symptom handling (rewrite then HyDE) — rewriting first normalizes the customer's language to technical vocabulary; applying HyDE to the rewritten query (rather than the raw query) produces hypothetical answers in the correct technical register that align with documentation language.
+3. Cohere Rerank as the merge layer for multi-query — after generating 80 candidates from 4 query variants, Cohere Rerank scores all 80 against the original (untransformed) query; this prevents transformed query variants from steering the final ranking away from the customer's actual intent.
+4. Resolution classifier for auto-escalation — a post-generation LLM classifier assesses whether the generated response directly answers the query; responses classified as unlikely to resolve are escalated to human agents rather than sent to the customer, preventing low-quality auto-responses from reaching customers.
+5. Query cache keyed on semantic similarity — query transformations are cached using near-duplicate detection (cosine similarity > 0.95 on query embeddings) rather than exact string match, avoiding re-transformation of semantically identical but differently phrased queries.
+
+**Implementation**:
+```python
+from langchain.retrievers.multi_query import MultiQueryRetriever
+from langchain_cohere import CohereRerank
+
+def transform_and_retrieve(ticket_text: str, query_type: str) -> list[Document]:
+
+    if query_type == "precise_technical":
+        # No transformation — direct retrieval
+        return retriever.retrieve(ticket_text, top_k=5)
+
+    elif query_type == "vague_symptom":
+        # Step 1: Rewrite to technical language
+        rewritten = llm_mini.generate(REWRITE_PROMPT.format(query=ticket_text))
+
+        # Step 2: Generate hypothetical answer from rewritten query
+        hypothetical = llm_mini.generate(
+            f"Write a technical support article excerpt that would resolve: {rewritten}"
+        )
+
+        # Step 3: Embed hypothetical and retrieve
+        hyp_embedding = embed(hypothetical)
+        candidates = vector_db.search(hyp_embedding, top_k=10)
+
+        # Rerank against original ticket text (not the rewritten or HyDE version)
+        reranked = cohere_rerank.rerank(
+            query=ticket_text,  # original intent
+            documents=candidates,
+            top_n=5
+        )
+        return reranked
+
+    elif query_type == "how_to":
+        # Multi-query expansion via LangChain
+        multi_retriever = MultiQueryRetriever.from_llm(
+            retriever=base_retriever,
+            llm=llm_mini,
+            include_original=True
+        )
+        candidates = multi_retriever.get_relevant_documents(ticket_text)
+        # Dedup by document ID
+        seen, unique = set(), []
+        for doc in candidates:
+            if doc.metadata["id"] not in seen:
+                seen.add(doc.metadata["id"])
+                unique.append(doc)
+        # Rerank top-5
+        return cohere_rerank.rerank(ticket_text, unique, top_n=5)
+
+    elif query_type == "multi_issue":
+        # Decompose into sub-questions
+        sub_questions = decompose_query(ticket_text, llm_mini)
+        sub_answers = [retrieve_and_answer(sq) for sq in sub_questions]
+        return synthesize_multi_issue(ticket_text, sub_answers)
+```
+
+**Results**:
+
+| Metric | Baseline RAG | With Query Transformation |
+|--------|-------------|--------------------------|
+| First-response resolution rate | 31% | 54% |
+| Human escalation rate | 69% | 46% |
+| Precise technical queries: Recall@5 | 78% | 79% (+1%) |
+| Vague symptom queries: Recall@5 | 38% | 67% (+29%) |
+| How-to queries: Recall@5 | 52% | 71% (+19%) |
+| Average query latency | 0.8s | 1.4s |
+| Transformation LLM cost per query | $0 | $0.0004 |
+
+**Tradeoffs and Alternatives**:
+- HyDE showed the largest recall improvement (+29%) for vague symptom queries but required careful A/B testing; an initial deployment without the query type classifier applied HyDE to all queries and degraded precise technical query recall by 8%, causing a rollback.
+- The resolution classifier adds 200ms and $0.0002 per query but prevents an estimated 15% of poor auto-responses from reaching customers; at 8,000 tickets/day, this saves approximately 1,200 customer-facing poor responses per day.
+- Caching with semantic near-duplicate detection reduced transformation LLM calls by 34% (many support tickets reuse the same phrasing for common issues); average cache hit latency dropped to 0.2s for cached queries.
+- Considered fine-tuning a domain-specific embedding model on (ticket, resolution_article) pairs instead of query transformation; fine-tuning improved recall@5 by 12% on its own but required 3 weeks of ML engineering; query transformation delivered similar gains in 1 week and works atop any embedding model.

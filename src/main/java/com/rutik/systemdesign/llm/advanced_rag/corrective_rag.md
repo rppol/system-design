@@ -344,9 +344,24 @@ A: These can stack at different pipeline stages. CRAG operates pre-generation: e
 **Q: What's the most common production failure mode in CRAG systems?**
 A: The most common failure is the relevance evaluator being too conservative, triggering web search for queries that are actually within the knowledge base. This happens when the evaluator's threshold is set too high during development on a small, clean test set that doesn't represent the messier production query distribution. Symptoms: web search API costs spike; latency increases across the board; users get web-sourced answers for queries that the KB could answer accurately. Diagnosis: log (query, KB score, used_web_search) for all requests and manually review a sample of web-search-triggered queries — if >50% could have been answered from the KB, the threshold is too strict.
 
+**Q: How do you train or select the relevance evaluator in CRAG?**
+A: The relevance evaluator is the core component of CRAG; its quality determines the system's accuracy. You can use a pre-trained cross-encoder (cross-encoder/ms-marco-MiniLM-L-6-v2 is a strong default, trained on MSMARCO passage ranking) or fine-tune a bi-encoder or cross-encoder on domain-specific labeled pairs. To build training data: sample 500-1000 (query, document) pairs from your actual query logs and KB documents; have domain experts label each pair as relevant or irrelevant; fine-tune or calibrate the evaluator on this domain-specific data. A cross-encoder fine-tuned on your domain will outperform a general MSMARCO model if your corpus is specialized (medical, legal, financial). Test the evaluator in isolation before integrating it into the full CRAG pipeline.
+
+**Q: What is the cost of the correction step in CRAG and when does it justify the overhead?**
+A: The correction step adds two costs: (1) relevance evaluation — approximately 50-150ms for a cross-encoder on 5 documents, or 100-300ms if using an LLM classifier; (2) web search fallback — 500ms-3s when triggered. The overhead is justified when your knowledge base has significant coverage gaps and hallucinations from irrelevant context have real user-facing consequences. For a medical or financial Q&A system where a confidently wrong answer causes harm, the correction overhead is clearly justified. For a general FAQ bot with a comprehensive, well-maintained KB, the overhead adds latency for queries that would have been answered correctly anyway. Measure: compare standard RAG vs. CRAG on out-of-KB queries — if hallucination rate drops by more than 20%, the correction step earns its overhead.
+
+**Q: How does CRAG compare to simple confidence thresholding on the retriever score?**
+A: Simple confidence thresholding uses the vector similarity score from the retriever (e.g., cosine similarity > 0.7 = use; else fallback). CRAG uses a dedicated cross-encoder relevance evaluator, which is significantly more accurate. The retriever's similarity score measures semantic proximity in embedding space but is poorly calibrated for relevance — a document can have high embedding similarity to a query without actually answering it. A cross-encoder evaluates the (query, document) pair jointly, capturing fine-grained relevance that a bi-encoder similarity score misses. In practice, cross-encoder CRAG evaluators reduce false positives (irrelevant documents scoring as relevant) by 40-60% compared to simple similarity thresholding. The cost is the additional cross-encoder inference; the gain is a much more reliable quality gate.
+
+**Q: How do you handle ambiguous relevance scores in CRAG?**
+A: Documents scoring in the ambiguous range (e.g., 0.3 to 0.7) are genuinely uncertain — the evaluator cannot confidently classify them. Strategies: (1) sentence-level refinement (the CRAG paper's default): extract sentences from the ambiguous document and re-score each at sentence level; keep sentences above a threshold; this recovers the relevant portion while discarding noise. (2) Trigger web search alongside the ambiguous KB content: combine both sources and let the generation LLM resolve contradictions or complement the ambiguous KB passage with web context. (3) Raise the confidence threshold progressively: if the highest-scoring document is in the ambiguous range, treat it as "incorrect" and trigger web search. Log the distribution of relevance scores in production; if >50% of queries produce ambiguous scores, the evaluator needs domain-specific calibration.
+
+**Q: How do you integrate CRAG into an existing RAG pipeline without a full rebuild?**
+A: CRAG is designed as a drop-in quality gate between retrieval and generation. Minimal integration requires: (1) adding a relevance evaluator call after your existing retriever returns documents; (2) adding conditional logic that checks the evaluator's scores and either passes documents to generation (high quality) or triggers a web search fallback (low quality); (3) updating the generation prompt to include source metadata. The evaluator and web search fallback are new components, but the retriever, embedding model, and generation LLM remain unchanged. Incremental rollout strategy: start with monitoring mode (evaluate relevance scores and log would-have-triggered decisions without actually triggering web search); after 1-2 weeks of data, calibrate thresholds; then enable the actual correction behavior.
+
 ---
 
-## 11. Best Practices
+## 12. Best Practices
 
 1. **Calibrate thresholds on representative data** — use a sample of actual production queries (not just the clean test set) to tune correct/incorrect thresholds.
 2. **Use a fast evaluator** — MiniLM-based cross-encoder or bi-encoder similarity; cross-encoder/ms-marco-MiniLM-L-6-v2 balances speed and accuracy well.
@@ -355,3 +370,146 @@ A: The most common failure is the relevance evaluator being too conservative, tr
 5. **Set web search timeouts** — hard timeout of 3 seconds; fall back to best available KB context to protect user experience.
 6. **Monitor trigger rates** — track % of queries hitting each CRAG path (all-correct, mixed, all-incorrect); anomalies indicate evaluator or KB coverage issues.
 7. **Expand the KB before increasing web search** — if web search trigger rate is consistently above 20%, it means the KB has coverage gaps that should be filled rather than perpetually patched with web search.
+
+---
+
+## 13. Case Study: CRAG for a Medical Q&A System
+
+**Problem Statement**: A clinical decision support platform serves 1,200 physicians at a hospital network. Physicians ask clinical questions and expect answers grounded in current clinical guidelines, drug interaction databases, and recent trial data. The internal knowledge base contains 45,000 curated clinical guideline documents from USPSTF, ACC/AHA, and specialty societies, updated quarterly. However, 30-40% of physician queries involve recent guideline updates, off-label drug use, or rare conditions not well-represented in the quarterly-updated index. Standard RAG was generating confidently wrong answers for these out-of-KB queries — a patient safety risk.
+
+**Architecture Overview**:
+```
+Physician Query
+    |
+    v
+[Knowledge Base Retrieval]
+  45,000 guideline documents (quarterly updated)
+  Vector DB: Pinecone with text-embedding-3-large
+  Top-K = 5 documents retrieved
+    |
+    v
+[Relevance Evaluator]
+  Cross-encoder fine-tuned on medical (query, document, label) pairs
+  Model: cross-encoder/ms-marco-MiniLM-L-6-v2 fine-tuned on
+         500 physician-labeled (query, guideline_chunk, relevant: T/F) pairs
+  Scores each of 5 documents [0.0 - 1.0]
+    |
+    +-- All CORRECT (scores > 0.65)
+    |   [Use KB context directly]
+    |   → LLM Generation → Answer with guideline citations
+    |
+    +-- MIXED (some above 0.4, some below)
+    |   [Sentence-level refinement]
+    |   Extract relevant sentences from ambiguous documents
+    |   → LLM Generation → Answer with refined context
+    |
+    +-- All INCORRECT (all scores < 0.4)
+        [PubMed Search Fallback]
+        Query reformulation: "Remove clinical context artifacts; add MeSH terms"
+        PubMed API: search with clinical Boolean query
+        Fetch top-3 abstracts + results sections
+        Apply relevance evaluator to PubMed results
+        Filter: keep only articles with score > 0.4
+            |
+        [Combine any relevant KB + PubMed content]
+            |
+        [LLM Generation]
+        Answer with explicit source labeling:
+        "Based on PubMed literature (not official guidelines): ..."
+            |
+        [Safety Disclaimer]
+        If answer is from PubMed only: append mandatory disclaimer
+        "This answer is based on research literature; consult current
+         institutional guidelines before clinical application."
+            |
+        Physician-facing Answer with Source Attribution
+```
+
+**Key Design Decisions**:
+1. Domain-specific fine-tuning of the relevance evaluator — a general MSMARCO cross-encoder had 61% precision on medical (query, document) pairs; after fine-tuning on 500 physician-labeled examples, precision improved to 84%.
+2. PubMed rather than general web search — physicians require peer-reviewed sources; general web search (Google, Bing) returns patient-facing content and non-clinical sources; PubMed API constrains results to indexed clinical literature.
+3. Mandatory safety disclaimers for PubMed-only answers — when answers come from research literature rather than approved guidelines, a mandatory disclaimer is appended; this satisfies both clinical governance and patient safety requirements.
+4. Lower threshold for medical context (0.65 vs. 0.7 general) — physicians tolerate slightly lower precision to avoid excessive PubMed fallbacks; calibrated by reviewing 200 physician feedback instances.
+5. Context refinement (sentence-level) for mixed cases — guidelines often have a relevant paragraph surrounded by irrelevant boilerplate; sentence-level refinement recovers 60-70% of the relevant content from ambiguous documents.
+
+**Implementation**:
+```python
+from transformers import CrossEncoder
+
+# Fine-tuned medical relevance evaluator
+evaluator = CrossEncoder(
+    "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    num_labels=1,
+    max_length=512
+)
+# Fine-tuned on 500 physician-labeled (query, chunk, score) triples
+# Thresholds calibrated on held-out 100-example validation set:
+CORRECT_THRESHOLD = 0.65
+INCORRECT_THRESHOLD = 0.35
+
+def medical_crag(query: str) -> dict:
+    # Step 1: Retrieve from internal guideline KB
+    kb_docs = guideline_retriever.retrieve(query, top_k=5)
+
+    # Step 2: Score relevance
+    pairs = [(query, doc.text) for doc in kb_docs]
+    scores = evaluator.predict(pairs)
+
+    labeled = [
+        (doc, score,
+         "correct" if score > CORRECT_THRESHOLD else
+         "incorrect" if score < INCORRECT_THRESHOLD else "ambiguous")
+        for doc, score in zip(kb_docs, scores)
+    ]
+
+    context_parts, sources = [], []
+    all_incorrect = all(label == "incorrect" for _, _, label in labeled)
+
+    if not all_incorrect:
+        for doc, score, label in labeled:
+            if label == "correct":
+                context_parts.append(doc.text)
+                sources.append({"type": "guideline", "id": doc.id})
+            elif label == "ambiguous":
+                refined = sentence_level_refine(query, doc.text, evaluator, INCORRECT_THRESHOLD)
+                if refined:
+                    context_parts.append(refined)
+                    sources.append({"type": "guideline_refined", "id": doc.id})
+
+    pubmed_used = False
+    if all_incorrect:
+        pubmed_query = reformulate_for_pubmed(query)  # adds MeSH terms, clinical filters
+        pubmed_results = pubmed_search(pubmed_query, max_results=3)
+        for result in pubmed_results:
+            score = evaluator.predict([(query, result.abstract)])[0]
+            if score > INCORRECT_THRESHOLD:
+                context_parts.append(result.abstract)
+                sources.append({"type": "pubmed", "pmid": result.pmid})
+                pubmed_used = True
+
+    answer = generate_answer(query, context_parts, sources)
+    if pubmed_used:
+        answer["disclaimer"] = (
+            "This response is based on PubMed research literature, not current "
+            "institutional clinical guidelines. Verify with current guidelines before "
+            "clinical application."
+        )
+    return answer
+```
+
+**Results**:
+
+| Metric | Standard RAG | CRAG with PubMed Fallback |
+|--------|-------------|--------------------------|
+| Hallucination rate (out-of-KB queries) | 38% | 11% |
+| Overall answer accuracy (physician-rated) | 71% | 89% |
+| Web/PubMed fallback trigger rate | N/A | 22% of queries |
+| Latency (KB path) | 0.9s | 1.1s (+200ms evaluator) |
+| Latency (PubMed fallback) | N/A | 3.2s |
+| Physician trust rating (1-5 scale) | 3.1 | 4.3 |
+
+**Tradeoffs and Alternatives**:
+- PubMed fallback adds 3.2s latency for 22% of queries; physicians accepted this because slow-but-accurate is preferable to fast-but-wrong in a clinical context.
+- Considered UpToDate and DynaMed (premium clinical decision support databases) as the web fallback instead of raw PubMed; rejected due to API licensing cost at $80K/year; PubMed is free with sufficient quality.
+- The sentence-level refinement step recovers useful content from 55% of ambiguous documents, saving PubMed API calls for 8% of queries that would otherwise have triggered the fallback.
+- Threshold calibration required 3 rounds of adjustment over 6 weeks as production query distribution proved more diverse than the development test set.

@@ -397,6 +397,21 @@ A: Embedding models have different context windows: BAAI/bge-small-en has a 512-
 **Q: What is a sliding window approach to chunking and when does it help?**
 A: A sliding window creates overlapping chunks by advancing a fixed-size window by less than its full size: window size 500 tokens, stride 250 tokens → 50% overlap. Every token appears in approximately 2 chunks. This is more aggressive than the standard 10-15% overlap approach. When it helps: highly dense documents where key information is concentrated in narrow segments (dense financial disclosures, legal definitions, technical specifications). When it hurts: documents with longer prose passages (creates too many near-duplicate chunks; retrieval returns redundant results; reranker sees same content multiple times). The tradeoff is 2-3× more chunks in the index (higher storage and retrieval cost) for better boundary coverage.
 
+**Q: How do you handle nested document structures (sections within sections) when chunking?**
+A: Use recursive or hierarchical chunking that respects document structure — split at the highest-level headers first (H1 → H2 → H3), then subdivide large sections at lower-level boundaries. Store parent-child relationships in metadata for every chunk: `parent_section_id`, `section_title`, and `depth_level`. At retrieval time, use these relationships for context expansion — when a child chunk is retrieved, return its parent section as the context block sent to the LLM. This approach preserves semantic meaning at every level of nesting, prevents a subsection from being embedded in isolation with no surrounding document context, and enables precise child-level retrieval combined with complete parent-level context delivery.
+
+**Q: What is the empirical recall impact of semantic vs fixed-size chunking?**
+A: Semantic chunking improves retrieval recall@5 by 8-15% over fixed-size on heterogeneous document collections — collections with documents on diverse topics where sections shift meaning frequently. The improvement is driven by chunks that align with topic boundaries rather than arbitrary character counts, producing sharper, more distinctive embeddings. On homogeneous document collections (all same format — e.g., all structured data sheets, all consistent news articles), the gap narrows to 2-5% because fixed-size boundaries accidentally coincide with semantic boundaries more often. The cost is 2-5× longer indexing time because each sentence must be embedded to detect topic shifts. Practical guidance: measure the gap on a sample of your specific corpus before committing to the higher indexing compute.
+
+**Q: How does late chunking work and when should you use it?**
+A: Late chunking embeds the entire document first using a long-context encoder, producing token-level embeddings for the full document, then splits the resulting embedding sequence into chunk-sized windows — each chunk embedding retains global document context because the attention mechanism saw the full document before the split. This differs from standard chunking where each chunk is embedded in isolation without awareness of the surrounding document. Use late chunking when: document coherence is critical (each chunk must be understood in the context of the whole document), your embedding model supports long sequences (jina-embeddings-v2 supports 8192 tokens), and chunks from isolated embedding produce coherence artifacts. Late chunking improves retrieval quality by 3-8% on long-document corpora compared to isolated chunk embedding.
+
+**Q: What overlap strategy works best for legal and regulatory documents?**
+A: Legal and regulatory documents need 15-25% overlap (vs. 10% standard) because key terms, definitions, and cross-references frequently span paragraph boundaries. A definition in paragraph 3 governs the meaning of a term used in paragraph 7 — without overlap, the chunk containing paragraph 7 has no access to that definition. Additionally, include the section header and the governing definition block as metadata attached to every chunk within that section — not just in the overlap text, but as structured metadata fields. This metadata-enrichment approach means that a retrieved chunk about a specific obligation also carries the formal definition of the regulated entity, enabling the LLM to give a complete and accurate answer. For cross-referenced sections (e.g., "as defined in Section 2.1"), store the cross-reference target's text as a metadata field on the referencing chunk.
+
+**Q: How do you evaluate chunking strategy quality independently from the rest of the RAG pipeline?**
+A: Measure chunk-level retrieval recall in isolation by holding the embedding model and retriever constant while varying only the chunking strategy. Build a labeled eval set of (question, gold_passage_text) pairs created by domain experts — 100-200 pairs is sufficient for statistical significance. For each chunking strategy, index the corpus with that strategy, then for each question check whether the gold passage text (or a chunk substantially overlapping it) appears in the top-K retrieved results. Compute recall@5 and recall@10 per strategy. Additionally, measure chunk self-containment qualitatively: for 20 representative retrieved chunks, answer the question "can a human answer the query from this chunk alone without additional context?" Poor self-containment (the chunk references information clearly present in an adjacent chunk) indicates that chunk size is too small or overlap is insufficient.
+
 ---
 
 ## 11. Best Practices
@@ -408,3 +423,160 @@ A: A sliding window creates overlapping chunks by advancing a fixed-size window 
 5. **Route document types** — code to AST-aware, legal to clause-based, research to semantic; a single generic strategy underperforms across diverse document types.
 6. **Validate chunk coherence qualitatively** — inspect 20-30 retrieved chunks; truncated, mid-sentence chunks signal incorrect splitting.
 7. **Keep chunk size below the embedding model's token limit** — with margin; silently truncated chunks produce misleading embeddings.
+
+---
+
+## 12. Case Study
+
+### Design a Chunking Pipeline for a Legal Compliance Knowledge Base
+
+**Problem Statement**
+
+A global financial institution has 50,000 regulatory documents — Basel III accords, MiFID II directives, GDPR guidance, and national banking regulations — totaling approximately 200 million tokens. Documents range from 2-page guidance notes to 400-page regulatory frameworks. Users submit compliance questions like "What are the reporting obligations for intraday liquidity under Basel III LCR?" A generic sentence-boundary chunker with 500-token chunks produced recall@5 of 54% — unacceptable for a compliance system where missing a relevant obligation is a legal risk.
+
+**Architecture Overview**
+
+```
+Ingestion Pipeline:
+  Document                        Chunking
+  Classification                  Strategy
+      |                               |
+      +-- Regulation (>50 pages) --> Hierarchical chunking
+      |                               Parent: full section (800-1200 tokens)
+      |                               Child: paragraph (200-350 tokens)
+      |                               Overlap: 20% (legal cross-refs)
+      |
+      +-- Guidance note (<10 pg) --> Sentence-boundary chunking
+      |                               Size: 350-500 tokens, 15% overlap
+      |
+      +-- Amended appendix --------> Section-header-anchored chunking
+                                      Split on "Section X.", "Annex Y."
+                                      Include regulation ID in every chunk
+
+Metadata Enrichment (per chunk):
+  regulation_id:    "BASEL-III-LCR-2019"
+  effective_date:   "2019-01-01"
+  superseded_by:    null | "BASEL-III-LCR-2023"
+  section_title:    "Intraday Liquidity Monitoring"
+  jurisdiction:     ["EU", "UK", "US"]
+  definition_block: (for chunks under a defined term)
+  parent_chunk_id:  (for hierarchical retrieval)
+```
+
+**Key Design Decisions**
+
+1. Hierarchical chunking for long regulations: child chunks (200-350 tokens) are embedded for precise retrieval; parent sections (800-1200 tokens) are stored in a document store and returned as context to the LLM. This captures "What does subsection 3.4.2 require?" precisely while delivering the full section context for LLM generation.
+
+2. Definition-aware overlap: every chunk includes the governing definition block of any regulated term it references as a structured metadata field, not just in the overlap text. When a chunk references "High-Quality Liquid Assets (HQLA)," the HQLA definition from Section 2 is stored as `definition_context` metadata. The LLM prompt template injects these definitions automatically.
+
+3. Effective-date metadata filtering: each chunk carries `effective_date` and `superseded_by` fields. At query time, a pre-filter restricts retrieval to documents effective as of the query date, eliminating superseded regulations without embedding similarity computation.
+
+4. Regulation ID injection: the regulation identifier (e.g., "Basel III Article 412") is prepended to the text of every child chunk before embedding: "Basel III Article 412 LCR: Banks must maintain..." This anchors the chunk's embedding to the regulation namespace, improving retrieval precision for queries that mention specific article numbers.
+
+**Implementation**
+
+```python
+from dataclasses import dataclass
+from enum import Enum
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+import re
+
+class DocumentType(Enum):
+    LONG_REGULATION = "long_regulation"     # >50 pages
+    SHORT_GUIDANCE = "short_guidance"       # <10 pages
+    AMENDED_APPENDIX = "amended_appendix"
+
+@dataclass
+class LegalChunk:
+    text: str
+    regulation_id: str
+    effective_date: str
+    superseded_by: str | None
+    section_title: str
+    jurisdiction: list[str]
+    definition_context: dict[str, str]     # term → definition text
+    parent_chunk_id: str | None
+    chunk_id: str
+
+def classify_document(doc_metadata: dict) -> DocumentType:
+    if doc_metadata["page_count"] > 50:
+        return DocumentType.LONG_REGULATION
+    elif doc_metadata["page_count"] < 10:
+        return DocumentType.SHORT_GUIDANCE
+    else:
+        return DocumentType.AMENDED_APPENDIX
+
+def extract_section_definitions(section_text: str) -> dict[str, str]:
+    """Extract 'Term means ...' or 'X is defined as ...' patterns."""
+    definitions = {}
+    pattern = r'"([A-Z][^"]+)"\s+means\s+([^.]+\.)'
+    for match in re.finditer(pattern, section_text):
+        term, definition = match.group(1), match.group(2)
+        definitions[term] = definition
+    return definitions
+
+def chunk_long_regulation(doc_text: str, metadata: dict) -> list[LegalChunk]:
+    # Split into sections on "Article X", "Section X.", "Part Y"
+    section_pattern = r'(?=(?:Article|Section|Part)\s+\d+[\.\:])'
+    sections = re.split(section_pattern, doc_text)
+
+    chunks = []
+    global_definitions = extract_section_definitions(doc_text[:5000])  # preamble
+
+    for section_idx, section_text in enumerate(sections):
+        section_title = extract_section_title(section_text)
+        section_definitions = {**global_definitions,
+                                **extract_section_definitions(section_text)}
+
+        # Parent chunk: full section
+        parent_id = f"{metadata['regulation_id']}_section_{section_idx}"
+
+        # Child chunks: paragraphs within section, 200-350 tokens, 20% overlap
+        child_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=300, chunk_overlap=60,
+            separators=["\n\n", "\n", ". ", " "]
+        )
+        child_texts = child_splitter.split_text(section_text)
+
+        for child_idx, child_text in enumerate(child_texts):
+            # Inject regulation ID into text before embedding
+            enriched_text = (
+                f"{metadata['regulation_id']} {section_title}: {child_text}"
+            )
+            chunks.append(LegalChunk(
+                text=enriched_text,
+                regulation_id=metadata["regulation_id"],
+                effective_date=metadata["effective_date"],
+                superseded_by=metadata.get("superseded_by"),
+                section_title=section_title,
+                jurisdiction=metadata["jurisdiction"],
+                definition_context=section_definitions,
+                parent_chunk_id=parent_id,
+                chunk_id=f"{parent_id}_child_{child_idx}"
+            ))
+    return chunks
+```
+
+**Results**
+
+| Metric | Before (generic 500-token chunks) | After (hierarchical + metadata) |
+|--------|----------------------------------|--------------------------------|
+| Recall@5 | 54% | 81% |
+| Recall@10 | 67% | 91% |
+| Chunk self-containment (human eval) | 43% | 78% |
+| Stale regulation retrievals | 18% of queries | 0% (date filter) |
+| Average indexing time | 2.1 hours | 4.8 hours |
+
+The 4.8-hour indexing time is acceptable for a corpus updated weekly. The 81% recall@5 (up from 54%) translated directly to a 23% reduction in LLM hallucination rate on compliance questions in A/B testing.
+
+**Tradeoffs and Alternatives**
+
+- Hierarchical chunking adds complexity: two storage layers (vector DB for children, document store for parents), parent-lookup logic at query time, and parent ID consistency management during document updates.
+- Alternative for simpler deployments: sentence-boundary chunking with 400 tokens + 25% overlap and regulation ID metadata injection achieves recall@5 of ~71% — a reasonable intermediate if the hierarchical infrastructure cost is prohibitive.
+- The definition-context metadata adds ~300 bytes per chunk to the metadata payload; this increases vector DB storage costs by ~8% but the retrieval quality improvement justifies it for compliance use cases.
+
+**Interview Discussion Points**
+
+- Why not just use 1000-token fixed chunks? Large fixed chunks would embed multiple regulatory obligations together, diluting the embedding and reducing retrieval precision for specific obligation queries.
+- How do you handle document updates (new regulation version)? Set `superseded_by` on old chunks and create a new regulation version in the index with a new `regulation_id`. The date pre-filter handles version routing automatically — old chunks become invisible to current-date queries without deletion.
+- How do you scale this to 500,000 documents? The chunking pipeline runs in parallel workers (one per document type); a Kafka queue feeds documents to chunkers; each chunker worker outputs to a shared embedding queue. Indexing throughput scales horizontally with worker count.

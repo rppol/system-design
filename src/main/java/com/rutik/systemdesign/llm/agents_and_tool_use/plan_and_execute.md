@@ -463,6 +463,24 @@ A: LangGraph's `interrupt_before` and `interrupt_after` mechanisms enable precis
 **Q: What is the cost model of Plan-and-Execute compared to direct ReAct?**
 A: Plan-and-Execute has an additional planning call (typically 1,000-3,000 tokens with a large model). At GPT-4o pricing ($5/1M input): planning call costs ~$0.005-$0.015. For a 15-step task using GPT-4o-mini executors (~1K tokens/step × $0.60/1M): execution costs ~$0.009. Total P&E: ~$0.015-$0.025. ReAct with the same large model for all steps: 15 steps × 2K tokens × $5/1M = ~$0.15. P&E is typically cheaper because it routes executor work to smaller models. However, if replanning triggers multiple times, each replan adds another large-model call — keep replan count ≤ 3.
 
+**Q: How do you validate a generated plan before beginning execution?**
+A: Plan validation runs immediately after the planner generates the plan and before any executor call. Validation checks: (1) tool availability — every action in the plan must reference a tool that exists; if the plan says "query the analytics database" but no `run_sql` tool is available, flag the step before wasting execution budget; (2) dependency ordering — verify that no step references information that will only be produced by a later step; (3) completeness — does the plan include a synthesis step that produces the required deliverable format?; (4) step count sanity — a plan with 50 steps is likely over-decomposed; a plan with 2 vague steps is under-specified; (5) parallelism validity — verify that steps marked [PARALLEL] have no data dependency between them. Implementation: a lightweight validator LLM call ("Does this plan have any obvious issues? List problems.") or deterministic checks against the tool registry. A bad plan caught before execution saves the cost of all executor calls that would run before the inevitable failure.
+
+**Q: How do you revise a plan dynamically when a step fails mid-execution?**
+A: Dynamic plan revision (replanning) is triggered when a step's actual output contradicts the expectation embedded in the plan. The replanner receives: (a) the original task, (b) a summary of all completed steps and their results, (c) the remaining original plan, (d) the specific failure reason. It outputs a revised plan for remaining work only — completed steps are not redone. Key design: the replanner must be told explicitly what assumption the original plan made that is now violated. Example: original plan assumed "search for company X's recent funding" would find results; step 2 found "company X was acquired in 2023 and no longer files public reports." The replanner rewrites remaining steps to search for the acquiring company's records instead. Without this context, the replanner generates a nearly identical plan. Cap replanning at 2-3 iterations — a plan that keeps failing likely indicates the task is not achievable with available tools, not that better planning will help.
+
+**Q: What is optimal plan granularity — how coarse or fine should plan steps be?**
+A: Each plan step should map to a single executor invocation — approximately one tool call or one synthesis action. Too coarse: "Research all competitors" as one step gives the executor insufficient guidance on which competitors, which sources, and what format; the executor must make many implicit decisions, leading to inconsistent results across runs. Too fine: "Search Google for Stripe pricing page URL, click the first result, read the pricing table, copy the table to text" as four micro-steps creates a 50-step plan for a 10-step task, makes replanning expensive (one failure cascades to many steps), and fills the plan with orchestration noise rather than strategic content. Optimal granularity: "Search for Stripe's pricing page and extract all tier names and prices as structured JSON — Expected output: {tier: string, monthly_price: number, features: [string]}[]". This gives the executor enough guidance to complete the step reliably while preserving planner authority over strategy.
+
+**Q: What are the known limitations of LLM planning and how do they affect plan quality?**
+A: LLMs have four consistent planning failure modes: (1) optimism bias — the planner assumes every step will succeed and doesn't include contingency branches; fix by prompting "For each step, briefly note what to do if it fails or returns no results"; (2) tool hallucination — the planner invents tool names that don't exist ("use the competitor_analysis_api"); fix by including the exact tool list in the planner prompt; (3) dependency blindness — the planner marks steps as [PARALLEL] when they actually share a data dependency; fix with a dependency validation pass after plan generation; (4) scope creep — plans for open-ended research tasks expand to 30+ steps as the planner tries to be thorough; fix with a step budget cap in the planner prompt ("Generate a plan with at most 12 steps"). Current frontier models (GPT-4o, Claude 3.5 Sonnet) produce plans with ~85% step validity on structured tasks; on open-ended tasks, validity drops to 60-70%, making replanning more common.
+
+**Q: How does Plan-and-Execute compare to pure ReAct on long multi-step tasks?**
+A: On tasks requiring 15+ steps, Plan-and-Execute outperforms ReAct on goal adherence (the agent completes the intended task rather than drifting to a related but different task), completeness (all required sections produced), and efficiency (fewer redundant steps because the planner identifies which work is needed upfront). ReAct outperforms Plan-and-Execute on adaptability (tasks where new information dramatically changes what should be done next), latency-to-first-result (ReAct produces partial results after each step; P&E waits for the whole plan), and simplicity of implementation. Empirically, for research and report generation tasks (10-20 steps with known structure), Plan-and-Execute achieves ~20-30% higher quality ratings in human evaluation. For debugging and exploratory tasks (unknown structure, requiring many hypothesis-test cycles), ReAct is more effective. The practical recommendation: start with ReAct; migrate to Plan-and-Execute when tasks consistently exceed 10 steps and analysts report that the agent "lost the thread."
+
+**Q: What is the cost of the planning step itself and when is it not worth paying?**
+A: A planning call uses a large model (GPT-4o, Claude Opus) and generates 300-800 tokens of plan text at ~1,500-2,500 input tokens of context. At GPT-4o pricing: planning costs $0.008-$0.020 per task. This overhead is not worth paying when: (a) the task is always 3-5 steps with obvious structure — "answer this question by searching and summarizing" needs no formal plan; (b) task success rate with pure ReAct is already above 90% — the planning overhead buys no quality improvement; (c) latency matters — the planning call adds 2-4 seconds of wall time before the first executor call begins. The overhead is worthwhile when: task quality with ReAct is below 80%, tasks frequently have parallel opportunities that ReAct cannot exploit, or the task has human approval gates where an explicit plan is required for the approval workflow. Rule of thumb: if the average task requires more than 8 steps, the planning overhead pays for itself in execution efficiency.
+
 ---
 
 ## Best Practices
@@ -473,3 +491,143 @@ A: Plan-and-Execute has an additional planning call (typically 1,000-3,000 token
 4. **Cap replanning at 2-3 iterations**: unlimited replanning loops waste budget; after the cap, return best partial answer or escalate.
 5. **Summarize step results before storing**: store concise summaries (50-100 words per step) rather than full outputs — prevents context window overflow on long plans.
 6. **Test plan staleness explicitly**: inject deliberate failures in testing (tool returns empty result, unexpected data) and verify replanning triggers correctly.
+
+---
+
+## 14. Case Study: Automated Code Migration Agent
+
+**Problem Statement**: A fintech company needs to migrate 200,000 lines of Python 2 code across 140 modules to Python 3. Manual migration takes 3 developer-months. The migration must: identify affected files, map deprecated API calls to Python 3 equivalents, apply transforms, run the test suite, and roll back on failures. Mistakes in financial calculation code are unacceptable — correctness is more important than speed.
+
+**Architecture Overview**:
+
+```
+Task: "Migrate module payments/core.py from Python 2 to Python 3"
+      |
+      v
+┌─────────────────────────────────────────────────────────────────┐
+│  PHASE 1: PLANNER (Claude Opus)                                 │
+│                                                                 │
+│  Step 1: Read payments/core.py — Expected: file contents        │
+│  Step 2: Identify Python 2 patterns — Expected: pattern list    │
+│  Step 3: [PARALLEL] Look up migration for each pattern          │
+│  Step 4: Apply transforms — Expected: modified file             │
+│  Step 5: Run test suite — Expected: all tests pass              │
+│  Step 6: If tests fail → diagnose and fix (max 2 retries)       │
+│  Step 7: Generate migration report                              │
+└─────────────────────────────────────────────────────────────────┘
+      |
+      v
+┌─────────────────────────────────────────────────────────────────┐
+│  PHASE 2: EXECUTOR LOOP (GPT-4o-mini per step)                  │
+│                                                                 │
+│  Step 1: read_file("payments/core.py")                          │
+│  Step 2: analyze_patterns(content) → [print_stmt, dict_items,  │
+│                                        unicode_str, xrange]     │
+│  Step 3a: lookup_migration("print_stmt") → "print() function"  │
+│  Step 3b: lookup_migration("dict_items") → ".items() returns   │
+│            view, not list — wrap in list() if needed"           │
+│  Step 4: apply_2to3(file, patterns) → modified_content         │
+│  Step 5: write_file + run_tests → {pass:142, fail:3, error:0}  │
+│        |                                                        │
+│  [3 failures → REPLAN: diagnose why and add fix steps]         │
+│        |                                                        │
+│  Step 6: fix_test_failures(failure_details)                     │
+│  Step 7: run_tests → {pass:145, fail:0, error:0}               │
+│  Step 8: generate_migration_report()                            │
+└─────────────────────────────────────────────────────────────────┘
+      |
+      v
+Migration committed to git with report attached
+```
+
+**Key Design Decisions**:
+
+1. Git checkpoint before any write: the first executor action is always `git_commit("pre-migration snapshot")`. If the migration produces an unrecoverable state, the rollback tool reverts to this checkpoint. This makes all write steps safe.
+
+2. Replanning on test failure: if `run_tests` returns any failures, the executor does not proceed — it triggers a replan. The replanner receives the failure details and adds targeted fix steps before re-running tests. Test failure is not treated as a final outcome; it is treated as new information requiring plan revision.
+
+3. Parallel pattern lookup: Python 2 modules typically have 4-8 distinct deprecated patterns. Looking them up sequentially wastes time; they are independent and run in parallel (step 3 is marked [PARALLEL]). This reduces pattern lookup from ~8s sequential to ~2s parallel.
+
+4. Executor model routing: steps 1-2 (read + identify patterns) use GPT-4o-mini (cheap, low complexity). Step 4 (apply transforms with correctness requirements) uses GPT-4o (higher quality for code modification). Step 5 (test diagnosis) uses Claude Opus (best reasoning for understanding why tests fail in financial code).
+
+5. Planner tool list constraint: the planner prompt includes the exact tool list: `read_file, write_file, run_tests, git_commit, git_rollback, apply_2to3, lookup_migration, generate_report`. The planner cannot hallucinate a `deploy_to_production` step because that tool does not exist.
+
+**Implementation**:
+
+```python
+MIGRATION_PLANNER_PROMPT = """You are a Python 2→3 migration planner.
+Generate a step-by-step migration plan for the given file.
+
+Available tools: read_file, write_file, run_tests, git_commit,
+                 git_rollback, apply_2to3, lookup_migration, generate_report
+
+Requirements:
+- First step must always be git_commit (checkpoint)
+- Last step before reporting must be run_tests (all tests must pass)
+- Mark independent lookup steps as [PARALLEL]
+- Include rollback instructions for each write step
+- Maximum 10 steps
+
+Output format:
+Step N: [action] — Expected output: [what success looks like]
+         On failure: [what to do if this step fails]
+"""
+
+def migration_replan(completed_steps, test_failures, remaining_plan):
+    """Called when run_tests returns failures."""
+    failure_context = format_test_failures(test_failures)
+    prompt = f"""
+Migration is partially complete. Tests are failing.
+
+Completed steps: {summarize_steps(completed_steps)}
+Test failures: {failure_context}
+Original remaining plan: {remaining_plan}
+
+Generate a revised plan that:
+1. Diagnoses why these specific tests fail
+2. Applies targeted fixes
+3. Re-runs tests to verify
+4. Proceeds to reporting if tests pass
+
+Do not redo already completed steps. Maximum 5 additional steps.
+"""
+    return planner_llm.invoke(prompt)
+
+async def migrate_module(filepath: str) -> MigrationResult:
+    # Phase 1: Plan with validation
+    plan = planner.generate(task=f"Migrate {filepath} from Python 2 to Python 3")
+    validate_plan(plan, available_tools=TOOLS)  # raises on tool hallucination
+
+    completed = []
+    replan_count = 0
+
+    for step in plan:
+        result = await executor.run(step, context=summarize(completed))
+        completed.append(result)
+
+        # Replanning trigger: test failures
+        if step.tool == "run_tests" and result.failures:
+            if replan_count >= 2:
+                await git_rollback()
+                return MigrationResult(status="failed", reason="max replans reached")
+            new_steps = migration_replan(completed, result.failures, plan[plan.index(step)+1:])
+            plan = plan[:plan.index(step)+1] + new_steps
+            replan_count += 1
+
+    return MigrationResult(status="success", steps_taken=len(completed))
+```
+
+**Results**:
+
+- Migration success rate (all tests pass, no rollback): 91% of modules on first attempt
+- Average steps per module: 8.3 (target was <= 10)
+- Average cost per module: $0.18 (GPT-4o-mini executors, GPT-4o for transforms, Opus for diagnosis)
+- Replanning triggered: 23% of modules (mostly due to implicit Python 2 assumptions in financial logic)
+- Total 140-module migration: completed in 4 days vs. 3-month manual estimate
+- Zero production incidents post-deployment (financial calculations verified by full test suite)
+
+**Tradeoffs and Alternatives**:
+
+- Pure ReAct was prototyped first: it achieved 74% success rate but frequently "lost the thread" after step 8 and began repeating pattern lookups without making progress. Plan-and-Execute improved success rate to 91%.
+- Using `2to3` CLI directly without an LLM planner was considered for simple files: implemented as a fast path — files with only syntactic changes (print statements, integer division) skip the LLM planner entirely and use the CLI tool. The LLM planner handles only files with semantic changes.
+- Human review gate was added after Step 4 (apply transforms) for files touching the core payment calculation engine — the plan pauses and emails a diff to the team lead before running tests. This added 2-4 hours per such file but eliminated the risk of merging semantically incorrect financial logic.

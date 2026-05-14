@@ -427,6 +427,21 @@ A: Anthropic's extended thinking (`thinking` parameter in the Claude API) enable
 **Q: Why does the order of reasoning matter — Thought before Action vs. Action before Thought?**
 A: Thought before Action (standard ReAct) forces the model to explicitly reason about what to do before committing to a tool call. This activates the model's planning capacity via chain-of-thought and reduces "reflex actions" — selecting the first plausible tool. Action before Thought would produce lower-quality decisions because the model generates the action token before articulating its reasoning, losing the benefit of explicit deliberation. Empirically, models that output a Thought field select the correct tool more often and use better search queries. The mechanism: each token the model generates attends to all previous tokens — writing a complete Thought first makes that reasoning available when generating the Action's arguments.
 
+**Q: How does ReAct compare to Plan-and-Execute for complex multi-step tasks?**
+A: ReAct discovers its next action one step at a time using the Thought-Action-Observation loop — it adapts dynamically but can lose strategic direction after 15+ steps. Plan-and-Execute generates a complete plan upfront, then executes each step with a focused executor — it maintains strategic coherence on long tasks but requires a replanning mechanism when new information invalidates the plan. ReAct wins for: short tasks (<10 steps), highly unpredictable environments where no meaningful plan can be formed ahead of time, and interactive tasks where user feedback changes the goal mid-execution. Plan-and-Execute wins for: long structured tasks (research → analyze → write), tasks requiring parallel execution of independent sub-tasks, and compliance contexts where stakeholders must approve a plan before execution. Many production systems layer them: Plan-and-Execute for top-level structure, with each execution step running a mini ReAct loop for its sub-tasks.
+
+**Q: How do you handle ReAct loops where the model keeps repeating the same action?**
+A: Repetition in a ReAct loop occurs when the model's Thought field fails to update based on the Observation — the agent "ignores" what it saw and repeats the same action. Prevention: (1) inject explicit repetition detection — after each step, check if (tool_name, arguments) matches any prior step; if so, inject "You have already tried this exact action and received: [prior result]. Do not repeat it. Try a different approach or conclude the task."; (2) add recency weighting in the system prompt: "In your Thought, explicitly reference what the most recent Observation told you before deciding your next action"; (3) enforce step diversity — if the same tool is called 3 times with identical arguments, abort and return a partial answer. The root cause is often that the Observation was not informative (tool returned nothing) and the model defaults to the action it knows. Inject better error messages in tool results: "No results found — try broader search terms or check spelling."
+
+**Q: How do you reduce ReAct latency for latency-sensitive applications?**
+A: ReAct's latency is N_steps × LLM_call_latency, where each step adds 1-3 seconds for a frontier model. Reduction strategies: (1) Thought verbosity control — add to the system prompt "Keep your Thought concise — 1-2 sentences maximum. Do not explain your reasoning at length."; verbose Thoughts use more output tokens and slow generation by 30-50%; (2) Smaller model for executor — if the ReAct loop uses a frontier model for every step, switch to a smaller model (GPT-4o-mini, Haiku) for standard tool calls; reserve the frontier model only for the final synthesis step; (3) Parallel tool calls — emit multiple independent tool calls in one response to eliminate one full LLM round-trip per parallel call; (4) Early termination — after each step check if the accumulated information already suffices to answer; inject a "can you answer now without more tool calls?" gate to short-circuit loops. A well-optimized ReAct agent can achieve 40-60% latency reduction vs. naive implementation while maintaining most quality.
+
+**Q: How do you use ReAct with structured tool outputs to improve observation parsing?**
+A: Structured observations (JSON with explicit field names) dramatically outperform prose observations in ReAct because the model extracts facts reliably from labeled fields rather than parsing natural language. Instead of returning "Apple stock is trading at $189.50, up 1.2% today", return `{"symbol": "AAPL", "price_usd": 189.50, "change_pct": 1.2, "as_of": "2025-05-15T14:30:00Z"}`. This enables the model's Thought to reference `price_usd` explicitly: "The observation shows price_usd=189.50, which is above the user's $180 threshold." Beyond reliability, structured observations support programmatic parsing — you can extract specific fields from observations for logging, alerting, or downstream processing without re-parsing the model's Thought. For tools returning large results, add a `summary` field with a one-sentence digest so the Thought field can remain concise.
+
+**Q: How do you measure ReAct reasoning faithfulness — whether the model's Thought actually predicts its Action?**
+A: Faithfulness measures whether the stated Thought causally determines the Action, or whether the Action was chosen first and the Thought post-hoc rationalized. Measurement approach: (1) Prediction test — have an independent LLM read only the Thought field and predict what Action it implies; compare to actual Action taken; agreement rate measures faithfulness; (2) Counterfactual test — modify the Thought to imply a different action ("I should search for X instead of Y") and check if the Action changes accordingly; a faithful model changes its action; an unfaithful one ignores the Thought change; (3) Ablation — run the agent with Thought fields stripped from context; if task success rate is unchanged, the Thoughts were not influencing decisions. In practice, faithfulness varies by model: Claude and GPT-4o show ~70-80% Thought-Action faithfulness on standard tasks; smaller models show lower faithfulness, especially when the task becomes complex. Log Thought and Action separately for analysis.
+
 ---
 
 ## Best Practices
@@ -437,3 +452,166 @@ A: Thought before Action (standard ReAct) forces the model to explicitly reason 
 4. **Log all Thought fields**: the reasoning traces are essential for debugging agent mistakes and building evaluation datasets.
 5. **Inject step counts into the Thought context**: "You have used 6 of 15 allowed steps" — prevents the model from not noticing when it's approaching the iteration limit.
 6. **Test for observation-ignoring**: create test cases where the tool returns "not found" and verify the agent's next Thought acknowledges this; hallucinated observations are a common failure mode.
+
+---
+
+## 14. Case Study: ReAct Agent for a Data Analysis Assistant
+
+**Problem Statement**: Build a data analysis assistant for a 500-person SaaS company. Business analysts submit natural language questions like "Which customer segment had the highest churn in Q1 2025, and what were the top 3 contributing factors?" The agent must query a PostgreSQL database, generate charts, and answer iteratively — analysts often ask follow-up questions within the same session. Average question requires 6-10 ReAct steps.
+
+**Architecture Overview**:
+
+```
+Analyst Question
+      |
+      v
+┌────────────────────────────────────────────────────────────┐
+│  ReAct LOOP (GPT-4o, max 15 steps)                         │
+│                                                            │
+│  Thought: "I need to identify churn by segment first.      │
+│            I'll query the customers and events tables."    │
+│      |                                                     │
+│  Action: run_sql(query="SELECT segment, COUNT(*) ...")     │
+│      |                                                     │
+│  Observation: {"rows": [...], "row_count": 847, ...}       │
+│      |                                                     │
+│  Thought: "Enterprise segment shows 18% churn vs 6% SMB.  │
+│            I need to drill into Enterprise cancellation    │
+│            reasons next."                                  │
+│      |                                                     │
+│  Action: run_sql(query="SELECT reason, COUNT(*) ...")      │
+│      |                                                     │
+│  Observation: ...                                          │
+│      |                                                     │
+│  [optionally: create_chart(data=..., type="bar")]          │
+│      |                                                     │
+│  Final Answer: structured business response with chart URL │
+└────────────────────────────────────────────────────────────┘
+```
+
+**Key Design Decisions**:
+
+1. Concise Thoughts enforced: system prompt limits Thoughts to 2 sentences. Without this, the model generates 5-sentence Thoughts adding 200+ extra output tokens per step — on a 10-step task that is 2,000 extra tokens at $0.015/1K = $0.03 wasted per question.
+
+2. Structured SQL results: `run_sql` returns `{"rows": [...], "row_count": N, "columns": [...], "truncated": bool, "query_time_ms": T}` — never raw psycopg2 output. The `truncated` flag tells the model to add a `LIMIT` or aggregate when the result was cut.
+
+3. Step limit with countdown injection: at step 8 of 15, the system injects "You have 7 steps remaining. Prioritize answering the core question." This prevents the model from exhaustively querying every dimension and failing to synthesize.
+
+4. Repetition detection: the executor checks if the last SQL query is a substring of any prior query. If so, it injects "You already ran a similar query at step N and received [result]. Do not repeat — synthesize from existing results."
+
+5. Chart creation as the final ReAct step: `create_chart` is always the last tool call before Final Answer. The system prompt instructs: "Only create one chart per question, after you have gathered all necessary data."
+
+**Implementation**:
+
+```python
+REACT_SYSTEM_PROMPT = """You are a data analysis assistant with access to the company database.
+
+Use this format strictly:
+Thought: [1-2 sentences: what do you know, what gap are you filling]
+Action: tool_name(arg1=value1, arg2=value2)
+Observation: [tool result — provided by system]
+... (repeat until you have enough data)
+Thought: I now have sufficient data to answer the question.
+Final Answer: [structured business answer with key metrics]
+
+Rules:
+- Keep each Thought to 1-2 sentences maximum
+- Your Action must directly follow from your Thought
+- Reference specific numbers from the most recent Observation in your next Thought
+- Create at most one chart per question
+- If you have 3 steps remaining, stop querying and synthesize
+"""
+
+tools = [
+    {
+        "name": "run_sql",
+        "description": (
+            "Execute a read-only SQL query against the analytics database. "
+            "Use for retrieving metrics, counts, and aggregations. "
+            "Results are truncated at 500 rows — use aggregations for large tables. "
+            "Do NOT use for mutations (INSERT, UPDATE, DELETE are blocked)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Valid PostgreSQL SELECT statement"},
+                "description": {"type": "string", "description": "One sentence: what this query answers"}
+            },
+            "required": ["query", "description"]
+        }
+    },
+    {
+        "name": "create_chart",
+        "description": (
+            "Generate a chart from structured data and return a URL. "
+            "Call only after data is fully gathered — this is typically the last tool call. "
+            "Use for bar, line, or pie charts of final result data."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "data": {"type": "object", "description": "Data to visualize as {labels: [...], values: [...]}"},
+                "chart_type": {"type": "string", "enum": ["bar", "line", "pie"]},
+                "title": {"type": "string"}
+            },
+            "required": ["data", "chart_type", "title"]
+        }
+    }
+]
+
+async def react_data_agent(question: str, max_steps: int = 15) -> str:
+    messages = [
+        {"role": "system", "content": REACT_SYSTEM_PROMPT},
+        {"role": "user", "content": question}
+    ]
+    prior_queries = []
+
+    for step in range(max_steps):
+        # Inject step countdown at 60% of budget
+        if step == int(max_steps * 0.6):
+            messages.append({
+                "role": "system",
+                "content": f"[SYSTEM: {max_steps - step} steps remaining. Prioritize synthesizing your answer.]"
+            })
+
+        response = await llm.ainvoke(messages, tools=tools)
+
+        if response.stop_reason == "end_turn":
+            return extract_final_answer(response)
+
+        # Repetition detection
+        tool_call = extract_tool_call(response)
+        if tool_call.name == "run_sql":
+            query = tool_call.args["query"]
+            for prior in prior_queries:
+                if similarity(query, prior) > 0.85:
+                    result = {"status": "skipped",
+                              "reason": f"Similar query already executed at a prior step.",
+                              "suggestion": "Synthesize from existing results."}
+                    break
+            else:
+                result = await execute_sql(query)
+                prior_queries.append(query)
+        else:
+            result = await execute_tool(tool_call)
+
+        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "tool", "tool_call_id": tool_call.id,
+                         "content": json.dumps(result)})
+
+    return synthesize_partial_results(messages)
+```
+
+**Results**:
+
+- Average steps per question: 6.8 (target was <= 10)
+- Question success rate (analyst rated as correct): 89%
+- Average cost per question: $0.041 (well within $0.10 budget)
+- Repetition loop incidents: 0.3% of questions after repetition detection added (was 4.1% before)
+- P95 latency: 28 seconds (acceptable for async analyst workflow)
+
+**Tradeoffs and Alternatives**:
+
+- Plan-and-Execute was considered: rejected because analyst follow-up questions mid-session make upfront planning unreliable — ReAct's adaptability is more valuable here.
+- Streaming intermediate Thoughts to the analyst UI was added after launch — analysts report significantly higher trust in results when they can see the Thought-Action-Observation trace in real time.
+- Self-consistency (N=3 runs, majority vote) was prototyped for critical metrics queries — improved accuracy by ~7% but tripled cost; not deployed for general use; available as an optional "high confidence" mode.

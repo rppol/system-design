@@ -488,6 +488,21 @@ A: `tool_choice` controls whether the model must call a tool. `"auto"` (default)
 **Q: How do you design tools for a code generation agent vs. a research agent?**
 A: Code agent tools prioritize execution feedback: `run_code(code, language)` returning structured output with `stdout`, `stderr`, `exit_code`, `execution_time_ms`; `read_file(path)` and `write_file(path, content)` returning success/error with file metadata; `run_tests()` returning `pass_count`, `fail_count`, `failures` list. Research agent tools prioritize information retrieval: `web_search(query)` returning structured snippets with `url`, `title`, `snippet`; `fetch_page(url)` returning cleaned text; `search_documents(query)` returning ranked results. The key design principle for both: return structured data with explicit status fields, and include enough metadata for the model to decide its next action without needing to call another tool just to clarify what happened.
 
+**Q: How do you write tool descriptions that maximize correct tool selection across a large tool suite?**
+A: When a suite has 10+ tools, selection accuracy degrades because descriptions become harder for the model to distinguish. Four techniques counteract this: (1) disambiguation lines — "Use this tool for X. Do NOT use this for Y; use `tool_z` instead" directly in the description; (2) trigger phrases — "Call this whenever the user says phrases like 'current price', 'right now', 'as of today'"; (3) anti-trigger phrases — "Do not call this for historical data or future projections"; (4) example argument values embedded in parameter descriptions — "e.g., 'AAPL', 'MSFT', 'GOOGL'". For suites over 20 tools, add a router layer: a preliminary LLM call that receives only tool names and one-line summaries and selects 3-5 candidate tools, then passes only those full specs to the main call. This dramatically reduces the noise seen by the main model.
+
+**Q: How do you handle tool call failures gracefully without breaking the agent loop?**
+A: Never raise an exception from a tool failure — exceptions surface to the orchestrator and abort the agent loop. Instead, catch all exceptions in the tool executor and convert them to structured error result messages: `{"status": "error", "error_type": "timeout", "message": "API did not respond within 10s", "suggestion": "Try with a smaller query or retry in 30 seconds"}`. The model reads this error as an observation and can recover: retry with different arguments, try an alternative tool, or acknowledge the limitation to the user. Implement a per-tool retry policy at the executor level: transient errors (network timeout, rate limit 429) retry up to 3 times with exponential backoff (1s, 2s, 4s) before injecting the error message. Permanent errors (invalid argument, resource not found) fail immediately and inject the error without retrying.
+
+**Q: When should tool calls be parallelized vs. kept sequential?**
+A: Parallelize when: the tool calls have no data dependency (neither call's arguments depend on the other call's result), both calls are safe to execute concurrently (no shared mutable state), and the latency savings justify the implementation complexity. Sequential when: call B requires call A's result to form its arguments ("find the CEO of Apple, then look up their net worth"), or when one call is a gate on whether the next call is needed at all ("check if file exists before reading it"). Detection heuristic: scan the model's tool call batch — if all calls use only information already in the original user message or prior observations (not results from the same batch), they are independent and safe to parallelize. The speedup is max(T_1, T_2, ..., T_N) instead of T_1 + T_2 + ... + T_N — significant for N >= 3 slow calls.
+
+**Q: How do you prevent infinite tool call loops in a production agent?**
+A: Three layers of defense: (1) hard step limit — hard-code a maximum number of tool call rounds (typically 20-50 depending on task complexity); inject "You have N steps remaining — prioritize completing the task" at each step to give the model self-awareness; (2) repetition detection — after each tool call, compare the (tool_name, arguments) pair to all previous calls; if an exact duplicate appears, inject "You have already called this tool with these arguments and received the following result: [result]. Do not repeat this call. Try a different approach or conclude the task." (3) progress scoring — every 5 steps, ask a lightweight LLM call: "Based on the trajectory so far, is the agent making meaningful progress? YES or NO." If NO, inject a refocus message or abort. The repetition detection is the most important layer — infinite loops almost always manifest as repeated identical tool calls.
+
+**Q: How do you version tools and maintain backward compatibility in a live production system?**
+A: Version by appending `_v2`, `_v3` to the tool name when making breaking changes (parameter renames, removed required parameters, changed return schema). Non-breaking additions (new optional parameters with defaults, new optional return fields) do not require versioning — add them to the existing tool. Migration protocol: (1) add the new versioned tool to the spec alongside the old one; (2) add a deprecation notice to the old tool's description: "DEPRECATED: use `search_v2` which supports filtering. This tool will be removed 2025-09-01."; (3) monitor tool selection logs — the model will switch to the new tool if its description signals it is preferred; (4) after 30+ consecutive days of zero selection of the old tool, safely remove it. Never silently remove a tool the model might still select — the API will return an error for unrecognized tool call names.
+
 ---
 
 ## Best Practices
@@ -499,3 +514,139 @@ A: Code agent tools prioritize execution feedback: `run_code(code, language)` re
 5. **Log every tool call**: name, arguments, result, latency — essential for debugging which tool selection decision caused an incorrect final answer.
 6. **Validate tool results before injecting**: Malformed API responses injected as tool results corrupt the model's context; validate schema or inject an error message.
 7. **Handle tool errors as observations**: Inject failures as structured tool result messages, not exceptions — the model can recover from errors it can read.
+
+---
+
+## 14. Case Study: AI Travel Assistant Tool Suite
+
+**Problem Statement**: Build a tool suite for an AI travel assistant serving 50,000 daily users. The assistant must handle flight search, hotel booking, weather lookup, and itinerary generation. Booking actions are irreversible and involve real money, so reliability and safety are paramount. Average session involves 8-12 tool calls across 3-4 tool types.
+
+**Architecture Overview**:
+
+```
+User Request
+      |
+      v
+┌─────────────────────────────────────────────────────┐
+│  TRAVEL ASSISTANT LLM (GPT-4o, strict mode)         │
+│  Tool selection based on descriptions + context     │
+└───────────────────────┬─────────────────────────────┘
+                        │  tool calls (parallel where safe)
+          ┌─────────────┼──────────────┬──────────────┐
+          v             v              v              v
+  [search_flights] [search_hotels] [get_weather] [get_itinerary]
+     (read-only)    (read-only)    (read-only)   (read-only)
+          |              |
+          v              v
+  [confirm_flight]  [confirm_hotel]
+   (write — HITL)   (write — HITL)
+          |              |
+          v              v
+    User approval gate (required before execution)
+          |
+          v
+  [booking_api] → confirmation number + receipt
+```
+
+**Key Design Decisions**:
+
+1. Read vs write tool separation: all search tools are read-only and can run in parallel; all confirmation tools are write-only and require explicit human approval before execution. This partitioning makes it structurally impossible to accidentally book without confirmation.
+
+2. Description-level disambiguation: `search_flights` description includes "Use for availability and pricing only. Do NOT use to book — use `confirm_flight` after user approves." The model never conflates search and booking.
+
+3. Strict mode on confirmation tools: `confirm_flight` and `confirm_hotel` use `"strict": true` with an enum for `payment_method` and ISO date strings for dates — eliminates hallucinated booking parameters.
+
+4. Parallel search execution: when the user asks "find me flights and hotels in Paris for next weekend", both `search_flights` and `search_hotels` execute in parallel (they share no data dependency), reducing response latency from ~6s sequential to ~3s parallel.
+
+5. Structured error propagation: if `search_flights` returns `{"status": "error", "error_type": "no_routes_found", "suggestion": "Try nearby airports: CDG or ORY"}`, the model reads the suggestion and retries with the alternative airport, without the user seeing the failure.
+
+**Implementation**:
+
+```python
+tools = [
+    {
+        "name": "search_flights",
+        "description": (
+            "Search for available flights between two cities. "
+            "Call when the user asks about flight options, prices, or schedules. "
+            "Returns a list of flight options — does NOT book. "
+            "To book after user selects, use confirm_flight."
+        ),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "origin": {"type": "string", "description": "IATA code, e.g. 'JFK'"},
+                "destination": {"type": "string", "description": "IATA code, e.g. 'CDG'"},
+                "departure_date": {"type": "string", "description": "ISO date, e.g. '2025-06-15'"},
+                "cabin": {
+                    "type": "string",
+                    "enum": ["economy", "business", "first"],
+                    "description": "Default to economy unless user specifies."
+                },
+                "passengers": {"type": "integer", "description": "Number of passengers (1-9)"}
+            },
+            "required": ["origin", "destination", "departure_date"],
+            "additionalProperties": False
+        }
+    },
+    {
+        "name": "confirm_flight",
+        "description": (
+            "Book a specific flight that the user has explicitly chosen and approved. "
+            "ONLY call after the user has selected a flight from search results "
+            "and confirmed they want to proceed. Never call speculatively."
+        ),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "flight_id": {"type": "string", "description": "ID from search_flights result"},
+                "passenger_name": {"type": "string"},
+                "payment_method": {
+                    "type": "string",
+                    "enum": ["card_on_file", "new_card", "travel_credits"]
+                }
+            },
+            "required": ["flight_id", "passenger_name", "payment_method"],
+            "additionalProperties": False
+        }
+    }
+    # ... search_hotels, confirm_hotel, get_weather, get_itinerary
+]
+
+async def execute_tools(tool_calls: list) -> list:
+    """Execute read-only tools in parallel; gate write tools on user approval."""
+    read_tools = {"search_flights", "search_hotels", "get_weather", "get_itinerary"}
+    write_tools = {"confirm_flight", "confirm_hotel"}
+
+    read_calls = [tc for tc in tool_calls if tc.function.name in read_tools]
+    write_calls = [tc for tc in tool_calls if tc.function.name in write_tools]
+
+    # Parallel execution for all read calls
+    results = await asyncio.gather(*[execute_single(tc) for tc in read_calls])
+
+    # Human approval gate for each write call
+    for tc in write_calls:
+        approved = await request_user_approval(tc)
+        if approved:
+            result = await execute_single(tc)
+        else:
+            result = {"status": "cancelled", "message": "User did not approve."}
+        results.append(result)
+
+    return results
+```
+
+**Results**:
+
+- Tool selection accuracy: 97.3% (measured by logging tool calls vs. user intent)
+- Booking error rate: 0.02% (eliminated wrong-tool booking via description disambiguation)
+- Average session latency: 3.1s per round (parallel search saves ~3s vs sequential)
+- User approval rate for booking: 84% (16% cancel after seeing confirmation details)
+
+**Tradeoffs and Alternatives**:
+
+- Single monolithic `travel_action` tool with an `action_type` parameter was considered — rejected because description quality degrades with many action types in one tool; separate tools give the model cleaner signals.
+- Removing the approval gate for trusted users was considered — rejected because booking irreversibility makes the 200ms HITL overhead worthwhile at any trust level.
+- Using `tool_choice="required"` for all calls was rejected — it forces a tool call even for pure conversational turns; `"auto"` is correct here.

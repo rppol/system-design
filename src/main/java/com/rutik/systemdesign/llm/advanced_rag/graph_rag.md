@@ -356,9 +356,24 @@ A: Traditional enterprise knowledge graphs (Wikidata-style, ontology-driven) are
 **Q: How should you tune Leiden community resolution for your use case?**
 A: Resolution is the key Leiden hyperparameter: higher resolution → more, smaller communities (granular); lower resolution → fewer, larger communities (thematic). Tuning process: (1) Run Leiden with 3-5 resolution values. (2) For each, inspect 20-30 communities: are entities within a community meaningfully related? (3) Test on 50 global queries with human-labeled answers: which resolution produces best coverage? (4) Choose the resolution that maximizes both coherence (entities in a community are related) and coverage (queries are answered comprehensively). Typically, the sweet spot for enterprise documents is resolution that produces 50-200 communities for a 10K-document corpus.
 
+**Q: How does knowledge graph construction quality affect the end-to-end Graph RAG system, and how do you manage error propagation?**
+A: Knowledge graph quality is the foundation of Graph RAG — entity extraction errors, missed relationships, and deduplication failures all propagate through to community detection, community summaries, and final answers. If entity extraction produces noisy or hallucinated relationships, Leiden clustering forms incoherent communities, and community summaries describe non-existent connections. Error propagation is multiplicative: 10% extraction error rate, combined with imperfect deduplication, can produce 30-40% unreliable community summaries. Mitigation: (1) validate entity extraction with a 100-sample manual review before full indexing; (2) track extraction confidence scores and re-extract low-confidence chunks with a stronger model; (3) implement graph consistency checks (entity appears in at least 2 documents, relationship has supporting evidence in source text); (4) allow humans to correct high-importance entities during an initial review phase.
+
+**Q: How does community detection via Leiden algorithm work for global query summarization, and what granularity should you use?**
+A: The Leiden algorithm partitions the knowledge graph into communities that maximize modularity — groups of entities more densely connected internally than externally. For global query summarization, Graph RAG generates an LLM summary for each community at multiple resolution levels (L0 = fine-grained, L2 = thematic). When a global query arrives, the map-reduce process generates partial answers from each relevant community summary (map step), then synthesizes them (reduce step). The resolution level determines answer granularity: L0 communities produce precise but narrow answers; L2 communities produce broad thematic coverage. Empirically, L1 or L2 performs best for most enterprise global queries — too fine-grained produces fragmented answers; too coarse loses important distinctions. Test 2-3 levels on your specific query distribution.
+
+**Q: How do you scale Graph RAG to corpora with millions of entities?**
+A: At millions of entities, several components break: in-memory NetworkX cannot hold the graph; naive Leiden runs out of memory; LLM community summarization creates thousands of calls. Scaling strategies: (1) Use Neo4j or a distributed graph DB instead of NetworkX — Neo4j scales to billions of nodes with efficient Cypher subgraph extraction. (2) Run Leiden in batches or use the hierarchical variant that processes subgraphs independently. (3) Parallelize community summarization — thousands of independent LLM calls, process with a high-throughput batch inference endpoint. (4) Use a smaller, cheaper model (GPT-4o-mini) for community summarization when the number of communities exceeds 1000. (5) Implement incremental indexing so that only new documents trigger graph updates, not full rebuilds. Microsoft GraphRAG's production infrastructure uses distributed entity extraction (Azure Batch) and staged community summarization pipelines to handle corpus sizes above 10M tokens.
+
+**Q: How do you implement hybrid graph-plus-vector retrieval for queries that fall between purely local and purely global?**
+A: Many queries are neither purely local (specific entity lookup) nor purely global (thematic synthesis) — they fall in between. Example: "What are the main risks facing our three largest portfolio companies?" This requires entity identification (which companies are the largest), subgraph extraction (their risk-related relationships), and some thematic synthesis across those entities. Hybrid retrieval: (1) identify named entities in the query and extract their subgraphs from the knowledge graph; (2) retrieve relevant community summaries that contain those entities; (3) run standard vector search for specific factual passages about those entities; (4) combine all three context sources (subgraph relationships, community themes, specific passages) in the LLM prompt. The reranker scores all candidates against the original query before passing to generation.
+
+**Q: When does entity extraction quality make Graph RAG impractical to deploy?**
+A: Graph RAG becomes impractical when entity extraction yields too much noise to produce coherent communities. Signals that extraction quality is too low: (1) more than 20% of extracted entities are hallucinated or incorrectly named (verified by manual sampling); (2) deduplication failure leaves 50+ variants of the same entity as separate nodes; (3) community detection produces communities where 40%+ of member entities are unrelated to each other; (4) community summaries read as incoherent or contradictory when reviewed manually. This typically occurs with informal, jargon-heavy, or domain-specific corpora where general-purpose entity extraction models fail. Mitigation options: fine-tune an entity extractor on domain-specific labeled data; use a domain ontology to constrain extraction to known entity types; fall back to standard RAG with a note that Graph RAG quality is insufficient for this corpus. Building Graph RAG on a poor-quality knowledge graph is worse than not using Graph RAG — incorrect relationship summaries mislead the LLM more than no graph context.
+
 ---
 
-## 11. Best Practices
+## 12. Best Practices
 
 1. **Estimate indexing cost before committing** — calculate entity extraction LLM cost for your full corpus size; ensure it's within budget.
 2. **Use cheaper models for entity extraction** — GPT-4o-mini or Haiku for entity extraction is 10-20× cheaper than GPT-4o with minimal quality loss.
@@ -367,3 +382,169 @@ A: Resolution is the key Leiden hyperparameter: higher resolution → more, smal
 5. **Evaluate at multiple community levels** — test level 0, 1, 2 on your query distribution; different query types benefit from different levels.
 6. **Plan for incremental updates** — design the indexing pipeline for incremental document addition from day one; full rebuild every update is unsustainable.
 7. **Visualize the graph** — use Gephi or NetworkX visualization on a sample; manual inspection reveals deduplication failures, isolated nodes, and structural anomalies early.
+
+---
+
+## 13. Case Study: Graph RAG for Enterprise Knowledge Management at a Consulting Firm
+
+**Problem Statement**: A global management consulting firm with 8,000 consultants has accumulated 50K+ client deliverables, research reports, and internal methodology documents over 12 years. These documents contain dense cross-references between industry trends, client organizations, regulatory frameworks, and strategic concepts. Consultants routinely ask multi-hop questions: "What engagement methodologies have we applied to digital transformation programs in financial services, and which led to measurable client outcomes?" Standard vector-only RAG returned fragmented chunks from individual documents — entity relationships were completely lost. A query about "relationships between our healthcare clients and regulatory compliance frameworks" returned scattered paragraphs with no synthesis across the corpus. The firm needed a system that could reason across documents, surface hidden entity connections, and answer thematic queries spanning thousands of deliverables.
+
+**Architecture Overview**:
+```
+Document Sources
+    |
+    +-- Client deliverables (35K PDFs)   --> [Document Ingestion + OCR]
+    +-- Research reports (10K docs)       --> [Section-aware parsing]
+    +-- Methodology library (5K docs)     --> [Structured extraction]
+                                                    |
+                                                    v
+                                          [Chunking: 800 tokens, 200 overlap]
+                                          ~120K total text chunks
+                                                    |
+                                                    v
+                                    [Entity/Relation Extraction]
+                                      GPT-4o-mini for cost efficiency
+                                      Entity types: Organization, Person,
+                                        Industry, Framework, Methodology,
+                                        Technology, Regulation, Outcome
+                                      Relation types: APPLIED_TO, RESULTED_IN,
+                                        REGULATED_BY, PARTNERED_WITH,
+                                        COMPETED_WITH, ADOPTED
+                                      ~62K unique entities, 285K relationships
+                                                    |
+                                                    v
+                                    [Entity Deduplication Pipeline]
+                                      Phase 1: String normalization
+                                        "McKinsey & Company" = "McKinsey"
+                                      Phase 2: Embedding similarity (threshold 0.92)
+                                      Phase 3: LLM-assisted resolution for
+                                        ambiguous pairs (batch of 500)
+                                      Dedup reduced 62K -> 41K unique entities
+                                                    |
+                                                    v
+                                    [Graph Construction: Neo4j]
+                                      Nodes: 41K entities with merged descriptions
+                                      Edges: 285K relationships with source refs
+                                      Edge weighting: co-occurrence frequency +
+                                        recency bias (newer docs weighted 1.5x)
+                                                    |
+                                                    v
+                                    [Community Detection: Leiden]
+                                      Resolution = 1.2 (tuned on 30-sample eval)
+                                      Level 0: 210 specific communities
+                                      Level 1: 55 thematic communities
+                                      Level 2: 14 industry/practice domains
+                                                    |
+                                                    v
+                                    [Community Summarization: GPT-4o]
+                                      210 + 55 + 14 = 279 LLM summarization calls
+                                      Each summary: ~500 tokens output
+                                                    |
+                                              [Storage Layer]
+                                      Neo4j:     entity/relation graph
+                                      Pinecone:  community summaries + entity
+                                                 description embeddings
+                                      S3:        original chunks with metadata
+                                                    |
+                                              Query Time
+                                                    |
+                                    [Hybrid Retrieval Router]
+                              Global (thematic/cross-document) vs.
+                              Local (specific entity/project) vs.
+                              Multi-hop (entity chain traversal)
+                                                    |
+                  +-----------------------------+---+---------------------------+
+                  |                                 |                           |
+           [Global Path]                   [Multi-hop Path]           [Local Path]
+      Retrieve community summaries     Entity ID in query        Subgraph extraction
+      at L1/L2 level                   Graph traversal (2-3      from Neo4j + vector
+      Map: partial answers per         hops) to find connected   search for specific
+      community (parallel)             entities + relationships  passages
+      Reduce: LLM synthesis            Assemble path context     Direct LLM generation
+                  |                         |                           |
+                  +-----------------------------+---------------------------+
+                                                |
+                                        Final Answer with
+                                  entity references, source doc IDs,
+                                  and relationship provenance
+```
+
+**Key Design Decisions**:
+1. Three-phase entity deduplication — raw extraction produced 62K entities with massive duplication ("Deloitte," "Deloitte Consulting," "Deloitte LLP" as separate nodes). String normalization caught 30% of duplicates; embedding similarity at 0.92 threshold caught another 25%; LLM-assisted resolution handled the remaining ambiguous 500 pairs. Without this pipeline, community detection produced incoherent clusters mixing duplicate entities across communities.
+2. Recency-weighted edge scoring — client engagements from the last 3 years weighted 1.5x higher than older documents, ensuring community summaries reflect current methodologies and active client relationships rather than stale historical patterns.
+3. Hybrid retrieval routing with multi-hop path — beyond simple global/local classification, a third "multi-hop" path handles entity-chain queries ("Which clients adopted frameworks recommended by our financial services practice?") by performing 2-3 hop graph traversals before assembling context.
+4. GPT-4o-mini for entity extraction, GPT-4o for community summarization — extraction is high-volume (120K chunks) and tolerates moderate quality (91% accuracy at 10x cost savings); community summarization is low-volume (279 calls) and demands high quality for executive-facing answers.
+
+**Implementation**:
+```python
+# Entity deduplication pipeline
+def deduplicate_entities(entities: list[dict], embed_fn, llm) -> list[dict]:
+    # Phase 1: String normalization
+    normalized = {}
+    for e in entities:
+        key = normalize(e["name"])  # lowercase, remove suffixes (Inc, LLC, Corp)
+        if key in normalized:
+            normalized[key]["descriptions"].extend(e["descriptions"])
+            normalized[key]["doc_refs"].extend(e["doc_refs"])
+        else:
+            normalized[key] = e
+
+    # Phase 2: Embedding similarity
+    embeddings = {k: embed_fn(v["name"] + " " + v["descriptions"][0])
+                  for k, v in normalized.items()}
+    merge_pairs = find_similar_pairs(embeddings, threshold=0.92)
+    for a, b in merge_pairs:
+        normalized[a] = merge_entity(normalized[a], normalized.pop(b))
+
+    # Phase 3: LLM-assisted resolution for ambiguous pairs (0.85-0.92 similarity)
+    ambiguous = find_similar_pairs(embeddings, threshold=0.85, upper=0.92)
+    for batch in chunk_list(ambiguous, size=20):
+        prompt = f"Are these entity pairs the same real-world entity? {batch}"
+        decisions = llm.generate(prompt)  # returns list of {pair, same: bool}
+        for d in decisions:
+            if d["same"]:
+                normalized[d["pair"][0]] = merge_entity(
+                    normalized[d["pair"][0]], normalized.pop(d["pair"][1])
+                )
+    return list(normalized.values())
+
+# Multi-hop graph traversal for entity chain queries
+def multi_hop_retrieve(query: str, entities: list[str], neo4j, depth: int = 3):
+    cypher = """
+    MATCH path = (start)-[*1..{depth}]-(end)
+    WHERE start.name IN $entities
+    RETURN path,
+           [r IN relationships(path) | r.description] AS rel_descriptions,
+           [n IN nodes(path) | n.description] AS node_descriptions
+    ORDER BY length(path)
+    LIMIT 50
+    """.format(depth=depth)
+
+    paths = neo4j.run(cypher, entities=entities)
+
+    # Assemble context from graph paths + source chunks
+    context_parts = []
+    for p in paths:
+        path_summary = " -> ".join([
+            f"{n} ({r})" for n, r in zip(p["node_descriptions"], p["rel_descriptions"])
+        ])
+        context_parts.append(path_summary)
+
+    return "\n".join(context_parts)
+```
+
+**Results**:
+
+| Metric | Vector-Only RAG | Graph RAG (Hybrid) |
+|--------|----------------|-------------------|
+| Multi-hop question accuracy | 31% | 71% (+40%) |
+| Cross-document reasoning score | 2.1/5 | 4.3/5 (3x better) |
+| Single-entity lookup accuracy | 82% | 85% |
+| Thematic synthesis quality (LLM-judge) | 28% | 76% |
+| Initial indexing cost | $240 | $2,800 |
+| Indexing time (parallelized) | 3 hours | 38 hours |
+| Global query latency (p50) | 1.1s | 14s |
+| Local query latency (p50) | 0.7s | 1.8s |
+| Consultant satisfaction (1-5) | 2.4 | 4.2 |
+
+**Tradeoffs**: The 38-hour initial indexing required a weekend batch job parallelized across 16 workers; incremental updates for new deliverables process nightly and re-summarize only affected communities (typically 10-20 per batch). Entity deduplication was the highest-leverage quality investment — without it, community detection produced fragmented clusters where the same client appeared in 3-4 separate communities, and community summaries contradicted each other. The firm considered a manually curated ontology but rejected it because consulting terminology evolves rapidly and a static ontology would require constant human maintenance. Graph RAG's global query latency of 14 seconds was acceptable for research workflows but required a caching layer for frequently asked executive briefing questions. The $2,800 indexing cost is amortized across 8,000 consultants — $0.35 per user for a system that replaced 4-6 hours of manual cross-referencing per research request.

@@ -18,7 +18,7 @@ A comprehensive, one-stop reference for understanding everything about Large Lan
 
 ## What This Section Covers
 
-This section is organized into **28 topic directories** plus **7 real-world case studies**, covering the full LLM lifecycle. Five topics have **deep-dive sub-files** (see the Sub-Files Index below):
+This section is organized into **34 topic directories** plus **7 real-world case studies**, covering the full LLM lifecycle. Five topics have **deep-dive sub-files** (see the Sub-Files Index below):
 
 - How models are built (architecture, tokenization, pre-training, fine-tuning, alignment)
 - How to use models effectively (prompting, RAG, reasoning, code generation)
@@ -61,6 +61,12 @@ This section is organized into **28 topic directories** plus **7 real-world case
 | 26 | [Multimodal Models](multimodal_models/README.md) | VLMs, vision encoders, diffusion, speech, video | Advanced |
 | 27 | [AI Applications](ai_applications/README.md) | Healthcare, legal, finance, education, customer support | Beginner |
 | 28 | [LLM Ecosystem & Landscape](llm_ecosystem_and_landscape/README.md) | Model families, licensing, cost analysis, timeline | Beginner |
+| 29 | [MCP (Model Context Protocol)](mcp_model_context_protocol/README.md) | MCP servers/clients, resources/tools/prompts, transports, JSON-RPC, A2A | Intermediate |
+| 30 | [Small Language Models & Edge AI](small_language_models_and_edge_ai/README.md) | Phi-3/4, LLaMA 3.2 1B/3B, on-device inference, quantization for mobile | Intermediate |
+| 31 | [Mixture of Experts](mixture_of_experts/README.md) | MoE architecture, top-k routing, load balancing, Mixtral, DeepSeek-V3 | Advanced |
+| 32 | [LLM Routing & Model Selection](llm_routing_and_model_selection/README.md) | Multi-model routing, cascade patterns, confidence thresholds, cost-quality optimization | Intermediate |
+| 33 | [Token Economics & Cost Optimization](token_economics_and_cost_optimization/README.md) | Per-token pricing, prompt caching, batch APIs, self-hosting break-even, budget enforcement | Intermediate |
+| 34 | [Data Flywheels & Continuous Learning](data_flywheels_and_continuous_learning/README.md) | Production feedback loops, active learning, drift detection, A/B testing for LLMs | Advanced |
 
 ---
 
@@ -149,15 +155,15 @@ Build autonomous systems that take actions, use tools, and coordinate with other
 
 ### Phase 5 — Production
 ```
-Inference & Decoding  -->  Context Windows & Long Context  -->  Inference Engines  -->  vLLM Deep Dive  -->  Optimization & Quantization  -->  Deployment & MLOps  -->  Evaluation & Benchmarks  -->  Guardrails & Content Safety
+Inference & Decoding  -->  Context Windows & Long Context  -->  Inference Engines  -->  vLLM Deep Dive  -->  Optimization & Quantization  -->  Deployment & MLOps  -->  Token Economics & Cost Optimization  -->  LLM Routing & Model Selection  -->  Evaluation & Benchmarks  -->  Guardrails & Content Safety
 ```
-Deploy LLMs efficiently, cheaply, and safely. Understand context mechanics before diving into engines; evaluate before hardening with guardrails.
+Deploy LLMs efficiently, cheaply, and safely. Understand context mechanics before diving into engines; optimize costs with routing and caching; evaluate before hardening with guardrails.
 
 ### Phase 6 — Advanced Topics
 ```
-Safety & Alignment  -->  Multimodal Models  -->  AI Applications  -->  LLM Ecosystem & Landscape
+Safety & Alignment  -->  Multimodal Models  -->  Small Language Models & Edge AI  -->  Mixture of Experts  -->  MCP (Model Context Protocol)  -->  AI Applications  -->  LLM Ecosystem & Landscape  -->  Data Flywheels & Continuous Learning
 ```
-Broaden understanding of safety, multimodal capabilities, domain applications, and the full landscape.
+Broaden understanding of safety, multimodal capabilities, small models, MoE architecture, tool protocols, domain applications, the full landscape, and continuous improvement.
 
 ---
 
@@ -208,6 +214,11 @@ Step 5: Evaluate and Iterate
 | Quantization | INT4 (2x faster) | FP16 (better quality) | Quality vs. speed |
 | Sampling | Temperature > 0 (creative) | Temperature = 0 (deterministic) | Task type |
 | Guardrails | Pre-LLM filter | Post-LLM filter | Latency sensitivity |
+| Model routing | Single model | Multi-model routing | Cost vs. complexity |
+| Tool integration | Native function calling | MCP protocol | Portability vs. simplicity |
+| Model size | Cloud LLM (70B+) | Edge SLM (1-7B) | Privacy + latency vs. quality |
+| Architecture | Dense transformer | Mixture of Experts | Inference cost vs. memory |
+| Improvement | Static model | Data flywheel | Maintenance effort vs. quality gains |
 
 ---
 
@@ -240,6 +251,12 @@ Step 5: Evaluate and Iterate
 | Safety & Alignment | Guardrails & Content Safety, Evaluation & Benchmarks |
 | Reasoning Models | Prompt Engineering (CoT), Evaluation & Benchmarks |
 | Code Generation | Agents & Tool Use, Evaluation (HumanEval, SWE-bench) |
+| MCP | Agents & Tool Use, Agentic Frameworks, Function Calling |
+| Small Language Models | Optimization & Quantization, Inference Engines, Deployment |
+| Mixture of Experts | Foundations & Architecture, Inference Engines, LLM Ecosystem |
+| LLM Routing | Deployment & MLOps, Token Economics, Evaluation |
+| Token Economics | Deployment & MLOps, LLM Ecosystem, LLM Routing |
+| Data Flywheels | Fine-Tuning, Evaluation & Benchmarks, Deployment & MLOps |
 
 ---
 

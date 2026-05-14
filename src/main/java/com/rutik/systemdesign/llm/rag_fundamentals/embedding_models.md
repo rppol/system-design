@@ -415,6 +415,21 @@ A: Cost comparison for 10M documents × 400 tokens average = 4B tokens indexing:
 **Q: What is the asymmetric nature of query-document embedding and how does BGE handle it?**
 A: In retrieval, queries are short (5-20 words) and documents are longer (100-500 tokens). Bi-encoders trained symmetrically (where query and document encoders are identical) underperform on this asymmetry because the model wasn't explicitly trained to bridge the length gap. BGE addresses this by requiring a query-specific prefix: "Represent this sentence for searching relevant passages: [query]" for queries, and no prefix for documents. The prefix trains the model to encode queries in "retrieval mode" — producing vectors aligned with document vectors rather than symmetric sentence vectors. Critically: you must use this prefix consistently at query time; forgetting it degrades retrieval quality by ~3-5% on BGE models.
 
+**Q: When should you choose dense vs sparse retrieval from an embedding model perspective?**
+A: Dense (embedding) retrieval excels at semantic similarity and paraphrase matching — queries phrased differently from the document still retrieve correctly because the embedding captures meaning, not words. Sparse (BM25) retrieval excels at exact keyword matching, rare terms, and entity names — product SKUs, regulation numbers, error codes, and proper nouns that the embedding model may not have seen frequently during training. Use dense for conversational semantic queries ("explain how X works"), use sparse for keyword-heavy queries (error codes, product names, regulation IDs), and use hybrid for production systems serving real users with a mixed query distribution. The embedding model choice is irrelevant for BM25 — sparse retrieval operates on raw tokenized text.
+
+**Q: How do you fine-tune an embedding model with hard negatives?**
+A: Hard negatives are passages that are superficially similar to the query but do not contain the answer — they are semantically adjacent but factually incorrect. Standard random negatives (random passages from the corpus) are too easy; the model quickly learns to distinguish them and stops improving. Hard negative mining: retrieve the top-50 candidates for each training query using BM25 or the base embedding model, filter out confirmed true positives using ground-truth labels, and treat the remaining high-scoring non-relevant passages as hard negatives. Use these in contrastive training via MultipleNegativesRankingLoss or TripletLoss. Hard negative mining improves fine-tuned model recall@10 by 15-25% over random-negative training because the model must learn the subtle distinctions that matter in your domain.
+
+**Q: How does Matryoshka truncation affect retrieval quality at different dimensions?**
+A: Truncating a Matryoshka-trained embedding from 768 to 256 dimensions retains approximately 95% of retrieval quality (recall@10) for most general-purpose tasks. Below 128 dimensions, quality drops sharply to 80-85% of the full-dimension baseline — the model can no longer represent the full range of semantic distinctions needed for retrieval. The exact breakpoint depends on domain: tasks with high lexical similarity between relevant and irrelevant documents (legal, medical) need more dimensions to capture fine-grained distinctions; simpler semantic tasks tolerate more aggressive truncation. Practical approach: test recall@10 at 64, 128, 256, 512 dimensions on your labeled eval set and pick the smallest dimension that stays within 3% of the full-dimension baseline — this minimizes storage and ANN search cost.
+
+**Q: What are the challenges of multilingual embedding models?**
+A: Multilingual models must align representations across languages so that "machine learning" (English) and its translations in French, German, and Japanese cluster together in embedding space — a much harder training objective than monolingual alignment. Challenges: (1) lower-resource languages receive weaker embeddings because training data is sparse; cross-lingual retrieval accuracy for low-resource language queries drops 10-20% vs. high-resource languages; (2) cross-lingual retrieval (query in English, documents in French) accuracy drops 10-20% vs. monolingual retrieval even for well-resourced language pairs; (3) vocabulary coverage varies — the tokenizer may break low-resource language words into many sub-word tokens, reducing effective context window. Models like multilingual-e5-large and Cohere embed-multilingual-v3.0 handle 100+ languages and are the correct defaults for multilingual RAG.
+
+**Q: How do you estimate the right embedding dimensionality for your use case?**
+A: Higher dimensions capture more semantic nuance but increase storage and ANN search cost non-linearly (HNSW memory usage scales linearly with dimension; search time scales sub-linearly but still increases). Rule of thumb: 384 dimensions for simple semantic search on small corpora (under 1M documents), 768 dimensions for standard production RAG, 1024+ dimensions only when fine-tuned for domain-specific nuance where the additional dimensions encode domain-relevant distinctions. Empirical approach: measure recall@10 at 256, 384, 512, 768 dimensions using MRL-truncated embeddings on your domain eval set. Stop increasing dimensionality when recall plateaus (less than 1% gain per doubling of dimensions). For most RAG deployments, the recall plateau is reached at 512-768 dimensions — deploying at 1024+ is rarely justified by the storage and latency cost.
+
 ---
 
 ## 11. Best Practices
@@ -426,3 +441,143 @@ A: In retrieval, queries are short (5-20 words) and documents are longer (100-50
 5. **Batch embedding calls** — embed 100-256 chunks per batch; single-call embedding is 100× slower for large corpora.
 6. **Store model name as index metadata** — prevents dimension mismatch bugs when models are upgraded; enforce model consistency between indexing and query time.
 7. **Consider fine-tuning only after measuring** — baseline recall@10 under 70% on domain-specific eval set is the signal to invest in fine-tuning; most general-purpose deployments don't need it.
+
+---
+
+## 12. Case Study
+
+### Building a Multilingual Embedding Pipeline for Global E-Commerce Product Search
+
+**Problem Statement**
+
+A global e-commerce platform operates in 12 countries across 5 languages (English, French, German, Spanish, Japanese). The product catalog has 8 million SKUs. Users search in their native language; products are described in the language of their origin market plus English. The initial system used text-embedding-3-small (English-only in practice) — cross-language recall@10 was 41% (a French query finding an English-listed product), and Japanese queries had 28% recall@10. The business impact: users in non-English markets found fewer products, leading to 31% lower conversion rate vs. English-speaking markets.
+
+**Architecture Overview**
+
+```
+Embedding Pipeline:
+
+Product Catalog (8M SKUs)
+    |
+    +-- Language Detection (langdetect)
+    |
+    +-- Translation (optional enrichment)
+    |   If product only in one language: translate title+description
+    |   to English using DeepL API; store both as fields
+    |
+    +-- Field Selection for Embedding
+    |   Combined text: title + brand + category + key_attributes
+    |   Max 256 tokens (optimized dimension for catalog search)
+    |
+    +-- Embedding Model: multilingual-e5-large
+    |   Dimension: 1024 → truncated to 512 via MRL
+    |   Batch size: 128 per GPU call
+    |   GPU: 4× A10G; throughput: ~8M embeddings/hour
+    |
+    +-- Vector Index: Weaviate
+        HNSW (ef=200, m=16 for high recall)
+        Pre-filter: product_status=active, country=available_in
+        Metadata: sku_id, category, brand, price_range, country_availability
+
+
+Query Pipeline:
+
+User Query (any language)
+    |
+    +-- Language Detection
+    |
+    +-- Query Prefix Injection:
+    |   "query: {user_query}"  (multilingual-e5 requires this prefix)
+    |
+    +-- Embedding (same multilingual-e5-large model)
+    |
+    +-- Hybrid Search:
+    |   Dense: ANN search (top-200 candidates)
+    |   Sparse: BM25 on product title + brand (keyword matching)
+    |   Fusion: RRF (k=60)
+    |
+    +-- Metadata Pre-filter:
+    |   country_availability includes user.country
+    |   product_status = "active"
+    |
+    +-- Reranker (Cohere rerank-multilingual-v3.0)
+    |   Top-200 → Top-20 for display
+    |
+    +-- Results Ranked by (rerank_score × 0.7 + popularity_score × 0.3)
+```
+
+**Key Design Decisions**
+
+1. Model selection — multilingual-e5-large over alternatives: MTEB multilingual retrieval comparison showed multilingual-e5-large outperformed mDPR by 12% and multilingual-MiniLM by 18% on cross-lingual product retrieval. BAAI/bge-m3 was competitive (+1%) but slower at inference — rejected for throughput reasons.
+
+2. Dimension reduction via MRL: Full 1024-dim embeddings for 8M SKUs required 32GB for the HNSW index. Truncating to 512 dimensions reduced index to 16GB with only 2.3% recall@10 degradation on the eval set — acceptable. The MRL property of multilingual-e5 makes this truncation valid.
+
+3. Query prefix requirement: multilingual-e5 requires a "query: " prefix for queries and "passage: " prefix for documents during embedding. Missing this prefix degraded cross-lingual recall@10 by 7%. Both prefixes are injected automatically in the embedding service — encoding context (query vs. document) is a runtime parameter, not caller responsibility.
+
+4. Fine-tuning on product-specific pairs: the base multilingual-e5-large had 41% cross-lingual recall@10 on the product eval set. Fine-tuning on 15,000 (query_language_X, relevant_product_description_language_Y) pairs for 3 epochs raised it to 67% — a 26-point improvement. Training data was generated by taking existing successful cross-language search sessions from user logs (user searched in French, clicked a German-listed product = positive pair).
+
+**Implementation — Fine-Tuning**
+
+```python
+from sentence_transformers import SentenceTransformer, losses
+from sentence_transformers.trainer import SentenceTransformerTrainer
+from sentence_transformers.training_args import SentenceTransformerTrainingArguments
+from datasets import Dataset
+
+# Training data: cross-lingual query-product pairs
+train_pairs = Dataset.from_list([
+    {
+        "anchor": "query: chaussures de course femme",        # French query
+        "positive": "passage: Women's running shoes lightweight breathable",  # English product
+        "negative": "passage: Men's formal leather oxford shoes dress"        # hard negative
+    },
+    # 15,000 pairs across 5 language combinations
+])
+
+model = SentenceTransformer("intfloat/multilingual-e5-large")
+
+loss = losses.MultipleNegativesRankingLoss(model)
+
+args = SentenceTransformerTrainingArguments(
+    output_dir="multilingual-e5-ecommerce",
+    num_train_epochs=3,
+    per_device_train_batch_size=32,   # smaller batch for GPU memory with 1024d
+    learning_rate=1e-5,               # low LR to preserve multilingual alignment
+    warmup_ratio=0.1,
+    fp16=True,
+    evaluation_strategy="epoch",
+)
+
+trainer = SentenceTransformerTrainer(
+    model=model,
+    args=args,
+    train_dataset=train_pairs,
+    loss=loss,
+)
+trainer.train()
+# Save to HuggingFace Hub or local artifact store
+model.save_pretrained("multilingual-e5-ecommerce-v1")
+```
+
+**Results**
+
+| Metric | Baseline (text-embedding-3-small) | multilingual-e5-large (base) | multilingual-e5-large (fine-tuned) |
+|--------|----------------------------------|------------------------------|-------------------------------------|
+| Cross-lingual recall@10 | 41% | 61% | 67% |
+| Japanese query recall@10 | 28% | 52% | 61% |
+| English recall@10 | 79% | 77% | 81% |
+| Embedding throughput | 2M/hr (API) | 8M/hr (self-hosted GPU) | 8M/hr (self-hosted GPU) |
+| Indexing cost (8M SKUs) | $128 one-time | GPU infra only | GPU infra only |
+| Cross-market conversion rate gap | 31% | 14% | 9% |
+
+**Tradeoffs and Alternatives**
+
+- Self-hosting multilingual-e5-large requires 4× A10G GPUs for 8M-SKU re-indexing in under 1 hour. Alternative: use Cohere embed-multilingual-v3.0 API — no GPU infra, similar quality, but $0.10/M tokens × 8M SKUs × 256 tokens = ~$200 per full re-index. At weekly re-indexing, API cost becomes $800/month vs. GPU depreciation.
+- Translation-based approach (translate all queries to English, use monolingual model): achieves 58% cross-lingual recall@10 with text-embedding-3-large — lower than fine-tuned multilingual but simpler operationally. Adds 50-80ms DeepL translation latency per query.
+- Query language detection adds 5ms latency but enables per-language performance monitoring — a critical operational metric for identifying which languages need additional fine-tuning data.
+
+**Interview Discussion Points**
+
+- Why not use one model per language? Separate monolingual models would achieve higher per-language recall but cannot perform cross-lingual retrieval (French query, English product) without a separate translation step. The translation approach adds latency, cost, and a failure mode (translation errors degrade retrieval).
+- How do you handle new language additions? Fine-tune the existing multilingual model with pairs for the new language — the base model's multilingual alignment provides a strong starting point, and 2,000-3,000 language-specific pairs are usually sufficient for a 10-15% recall improvement over the base model.
+- How do you keep embeddings fresh as the catalog changes? New and updated products are embedded incrementally (event-driven, triggered by catalog update events). Full re-indexing is done monthly to handle model updates. The vector index supports upsert by SKU ID, enabling incremental updates without full re-index.

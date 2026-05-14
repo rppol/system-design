@@ -383,6 +383,21 @@ A: LoftQ (LoRA-Fine-Tuning-Aware Quantization, 2023) addresses a specific proble
 **Q: When would you use PEFT for inference rather than fine-tuning?**
 A: PEFT for inference means applying pre-trained adapters at deployment time rather than training new ones. Use cases: (1) Multi-task serving — a single base model with multiple task-specific LoRA adapters, swapped per request type (vLLM supports this with minimal overhead); (2) Personalization — per-user or per-tenant LoRA adapters stored cheaply (50MB each) and loaded on-demand; (3) Style switching — different adapters for different response styles (formal, casual, domain-specific) applied dynamically; (4) AB testing — comparing adapter variants in production without deploying separate model versions. The key advantage: all adapter variants share the same base model loaded once on GPU; adapter weights are loaded into a small memory region and applied as matrix additions, costing effectively zero inference latency with LoRA (merged at load time).
 
+**Q: When should you choose LoRA over prefix tuning, and what determines that decision?**
+A: LoRA and prefix tuning have different inductive biases that make each better suited to different scenarios. LoRA modifies weight matrices directly, making it effective for behavioral changes — teaching the model a new output format, response style, or task-specific reasoning pattern. Prefix tuning prepends learned virtual tokens to attention keys and values, making it better for task-specific conditioning of generation — guiding what the model generates (domain register, writing style) without explicitly changing how it reasons. Choose LoRA when: the task requires consistent structured outputs (JSON, SQL, code), domain-specific terminology or factual grounding, or multi-step reasoning chains. Choose prefix tuning when: you need to condition generation style or domain without modifying the model's knowledge (e.g., "always respond formally," "generate in the style of legal contracts"), the model scale is large (>10B, where prefix tuning becomes competitive), or you need multiple conditioning modes that cannot be merged. A practical decision rule: if you can describe the desired change as "the model should think differently," use LoRA; if you can describe it as "the model should respond in a certain register," consider prefix tuning.
+
+**Q: What is IA3 and how does it differ from LoRA in parameter efficiency?**
+A: IA3 (Infused Adapter by Inhibiting and Amplifying Inner Activations, Liu et al. 2022) learns element-wise scaling vectors that multiply into keys, values, and FFN intermediate activations — not matrix multiplications. Instead of ΔW = B×A (rank-r matrix requiring r×(d+k) parameters), IA3 learns a single vector l ∈ ℝ^d that scales activations: h_adapted = l ⊙ h_original. This is a Hadamard (element-wise) product, not a matrix multiply. Parameter count: for each targeted activation (keys, values, FFN intermediate), IA3 requires only d parameters versus LoRA's r×(d+k) per layer. For a 7B model with d=4096 and r=16: IA3 uses 4096 per target; LoRA uses 16×(4096+4096) = 131,072 per target — roughly 32× fewer parameters with IA3. The tradeoff: element-wise scaling is less expressive than low-rank matrix updates; IA3 works well for simple task adaptation (classification, format changes) but underperforms LoRA on tasks requiring significant behavioral change. IA3 is particularly useful for few-shot in-context learning scenarios where you want efficient adaptation to each example's context.
+
+**Q: How does AdapterFusion enable multi-task serving and what are its limitations?**
+A: AdapterFusion (Pfeiffer et al. 2021) trains a learned weighted combination of multiple task-specific adapters. The training process has two phases: first, train separate adapters for each task independently; second, freeze all adapters and the base model, then train a small attention-based fusion layer that learns to weight each adapter's output based on the current input. The fusion layer computes: h_fused = sum(attention_weight_i × adapter_i(h)) where attention weights are input-dependent. This enables a single model to handle multiple tasks by dynamically weighting adapter contributions per input. Limitations: (1) inference latency — all adapters execute on every forward pass regardless of which task is relevant, making inference cost scale linearly with number of tasks; (2) training complexity — fusion training requires all task-specific training data simultaneously to learn good attention weights; (3) task interference ceiling — adapters trained on highly dissimilar tasks interfere even with learned fusion weights, capping maximum performance below single-task adapters. AdapterFusion is primarily a research technique; production multi-task deployments typically prefer per-request adapter routing (vLLM LoRA hot-swapping) over fusion because it avoids the latency and interference problems.
+
+**Q: How do you use PEFT for multi-task learning where different inputs need different fine-tuned behaviors?**
+A: The standard production pattern is to train separate LoRA adapters per task and route at inference time based on task classification. Architecture: (1) train one LoRA adapter per task using the same base model; (2) at inference, run a lightweight intent classifier (BERT-scale model or even regex rules) to determine the task type for each incoming request; (3) load the appropriate adapter for the request using vLLM's LoRA hot-swap API. vLLM maintains a pool of adapter slots in GPU memory (configurable, typically 4-8 simultaneous adapters) and evicts least-recently-used adapters from GPU to pinned CPU memory when the pool is full; adapter swap latency is 5-20ms depending on adapter size. This approach provides isolation — a change to one task's adapter does not affect other tasks — and independent scaling (high-traffic tasks can use dedicated serving instances). The alternative, training a single adapter on mixed multi-task data, typically underperforms per-task adapters by 3-7% on each individual task because the adapter must compromise between task-specific optimization directions.
+
+**Q: What is the cost of switching between PEFT methods mid-project, and when is it justified?**
+A: Switching PEFT methods (e.g., from LoRA to prefix tuning) costs primarily in data preparation and hyperparameter search, not in architectural code changes. The HuggingFace PEFT library abstracts the method differences — changing from LoRA to prefix tuning is a configuration change (swap LoraConfig for PrefixTuningConfig), not a code rewrite. The real switching costs: (1) hyperparameter re-search — LoRA hyperparameters (rank, alpha, target modules) do not transfer to prefix tuning (prefix length, reparameterization MLP hidden size); expect 5-10 training runs to find good prefix tuning hyperparameters; (2) data re-formatting — prefix tuning and LoRA use identical data formats, so no reformatting cost; (3) adapter re-training — prior adapters cannot be converted between PEFT methods; full retraining is required; (4) evaluation re-run — re-evaluate all benchmarks with the new method. Switching is justified when: the current PEFT method has hit a quality ceiling that cannot be overcome by hyperparameter tuning (e.g., LoRA r=64 still underperforms by >5% vs. full FT), or when production constraints change (e.g., merge capability becomes required and you're using adapters). In practice, most projects choose LoRA initially and tune rank rather than switching methods.
+
 ---
 
 ## 11. Best Practices
@@ -394,3 +409,116 @@ A: PEFT for inference means applying pre-trained adapters at deployment time rat
 5. **Use prompt tuning only for >10B models** — at smaller scales, prompt tuning significantly underperforms LoRA; never use it as a lazy alternative to LoRA for small/medium models.
 6. **Evaluate PEFT quality against full FT baseline** — know the quality gap; if LoRA r=64 still falls 5% below full FT on your eval set, full fine-tuning may be justified.
 7. **Store adapter metadata** — base model name, rank, alpha, target modules, training dataset, training date; essential for reproducing results and correct deployment.
+
+---
+
+## 12. Case Study: Multi-Task Customer Service Platform Using Adapter Composition
+
+**Problem Statement**: A large e-commerce company runs a customer service platform handling three distinct query types: billing disputes, technical product support, and returns/refunds. Each domain has different vocabulary, reasoning patterns, and output structures. A single generalist fine-tuned model performs at 81% average accuracy across all three domains. Domain-specific full fine-tuned models each achieve 91-93% accuracy but require three separate 14GB model deployments — 42GB total just for model weights, plus separate serving infrastructure per domain. The team needs to serve all three domains from a single GPU instance while achieving per-domain accuracy comparable to single-task fine-tuned models.
+
+**Architecture Overview**:
+```
+Training Phase (independent, parallel):
+
+Base Model: Mistral 7B Instruct (shared across all adapters)
+
+Task-Specific LoRA Adapters:
+  billing_adapter     (r=16, q+k+v+o, 50MB)
+  technical_adapter   (r=16, q+k+v+o+FFN, 80MB)
+  returns_adapter     (r=8,  q+v, 30MB)
+
+(Technical adapter targets FFN because product troubleshooting
+ requires domain-specific factual associations; billing and returns
+ are format/behavior changes only)
+
+Inference Routing:
+
+  Incoming Request
+       |
+       v
+  Intent Classifier (DistilBERT, 66M params, <10ms latency)
+       |
+       +--[billing]--> load billing_adapter ──> vLLM ──> response
+       |
+       +--[technical]-> load technical_adapter ──> vLLM ──> response
+       |
+       +--[returns]--> load returns_adapter ──> vLLM ──> response
+
+vLLM Multi-Adapter Serving:
+  Base model (Mistral 7B, 14GB BF16) loaded once
+  Adapter pool: 3 adapters in GPU memory simultaneously (160MB total)
+  Adapter hot-swap: <5ms P99 (adapter already in GPU pool)
+```
+
+**Key Design Decisions**:
+1. Separate adapters per domain rather than a single mixed-domain adapter: per-domain accuracy improved from 81% (single mixed adapter) to 88-91% per domain — a 7-10 percentage point improvement that justified the added routing complexity.
+2. Different configurations per task: billing (r=16, attention-only) because billing dispute handling is primarily format and tone; technical (r=16, attention+FFN) because product-specific troubleshooting requires factual associations in FFN layers; returns (r=8, q+v only) because returns queries follow highly templated patterns that simple attention adaptation handles adequately.
+3. Intent classifier choice: DistilBERT fine-tuned on 2,000 labeled routing examples achieves 97.3% routing accuracy in under 10ms; incorrect routing adds latency but does not produce catastrophically wrong outputs — the base model handles off-domain queries gracefully.
+4. All adapters trained on identical base model checkpoint: any version mismatch between adapters and the serving base model causes incorrect behavior. Pinned the base model to a specific commit hash.
+
+**Implementation**:
+```python
+# Training each adapter independently (same pattern for all three)
+from peft import LoraConfig, get_peft_model
+from trl import SFTTrainer
+
+# Billing adapter — attention only, simple format adaptation
+billing_config = LoraConfig(
+    r=16, lora_alpha=32,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+    lora_dropout=0.05, bias="none", task_type="CAUSAL_LM"
+)
+
+# Technical adapter — attention + FFN for factual associations
+technical_config = LoraConfig(
+    r=16, lora_alpha=32,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj"],
+    lora_dropout=0.05, bias="none", task_type="CAUSAL_LM"
+)
+
+# Returns adapter — minimal, q+v only for templated patterns
+returns_config = LoraConfig(
+    r=8, lora_alpha=16,
+    target_modules=["q_proj", "v_proj"],
+    lora_dropout=0.05, bias="none", task_type="CAUSAL_LM"
+)
+
+# Serving with vLLM multi-adapter support
+from vllm import LLM, SamplingParams
+
+llm = LLM(
+    model="mistralai/Mistral-7B-Instruct-v0.3",
+    enable_lora=True,
+    max_lora_rank=16,
+    max_loras=3,                    # keep all 3 adapters in GPU pool
+)
+
+# Route and serve
+def handle_request(query: str) -> str:
+    domain = intent_classifier.predict(query)   # billing/technical/returns
+    adapter_map = {
+        "billing": "./billing_adapter",
+        "technical": "./technical_adapter",
+        "returns": "./returns_adapter"
+    }
+    request = LoRARequest(domain, 1, adapter_map[domain])
+    outputs = llm.generate([query], SamplingParams(max_tokens=512),
+                            lora_request=request)
+    return outputs[0].outputs[0].text
+```
+
+**Results**:
+- Billing domain accuracy: 88.4% (vs. 93% single-task full FT; vs. 81% single mixed adapter)
+- Technical domain accuracy: 91.2% (vs. 93% single-task full FT; best result across domains due to FFN targeting)
+- Returns domain accuracy: 87.1% (vs. 91% single-task full FT; r=8 adapter sufficient for templated task)
+- GPU memory: 14GB (base) + 0.16GB (3 adapters) = 14.16GB — single A100 40GB handles production load
+- Inference latency P50: 340ms (vs. 330ms with single generalist adapter — 10ms overhead for intent classification)
+- Infrastructure savings: 1 GPU instance vs. 3 separate instances; 68% cost reduction in serving infrastructure
+- Total adapter training time: 6 hours across 3 adapters (parallel training on 3 GPUs — 2 hours each)
+
+**Tradeoffs and Alternatives**:
+- Single mixed-domain LoRA adapter: 81% average accuracy — 7-10 percentage points lower; avoids routing complexity but unacceptable quality for this application.
+- Three separate full model deployments: 91-93% accuracy per domain — the quality ceiling; costs 3× more in GPU serving infrastructure and requires 3× the model storage.
+- AdapterFusion: evaluated in a research spike — all three adapters execute on every request (3× compute), routing accuracy from attention weights was only 91% (below the 97.3% of a dedicated classifier), and managing training complexity was significantly higher. Not adopted for production.
+- Prompt engineering (no fine-tuning): 74% average accuracy — insufficient for production customer service where incorrect resolution advice generates escalations and refund costs that exceed the fine-tuning investment.

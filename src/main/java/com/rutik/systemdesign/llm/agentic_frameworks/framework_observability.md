@@ -521,6 +521,9 @@ Never log: (1) PII — user names, emails, phone numbers, health data without ex
 **Q: How do you trace non-LangChain LLM applications?**
 Three options: (1) Langfuse `@observe()` decorator on any Python function — wrap LLM calls and manual spans; requires code changes; (2) OpenLLMetry auto-instrumentation — patches the OpenAI/Anthropic SDK at import time; zero code changes; (3) Helicone HTTP proxy — configure `openai.base_url = "https://oai.hconeai.com/v1"` and all calls are proxied and logged; zero code changes, any framework. For direct API calls without frameworks: Langfuse is most flexible (manual span creation for any call); OpenLLMetry is lowest effort (auto-instruments SDK). For enterprise: OpenTelemetry with existing APM infrastructure is the most durable choice.
 
+**Q: How do you set up cost alerting and budget enforcement across LLM frameworks?**
+Implement cost tracking at the gateway level by intercepting all LLM API calls and recording token counts, model used, and computed cost. Tools: LangSmith and Langfuse both provide per-trace cost calculation. Set up alerts at three thresholds: (1) per-request cost > $X triggers investigation (a single agent loop spending $5 is suspicious); (2) hourly cost rate > budget/24 triggers throttling; (3) daily cost > budget triggers hard rejection of new requests. For budget enforcement, implement a cost middleware that checks remaining budget before forwarding LLM calls. Track cost per feature, per user, and per model to identify optimization opportunities.
+
 ---
 
 ## 13. Best Practices

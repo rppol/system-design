@@ -352,9 +352,24 @@ A: ReAct is the general pattern underlying agentic RAG: Thought (reasoning about
 **Q: How do you prevent circular retrieval in iterative loops?**
 A: Circular retrieval — where the loop keeps retrieving the same documents — is a common failure mode. Track retrieved document IDs in state across all iterations. Before each new retrieval, inject a constraint into the retrieval query prompt: "Search for information NOT already in your context. Avoid queries that would retrieve documents you've already seen." Optionally, filter out previously retrieved document IDs at the vector DB level (metadata filter: `{"id": {"$nin": seen_ids}}`). Also, if two consecutive iterations retrieve an identical set of document IDs, terminate the loop early — it's not making progress.
 
+**Q: How do you control tool selection accuracy in agentic RAG when multiple retrieval sources are available?**
+A: Tool selection accuracy — choosing the right source (internal knowledge base, web search, SQL database, external API) for each sub-query — is critical when multiple retrieval tools are available. Poor tool selection wastes iterations and degrades answer quality. Improve accuracy by: (1) writing precise tool descriptions with concrete examples of when to use each ("use knowledge_base for internal policy questions; use web_search for news and recent events"); (2) evaluating tool selection on a labeled test set of (query, expected_tool) pairs and measuring accuracy; (3) using a stronger model for the tool-selection step even if a smaller model handles generation. If tool selection accuracy is below 80%, consolidate tools to reduce decision complexity.
+
+**Q: How do you control cost for iterative retrieval when each iteration adds LLM and retrieval calls?**
+A: Cost control requires both architectural limits and monitoring. Set hard iteration caps (3 in production, 5 maximum). Use a cheap small model (GPT-4o-mini, Claude Haiku) for retrieval query generation and sufficiency checks; reserve the capable model only for final answer generation. Implement query-level budget tracking: if a query has consumed more than a configured token budget, force early termination with a best-effort answer. Route simple queries to standard RAG using an upfront classifier — agentic RAG should be triggered for fewer than 20-30% of all queries. Monitor average iterations per query in production; a creeping average above 2.5 signals the sufficiency check is miscalibrated.
+
+**Q: How do you combine agentic RAG with traditional RAG as a fallback?**
+A: A hybrid architecture uses standard RAG as the fast default and agentic RAG for queries that standard RAG fails on. The pattern: (1) run standard RAG first; (2) score the retrieved context relevance and the answer faithfulness; (3) if both scores exceed thresholds, return the standard RAG answer; (4) if either score is low, escalate to agentic RAG for the same query. This ensures agentic overhead is only incurred when necessary. An alternative is to route at query time using a classifier trained on (query_text → needs_agentic: bool) rather than routing based on retrieval quality post-hoc. The hybrid approach is more cost-efficient than always using agentic RAG.
+
+**Q: How do you debug agentic RAG failures in production?**
+A: Debugging agentic failures requires full execution traces. Each agentic run must log: (1) the original query and all generated sub-queries in order; (2) the documents retrieved and their scores at each iteration; (3) the sufficiency check result and reasoning at each iteration; (4) the final answer and which context supported it. Without these traces, post-hoc debugging is impossible. Common failure patterns to look for: circular retrieval (same document IDs across iterations), premature termination (sufficiency check said "yes" with incomplete context), infinite loop detection (max_iterations hit every time). Tool-level tracing with LangSmith or Arize Phoenix is non-negotiable for production agentic systems.
+
+**Q: What metrics differentiate agentic RAG from single-shot RAG in evaluation?**
+A: Beyond standard answer accuracy, track agentic-specific metrics. Iteration efficiency: average iterations to reach a correct answer (target 1.5-2.5; higher indicates sufficiency check problems). Multi-hop accuracy: accuracy on a held-out set of labeled multi-hop queries (the primary justification for agentic RAG). Unnecessary iteration rate: fraction of single-hop queries that trigger multiple iterations (should be near zero with a good query router). Context utilization: fraction of accumulated context actually cited in the final answer (low utilization means retrieval is noisy). Cost-per-correct-answer: total LLM token cost divided by number of correctly answered questions, compared between agentic and standard RAG to quantify the accuracy-cost tradeoff.
+
 ---
 
-## 11. Best Practices
+## 12. Best Practices
 
 1. **Always set max_iterations** — never let the loop run unbounded; 3-5 iterations handles 95% of multi-hop queries.
 2. **Log every iteration** — trace retrieval queries, document IDs, and sufficiency check results; debugging without this trace is impossible.
@@ -363,3 +378,119 @@ A: Circular retrieval — where the loop keeps retrieving the same documents —
 5. **Compress context across iterations** — don't blindly accumulate; summarize or select top-K relevant chunks to avoid hitting context limits.
 6. **Track circular retrieval** — if the same document IDs appear in consecutive iterations, terminate early.
 7. **Benchmark against standard RAG on your query distribution** — if your queries are 90% single-hop, agentic RAG adds cost with no quality gain.
+
+---
+
+## 13. Case Study: Agentic RAG for a Financial Research Assistant
+
+**Problem Statement**: A financial data firm serves 500 buy-side analysts who research investment opportunities. Analysts ask multi-hop questions across three distinct sources: SEC EDGAR filings (10-K, 10-Q, 8-K), earnings call transcripts, and real-time financial news. A typical question is: "Compare the gross margin trajectory of Company A and Company B over the last 3 quarters, and identify what each management team cited as the primary driver of margin changes." Standard RAG answered only one part of these questions; analysts were spending 2+ hours per research brief manually cross-referencing sources.
+
+**Architecture Overview**:
+```
+Analyst Query
+    |
+    v
+[Query Router]
+  "Is this multi-hop? Does it span multiple sources?"
+    |
+    +-- Simple (30%) -----> [Standard RAG] → Answer in <2s
+    |
+    +-- Multi-hop (70%) --> [Agentic RAG Loop]
+                                |
+                        [Iteration 1: Decompose]
+                          LLM identifies sub-questions:
+                          Q1: "Company A gross margin Q1-Q3"
+                          Q2: "Company B gross margin Q1-Q3"
+                          Q3: "Company A mgmt margin commentary"
+                          Q4: "Company B mgmt margin commentary"
+                                |
+                        [Tool Selection per Sub-Query]
+                          Q1, Q2 → search_sec_filings (10-Q)
+                          Q3, Q4 → search_earnings_transcripts
+                          Market context → search_financial_news
+                                |
+                        [Parallel Retrieval: 3 tools simultaneously]
+                          SEC EDGAR Vector DB  → margin data chunks
+                          Transcript Vector DB → mgmt commentary
+                          News Vector DB       → analyst context
+                                |
+                        [Sufficiency Check + Gap Analysis]
+                          "Missing: Q2 10-Q for Company B not found"
+                                |
+                        [Iteration 2: Targeted Retrieval]
+                          search_sec_filings("Company B 10-Q Q2 2024 gross margin")
+                                |
+                        [Calculation Tool]
+                          compute_margin_delta(q1_margin, q2_margin, q3_margin)
+                                |
+                        [Final Generation]
+                          LLM synthesizes across all retrieved context
+                          with inline citations (filing date, page, transcript timestamp)
+                                |
+                        Research Brief with Sources
+```
+
+**Key Design Decisions**:
+1. Parallel tool execution within each iteration — Q1/Q2 SEC queries and Q3/Q4 transcript queries run concurrently, reducing average iteration time from 8s to 3s.
+2. Dedicated calculation tool — financial calculations (margin delta, CAGR) are offloaded to a Python executor rather than asking the LLM to compute, eliminating arithmetic errors.
+3. Hard limit of 4 iterations — beyond 4 iterations, cost exceeds analyst time-value; the system reports what it found with explicit gaps rather than continuing.
+4. Source-typed retrieval — each sub-question is matched to its appropriate source type (filings for numbers, transcripts for management commentary, news for market context), improving precision by 35% over single-source retrieval.
+5. Citation threading — every fact in the final answer carries a citation tuple (source_type, document_id, page/timestamp) that the analyst can click to verify.
+
+**Implementation**:
+```python
+tools = [
+    {
+        "name": "search_sec_filings",
+        "description": "Search SEC EDGAR 10-K/10-Q/8-K filings for financial data, "
+                       "metrics, and disclosures. Use for quantitative questions about "
+                       "revenue, margins, cash flow, guidance.",
+        "parameters": {"query": "str", "company_ticker": "str", "filing_type": "str",
+                       "date_range": "str"}
+    },
+    {
+        "name": "search_earnings_transcripts",
+        "description": "Search earnings call transcripts for management commentary, "
+                       "forward guidance, and analyst Q&A. Use for qualitative questions "
+                       "about strategy, drivers, and management perspective.",
+        "parameters": {"query": "str", "company_ticker": "str", "quarter": "str"}
+    },
+    {
+        "name": "search_financial_news",
+        "description": "Search recent financial news for market context, analyst reactions, "
+                       "and industry developments. Use for news within the last 90 days.",
+        "parameters": {"query": "str", "days_back": "int"}
+    },
+    {
+        "name": "compute_financial_metrics",
+        "description": "Execute financial calculations: margin delta, CAGR, YoY growth, ratios.",
+        "parameters": {"operation": "str", "values": "list[float]", "periods": "list[str]"}
+    }
+]
+
+# Agent state includes iteration count, accumulated context, and cited sources
+state = AgentState(
+    query=analyst_query,
+    context=[],
+    cited_sources=[],
+    iteration=0,
+    max_iterations=4
+)
+```
+
+**Results**:
+
+| Metric | Standard RAG | Agentic RAG |
+|--------|-------------|-------------|
+| Multi-hop question accuracy | 42% | 87% |
+| Average answer latency | 1.2s | 11s |
+| Analyst research time saved | baseline | 65 min/brief |
+| Citation accuracy | 71% | 94% |
+| Queries hitting max_iterations | N/A | 8% |
+| Cost per research brief | $0.02 | $0.31 |
+
+**Tradeoffs and Alternatives**:
+- Latency (11s average) was acceptable because analysts expect research synthesis to take time; a real-time conversational interface would require a stricter iteration budget.
+- The calculation tool was initially omitted, causing 12% of answers to contain arithmetic errors; adding it improved accuracy by 8 percentage points.
+- Considered pre-computing all pairwise comparisons (Company A vs. B across all metrics) as a batch job; rejected because the query space was too large and analyst needs were too specific.
+- The query router's 70/30 agentic/standard split was validated empirically; initial estimates were 50/50 but analyst queries proved more complex than anticipated.

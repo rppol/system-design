@@ -5,7 +5,7 @@
 A comprehensive system design study repository covering:
 - **LLD** — Design patterns (GoF), SOLID, anti-patterns
 - **HLD** — Distributed system concepts (CAP, caching, queues, sharding, etc.) + case studies
-- **LLM** — Complete LLM engineering guide (28 modules, 7 case studies, 31 deep-dive sub-files across 5 topics)
+- **LLM** — Complete LLM engineering guide (34 modules, 7 case studies, 31 deep-dive sub-files across 5 topics)
 - **Java** — Pure Java senior-engineer + interview prep guide (17 modules, 4 case studies)
 - **Spring** — Spring Framework senior-engineer + interview prep guide (23 modules, 5 case studies)
 
@@ -144,6 +144,12 @@ Current modules under `src/main/java/com/rutik/systemdesign/llm/`:
 | `ai_applications/` | Healthcare, legal, finance, education, customer support | — |
 | `llm_ecosystem_and_landscape/` | Model families, licensing, cost analysis, timeline | — |
 | `vllm_deep_dive/` | PagedAttention, continuous batching, prefix caching, TP/PP | — |
+| `mcp_model_context_protocol/` | MCP protocol, servers/clients, resources/tools/prompts, JSON-RPC, A2A | — |
+| `small_language_models_and_edge_ai/` | Phi-3/4, Gemma, on-device inference, ONNX, Core ML, quantization | — |
+| `mixture_of_experts/` | MoE routing, Mixtral 8x7B, DeepSeek-V3, load balancing, sparse activation | — |
+| `llm_routing_and_model_selection/` | Multi-model routing, cascade patterns, confidence thresholds, cost optimization | — |
+| `token_economics_and_cost_optimization/` | Per-token pricing, prompt caching, batch APIs, self-hosting break-even | — |
+| `data_flywheels_and_continuous_learning/` | Production feedback loops, active learning, drift detection, A/B testing | — |
 
 Case studies in `llm/case_studies/`: design_chatgpt, design_copilot, design_rag_pipeline, design_ai_search_engine, design_llm_gateway, design_ai_coding_assistant, design_customer_support_bot.
 

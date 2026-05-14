@@ -120,6 +120,8 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 | [Inference Engines](src/main/java/com/rutik/systemdesign/llm/inference_engines/) | vLLM, TensorRT-LLM, llama.cpp, SGLang, Ollama, TGI |
 | [Optimization & Quantization](src/main/java/com/rutik/systemdesign/llm/optimization_and_quantization/) | GPTQ, AWQ, Flash Attention, MoE, pruning, distillation |
 | [Deployment & MLOps](src/main/java/com/rutik/systemdesign/llm/deployment_and_mlops/) | LLM gateway, model routing, semantic caching, observability |
+| [Token Economics & Cost Optimization](src/main/java/com/rutik/systemdesign/llm/token_economics_and_cost_optimization/) | Per-token pricing, prompt caching, batch APIs, self-hosting break-even |
+| [LLM Routing & Model Selection](src/main/java/com/rutik/systemdesign/llm/llm_routing_and_model_selection/) | Multi-model routing, cascade patterns, confidence thresholds |
 
 #### Safety & Evaluation
 | Topic | Key Concepts |
@@ -135,6 +137,10 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 | [Context Windows & Long Context](src/main/java/com/rutik/systemdesign/llm/context_windows_and_long_context/) | RoPE, YaRN, ALiBi, "lost in the middle", long context vs RAG |
 | [AI Applications](src/main/java/com/rutik/systemdesign/llm/ai_applications/) | Healthcare, legal, finance, education, customer support, ROI |
 | [LLM Ecosystem & Landscape](src/main/java/com/rutik/systemdesign/llm/llm_ecosystem_and_landscape/) | Model families, licensing, cost analysis, timeline 2017-2025 |
+| [Small Language Models & Edge AI](src/main/java/com/rutik/systemdesign/llm/small_language_models_and_edge_ai/) | Phi-3/4, Gemma, on-device inference, quantization for mobile |
+| [Mixture of Experts](src/main/java/com/rutik/systemdesign/llm/mixture_of_experts/) | MoE routing, Mixtral, DeepSeek-V3, load balancing, sparse activation |
+| [MCP (Model Context Protocol)](src/main/java/com/rutik/systemdesign/llm/mcp_model_context_protocol/) | Universal LLM-tool protocol, servers/clients, JSON-RPC, A2A |
+| [Data Flywheels & Continuous Learning](src/main/java/com/rutik/systemdesign/llm/data_flywheels_and_continuous_learning/) | Production feedback loops, active learning, drift detection, A/B testing |
 
 #### LLM Case Studies
 | Case Study | What It Covers |

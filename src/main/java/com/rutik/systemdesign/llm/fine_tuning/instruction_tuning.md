@@ -405,6 +405,21 @@ A: System prompts are per-session instructions that establish the model's person
 **Q: How do you handle very long instructions or responses in instruction tuning?**
 A: Sequences longer than the model's maximum context window must be handled. Options: (1) Truncation: truncate to max_length, but this loses the end of long responses — critical if the main answer is in the truncated portion; (2) Filtering: remove examples where instruction + response exceeds max_length — ensures all training data fits cleanly; (3) Chunking: for long documents in instructions, use document chunking (sliding window over the instruction) to create multiple shorter examples; (4) Long context model: use a model with longer context (LLaMA-3 supports 8K, others 32K+) and increase max_seq_length accordingly. For most instruction tuning: filter examples >2048 tokens (keeps ~85% of typical instruction datasets) and use the model's native context window.
 
+**Q: Does data quality or quantity matter more in instruction tuning, and what evidence supports this?**
+A: Data quality dominates data quantity, especially beyond ~5,000 examples. The LIMA paper (Less Is More for Alignment, 2023) demonstrated this empirically: a model instruction-tuned on 1,000 carefully curated examples matched or outperformed models trained on 52,000 unfiltered examples (the original Alpaca dataset) on human preference evaluations. The mechanism: after the model sees enough diverse examples to learn the instruction-following format (~1,000-5,000 examples), additional noisy examples add noise to the gradient signal rather than new information. Adding poor-quality examples past this threshold actively hurts quality by teaching the model to produce mediocre responses. Practical implication: invest budget in quality filtering and human review of 1,000-5,000 examples rather than generating 50,000 synthetic examples without filtering.
+
+**Q: Why is format diversity in training data important, and what happens without it?**
+A: Format diversity — training on a mix of single-turn, multi-turn, JSON, markdown, code, and prose response formats — prevents format rigidity, a failure mode where the model learns to produce only the format types it saw during training. Without format diversity: a model trained only on prose Q&A pairs will produce prose even when the instruction explicitly asks for JSON; a model trained only on single-turn examples will ignore conversational context in multi-turn interactions; a model trained only on short responses will truncate long answers. Include all target output formats in the training data in representative proportions. If the production use case requires JSON outputs 30% of the time, ensure roughly 30% of training examples have JSON responses. Evaluate format compliance rate (fraction of responses that match the requested format) as a first-class metric alongside accuracy.
+
+**Q: What did the FLAN scaling experiments reveal about the relationship between number of tasks and instruction tuning quality?**
+A: The FLAN experiments (Google, 2021-2022) showed that instruction tuning quality scales with the number of distinct tasks in training, but with strong diminishing returns after roughly 200 diverse tasks. Scaling from 20 tasks to 200 tasks produced substantial improvements across held-out task evaluations; scaling from 200 to 1,836 tasks produced marginal further gains. The implication: breadth of task coverage matters up to a point, but task diversity (covering fundamentally different task types: classification, generation, extraction, reasoning, translation) matters more than raw task count. A dataset covering 50 genuinely distinct task types outperforms one with 500 tasks that are all variations of text classification. For practical instruction tuning datasets: ensure coverage of 10-20 fundamentally different task categories rather than exhaustively cataloging hundreds of similar tasks.
+
+**Q: What quality problems were found in the original Alpaca dataset, and why does this matter?**
+A: Post-hoc audits of the Stanford Alpaca dataset found approximately 30% of the 52,000 examples contained quality issues: factual mistakes (incorrect information in responses), incomplete answers (responses that started but didn't finish addressing the instruction), formatting inconsistencies, and unhelpful or overly brief responses. This occurred because the examples were generated using GPT-3 (text-davinci-003) without filtering, and GPT-3's instruction-following quality was inconsistent for complex or ambiguous instructions. The consequence: models fine-tuned on unfiltered Alpaca learned some incorrect behaviors and response patterns. This spawned "Alpaca-Cleaned," a filtered version that removed or fixed identified issues. The practical lesson: always apply quality filtering to synthetic datasets before fine-tuning — use a stronger model (GPT-4) as a judge to score each (instruction, response) pair and remove examples scoring below a threshold; target removing at least the bottom 20-30% of examples by quality score.
+
+**Q: How should you evaluate an instruction-tuned model to ensure it generalizes to new instruction types?**
+A: Effective evaluation requires held-out instructions sampled from task categories not seen during training, LLM-as-judge scoring across multiple quality dimensions, and human preference evaluation. The held-out set should include instruction types deliberately excluded from training: if the model was trained on Q&A, summarization, and code, the eval set should include translation, comparison, and roleplay instructions to test generalization. LLM-as-judge (using GPT-4 as evaluator) scores each response on helpfulness (1-5), instruction compliance (did the model do what was asked?), and format accuracy. Human preference evaluation: present pairs of responses (from base model vs. fine-tuned model, or model A vs. model B) to human raters and collect preference votes. Aggregate win rate across 100-200 human-evaluated pairs is the most reliable quality signal. Never evaluate only on task types included in training — that measures memorization, not generalization.
+
 ---
 
 ## 11. Best Practices
@@ -416,3 +431,148 @@ A: Sequences longer than the model's maximum context window must be handled. Opt
 5. **Enable packing for efficiency** — use TRL's `packing=True`; reduces GPU compute waste by 5-10× for datasets with short examples.
 6. **Maintain a general benchmark suite** — evaluate MMLU or MT-Bench after fine-tuning to verify general capability is not degraded.
 7. **Keep a quality-focused eval set separate from training data** — 100-200 manually curated evaluation examples across all task types; this is your ground truth for measuring fine-tuning success.
+
+---
+
+## 12. Case Study
+
+### Building an Instruction-Tuned Model for a Healthcare Q&A System
+
+#### Problem Statement
+
+A digital health company needed an LLM-powered Q&A assistant for patients and clinicians. The base model (LLaMA-3-8B-Instruct) handled general medical questions inconsistently: accurate for common conditions, unreliable for drug interactions, dosage queries, and differential diagnosis. The goal was an instruction-tuned model that answers medical questions accurately in four formats: plain explanation (for patients), clinical summary (for physicians), step-by-step differential diagnosis, and structured JSON for EHR integration.
+
+#### Architecture Overview
+
+```
+Data Sources
+  Medical guidelines (WHO, NIH, UpToDate summaries)    2,400 examples
+  Drug monograph Q&A (pharmacist-reviewed)               800 examples
+  Differential diagnosis chains (physician-authored)     600 examples
+  Patient-facing explanations (health literacy L6-8)   1,200 examples
+  Structured JSON extraction examples                    400 examples
+  General medical multi-turn conversations               600 examples
+                                          Total:       6,000 examples
+           |
+           v
+[Quality Filtering]
+  GPT-4 judge: score each (instruction, response) on accuracy + format
+  Remove bottom 20% by score (1,200 examples removed)
+  Expert physician review of random 200-example sample
+  Final dataset: 4,800 examples
+           |
+           v
+[Template Application + Label Masking]
+  LLaMA-3 chat template applied
+  Instruction tokens masked (labels = -100)
+           |
+           v
+[SFT Training on LLaMA-3-8B-Instruct]
+  LoRA r=32, alpha=64 (instruction tuning, not CPT)
+  2 epochs, LR=2e-4, cosine schedule
+  Effective batch size 32, packing=True
+           |
+           v
+[Evaluation]
+  Medical accuracy: MedQA held-out (USMLE-style)
+  Format compliance: JSON schema validation, markdown structure
+  General regression: MMLU, MT-Bench vs. base model
+  Human evaluation: 5 physician raters, 100 outputs
+```
+
+#### Key Design Decisions
+
+**Multi-format training (30% of dataset).** Each response format (explanation, clinical summary, differential diagnosis, JSON) was explicitly labeled in the system prompt. Training examples used four distinct system prompt variants, ensuring the model learns to switch format based on the system prompt rather than defaulting to one format. Without this, the model defaulted to patient-facing explanation prose even when JSON was requested.
+
+**Differential diagnosis chain-of-thought format.** Differential diagnosis examples used a structured reasoning format: symptom list, ranked differentials with reasoning, recommended next steps. Training on 600 such examples taught the model the clinical reasoning sequence. Plain Q&A training alone produced flat answers; chain-of-thought examples produced clinically structured outputs.
+
+**Physician-authored responses for high-stakes content.** Drug interaction and dosage examples were authored by clinical pharmacists, not generated synthetically. Pharmacist review caught GPT-4 errors in drug interaction responses (~8% error rate for rare interactions). For safety-critical content, human authorship is not optional.
+
+**Format compliance gating.** JSON outputs were validated against a schema before inclusion in the training set. Malformed JSON examples were regenerated rather than included — training on malformed JSON examples caused the model to reproduce similar formatting errors.
+
+#### Implementation
+
+```python
+from trl import SFTTrainer, SFTConfig
+from peft import LoraConfig, get_peft_model
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model_id = "meta-llama/Meta-Llama-3-8B-Instruct"
+model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype="bfloat16")
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+# LoRA config — instruction tuning, not CPT; r=32 is sufficient
+lora_config = LoraConfig(
+    r=32,
+    lora_alpha=64,
+    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM"
+)
+model = get_peft_model(model, lora_config)
+
+# Format examples with system prompt indicating desired output format
+def format_medical_example(example):
+    system_prompt = example["system_prompt"]  # varies by format type
+    return tokenizer.apply_chat_template(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",  "content": example["question"]},
+            {"role": "assistant", "content": example["answer"]}
+        ],
+        tokenize=False,
+        add_generation_prompt=False
+    )
+
+dataset = dataset.map(lambda ex: {"text": format_medical_example(ex)})
+
+sft_config = SFTConfig(
+    max_seq_length=2048,
+    packing=True,
+    num_train_epochs=2,
+    per_device_train_batch_size=4,
+    gradient_accumulation_steps=8,   # effective batch = 32
+    learning_rate=2e-4,
+    lr_scheduler_type="cosine",
+    warmup_ratio=0.03,
+    bf16=True,
+    eval_steps=200,
+    save_steps=200,
+    load_best_model_at_end=True,
+    metric_for_best_model="eval_loss",
+)
+
+trainer = SFTTrainer(
+    model=model,
+    args=sft_config,
+    train_dataset=train_ds,
+    eval_dataset=eval_ds,
+)
+trainer.train()
+```
+
+#### Results
+
+| Metric | Base LLaMA-3-8B-Instruct | Fine-Tuned |
+|--------|--------------------------|------------|
+| MedQA accuracy (USMLE-style) | 58.3% | 71.2% |
+| JSON format compliance | 41% | 94% |
+| Differential diagnosis structure compliance | 23% | 89% |
+| MMLU regression vs. base | — | -1.8% (within tolerance) |
+| Physician rating (1-5 scale, 100 outputs) | 3.1 | 4.3 |
+
+General capability regression (MMLU -1.8%) stayed well within the acceptable 5% threshold because the training set was small (4,800 examples) and LoRA was used — base weights were frozen.
+
+#### Tradeoffs and Alternatives
+
+**Instruction tuning vs. RAG.** For factual accuracy on evolving medical knowledge (new drug approvals, updated guidelines), RAG is superior — fine-tuning encodes knowledge at training time and becomes stale. The implemented system combined both: fine-tuning taught format and reasoning structure; RAG retrieved current guideline text at query time. Neither alone achieved the target quality.
+
+**6,000 examples vs. larger dataset.** Attempting to scale to 50,000 synthetic examples (GPT-4 generated, unreviewed) degraded physician evaluation scores from 4.3 to 3.8 — the larger noisy dataset hurt quality. The LIMA finding held: 4,800 quality-filtered examples outperformed 50,000 unfiltered examples in human evaluation.
+
+#### Interview Discussion Points
+
+- Why was LoRA chosen over full fine-tuning for this use case?
+- How would you update the model when medical guidelines change?
+- What evaluation would you add before deploying in a clinical setting?
+- How does the system prompt format approach differ from training separate models per format type?

@@ -551,6 +551,15 @@ Standard converters (`PDFToTextConverter` using `pypdf`) lose table structure. B
 **Q: How do you scale Haystack for high-throughput production?**
 Scaling approaches: (1) Async pipeline — use `pipeline.run_async()` and `asyncio.gather()` to process multiple requests concurrently; (2) Horizontally scale the API layer — Haystack pipelines are stateless (no internal state between calls); deploy behind a load balancer; (3) Use managed vector stores — Pinecone Serverless or OpenSearch Service scale independently; don't run your own vector DB under high load; (4) Embedding caching — cache query embeddings for repeated questions; reduces OpenAI API calls and latency; (5) Reranker on GPU — if using `TransformersSimilarityRanker`, run on GPU; CPU reranking adds 500ms+ at 100+ documents. Benchmark: Haystack pipeline overhead (excluding LLM calls) is typically <50ms.
 
+**Q: How does Haystack's Pipeline abstraction handle branching and conditional logic?**
+Haystack 2.x pipelines are directed graphs where components connect through typed input/output sockets. Conditional branching uses Router components that examine intermediate results and route to different downstream components. For example, a ClassifierRouter can route queries to different retrievers based on query type. Unlike linear pipelines, this enables fan-out (one component feeding multiple downstream components) and fan-in (multiple components feeding one). The pipeline validates graph connectivity at construction time, catching mismatched types before runtime.
+
+**Q: How does Haystack compare to LlamaIndex for document-heavy RAG applications?**
+Both excel at document processing, but Haystack provides more flexibility in pipeline composition (custom components, branching, loops) while LlamaIndex offers more built-in index types and query engines out of the box. Haystack's component protocol (run method with typed I/O) is more explicit than LlamaIndex's implicit query-response pattern. For simple RAG: LlamaIndex is faster to prototype. For complex pipelines with custom processing steps, multiple retrievers, or production deployment requirements: Haystack's explicit pipeline architecture is more maintainable.
+
+**Q: How do you deploy a Haystack pipeline as a production REST API?**
+Haystack pipelines serialize to YAML and can be deployed using Hayhooks, the official deployment server that exposes pipelines as REST endpoints. Steps: (1) define pipeline in Python or YAML; (2) deploy with Hayhooks (docker run deepset/hayhooks); (3) Hayhooks auto-generates OpenAPI endpoints from pipeline I/O types. For custom deployment: wrap the pipeline in FastAPI, add authentication, rate limiting, and monitoring. Production considerations: warm up the pipeline on startup (load models into memory), implement health checks, and use connection pooling for document stores.
+
 ---
 
 ## 13. Best Practices

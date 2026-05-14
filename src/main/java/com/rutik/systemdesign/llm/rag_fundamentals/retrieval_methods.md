@@ -413,6 +413,21 @@ A: The RRF constant k (default 60) controls how much the top ranks are boosted r
 **Q: What is the impact of query length on dense vs. sparse retrieval quality?**
 A: Short queries (1-3 words): BM25 works well (few high-IDF terms to match); dense retrieval may underperform because there's insufficient context for a meaningful embedding. Long queries (20+ words): dense retrieval excels because the embedding captures the full semantic intent; BM25 may be noisy (too many terms, including low-IDF stopwords, that dilute the signal). For RAG systems where users write full-sentence questions ("What are the requirements for ISO certification of a medical device manufacturer?"), dense retrieval is the primary contributor and BM25 adds value primarily for rare terms in the query.
 
+**Q: How do you tune BM25 parameters (k1, b) for your corpus?**
+A: k1 controls term frequency saturation — the default is 1.2, and higher values weight repeated terms more heavily (useful when a document uses a term many times, indicating importance). b controls document length normalization — the default is 0.75, reducing scores for longer documents. Short documents (product descriptions, titles averaging 20-50 tokens) benefit from b=0.3-0.5 to reduce the length penalty on naturally concise documents; long documents (articles, reports averaging 500-2000 tokens) use the standard b=0.7-0.9. In practice, BM25 parameter tuning on most corpora improves recall by only 1-3% over defaults — it is rarely the bottleneck. Tune BM25 parameters only after confirming that sparse retrieval is underperforming on short or long documents specifically, not as a first optimization step.
+
+**Q: How do you configure hybrid search weighting between BM25 and dense?**
+A: Start with Reciprocal Rank Fusion (RRF) at k=60 as the default — it requires no weighting parameter, is robust to score scale differences between retrievers, and performs within 2-3% of optimally tuned linear interpolation on most corpora. If you choose linear interpolation (hybrid_score = alpha × dense_score + (1-alpha) × sparse_score), normalize both score sets to [0,1] before combining and tune alpha on your labeled eval set starting from alpha=0.5. Keyword-heavy domains (legal codes, medical ICD codes, product identifiers) favor alpha=0.3-0.4, giving more weight to BM25; conversational semantic domains favor alpha=0.6-0.7, giving more weight to dense. Use RRF by default; switch to tuned linear interpolation only if you have a labeled eval set and the 2-3% precision improvement justifies the tuning overhead.
+
+**Q: How does ColBERT's late interaction scale compared to bi-encoder retrieval?**
+A: ColBERT stores per-token embeddings (128 dimensions each) rather than a single document vector. A document with 200 tokens produces 200 × 128 = 25,600 floats, compared to 768 floats for a standard bi-encoder — a 33× storage increase per document. For a 10M document corpus, a bi-encoder index requires ~30GB; a ColBERT index requires ~1TB. ColBERT retrieval uses PLAID (a two-stage approximation): fast approximate centroid scoring first, then exact MaxSim on the top candidates — enabling sub-10ms retrieval despite large storage. ColBERT improves recall by 5-15% over bi-encoders on most retrieval benchmarks. Use ColBERT when recall is the primary constraint, GPU storage is available (ColBERT-on-GPUs for fast MaxSim), and the 33× storage increase is acceptable.
+
+**Q: What is SPLADE and how does it compare to BM25?**
+A: SPLADE (Sparse Lexical and Expansion model) is a learned sparse retrieval model that generates sparse vectors where each dimension corresponds to a vocabulary term, similar to BM25's inverted index structure. Unlike BM25, which uses raw term frequencies and IDF, SPLADE learns to expand both queries and documents with related terms — a document about "cardiac arrest" gets "heart attack" and "myocardial infarction" added to its sparse representation, enabling semantic matching. SPLADE vectors are stored in an inverted index and retrieved with the same efficiency as BM25. On BEIR benchmark retrieval tasks, SPLADE outperforms BM25 by 5-10% in recall while maintaining BM25-level search latency. In a hybrid pipeline, replacing BM25 with SPLADE in the sparse leg typically improves overall hybrid recall by 3-7%. The cost: a trained SPLADE model (e.g., naver/splade-cocondenser-distil) must be self-hosted, and sparse vectors are larger than BM25 inverted index entries.
+
+**Q: How do you evaluate retrieval quality independently from generation?**
+A: Build a retrieval-only evaluation set: 200-500 (query, relevant_document_ids) pairs labeled by domain experts or derived from user click logs (clicked document = relevant). Run the retriever in isolation and measure: Recall@K (fraction of queries where a relevant document appears in top-K results), MRR (Mean Reciprocal Rank — the mean of 1/rank_of_first_relevant_document), and NDCG@K (Normalized Discounted Cumulative Gain — weights earlier positions more heavily). Recall@5 and Recall@10 are the most actionable metrics for RAG because they directly measure whether the LLM will have the right information to generate a correct answer. If retrieval Recall@5 is below 80%, no amount of LLM quality improvement will consistently compensate — invest in retrieval improvements first. Evaluate the retriever in isolation before optimizing the generator.
+
 ---
 
 ## 11. Best Practices
@@ -424,3 +439,155 @@ A: Short queries (1-3 words): BM25 works well (few high-IDF terms to match); den
 5. **Test both dense and sparse separately on your query distribution** — this diagnoses which retrieval mode is the bottleneck and whether hybrid helps.
 6. **Monitor per-query retrieval scores** — if top-1 cosine similarity is below 0.6 for many queries, the embedding model or chunking is misaligned with your query distribution.
 7. **Use BM25 to validate dense retrieval** — if BM25 consistently returns better results for certain query types, those queries should be weighted toward sparse in your hybrid.
+
+---
+
+## 12. Case Study
+
+### Building a Hybrid Retrieval System for a Technical Documentation Platform
+
+**Problem Statement**
+
+A software company's developer documentation platform serves 500,000 monthly active developers. The corpus: 120,000 document chunks from API references, tutorials, changelog entries, and error code guides. Initial system: dense-only retrieval with text-embedding-3-small. Problems observed: (1) queries containing exact error codes (e.g., "ERR_SOCKET_TIMEOUT_4203") returned semantically related but incorrect chunks — the embedding model had no strong signal for arbitrary alphanumeric identifiers; (2) queries for specific function signatures ("pandas DataFrame.merge() with how='left'") retrieved generic pandas documentation instead of the specific method page. Recall@5 on a 500-query eval set: 61% for semantic queries but 34% for exact-identifier queries — the identifier query failure drove overall recall@5 to 54%.
+
+**Architecture Overview**
+
+```
+Dual-Index Retrieval Architecture:
+
+Documentation Corpus (120K chunks)
+    |
+    +-- Dense Index (Qdrant)
+    |   Model: text-embedding-3-small (1536d)
+    |   HNSW: ef_construction=200, m=16
+    |   Metadata: doc_type, product, version, last_updated
+    |
+    +-- Sparse Index (Elasticsearch BM25)
+        Tokenizer: custom (preserves hyphens, underscores, dots)
+        Index fields: title (boost 3.0), content (boost 1.0),
+                      code_identifiers (boost 5.0, not_analyzed)
+        Stopwords: English minus "not", "no", "error" (preserve negation)
+
+
+Query Pipeline:
+
+User Query
+    |
+    +-- Query Classification:
+    |   Exact-match signals: uppercase sequences, digits, underscores,
+    |                        error code patterns (ERR_*, HTTP_*, 0x*)
+    |   Classification: semantic | exact_match | mixed
+    |
+    +-- Retrieval:
+    |   Semantic query:    dense top-100 only
+    |   Exact-match query: BM25 top-100 only (fast path)
+    |   Mixed query:       both, RRF fusion (k=60), top-100 combined
+    |
+    +-- Metadata Pre-filter:
+    |   product = user.selected_product
+    |   version >= user.min_version (version-aware retrieval)
+    |
+    +-- Reranker: BGE-reranker-large (self-hosted)
+    |   100 candidates → top-5
+    |
+    +-- LLM Generation (GPT-4o)
+        Context: top-5 chunks + source URLs for citation
+```
+
+**Key Design Decisions**
+
+1. Custom tokenizer for technical identifiers: Elasticsearch's default tokenizer splits "ERR_SOCKET_TIMEOUT_4203" into ["ERR", "SOCKET", "TIMEOUT", "4203"] — each sub-token is common, giving low IDF and weak BM25 signal. A custom tokenizer configured with `word_delimiter_graph` and `preserve_original=true` indexes both the full identifier ("ERR_SOCKET_TIMEOUT_4203") and sub-tokens, giving the full identifier a separate high-IDF entry. This single change improved exact-identifier query recall@5 from 34% to 71%.
+
+2. Query classification for adaptive retrieval: queries classified as "exact-match" skip dense retrieval entirely (reducing latency by 40ms) and route to BM25 only. Classification uses a simple heuristic: if the query contains 2+ uppercase letter sequences or identifiers matching `[A-Z][A-Z_0-9]{3,}`, it is flagged as exact-match. False positive rate: 8% (semantic queries misclassified as exact-match) — acceptable because BM25 still retrieves reasonable results for semantic queries with technical terms.
+
+3. Version-aware pre-filtering: every chunk carries `product_version` and `min_version_applies` metadata. Developers working on product v3.2 should not retrieve deprecated v2.x API documentation. The pre-filter `version >= user.min_version AND version <= user.max_version` scopes retrieval to relevant versions before any similarity computation. This filter eliminated 23% of previously retrieved results that were correct but version-mismatched.
+
+4. Code identifier field with high boost: API reference pages contain function signatures, class names, and parameter names. Indexing these as a separate `code_identifiers` field with boost 5.0 (vs. content boost 1.0) means a query containing `DataFrame.merge` strongly prioritizes chunks with that exact function name in the identifiers field. Code identifiers are extracted using a regex pass during indexing.
+
+**Implementation — RRF Fusion with Query Classification**
+
+```python
+import re
+from dataclasses import dataclass
+from enum import Enum
+
+class QueryType(Enum):
+    SEMANTIC = "semantic"
+    EXACT_MATCH = "exact_match"
+    MIXED = "mixed"
+
+def classify_query(query: str) -> QueryType:
+    exact_match_patterns = [
+        r'\b[A-Z][A-Z_0-9]{3,}\b',        # ERROR_CODE_PATTERN
+        r'\b0x[0-9a-fA-F]+\b',             # hex codes
+        r'\b\w+\.\w+\(\)',                  # function signatures
+        r'\bHTTP_\d+\b',                    # HTTP status codes
+    ]
+    matches = sum(
+        len(re.findall(p, query)) for p in exact_match_patterns
+    )
+    if matches >= 2:
+        return QueryType.EXACT_MATCH
+    elif matches == 1:
+        return QueryType.MIXED
+    return QueryType.SEMANTIC
+
+def retrieve(query: str, user_product: str, user_version: str,
+             top_k: int = 100) -> list[dict]:
+    query_type = classify_query(query)
+    metadata_filter = {
+        "product": user_product,
+        "max_version": {"$gte": user_version}
+    }
+
+    if query_type == QueryType.EXACT_MATCH:
+        # Fast path: BM25 only
+        return bm25_retrieve(query, metadata_filter, top_k)
+
+    elif query_type == QueryType.SEMANTIC:
+        # Dense only
+        return dense_retrieve(query, metadata_filter, top_k)
+
+    else:  # MIXED
+        dense_results = dense_retrieve(query, metadata_filter, top_k)
+        sparse_results = bm25_retrieve(query, metadata_filter, top_k)
+        return reciprocal_rank_fusion(dense_results, sparse_results, k=60)
+
+def reciprocal_rank_fusion(dense: list, sparse: list, k: int = 60) -> list:
+    scores = {}
+    for rank, doc in enumerate(dense):
+        doc_id = doc["chunk_id"]
+        scores.setdefault(doc_id, {"doc": doc, "rrf": 0.0})
+        scores[doc_id]["rrf"] += 1.0 / (k + rank + 1)
+    for rank, doc in enumerate(sparse):
+        doc_id = doc["chunk_id"]
+        scores.setdefault(doc_id, {"doc": doc, "rrf": 0.0})
+        scores[doc_id]["rrf"] += 1.0 / (k + rank + 1)
+    return [v["doc"] for v in sorted(
+        scores.values(), key=lambda x: x["rrf"], reverse=True
+    )]
+```
+
+**Results (500-query eval set)**
+
+| Metric | Dense Only | BM25 Only | Hybrid RRF | Hybrid + Reranker |
+|--------|-----------|-----------|------------|-------------------|
+| Overall Recall@5 | 54% | 48% | 71% | 82% |
+| Semantic query Recall@5 | 61% | 39% | 68% | 79% |
+| Exact-match query Recall@5 | 34% | 67% | 77% | 88% |
+| P95 retrieval latency | 45ms | 18ms | 62ms | 158ms |
+| Index storage | 3.2GB | 1.1GB | 4.3GB | 4.3GB |
+
+The hybrid + reranker pipeline (158ms P95 retrieval latency) fits within the system's 2-second end-to-end SLO. The 82% overall Recall@5 (up from 54%) reduced the fraction of queries where the LLM had to hedge ("I don't have enough information") from 31% to 9%.
+
+**Tradeoffs and Alternatives**
+
+- Maintaining two indices (Qdrant + Elasticsearch) adds operational complexity: dual ingestion pipelines, separate monitoring, and two index update operations per document. Alternative: Weaviate's native hybrid search (BM25 + dense in one system) reduces operational overhead but the custom tokenizer for technical identifiers is not configurable in Weaviate's BM25 implementation.
+- The query classifier introduces a failure mode: misclassified queries route to the wrong retriever. The 8% false positive rate is acceptable but should be monitored. A simple fallback: if the routed retriever returns top-1 similarity below 0.5, automatically fall back to hybrid.
+- SPLADE as a BM25 replacement: replacing Elasticsearch BM25 with SPLADE improved exact-match recall@5 by 4% (from 77% to 81% hybrid) but required additional GPU inference at indexing time and a SPLADE model serving endpoint. Accepted for the next iteration.
+
+**Interview Discussion Points**
+
+- Why does BM25 outperform dense on exact-match queries? Dense retrieval learns semantic proximity from training data — arbitrary alphanumeric codes like "ERR_4203" appear rarely or never in training data, so the model produces a generic embedding with little discriminative power. BM25 treats "ERR_4203" as a single high-IDF term (rare in the corpus = high discriminative power) and scores it heavily when it appears.
+- How do you handle documentation updates? Incremental indexing: on documentation commit, extract changed chunks (diff-based), delete old versions from both indices by chunk_id, and insert new chunks. Both Qdrant and Elasticsearch support upsert by ID. A nightly full consistency check verifies both indices are in sync.
+- How would you scale this to 10M chunks? The dual-index architecture scales independently: Qdrant clusters horizontally for dense retrieval; Elasticsearch scales with standard shard configuration. The RRF merge step is O(n) in the candidate set size — it does not become a bottleneck. The query classifier remains a single stateless service that scales with horizontal pod replication.

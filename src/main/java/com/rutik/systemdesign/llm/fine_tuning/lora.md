@@ -371,6 +371,21 @@ A: Adapter layers (Houlsby et al. 2019) insert small bottleneck modules (down-pr
 **Q: How is LoRA applied to vision and multimodal models?**
 A: LoRA applies identically to vision and multimodal models. In Vision Transformers (ViT): apply LoRA to attention Q, K, V, O projections in the image encoder. In multimodal models (LLaVA, InstructBLIP): can apply LoRA to both the language model decoder and the vision encoder independently, or jointly. The rank and target module choices follow the same guidelines as language-only models. One consideration for multimodal fine-tuning: the vision encoder often requires lower ranks (r=4 to r=8) because visual representations change less than language representations during task adaptation. Keep separate LoRA configurations for vision and language components if they require different learning dynamics.
 
+**Q: How do you serve multiple LoRA adapters efficiently from a single base model?**
+A: Multi-LoRA serving loads one copy of the base model weights on GPU and dynamically applies per-request adapter weights. vLLM implements this natively: the base model occupies the bulk of GPU memory; each adapter is stored as a small set of matrices loaded into a pre-allocated adapter slot. Memory cost per adapter: for each target layer, the adapter adds rank × 2 × hidden_dim × 2 bytes (one A matrix and one B matrix in BF16). For a 7B model with r=16 targeting q_proj and v_proj across 32 layers: 16 × 2 × 4096 × 2 bytes × 2 projections × 32 layers = 134MB per adapter. vLLM can serve 50+ adapters from one base model instance by keeping only the active adapter's weights in GPU SRAM during a request; idle adapter weights can reside in pinned CPU memory and transfer in ~5-10ms. Route requests using an adapter_id tag in the request metadata.
+
+**Q: How do you diagnose whether your LoRA rank is too low for the task?**
+A: Rank insufficiency shows two clear signals. First, validation loss plateaus early and stays high — training loss continues decreasing (the rank-constrained adapter overfits to the training distribution) while validation loss stagnates, indicating the low-rank subspace cannot represent the task-relevant update directions. Second, the model fails specifically on complex patterns while succeeding on simple ones — for a SQL generation task, it handles basic SELECT queries but fails on multi-table JOINs or subqueries. Diagnosis steps: train with r=16 and evaluate; train with r=32 and compare; if r=32 shows meaningful improvement (>2% on your eval metric), the bottleneck was rank. Also inspect adapter singular values: a well-fit adapter has singular values that decay gradually; a rank-insufficient adapter has all singular values near the maximum, indicating the rank constraint is actively binding.
+
+**Q: Can you combine multiple LoRA adapters and how does quality hold up?**
+A: Multiple LoRA adapters can be combined through linear combination of their weight updates: W_combined = W_base + lambda_1 × (B_1 × A_1) + lambda_2 × (B_2 × A_2). The lambdas are mixing coefficients (typically summing to 1). In practice with two adapters (lambda_1 = lambda_2 = 0.5), the combined model retains roughly 80-90% of each individual adapter's task performance. Quality degrades noticeably with three or more adapters — the low-rank updates from different tasks increasingly interfere in weight space, and the combined update no longer sits cleanly in any single task's useful subspace. Ties-Merging and DARE are techniques that prune redundant adapter parameters before merging to reduce interference. For production multi-task serving, hot-swapping discrete adapters per request is more reliable than merging — blending is primarily useful for style interpolation (e.g., 70% formal + 30% concise tone adapter).
+
+**Q: What is the quality impact of applying LoRA to MLP layers in addition to attention layers?**
+A: Targeting only attention layers (q_proj, v_proj) is the standard starting point and handles most behavior changes. Adding MLP layers (gate_proj, up_proj, down_proj) increases trainable parameters by roughly 50% for a standard LLaMA architecture — from approximately 8M to 30M parameters for a 7B model at r=16 — and empirically improves quality by 2-5% on complex tasks. The mechanism: attention layers primarily control what information is attended to and combined; MLP layers encode the model's factual knowledge and transformation functions. Tasks requiring new domain knowledge (medical terminology, specialized code APIs, legal reasoning patterns) benefit more from including MLP layers because the relevant information is stored in FFN weights. Simple behavior changes (output format, response style, persona) do not need MLP layers. A practical rule: include gate_proj, up_proj, down_proj when your training data contains substantial domain-specific vocabulary or factual content not well-represented in the base model.
+
+**Q: How do you prevent catastrophic forgetting of general capabilities during LoRA fine-tuning?**
+A: LoRA's frozen base weights are the primary defense against forgetting — general capabilities encoded in W are never updated. However, the adapter output B×A×x can steer the model's responses in ways that effectively suppress general capabilities even without changing W. The main risk is heavy domain concentration in training data. Mitigation strategies: mix 10-20% general instruction-following examples (e.g., Alpaca, ShareGPT) into the training set alongside domain-specific data; this regularizes the adapter to maintain general response quality. Use a lower learning rate for LoRA (1e-4 rather than 3e-4) to constrain how strongly the adapter shifts model behavior. Monitor general capability benchmarks (MMLU, MT-Bench, or a held-out general instruction set) alongside task-specific metrics throughout training; if general scores drop more than 5% relative, reduce the learning rate or increase the general data mixture. Gradient clipping at 1.0 also helps prevent large adapter updates that dominate base model representations.
+
 ---
 
 ## 11. Best Practices
@@ -382,3 +397,105 @@ A: LoRA applies identically to vision and multimodal models. In Vision Transform
 5. **Validate before merging** — evaluate merged model vs. adapter model to confirm merge was lossless; occasional numerical precision issues can degrade quality.
 6. **Track adapter metadata** — store base model name, exact checkpoint, rank, alpha, target modules; enables correct loading and reproduction.
 7. **Test on general benchmarks after fine-tuning** — even with LoRA's frozen base, verify the adapter doesn't degrade the model's general capabilities before production deployment.
+
+---
+
+## 12. Case Study: Fine-Tuning LLaMA 3 8B with LoRA for Customer Support
+
+**Problem Statement**: A SaaS company needs to fine-tune LLaMA 3 8B Instruct to handle customer support tickets. The base model responds well to general questions but fails on three key requirements: (1) always structuring responses in a specific JSON format with fields for `issue_category`, `resolution_steps`, and `escalation_required`; (2) using company-specific product terminology correctly (product names, internal codes); (3) keeping responses under 200 words. The previous prompt-engineering approach required 800-token system prompts that ate into the context window and added latency.
+
+**Architecture Overview**:
+```
+Training Data Pipeline:
+  5,000 historical tickets ──> format as instruction pairs ──> jsonl dataset
+  (input: raw ticket text) ──> (output: structured JSON response)
+
+Fine-tuning Setup:
+  Base: meta-llama/Meta-Llama-3-8B-Instruct
+  Hardware: 1x A100 40GB
+  Method: LoRA (r=16, alpha=32)
+  Target: q_proj, k_proj, v_proj, o_proj (attention only; no FFN needed)
+
+Serving:
+  vLLM ──> adapter hot-swapping ──> support_v1 adapter
+         ──> other adapters for future tasks (shared base)
+
+Evaluation:
+  Format adherence (JSON parse success rate)
+  Terminology accuracy (keyword match against product glossary)
+  Response length compliance (<200 words)
+  CSAT score delta (compared to prompt-only baseline)
+```
+
+**Key Design Decisions**:
+1. Attention-only target modules (q_proj, k_proj, v_proj, o_proj) because the task requires behavior change (format adherence, response style) not new knowledge — MLP layers not needed.
+2. Rank r=16 chosen after evaluating r=8 (86% format adherence) and r=16 (93% format adherence) on a 200-example holdout set; r=32 added only 0.5% improvement, not worth doubling parameters.
+3. 10% general instruction data mixed in (500 examples from ShareGPT) to prevent the adapter from degrading general QA capability.
+4. Deployed as a separate adapter rather than a merged model — the company runs three other LoRA adapters from the same LLaMA 3 8B base (billing, technical docs, returns), all served from a single vLLM instance.
+
+**Implementation**:
+```python
+from peft import LoraConfig, get_peft_model, TaskType
+from transformers import AutoModelForCausalLM, TrainingArguments
+from trl import SFTTrainer
+import torch
+
+base_model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Meta-Llama-3-8B-Instruct",
+    torch_dtype=torch.bfloat16,
+    device_map="auto"
+)
+
+lora_config = LoraConfig(
+    r=16,
+    lora_alpha=32,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+    lora_dropout=0.05,
+    bias="none",
+    task_type=TaskType.CAUSAL_LM
+)
+
+model = get_peft_model(base_model, lora_config)
+# Trainable: 33,554,432 / 8,030,261,248 = 0.42%
+
+training_args = TrainingArguments(
+    output_dir="./support_lora",
+    per_device_train_batch_size=4,
+    gradient_accumulation_steps=8,   # effective batch = 32
+    num_train_epochs=3,
+    learning_rate=2e-4,
+    lr_scheduler_type="cosine",
+    warmup_ratio=0.03,
+    bf16=True,
+    logging_steps=50,
+    evaluation_strategy="steps",
+    eval_steps=200,
+    save_strategy="best",
+    metric_for_best_model="eval_loss"
+)
+
+trainer = SFTTrainer(
+    model=model,
+    train_dataset=train_dataset,
+    eval_dataset=eval_dataset,
+    args=training_args,
+    max_seq_length=1024
+)
+trainer.train()
+model.save_pretrained("./support_lora_adapter")
+```
+
+**Results**:
+- JSON format adherence: 91% (up from 61% with prompt engineering alone; target was 90%)
+- Terminology accuracy: 88% keyword match (up from 72%)
+- Response length compliance: 94% under 200 words (up from 78%)
+- Average system prompt reduced from 800 tokens to 120 tokens (standard system prompt only)
+- Inference latency: 18% lower than prompt-engineering approach due to shorter effective context
+- Training time: 2 hours 40 minutes on 1x A100 40GB
+- Training cost: ~$12 at cloud GPU rates
+
+**Tradeoffs and Alternatives**:
+- Full fine-tuning was evaluated: achieved 94% format adherence (vs. 91% with LoRA r=16), not worth the 56GB memory requirement and inability to share the GPU across four adapter variants.
+- LoRA r=32 was evaluated: 91.5% format adherence vs. 91.0% for r=16; the 0.5% gain did not justify doubling trainable parameters and adapter file size.
+- Prompt engineering alone (no fine-tuning): 61% format adherence — the structured JSON output requirement was too strict for prompt-only approaches to reliably satisfy across ticket types.
+- QLoRA was considered: A100 40GB had sufficient memory for standard LoRA; QLoRA would have added 20% training time overhead (dequantization) with no memory benefit on this hardware.

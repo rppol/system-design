@@ -505,6 +505,12 @@ Testing approach: (1) Deterministic testing with mock LLM: replace `ChatOpenAI` 
 **Q: What are the failure modes of AutoGen multi-agent conversations?**
 Common failures: (1) Early termination — agent says "TERMINATE" before task is complete; often caused by ambiguous termination phrases in the system message; (2) Infinite loop — agents cycle between approaches without making progress; `max_consecutive_auto_reply` prevents indefinite loops but the conversation may terminate without a result; (3) Agent confusion in GroupChat — with `speaker_selection_method="auto"`, the manager LLM may pick the wrong specialist repeatedly; (4) Code that never works — for hard coding tasks, the agent may make the same mistake repeatedly across retries; (5) Context window exhaustion — long conversations accumulate too many tokens; the LLM's performance degrades with very long context.
 
+**Q: How do you handle conversation divergence in multi-agent AutoGen systems?**
+Set explicit termination conditions using is_termination_msg callbacks, maximum round limits (max_consecutive_auto_reply), and conversation summarization at checkpoints. Without these, agents can loop indefinitely in polite disagreements or tangential discussions. Monitor token consumption per round and inject a "summarize and conclude" message when budget thresholds are hit.
+
+**Q: How does AutoGen's code execution sandbox work and what are its security implications?**
+AutoGen executes generated code in a Docker container by default (DockerCommandLineCodeExecutor), providing process isolation. Security considerations: (1) mount only necessary directories read-only; (2) set resource limits (CPU, memory, network); (3) disable network access unless explicitly needed; (4) never run with host filesystem access in production. The local executor (LocalCommandLineCodeExecutor) is faster but runs code directly on the host — use only in development.
+
 ---
 
 ## 13. Best Practices

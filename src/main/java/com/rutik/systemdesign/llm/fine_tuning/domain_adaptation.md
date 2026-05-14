@@ -407,6 +407,21 @@ A: Three evaluation levels. (1) Domain knowledge benchmarks: domain-specific mul
 **Q: What is the difference between domain adaptation and task-specific fine-tuning?**
 A: Domain adaptation: broader, changes the model's knowledge and vocabulary representation for an entire domain. Targets: the model should know more about domain entities, use domain terminology correctly, reason in domain-appropriate ways. Takes weeks of CPT + days of SFT. Task-specific fine-tuning: narrower, teaches the model a specific task format and behavior within a domain or across domains. Targets: consistent output format, specific task handling, particular persona. Takes hours of SFT. Example: medical domain adaptation = teaching the model clinical medicine broadly. Medical task-specific fine-tuning = teaching the model to produce ICD-10 codes from clinical text. In practice: domain adaptation first (if the domain gap is large), then task-specific fine-tuning to target the specific production task.
 
+**Q: What is the recommended ratio of domain data to general data during continued pre-training?**
+A: A mix of 80-90% domain data and 10-20% general data is the practical sweet spot for most continued pre-training runs. The exact ratio depends on domain corpus volume: if the domain corpus is small (under 1B tokens), use 80% domain / 20% general to ensure sufficient domain signal; if the domain corpus is large (10B+ tokens), 90% domain / 10% general provides enough general gradient signal to prevent forgetting while maximizing domain knowledge acquisition. Pure domain training (100% domain, 0% general) almost always causes measurable catastrophic forgetting — even 5% general data makes a significant difference. The mixing is performed at the dataset interleaving level, not as separate training phases, so the model sees general examples continuously throughout CPT rather than in a separate pass.
+
+**Q: How do you detect and measure catastrophic forgetting during domain adaptation?**
+A: Track MMLU (general knowledge), HumanEval (code generation), and MT-Bench (instruction following quality) scores at every CPT checkpoint alongside domain-specific metrics. Run these evaluations every 500-1,000 gradient steps rather than only at the end of training — forgetting can be rapid and catching it at checkpoint N-1 rather than at the end saves days of wasted training. Set concrete thresholds before training: define that >5% regression on MMLU or >10% regression on HumanEval triggers a training halt and LR reduction. If forgetting is detected: reduce the learning rate by 2-5×, increase the general data mixing fraction, or switch to LoRA if training full weights. Evaluate on the same benchmark splits across all checkpoints — switching benchmarks mid-run makes trend detection unreliable.
+
+**Q: What data mixing strategies exist for continued pre-training, and which is most robust?**
+A: Three primary strategies are used in practice. Proportional mixing: sample domain and general data in fixed proportions (85%/15%) throughout training; simple, reproducible, robust for most cases. Temperature-based sampling: each dataset is sampled with probability proportional to its token count raised to a temperature parameter T; at T=1.0 this is proportional mixing; at T<1.0 (e.g., T=0.7) smaller datasets are upsampled relative to their size, preventing large general corpora from dominating; T=0.7 is the most commonly cited robust default. Curriculum learning: start with general data in higher proportion (50/50), then progressively shift toward domain data over training (ending at 90/10); the intuition is that the model first stabilizes general knowledge, then acquires domain knowledge on top. Empirically, temperature sampling at T=0.7 is the most robust across diverse domain sizes and types; curriculum learning can outperform it when domain data volume is much smaller than general data.
+
+**Q: How do you maintain both domain performance and general capability in evaluation?**
+A: Always maintain two parallel evaluation suites and set explicit acceptance criteria for both before training begins. The domain suite measures what the fine-tuning is trying to improve: domain-specific Q&A accuracy, task F1, expert ratings. The general suite measures what must not regress: MMLU for general knowledge, HumanEval for coding, MT-Bench for instruction following. Define success as: domain metrics improve by a target threshold AND general metrics stay within 5% of the base model baseline. If general metrics degrade beyond 5%, the run fails regardless of domain improvement — this hard constraint prevents shipping a model that is excellent at one domain task but broken for production use. Teams that skip general evaluation discover forgetting only after user complaints. Concretely: run both suites at every checkpoint and plot both on the same dashboard to make the tradeoff visible throughout training.
+
+**Q: What is a replay buffer in the context of continual learning for domain adaptation, and how is it implemented?**
+A: A replay buffer is a fixed-size collection of general-domain examples that are mixed into domain training batches throughout CPT, directly analogous to experience replay in reinforcement learning. The mechanism: maintain a buffer of N general examples (typically 10,000-100,000 examples from The Pile or C4); at each training step, sample a fraction (5-15%) of the batch from the replay buffer and the remainder from the domain corpus. This continuously provides gradient signal to preserve general capabilities without requiring a full general corpus to be present at every step. The buffer is populated once before training and remains fixed — it is not updated during training. Implementation: `interleave_datasets([domain_dataset, replay_buffer], probabilities=[0.90, 0.10], seed=42)`. The replay buffer approach is particularly useful when the domain corpus is streamed and a fixed general data mix ratio is difficult to maintain; the buffer provides deterministic general coverage regardless of domain data sampling variability.
+
 ---
 
 ## 11. Best Practices
@@ -418,3 +433,177 @@ A: Domain adaptation: broader, changes the model's knowledge and vocabulary repr
 5. **Follow the domain-then-instruct sequence** — CPT builds knowledge capacity; instruction tuning teaches expression; doing both in sequence outperforms any simultaneous approach.
 6. **Use LoRA for instruction tuning phase, consider full FT for CPT** — LoRA is excellent for SFT (minimal forgetting risk); CPT benefits from higher-rank or full fine-tuning for deep knowledge integration.
 7. **Build domain-expert evaluation benchmarks** — general LLM benchmarks don't measure domain-specific quality; invest in domain-expert-validated test sets before any training.
+
+---
+
+## 12. Case Study
+
+### Adapting LLaMA 3 8B for Legal Contract Analysis
+
+#### Problem Statement
+
+A legal tech company needed a model to analyze commercial contracts: extract key clauses (indemnification, limitation of liability, payment terms, termination conditions), flag non-standard language, and summarize contract risk profiles. GPT-4 with prompting achieved 71% clause extraction F1 on their benchmark — insufficient for production (target: 85%+ F1). General-purpose LLMs struggled with legal boilerplate patterns and jurisdiction-specific clause structures not well-represented in standard pre-training data.
+
+#### Architecture Overview
+
+```
+Phase 1: Continued Pre-Training
+  Source corpus:
+    SEC EDGAR contracts (10-K exhibits, material contracts)   180B tokens
+    Court opinions mentioning contract clauses               120B tokens
+    Legal textbooks and treatises (public domain)             80B tokens
+    Bar exam prep materials                                   20B tokens
+    General mix (The Pile subset)                           100B tokens
+                                     Total CPT corpus:      500B tokens
+  General mix fraction: 20% (100B / 500B)
+  Training: LLaMA-3-8B full weights, LR=8e-5, cosine, 1 epoch
+  Hardware: 64x A100 80GB, ~4 days
+
+           |
+           v
+
+[Domain-Knowledgeable Legal Base Model]
+  Checkpoint evaluated on:
+    - LegalBench (held-out clauses)
+    - MMLU (general regression check)
+    - HumanEval (code regression check)
+
+           |
+           v
+
+Phase 2: Instruction Tuning (clause extraction + analysis tasks)
+  Task types:
+    Clause extraction (identify + quote specific clause)    8,000 examples
+    Clause classification (standard vs. non-standard)      3,000 examples
+    Risk flag generation                                   2,500 examples
+    Contract summarization                                 2,000 examples
+    Comparative clause analysis (two contract versions)    1,500 examples
+    Multi-turn contract Q&A                               3,000 examples
+                                     Total SFT dataset:   20,000 examples
+  Training: LoRA r=32, LR=2e-4, 3 epochs
+
+           |
+           v
+
+[Legal Contract Analysis Assistant]
+  Evaluated on:
+    - Clause extraction F1 (internal benchmark, 500 held-out contracts)
+    - False positive rate on non-standard clause flagging
+    - MMLU and HumanEval vs. base (forgetting check)
+    - Attorney rating (20 attorneys, 50 outputs each)
+```
+
+#### Key Design Decisions
+
+**Full weight CPT with 20% general mix.** Full weight training (not LoRA) was chosen for CPT because legal language requires deep representational changes — contract boilerplate, clause structures, and legal entity co-occurrence patterns are fundamentally different from web text. LoRA at r=64 was tested but showed 8% lower LegalBench improvement versus full fine-tuning. The 20% general mix (100B tokens from The Pile) was chosen over the default 15% because the legal corpus was large enough (400B domain tokens) that the absolute general signal at 15% (75B tokens) was deemed insufficient. MMLU regression at 20% mix: -2.1%; at 15% mix: -4.3%. The extra 5% general data was worth it.
+
+**Forgetting checkpoint protocol.** MMLU and HumanEval were evaluated every 1,000 gradient steps during CPT (approximately every 6 hours). An automated pipeline ran the evals and posted results to Slack. Forgetting alert threshold: MMLU regression >4% OR HumanEval regression >8%. The alert triggered once at step 7,000 (MMLU had dropped 5.2%); training was paused and learning rate reduced from 8e-5 to 4e-5. After LR reduction, MMLU recovered to -2.8% regression by step 10,000. The intervention saved the run — without monitoring, a fully forgotten model would have been discovered only at the end of training.
+
+**Structured extraction format for clause identification.** The instruction tuning dataset used a JSON output format for clause extraction:
+
+```json
+{
+  "clause_type": "indemnification",
+  "location": "Section 8.2",
+  "quoted_text": "Party A shall indemnify...",
+  "standard_language": false,
+  "risk_flag": "Unlimited indemnification scope — no cap on liability",
+  "risk_level": "HIGH"
+}
+```
+
+Training on this structured format (8,000 examples) produced 94% JSON schema compliance at inference vs. 41% with prompting alone on the base model. The schema also made downstream pipeline integration deterministic — the risk flagging system consumed the JSON directly rather than parsing free-text.
+
+**20% general data mixing ratio for CPT.** The team ran ablations at 5%, 10%, 15%, and 20% general mixing ratios:
+
+```
+General mix %   MMLU regression   LegalBench F1   Decision
+     5%              -8.1%            +18.3%       Unacceptable forgetting
+    10%              -5.4%            +17.1%       Borderline
+    15%              -4.3%            +16.8%       Acceptable
+    20%              -2.1%            +16.2%       Selected (best tradeoff)
+    30%              -0.9%            +13.7%       Domain gain too low
+```
+
+The 20% ratio was the clear Pareto-optimal choice: forgetting held within acceptable bounds while domain improvement remained strong.
+
+#### Implementation Highlights
+
+```python
+# Phase 1: CPT with data mixing
+from datasets import interleave_datasets
+
+legal_corpus = load_dataset("path/to/legal_corpus", streaming=True)
+general_corpus = load_dataset("path/to/the_pile_subset", streaming=True)
+
+# 80% legal, 20% general
+mixed_cpt_dataset = interleave_datasets(
+    [legal_corpus, general_corpus],
+    probabilities=[0.80, 0.20],
+    seed=42
+)
+
+cpt_args = TrainingArguments(
+    output_dir="./llama3-legal-cpt",
+    per_device_train_batch_size=2,
+    gradient_accumulation_steps=32,   # effective batch = 64 per GPU
+    learning_rate=8e-5,
+    lr_scheduler_type="cosine",
+    warmup_ratio=0.01,
+    num_train_epochs=1,
+    bf16=True,
+    save_steps=1000,
+    eval_steps=1000,  # MMLU/HumanEval evaluated here
+    logging_steps=50,
+)
+
+# Phase 2: SFT with LoRA on legal tasks
+from peft import LoraConfig
+
+lora_config = LoraConfig(
+    r=32, lora_alpha=64,
+    target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj"],
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM"
+)
+
+sft_config = SFTConfig(
+    max_seq_length=4096,        # contracts can be long; extended context
+    packing=False,              # contracts vary greatly in length; packing complicates masking
+    num_train_epochs=3,
+    per_device_train_batch_size=2,
+    gradient_accumulation_steps=16,
+    learning_rate=2e-4,
+    lr_scheduler_type="cosine",
+    bf16=True,
+)
+```
+
+#### Results
+
+| Metric | GPT-4 + Prompting | Base LLaMA-3-8B | After CPT Only | After CPT + SFT |
+|--------|-------------------|-----------------|----------------|-----------------|
+| Clause extraction F1 | 71% | 52% | 63% | 88% |
+| JSON schema compliance | 41% | 38% | 39% | 94% |
+| Non-standard clause flag precision | 68% | 41% | 58% | 83% |
+| MMLU vs. base | n/a | baseline | -2.1% | -2.4% |
+| HumanEval vs. base | n/a | baseline | -3.8% | -4.1% |
+| Attorney accuracy rating (1-5) | 3.9 | 2.4 | 3.1 | 4.4 |
+
+The final model exceeded the 85% F1 target and outperformed GPT-4 with prompting on the domain benchmark by 17 percentage points. General capability regression stayed within the 5% acceptable threshold on MMLU (-2.4%) and within the 8% threshold on HumanEval (-4.1%). Inference cost: the 8B model runs at 4× lower cost per token than GPT-4 at the same throughput.
+
+#### Tradeoffs and Alternatives
+
+**RAG as an alternative.** For contracts already in the company's database, RAG could retrieve similar clauses for comparison at query time. The team implemented RAG in parallel: RAG alone achieved 74% clause extraction F1 (better than prompting but worse than fine-tuning). The production system combined both: the fine-tuned model handled extraction and classification; RAG retrieved similar historical clauses for the comparative analysis task.
+
+**Full CPT vs. LoRA CPT tradeoff.** Full CPT cost approximately $18,000 in GPU compute (64× A100, 4 days). LoRA CPT at r=128 cost $6,000 but achieved only 81% clause extraction F1 vs. 88% for full CPT. For this use case the 7-point F1 improvement justified the 3× compute cost; for a smaller company the LoRA CPT tradeoff would favor cost savings.
+
+**Data volume: 500B CPT tokens.** An ablation on CPT data volume (50B, 100B, 200B, 500B tokens) showed: 50B tokens improved F1 by +9 points; 100B by +13 points; 200B by +15 points; 500B by +16 points. The marginal return dropped sharply after 200B tokens — in retrospect, 200B CPT tokens would have achieved nearly equivalent results at 40% of the compute cost.
+
+#### Interview Discussion Points
+
+- At what point would you switch from continued pre-training to a RAG-only approach?
+- How would you update the model as new contract law develops?
+- Why was packing disabled for the SFT phase in this case?
+- What additional evaluation would an attorney demand before using this system on real contracts?

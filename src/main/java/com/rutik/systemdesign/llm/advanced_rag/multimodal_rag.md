@@ -381,9 +381,24 @@ A: Scanned PDFs (images of scans, no native text layer) require OCR before any p
 **Q: What is the difference between Unstructured.io's "fast," "hi_res," and "ocr_only" modes?**
 A: These are document processing pipeline modes trading accuracy for speed. "fast" mode uses direct text extraction (pdfminer) — fastest but misses layout information and can't handle scanned PDFs; suitable for text-heavy documents with simple layouts. "hi_res" mode renders each page as a high-resolution image and uses a document layout analysis model (detectron2) to identify text, tables, figures, headers before extracting each element type with specialized processors — most accurate, especially for tables and mixed-layout documents; 5-10× slower than fast mode. "ocr_only" applies OCR to every page regardless of whether it has a text layer — useful for scanned documents or when native text extraction produces garbled results.
 
+**Q: How should you handle tables in multimodal RAG — embedded text extraction, text-to-SQL, or embedding the table directly?**
+A: The right strategy depends on table complexity and query type. For simple lookup tables (headers + rows, no merged cells), extract to markdown and embed as text — standard text retrieval handles these well. For structured relational tables where users ask aggregation or filter queries ("which line items exceed $1M?"), convert to SQL schema or Pandas DataFrame and use a code-interpreter or text-to-SQL approach rather than embedding; this enables exact computation rather than approximate retrieval. For complex multi-row headers or transposed tables, use a vision LLM to extract the table structure and convert to normalized markdown. The key principle: never embed a table that requires computation — retrieval-based approaches return the whole table as context and let the LLM approximate the answer; text-to-SQL gives exact results. In practice, most enterprise document pipelines use markdown extraction for tables under 50 rows and text-to-SQL for large structured tables from databases.
+
+**Q: How does image description quality affect downstream retrieval accuracy, and how do you measure and improve it?**
+A: Image description quality is the primary bottleneck in vision-to-text multimodal RAG pipelines. A poor description (missing key data values, wrong chart type, missing axis labels) produces a text chunk that does not match user queries about that image, resulting in retrieval failure. Measurement: build a 100-image test set with manually verified ground-truth descriptions; score generated descriptions on (a) numeric accuracy — are the key data values present and correct? (b) semantic coverage — do the descriptions mention the key terms a user would use to query for this image? Use BERTScore for semantic similarity and exact-match for numeric values. Improvement strategies: add surrounding document context to the vision LLM prompt; use a multi-turn prompt that first asks "what type of chart is this?" then "list all data values visible"; for charts specifically, GPT-4o's detail="high" mode significantly outperforms detail="low" for reading axis values.
+
+**Q: What is the cost of VLM-based document processing at scale, and how do you budget for it?**
+A: VLM processing costs scale with the number of images in your corpus. GPT-4o charges approximately 85 tokens for a low-detail image and 2048 tokens for a high-detail image. At 10,000 pages with an average of 3 images per page (30,000 images), using detail="high": 30,000 × 2048 tokens × $5/1M tokens = $307. For 100,000 pages: ~$3,070 one-time indexing cost. Ongoing incremental costs apply when new documents are added. Cost reduction strategies: (1) use detail="low" for simple charts where data values are large and readable; (2) use a cheaper vision model (LLaVA 1.6 self-hosted, or Claude Haiku) for simple tables; (3) skip images below a minimum area threshold (icons, logos); (4) cache descriptions — if the same image appears in multiple documents (e.g., a standard company logo), describe it once. Benchmark the quality-cost tradeoff before committing to a specific model.
+
+**Q: How do you evaluate multimodal retrieval accuracy specifically for cross-modal queries?**
+A: Cross-modal retrieval accuracy — a text query successfully retrieving a relevant image — requires a dedicated evaluation protocol. Build a test set of (text query, expected image ID) pairs: 200-300 pairs covering chart queries ("which quarter had the highest revenue?"), diagram queries ("show the system architecture"), and table queries ("find the pricing comparison table"). Measure Recall@K: what fraction of expected images appear in the top-K retrieved results? Separate metrics for the CLIP path (direct image embedding retrieval) and the vision-LLM-description path (text embedding of descriptions). In practice, the description path typically achieves Recall@10 of 70-85% for well-described charts; the CLIP path achieves 50-70% for domain-specific technical diagrams. Combine both paths and re-rank to achieve best overall recall.
+
+**Q: What chunking strategies work best for mixed-content documents containing both text and visual elements?**
+A: Standard token-based chunking destroys the semantic coherence of mixed-content documents by splitting text away from its associated figures and tables. Element-aware chunking is essential: (1) treat each extracted element (text block, table, figure) as a unit with its own chunk boundary — never split a table across two chunks; (2) preserve element-context linkage — each figure chunk carries metadata pointing to its source page, surrounding text (±200 tokens), and caption; (3) use layout-aware chunking that respects document structure (sections, subsections) as natural boundaries. For multi-column documents, parse columns independently before chunking to avoid cross-column text merging. The practical implementation: use Unstructured.io's hi_res mode to extract elements with layout coordinates, then apply element-type-aware chunking rules (text → token-based, tables → whole-table, figures → single chunk + description chunk pair).
+
 ---
 
-## 11. Best Practices
+## 12. Best Practices
 
 1. **Extract at high resolution** — minimum 150 DPI, 300 DPI for documents with dense tables or small text; poor resolution produces poor descriptions and embeddings.
 2. **Include surrounding context in vision LLM prompts** — ±200 tokens around each image dramatically improves description accuracy.
@@ -392,3 +407,210 @@ A: These are document processing pipeline modes trading accuracy for speed. "fas
 5. **Validate extraction quality** — automated checks: does the description contain numeric values consistent with nearby text? Does the table have the expected number of rows/columns?
 6. **Limit images per generation call** — cap at 2-3 images per query; prefer text descriptions for routine queries, original images only for queries that explicitly need visual detail.
 7. **Benchmark vision LLM options** — accuracy and cost vary significantly; evaluate GPT-4o, Claude 3.5, and Gemini 1.5 Pro on your specific document types before committing.
+
+---
+
+## 13. Case Study: Multimodal RAG for Manufacturing Equipment Maintenance
+
+**Problem Statement**: A heavy equipment manufacturer with 1,200 field technicians maintains a knowledge base of 4,500 technical manuals covering 380 equipment models. These manuals are 45% text, 30% engineering diagrams (exploded views, wiring schematics, hydraulic circuits), 15% annotated photographs of equipment assemblies, and 10% troubleshooting flowcharts. The company also has a library of 120K equipment failure photographs tagged by model and component, plus 800 video tutorials with transcripts. The existing text-only RAG system indexed prose sections only, losing all visual context. When a technician queried "hydraulic pump seal replacement procedure for Model HX-450," the system returned text steps but missed the critical exploded-view diagram showing seal orientation and the torque specification table embedded in Figure 12. Field surveys revealed that 40% of maintenance queries required visual context that text-only RAG could not provide, resulting in unnecessary escalations to senior technicians (averaging 2.5 hours per escalation) and extended mean-time-to-repair (MTTR) of 4.2 hours per incident.
+
+**Architecture Overview**:
+```
+Document Sources
+    |
+    +-- Technical manuals (4,500 PDFs, avg 180 pages each)
+    +-- Equipment failure photos (120K images, tagged by model/component)
+    +-- Video tutorials (800 videos → keyframe extraction + transcripts)
+                                        |
+                                        v
+                              [Document Parser: Unstructured.io hi_res mode]
+                                Render at 300 DPI for diagram clarity
+                                Layout analysis: detectron2 model
+                                        |
+                    +-------------------+-------------------+
+                    |                   |                   |
+              [Text blocks]      [Tables]           [Figures/Diagrams]
+                    |                   |                   |
+                    v                   v                   v
+          [Section-aware          [Markdown             [Element classifier]
+           chunking]               conversion]           CLIP zero-shot:
+          800 tokens,             Preserve headers,      exploded-view, wiring
+          respect section         units, torque          schematic, flowchart,
+          boundaries              spec values            photograph, data chart
+                    |                   |                   |
+                    |                   |         +--------+--------+
+                    |                   |         |                 |
+                    |                   |   [Vision LLM            [CLIP ViT-L/14
+                    |                   |    Description]           Image Embedding]
+                    |                   |    GPT-4o detail=high     768-dim vectors
+                    |                   |    for schematics;              |
+                    |                   |    GPT-4o-mini for              |
+                    |                   |    simple photos                |
+                    |                   |         |                       |
+                    v                   v         v                       v
+              [Text Embed]     [Text Embed]   [Text Embed]        [Image Vector DB]
+              text-embed-3     text-embed-3   text-embed-3        Weaviate multi2vec
+              -large           -large         -large
+                    |                 |              |                    |
+                    +-----------------+--------------+                   |
+                                     |                                  |
+                              [Pinecone: Text Index]             [Weaviate: Image]
+                                     |                                  |
+                                     +----------------------------------+
+                                                    |
+                                          [S3 Blob Storage]
+                                    Original images with metadata
+                                    (manual_id, page, figure_num, model)
+                                                    |
+                                              Query Time
+                                                    |
+                                     [Equipment Model Detection]
+                                     Extract model number from query
+                                     for metadata filtering
+                                                    |
+                                          [Dual Retrieval]
+                                Text query -> text embed -> Pinecone (top-10)
+                                Text query -> CLIP text embed -> Weaviate (top-5)
+                                                    |
+                                          [Merge + Rerank]
+                                Cross-encoder reranks text candidates
+                                CLIP scores rank image candidates
+                                Weighted merge: text 0.6, image 0.4
+                                                    |
+                                          [Figure-Reference Linking]
+                                If text chunk references "See Figure 12",
+                                auto-include Figure 12 from S3
+                                                    |
+                                          [Context Assembly]
+                                Top-5 text chunks + top-2 images
+                                (originals fetched from S3)
+                                                    |
+                                          [VLM Generation: GPT-4o]
+                                Sees text + original diagrams/photos
+                                Generates step-by-step answer with
+                                figure references and spec callouts
+                                                    |
+                                          Answer with visual citations
+                                "See attached Figure 12 for seal orientation.
+                                 Torque to 45 Nm per specification table."
+```
+
+**Key Design Decisions**:
+1. Element classification before vision LLM processing — not all images need the same treatment. Exploded-view diagrams and wiring schematics require GPT-4o with detail="high" (2048 tokens per image, ~$0.01 each) for accurate part number and torque specification extraction. Simple equipment photographs use GPT-4o-mini at detail="low" (~$0.001 each). CLIP zero-shot classification routes images to the appropriate model. This classification reduced vision LLM indexing cost by 65% compared to uniform GPT-4o high-detail processing.
+2. 300 DPI extraction for all diagrams — initial prototype at 150 DPI produced vision LLM descriptions that missed 30% of part numbers and torque specifications in dense engineering drawings. Upgrading to 300 DPI increased storage 4x but improved specification extraction accuracy from 68% to 94%.
+3. Dual retrieval paths with figure-reference linking — CLIP retrieval alone achieved only 52% recall on domain-specific engineering diagrams (hydraulic schematics are poorly represented in CLIP's web-trained embedding space). Vision LLM text descriptions embedded in the text index achieved 78% recall. Combining both with weighted merge achieved 87%. Additionally, when a retrieved text chunk references "See Figure 12," the linked figure is automatically included in context assembly, ensuring the technician always sees referenced diagrams.
+4. Section-aware chunking preserving document structure — text chunks respect manual section boundaries (e.g., "3.2 Hydraulic Pump Disassembly" stays as one chunk even if slightly over 800 tokens) rather than splitting mid-procedure. Each chunk carries metadata linking to figures within that section.
+
+**Implementation**:
+```python
+# Element classification for cost-optimized vision LLM processing
+def classify_and_describe_image(
+    image_path: str, context: str, metadata: dict
+) -> dict:
+    """Route images to appropriate vision model based on content type."""
+    # Fast classification using CLIP zero-shot
+    labels = [
+        "exploded view diagram", "wiring schematic", "hydraulic circuit",
+        "troubleshooting flowchart", "equipment photograph",
+        "simple icon or logo", "data table screenshot"
+    ]
+    predicted_type = clip_zero_shot_classify(image_path, labels)
+
+    if predicted_type in ("simple icon or logo",):
+        return {"skip": True, "reason": "decorative"}
+
+    if predicted_type in (
+        "exploded view diagram", "wiring schematic", "hydraulic circuit"
+    ):
+        # High-detail processing for technical diagrams
+        description = vision_llm_describe(
+            image_path, context,
+            model="gpt-4o",
+            detail="high",
+            prompt_suffix=(
+                "Extract ALL part numbers, torque specifications, "
+                "measurement values, and component labels visible. "
+                "Describe spatial relationships between components. "
+                "List any safety warnings or critical notes."
+            )
+        )
+    elif predicted_type == "troubleshooting flowchart":
+        description = vision_llm_describe(
+            image_path, context,
+            model="gpt-4o",
+            detail="high",
+            prompt_suffix=(
+                "Transcribe the flowchart: list each decision point, "
+                "its yes/no branches, and the action at each terminal node."
+            )
+        )
+    else:
+        # Standard processing for equipment photos
+        description = vision_llm_describe(
+            image_path, context,
+            model="gpt-4o-mini",
+            detail="low",
+            prompt_suffix=(
+                "Describe the equipment component shown, "
+                "any visible damage or wear patterns, and all labels."
+            )
+        )
+
+    return {
+        "description": description,
+        "image_type": predicted_type,
+        "equipment_model": metadata.get("model"),
+        "figure_number": metadata.get("figure_number"),
+        "source_manual": metadata.get("manual_id"),
+        "page": metadata.get("page")
+    }
+
+
+# Dual retrieval with figure-reference linking
+def retrieve_with_images(query: str, equipment_model: str = None):
+    metadata_filter = (
+        {"equipment_model": equipment_model} if equipment_model else {}
+    )
+
+    # Text path
+    text_results = pinecone.query(
+        vector=embed_text(query), top_k=10, filter=metadata_filter
+    )
+
+    # Image path (CLIP cross-modal)
+    image_results = weaviate.query(
+        vector=clip_embed_text(query), top_k=5, filter=metadata_filter
+    )
+
+    # Collect linked figures from retrieved text chunks
+    linked_figure_ids = set()
+    for chunk in text_results:
+        if chunk.metadata.get("linked_figures"):
+            linked_figure_ids.update(chunk.metadata["linked_figures"])
+
+    # Fetch linked figures from S3 (ensures "See Figure 12" references resolve)
+    linked_images = [fetch_image_from_s3(fig_id) for fig_id in linked_figure_ids]
+
+    # Merge and rerank
+    top_text = rerank_cross_encoder(query, text_results, top_k=5)
+    all_images = deduplicate_images(image_results + linked_images)[:3]
+
+    return top_text, all_images
+```
+
+**Results**:
+
+| Metric | Text-Only RAG | Multimodal RAG |
+|--------|--------------|----------------|
+| Query resolution without escalation | 54% | 86% (-60% escalations) |
+| Mean time to repair (MTTR) | 4.2 hours | 2.7 hours (-35%) |
+| Technician satisfaction (1-5 survey) | 2.8 | 4.4 |
+| Correct part identification from query | 61% | 89% |
+| Specification value extraction accuracy | N/A | 94% (at 300 DPI) |
+| One-time indexing cost | $380 | $4,200 |
+| Indexing time (8 parallel workers) | 8 hours | 52 hours |
+| Query latency (p50) | 0.9s | 2.4s |
+| Query latency (p95) | 1.8s | 4.1s |
+| Incremental cost per new manual | ~$0.10 | ~$1.50 |
+
+**Tradeoffs**: The $4,200 one-time indexing cost is justified against operational savings: with 1,200 technicians averaging 8 queries/day and a 35% MTTR reduction, the system saves approximately 1,400 technician-hours per month. The 52-hour initial indexing required batched weekend processing across 8 parallel workers; incremental indexing for new manuals (~200/year) costs $1-2 per manual. The 2.4s query latency (vs. 0.9s text-only) is acceptable for field technicians who previously spent 10-15 minutes searching physical manuals. The CLIP retrieval path underperforms on domain-specific engineering diagrams but catches equipment failure photographs that vision LLM descriptions sometimes inadequately describe — removing the CLIP path drops overall image recall from 87% to 78%. The element classifier occasionally misroutes complex hybrid diagrams (part schematic, part photograph) to the cheaper GPT-4o-mini path, causing 6% of those images to have incomplete descriptions; a manual review of misclassified images during the first indexing run identified the issue and led to adding a "hybrid diagram" classification category.

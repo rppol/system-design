@@ -338,6 +338,21 @@ A: Reranking determines which documents appear in the LLM's context, and context
 **Q: What is "reranking" in the context of RAG evaluation and why does it complicate evaluation?**
 A: Reranking introduces a source of improvement that's orthogonal to embedding quality — a weak bi-encoder + strong reranker can outperform a strong bi-encoder without reranker. This complicates evaluation: the question is not just "is this embedding model good?" but "is this embedding model + reranker combination good?" Evaluation must measure the end-to-end pipeline, not just retrieval in isolation. Additionally, evaluation metrics can be misleading: recall@100 (before reranking) matters more than precision@100; the reranker handles the precision-5 optimization. Standard evaluation: measure recall@100 (retrieval quality — are relevant docs in the pool?) and then precision@5 after reranking (does the reranker surface the right ones from the pool?).
 
+**Q: What is the typical latency budget for cross-encoder reranking?**
+A: Cross-encoder reranking on 20 candidates with a 400M parameter model (BGE-reranker-large) takes 100-150ms on a T4 GPU and 50-80ms on an A10G. For a system with a 2-second end-to-end SLO, a representative latency budget allocation is: embedding (10ms) + retrieval/ANN search (30ms) + reranking (100ms) + LLM generation (1.5s) + network and overhead (100ms) = ~1.74s, leaving ~260ms of margin. To reduce reranking latency without sacrificing quality: limit candidates to top-20 instead of top-100 (linear latency reduction), use a smaller reranker model (BGE-reranker-base: ~30ms on T4 at the cost of 5-8% quality), or use ColBERT (~5ms) for latency-sensitive workloads.
+
+**Q: How does RRF compare to learned score fusion for combining retriever results?**
+A: RRF (Reciprocal Rank Fusion) merges ranked lists by computing a score of 1/(k+rank) for each document across each retriever, then summing. It is simple, requires no training data, no tuning, and performs within 2-3% of optimally tuned learned fusion on most retrieval benchmarks. Learned score fusion trains a small model (logistic regression or a shallow neural network) on retriever scores as features, using labeled relevance data as the target — it can capture non-linear combinations and query-type-specific weights that RRF cannot. However, learned fusion requires 500+ labeled (query, relevant_doc) pairs for training, periodic retraining as the corpus and query distribution shift, and adds a serving dependency. Start with RRF; only consider learned fusion if your eval set shows a consistent 5%+ gap favoring learned fusion and you have the labeled data and retraining infrastructure to support it.
+
+**Q: When should you use an LLM as a reranker instead of a cross-encoder?**
+A: Use an LLM as a reranker when: (1) you do not have a fine-tuned cross-encoder for your domain and the general-purpose cross-encoder underperforms; (2) you need explainable relevance scores — the LLM can output a relevance score with a reasoning justification ("this document answers the query because..."); (3) latency budget is generous (500ms+) and the query volume is low enough that LLM API cost is acceptable. Cost comparison: scoring 20 documents with GPT-4o-mini costs approximately $0.001 per query at current pricing; BGE-reranker-large self-hosted costs GPU compute only (~$0.0001 at A10G spot pricing per query). At 100K queries/day: GPT-4o-mini reranking costs ~$100/day; self-hosted cross-encoder costs ~$10/day. Cross-encoders are 10× cheaper and 5× faster at scale — LLM reranking is a domain-adaptation shortcut, not a permanent production architecture.
+
+**Q: How do you choose the optimal top-k for reranking?**
+A: Retrieve more candidates than you will ultimately use — the standard pattern is retrieve top-50 to top-100, rerank to top-5. The quality improvement from expanding the candidate pool exhibits diminishing returns: going from top-20 to top-50 candidates improves recall@5 by 3-5%; going from top-50 to top-100 adds only 1-2% more. The optimal candidate count depends on initial retrieval quality: if your retriever achieves recall@20 above 90% (the relevant document is almost always in the top-20), reranking top-20 is sufficient. If recall@20 is below 80%, expand to top-50 or focus on improving the base retriever first — a reranker cannot surface relevant documents that the retriever never retrieved. Reranking latency scales linearly with candidate count; doubling from top-50 to top-100 approximately doubles reranking time.
+
+**Q: What is the difference between pointwise, pairwise, and listwise reranking?**
+A: Pointwise reranking scores each document independently with a single relevance score (cross-encoder output: 0.0-1.0); it does not consider other documents in the candidate pool during scoring. Pairwise reranking compares documents in pairs — for each pair (doc_A, doc_B), predicts which is more relevant; the final ranking is derived from pairwise wins. Pairwise captures relative preference but is O(n^2) in the candidate count — impractical for 100 candidates (4,950 pairs). Listwise reranking scores the entire candidate list jointly — models like ListT5 take all candidates simultaneously and produce an optimal ranking considering inter-document relationships. Listwise produces the best ranking quality but is expensive (one forward pass over all candidates at once). For production RAG: pointwise cross-encoder reranking is the standard — it is the most practical (one forward pass per document, easily batched), and provides the best quality-latency-cost tradeoff at the candidate pool sizes typical in RAG (20-100 documents).
+
 ---
 
 ## 11. Best Practices
@@ -349,3 +364,150 @@ A: Reranking introduces a source of improvement that's orthogonal to embedding q
 5. **Measure NDCG@5 and MRR@5 before and after adding reranker** — quantify the improvement; if less than 10%, the retrieval is already good or the candidate pool is too small.
 6. **Monitor reranker latency separately** — cross-encoder latency should be tracked as a distinct component in your pipeline metrics; it's the second-most common latency bottleneck after LLM generation.
 7. **Choose BGE-reranker for self-hosted English workloads, Cohere for multilingual** — these are the right defaults for their respective use cases.
+
+---
+
+## 12. Case Study
+
+### Adding Reranking to a Customer Support RAG Pipeline
+
+**Problem Statement**
+
+A SaaS company's customer support RAG system handles 100,000 queries per day across a knowledge base of 45,000 chunks (support articles, product documentation, and troubleshooting guides). The initial pipeline: text-embedding-3-small for retrieval, top-5 chunks sent directly to GPT-4o for answer generation. Observed problems: customer satisfaction scores for self-service answers were 3.1/5.0 (target: 4.0/5.0). An audit of 200 failed queries revealed that 68% of failures were caused by irrelevant context in the top-5 retrieved chunks — the LLM generated plausible-sounding but incorrect answers based on tangentially related documentation. Retrieval recall@5 on a 500-query labeled eval set: 72%. The top-5 precision (fraction of top-5 chunks actually relevant) was 51% — retrieval was surfacing mostly irrelevant chunks.
+
+**Architecture Overview**
+
+```
+Before (dense-only, no reranker):
+  Query
+    → text-embedding-3-small (embed)
+    → Pinecone ANN (top-5 direct)
+    → GPT-4o (generate)
+  Recall@5: 72%  |  Precision@5: 51%  |  Latency: ~1.6s
+
+After (hybrid + reranker):
+  Query
+    |
+    +-- text-embedding-3-small (embed, 10ms)
+    +-- BM25 tokenization (2ms)
+    |
+    +-- Parallel:
+    |   Dense: Pinecone top-100 (35ms)
+    |   Sparse: Elasticsearch BM25 top-100 (15ms)
+    |
+    +-- RRF Fusion: 100 combined candidates (3ms)
+    |
+    +-- Cohere Rerank (rerank-english-v3.0)
+    |   100 candidates → top-10 (95ms)
+    |
+    +-- GPT-4o with top-10 context (~1.5s)
+
+  Recall@5: 89%  |  Precision@5: 81%  |  Latency: ~1.8s
+```
+
+**Key Design Decisions**
+
+1. Retrieve top-100, rerank to top-10: the initial pipeline retrieved top-5 directly — no opportunity for a reranker to improve. Expanding retrieval to top-100 first (recall@100: 94%) gives the reranker a rich candidate pool. Reranking to top-10 (instead of top-5) provides the LLM with more context for complex multi-step support issues, improving answer completeness.
+
+2. Cohere Rerank over self-hosted BGE-reranker: customer support queries include product names, error messages, and feature names that require precise relevance scoring. Cohere Rerank 3 with its 4096-token context window handles long troubleshooting articles without truncation — the BGE-reranker-large's 512-token limit was truncating 34% of chunks (support articles average 650 tokens). The $2/1000 queries cost at 100K/day = $200/day, which is justified by the customer satisfaction improvement.
+
+3. Hybrid retrieval for support-specific queries: support queries mix semantic ("my account keeps getting locked") and exact-match ("error code 403 when logging in") queries. BM25 handles error code matching precisely — dense retrieval alone missed 28% of error-code queries.
+
+4. Relevance threshold filtering: after reranking, chunks with a Cohere relevance score below 0.3 are excluded from the LLM context — if fewer than 3 chunks pass the threshold, the system returns a "contact support agent" fallback instead of generating a potentially incorrect answer. This threshold eliminated 11% of queries from self-service (routing them to human agents), but improved self-service CSAT from 3.1 to 4.1 for queries that passed the threshold.
+
+**Implementation**
+
+```python
+import cohere
+from openai import OpenAI
+
+co = cohere.Client(api_key="...")
+openai_client = OpenAI()
+
+RELEVANCE_THRESHOLD = 0.30
+MIN_RELEVANT_CHUNKS = 3
+
+def retrieve_and_rerank(query: str, top_k_retrieval: int = 100,
+                         top_k_rerank: int = 10) -> list[dict] | None:
+    # Stage 1: Hybrid retrieval
+    dense_results = pinecone_dense_retrieve(query, top_k=top_k_retrieval)
+    sparse_results = elasticsearch_bm25_retrieve(query, top_k=top_k_retrieval)
+    candidates = reciprocal_rank_fusion(dense_results, sparse_results)[:top_k_retrieval]
+
+    # Stage 2: Reranking
+    doc_texts = [c["text"] for c in candidates]
+    rerank_response = co.rerank(
+        model="rerank-english-v3.0",
+        query=query,
+        documents=doc_texts,
+        top_n=top_k_rerank,
+        return_documents=True
+    )
+
+    # Stage 3: Relevance threshold filtering
+    relevant_chunks = [
+        {
+            "text": r.document.text,
+            "relevance_score": r.relevance_score,
+            "source": candidates[r.index]["source_url"]
+        }
+        for r in rerank_response.results
+        if r.relevance_score >= RELEVANCE_THRESHOLD
+    ]
+
+    if len(relevant_chunks) < MIN_RELEVANT_CHUNKS:
+        return None  # Insufficient confidence — route to human agent
+
+    return relevant_chunks
+
+def generate_answer(query: str, chunks: list[dict]) -> str:
+    context = "\n\n".join([
+        f"[Source: {c['source']}]\n{c['text']}"
+        for c in chunks
+    ])
+    response = openai_client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": (
+                "You are a customer support assistant. Answer using only "
+                "the provided documentation. If the documentation does not "
+                "contain the answer, say so explicitly."
+            )},
+            {"role": "user", "content": f"Documentation:\n{context}\n\nQuestion: {query}"}
+        ]
+    )
+    return response.choices[0].message.content
+
+def handle_support_query(query: str) -> dict:
+    chunks = retrieve_and_rerank(query)
+    if chunks is None:
+        return {"answer": None, "route": "human_agent", "reason": "low_retrieval_confidence"}
+    answer = generate_answer(query, chunks)
+    return {"answer": answer, "route": "self_service", "sources": [c["source"] for c in chunks]}
+```
+
+**Results**
+
+| Metric | Before (dense top-5, no reranker) | After (hybrid + Cohere Rerank) |
+|--------|----------------------------------|-------------------------------|
+| Retrieval Recall@5 | 72% | 89% |
+| Top-5 Precision | 51% | 81% |
+| Self-service CSAT | 3.1 / 5.0 | 4.1 / 5.0 |
+| Queries routed to human agents | 22% | 33% (11% newly routed due to threshold) |
+| LLM hallucination rate (audit) | 31% | 8% |
+| End-to-end P95 latency | 1.6s | 1.95s |
+| Daily retrieval cost | ~$40 (embedding API) | ~$240 (embedding + Cohere Rerank) |
+
+The $200/day increase in retrieval cost (Cohere Rerank) was justified: the 23-point CSAT improvement reduced human agent escalations by 11% net (despite routing 11% more via threshold), saving ~$1,800/day in agent handling time at the company's support cost model.
+
+**Tradeoffs and Alternatives**
+
+- Self-hosted BGE-reranker-large alternative: would cost ~$15/day GPU vs. $200/day Cohere but required handling the 512-token truncation problem (34% of chunks) — truncation caused the reranker to miss relevant content in the second half of long support articles. Switching to 400-token chunks (with re-indexing) would resolve the truncation issue and make BGE-reranker-large viable at a 13× cost reduction.
+- The relevance threshold (0.30) was calibrated on the labeled eval set: at 0.30, the precision of returned answers was 89%; raising to 0.40 improved precision to 94% but routed 28% of queries to human agents (unacceptable deflection rate). The threshold is a product decision as much as a technical one.
+- Flash reranking (FlashRank): a lightweight reranker that runs in 15ms CPU-only, suitable for eliminating the GPU dependency. FlashRank achieves approximately 80% of BGE-reranker-large quality — acceptable for Tier 2 support (general product questions) but not Tier 1 (billing, security, account access) where the quality gap matters.
+
+**Interview Discussion Points**
+
+- How do you measure whether the reranker is actually adding value? Compare NDCG@5 before reranking (using retrieval rank order) and after reranking (using reranker rank order) on the labeled eval set. In this case, NDCG@5 improved from 0.61 to 0.84 — a 38% improvement confirming significant value. Also monitor the correlation between reranker score and actual helpfulness ratings from CSAT — if high-scoring chunks consistently produce high CSAT answers, the reranker is well-calibrated.
+- What happens if the Cohere API is unavailable? The fallback is to use the raw hybrid retrieval top-10 directly, bypassing the reranker. This degrades precision@5 from 81% to ~58% — acceptable as a temporary fallback but triggers an alert for on-call. The relevance threshold check is also bypassed in fallback mode, accepting some quality degradation to maintain availability.
+- How do you handle seasonal query distribution shifts? Customer support query topics shift with product releases (new feature queries spike) and seasonal events (billing queries spike at renewal periods). Monitor per-query-type Recall@5 weekly. If a query category's recall drops below 80%, investigate whether new documentation chunks need to be added or the embedding model fine-tuned on the new query types.

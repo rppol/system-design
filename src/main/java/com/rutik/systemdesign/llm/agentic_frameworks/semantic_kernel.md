@@ -552,6 +552,12 @@ SK's agent capabilities lag behind LangGraph: (1) No built-in state machine — 
 **Q: How do you handle multi-language support in SK responses?**
 Three approaches: (1) System message: "Always respond in {{$language}}" injected via `ChatHistory.AddSystemMessage()` — simplest, but model may ignore for complex technical content; (2) Semantic function with language variable: `"Respond in {{$language}}: {{$question}}"` — explicit, usually reliable with GPT-4; (3) Post-processing translation: generate response in English, then invoke a translation semantic function; most reliable for accuracy but doubles LLM calls. For enterprise multi-lingual deployments: approach 3 with caching (cache translations for repeated phrases) balances reliability and cost.
 
+**Q: How does Semantic Kernel's plugin architecture differ from LangChain's tool abstraction?**
+Semantic Kernel plugins are strongly typed classes with annotated methods (KernelFunction attribute), providing compile-time type safety and IDE support — particularly advantageous in C# and Java enterprise environments. LangChain tools are Python functions wrapped with decorators, offering more flexibility but less type safety. SK's approach enables automatic function signature extraction for the model's function calling schema. Choose SK for enterprise .NET/Java projects where type safety and existing SDK integration matter; choose LangChain for Python-first rapid prototyping.
+
+**Q: How do you implement multi-step planning with Semantic Kernel's Planner?**
+SK's planner takes a user goal and available plugins, then generates a plan (sequence of function calls) to achieve it. The Handlebars planner generates a Handlebars template with function calls; the Stepwise planner executes functions iteratively with ReAct-style reasoning. Key configuration: limit the number of available functions presented to the planner (exposing 50+ functions degrades plan quality), set max iterations (default 10), and implement plan validation before execution. The planner works best with well-described function parameters and clear function names.
+
 ---
 
 ## 13. Best Practices
