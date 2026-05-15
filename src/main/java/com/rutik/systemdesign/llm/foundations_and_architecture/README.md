@@ -32,7 +32,11 @@ This architectural shift enabled:
 - **Positional Encoding**: Since attention is order-agnostic, positions are injected via sinusoidal functions (original) or learned embeddings or RoPE (modern).
 - **Feed-Forward Layers**: Two-layer MLP applied independently to each token after attention. Stores factual knowledge.
 - **Residual Connections**: `output = x + sublayer(x)` — prevents vanishing gradients, enables depth.
-- **Layer Normalization**: Stabilizes training; applied before (pre-norm) or after (post-norm) each sublayer.
+- **Layer Normalization**: Stabilizes training by normalizing activations across the hidden dimension. Two placement strategies exist:
+  - **Post-LN** (original Transformer): `output = LN(x + sublayer(x))` — LayerNorm after residual addition. Gradients at early layers can explode or vanish, requiring careful learning rate warmup.
+  - **Pre-LN** (modern standard): `output = x + sublayer(LN(x))` — LayerNorm before the sublayer. The residual path stays "clean" (no normalization on it), producing more stable gradient flow. Tradeoff: some studies show slightly lower final performance, but dramatically easier training.
+  - Nearly all modern LLMs use Pre-LN: GPT-2+, LLaMA, Mistral, Falcon, Qwen.
+  - **RMSNorm** (LLaMA, Mistral, Gemma): Simplified LayerNorm that normalizes by root-mean-square only, skipping mean centering. ~10-15% faster than standard LayerNorm with equivalent quality. Used in all LLaMA variants.
 - **Token Prediction**: Autoregressive models predict the next token given all previous tokens (causal LM).
 
 ---
@@ -58,6 +62,25 @@ This architectural shift enabled:
 - Instead of a single FFN, multiple "expert" FFNs exist; a router selects K of N for each token
 - Total parameters >> active parameters → cheaper inference at same quality
 - Examples: Mixtral 8x7B, GPT-4 (rumored), DeepSeek-V3 (671B params, 37B active)
+
+### 3.5 Attention Variants by Span
+
+Standard self-attention computes O(n^2) interactions — every token attends to every other token. Several architectural variants reduce this cost:
+
+| Variant | Attention Span | Complexity | Key Idea |
+|---------|---------------|------------|----------|
+| **Full causal attention** | All previous tokens | O(n^2) | Standard decoder-only attention |
+| **Sliding window attention** | W previous tokens only | O(n * W) | Each token attends to a fixed local window |
+| **Longformer** | Local window + global on special tokens | O(n * W + n * g) | Combines local sliding window with global attention on [CLS] or task-specific tokens |
+| **BigBird** | Local + global + random | O(n * (W + g + r)) | Adds random attention connections for theoretical guarantees |
+
+**Sliding Window Attention** is the most widely adopted variant in production LLMs:
+- Each token attends only to the W previous tokens (e.g., W=4096 in Mistral 7B)
+- Complexity drops from O(n^2) to O(n * W) — linear in sequence length for a fixed window size
+- Information propagation across layers: with L layers and window W, information can flow across L * W tokens total through stacking
+- Mistral 7B: W=4096, 32 layers -> effective attention span of 131,072 tokens despite each layer seeing only 4096
+- Combines naturally with a **rolling KV cache**: only store W entries per layer instead of the full sequence length
+- KV cache savings: at 32K sequence length with W=4096, the rolling cache saves ~87% KV cache memory compared to full attention
 
 ---
 
@@ -337,6 +360,50 @@ Attention(Q, K, V) = softmax(QKᵀ / √d_k) · V
 - Softmax normalizes to attention weights (sum to 1 per row)
 - Multiply by V: each token's output is a weighted sum of all value vectors
 
+### Sliding Window Attention — Detailed Mechanics
+
+Standard causal attention at position `i` computes scores against all positions `0..i-1`, producing an `[n x n]` lower-triangular matrix. Sliding window attention restricts this to positions `max(0, i-W)..i-1`:
+
+```
+Full causal mask (n=8):        Sliding window mask (n=8, W=3):
+T1: X . . . . . . .           T1: X . . . . . . .
+T2: X X . . . . . .           T2: X X . . . . . .
+T3: X X X . . . . .           T3: X X X . . . . .
+T4: X X X X . . . .           T4: . X X X . . . .
+T5: X X X X X . . .           T5: . . X X X . . .
+T6: X X X X X X . .           T6: . . . X X X . .
+T7: X X X X X X X .           T7: . . . . X X X .
+T8: X X X X X X X X           T8: . . . . . X X X
+
+Full: 36 active cells             Window: 22 active cells (39% fewer)
+At n=32K, W=4096: ~87% fewer attention computations
+```
+
+**Information propagation through layer stacking:**
+```
+Layer 1: Token at position i sees positions [i-W, i]
+Layer 2: Token at position i sees positions [i-2W, i]  (because tokens at i-W already saw i-2W)
+...
+Layer L: Token at position i sees positions [i-L*W, i]
+
+Mistral 7B: W=4096, L=32 layers
+  -> Effective span = 32 * 4096 = 131,072 tokens
+  -> Far exceeds the 32K context window
+```
+
+**Rolling KV cache** pairs naturally with sliding window attention. Instead of caching all past keys/values (growing linearly with sequence length), maintain a circular buffer of size W per layer:
+
+```
+Standard KV cache at position 10000:  stores 10000 entries per layer
+Rolling KV cache at position 10000:   stores 4096 entries per layer (W=4096)
+  -> Position 10000 overwrites the slot at index (10000 mod 4096) = 1712
+  -> Memory: fixed at W * num_layers * 2 * d_head * bytes regardless of sequence length
+```
+
+For Mistral 7B serving at 32K context: standard KV cache needs ~2.1GB per sequence; rolling cache needs ~270MB per sequence — a fixed cost that does not grow with sequence length.
+
+---
+
 ### Key Architectural Improvements in Modern LLMs
 
 The original 2017 transformer has been refined substantially. Here is a comprehensive compilation:
@@ -350,7 +417,7 @@ The original 2017 transformer has been refined substantially. Here is a comprehe
 | **Flash Attention 1** (2022) | O(n²) HBM memory for attention | Tile Q, K, V into SRAM; fused kernel; online softmax | Requires recompute in backward pass |
 | **Flash Attention 2** (2023) | FA-1 poor GPU utilization | Better parallelism across warps; 2× faster than FA-1 | — |
 | **Flash Attention 3** (2024) | H100 underutilized by FA-2 | Async pipeline; FP8 support; 75% peak FLOP utilization | H100-specific |
-| **Sliding Window Attention** | Full attention wasteful for local tasks | Each token attends to ±w/2 neighbors; O(n×w) not O(n²) | Cannot directly attend far-away tokens |
+| **Sliding Window Attention** | Full attention wasteful for local tasks | Each token attends to W previous tokens; O(n*W) not O(n^2); rolling KV cache stores only W entries per layer | Cannot directly attend beyond window; relies on layer stacking for long-range flow (L layers * W = effective span) |
 
 **2. Positional Encoding**
 
@@ -364,8 +431,9 @@ The original 2017 transformer has been refined substantially. Here is a comprehe
 
 | Approach | Formula | Tradeoff |
 |---------|---------|---------|
-| **LayerNorm** (original) | Normalize by mean and variance | More expensive; pre-norm more stable than post-norm |
-| **RMSNorm** | Normalize only by RMS (no mean subtraction) | ~8% faster; equally effective; used in LLaMA, Mistral, Gemma |
+| **Post-LN** (original) | `LN(x + sublayer(x))` — normalize after residual | Gradient instability in early layers; requires careful warmup; slightly higher final quality in some studies |
+| **Pre-LN** (modern standard) | `x + sublayer(LN(x))` — normalize before sublayer | Clean residual path, stable gradients, easier training; used in GPT-2+, LLaMA, Mistral, Falcon |
+| **RMSNorm** | Normalize only by RMS (no mean subtraction) | ~10-15% faster than LayerNorm; equivalent quality; used in LLaMA, Mistral, Gemma |
 
 **4. Activations**
 
@@ -526,6 +594,12 @@ Decoder-only models dominate because they are the most versatile architecture fo
 
 **Q: What is the "attention sink" phenomenon and why does it matter for long-context inference?**
 Attention sink refers to the observation that transformer models assign disproportionately high attention weight to the first few tokens in the sequence, regardless of their semantic relevance. StreamingLLM (Xiao et al., 2023) showed that the first 4 tokens act as "attention sinks" — removing them causes catastrophic quality degradation even when remaining tokens are relevant. This matters for long-context inference because: (1) KV cache eviction strategies must never evict the first few tokens; (2) sliding window attention must retain initial tokens; (3) it explains why naive context truncation from the beginning breaks model quality. Practical implication: always keep a small "sink" window at the start of the context when doing any KV cache optimization.
+
+**Q: How does sliding window attention achieve long-range information flow despite each layer only seeing a local window?**
+Sliding window attention restricts each token to attend only to the W previous tokens within a single layer, reducing per-layer complexity from O(n^2) to O(n * W). Long-range information flows through layer stacking: at layer 1, token i sees positions [i-W, i]; at layer 2, it effectively sees [i-2W, i] because tokens at position i-W already incorporated information from i-2W in the previous layer. With L layers and window W, the effective attention span is L * W tokens. Mistral 7B uses W=4096 and 32 layers, giving an effective span of 131,072 tokens — far exceeding its 32K context window. The practical benefit extends to memory: a rolling KV cache stores only W entries per layer in a circular buffer instead of the full sequence length, saving ~87% KV cache memory at 32K context. This fixed-size cache means memory does not grow with sequence length, which is critical for streaming and long-document inference.
+
+**Q: What is the difference between Pre-LN and Post-LN, and why do nearly all modern LLMs use Pre-LN?**
+Post-LN (original Transformer) applies LayerNorm after the residual addition: `output = LN(x + sublayer(x))`. Pre-LN applies LayerNorm before the sublayer: `output = x + sublayer(LN(x))`. The critical difference is gradient flow stability. In Post-LN, the residual path passes through LayerNorm, which can distort gradients — early layers receive unstable gradients that require careful learning rate warmup (often 10K+ steps) to avoid divergence. In Pre-LN, the residual path is "clean" (identity connection with no normalization), so gradients flow directly to early layers without distortion. This makes Pre-LN dramatically easier to train at scale. The tradeoff: some studies show Post-LN achieves marginally higher final quality when training succeeds, but the training instability makes it impractical for billion-parameter models. GPT-2+, LLaMA, Mistral, and Falcon all use Pre-LN. Most modern models further replace standard LayerNorm with RMSNorm (normalizing by root-mean-square only, skipping mean centering), which is ~10-15% faster with no quality loss.
 
 ---
 

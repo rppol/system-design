@@ -341,6 +341,187 @@ Answer: [yes/no]"""
         return 1 - failures / len(attack_suite)  # Safety rate
 ```
 
+### A/B Testing for LLM Systems
+
+A/B testing LLMs is fundamentally harder than A/B testing click-through rates or conversion funnels because text outputs have high variance and quality is multidimensional.
+
+```
+Challenge: High variance in text outputs
+  A button color A/B test: binary outcome (click or not), low variance
+  An LLM A/B test: open-ended text, quality is subjective, variance is enormous
+  → Statistical significance is much harder to achieve
+
+Sample sizes:
+  Click-through A/B test: ~200-500 samples per variant often sufficient
+  LLM quality A/B test: 1000-5000+ comparisons per variant typically needed
+  For small effect sizes (2-5% improvement): may need 10,000+ comparisons
+  Power analysis must account for high output variance — standard calculators underestimate
+
+Metrics for LLM A/B tests:
+  Win rate: pairwise comparison — what % of time does variant B beat variant A?
+  Elo rating: continuous rating derived from pairwise comparisons (Chatbot Arena style)
+  Quality score distribution: histogram of LLM-as-judge scores per variant
+  Implicit signals: regeneration rate, session length, task completion, thumbs up/down
+
+LLM-as-judge for A/B:
+  Use a judge model to compare outputs from variant A vs B on same input
+  Run both orderings (A first, B first) to cancel position bias
+  Aggregate win rates with confidence intervals
+  Cost: ~$0.01-0.05 per comparison with GPT-4o judge
+
+Stratification (critical for LLM A/B tests):
+  Split results by query type (factual, creative, reasoning, code)
+  Split by complexity (simple, medium, hard)
+  Split by domain (finance, medical, general)
+  Why: a model can improve 10% on creative tasks but regress 5% on factual
+    — aggregate metric shows 3% improvement, masking a real regression
+  Always report per-category results alongside aggregate
+
+Duration:
+  Minimum 7-14 days to capture temporal patterns
+  Weekend vs weekday usage patterns differ (consumer apps)
+  Business hours vs off-hours (enterprise apps)
+  New model "novelty effect" — users initially engage more, then revert
+  Run at least 2 full weekly cycles before making rollout decisions
+```
+
+```python
+class LLMABTest:
+    def __init__(self, judge_model, categories: list[str]):
+        self.judge = judge_model
+        self.categories = categories
+        self.results = {cat: {"a_wins": 0, "b_wins": 0, "ties": 0}
+                        for cat in categories}
+
+    def compare(self, query: str, response_a: str, response_b: str,
+                category: str):
+        """Pairwise comparison with position-bias cancellation."""
+        # Run both orderings
+        verdict_ab = self._judge_pair(query, response_a, response_b)
+        verdict_ba = self._judge_pair(query, response_b, response_a)
+
+        # Aggregate: only count if both orderings agree
+        if verdict_ab == "A" and verdict_ba == "B":
+            self.results[category]["a_wins"] += 1
+        elif verdict_ab == "B" and verdict_ba == "A":
+            self.results[category]["b_wins"] += 1
+        else:
+            self.results[category]["ties"] += 1
+
+    def report(self) -> dict:
+        """Win rates per category with confidence intervals."""
+        report = {}
+        for cat, counts in self.results.items():
+            total = counts["a_wins"] + counts["b_wins"] + counts["ties"]
+            if total == 0:
+                continue
+            b_win_rate = counts["b_wins"] / total
+            # Wilson score interval for binomial proportion
+            ci = self._wilson_ci(counts["b_wins"], total, z=1.96)
+            report[cat] = {
+                "b_win_rate": b_win_rate,
+                "ci_lower": ci[0], "ci_upper": ci[1],
+                "n": total,
+                "significant": ci[0] > 0.5 or ci[1] < 0.5
+            }
+        return report
+```
+
+### Model Drift Detection
+
+Model drift is a silent production killer — API providers update models, weights shift during continued training, and capabilities quietly regress on specific tasks without any alert.
+
+```
+Capability regression:
+  Model updates or API changes silently degrade specific capabilities
+  Example: OpenAI GPT-4 performance on coding and math tasks reportedly
+    degraded between March-June 2023 — users noticed before OpenAI acknowledged
+  Root cause: model updates optimize for aggregate quality but can regress
+    on specific subcategories (Goodhart's Law at scale)
+
+Detection methods:
+  1. Weekly benchmark tracking:
+     Run golden dataset evaluation every 7 days (or on every model version change)
+     Track per-category scores, not just aggregate
+     Plot trend lines — gradual 1% weekly drift adds up to 10%+ over a quarter
+
+  2. Per-category quality metrics:
+     Don't just track "overall accuracy" — break down by:
+       - Task type (QA, summarization, code, reasoning)
+       - Domain (medical, legal, financial, general)
+       - Difficulty tier (easy, medium, hard)
+     A 2% aggregate improvement can mask a 15% regression in a critical category
+
+  3. Automated regression suite:
+     Run golden dataset evaluation on every model update
+     Golden set: 200-500 curated examples with verified correct answers
+     Must cover all critical use cases and edge cases
+     Version-control the golden set alongside application code
+
+Alert thresholds:
+  >3% drop on any single benchmark category → automated investigation trigger
+  >5% drop on any category → block deployment, require human review
+  >2% drop on aggregate score → flag for review within 24 hours
+  Consecutive 1% weekly drops for 3+ weeks → trend alert (slow drift)
+
+Shadow evaluation pattern (production best practice):
+  ┌──────────────┐    ┌───────────────────┐
+  │ Production    │    │ Shadow Pipeline    │
+  │ Model v2.1   │    │ Candidate v2.2     │
+  │ (serves users)│    │ (no user traffic)  │
+  └──────┬───────┘    └──────┬────────────┘
+         │                    │
+         │    ┌───────────┐   │
+         └───→│ Golden Set │←──┘
+              │ Evaluator  │
+              └─────┬─────┘
+                    │
+              ┌─────v─────┐
+              │ Compare    │
+              │ v2.1 vs   │
+              │ v2.2       │
+              └─────┬─────┘
+                    │
+         Pass: promote v2.2 to production
+         Fail: investigate regressions before any user exposure
+```
+
+```python
+class DriftDetector:
+    def __init__(self, golden_set, judge_model, alert_threshold=0.03):
+        self.golden_set = golden_set  # {category: [(query, expected), ...]}
+        self.judge = judge_model
+        self.threshold = alert_threshold
+        self.history = {}  # {category: [score_t0, score_t1, ...]}
+
+    def evaluate_and_check(self, model, model_version: str) -> dict:
+        """Run golden set evaluation and check for regressions."""
+        alerts = []
+        for category, examples in self.golden_set.items():
+            score = self._evaluate_category(model, examples)
+
+            if category in self.history and len(self.history[category]) > 0:
+                prev_score = self.history[category][-1]
+                delta = score - prev_score
+                if delta < -self.threshold:
+                    alerts.append({
+                        "category": category,
+                        "current": score,
+                        "previous": prev_score,
+                        "delta": delta,
+                        "severity": "critical" if delta < -0.05 else "warning"
+                    })
+
+            self.history.setdefault(category, []).append(score)
+
+        return {
+            "model_version": model_version,
+            "scores": {cat: scores[-1] for cat, scores in self.history.items()},
+            "alerts": alerts,
+            "deploy_ok": len([a for a in alerts if a["severity"] == "critical"]) == 0
+        }
+```
+
 ---
 
 ## 6. Real-World Examples
@@ -403,6 +584,9 @@ Answer: [yes/no]"""
 4. **Single-metric optimization**: Optimizing MMLU causes capability regression on other tasks (Goodhart's Law).
 5. **Not testing on your domain**: A model scoring 86% on MMLU might score 60% on your medical QA domain.
 6. **Ignoring latency in evaluation**: A model that scores 5% better but runs 3× slower may be worse for production.
+7. **Treating LLM evaluation as deterministic**: Same prompt with temperature=0 can still vary across runs due to floating-point non-determinism, GPU batching differences, and provider-side model updates. A team at a fintech company saw their "deterministic" evaluation suite produce scores ranging from 82% to 87% on the same model across consecutive runs — they were making launch decisions on noise. Mitigation: run each evaluation 3-5 times, report mean and 95% confidence intervals, and only flag changes that exceed the confidence interval.
+8. **Trusting single-run LLM-as-judge scores**: Judge models disagree with themselves 10-20% of the time on borderline cases. One production team discovered their "improved" prompt was indistinguishable from the baseline when they ran the judge evaluation three times — the initial "improvement" was within judge variance. Mitigation: use majority voting with 3+ independent judge evaluations per sample, and report the agreement rate alongside quality scores. If inter-judge agreement drops below 70%, the evaluation rubric needs refinement, not more samples.
+9. **Ignoring evaluation prompt sensitivity**: Changing the wording of an LLM-as-judge evaluation prompt can shift aggregate scores by 5-15%. A team changed "Rate the helpfulness of this response" to "How helpful is this response?" and saw average scores jump from 3.8/5 to 4.2/5 — same model, same test set, same judge. Best practice: version-lock evaluation prompts, judge models, and all parameters (temperature, max_tokens, system prompt). Treat evaluation infrastructure as production code with the same rigor around versioning, testing, and change management.
 
 ---
 

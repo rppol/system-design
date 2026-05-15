@@ -122,12 +122,15 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 | [Deployment & MLOps](src/main/java/com/rutik/systemdesign/llm/deployment_and_mlops/) | LLM gateway, model routing, semantic caching, observability |
 | [Token Economics & Cost Optimization](src/main/java/com/rutik/systemdesign/llm/token_economics_and_cost_optimization/) | Per-token pricing, prompt caching, batch APIs, self-hosting break-even |
 | [LLM Routing & Model Selection](src/main/java/com/rutik/systemdesign/llm/llm_routing_and_model_selection/) | Multi-model routing, cascade patterns, confidence thresholds |
+| [Knowledge Distillation & Model Merging](src/main/java/com/rutik/systemdesign/llm/knowledge_distillation_and_model_merging/) | Teacher-student distillation, SLERP/TIES/DARE merging, structured pruning |
+| [LLM Observability & Monitoring](src/main/java/com/rutik/systemdesign/llm/llm_observability_and_monitoring/) | Tracing, quality monitoring, cost attribution, alerting, Langfuse |
 
 #### Safety & Evaluation
 | Topic | Key Concepts |
 |-------|-------------|
 | [Guardrails & Content Safety](src/main/java/com/rutik/systemdesign/llm/guardrails_and_content_safety/) | NeMo Guardrails, Llama Guard, PII detection, HIPAA compliance |
 | [Safety & Alignment](src/main/java/com/rutik/systemdesign/llm/safety_and_alignment/) | Jailbreaking, hallucination, bias, prompt injection, red teaming |
+| [LLM Security](src/main/java/com/rutik/systemdesign/llm/llm_security/) | Prompt injection, data extraction, model theft, supply chain, adversarial robustness |
 | [Evaluation & Benchmarks](src/main/java/com/rutik/systemdesign/llm/evaluation_and_benchmarks/) | MMLU, HumanEval, RAGAS, LLM-as-judge, Chatbot Arena |
 
 #### Advanced & Landscape
@@ -153,6 +156,12 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 | [Design LLM Gateway](src/main/java/com/rutik/systemdesign/llm/case_studies/design_llm_gateway.md) | Routing, semantic cache, circuit breaker, budget enforcement |
 | [Design AI Coding Assistant](src/main/java/com/rutik/systemdesign/llm/case_studies/design_ai_coding_assistant.md) | Completions, agent loops, sandboxed execution, privacy |
 | [Design Customer Support Bot](src/main/java/com/rutik/systemdesign/llm/case_studies/design_customer_support_bot.md) | Intent routing, escalation, tool use, multilingual, CSAT |
+| [Design AI Content Moderation](src/main/java/com/rutik/systemdesign/llm/case_studies/design_ai_content_moderation.md) | Multi-tier filtering, toxicity classification, appeals workflow |
+| [Design LLM Fine-Tuning Platform](src/main/java/com/rutik/systemdesign/llm/case_studies/design_llm_fine_tuning_platform.md) | Self-serve fine-tuning, data pipeline, distributed training |
+| [Design Notion AI](src/main/java/com/rutik/systemdesign/llm/case_studies/design_notion_ai.md) | Permission-aware RAG, workspace search, multi-tenant isolation |
+| [Design AI Data Analyst](src/main/java/com/rutik/systemdesign/llm/case_studies/design_ai_data_analyst.md) | File upload, NL-to-SQL, code sandbox, visualization |
+| [Design AI Code Review](src/main/java/com/rutik/systemdesign/llm/case_studies/design_ai_code_review.md) | PR diff analysis, security detection, CI/CD gate |
+| [Design Real-Time Translation](src/main/java/com/rutik/systemdesign/llm/case_studies/design_real_time_translation.md) | Sub-1s latency, context preservation, streaming translations |
 
 See the [LLM Master Index](src/main/java/com/rutik/systemdesign/llm/README.md) for the full 6-phase learning path and system design interview framework.
 

@@ -18,7 +18,7 @@ A comprehensive, one-stop reference for understanding everything about Large Lan
 
 ## What This Section Covers
 
-This section is organized into **35 topic directories** plus **7 real-world case studies**, covering the full LLM lifecycle. Five topics have **deep-dive sub-files** (see the Sub-Files Index below):
+This section is organized into **38 topic directories** plus **13 real-world case studies**, covering the full LLM lifecycle. Five topics have **deep-dive sub-files** (see the Sub-Files Index below):
 
 - How models are built (architecture, tokenization, pre-training, fine-tuning, alignment)
 - How to use models effectively (prompting, RAG, reasoning, code generation)
@@ -68,6 +68,9 @@ This section is organized into **35 topic directories** plus **7 real-world case
 | 33 | [LLM Ecosystem & Landscape](llm_ecosystem_and_landscape/README.md) | Model families, licensing, cost analysis, timeline | Beginner |
 | 34 | [Data Flywheels & Continuous Learning](data_flywheels_and_continuous_learning/README.md) | Production feedback loops, active learning, drift detection, A/B testing for LLMs | Advanced |
 | 35 | [LLM Testing Strategies](llm_testing_strategies/README.md) | Golden datasets, LLM-as-judge, regression eval, flakiness detection, CI/CD integration | Intermediate |
+| 36 | [Knowledge Distillation & Model Merging](knowledge_distillation_and_model_merging/README.md) | Teacher-student distillation, SLERP/TIES/DARE merging, structured pruning, SparseGPT | Advanced |
+| 37 | [LLM Observability & Monitoring](llm_observability_and_monitoring/README.md) | Tracing, quality monitoring, cost attribution, alerting, Langfuse, Arize Phoenix | Intermediate |
+| 38 | [LLM Security](llm_security/README.md) | Prompt injection, data extraction, model theft, supply chain, adversarial robustness, red teaming | Advanced |
 
 ---
 
@@ -157,15 +160,15 @@ Build autonomous systems that take actions, use tools, and coordinate with other
 
 ### Phase 5 — Production
 ```
-Inference & Decoding  -->  Context Windows & Long Context  -->  Inference Engines  -->  vLLM Deep Dive  -->  Optimization & Quantization  -->  Deployment & MLOps  -->  Token Economics & Cost Optimization  -->  LLM Routing & Model Selection  -->  Evaluation & Benchmarks  -->  Guardrails & Content Safety
+Inference & Decoding  -->  Context Windows & Long Context  -->  Inference Engines  -->  vLLM Deep Dive  -->  Optimization & Quantization  -->  Knowledge Distillation & Model Merging  -->  Deployment & MLOps  -->  LLM Observability & Monitoring  -->  Token Economics & Cost Optimization  -->  LLM Routing & Model Selection  -->  Evaluation & Benchmarks  -->  Guardrails & Content Safety
 ```
-Deploy LLMs efficiently, cheaply, and safely. Understand context mechanics before diving into engines; optimize costs with routing and caching; evaluate before hardening with guardrails.
+Deploy LLMs efficiently, cheaply, and safely. Compress models via distillation and merging; instrument with observability; optimize costs with routing and caching; evaluate before hardening with guardrails.
 
 ### Phase 6 — Advanced Topics
 ```
-Safety & Alignment  -->  Multimodal Models  -->  Small Language Models & Edge AI  -->  Mixture of Experts  -->  MCP (Model Context Protocol)  -->  AI Applications  -->  LLM Ecosystem & Landscape  -->  Data Flywheels & Continuous Learning
+Safety & Alignment  -->  LLM Security  -->  Multimodal Models  -->  Small Language Models & Edge AI  -->  Mixture of Experts  -->  MCP (Model Context Protocol)  -->  AI Applications  -->  LLM Ecosystem & Landscape  -->  Data Flywheels & Continuous Learning
 ```
-Broaden understanding of safety, multimodal capabilities, small models, MoE architecture, tool protocols, domain applications, the full landscape, and continuous improvement.
+Broaden understanding of safety, security threats and defenses, multimodal capabilities, small models, MoE architecture, tool protocols, domain applications, the full landscape, and continuous improvement.
 
 ---
 
@@ -221,6 +224,9 @@ Step 5: Evaluate and Iterate
 | Model size | Cloud LLM (70B+) | Edge SLM (1-7B) | Privacy + latency vs. quality |
 | Architecture | Dense transformer | Mixture of Experts | Inference cost vs. memory |
 | Improvement | Static model | Data flywheel | Maintenance effort vs. quality gains |
+| Security depth | More guardrails (safer) | Fewer guardrails (faster) | Latency vs. safety |
+| Observability | Full tracing (comprehensive) | Sampling (low overhead) | Cost vs. visibility |
+| Model compression | Distillation (quality) | Quantization (simplicity) | Quality retention vs. effort |
 
 ---
 
@@ -237,7 +243,9 @@ Step 5: Evaluate and Iterate
 | Evaluation | RAGAS, LangSmith, Weights & Biases, TruLens, DeepEval |
 | Guardrails | NeMo Guardrails, Llama Guard, Guardrails AI, Rebuff |
 | Training infra | DeepSpeed, FSDP, Megatron-LM, Ray Train, SkyPilot |
-| Monitoring | LangSmith, Arize Phoenix, Helicone, Langfuse, OpenTelemetry |
+| Monitoring | LangSmith, Arize Phoenix, Helicone, Langfuse, OpenTelemetry, Weights & Biases |
+| Security | Rebuff, Lakera Guard, Prompt Armor, NVIDIA NeMo Guardrails, canary tokens |
+| Distillation & Merging | mergekit, distilabel, Hugging Face PEFT, SparseML, Neural Magic |
 
 ---
 
@@ -260,6 +268,9 @@ Step 5: Evaluate and Iterate
 | Token Economics | Deployment & MLOps, LLM Ecosystem, LLM Routing |
 | Data Flywheels | Fine-Tuning, Evaluation & Benchmarks, Deployment & MLOps |
 | LLM Testing Strategies | Evaluation & Benchmarks, Agents & Tool Use, Data Flywheels, Deployment & MLOps |
+| Knowledge Distillation & Model Merging | Optimization & Quantization, Fine-Tuning, Deployment & MLOps, Inference Engines |
+| LLM Observability & Monitoring | Deployment & MLOps, Evaluation & Benchmarks, LLM Testing Strategies, Token Economics |
+| LLM Security | Safety & Alignment, Guardrails & Content Safety, Prompt Engineering, Deployment & MLOps |
 
 ---
 
@@ -274,3 +285,9 @@ Step 5: Evaluate and Iterate
 | [Design LLM Gateway](case_studies/design_llm_gateway.md) | Routing, rate limiting, caching, observability | Intermediate |
 | [Design AI Coding Assistant](case_studies/design_ai_coding_assistant.md) | Code agents, tool use, context gathering | Advanced |
 | [Design Customer Support Bot](case_studies/design_customer_support_bot.md) | RAG + guardrails + escalation, evaluation | Intermediate |
+| [Design AI Content Moderation](case_studies/design_ai_content_moderation.md) | Multi-tier filtering, toxicity classification, appeals workflow, multi-language | Advanced |
+| [Design LLM Fine-Tuning Platform](case_studies/design_llm_fine_tuning_platform.md) | Self-serve fine-tuning, data pipeline, distributed training, model registry | Advanced |
+| [Design Notion AI](case_studies/design_notion_ai.md) | Permission-aware RAG, workspace search, AI writing, multi-tenant isolation | Advanced |
+| [Design AI Data Analyst](case_studies/design_ai_data_analyst.md) | File upload, auto-EDA, NL-to-SQL, code sandbox, visualization, report synthesis | Intermediate |
+| [Design AI Code Review](case_studies/design_ai_code_review.md) | PR diff analysis, security/performance detection, CI/CD gate, learning loop | Advanced |
+| [Design Real-Time Translation](case_studies/design_real_time_translation.md) | Sub-1s latency, context preservation, streaming partial translations, confidence scoring | Advanced |

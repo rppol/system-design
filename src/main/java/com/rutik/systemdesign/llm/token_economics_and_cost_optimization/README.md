@@ -127,6 +127,95 @@ Tier 6 — Embedding caching           (medium effort, near-100% savings on repe
 Tier 7 — Self-hosting                (high effort, highest savings at scale)
 ```
 
+### Rate Limiting and Quota Management
+
+Production LLM platforms must enforce rate limits and budgets to prevent cost overruns and ensure
+fair resource allocation across tenants.
+
+**Per-user rate limits** control burst and sustained usage through two dimensions: requests per
+minute (RPM) and tokens per minute (TPM). RPM prevents abuse from rapid-fire calls; TPM prevents
+cost spikes from large payloads. Typical tiered limits:
+
+```
+Free tier:       10 RPM,   100K TPM,     500 requests/day
+Pro tier:        60 RPM,   1M TPM,     10,000 requests/day
+Enterprise:   custom RPM, custom TPM,   unlimited requests/day
+```
+
+**Per-organization quotas** set monthly token budgets with either hard caps (requests rejected at
+100%) or soft warnings (alerts at 80%, degraded service at 100%, override at 110% for grace
+period). A fintech startup budgeting $5,000/month on GPT-4o sets a hard cap at ~500M output tokens
+(at $10/1M) and a soft warning at 400M tokens.
+
+**Token bucket algorithm** is the standard enforcement mechanism. The bucket fills at a rate of
+quota / period (e.g., 1M tokens / 60 seconds = ~16,667 tokens/second) and has a maximum size
+equal to the burst allowance (e.g., 100K tokens). Each request drains the bucket by its estimated
+token count. If the bucket is empty, the request is rate-limited. This allows bursts up to the
+bucket size while enforcing sustained rate limits over the period.
+
+**Sliding window rate limiting** provides more accurate enforcement than fixed windows. A fixed
+1-minute window allows 2x the limit if requests cluster at the boundary between two windows.
+Sliding windows track timestamps of recent requests and compute the effective rate at any point.
+Redis sorted sets with ZRANGEBYSCORE enable sliding window counting at sub-millisecond latency.
+
+**Queue-based overflow** prevents request loss when rate limits are hit. Instead of returning 429
+immediately, low-priority requests are enqueued with priority ordering (paid users before free,
+small requests before large) and processed when capacity is available. This converts hard failures
+into delayed responses, improving user experience at the cost of added queuing infrastructure.
+
+**Production pattern:** Return HTTP 429 with `Retry-After` header (seconds until next allowed
+request). Include `X-RateLimit-Remaining`, `X-RateLimit-Limit`, and `X-RateLimit-Reset` headers
+on every response so clients can self-throttle before hitting the limit.
+
+### TCO Modeling for Self-Hosted Deployments
+
+Self-hosting cost analysis requires accounting for all cost components, not just GPU rental.
+
+**Hardware costs:** An 8x A100 80GB node costs approximately $200K to purchase outright or ~$15K/
+month on a cloud lease (1-year reserved). A single A100 at on-demand rates runs ~$2-3/hour
+(~$1,500-$2,200/month). Reserved pricing drops this 30-60%.
+
+**Infrastructure overhead:** Networking (InfiniBand for multi-node, 10-25Gbps for single node),
+NVMe storage for model weights and KV cache spill, and cooling (on-premises only) add 20-30%
+on top of raw GPU costs. A $20K/month GPU bill carries $4-6K in infrastructure overhead.
+
+**Personnel:** At minimum 0.5 FTE of an ML/infrastructure engineer ($200-300K/year fully loaded)
+for monitoring, incident response, capacity planning, and optimization. For larger deployments
+(multi-model, multi-node), budget 1-2 FTEs. This is the most commonly underestimated cost
+component.
+
+**Maintenance:** NVIDIA driver updates (quarterly), CUDA/cuDNN compatibility patches, security
+patches, inference framework upgrades (vLLM, TensorRT-LLM release cadence is 2-4 weeks), and
+hardware failures. GPU failure rate is 2-5% annually; an 8-GPU node has a 15-35% chance of at
+least one GPU failure per year, requiring hot-spare capacity or graceful degradation logic.
+
+**Hidden costs:** Inference framework tuning (batch size optimization, KV cache sizing, quantization
+calibration), model update deployments (new model weights require validation, A/B testing
+infrastructure, rollback procedures), and monitoring stack (Prometheus + Grafana for GPU
+utilization, vLLM metrics endpoint, alerting for throughput drops and latency spikes).
+
+**TCO formula:**
+
+```
+Monthly TCO = GPU lease
+            + Infrastructure overhead (20-30% of GPU)
+            + Personnel (salary / N_models_managed)
+            + Monitoring and tooling
+            + Opportunity cost of engineering time
+```
+
+**Decision framework by daily token volume:**
+
+| Daily Volume | Recommendation | Reasoning |
+|---|---|---|
+| < 10M tokens/day | API only | API cost is low; self-hosting overhead exceeds savings |
+| 10-50M tokens/day | Hybrid | Route high-volume, latency-tolerant tasks to self-hosted; keep real-time on API |
+| > 50M tokens/day | Self-host primary workloads | Self-hosting cost per token drops well below API rates at this scale |
+
+The break-even point for a 70B model on 4x A100 (reserved) at $28,700/month TCO versus a
+commercial API at $7.80/1M blended token cost falls at approximately 120M tokens/day. Below this,
+the API is cheaper when all costs are honestly included.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -722,6 +811,12 @@ out-of-distribution inputs). Prompt engineering with a frontier model has zero u
 immediately to requirement changes, and handles edge cases better, but has ongoing high inference
 cost. The decision depends on query volume (fine-tuning pays off faster at higher volume) and
 task stability (stable, narrow tasks are better fine-tuning candidates).
+
+**What rate limiting strategies would you implement for a multi-tenant LLM platform?**
+A multi-tenant platform needs layered rate limiting across three dimensions: per-user RPM and TPM limits (prevent individual abuse), per-organization monthly token budgets (cost control), and global capacity limits (prevent infrastructure overload). Implementation uses token bucket algorithm with Redis + Lua scripts for atomic counting — the bucket fills at quota/period rate and drains by estimated token count per request. Sliding window rate limiting is preferred over fixed windows to prevent the boundary-burst problem where clients hit 2x the limit by straddling two fixed windows. Return HTTP 429 with Retry-After header and include X-RateLimit-Remaining in every response so clients can self-throttle. For overflow handling, queue lower-priority requests (free tier) rather than rejecting immediately, while high-priority requests (paid, SLA-bound) bypass the queue. Budget enforcement: warn at 80% of monthly allocation, soft-cap at 100% with a 10% grace period, hard-cap at 110%. The key production lesson is to enforce limits at the API gateway layer (not the application layer) to catch all traffic uniformly.
+
+**When does self-hosting LLMs become cost-effective versus using commercial APIs?**
+The break-even depends on daily token volume and whether all costs are honestly accounted for. For a 70B model on 4x A100 80GB reserved instances, the all-in monthly TCO is approximately $28,700 (GPU lease $15K + infrastructure overhead $4K + personnel share $6K + monitoring/tooling $3.7K). Against a commercial API at ~$7.80/1M blended token cost, this breaks even at approximately 120M tokens/day. Below 10M tokens/day, the API is almost always cheaper because self-hosting overhead (personnel, infrastructure, maintenance) exceeds any per-token savings. Between 10M and 50M tokens/day, a hybrid approach works: route high-volume, latency-tolerant tasks (batch processing, embeddings) to self-hosted infrastructure while keeping real-time, user-facing queries on the API. Above 50M tokens/day, self-hosting primary workloads becomes clearly cost-effective. The most commonly underestimated costs are personnel (0.5-1.0 FTE ML engineer for maintenance), GPU failure rates (2-5% annually, requiring spare capacity), and inference framework tuning (vLLM/TensorRT-LLM configuration is not set-and-forget). Revisit the analysis every 6 months because API prices are declining 30-50% per year.
 
 ---
 

@@ -432,6 +432,71 @@ At 500 conversations/day with 50% split: 3,550 / 250 = 14 days
 
 This is why small LLM applications cannot run meaningful A/B tests on weekly update cycles — volume matters.
 
+### 6.7 Cold Start Bootstrapping
+
+The flywheel requires production data to improve the model, but a new product has no production data. Breaking this circular dependency requires a deliberate bootstrapping phase:
+
+```
+Phase 1 — Pre-launch (weeks -4 to -2):
+  Approach A: Synthetic data seeding
+    - Use a strong model (GPT-4, Claude) to generate 500-2000 initial training pairs
+    - Cover expected query types based on product requirements and competitor analysis
+    - Quality: good enough to launch but not production-grade
+
+  Approach B: Transfer from adjacent domain
+    - Fine-tune on publicly available datasets from similar domains
+    - Customer support: use ShareGPT, OpenAssistant, or domain-specific public datasets
+    - Accuracy will be lower than eventual production-tuned model but far better than base model
+
+  Approach C: Human-in-the-loop seeding
+    - Hire 3-5 domain annotators for 2 weeks
+    - Generate 500-1000 gold-standard examples covering the expected query distribution
+    - Most expensive but highest quality; often used for regulated domains (healthcare, finance)
+
+Phase 2 — Soft launch (weeks 1-4):
+  - Deploy with strong base model + few-shot prompting (no fine-tuning yet)
+  - Instrument everything: log all (prompt, response, feedback, outcome) from day one
+  - Route low-confidence queries to human agents; their resolutions become training data
+  - Target: accumulate 500-1000 high-quality examples before first fine-tuning cycle
+
+Phase 3 — First fine-tune (week 4-6):
+  - LoRA fine-tune on curated production data + original seed data
+  - Minimum viable dataset: 500-1000 examples typically sufficient for measurable improvement
+  - Run full evaluation suite against baseline; deploy via canary
+
+Phase 4 — Flywheel engaged (week 6+):
+  - Production volume now generates enough feedback for regular update cycles
+  - Each cycle produces a better model, which generates better responses, which triggers
+    more informative corrections on genuinely hard cases
+```
+
+Approach D — Red-team bootstrapping: internal team stress-tests the system before launch, and every correction or failure resolution becomes training data. This simultaneously tests the product and generates high-signal training examples.
+
+### 6.8 Concept Drift Detection
+
+Section 6.5 covers covariate shift (input distribution changes). Concept drift is the complementary problem: the correct answer to existing query types changes, but the queries themselves look the same.
+
+**Types of concept drift:**
+- **Gradual drift**: User expectations evolve slowly (e.g., support bot must learn about new features over months)
+- **Sudden drift**: Policy change, product update, or regulatory change makes existing correct answers wrong overnight (e.g., return policy changes from 30 days to 14 days)
+- **Seasonal drift**: Periodic shifts that recur (e.g., holiday-specific promotions, tax season queries)
+
+**Detection methods beyond PSI:**
+- **Quality metric monitoring**: Track resolution rate, user satisfaction score, and thumbs-down rate on a 7-day sliding window. A >10% relative change without a model update signals concept drift.
+- **Embedding centroid shift**: Compute the centroid of query embeddings for each major query category weekly. If any category centroid shifts by >10% cosine distance from its training-time position, investigate.
+- **Confidence-outcome divergence**: When the model's confidence remains high but outcome metrics degrade, this is the hallmark of concept drift — the model is confidently producing answers that are no longer correct.
+- **KL divergence on response distribution**: Compare the distribution of model responses (by topic cluster) to the distribution of approved/corrected responses. Growing KL divergence signals the model's learned patterns are drifting from current ground truth.
+
+**Alert thresholds:**
+- Quality metric (resolution rate, satisfaction) drops >5% relative over 7 days: trigger review
+- >10% drop: trigger investigation, check for policy/product changes
+- >20% drop: trigger emergency retraining or prompt update
+
+**Response protocol:**
+- Not every drift requires retraining — first check if a prompt update or RAG knowledge base update resolves the issue
+- For sudden drift (policy change), update the knowledge base or system prompt immediately; schedule retraining for next cycle
+- For gradual drift, increase the proportion of recent production data in the next fine-tuning mix
+
 ---
 
 ## 7. Real-World Examples
@@ -554,6 +619,21 @@ A team implemented daily fine-tuning on the previous day's feedback. After three
 | Fine-tuning | Hugging Face PEFT | LoRA, QLoRA, and other parameter-efficient fine-tuning methods | Standard library for fine-tuning LLMs on curated feedback data |
 | A/B testing | Optimizely / custom | Traffic splitting and experiment assignment | Most LLM teams build custom A/B routing at the inference gateway |
 | PII scrubbing | Microsoft Presidio | Open-source PII detection and anonymization | Supports 40+ entity types; customizable recognizers |
+| Annotation platform | Prodigy | Spacy-integrated annotation tool with built-in active learning | Efficient for NLP tasks; recipes for text classification, NER, ranking |
+
+### Annotation Workflow Design
+
+Production annotation workflows for data flywheels require more structure than ad-hoc labeling:
+
+**Task queuing:** Route examples from the active learning selector into a task queue (Label Studio or Argilla). Prioritize by expected information gain: error-proxy examples first, high-uncertainty examples second, random samples third. Set daily annotation targets per annotator (typically 50-100 examples/day for text quality tasks, 200-400 for classification).
+
+**Inter-annotator agreement (IAA):** Measure consistency using Cohen's kappa. Targets: kappa >0.7 for classification tasks, kappa >0.6 for generation quality ratings (inherently more subjective). Assign 15-20% of examples to 2+ annotators for IAA measurement. If kappa drops below threshold, run a calibration session before continuing.
+
+**Quality control:** Include 10% "golden" examples with known correct labels in each annotation batch. Annotators whose agreement with golden examples falls below 85% are flagged for retraining. Adjudication: when two annotators disagree, a senior annotator resolves the tie — the resolution becomes the label.
+
+**Human-in-the-loop pipeline:** Route low-confidence model predictions to human review in near-real-time. The human correction simultaneously serves the user (better response) and feeds the training pipeline (corrected example). This dual-purpose flow is the highest-ROI annotation investment because each correction solves a user problem and improves the model.
+
+**Cost benchmarks:** Professional annotation costs $0.10-0.50 per example for simple classification, $2-10 for complex generation quality evaluation, and $5-20 for writing full correction responses. A typical weekly curation cycle of 500 examples costs $500-2,500 depending on task complexity.
 
 ---
 
@@ -594,6 +674,12 @@ Frame the ROI in terms of the cost avoided by the model handling conversations t
 
 **What is the difference between online learning and periodic batch fine-tuning for LLMs, and which would you recommend?**
 Online learning updates model weights continuously or after every small batch of new examples. Periodic batch fine-tuning accumulates data over a fixed window (days to weeks) and then runs a full fine-tuning job. For generative LLMs, periodic batch fine-tuning is almost always the correct choice. Online learning on generative LLMs causes catastrophic forgetting — continuous weight updates on recent examples overwrite representations of earlier examples, causing the model to degrade on any pattern not present in recent traffic. Batch fine-tuning allows mixing historical data with recent data to prevent forgetting, running a full evaluation suite before deployment, and maintaining a stable checkpoint history for rollback. Online learning is appropriate for retrieval models, ranking models, and embedding models where the architecture is smaller and forgetting is less severe.
+
+**How do you bootstrap a data flywheel when you have zero production data?**
+The cold start problem requires a deliberate bootstrapping phase before the flywheel can engage. The most common approach combines synthetic data seeding (use GPT-4 or Claude to generate 500-2000 initial training pairs covering expected query types) with a soft-launch strategy (deploy with a strong base model plus few-shot prompting, instrument all interactions from day one, and route low-confidence queries to human agents whose resolutions become training data). The minimum viable dataset for the first LoRA fine-tune is typically 500-1000 high-quality examples, which most products accumulate within 2-4 weeks of production traffic at modest scale. For regulated domains where quality is critical from day one, invest in human-annotated seed data (hire 3-5 domain experts for 2 weeks to create gold-standard examples). Red-team bootstrapping — where the internal team stress-tests the system pre-launch and every correction becomes training data — simultaneously validates the product and seeds the flywheel. The key principle: launch fast with a strong base model, collect data aggressively, and do not attempt fine-tuning until you have accumulated sufficient high-quality examples.
+
+**How do you distinguish concept drift from covariate shift in production, and why does the distinction matter?**
+Covariate shift means the input query distribution changes (new query types appear or existing ones change frequency), while concept drift means the correct answer to existing query types changes (policy update, product change, factual update). The distinction matters because they require different responses. Covariate shift is detected by monitoring the input embedding distribution — compute PSI weekly against a reference distribution, and a PSI above 0.2 signals major shift. Concept drift is invisible to input monitoring because the queries look the same; it is detected by monitoring outcome metrics (resolution rate, satisfaction score) on a sliding window — if quality degrades without a model update and without input distribution change, concept drift is the likely cause. For covariate shift, collect and annotate examples of the new query types, then retrain. For concept drift, update the knowledge base or system prompt immediately (fastest fix), then update training data to reflect new correct answers and retrain. A common production incident: a return policy changes from 30 to 14 days; the bot confidently answers "30 days" to return-policy queries because it has high confidence on this familiar query type — this is concept drift. The model's confidence-outcome divergence (high confidence, bad outcomes) is the strongest diagnostic signal.
 
 ---
 

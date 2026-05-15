@@ -26,7 +26,10 @@ LLM MLOps encompasses model serving infrastructure, cost management, monitoring 
 - **Observability is non-negotiable**: LLM outputs are non-deterministic and hard to validate. You need extensive logging to understand failures.
 - **Latency SLAs are user-facing**: Users notice latency. TTFT (Time to First Token) < 1 second is a hard requirement for conversational applications.
 - **Gradual rollout**: LLMs can silently degrade (sycophancy, capability regression, safety issues). Always use A/B testing for major changes.
-- **Prompts are code**: Treat prompt changes with the same rigor as code changes: version control, review, staged rollout.
+- **Prompts are code**: Treat prompt changes with the same rigor as code changes: version control, review, staged rollout. Store prompts in a registry with metadata (model, temperature, version, author) and require PR review before production deployment.
+- **Canary everything**: Never roll out a model change, prompt change, or parameter tweak to 100% of traffic at once. Start at 1-5%, monitor for 24-48 hours, then gradually increase.
+- **GPU memory is your scarcest resource**: A single long-context request or batch size spike can OOM a serving node. Monitor GPU memory utilization continuously and set alerts at 85% to prevent cascading failures.
+- **Cost attribution enables accountability**: Without per-team/per-user cost tracking, LLM costs become an unowned shared expense that grows unchecked. The LLM gateway is the natural metering point.
 
 ---
 
@@ -115,6 +118,58 @@ Hit rates for common applications:
 - General Q&A: 10-20% cache hit rate
 - Code generation: <5% cache hit rate (unique code inputs)
 
+### 3.4 Prompt Versioning & Management
+
+Prompts are the most frequently changed component in an LLM system. A git-like workflow for prompts prevents silent regressions:
+
+```
+Prompt Registry Schema:
+  prompt_id:       "customer_support_v1"
+  version:         "2.3.1"          (semantic versioning)
+  model:           "gpt-4o"
+  temperature:     0.7
+  max_tokens:      1024
+  author:          "alice@company.com"
+  created_at:      "2025-03-15T10:00:00Z"
+  approved_by:     "bob@company.com"
+  status:          "production"      (draft | staging | production | deprecated)
+  system_prompt:   "You are a helpful customer support agent..."
+  tags:            ["customer_support", "tier_1"]
+
+Workflow:
+  1. Developer creates new prompt version (draft)
+  2. Automated eval suite runs against golden dataset
+  3. PR review by prompt engineering team
+  4. Deploy to staging (internal traffic only)
+  5. Canary to 5% production traffic
+  6. Full rollout after 24-48 hours monitoring
+  7. Previous version kept for instant rollback
+```
+
+```python
+class PromptRegistry:
+    """DB-backed prompt registry with version control."""
+
+    def get_active_prompt(self, prompt_id: str, traffic_split: dict = None) -> Prompt:
+        """Return the active prompt, respecting A/B test splits."""
+        if traffic_split:
+            # A/B testing: split traffic between prompt versions
+            version = self._select_version(prompt_id, traffic_split)
+        else:
+            version = self._get_production_version(prompt_id)
+        return self.db.get(prompt_id, version)
+
+    def rollback(self, prompt_id: str):
+        """Instant rollback to previous production version — no redeployment needed."""
+        current = self._get_production_version(prompt_id)
+        previous = self._get_previous_version(prompt_id)
+        self.db.set_status(prompt_id, current, "deprecated")
+        self.db.set_status(prompt_id, previous, "production")
+        # Takes effect on next request — no model reload required
+```
+
+Key principle: Prompt changes go through PR review just like code. A one-word change to a system prompt can shift model behavior for millions of users.
+
 ---
 
 ## 4. Architecture Diagrams
@@ -150,28 +205,62 @@ Hit rates for common applications:
      Drift | Error rates
 ```
 
-### Deployment Pipeline
+### Deployment Pipeline with Canary Strategy
 ```
 Development
-  └── Prompt iteration (LangSmith)
+  └── Prompt iteration (LangSmith / PromptLayer)
+      Prompt changes go through PR review
       |
       v
 Staging
   └── Automated evaluation suite
-      │── MMLU / domain benchmarks
-      │── Safety tests
-      │── Regression tests vs. current production
+      |── MMLU / domain benchmarks
+      |── Safety tests
+      |── Regression tests vs. current production
       Pass threshold (e.g., no regression > 2%)
       |
       v
-Production Canary (5% traffic)
-  └── Monitor: latency, error rate, user satisfaction
-      Run for 24-48 hours
+Shadow Mode (optional)
+  └── New model runs in parallel, results NOT served
+      Compare outputs offline against production model
+      Catch catastrophic regressions before any user sees them
       |
       v
-Production Rollout (50% → 100%)
-  └── Gradual traffic shift
-      Automatic rollback if degradation detected
+Production Canary (1-5% traffic)
+  └── Traffic split via consistent hashing on user_id
+      Monitor for 24-48 hours:
+      |── Latency P99 > 2x baseline? → auto rollback
+      |── Quality score drop > 5%?   → auto rollback
+      |── Error rate > 1%?           → auto rollback
+      |── Safety violations?          → immediate rollback
+      |
+      v
+Gradual Ramp (5% → 25% → 50% → 100%)
+  └── Each step: 12-24 hours observation
+      Automated metric comparison at each gate
+      |
+      v
+Full Rollout
+  └── Old model kept warm for 24 hours (instant rollback)
+      Old prompt version preserved in registry
+```
+
+### Blue-Green for Model Serving
+```
+                    [Load Balancer / Ingress]
+                           |
+              +------------+------------+
+              |                         |
+         [Blue Stack]             [Green Stack]
+         Model v2.1               Model v2.2
+         3x A100 nodes            3x A100 nodes
+         (serving 100%)           (pre-warmed, 0%)
+                                       |
+                              [Eval Suite Passes]
+                                       |
+                              [Switch traffic: Blue 0%, Green 100%]
+                                       |
+                              [Keep Blue alive 24h for rollback]
 ```
 
 ---
@@ -281,6 +370,138 @@ Quality dashboard:
   Monthly: A/B test results, model upgrade candidates
 ```
 
+### GPU Memory Monitoring & OOM Prevention
+
+GPU memory is the most constrained resource in LLM serving. A single OOM crash kills all in-flight requests on that node.
+
+```
+GPU Memory Budget (A100 80GB serving LLaMA 3 70B in INT4):
+  Model weights (INT4):    ~35-40 GB
+  KV cache (peak):         ~25-30 GB (depends on batch size + context length)
+  Activation memory:       ~3-5 GB
+  CUDA overhead:           ~2-3 GB
+  ─────────────────────────────────
+  Total at peak:           ~65-78 GB out of 80 GB
+  Headroom:                2-15 GB (dangerously thin at peak)
+
+GPU Memory Budget (A100 80GB serving LLaMA 3 8B in FP16):
+  Model weights (FP16):    ~16 GB
+  KV cache (peak):         ~30-40 GB (high batch sizes possible)
+  Activation memory:       ~2-3 GB
+  CUDA overhead:           ~2 GB
+  ─────────────────────────────────
+  Total at peak:           ~50-61 GB
+  Headroom:                19-30 GB (comfortable)
+```
+
+```
+Monitoring Strategy:
+  Alert thresholds:
+    WARNING:  GPU memory utilization > 75% sustained 2 min
+    CRITICAL: GPU memory utilization > 85% sustained 1 min
+    EMERGENCY: GPU memory utilization > 95% → immediate load shedding
+
+  Memory pressure signals (early warning):
+    - Increasing CUDA malloc retries (visible in nvidia-smi or DCGM)
+    - KV cache eviction rate climbing (vLLM metrics)
+    - Batch size auto-reduction triggering (inference engine adapting)
+    - Swap usage appearing (should always be zero for GPU workloads)
+
+  Graceful degradation chain:
+    1. Reduce max batch size (fewer concurrent requests)
+    2. Reduce max context length (reject requests > N tokens)
+    3. Route overflow to CPU fallback or API provider
+    4. Reject new requests with 503 (last resort)
+
+  Common OOM causes:
+    - Long context request: single 128K-token request consumes 4-8 GB KV cache
+    - Batch size spike: burst of concurrent requests fills KV cache
+    - Memory leaks in custom pre/post-processing code
+    - Model loaded at higher precision than expected (FP16 instead of INT4)
+
+  Tools:
+    nvidia-smi:            Basic GPU monitoring (poll every 5s)
+    DCGM (Data Center GPU Manager): Production-grade GPU telemetry
+    Prometheus GPU exporter: dcgm-exporter → Prometheus → Grafana
+    K8s device plugin:      GPU resource limits in pod specs
+    vLLM metrics endpoint:  /metrics exposes KV cache utilization, batch size
+```
+
+### Cost Allocation & Chargeback
+
+Without per-team cost attribution, LLM costs become an uncontrolled shared expense. The LLM gateway is the natural metering point.
+
+```
+Request tagging:
+  Every request includes metadata:
+    { "team": "search", "project": "product_search",
+      "user_id": "u_12345", "cost_center": "CC-4200",
+      "environment": "production" }
+
+  Gateway enriches with cost data:
+    { ...metadata,
+      "model": "gpt-4o", "input_tokens": 1200, "output_tokens": 450,
+      "cost_usd": 0.0105, "cache_hit": false,
+      "timestamp": "2025-03-15T14:30:00Z" }
+
+Cost aggregation pipeline:
+  Gateway → Kafka topic (llm-usage) → Flink/Spark aggregation → Cost DB
+    → Daily rollup per team/project/model
+    → Weekly chargeback report
+    → Monthly invoice to cost center
+
+Chargeback models:
+  Showback (visibility only):
+    Teams see their costs on a dashboard
+    No actual billing — used for awareness
+    Good starting point before enforcement
+
+  Chargeback (actual billing):
+    Each team's budget is debited based on usage
+    Requires finance system integration
+    Creates accountability but adds friction
+
+Budget management:
+  WARN:  Team usage reaches 80% of monthly budget → Slack/email alert
+  SOFT:  Team reaches 100% → alert + manager approval for continued usage
+  HARD:  Team reaches 120% → requests throttled or routed to cheaper model
+
+Dashboard metrics (per team, per day):
+  - Total tokens consumed (input + output)
+  - Total cost ($)
+  - Cost per query (average)
+  - Model mix (% of queries per model)
+  - Cost trend (7-day moving average)
+  - Top 10 most expensive queries (for optimization)
+```
+
+```python
+class CostTracker:
+    """Per-request cost tracking at the gateway layer."""
+
+    MODEL_PRICING = {
+        "gpt-4o":      {"input": 2.50, "output": 10.00},   # per 1M tokens
+        "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+        "claude-3.5":  {"input": 3.00, "output": 15.00},
+    }
+
+    def track(self, request: LLMRequest, response: LLMResponse):
+        pricing = self.MODEL_PRICING[request.model]
+        cost = (
+            (request.input_tokens / 1_000_000) * pricing["input"] +
+            (response.output_tokens / 1_000_000) * pricing["output"]
+        )
+        self.emit_metric(
+            team=request.metadata["team"],
+            project=request.metadata["project"],
+            model=request.model,
+            cost_usd=cost,
+            input_tokens=request.input_tokens,
+            output_tokens=response.output_tokens,
+        )
+        self.check_budget(request.metadata["team"], cost)
+```
+
 ---
 
 ## 6. Real-World Examples
@@ -299,11 +520,19 @@ Quality dashboard:
 - A/B testing of system prompt changes across user cohorts
 
 ### Netflix LLM Platform
-- Internal LLM gateway for all ML teams
+- Internal LLM gateway for all ML teams — the central metering point for cost attribution
 - Model catalog: approved models + their cost/quality characteristics
 - Shared observability: all teams' LLM usage in one dashboard
-- Chargeback by team: each team sees their LLM cost
+- Chargeback by team: each team sees their LLM cost, broken down by model and project
+- Budget alerts at 80% of monthly allocation; hard caps enforced at the gateway level
 - Fine-tuned models for specific use cases (content recommendation copy, A/B test variants)
+
+### Stripe's Prompt Management
+- All production prompts stored in a versioned registry with metadata (model, temperature, author)
+- Prompt changes require PR approval from both engineering and product
+- A/B testing framework splits traffic between prompt versions, measuring task completion rate
+- Rollback capability: revert to any previous prompt version in under 60 seconds without redeployment
+- Shadow mode for new models: run alongside production for 48 hours before any traffic shift
 
 ---
 
@@ -325,6 +554,20 @@ Quality dashboard:
 | Semantic cache | Medium | Very low (cache hits) | Low |
 | Model routing | Medium | Low | Low (uses cheap model) |
 
+| Rollout Strategy | Risk | Speed | Complexity | GPU Overhead |
+|-----------------|------|-------|------------|--------------|
+| Big-bang deploy | High | Fast | Low | None |
+| Canary (1-5%) | Low | Slow (24-48h) | Medium | +5% GPU capacity |
+| Blue-green | Low | Medium (minutes) | High | 2x GPU capacity |
+| Shadow mode | None (no user impact) | Slow | High | 2x GPU capacity |
+
+| Cost Model | Accountability | Friction | Implementation |
+|------------|---------------|----------|----------------|
+| No tracking | None | None | None |
+| Showback (visibility) | Low-medium | Low | Dashboard only |
+| Chargeback (billing) | High | Medium | Finance integration |
+| Hard budget caps | Very high | High | Gateway enforcement |
+
 ---
 
 ## 8. When to Use / When NOT to Use
@@ -345,12 +588,16 @@ Quality dashboard:
 
 ## 9. Common Pitfalls
 
-1. **No prompt versioning**: Changing system prompts without version control makes it impossible to diagnose regressions.
+1. **No prompt versioning**: A team changed one word in a system prompt ("concise" to "brief") and response quality dropped 15% across the board. Without versioning, it took 3 days to identify the change. Store every prompt version with metadata, diff capability, and instant rollback.
 2. **Ignoring TTFT**: Optimizing throughput but not latency; users perceive TTFT as the response time.
-3. **No cost budgets**: Allowing runaway API costs from buggy agents or large batches.
+3. **No cost budgets**: A buggy agent loop burned $14,000 in API costs in 4 hours before anyone noticed. Set per-team budget alerts at 80% and hard caps at 100% of monthly allocation.
 4. **Monitoring only technical metrics**: Tracking p99 latency but not output quality; a model can be fast and wrong.
 5. **Cold start in auto-scaling**: Scaling to zero to save money but 70B models take 3+ minutes to load. Set minimum replicas = 1.
 6. **No rate limiting per user**: One user floods the system with requests, degrading experience for others.
+7. **Skipping canary for "minor" model updates**: A team deployed a quantized model variant directly to 100% traffic. The INT4 quantization introduced subtle quality regressions in math tasks that only appeared under production query distribution. Always canary model changes, even minor ones -- start at 1-5% traffic, monitor for 24-48 hours, compare quality metrics against the baseline.
+8. **GPU OOM from long-context requests**: A single 128K-token request consumed 6 GB of KV cache and OOM-killed the serving process, dropping all 47 concurrent requests on that node. Set per-request context length limits, monitor GPU memory at 85% threshold, and implement graceful degradation (reduce batch size before rejecting requests).
+9. **Cost allocation without enforcement**: Dashboards showing per-team costs were ignored for months until the monthly LLM bill hit $180K. Showback (visibility) alone is not enough -- implement budget alerts and, eventually, hard caps or automatic routing to cheaper models when budgets are exhausted.
+10. **No shadow mode before major model swaps**: Switching from GPT-4 to GPT-4o directly in production revealed prompt incompatibilities that caused 8% of responses to be malformed JSON. Shadow mode (running the new model in parallel without serving results) would have caught this offline.
 
 ---
 

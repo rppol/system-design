@@ -340,12 +340,79 @@ Simple, widely used (vLLM default for preemption)
 Problem: may evict a long, expensive-to-recompute prefix
 ```
 
-**Attention-score-based eviction (H2O, SnapKV):**
+**H2O (Heavy-Hitter Oracle):**
+```
+Observation: A small fraction of tokens ("heavy hitters") receive
+disproportionately high attention across all layers and heads.
+
+Algorithm:
+  1. Track cumulative attention score for each cached token
+     score[t] = sum of attention weights token t received across all heads/layers
+  2. At each decode step, rank all cached tokens by score
+  3. Evict the lowest-scoring tokens when cache budget exceeded
+  4. Always keep: recent tokens (last W) + heavy hitters (top H by score)
+
+Cache budget split:
+  Recent window:   last 128-256 tokens (recency matters for coherence)
+  Heavy hitters:   top 64-128 tokens by cumulative attention
+  Total budget:    256-512 tokens out of potentially 128K context
+
+Memory savings:
+  128K context on 70B model:
+    Full KV cache:  ~40 GB (320KB/token × 131,072 tokens)
+    With H2O:       ~8-10 GB (keeping ~3% of tokens)
+    Quality loss:   <1% on most benchmarks (LongBench, RULER)
+
+Overhead: ~5-10% additional latency per decode step for score tracking
+```
+
+**SnapKV:**
+```
+Approach: Observe attention patterns in a short prefix window, then prune
+
+Algorithm:
+  1. Run a short observation window (first 128-256 tokens of decode)
+  2. Track which KV positions receive consistent attention across layers
+  3. Identify "consistently important" tokens — high attention in most layers
+  4. Compress KV cache to only these tokens + sliding recent window
+  5. Continue decoding with the compressed cache
+
+Key difference from H2O:
+  H2O:    continuously tracks and evicts during generation (dynamic)
+  SnapKV: observes once, prunes once, then decodes with fixed cache (static)
+
+Result: 50-80% KV cache reduction with <1% quality degradation
+Faster than H2O (no per-step scoring) but less adaptive to shifting attention
+```
+
+**Attention-score-based eviction (general pattern):**
 ```
 Track cumulative attention scores for each token in the KV cache
 Evict tokens that received the least attention (least "important")
 Keep: recent tokens + tokens with high historical attention
-Result: 20× KV cache compression with <1% quality loss on some tasks
+Result: 20x KV cache compression with <1% quality loss on some tasks
+```
+
+**Production numbers for KV cache eviction:**
+```
+Model: LLaMA 3 70B, 128K context
+  Without eviction:  KV cache = ~40 GB per request
+  With H2O (3%):     KV cache = ~10 GB per request → 4x more concurrent users
+  With SnapKV (20%): KV cache = ~8 GB per request  → 5x more concurrent users
+
+Tradeoff matrix:
+  Method      | Memory savings | Quality loss | Latency overhead | Adaptiveness
+  ------------|---------------|-------------|-----------------|-------------
+  No eviction | 0%            | 0%          | 0%              | N/A
+  H2O         | 50-75%        | <1%         | 5-10%           | High (dynamic)
+  SnapKV      | 50-80%        | <1%         | 2-5% (one-time) | Low (static)
+  StreamingLLM| 80-95%        | 2-5%        | ~0%             | None (fixed)
+
+When eviction matters:
+  - Long context (32K+) with high concurrency → KV cache is the bottleneck
+  - Edge deployment where GPU memory is limited (e.g., single A10 24GB)
+  - Cost optimization: fewer GPUs needed to serve same number of users
+  - When NOT to use: short context (<4K) where KV cache is small anyway
 ```
 
 **Sliding window + sink tokens (StreamingLLM):**
@@ -496,6 +563,180 @@ Incoming request
 [Continuous batching] → add to active batch at next iteration boundary
 ```
 
+### 3.13 Streaming Architectures
+
+Streaming delivers tokens to the client as they are generated rather than buffering the entire response. This is critical for perceived latency — a user waiting 3 seconds for a complete response feels slower than seeing the first token at 300ms with subsequent tokens flowing in.
+
+**Server-Sent Events (SSE):**
+```
+Protocol: HTTP/1.1 compatible, unidirectional (server → client)
+Content-Type: text/event-stream
+Connection: keep-alive
+
+Server sends:
+  data: {"token": "Paris", "index": 0}\n\n
+  data: {"token": " is", "index": 1}\n\n
+  data: {"token": " the", "index": 2}\n\n
+  data: [DONE]\n\n
+
+Characteristics:
+  - Built on standard HTTP — works through CDNs, proxies, load balancers
+  - Auto-reconnect built into browser EventSource API
+  - Text-only (no binary frames)
+  - One-way: client cannot send data mid-stream without a separate request
+  - OpenAI, Anthropic, and most LLM APIs use SSE for streaming
+```
+
+**WebSocket:**
+```
+Protocol: Upgrade from HTTP/1.1, bidirectional (full duplex)
+Connection: persistent TCP
+
+Client sends:  {"action": "generate", "prompt": "Tell me about..."}
+Server sends:  {"token": "Paris", "index": 0}
+Server sends:  {"token": " is", "index": 1}
+Client sends:  {"action": "cancel"}     ← mid-stream cancellation
+Server sends:  {"status": "cancelled"}
+
+Characteristics:
+  - Lower per-message overhead (2-6 byte frame header vs. SSE text framing)
+  - Bidirectional: client can cancel, steer, or send new input mid-generation
+  - Binary and text support
+  - Does not auto-reconnect; application must handle reconnection
+  - More complex proxy/load balancer configuration (sticky sessions required)
+```
+
+**TTFT (Time to First Token) optimization:**
+```
+Target TTFT by scenario:
+  Cached/short prompts (<1K tokens):  < 500ms
+  Cold prompts (1K-8K tokens):        < 2s
+  Long context (32K+ tokens):         < 5s (chunked prefill helps)
+
+Optimization levers:
+  1. Prompt caching: reuse KV for shared prefixes → TTFT drops 80-90%
+  2. Chunked prefill: prevents long prefill from blocking first token
+  3. Model routing: send simple queries to smaller, faster models
+  4. Hardware: prefill is compute-bound → more FLOPS = lower TTFT
+```
+
+**Chunked streaming (token batching to client):**
+```
+Per-token streaming:
+  Token 1 → send → Token 2 → send → Token 3 → send
+  Network overhead: 1 HTTP chunk per token
+  Latency to first token: minimal
+  Network cost: high (headers/framing per token at 30-80 tok/s = 30-80 chunks/s)
+
+Chunked streaming (batch every 3-5 tokens):
+  Tokens 1-4 → buffer → send → Tokens 5-8 → buffer → send
+  Network overhead: 1 chunk per 4 tokens
+  Latency to first visible token: slightly higher (adds ~100-150ms for 4-token buffer)
+  Network cost: 75% reduction in chunk overhead
+  Common for: mobile clients on poor connections, cost-sensitive deployments
+
+Production pattern:
+  - Chat UIs: per-token streaming (users expect character-by-character appearance)
+  - API consumers: chunked streaming acceptable (programmatic consumers batch anyway)
+  - Mobile apps: chunk every 3-5 tokens to reduce battery and bandwidth usage
+```
+
+**When to use SSE vs WebSocket:**
+```
+SSE (default choice for most LLM applications):
+  - Chat interfaces, API streaming responses
+  - Read-only token streams
+  - Stateless deployments behind load balancers
+  - When CDN/proxy compatibility matters
+
+WebSocket (when bidirectionality is required):
+  - Collaborative editing with LLM suggestions (e.g., Cursor-style code editors)
+  - Real-time voice/audio streaming with interruption support
+  - Applications where client sends follow-up context mid-generation
+  - Gaming or interactive applications with continuous input/output
+
+Rule of thumb: use SSE unless you need the client to talk back mid-stream.
+```
+
+### 3.14 Semantic Caching
+
+Semantic caching avoids redundant LLM inference by detecting when a new prompt is semantically equivalent to a previously cached prompt and returning the cached response directly.
+
+**How it works:**
+```
+1. Incoming prompt → embed using sentence embedding model (e.g., text-embedding-3-small)
+2. Search vector DB for cached prompts with cosine similarity > threshold
+3. If match found → return cached response (skip LLM entirely)
+4. If no match → run LLM inference → cache (embedding, prompt, response)
+
+                   ┌─────────────────────────────────────────┐
+  User prompt ───→ │ Embed prompt → Search vector cache       │
+                   │   Match (sim > 0.95)? → Return cached    │
+                   │   No match? → LLM inference → Cache it   │
+                   └─────────────────────────────────────────┘
+
+Similarity threshold selection:
+  0.98+:  Very strict — only near-identical prompts match (safe, low hit rate)
+  0.95:   Standard threshold — good balance for most applications
+  0.90:   Aggressive — higher hit rate but risk of returning wrong cached answer
+  < 0.90: Dangerous — semantically different prompts start matching
+```
+
+**Cache hit rates by application type:**
+```
+Customer support bots:    15-40% hit rate
+  (users ask same questions: "where is my order", "how to reset password")
+
+FAQ / knowledge base:     25-50% hit rate
+  (highly repetitive queries against same corpus)
+
+General chat:             5-15% hit rate
+  (diverse conversations, low repetition)
+
+Code generation:          8-20% hit rate
+  (similar boilerplate requests, common patterns)
+```
+
+**Invalidation strategies:**
+```
+TTL-based:
+  Short TTL (1-4 hours): for rapidly changing information
+  Long TTL (1-7 days): for stable knowledge (documentation, tutorials)
+  Per-entry TTL based on query type (factual=short, conceptual=long)
+
+Model version change:
+  Invalidate entire cache when underlying model is updated
+  New model may produce different (better) answers for same prompts
+
+Semantic drift detection:
+  Periodically re-run a sample of cached prompts through the model
+  If new response diverges significantly from cached → invalidate that entry
+  Catches cases where model updates or fine-tuning changed behavior
+```
+
+**Cost savings:**
+```
+Without semantic caching:
+  1000 requests/hour × avg 500 output tokens × $15/1M tokens = $7.50/hour
+
+With semantic caching (30% hit rate):
+  700 LLM calls × $7.50/1000 = $5.25/hour
+  300 cache hits × ~$0 (embedding lookup cost negligible) = ~$0
+  Total: $5.25/hour → 30% cost reduction
+
+For highly repetitive workloads (40% hit rate):
+  600 LLM calls → 40% cost reduction
+  Plus latency improvement: cache hit returns in ~50ms vs. 1-3s for LLM call
+```
+
+**Tools and implementations:**
+```
+GPTCache:        Open-source, pluggable embedding + cache backends
+Redis + vector:  RediSearch with vector similarity (HNSW index)
+Custom:          Embedding model + FAISS/Qdrant + TTL logic
+LiteLLM:        Built-in caching layer for multi-provider setups
+```
+
 ---
 
 ## 4. Architecture Diagrams
@@ -526,6 +767,48 @@ With speculative decoding:
   Small model: |---draft 4 tokens fast---|
   Large model: |-------verify all 4 in one pass + correct---------|
   Net: ~4 tokens per large model pass → 3-4× speedup
+```
+
+### Streaming Delivery: SSE vs WebSocket
+```
+SSE (Server-Sent Events):
+  Client ──HTTP GET──→ Server
+  Client ←─text/event-stream─── Server
+  Client ←─data: token1─────── Server
+  Client ←─data: token2─────── Server
+  Client ←─data: [DONE]──────── Server
+  (unidirectional: server → client only)
+
+WebSocket:
+  Client ──HTTP Upgrade──→ Server
+  Client ←→ Full duplex TCP ←→ Server
+  Client ←─ token1 ─── Server
+  Client ──── cancel ──→ Server     ← client can interrupt
+  Client ←─ cancelled ─ Server
+  (bidirectional: both can send at any time)
+
+Chunked Streaming (batched tokens):
+  Per-token:   T1→send  T2→send  T3→send  T4→send   (4 network chunks)
+  Chunked(4):  T1,T2,T3,T4 → send                    (1 network chunk)
+  Tradeoff:    ~100-150ms added latency, 75% fewer network operations
+```
+
+### KV Cache Eviction: H2O vs SnapKV
+```
+Full KV cache (128K context, 70B model):
+  [tok_0][tok_1][tok_2]...[tok_131071]  = ~40 GB
+
+H2O eviction (dynamic, per-step scoring):
+  [sink_0..3][heavy_hitter_64..191][recent_384..511]  = ~10 GB
+   ^first 4    ^highest cumulative     ^sliding window
+   tokens       attention scores
+
+SnapKV eviction (static, one-time pruning after observation):
+  [observation window] → identify important tokens → prune
+  [important_0..127][recent_128..383]  = ~8 GB
+   ^consistently high  ^sliding window
+    attention across
+    all layers
 ```
 
 ---
@@ -591,6 +874,107 @@ Optimize for throughput (many users):
   - Continuous batching
   - PagedAttention: maximize KV cache utilization
   - Token/second × GPU is the key metric
+```
+
+### Streaming Delivery Mechanics
+
+```
+SSE implementation (server-side, Python/FastAPI):
+  @app.get("/v1/chat/completions")
+  async def stream_chat(request: ChatRequest):
+      async def token_generator():
+          async for token in model.generate_stream(request.prompt):
+              yield f"data: {json.dumps({'token': token})}\n\n"
+          yield "data: [DONE]\n\n"
+      return StreamingResponse(token_generator(), media_type="text/event-stream")
+
+SSE client-side (JavaScript):
+  const source = new EventSource("/v1/chat/completions?prompt=...");
+  source.onmessage = (event) => {
+      if (event.data === "[DONE]") { source.close(); return; }
+      const { token } = JSON.parse(event.data);
+      appendToUI(token);
+  };
+  // Auto-reconnects on network failure (built into EventSource API)
+
+WebSocket implementation (for bidirectional needs):
+  @app.websocket("/ws/chat")
+  async def websocket_chat(websocket: WebSocket):
+      await websocket.accept()
+      while True:
+          msg = await websocket.receive_json()
+          if msg["action"] == "generate":
+              async for token in model.generate_stream(msg["prompt"]):
+                  if await check_cancel(websocket):  # client can cancel
+                      break
+                  await websocket.send_json({"token": token})
+          elif msg["action"] == "cancel":
+              break  # stop generation immediately
+```
+
+**TTFT optimization in production:**
+```
+Scenario: Chat application, target TTFT < 500ms for 90% of requests
+
+Lever 1 — Prompt caching:
+  System prompt (2000 tokens) cached → skip prefill for shared prefix
+  TTFT for cached prefix: ~50ms (load KV from cache) vs ~800ms (compute KV)
+
+Lever 2 — Model routing for TTFT:
+  Input < 500 tokens → small model (8B), TTFT ~100ms
+  Input 500-4K tokens → medium model (70B), TTFT ~500ms
+  Input 4K+ tokens → large model with chunked prefill, TTFT ~2-5s
+
+Lever 3 — Chunked prefill interaction with streaming:
+  Without chunking: TTFT for 32K input = ~1800ms (user waits, sees nothing)
+  With chunking: TTFT for 32K input = ~2000ms total, but other users unblocked
+
+Lever 4 — Speculative prefill:
+  Start generating with a smaller model immediately (low TTFT)
+  Switch to larger model output once its prefill completes
+  User sees tokens from small model first → perceived TTFT ~100ms
+  Quality tokens from large model arrive ~500ms later and replace if needed
+```
+
+### Semantic Caching — Detailed Pipeline
+
+```
+Step-by-step flow:
+
+1. Normalize prompt:
+   - Strip whitespace, lowercase (optional), remove conversation metadata
+   - Hash the normalized prompt for exact-match cache (fast path)
+
+2. Exact match check (Redis/in-memory):
+   - Hash lookup: O(1), ~1ms
+   - If hit → return cached response immediately
+   - Common for: repeated API calls, retry logic, identical user queries
+
+3. Semantic match check (vector DB):
+   - Embed normalized prompt → 768-1536 dim vector (~5-10ms)
+   - HNSW search in vector DB for top-1 nearest neighbor (~2-5ms)
+   - If cosine_similarity > threshold (0.95) → return cached response
+   - If below threshold → proceed to LLM inference
+
+4. LLM inference (cache miss):
+   - Generate response normally (~1-5s)
+   - Store: (prompt_embedding, prompt_text, response, timestamp, model_version)
+   - Embedding storage: ~6KB per entry (1536 dims × 4 bytes)
+
+5. Cache maintenance:
+   - TTL expiry: scan and remove entries older than TTL
+   - Model version tag: invalidate all entries from previous model version
+   - Size limit: evict LRU entries when cache exceeds budget
+   - Drift check (weekly): re-run 1% sample, compare to cached, invalidate if diverged
+
+Production gotchas:
+  - Threshold too low (0.90): "How do I reset my password?" matches
+    "How do I change my email?" → wrong cached answer served
+  - Threshold too high (0.99): Only exact paraphrases match → 2% hit rate, not worth it
+  - Embedding model mismatch: cache built with text-embedding-ada-002, switched to
+    text-embedding-3-small → all similarity scores shift, cache effectively invalid
+  - Multi-turn context: cache key must include conversation history, not just last message
+    → dramatically reduces hit rate for multi-turn conversations
 ```
 
 ---

@@ -29,6 +29,8 @@ Understanding alignment is critical for anyone building LLM systems: it explains
 - **Sycophancy**: Aligned models tend to agree with users even when wrong, because human raters often prefer agreeable responses.
 - **Instruction following vs. values**: Teaching a model to follow instructions is easier than teaching it values; but values matter for edge cases.
 - **Iterative alignment**: Alignment is not a one-time process — deployed models require continuous red-teaming and retraining.
+- **Online vs. Offline alignment**: Online methods (RLHF/PPO) generate new responses during training and score them live with a reward model, adapting to the policy's evolving distribution. Offline methods (DPO, SimPO, KTO) train on a fixed preference dataset with no new generation. Online is more expensive (requires inference during training) but avoids distribution shift -- the reward model always sees on-policy outputs. Offline is simpler and cheaper but the model only learns from static preferences that may not reflect its current failure modes. Hybrid approaches like iterative DPO regenerate preference datasets periodically (every 1-2 epochs) to close this gap.
+- **Verifiable rewards**: For domains with objectively checkable outputs (code execution, math proofs, unit test pass/fail), reward signals can bypass reward models entirely. This eliminates reward model noise and reward hacking for those domains, as demonstrated by DeepSeek-R1's training on math/code verification signals.
 
 ---
 
@@ -156,6 +158,85 @@ Enables scaling feedback beyond human annotation capacity
 Quality depends heavily on judge model quality
 ```
 
+### 3.7 SimPO (Simple Preference Optimization)
+
+Reference-model-free preference optimization. Unlike DPO, SimPO eliminates the frozen reference policy entirely, using the average log probability of the response as an implicit reward.
+
+```
+SimPO Loss:
+  -log sigma(beta/|y_w| * sum(log pi_theta(y_w|x))
+             - beta/|y_r| * sum(log pi_theta(y_r|x)) - gamma)
+
+Where:
+  y_w: chosen (winning) response
+  y_r: rejected response
+  beta: scaling factor
+  gamma: target reward margin between chosen and rejected (typically 0.5-2.0)
+  |y|: response length (normalizes by token count)
+
+Key differences from DPO:
+  - No reference model pi_ref -- only the policy pi_theta is needed
+  - Average log probability per token acts as the implicit reward
+  - gamma enforces a minimum margin between chosen/rejected rewards
+  - Lower GPU memory: no need to hold reference model in VRAM (~halves model memory)
+```
+
+**Pros**: Simpler training pipeline; lower memory footprint; competitive with DPO on AlpacaEval 2 (44.7 vs 40.5 length-controlled win rate) and MT-Bench
+**Cons**: Gamma requires tuning per task; length normalization can under-reward genuinely detailed responses
+
+### 3.8 GRPO (Group Relative Policy Optimization)
+
+DeepSeek's RL approach used to train DeepSeek-R1. Groups multiple sampled outputs per prompt and computes advantages using within-group statistics, eliminating the need for a separate critic (value function) or reward model.
+
+```
+GRPO Pipeline:
+  1. For each prompt x, sample G outputs {y_1, y_2, ..., y_G} from pi_theta
+     (typical G = 8-64 outputs per prompt)
+  2. Score each output with a reward signal r_i (can be verifiable reward or RM)
+  3. Compute group-level advantage:
+     A_i = (r_i - mean(r_1..r_G)) / std(r_1..r_G)
+  4. Update policy using clipped objective (similar to PPO):
+     L = E[min(ratio * A_i, clip(ratio, 1-eps, 1+eps) * A_i)]
+     - KL(pi_theta || pi_ref)
+
+Where:
+  ratio = pi_theta(y_i|x) / pi_old(y_i|x)
+  eps = 0.2 (clip range, same as PPO)
+  Group statistics replace the learned value function entirely
+
+Key insight: no separate critic network needed -- the group
+  mean/std provide a natural baseline for advantage estimation
+```
+
+**Pros**: Simpler than PPO (no critic network); more sample-efficient for reasoning tasks; naturally pairs with verifiable rewards
+**Cons**: Requires generating multiple outputs per prompt (higher inference cost during training); group size G is a sensitive hyperparameter
+
+Used by: DeepSeek-R1, DeepSeek-V3.
+
+### 3.9 Verifiable Rewards
+
+For tasks with objectively checkable outputs, use execution-based or symbolic verification as the reward signal instead of a learned reward model.
+
+```
+Verifiable Reward Types:
+  Code: execute against test cases → pass/fail (binary) or pass_rate (0.0-1.0)
+  Math: parse symbolic/numeric answer → compare against ground truth
+  Formal proofs: type-check or verify proof steps
+  Structured output: validate JSON schema, SQL syntax, regex match
+
+Reward formulation:
+  r(x, y) = 1.0  if verification passes
+  r(x, y) = 0.0  if verification fails
+  (optionally: partial credit for passing K of N test cases)
+
+Used in combination with RL (PPO or GRPO):
+  DeepSeek-R1: code correctness + format reward
+  OpenAI o1/o3: math/code verification signals
+```
+
+**Pros**: Zero reward model noise; no reward hacking possible (ground truth is the reward); no human preference data needed for verifiable domains
+**Cons**: Only works for tasks with objectively verifiable outputs; real-world tasks (summarization, conversation) still need preference-based methods; binary pass/fail provides sparse signal (partial credit helps)
+
 ---
 
 ## 4. Architecture Diagrams
@@ -188,15 +269,50 @@ Pre-trained LLM
   → RLHF Aligned Model
 ```
 
-### DPO vs RLHF
+### DPO vs RLHF vs SimPO vs GRPO
 ```
-RLHF:
-  Preference Data → Reward Model → PPO Training
-  (3 models, 3 training runs, complex)
+RLHF (Online):
+  Preference Data → Reward Model → PPO Training (generates new responses live)
+  (4 models in VRAM: actor, critic, reward model, reference)
+  (3 training stages, complex, highest memory)
 
-DPO:
+DPO (Offline):
   Preference Data → DPO Loss → Aligned Model
-  (2 models: reference + trained, 1 training run, simple)
+  (2 models in VRAM: policy + frozen reference)
+  (1 training run, simple, moderate memory)
+
+SimPO (Offline, Reference-Free):
+  Preference Data → SimPO Loss → Aligned Model
+  (1 model in VRAM: policy only, no reference model)
+  (1 training run, simplest, lowest memory)
+
+GRPO (Online, Critic-Free):
+  Prompts → Sample G outputs → Score → Group Advantage → Policy Update
+  (2 models in VRAM: policy + reference; no critic)
+  (Online generation during training, pairs with verifiable rewards)
+```
+
+### Verifiable Rewards Pipeline
+```
+Prompt Dataset (math / code problems)
+     |
+     v
+Policy generates response (or G responses for GRPO)
+     |
+     v
+┌──────────────────────────────┐
+│  Verification Oracle         │
+│  Code: execute test cases    │
+│  Math: symbolic/numeric check│
+│  → Binary reward (0 or 1)    │
+│  → Or partial credit (0-1)   │
+└──────────────────────────────┘
+     |
+     v
+RL Update (PPO or GRPO)
+  No reward model needed
+  No human preference data needed
+  Ground truth IS the reward
 ```
 
 ---
@@ -251,6 +367,98 @@ Intuition: The policy itself encodes the reward — a response
   with higher probability than the reference model is preferred
 ```
 
+### SimPO: Reference-Free Mechanics
+
+SimPO removes the reference model entirely by using length-normalized log probability as the implicit reward:
+
+```
+Implicit reward for a response y given prompt x:
+  r_SimPO(x, y) = (1/|y|) * sum_{t=1}^{|y|} log pi_theta(y_t | x, y_{<t})
+
+This is simply the average per-token log probability under the current policy.
+
+The loss enforces a margin gamma between chosen and rejected:
+  L = -log sigma(beta * (r_SimPO(x, y_w) - r_SimPO(x, y_r) - gamma))
+
+Practical details:
+  beta = 2.0-10.0 (higher than DPO's typical 0.1-0.5)
+  gamma = 0.5-2.0 (target reward margin; 1.0-1.4 works well empirically)
+  Length normalization prevents the model from gaming reward via verbosity
+
+Memory savings vs DPO:
+  DPO: policy (7B = ~14GB in fp16) + reference (7B = ~14GB) = ~28GB model VRAM
+  SimPO: policy only = ~14GB model VRAM
+  For 70B models, this difference is the gap between 4xA100 and 8xA100
+```
+
+### GRPO: Group Relative Advantage
+
+GRPO replaces PPO's learned critic with group-level statistics. Detailed walkthrough:
+
+```
+Step 1: Sample G outputs per prompt
+  For prompt x_i, generate {y_1, ..., y_G} from pi_theta_old
+  Typical G = 16-64 (DeepSeek-R1 used G=64 for math tasks)
+
+Step 2: Compute rewards
+  r_j = reward_fn(x_i, y_j) for each output j in group
+  Reward can be:
+    - Verifiable: code test pass rate, math answer correctness
+    - Reward model: RM(x_i, y_j) → scalar
+    - Hybrid: verifiable + format reward (e.g., +0.1 for valid CoT format)
+
+Step 3: Compute group advantage (replaces the critic)
+  group_mean = mean(r_1, ..., r_G)
+  group_std  = std(r_1, ..., r_G)
+  A_j = (r_j - group_mean) / group_std
+
+  This normalizes rewards within each group:
+    Best response in group → positive advantage
+    Worst response → negative advantage
+    No separate value network needed
+
+Step 4: Policy gradient update with clipping
+  For each token t in output y_j:
+    ratio_t = pi_theta(y_j_t | x_i, y_j_{<t}) / pi_old(y_j_t | x_i, y_j_{<t})
+  L = E[min(ratio * A_j, clip(ratio, 1-eps, 1+eps) * A_j)]
+    - beta * KL(pi_theta || pi_ref)
+
+  eps = 0.2, beta = 0.01-0.04 (KL coefficient)
+
+Comparison to PPO:
+  PPO:  needs critic network (same size as policy) → 2x model memory
+  GRPO: no critic, uses G samples instead → more inference, less memory
+  For 7B model: PPO needs ~56GB (actor+critic+ref+RM), GRPO needs ~28GB (actor+ref)
+```
+
+### Verifiable Rewards: Mechanics
+
+```
+Code verification:
+  1. Policy generates code solution for problem x
+  2. Execute code in sandboxed environment (Docker, gVisor)
+  3. Run against K test cases (typical K = 5-20)
+  4. Reward = number_passed / K (partial credit)
+  5. Timeout: 10-30s per test case; infinite loops → reward = 0
+
+Math verification:
+  1. Policy generates chain-of-thought + final answer
+  2. Extract final answer via regex (e.g., \boxed{...} format)
+  3. Compare against ground truth:
+     - Numeric: |predicted - actual| < epsilon (1e-6)
+     - Symbolic: normalize both expressions, compare canonical forms
+  4. Reward = 1.0 if correct, 0.0 if incorrect
+
+Format rewards (used alongside verifiable rewards):
+  +0.1 if response uses expected CoT format
+  -0.1 if response skips reasoning steps
+  Prevents reward hacking via short-circuiting to just the answer
+
+DeepSeek-R1 combined reward:
+  r_total = r_correctness + lambda * r_format
+  lambda = 0.1-0.5 (format reward weight)
+```
+
 ---
 
 ## 6. Real-World Examples
@@ -274,22 +482,38 @@ Intuition: The policy itself encodes the reward — a response
 - Multiple rounds of alignment with human feedback
 
 ### DeepSeek-R1 Alignment
-- Group Relative Policy Optimization (GRPO) — PPO variant without value function
-- Reward: correctness (verifiable math/code) + format rewards
-- Demonstrated that RL from verifiable signals alone creates reasoning without human preference data
+- Group Relative Policy Optimization (GRPO) — PPO variant without value function or separate critic
+- Sampled G=64 outputs per prompt, computed advantage via group mean/std normalization
+- Reward: correctness (verifiable math/code via execution and symbolic checking) + format rewards (valid CoT structure)
+- No human preference data needed for reasoning -- verifiable rewards replaced the reward model entirely
+- Demonstrated emergent chain-of-thought reasoning, self-verification, and backtracking purely from RL on correctness signals
+- Training cost significantly lower than PPO-based approaches due to no critic network and no reward model
 
 ---
 
 ## 7. Tradeoffs
 
-| Method | Complexity | Stability | Data Needed | Quality |
-|--------|-----------|-----------|-------------|---------|
-| RLHF/PPO | High | Low | Pairwise comparisons | Excellent |
-| DPO | Low | High | Pairwise comparisons | Excellent |
-| Constitutional AI | Medium | Medium | Constitution + AI feedback | Very good |
-| ORPO | Low | High | Pairwise (no reference) | Very good |
-| KTO | Low | High | Per-response labels | Good |
-| RLAIF | Medium | Medium | AI-labeled pairs | Good |
+| Method | Complexity | Stability | Data Needed | Memory (7B) | Quality |
+|--------|-----------|-----------|-------------|-------------|---------|
+| RLHF/PPO | High | Low | Pairwise comparisons | ~56GB (4 models) | Excellent |
+| DPO | Low | High | Pairwise comparisons | ~28GB (2 models) | Excellent |
+| SimPO | Low | High | Pairwise (no reference) | ~14GB (1 model) | Excellent |
+| GRPO | Medium | Medium-High | Prompts + verifiable rewards | ~28GB (2 models) | Excellent (reasoning) |
+| Constitutional AI | Medium | Medium | Constitution + AI feedback | ~28GB | Very good |
+| ORPO | Low | High | Pairwise (no reference) | ~14GB (1 model) | Very good |
+| KTO | Low | High | Per-response labels | ~28GB (2 models) | Good |
+| RLAIF | Medium | Medium | AI-labeled pairs | ~28GB | Good |
+| Verifiable Rewards | Low-Medium | High | Prompts + ground truth | Depends on RL method | Excellent (verifiable tasks) |
+
+**Online vs. Offline Tradeoffs:**
+
+| Aspect | Online (PPO, GRPO) | Offline (DPO, SimPO, KTO) | Hybrid (Iterative DPO) |
+|--------|-------------------|--------------------------|----------------------|
+| Distribution shift | None (on-policy) | High (static data) | Moderate (periodic refresh) |
+| Training cost | High (inference during training) | Low (no generation) | Medium |
+| Data freshness | Always current | Stale after policy changes | Refreshed every N epochs |
+| Implementation | Complex (generation loop) | Simple (standard training) | Medium |
+| Best for | Reasoning, code, math | General alignment | Iterative improvement |
 
 ---
 
@@ -304,6 +528,26 @@ Intuition: The policy itself encodes the reward — a response
 - Reducing dependence on human annotators
 - Defining specific value constraints programmatically
 - Iterating alignment quickly without large annotation budgets
+
+### Use SimPO When:
+- GPU memory is constrained and you cannot hold a reference model alongside the policy
+- You already have high-quality preference data and want the simplest possible pipeline
+- Training large models (70B+) where eliminating the reference model saves 4+ GPUs
+
+### Use GRPO When:
+- Training reasoning models on math/code tasks with verifiable outputs
+- You want online RL but cannot afford PPO's critic network (saves ~50% model memory vs PPO)
+- Tasks where sampling multiple outputs and comparing them is natural (competition math, code generation)
+
+### Use Verifiable Rewards When:
+- Task outputs are objectively checkable (code with test cases, math with ground truth answers)
+- You want to eliminate reward model noise and reward hacking entirely
+- Building reasoning capabilities without human preference annotation
+
+### Do NOT Use Verifiable Rewards When:
+- Tasks involve subjective quality (summarization, creative writing, open-ended conversation)
+- Ground truth is ambiguous or does not exist
+- Binary pass/fail signal is too sparse for the task complexity (consider partial credit)
 
 ### Use KTO When:
 - Collecting pairwise comparisons is operationally difficult
@@ -368,6 +612,18 @@ KTO aligns models using only binary feedback (thumbs up/thumbs down) on individu
 
 **Q: How do you build and evaluate a reward model for RLHF?**
 A reward model is a classifier trained on human preference data to predict which of two responses a human would prefer. Architecture: take the base LLM, replace the language modeling head with a scalar reward head, and train with Bradley-Terry loss on preference pairs. Training data: 50K-500K preference pairs, each containing a prompt, a chosen response, and a rejected response. Key considerations: (1) annotator quality — use 3+ annotators per pair, measure inter-annotator agreement (>70% agreement is good); (2) diversity — include easy pairs (clearly good vs clearly bad), hard pairs (both good but different styles), and adversarial pairs (reward hacking patterns); (3) evaluation — hold out 10% of preference pairs, measure accuracy (good reward models achieve 70-75% agreement with human preferences). Failure modes: (1) length bias — preferring longer responses regardless of quality; (2) style bias — preferring a specific writing style regardless of content; (3) sycophancy — preferring responses that agree with the user. Mitigate by including length-controlled pairs and contrarian examples in training data.
+
+**Q: When would you choose SimPO over DPO, and what are SimPO's limitations?**
+Choose SimPO over DPO when GPU memory is the binding constraint. SimPO eliminates the frozen reference model entirely, using the average per-token log probability of the response as an implicit reward with a target margin gamma between chosen and rejected. For a 7B model, this saves ~14GB of VRAM (no reference model copy); for 70B models, it can mean the difference between needing 4 vs 8 A100s. SimPO achieves competitive results -- 44.7 vs DPO's 40.5 length-controlled win rate on AlpacaEval 2, and comparable MT-Bench scores. Choose DPO over SimPO when: (1) you need tight control over how far the policy drifts from a known-good reference (DPO's explicit KL against pi_ref); (2) your preference data has noisy labels where the reference model acts as a regularizer; (3) you are doing iterative alignment and want a stable anchor point across rounds. SimPO's gamma hyperparameter (typically 0.5-2.0) requires tuning per task, and its length normalization can under-reward responses that are genuinely more detailed.
+
+**Q: How does GRPO differ from PPO, and why was it chosen for DeepSeek-R1?**
+GRPO (Group Relative Policy Optimization) replaces PPO's learned critic (value function) with group-level statistics. For each prompt, GRPO samples G outputs (typically 16-64), scores them, and computes advantage as (reward - group_mean) / group_std. This eliminates the critic network entirely -- for a 7B model, PPO needs ~56GB for actor + critic + reward model + reference, while GRPO needs ~28GB for actor + reference only. DeepSeek chose GRPO for R1 because: (1) reasoning tasks naturally produce diverse outputs that can be ranked within a group; (2) verifiable rewards (code execution, math checking) provide clean signals without a learned reward model, and GRPO pairs naturally with these; (3) the group normalization provides a stable advantage estimate without the instability of training a separate value network. The tradeoff is higher inference cost during training -- generating G=64 outputs per prompt is expensive, but this cost is offset by eliminating the critic and by the improved sample efficiency on reasoning benchmarks. GRPO is less suited for open-ended tasks (conversation, creative writing) where verifiable rewards are unavailable and group diversity may be low.
+
+**Q: What are the tradeoffs between online and offline RLHF methods?**
+Online methods (PPO, GRPO) generate new responses during training and score them in real time, while offline methods (DPO, SimPO, KTO) train on a fixed preference dataset with no generation. The core tradeoff is distribution shift vs. cost. Online methods never suffer distribution shift because the reward model always evaluates on-policy outputs -- as the policy improves, training data improves with it. But online training requires running inference during each training step, which can 2-5x wall-clock time compared to offline. Offline methods are simpler and faster but learn only from a static dataset: after a few epochs, the policy may have moved far enough from the data distribution that the preference signal becomes stale. In practice, this manifests as DPO performance plateauing or degrading after 2-3 epochs. The practical middle ground is iterative DPO: run DPO for 1-2 epochs, regenerate preference data using the updated policy, re-score with a reward model or human evaluation, and repeat. This captures most of online RL's benefits at much lower complexity. Rule of thumb: use offline (DPO/SimPO) for general alignment, online (GRPO) for reasoning tasks with verifiable rewards, and iterative DPO when you need continuous improvement without full RL infrastructure.
+
+**Q: What are verifiable rewards and when do they fail?**
+Verifiable rewards use objective, execution-based signals as the reward in RL training -- code test case pass/fail, math answer correctness against ground truth, formal proof verification. Their key advantage is eliminating reward model noise entirely: there is no proxy, no Goodhart's Law, no reward hacking. The ground truth IS the reward. DeepSeek-R1 demonstrated that RL with only verifiable rewards (code execution + math checking) can produce emergent chain-of-thought reasoning, self-verification, and backtracking without any human preference data. OpenAI's o1/o3 models also use verification-based training for math and code. Limitations: (1) only works for tasks with objectively checkable outputs -- summarization, creative writing, and open-ended conversation have no ground truth to verify against; (2) binary pass/fail signals are sparse, especially for hard problems where the model rarely produces correct answers early in training (partial credit on test suites helps); (3) test case quality matters -- weak test cases let incorrect solutions pass, and comprehensive test suites are expensive to curate; (4) execution environments must be sandboxed (Docker, gVisor) with timeouts (10-30s) to prevent infinite loops and security exploits during training. In practice, verifiable rewards are combined with format rewards (+0.1 for valid CoT structure) and sometimes a lightweight reward model for stylistic preferences.
 
 ---
 

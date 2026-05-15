@@ -151,8 +151,11 @@ Current modules under `src/main/java/com/rutik/systemdesign/llm/`:
 | `token_economics_and_cost_optimization/` | Per-token pricing, prompt caching, batch APIs, self-hosting break-even | — |
 | `data_flywheels_and_continuous_learning/` | Production feedback loops, active learning, drift detection, A/B testing | — |
 | `llm_testing_strategies/` | Golden datasets, LLM-as-judge, regression eval, flakiness detection, CI/CD integration | — |
+| `knowledge_distillation_and_model_merging/` | Teacher-student distillation, SLERP/TIES/DARE merging, structured pruning, SparseGPT | — |
+| `llm_observability_and_monitoring/` | Tracing, quality monitoring, cost attribution, alerting, Langfuse, Arize Phoenix | — |
+| `llm_security/` | Prompt injection, data extraction, model theft, supply chain, adversarial robustness, red teaming | — |
 
-Case studies in `llm/case_studies/`: design_chatgpt, design_copilot, design_rag_pipeline, design_ai_search_engine, design_llm_gateway, design_ai_coding_assistant, design_customer_support_bot.
+Case studies in `llm/case_studies/`: design_chatgpt, design_copilot, design_rag_pipeline, design_ai_search_engine, design_llm_gateway, design_ai_coding_assistant, design_customer_support_bot, design_ai_content_moderation, design_llm_fine_tuning_platform, design_notion_ai, design_ai_data_analyst, design_ai_code_review, design_real_time_translation.
 
 Master index: `llm/README.md` (topics table + Sub-Files Index section).
 

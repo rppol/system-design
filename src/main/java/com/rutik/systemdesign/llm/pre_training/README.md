@@ -10,7 +10,7 @@ The scale of pre-training is staggering: GPT-4 was trained on trillions of token
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Pre-training is like reading every book, article, and website ever written — the model doesn't memorize, it absorbs patterns, facts, and reasoning styles at enormous scale.
 
@@ -22,20 +22,21 @@ The scale of pre-training is staggering: GPT-4 was trained on trillions of token
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Self-supervised learning**: Training signal from predicting next tokens; no human labels needed at scale.
-- **Data quality > quantity**: A well-curated 1T token dataset beats a poorly filtered 10T token dataset (the LIMA insight).
+- **Data quality > quantity**: A well-curated 1T token dataset beats a poorly filtered 10T token dataset (the LIMA insight). Quality filtering impact: a 10x smaller high-quality dataset can match or exceed a 10x larger unfiltered dataset on downstream benchmarks.
+- **Data mixture optimization**: Not all data domains are equal — code data at 10-15% of the mix improves reasoning even on non-code tasks. The optimal mixture depends on target capabilities, and algorithms like DoReMi can find better domain weights automatically.
 - **Training dynamics matter**: Loss curves, gradient norms, and learning rate schedules determine stability and final quality.
 - **Irreversibility**: Pre-training mistakes are expensive to fix — a contaminated training set or wrong architectural choice is hard to undo at scale.
-- **Compute-optimal training**: Per Chinchilla, the optimal strategy allocates compute equally between model size and tokens trained.
-- **Emergent capabilities**: Many capabilities (arithmetic, code, reasoning) emerge only at sufficient scale — they're not explicitly trained but arise from scale.
+- **Compute-optimal training**: Per Chinchilla, the optimal strategy allocates compute equally between model size and tokens trained. The Chinchilla-optimal ratio is roughly 20 tokens per parameter.
+- **Emergent capabilities**: Many capabilities emerge only at sufficient scale and exhibit phase transitions — performance is near zero then suddenly jumps to high accuracy. In-context learning appears around 6-7B parameters; chain-of-thought reasoning around 60-100B parameters (PaLM, GPT-3.5 class); multi-step arithmetic at ~100B+ parameters. Some researchers argue emergence is partly a measurement artifact that depends on the chosen evaluation metric, but the practical effect is that certain capabilities are unavailable below a threshold model size.
 
 ---
 
-## 3. Training Objectives
+## 4. Training Objectives
 
-### 3.1 Causal Language Modeling (CLM) — GPT-style
+### 4.1 Causal Language Modeling (CLM) — GPT-style
 
 Predict the next token given all previous tokens. The loss is the cross-entropy over the full sequence:
 
@@ -53,7 +54,7 @@ Properties:
 - All tokens in a batch contribute to loss (efficient)
 - Used by: GPT, LLaMA, Mistral, Claude, Gemini, all modern generation models
 
-### 3.2 Masked Language Modeling (MLM) — BERT-style
+### 4.2 Masked Language Modeling (MLM) — BERT-style
 
 Randomly mask 15% of tokens; predict the masked tokens:
 
@@ -68,7 +69,7 @@ Properties:
 - Cannot generate text autoregressively
 - Used by: BERT, RoBERTa, DeBERTa, embedding models
 
-### 3.3 Fill-in-the-Middle (FIM) — Code models
+### 4.3 Fill-in-the-Middle (FIM) — Code models
 
 Rearrange training examples so the model learns to complete a middle section given prefix + suffix:
 
@@ -86,9 +87,45 @@ Model must predict the middle given prefix and suffix
 
 Used by: CodeLLaMA, Starcoder, DeepSeek-Coder. Enables IDE completion features where the cursor is in the middle of existing code.
 
+### 4.4 Multi-Token Prediction (MTP)
+
+Instead of predicting only the next single token, the model predicts the next N tokens simultaneously (typically N=4). Multiple prediction heads share the same transformer trunk, with each head independently predicting the token at position +1, +2, ..., +N:
+
+```
+Text: "The quick brown fox jumps over"
+
+Standard CLM (next-1):
+  Input:  "The quick brown fox"
+  Target: "jumps"
+
+Multi-Token Prediction (N=4):
+  Input:  "The quick brown fox"
+  Head 1 target: "jumps"    (position +1)
+  Head 2 target: "over"     (position +2)
+  Head 3 target: "the"      (position +3)
+  Head 4 target: "lazy"     (position +4)
+
+Architecture:
+  [Shared Transformer Trunk]
+          |
+    +-----+-----+-----+
+    |     |     |     |
+  [H1]  [H2]  [H3]  [H4]
+   +1    +2    +3    +4
+
+Loss = Σ_{k=1}^{N} L_k (cross-entropy for each head)
+```
+
+Properties:
+- Forces the model to plan ahead — to predict token +3 correctly, the model must implicitly reason about what tokens +1 and +2 will be, improving coherence on longer sequences
+- Enables 2-3x faster inference via speculative decoding compatibility: the auxiliary heads can draft candidate tokens that the main head verifies in parallel
+- Training cost increases ~15-20% per step due to the additional prediction heads, but models often converge faster, partially offsetting the overhead
+- Can be used as either the primary training objective or as an auxiliary loss alongside standard CLM
+- Used by: DeepSeek-V3 (MTP as auxiliary loss, contributing to its remarkable cost efficiency), Meta's research models
+
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Pre-Training Data Pipeline
 ```
@@ -149,7 +186,7 @@ Final LR: ~10% of peak LR (or 0)
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Data Quality and Filtering
 
@@ -172,6 +209,38 @@ Raw CC crawl: ~100T tokens/year
   v  ~3-5% of raw CC survives (but that's still trillions of tokens)
 ```
 
+### Data Mixture Optimization
+
+The composition and weighting of training data domains has a direct, measurable impact on model capabilities. Not all tokens are equally valuable — a carefully optimized mixture produces significantly better models than uniform sampling.
+
+**Known effective mixtures:**
+```
+LLaMA recipe:
+  ~67% web crawl      (general knowledge, conversational ability)
+  ~15% code            (reasoning, structured output, logic)
+  ~4.5% Wikipedia      (factual accuracy, entity knowledge)
+  ~4.5% books          (long-range coherence, writing quality)
+  ~5% academic papers   (technical depth, citation patterns)
+  ~4.5% other          (forums, Q&A, multilingual)
+
+The Pile (EleutherAI):
+  Manually curated mixture across 22 sources
+  Explicit upsampling of high-quality domains (books, Wikipedia)
+  Deliberate inclusion of niche domains (GitHub, StackExchange, USPTO patents)
+```
+
+**Algorithmic mixture optimization — DoReMi (Google, 2023):**
+1. Train a small proxy model (~280M params) on uniform data
+2. Train a second small model that learns per-domain loss weights by upweighting domains where the proxy struggles
+3. Apply the learned domain weights to train the full-scale model
+4. Result: 2-5% improvement on downstream benchmarks vs. uniform sampling, without increasing total data volume
+
+**Key findings on domain weighting:**
+- Code data at 10-15% improves reasoning across all tasks, even non-code benchmarks like GSM8K (+5-10%), because code requires logical, step-by-step thinking
+- Diminishing returns apply: after ~1T tokens of a single domain, adding more of the same domain yields decreasing benefit — better to diversify
+- Quality filtering is a multiplier: a 10x smaller high-quality dataset can match a 10x larger unfiltered dataset (the Phi "textbooks are all you need" insight)
+- Late-stage mixture shifts (increasing code/math fraction in the final 10-20% of training) can sharpen specific capabilities without degrading general performance
+
 ### Training Dynamics
 
 **Gradient clipping**: Clip gradient norm to ~1.0. Prevents gradient explosion, especially early in training.
@@ -181,6 +250,44 @@ Raw CC crawl: ~100T tokens/year
 **Batch size ramp-up**: Start with small batch size (256K tokens), linearly increase to target (4M tokens) over first few billion tokens. Improves training stability.
 
 **BF16 vs FP16 training**: BF16 (Brain Float16) has the same exponent range as FP32 but fewer mantissa bits. More numerically stable than FP16 for training. Standard for modern LLM training.
+
+### Training Loss Diagnostics
+
+Monitoring the loss curve and related signals is critical for catching problems early and avoiding wasted compute.
+
+**Healthy loss curve**: Smooth exponential decay with small noise. The curve follows a power law: L(t) ~ t^(-alpha), where alpha depends on model size and data quality. Noise amplitude should be consistent — increasing noise suggests data pipeline issues.
+
+**Loss spike classification:**
+```
+Spike Type          | Magnitude  | Duration       | Cause                          | Action
+--------------------|------------|----------------|--------------------------------|------------------
+Transient spike     | 1-5%       | 10-50 steps    | Bad data batch                 | Self-recovers; log and investigate batch
+Moderate spike      | 5-20%      | 50-500 steps   | Data corruption or LR issue    | Roll back checkpoint, skip data
+Divergence          | >20%       | Does not recover| LR too high, NaN gradients     | Stop training, diagnose, restart
+Plateau             | 0% change  | 500+ steps     | Underfitting or data exhaustion | Check data pipeline, adjust LR
+```
+
+**Gradient norm monitoring**: Sudden gradient norm spikes precede loss spikes by approximately 100 steps, providing an early warning signal. Tracking per-layer gradient norms helps isolate which part of the network is destabilizing — attention layers and the final output projection are common culprits.
+
+**Checkpoint strategy**: Save full checkpoints every 1000-2000 steps (in addition to the 30-60 minute hardware-failure checkpoints). After detecting a spike, reload the most recent clean checkpoint and skip the problematic data shard. Some teams maintain a rolling window of the last 3-5 checkpoints to avoid losing too much progress.
+
+**Production heuristic**: If the training loss has not decreased in 500 steps, investigate the data pipeline first (corrupted shards, tokenizer issues, data loader stalls) before adjusting hyperparameters. Data problems are the cause roughly 70% of the time at scale.
+
+### Multi-Token Prediction — Training Mechanics
+
+When using MTP as an auxiliary loss (as in DeepSeek-V3), the total training loss combines the standard next-token loss with the multi-token heads:
+
+```
+L_total = L_CLM + lambda × (1/N) × Σ_{k=2}^{N} L_k
+
+Where:
+  L_CLM   = standard next-token prediction loss
+  L_k     = cross-entropy loss for the k-th prediction head
+  lambda  = auxiliary loss weight (typically 0.1-0.3)
+  N       = number of prediction heads (typically 4)
+```
+
+Each auxiliary head is a lightweight linear projection from the shared trunk's hidden state. The heads do not attend to each other — they independently predict their assigned future position. This keeps the additional compute overhead to ~15-20% per training step while providing a strong planning signal that improves the trunk's representations. During inference, only Head 1 is required for standard autoregressive generation, but all heads can participate in speculative decoding for 2-3x throughput improvement.
 
 ### Compute Scaling
 
