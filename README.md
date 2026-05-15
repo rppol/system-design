@@ -368,6 +368,81 @@ See the [Backend Master Index](src/main/java/com/rutik/systemdesign/backend/READ
 
 ---
 
+### Database Engineering — Principal Engineer & Interview Prep Guide
+
+A laser-focused, principal-engineer-level reference for database internals, selection strategies, production operations, distributed systems, and real-world case studies. 28 modules across 7 phases covering relational, NoSQL, emerging, and distributed database concepts.
+
+#### Phase 1 — Foundations
+| Module | Key Concepts |
+|--------|-------------|
+| [Database Fundamentals](src/main/java/com/rutik/systemdesign/database/database_fundamentals/) | ACID, BASE, CAP, PACELC, isolation levels, MVCC |
+| [Storage Engines Internals](src/main/java/com/rutik/systemdesign/database/storage_engines_internals/) | B+tree, LSM-tree, WAL, buffer pool, row vs columnar storage |
+| [Indexing Deep Dive](src/main/java/com/rutik/systemdesign/database/indexing_deep_dive/) | B+tree, GIN, BRIN, covering indexes, partial, composite, index bloat |
+| [Concurrency Control & Locking](src/main/java/com/rutik/systemdesign/database/concurrency_control_and_locking/) | MVCC, deadlocks, gap locks, SELECT FOR UPDATE SKIP LOCKED, advisory locks |
+
+#### Phase 2 — Relational Databases
+| Module | Key Concepts |
+|--------|-------------|
+| [PostgreSQL Internals](src/main/java/com/rutik/systemdesign/database/postgresql_internals/) | VACUUM, autovacuum, EXPLAIN ANALYZE, TOAST, replication slots, partitioning |
+| [MySQL InnoDB Internals](src/main/java/com/rutik/systemdesign/database/mysql_innodb_internals/) | Clustered index, redo/undo log, binary log, online DDL, GTID |
+| [SQL Query Optimization](src/main/java/com/rutik/systemdesign/database/sql_query_optimization/) | Join algorithms, CBO statistics, keyset pagination, N+1, window functions |
+| [Schema Design & Normalization](src/main/java/com/rutik/systemdesign/database/schema_design_and_normalization/) | Normal forms, temporal data, audit trails, multi-tenancy, JSONB |
+| [Database Migrations (Zero Downtime)](src/main/java/com/rutik/systemdesign/database/database_migrations_zero_downtime/) | Flyway, Liquibase, expand-contract, gh-ost, CREATE INDEX CONCURRENTLY |
+
+#### Phase 3 — NoSQL Databases
+| Module | Key Concepts |
+|--------|-------------|
+| [Document Databases](src/main/java/com/rutik/systemdesign/database/document_databases/) | MongoDB WiredTiger, embedding vs referencing, aggregation pipeline, sharding |
+| [Key-Value Stores](src/main/java/com/rutik/systemdesign/database/key_value_stores/) | Redis data structures, persistence (RDB/AOF), Cluster, Streams, Redlock |
+| [Wide-Column Databases](src/main/java/com/rutik/systemdesign/database/wide_column_databases/) | Cassandra ring, partition key, compaction strategies, consistency levels |
+| [Search Engines](src/main/java/com/rutik/systemdesign/database/search_engines/) | Inverted index, BM25, Elasticsearch ILM, aggregations, deep pagination |
+| [Graph Databases](src/main/java/com/rutik/systemdesign/database/graph_databases/) | Property graph, Neo4j index-free adjacency, Cypher, fraud detection patterns |
+| [Time-Series Databases](src/main/java/com/rutik/systemdesign/database/time_series_databases/) | TimescaleDB, InfluxDB, ClickHouse, Prometheus, Gorilla XOR compression |
+
+#### Phase 4 — Emerging Databases
+| Module | Key Concepts |
+|--------|-------------|
+| [Vector Databases](src/main/java/com/rutik/systemdesign/database/vector_databases/) | HNSW, IVF, PQ, pgvector, hybrid search, multi-tenancy, RAG integration |
+| [NewSQL & Distributed SQL](src/main/java/com/rutik/systemdesign/database/newsql_and_distributed_sql/) | Spanner TrueTime, CockroachDB Raft, TiDB HTAP, YugabyteDB, global ACID |
+| [In-Memory Databases](src/main/java/com/rutik/systemdesign/database/in_memory_databases/) | Redis vs Memcached, VoltDB, Ignite, eviction policies, durability modes |
+
+#### Phase 5 — Distributed Database Concepts
+| Module | Key Concepts |
+|--------|-------------|
+| [Replication & High Availability](src/main/java/com/rutik/systemdesign/database/replication_and_high_availability/) | Sync vs async, Patroni, split-brain prevention, replication slots, multi-region |
+| [Sharding & Partitioning](src/main/java/com/rutik/systemdesign/database/sharding_and_partitioning/) | Consistent hashing, shard key selection, Vitess, celebrity shard, resharding |
+| [Distributed Transactions](src/main/java/com/rutik/systemdesign/database/distributed_transactions/) | 2PC, Saga (choreography vs orchestration), outbox pattern, idempotency keys |
+| [Consistency Models & Consensus](src/main/java/com/rutik/systemdesign/database/consistency_models_and_consensus/) | Linearizability, Raft, Paxos, CRDTs, vector clocks, fencing tokens |
+| [Database Caching Patterns](src/main/java/com/rutik/systemdesign/database/database_caching_patterns/) | Cache-aside, write-through, write-behind, stampede prevention, hot key |
+
+#### Phase 6 — Production Operations
+| Module | Key Concepts |
+|--------|-------------|
+| [Connection Pool Management](src/main/java/com/rutik/systemdesign/database/connection_pool_management/) | HikariCP internals, pool sizing formula, PgBouncer transaction mode, K8s storm |
+| [Database Performance Tuning](src/main/java/com/rutik/systemdesign/database/database_performance_tuning/) | shared_buffers, work_mem, checkpoint tuning, autovacuum, slow query analysis |
+| [Backup, Recovery & Disaster Recovery](src/main/java/com/rutik/systemdesign/database/backup_recovery_and_disaster_recovery/) | PITR, WAL-G, pgBackRest, RPO/RTO measurement, restore drills |
+| [Database Security & Compliance](src/main/java/com/rutik/systemdesign/database/database_security_and_compliance/) | RLS, scram-sha-256, pgAudit, HashiCorp Vault, GDPR erasure, TDE |
+
+#### Phase 7 — Architecture & Selection
+| Module | Key Concepts |
+|--------|-------------|
+| [Database Selection Framework](src/main/java/com/rutik/systemdesign/database/database_selection_framework/) | Selection matrix, benchmark traps, TCO analysis, scorecard methodology |
+| [Polyglot Persistence Patterns](src/main/java/com/rutik/systemdesign/database/polyglot_persistence_patterns/) | CQRS, CDC (Debezium), dual-write failure modes, event sourcing, data mesh |
+
+#### Database Case Studies
+| Case Study | Key Databases | Core Concepts | Level |
+|------------|--------------|---------------|-------|
+| [Banking Ledger](src/main/java/com/rutik/systemdesign/database/case_studies/design_banking_ledger/) | PostgreSQL, Redis | Double-entry bookkeeping, SERIALIZABLE isolation, idempotency, RPO=0 | Expert |
+| [E-Commerce Catalog](src/main/java/com/rutik/systemdesign/database/case_studies/design_ecommerce_catalog/) | PostgreSQL, Elasticsearch, Redis | Polyglot persistence, CDC sync, inventory counters, full-text search | Advanced |
+| [Social Media Feed Storage](src/main/java/com/rutik/systemdesign/database/case_studies/design_social_media_feed_storage/) | Cassandra, Redis, PostgreSQL | Fan-out on write vs read, celebrity problem, TWCS, trending leaderboards | Advanced |
+| [Real-Time Analytics Platform](src/main/java/com/rutik/systemdesign/database/case_studies/design_realtime_analytics_platform/) | ClickHouse, Kafka, Redis | Columnar storage, materialized views, HyperLogLog, tenant isolation | Expert |
+| [Multi-Tenant SaaS Database](src/main/java/com/rutik/systemdesign/database/case_studies/design_multitenant_saas_database/) | PostgreSQL (RLS/schema/DB), PgBouncer | Three-tier isolation, RLS, schema-per-tenant, connection pooling at scale | Expert |
+| [Monolith to Polyglot Migration](src/main/java/com/rutik/systemdesign/database/case_studies/design_monolith_to_polyglot_migration/) | MySQL, PostgreSQL, Elasticsearch, ClickHouse | Strangler fig, CDC, dual-write, validation, zero-downtime migration | Expert |
+
+See the [Database Engineering Master Index](src/main/java/com/rutik/systemdesign/database/README.md) for the full 7-phase learning path, version matrix, and cross-reference map.
+
+---
+
 ## How to Use This Repository
 
 1. **Learning Path**: Start with SOLID principles, then move to Creational -> Structural -> Behavioral patterns

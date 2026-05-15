@@ -88,6 +88,8 @@ Quality                Architecture          Architecture
 | [Distributed Transactions & Consistency](distributed_transactions_and_consistency/) | 2PC problems, Saga, outbox pattern, idempotency keys | 15 | Expert |
 | [Database Types Deep Dive](database_types_deep_dive/) | Relational, Document, Key-Value, Wide-Column, Time-Series, Search, Graph, NewSQL — internals, tradeoffs, selection criteria | 18 | Expert |
 
+> For deeper coverage of every database topic above — storage engine internals, NoSQL deep dives, distributed consensus, polyglot persistence, production operations, and 6 end-to-end case studies — see the [Database Engineering](../database/README.md) section (28 modules, 7 phases, principal-engineer level).
+
 ### Phase 5 — Resilience & Reliability
 
 | Module | Topic | Q&As | Difficulty |

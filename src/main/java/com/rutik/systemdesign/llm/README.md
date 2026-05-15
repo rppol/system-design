@@ -55,17 +55,17 @@ This section is organized into **34 topic directories** plus **7 real-world case
 | 20 | [vLLM Deep Dive](vllm_deep_dive/README.md) | PagedAttention, continuous batching, prefix caching, speculative decoding, quantization, TP/PP, LoRA, structured output | Advanced |
 | 21 | [Optimization & Quantization](optimization_and_quantization/README.md) | GPTQ, AWQ, Flash Attention, MoE, pruning, distillation | Advanced |
 | 22 | [Deployment & MLOps](deployment_and_mlops/README.md) | Serving, GPU cost, monitoring, routing, edge deployment | Intermediate |
-| 23 | [Evaluation & Benchmarks](evaluation_and_benchmarks/README.md) | MMLU, HumanEval, LLM-as-judge, Chatbot Arena, RAGAs | Intermediate |
-| 24 | [Guardrails & Content Safety](guardrails_and_content_safety/README.md) | NeMo Guardrails, Llama Guard, input/output filters | Intermediate |
-| 25 | [Safety & Alignment](safety_and_alignment/README.md) | Jailbreaking, prompt injection, hallucination, bias, red teaming | Intermediate |
-| 26 | [Multimodal Models](multimodal_models/README.md) | VLMs, vision encoders, diffusion, speech, video | Advanced |
-| 27 | [AI Applications](ai_applications/README.md) | Healthcare, legal, finance, education, customer support | Beginner |
-| 28 | [LLM Ecosystem & Landscape](llm_ecosystem_and_landscape/README.md) | Model families, licensing, cost analysis, timeline | Beginner |
-| 29 | [MCP (Model Context Protocol)](mcp_model_context_protocol/README.md) | MCP servers/clients, resources/tools/prompts, transports, JSON-RPC, A2A | Intermediate |
-| 30 | [Small Language Models & Edge AI](small_language_models_and_edge_ai/README.md) | Phi-3/4, LLaMA 3.2 1B/3B, on-device inference, quantization for mobile | Intermediate |
-| 31 | [Mixture of Experts](mixture_of_experts/README.md) | MoE architecture, top-k routing, load balancing, Mixtral, DeepSeek-V3 | Advanced |
-| 32 | [LLM Routing & Model Selection](llm_routing_and_model_selection/README.md) | Multi-model routing, cascade patterns, confidence thresholds, cost-quality optimization | Intermediate |
-| 33 | [Token Economics & Cost Optimization](token_economics_and_cost_optimization/README.md) | Per-token pricing, prompt caching, batch APIs, self-hosting break-even, budget enforcement | Intermediate |
+| 23 | [Token Economics & Cost Optimization](token_economics_and_cost_optimization/README.md) | Per-token pricing, prompt caching, batch APIs, self-hosting break-even, budget enforcement | Intermediate |
+| 24 | [LLM Routing & Model Selection](llm_routing_and_model_selection/README.md) | Multi-model routing, cascade patterns, confidence thresholds, cost-quality optimization | Intermediate |
+| 25 | [Evaluation & Benchmarks](evaluation_and_benchmarks/README.md) | MMLU, HumanEval, LLM-as-judge, Chatbot Arena, RAGAs | Intermediate |
+| 26 | [Guardrails & Content Safety](guardrails_and_content_safety/README.md) | NeMo Guardrails, Llama Guard, input/output filters | Intermediate |
+| 27 | [Safety & Alignment](safety_and_alignment/README.md) | Jailbreaking, prompt injection, hallucination, bias, red teaming | Intermediate |
+| 28 | [Multimodal Models](multimodal_models/README.md) | VLMs, vision encoders, diffusion, speech, video | Advanced |
+| 29 | [Small Language Models & Edge AI](small_language_models_and_edge_ai/README.md) | Phi-3/4, LLaMA 3.2 1B/3B, on-device inference, quantization for mobile | Intermediate |
+| 30 | [Mixture of Experts](mixture_of_experts/README.md) | MoE architecture, top-k routing, load balancing, Mixtral, DeepSeek-V3 | Advanced |
+| 31 | [MCP (Model Context Protocol)](mcp_model_context_protocol/README.md) | MCP servers/clients, resources/tools/prompts, transports, JSON-RPC, A2A | Intermediate |
+| 32 | [AI Applications](ai_applications/README.md) | Healthcare, legal, finance, education, customer support | Beginner |
+| 33 | [LLM Ecosystem & Landscape](llm_ecosystem_and_landscape/README.md) | Model families, licensing, cost analysis, timeline | Beginner |
 | 34 | [Data Flywheels & Continuous Learning](data_flywheels_and_continuous_learning/README.md) | Production feedback loops, active learning, drift detection, A/B testing for LLMs | Advanced |
 
 ---

@@ -1,0 +1,450 @@
+# Wide-Column Databases
+
+## 1. Concept Overview
+
+Wide-column databases (also called column-family stores) store data in rows with dynamic columns, where different rows can have different columns. Apache Cassandra is the dominant open-source wide-column database, offering leaderless distributed architecture, tunable consistency, and linear scalability. Unlike relational tables, Cassandra's data model is designed around query patterns, not entity relationships.
+
+---
+
+## 2. Intuition
+
+Cassandra is like a distributed sorted map: each row has a partition key (determines which node), a clustering key (sort order within the partition), and arbitrary columns. Design rule: know your queries first, then design the table to answer them. Cassandra cannot do what you didn't design for.
+
+- **Key insight**: In Cassandra, queries drive schema design — the opposite of relational modeling. One access pattern = one table. Denormalization is expected and correct.
+
+---
+
+## 3. Core Principles
+
+### Cassandra Architecture (Ring / Consistent Hashing)
+
+```
+Token Ring (6 nodes, RF=3):
+
+Node 1: tokens 0-17
+Node 2: tokens 17-34
+Node 3: tokens 34-51         ← Virtual nodes (vnodes) default 256 per node
+Node 4: tokens 51-68            distribute tokens across ring evenly
+Node 5: tokens 68-85
+Node 6: tokens 85-99
+
+Partition key → murmur3 hash → token → ring position → 3 nodes (RF=3)
+
+Gossip Protocol: nodes exchange health information every second
+                 → All nodes know all other nodes' state without central coordinator
+                 → Node failure detected via heartbeat timeout
+```
+
+### Data Model
+
+```
+Keyspace (= database): defines RF (replication factor), replication strategy
+  Table: defines partition key, clustering key, regular columns
+    Partition: all rows with the same partition key value
+      Rows: rows within a partition, sorted by clustering key
+
+CREATE TABLE sensor_readings (
+    device_id   UUID,        -- Partition key: distributes data across nodes
+    ts          TIMESTAMP,   -- Clustering key: sort order WITHIN partition
+    temperature DOUBLE,
+    humidity    DOUBLE,
+    PRIMARY KEY (device_id, ts)  -- (partition key, clustering key)
+) WITH CLUSTERING ORDER BY (ts DESC);
+
+-- Query pattern this serves:
+SELECT * FROM sensor_readings
+WHERE device_id = ? AND ts >= ? AND ts <= ?;
+-- CANNOT do: WHERE temperature > 30 (not partition/clustering key)
+-- CANNOT do: WHERE ts = ? (without device_id first)
+```
+
+### Consistency Levels
+
+```
+Replication Factor = 3
+
+Consistency Level (CL):
+  ONE:    Respond after 1 replica acknowledges. Fastest, may read stale data.
+  TWO:    2 replicas. Faster than QUORUM, less consistent.
+  QUORUM: ⌊RF/2⌋ + 1 = 2 replicas must respond. Balance of speed and consistency.
+  ALL:    All 3 replicas. Strongest, fails if any replica is down.
+  LOCAL_QUORUM: QUORUM only within local datacenter. For multi-DC deployments.
+
+Read + Write QUORUM = "strong consistency" (for this RF):
+  Write QUORUM ensures 2/3 replicas have latest value
+  Read QUORUM reads 2/3 replicas → at least one has latest value
+
+Formula: W + R > RF → strong consistency
+  QUORUM + QUORUM = 2+2=4 > 3 → strong ✓
+  ONE + ONE = 1+1=2 ≤ 3 → eventual ✗
+```
+
+---
+
+## 4. Types / Architectures / Strategies
+
+### Write Path
+
+```
+Client → Coordinator node
+           |
+    ┌──────┴──────┐
+    ↓             ↓          ↓
+Replica 1    Replica 2   Replica 3
+    |
+    ├── 1. Write to commit log (WAL, sequential, durable)
+    ├── 2. Write to memtable (in-memory sorted structure)
+    └── 3. ACK to coordinator when (CL) replicas respond
+
+Memtable flush (when full, ~64MB default):
+  → Immutable SSTable written to disk
+  → SSTable: sorted, immutable file of key-value pairs
+
+Result:
+- Writes are sequential (commit log) → very fast
+- Write amplification from compaction (background)
+- No updates: new row version written (timestamp determines latest)
+```
+
+### Read Path
+
+```
+Client → Coordinator → sends read to replica(s) based on CL
+
+On Replica:
+1. Bloom filter: is this partition key in THIS SSTable? (99.9% accurate, skip if NO)
+2. Partition key cache: direct SSTable offset lookup (if cached)
+3. Row cache: entire partition cached? Return immediately (if enabled)
+4. SSTable index: binary search for partition key
+5. SSTable data: read rows, filter by clustering key
+6. Merge across multiple SSTables: take latest version per column (by timestamp)
+7. Return to coordinator → coordinator merges if multiple replicas → return to client
+
+Read repair: if replicas return different data → coordinator sends repair to stale replica
+```
+
+### Compaction Strategies
+
+```
+STCS (Size-Tiered Compaction Strategy) — default:
+  Merges SSTables of similar size
+  Good: write performance (low write amplification)
+  Bad:  space amplification (up to 2x), uneven read performance
+  Use:  write-heavy workloads, heavy inserts with few reads
+
+LCS (Leveled Compaction Strategy):
+  Organizes into size levels, like LSM-tree
+  Good: space efficiency (1.1x), consistent read performance
+  Bad:  high write amplification (10-30x), more I/O
+  Use:  read-heavy workloads, mixed OLTP
+
+TWCS (Time Window Compaction Strategy):
+  Groups SSTables by time window, compacts within window
+  Good: excellent for time-series data with TTL (entire SSTable expires together)
+  Bad:  not suitable for non-time-series data
+  Use:  time-series, IoT, event logs with TTL
+```
+
+### Lightweight Transactions (LWT) — CAS
+
+```cql
+-- Conditional INSERT (if not exists):
+INSERT INTO users (id, email) VALUES (uuid(), 'alice@example.com')
+IF NOT EXISTS;
+-- Uses Paxos protocol: 4-round-trip coordination
+-- Achieves linearizability (unlike normal Cassandra eventual consistency)
+-- Cost: ~4x latency vs regular write, lower throughput
+
+-- Conditional UPDATE:
+UPDATE accounts SET balance = 600
+WHERE user_id = 42
+IF balance = 500;
+-- Returns [applied=true] or [applied=false, balance=current_value]
+
+-- Use LWT only when absolutely necessary (login, unique constraint emulation)
+-- Performance: ~5-10x slower than regular writes
+```
+
+---
+
+## 5. Architecture Diagrams
+
+```
+CASSANDRA DATA DISTRIBUTION (RF=3, 6 nodes):
+
+Data: device_id=UUID-42
+murmur3(UUID-42) → token 47 → Node 3 owns token 47
+RF=3 → replicate to next 2 nodes: Node 4, Node 5
+
+   Node1    Node2    Node3    Node4    Node5    Node6
+  [0-17]  [17-34]  [34-51]  [51-68]  [68-85]  [85-99]
+                  [PRIMARY] [REPLICA] [REPLICA]
+
+Write with CL=QUORUM: wait for 2/3 of {Node3, Node4, Node5} to ACK
+Read with CL=QUORUM: request from 2/3 of {Node3, Node4, Node5}, take latest
+
+PARTITION STRUCTURE:
+
+Partition Key: device_id=UUID-42
+┌────────────────────────────────────────────────────────┐
+│ Partition: UUID-42                                     │
+│ ┌──────────────┬───────────┬──────────┬─────────────┐ │
+│ │ 2024-07-15   │ 100.0°F   │ 65%      │ ...         │ │
+│ │ (ts=latest)  │           │          │             │ │
+│ ├──────────────┼───────────┼──────────┼─────────────┤ │
+│ │ 2024-07-14   │ 98.6°F    │ 60%      │ ...         │ │
+│ ├──────────────┼───────────┼──────────┼─────────────┤ │
+│ │ ...          │ ...       │ ...      │ ...         │ │
+│ └──────────────┴───────────┴──────────┴─────────────┘ │
+│ Rows sorted by ts DESC (CLUSTERING ORDER BY ts DESC)  │
+└────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### Tombstone Accumulation Problem
+
+```
+Delete in Cassandra: writes a tombstone marker (not a physical delete)
+  DELETE FROM sensor_readings WHERE device_id=? AND ts=?
+  → Writes: {partition_key, clustering_key, tombstone_timestamp}
+
+Tombstones are resolved during compaction (SSTables that contain tombstone are merged)
+But tombstones must be retained until gc_grace_seconds (default 10 days) has passed
+  → Ensures deleted data propagates to all replicas before removal
+
+Problem scenario:
+  - 50M sensor readings deleted (device retired)
+  - Table has 50M tombstones
+  - Each read scans through tombstones before finding live data
+  - Read: "Scanned X rows before returning Y results" → X >> Y = tombstone problem
+
+Fixes:
+  1. Set TTL on inserts instead of deleting (TWCS compaction expires entire SSTables)
+     INSERT INTO sensor_readings (...) VALUES (...) USING TTL 86400
+  2. Tune tombstone_gc.mode=repair (Cassandra 4.1+): gc tombstones after repair
+  3. Reduce tombstone_threshold=0.1 (compact when 10% of SSTable is tombstones)
+  4. ALLOW FILTERING is never the fix — it disables partition pruning
+```
+
+### Anti-Patterns
+
+```
+1. Large partitions: partition > 100MB (soft limit) or > 100K rows
+   Causes: hot nodes during compaction, OOM during reads
+   Fix: add a "bucket" to the partition key (device_id, date) instead of (device_id)
+
+2. ALLOW FILTERING:
+   SELECT * FROM sensor_readings WHERE temperature > 90 ALLOW FILTERING;
+   → Full cluster scan (every partition on every node)
+   → Production-killing, never acceptable at scale
+   Fix: use a secondary index (for low-cardinality) or redesign table schema
+
+3. IN clause with many values:
+   SELECT * FROM users WHERE id IN (uuid1, uuid2, ..., uuid10000);
+   → Coordinator contacts 10000 partitions across cluster = scatter-gather
+   Fix: use token-aware drivers (hit correct nodes directly), or batch async reads
+
+4. No TTL on high-cardinality time-series:
+   Without TTL, data grows indefinitely. Disk fills. Compaction never reduces size.
+   Fix: INSERT ... USING TTL <seconds> or set default_time_to_live on table
+```
+
+---
+
+## 7. Real-World Examples
+
+- **Netflix**: Uses Cassandra for viewing history, user preferences, billing. Partition key = user_id, clustering key = show_id or timestamp.
+- **Discord**: Stores message history in Cassandra. Partition key = (channel_id, bucket_id) where bucket_id = `timestamp / 1000 / BUCKET_SIZE` to avoid large partitions.
+- **Instagram**: Uses Cassandra for time-series social graph (follower/following counts per user over time).
+- **Apple**: 75,000+ node Cassandra clusters for iCloud data storage (the largest known Cassandra deployment).
+
+---
+
+## 8. Tradeoffs
+
+| Feature | Cassandra | PostgreSQL | MongoDB |
+|---------|-----------|-----------|---------|
+| Write throughput | Very High (sequential writes) | High | High |
+| Read latency | Low (< 5ms local DC) | Low (< 10ms indexed) | Low (< 5ms) |
+| Horizontal scale | Linear, built-in | Manual (Citus) | Built-in (sharding) |
+| Consistency | Tunable (eventual to strong) | Strong (ACID) | Tunable |
+| Schema flexibility | Moderate | Rigid | High |
+| Query flexibility | Limited (partition key required) | Very High (SQL) | High (aggregation) |
+| Secondary indexes | Limited (local, materialized view) | Rich (B+tree, GIN, etc.) | Rich |
+| Transactions | Single partition or LWT | Full ACID | 4.0+ transactions |
+
+---
+
+## 9. When to Use / When NOT to Use
+
+**Use Cassandra when**:
+- Write-heavy workloads (> 100K writes/second)
+- Time-series data with natural partition key (device_id, user_id)
+- Global distribution with multi-datacenter requirements
+- Linear horizontal scale required
+- Queries always include the partition key
+
+**Do not use Cassandra when**:
+- Complex ad-hoc queries (no partition key in WHERE clause)
+- Transactions across multiple partitions required
+- Rich secondary indexing needed
+- Small datasets (< 1TB) — PostgreSQL is simpler and more flexible
+- Team needs SQL and relational modeling
+
+---
+
+## 10. Common Pitfalls
+
+**Pitfall 1: Unbound partition growth**
+A chat application stores all messages in `(conversation_id)` partition. After 3 years, popular conversations have 10M messages → multi-gigabyte partitions → OOM during compaction, slow reads. Fix: bucket the partition key: `(conversation_id, month)` where month = YYYYMM. Each partition holds one month of messages. Old months can be TTL-expired or moved to cold storage.
+
+**Pitfall 2: Tombstone explosion from time-series deletions**
+An IoT platform sends DELETE for each sensor reading older than 30 days (instead of using TTL). 10M deletes/day → 300M tombstones/month. Read latency degrades from 2ms to 2 seconds as reads scan tombstones. Fix: switch to `INSERT INTO ... USING TTL 2592000` (30 days in seconds). Use TWCS compaction — entire SSTables expire and are dropped without tombstone scanning.
+
+**Pitfall 3: Using Cassandra like a relational database**
+Development team writes `SELECT * FROM orders WHERE status = 'pending' ALLOW FILTERING`. Works fine in dev (1000 rows). In production (100M rows): scans all partitions on all nodes, takes 30+ seconds, saturates network. Fix: redesign table with status as partition key component, or maintain a separate `orders_by_status` table.
+
+**Pitfall 4: Multi-DC replication without LOCAL_QUORUM**
+Using `QUORUM` in a multi-DC deployment: QUORUM requires ⌊RF/2⌋+1 total nodes — this includes nodes in other datacenters. A cross-DC read/write adds 50-300ms latency. Fix: use `LOCAL_QUORUM` — requires quorum within the local datacenter only. Use `EACH_QUORUM` only when all DCs must have the latest data (rare use case).
+
+**Pitfall 5: Not understanding replication factor implications**
+A team sets RF=1 ("we don't need replication, we'll use RAID"). Node failure → data for all partitions on that node is lost (no replicas). Cassandra's distributed model assumes nodes will fail — RF=1 provides no fault tolerance. Minimum recommended: RF=3 for production. RF=3 means any single node can fail without data loss or service interruption.
+
+---
+
+## 11. Technologies & Tools
+
+| Tool | Purpose |
+|------|---------|
+| `nodetool status` | Cluster node health, token distribution, load |
+| `nodetool tpstats` | Thread pool stats, pending tasks, dropped messages |
+| `nodetool compactionstats` | Compaction progress and pending work |
+| `nodetool tablestats` | Per-table stats (partition size, tombstones, bloom filter efficiency) |
+| `cassandra-stress` | Built-in benchmarking tool |
+| `DataStax Astra DB` | Managed Cassandra (DBaaS) |
+| `DataStax Studio` | GUI for CQL development |
+| `Medusa` | Backup/restore tool for Cassandra |
+| `Reaper` | Cassandra repair management |
+| `Cassandra Exporter` | Prometheus metrics exporter |
+| ScyllaDB | C++ Cassandra-compatible alternative (shard-per-core, no JVM) |
+
+---
+
+## 12. Interview Questions with Answers
+
+**How do you design a Cassandra data model for time-series sensor readings?**
+Start with the query: "Get all readings for device X in time range [T1, T2]." Partition key: `device_id` — distributes devices across nodes. Clustering key: `ts DESC` — reads most recent first, enables range queries within partition. Problem: one device could accumulate millions of readings over years → large partition (> 100MB). Fix: compound partition key `(device_id, bucket)` where `bucket = date_trunc('day', ts)` or `ts_epoch / 86400` — one partition per device per day. Today's data is on one partition; historical data on separate partitions that can be TTL-expired. Index: the partition key is the "index" — queries must include device_id + bucket (or date range which implies bucket range).
+
+**What causes tombstone accumulation and how does it affect read performance?**
+Every DELETE in Cassandra writes a tombstone marker instead of physically removing data. Tombstones must survive for `gc_grace_seconds` (default 10 days) to allow propagation to temporarily-offline replicas. During reads, Cassandra must scan and skip tombstones to find live data. If many tombstones exist in a partition, reads must process thousands of tombstones before returning results — dramatically increasing read latency and coordinator-side CPU. Detection: `nodetool tablestats` shows `Average tombstones per read`. Prevention: use TTL (`INSERT ... USING TTL N`) instead of DELETE for time-expiring data. Use TWCS compaction for time-series — entire SSTables expire without creating individual tombstones. If using STCS, set `tombstone_compaction_interval_in_day=1` to compact tombstone-heavy SSTables frequently.
+
+**Explain how Cassandra achieves linearizability with lightweight transactions.**
+Cassandra's default consistency model is eventual (tunable to strong via QUORUM, but not linearizable). Lightweight Transactions (LWT) use the Paxos consensus protocol to achieve linearizability for single-partition operations. LWT workflow: (1) Prepare: coordinator sends prepare to all replicas for the partition, each responds with the highest promised Paxos round it knows. (2) Promise: if coordinator gets majority acknowledgment, proceeds. (3) Propose: coordinator sends the conditional operation (CAS: IF balance = 500 THEN balance = 600). (4) Commit: replicas commit if the condition is still true. Cost: 4 round trips (vs 1 for regular writes) → 4x latency, ~10x less throughput. Use only for: unique constraints (INSERT IF NOT EXISTS for unique emails), distributed counters requiring exact accuracy, reservation systems.
+
+**How does Cassandra's consistent hashing with vnodes differ from simple consistent hashing?**
+Simple consistent hashing: each node owns one contiguous token range. Node addition: the new node takes over one range from one existing node — only data from that one neighbor migrates. Problem: uneven distribution (some nodes get large ranges, others small). Vnodes (virtual nodes): each physical node owns multiple (default 256) non-contiguous token ranges distributed across the ring. Node addition: the new node takes a small range from many existing nodes → migration load distributed across all nodes. Benefits: (1) More uniform data distribution — each node has statistically similar data volume. (2) Faster rebalancing — only a small fraction of data from each node migrates. (3) Heterogeneous hardware: assign more vnodes to larger nodes. The tradeoff: higher coordination overhead (more token ranges to track in gossip).
+
+**What is the difference between STCS, LCS, and TWCS compaction strategies?**
+STCS (Size-Tiered): merges SSTables of similar sizes. Low write amplification — SSTables are merged infrequently and only with similar-sized peers. Space amplification: up to 2x (multiple overlapping SSTables with different versions of same row). Best for: write-heavy workloads where reads are infrequent. LCS (Leveled): organizes SSTables in size levels (similar to RocksDB LCS). Each level is a sorted, non-overlapping set. Low space amplification (1.1x). Higher write amplification (10-30x). Consistent read performance (fewer SSTables to check). Best for: read-heavy workloads, mixed OLTP. TWCS (Time Window): designed for time-series with TTL. Groups SSTables by time window (e.g., 1 hour). Compacts within windows but not across windows. When a time window's TTL expires, the entire SSTable is dropped — no tombstone scanning. Best for: IoT, time-series, any data with uniform TTL.
+
+**What is the replication factor and how does it interact with consistency levels?**
+Replication factor (RF): how many copies of each partition are stored across nodes. RF=3: every partition is stored on 3 different nodes. Fault tolerance: tolerate RF-1 node failures for full availability. Consistency level (CL) determines how many replicas must respond before acknowledging the operation. Strong consistency guarantee: W + R > RF. With RF=3, QUORUM (2/3) + QUORUM (2/3) = 4 > 3 → strong consistency (every read will see the latest write). With ONE + ONE = 2 ≤ 3 → eventual consistency (may read stale data). In multi-DC setup: `LOCAL_QUORUM` applies the quorum requirement only to the local datacenter, preventing cross-DC latency while maintaining local consistency.
+
+**How does Cassandra's leaderless architecture differ from a primary-replica model?**
+Primary-replica (PostgreSQL, MongoDB replica set): one node is the designated writer (primary). All writes go to primary, replicated to replicas. Failure of primary → election required → brief outage. Single-region writes (limited by primary's capacity). Leaderless (Cassandra): any node can handle any request. Client (or coordinator) sends writes to all RF replicas in parallel. No election needed on failure — coordinator simply routes around the failed node to remaining replicas (if CL is satisfied). Advantages: write throughput scales horizontally (any node can accept writes), no single point of failure, no election latency. Disadvantage: no total ordering of writes (conflict resolution via LWW timestamp, not transaction order), requires Paxos (LWT) for linearizability.
+
+**What is ALLOW FILTERING in Cassandra and why is it dangerous?**
+`ALLOW FILTERING` instructs Cassandra to perform a full cluster scan — it reads all partitions across all nodes, filtering at the coordinator. For a 1TB dataset across 10 nodes, a query with ALLOW FILTERING potentially reads 1TB of data to return a small result set. Cassandra disallows non-partition-key predicates by default to prevent this. When you add `ALLOW FILTERING`, you bypass this protection. In development with small data (1000 rows): returns in milliseconds. In production (100M rows): saturates network, CPU on all nodes, returns in 60+ seconds, blocks other queries. The fix is never ALLOW FILTERING — redesign the table or add a materialized view/secondary index for the access pattern.
+
+**How do you handle multi-datacenter Cassandra deployments?**
+Multi-DC Cassandra uses the `NetworkTopologyStrategy` replication strategy: `CREATE KEYSPACE myapp WITH REPLICATION = {'class': 'NetworkTopologyStrategy', 'us-east': 3, 'eu-west': 3}`. This places 3 replicas in each DC (total RF=6). For writes: use `LOCAL_QUORUM` — ensures 2/3 replicas in local DC ACK (fast, no cross-DC latency), then async replication to other DCs. For reads: `LOCAL_QUORUM` reads from local DC. Cross-DC consistency: eventually consistent by default. For globally consistent reads: `EACH_QUORUM` or `ALL` — 50-300ms cross-DC latency. Conflict resolution: Cassandra uses LWW (Last Write Wins) by server timestamp. Ensure NTP is synchronized across DCs (within 1ms accuracy) to prevent incorrect conflict resolution.
+
+**What is the bloom filter in Cassandra and how does it reduce disk I/O?**
+Each SSTable has a Bloom filter — a probabilistic data structure that answers "is this partition key in this SSTable?" with a controlled false positive rate. Default: 0.1% false positive rate. For a read of partition key K: for each SSTable on disk, check its Bloom filter (in memory). If the filter says NO (100% accurate, no false negatives): skip this SSTable entirely — no disk I/O. If YES (99.9% accurate, 0.1% false positive rate): check the SSTable's index and data (may be a false positive — one unnecessary I/O). Without Bloom filters: every SSTable requires an index lookup for every read (O(N SSTables) I/Os). With Bloom filters: typically 1-2 I/Os per read. Memory cost: ~10 bits/key in the filter.
+
+**Explain the read repair mechanism and when it fires.**
+Read repair: during a read, the coordinator contacts multiple replicas (based on CL). If a QUORUM read returns different data from different replicas (one is stale), the coordinator sends a repair write to the stale replica with the latest value. Two modes: (1) Foreground read repair (read_repair_chance=1.0 for QUORUM reads by default): fires synchronously during every QUORUM read — all replicas are checked, stale ones repaired. Adds latency. (2) Background read repair (dclocal_read_repair_chance): fires asynchronously, does not add to read latency. When it fires: configured probability (0.0-1.0) determines what fraction of reads trigger repair. Best practice: rely on full repair (`nodetool repair`) run weekly rather than read repair, which is designed as a secondary consistency mechanism.
+
+**How do you monitor partition size and detect large partitions?**
+Large partitions (> 100MB) cause problems: hot nodes during compaction, OOM during reads, slow reads (too much data in one partition). Detection: (1) `nodetool tablestats keyspace.table` → "Average partition size" and "Maximum partition size". A maximum much larger than average indicates problematic large partitions. (2) `nodetool toppartitions -s 100ms 30` → Lists top partitions by size and frequency during a sampling window. (3) Enable `large_partition_warn_threshold_mb = 100` in cassandra.yaml — logs warnings for partitions exceeding threshold. (4) Query `system.size_estimates` for partition size estimates per token range. Fix: redesign partition key to subdivide large partitions (add time bucket, shard bucket).
+
+**What happens during a Cassandra node failure and how does the system recover?**
+Node failure detection: heartbeat via gossip stops → other nodes mark it DOWN within ~10 seconds. Data availability: RF=3, CL=QUORUM: 2 of 3 replicas remain → operations continue. Reads and writes are served by the remaining 2 replicas. Hinted handoff: coordinator stores "hints" for writes intended for the failed node (up to max_hint_window_in_ms = 3 hours default). On node recovery: coordinator replays stored hints to the recovered node. After hints expire (or for longer outages): run `nodetool repair` to resync the recovered node from neighboring replicas. Full repair: compares data across all replicas, fixes inconsistencies using Merkle trees (anti-entropy mechanism). Schedule weekly `nodetool repair -full` on each node.
+
+---
+
+## 13. Best Practices
+
+1. Design tables around query patterns — every table serves specific query(ies).
+2. Partition keys must be high-cardinality and evenly distributed. Bucket time-series by time period.
+3. Use TTL (`INSERT ... USING TTL N`) instead of DELETE for time-expiring data.
+4. Use TWCS compaction for time-series tables with TTL.
+5. Never use ALLOW FILTERING in production queries.
+6. Aim for partition sizes < 100MB and < 100K rows per partition.
+7. Use LOCAL_QUORUM for multi-DC deployments to avoid cross-DC latency.
+8. Run `nodetool repair` weekly on each node to prevent replica divergence.
+9. Monitor tombstone counts via `nodetool tablestats` and alert when > 10K per read.
+10. Set `gc_grace_seconds` to < 864000 (10 days default) for tables with frequent deletes.
+
+---
+
+## 14. Case Study
+
+**Scenario**: A smart home platform collects sensor readings from 10 million IoT devices (temperature, humidity, motion, CO2) at 1-minute intervals. Requirements: 24-hour retention, query by device + time range, 500K writes/second, 100K reads/second.
+
+**Initial design (problematic)**:
+```cql
+CREATE TABLE sensor_readings (
+    device_id UUID,
+    ts TIMESTAMP,
+    sensor_type TEXT,
+    value DOUBLE,
+    PRIMARY KEY (device_id, ts)
+);
+-- Problem: after 24 hours, each device has 1440 readings × 4 sensor types = 5760 rows
+-- After 1 year: 5760 × 365 = 2M rows per device → partition too large
+```
+
+**Fixed design with bucketing + TTL**:
+```cql
+CREATE TABLE sensor_readings (
+    device_id   UUID,
+    hour_bucket INT,              -- Unix timestamp / 3600 (hour bucket)
+    ts          TIMESTAMP,
+    sensor_type TEXT,
+    value       DOUBLE,
+    PRIMARY KEY ((device_id, hour_bucket), ts, sensor_type)
+) WITH CLUSTERING ORDER BY (ts DESC, sensor_type ASC)
+  AND default_time_to_live = 86400  -- 24-hour retention
+  AND compaction = {
+    'class': 'TimeWindowCompactionStrategy',
+    'compaction_window_unit': 'HOURS',
+    'compaction_window_size': 1
+  };
+
+-- Max partition size: 60 readings/hour × 4 sensor types = 240 rows ≈ ~30KB
+
+-- Query last 6 hours for a device:
+SELECT * FROM sensor_readings
+WHERE device_id = ? AND hour_bucket IN (?, ?, ?, ?, ?, ?)
+  AND ts >= ? AND ts <= ?;
+-- Application generates hour_bucket values from time range
+
+-- Write:
+INSERT INTO sensor_readings (device_id, hour_bucket, ts, sensor_type, value)
+VALUES (?, ?, ?, ?, ?) USING TTL 86400;
+
+-- Monitoring table for current readings (separate table, 5-minute TTL):
+CREATE TABLE sensor_current (
+    device_id UUID,
+    sensor_type TEXT,
+    ts TIMESTAMP,
+    value DOUBLE,
+    PRIMARY KEY (device_id, sensor_type)
+) WITH default_time_to_live = 300;  -- 5-minute TTL
+```
+
+**Result**: Partition size: 240 rows, ~30KB max. TWCS compaction efficiently expires 1-hour windows when their TTL passes — no tombstone accumulation. Write throughput: 500K/s with 10-node cluster, RF=3, LOCAL_QUORUM. Read latency: < 5ms for 6-hour range queries. 24-hour data volumes: 10M devices × 1440 readings × 4 types = 57.6B rows/day, distributed evenly across all nodes.
