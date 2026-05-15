@@ -722,7 +722,7 @@ A: Naive batching waits for all requests in a batch to complete before accepting
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Always stream responses** — don't buffer; latency perception improves dramatically with streaming.
 2. **Size your KV cache budget** — 30-40% of total GPU memory is a good rule of thumb.
@@ -733,7 +733,7 @@ A: Naive batching waits for all requests in a batch to complete before accepting
 
 ---
 
-## 13. Case Study: Optimizing LLM Serving for a Chat Application
+## 14. Case Study: Optimizing LLM Serving for a Chat Application
 
 **Problem:** Chat app serves 1000 concurrent users with GPT-4-size model (70B). Naive serving: P99 TTFT = 8 seconds, throughput = 50 tokens/sec/GPU.
 

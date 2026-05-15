@@ -439,7 +439,7 @@ Each RAG component has a comprehensive standalone reference with 10+ senior-AI-e
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Evaluate retrieval separately from generation** — use retrieval metrics (recall@K, MRR) to debug retrieval before blaming the LLM.
 2. **Always use hybrid search** — pure dense or pure sparse consistently underperforms hybrid.
@@ -451,7 +451,7 @@ Each RAG component has a comprehensive standalone reference with 10+ senior-AI-e
 
 ---
 
-## 13. Case Study: Building a RAG System for 10,000 Internal Documents
+## 14. Case Study: Building a RAG System for 10,000 Internal Documents
 
 **Context:** Enterprise with 10,000 internal documents (policies, SOPs, HR guides, product docs). Employees spend 2 hours/day searching for information.
 

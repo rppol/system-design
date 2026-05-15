@@ -18,7 +18,7 @@ A comprehensive, one-stop reference for understanding everything about Large Lan
 
 ## What This Section Covers
 
-This section is organized into **34 topic directories** plus **7 real-world case studies**, covering the full LLM lifecycle. Five topics have **deep-dive sub-files** (see the Sub-Files Index below):
+This section is organized into **35 topic directories** plus **7 real-world case studies**, covering the full LLM lifecycle. Five topics have **deep-dive sub-files** (see the Sub-Files Index below):
 
 - How models are built (architecture, tokenization, pre-training, fine-tuning, alignment)
 - How to use models effectively (prompting, RAG, reasoning, code generation)
@@ -46,7 +46,7 @@ This section is organized into **34 topic directories** plus **7 real-world case
 | 11 | [Advanced RAG](advanced_rag/README.md) | Agentic RAG, Graph RAG, multi-modal RAG, evaluation — with 6 deep-dive sub-files | Advanced |
 | 12 | [Reasoning Models](reasoning_models/README.md) | o1/o3, test-time compute, MCTS, DeepSeek-R1, PRM/ORM | Advanced |
 | 13 | [Code Generation](code_generation/README.md) | FIM, CodeLLaMA, Copilot architecture, SWE-bench, code agents | Intermediate |
-| 14 | [Agents & Tool Use](agents_and_tool_use/README.md) | Function calling, ReAct, plan-and-execute, memory systems — with 6 deep-dive sub-files | Intermediate |
+| 14 | [Agents & Tool Use](agents_and_tool_use/README.md) | Function calling, ReAct, plan-and-execute, memory systems — with 7 deep-dive sub-files | Intermediate |
 | 15 | [Agentic Frameworks](agentic_frameworks/README.md) | LangChain/LCEL, LangGraph, LlamaIndex, CrewAI, AutoGen, Semantic Kernel, Haystack, DSPy, observability, structured outputs — with 10 deep-dive sub-files | Intermediate |
 | 16 | [Multi-Agent Systems](multi_agent_systems/README.md) | Orchestrator pattern, debate, ChatDev, MetaGPT, Swarm | Advanced |
 | 17 | [Inference & Decoding](inference_and_decoding/README.md) | Sampling, KV cache, speculative decoding, continuous batching | Advanced |
@@ -67,6 +67,7 @@ This section is organized into **34 topic directories** plus **7 real-world case
 | 32 | [AI Applications](ai_applications/README.md) | Healthcare, legal, finance, education, customer support | Beginner |
 | 33 | [LLM Ecosystem & Landscape](llm_ecosystem_and_landscape/README.md) | Model families, licensing, cost analysis, timeline | Beginner |
 | 34 | [Data Flywheels & Continuous Learning](data_flywheels_and_continuous_learning/README.md) | Production feedback loops, active learning, drift detection, A/B testing for LLMs | Advanced |
+| 35 | [LLM Testing Strategies](llm_testing_strategies/README.md) | Golden datasets, LLM-as-judge, regression eval, flakiness detection, CI/CD integration | Intermediate |
 
 ---
 
@@ -110,6 +111,7 @@ Topics marked with sub-files above contain individual deep-dive files in additio
 | [agent_memory.md](agents_and_tool_use/agent_memory.md) | Agent memory — short-term, long-term, episodic, semantic, working memory |
 | [computer_use_and_browser_agents.md](agents_and_tool_use/computer_use_and_browser_agents.md) | Computer use — Anthropic CUA, browser automation, screen understanding |
 | [agent_evaluation_and_benchmarking.md](agents_and_tool_use/agent_evaluation_and_benchmarking.md) | Agent eval — SWE-bench, GAIA, WebArena, trajectory evaluation |
+| [agent_reliability.md](agents_and_tool_use/agent_reliability.md) | Agent reliability — timeout/circuit breaker, retry, checkpointing, dead-loop detection, human handoff |
 
 ### Agentic Frameworks (`agentic_frameworks/`)
 | File | Topic |
@@ -257,6 +259,7 @@ Step 5: Evaluate and Iterate
 | LLM Routing | Deployment & MLOps, Token Economics, Evaluation |
 | Token Economics | Deployment & MLOps, LLM Ecosystem, LLM Routing |
 | Data Flywheels | Fine-Tuning, Evaluation & Benchmarks, Deployment & MLOps |
+| LLM Testing Strategies | Evaluation & Benchmarks, Agents & Tool Use, Data Flywheels, Deployment & MLOps |
 
 ---
 

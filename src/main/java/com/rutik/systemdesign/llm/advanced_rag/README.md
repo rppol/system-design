@@ -433,7 +433,7 @@ Each strategy has a comprehensive standalone reference with 10+ senior-AI-engine
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Measure before upgrading** — build an evaluation set before adding complexity; quantify the gap advanced RAG closes.
 2. **Use Graph RAG for knowledge graphs, standard RAG for documents** — don't over-apply Graph RAG.
@@ -444,7 +444,7 @@ Each strategy has a comprehensive standalone reference with 10+ senior-AI-engine
 
 ---
 
-## 13. Case Study: Multi-Hop Question Answering Over Financial Reports
+## 14. Case Study: Multi-Hop Question Answering Over Financial Reports
 
 **Problem:** Analysts need to answer complex questions like "Which of our portfolio companies increased revenue AND decreased headcount in Q3 2024?" across 200 earnings reports.
 

@@ -323,6 +323,86 @@ model_with_retry = ChatOpenAI(
 )
 ```
 
+### Prompt Caching with LangChain
+
+Anthropic's prompt caching reduces cost by 90% and latency by 80% for long, repeated system prompts (1000+ tokens). Pass `cache_control` via `extra_headers` on the `ChatAnthropic` model:
+
+```python
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import SystemMessage, HumanMessage
+
+# Mark the system prompt for caching — Anthropic caches the prefix up to this marker
+model = ChatAnthropic(
+    model="claude-opus-4-6",
+    extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
+)
+
+# Cache the long system prompt (must be >= 1024 tokens for claude-3, >= 2048 for claude-3-5)
+system_message = SystemMessage(
+    content=[{
+        "type": "text",
+        "text": "<long system prompt with 2000+ tokens of context, documentation, etc.>",
+        "cache_control": {"type": "ephemeral"}  # cache this prefix
+    }]
+)
+
+chain = model | StrOutputParser()
+
+# First call: cache miss — full input cost
+response1 = chain.invoke([system_message, HumanMessage(content="Question 1")])
+
+# Subsequent calls: cache hit — 90% cost discount on cached tokens
+# Usage metadata shows: cached_input_tokens vs new_input_tokens
+response2 = chain.invoke([system_message, HumanMessage(content="Question 2")])
+# response2.response_metadata["usage"] includes "cache_read_input_tokens"
+```
+
+For OpenAI (GPT-4o-mini, GPT-4o on API), automatic prefix caching is enabled by default. Inspect `usage.prompt_tokens_details.cached_tokens` in the response metadata to verify cache hits. Cached tokens are billed at 50% of standard input price.
+
+**Cost impact**: A RAG chain with a 4096-token system prompt making 1000 calls/day: uncached = $0.02/call × 1000 = $20/day; cached = $0.002/call × 1000 = $2/day. Cache hits also reduce TTFT by 400-600ms for long prompts.
+
+### Streaming Structured Outputs
+
+When using `with_structured_output` or `JsonOutputParser`, LangChain supports partial JSON streaming — yielding parsed fragments as tokens arrive:
+
+```python
+from langchain_core.output_parsers import JsonOutputParser
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel
+
+class ProductReview(BaseModel):
+    sentiment: str
+    score: int
+    summary: str
+    pros: list[str]
+    cons: list[str]
+
+model = ChatOpenAI(model="gpt-4o", temperature=0)
+
+# with_structured_output in streaming mode — yields partial Pydantic objects
+structured_model = model.with_structured_output(ProductReview, include_raw=False)
+
+# Use astream for async streaming of partial objects
+async for partial in structured_model.astream(
+    "Review this product: noise-cancelling headphones with 30h battery..."
+):
+    # partial is a partial ProductReview — fields populate as they arrive
+    # partial.sentiment may be "positive" before partial.pros is populated
+    print(partial)
+
+# JsonOutputParser approach — yields partial dicts
+json_parser = JsonOutputParser(pydantic_object=ProductReview)
+chain = model | json_parser
+
+for partial_dict in chain.stream("Extract review info: ..."):
+    # partial_dict grows as JSON tokens arrive:
+    # {} -> {"sentiment": "pos"} -> {"sentiment": "positive", "score": 4} -> ...
+    if "score" in partial_dict:
+        print(f"Score so far: {partial_dict['score']}")
+```
+
+**Streaming mode**: `streaming_mode="partial"` in `with_structured_output` yields progressively more complete Pydantic models. Use this for real-time UI updates (show fields as they parse rather than waiting for complete JSON). Caveat: partial Pydantic validation fails — use `include_raw=True` to get the raw chunk alongside the validated object.
+
 ---
 
 ## 7. Real-World Examples
@@ -414,6 +494,25 @@ def my_lambda(x):
 **Pitfall 6: Callback handler thread-safety**
 LangChain callbacks run in the same thread as the chain by default. In async code, `on_llm_start` may be called from multiple coroutines simultaneously. Custom callback handlers that write to non-thread-safe structures (plain lists, dicts) corrupt data in production under load.
 
+Fix: replace custom callback-based tracing with LangSmith's env-var tracing (`LANGSMITH_TRACING=true`). For per-request attribution, propagate `run_id` from the config:
+
+```python
+import uuid
+from langchain_core.runnables import RunnableConfig
+
+# Generate a unique run_id per request — traces in LangSmith are grouped by run_id
+run_id = uuid.uuid4()
+config = RunnableConfig(run_id=run_id, tags=["user-123", "prod"])
+
+result = chain.invoke(input_data, config=config)
+
+# In LangSmith, filter traces by run_id to see the exact chain execution
+# No custom callback needed — LangSmith captures everything automatically
+print(f"Trace: https://smith.langchain.com/runs/{run_id}")
+```
+
+This approach is thread-safe (LangSmith handles concurrency), captures full input/output/latency at each step, and links traces across services when the same `run_id` is propagated.
+
 **Pitfall 7: Memory in production**
 `ConversationBufferMemory` stores entire conversation history in RAM. A chat session with 100 messages and 500 tokens each = 50K tokens of history passed on every call. Cost: $0.25/call for GPT-4o. Fix: use `ConversationSummaryMemory` with a 2K token budget, or `ConversationBufferWindowMemory(k=5)` to keep last 5 turns only.
 
@@ -428,7 +527,7 @@ LangChain callbacks run in the same thread as the chain by default. In async cod
 | `langchain-community` | 300+ third-party integrations | Moves fast, pin strictly |
 | `langchain-openai` | OpenAI-specific integration | Separate package since 0.1 |
 | `langchain-anthropic` | Anthropic-specific integration | Separate package since 0.1 |
-| `langsmith` | Tracing, evaluation, dataset management | Set `LANGSMITH_TRACING=true` |
+| `langsmith` | Tracing, evaluation, dataset management | Set `LANGSMITH_TRACING=true`; dataset versioning, A/B testing for chains |
 | `langgraph` | Stateful agent graphs | Companion to LangChain |
 | `pydantic` v2 | Output validation | LangChain 0.2+ requires pydantic v2 |
 
@@ -437,6 +536,12 @@ LangChain callbacks run in the same thread as the chain by default. In async cod
 - LangChain 0.1.x (early 2024): LCEL introduced, legacy deprecation announced
 - LangChain 0.2.x (mid-2024): pydantic v2, package split, legacy removed
 - `langchain-core`: the stable foundation; updates are backward-compatible
+
+**LangSmith 2025 features:**
+- **Dataset versioning**: tag datasets (`v1`, `v2`, `baseline`) and compare chain performance across versions.
+- **A/B testing chains**: run two chain variants against the same dataset, compare scores side-by-side, and select the winner with statistical confidence.
+- **Prompt Hub versioning**: commit prompts with versions, pull specific versions by commit hash, track prompt performance over time.
+- **Annotation queues**: route production traces to human reviewers; collect corrections that become training data.
 
 ---
 
@@ -489,6 +594,15 @@ Signs: (1) more time debugging LangChain internals than your own logic; (2) cust
 
 **Q: What is LangSmith and why is it necessary for production?**
 LangSmith is LangChain's observability and evaluation platform. It automatically captures: every LLM call with full input/output/latency/cost, tool calls with arguments and results, chain execution trees with per-step breakdown. It is necessary for production because: (1) without it, debugging means guessing — you see input and output but not intermediate state; (2) cost monitoring — track token usage per user/endpoint; (3) quality evaluation — run automated evaluators on a sample of production traces; (4) creating test datasets from real production queries. Setup: `LANGSMITH_API_KEY=<key>` environment variable, `LANGSMITH_TRACING=true`. Zero code changes required.
+
+**Q: How does prompt caching work with LangChain and Anthropic, and what cost savings does it provide?**
+Anthropic's prompt caching saves the KV cache for a prompt prefix marked with `cache_control: {"type": "ephemeral"}`. When subsequent requests share the same prefix, the cached KV is reused instead of recomputing attention over the full context. In LangChain, pass `extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}` to `ChatAnthropic` and annotate the system message content with `cache_control`. Cost impact: cached tokens are billed at 10% of standard input price (90% discount); cache writes cost 25% more per token than regular input, but pay back after the second cache hit. For a 4096-token system prompt used in 1000 daily requests, uncached = $0.020/request × 1000 = $20/day; cached = $0.002/request × 1000 = $2/day. Minimum cacheable block: 1024 tokens for claude-3; 2048 for claude-3-5 and later. Cache TTL: 5 minutes (ephemeral).
+
+**Q: How do you stream structured outputs (Pydantic models) from a LangChain chain?**
+Use `model.with_structured_output(YourModel)` and call `.astream()` — LangChain yields progressively completed Pydantic objects as tokens arrive. Early yields will have `None` for fields not yet parsed. Alternatively, use `JsonOutputParser` and `.stream()` to receive partial dicts growing token-by-token: first `{}`, then `{"name": "Jan"}`, then `{"name": "Jane", "role": "CTO"}`. The tradeoff: `with_structured_output` gives typed objects but validation only completes at the end; `JsonOutputParser` gives raw dicts at every step. For real-time UI updates where you want to show fields as they arrive, use `JsonOutputParser` with field-presence checks. Partial Pydantic validation: set `include_raw=True` to receive both the partial model and the raw string chunk at each step.
+
+**Q: How do you A/B test two LangChain chains using LangSmith?**
+Create a LangSmith dataset with representative input examples. Run both chain variants against the dataset using `langsmith.evaluate()`, specifying the dataset name and an evaluator (LLM-as-judge, custom Python function, or built-in evaluators like `exact_match`). LangSmith records each chain's outputs side-by-side with scores. Compare summary statistics (mean score, pass rate) and individual example failures. Statistical significance: with 100+ examples, a 5-point mean score difference is typically significant. Workflow: baseline chain (tagged `v1`) vs candidate chain (tagged `v2`) → evaluate on 200-example dataset → if candidate wins on primary metric without regression on secondary → deploy candidate. This prevents shipping prompt changes that improve one metric while silently degrading another.
 
 ---
 

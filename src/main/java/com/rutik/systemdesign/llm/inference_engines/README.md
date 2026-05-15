@@ -447,7 +447,7 @@ Model loading (downloading weights and transferring to GPU memory) takes 1-10 mi
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Set gpu_memory_utilization carefully** — vLLM's default 0.9 (90% of GPU for model + KV cache) is aggressive; start with 0.85 to leave headroom.
 2. **Set max_model_len explicitly** — don't let the engine default to model's maximum; set it to your actual max input + output.
@@ -458,7 +458,7 @@ Model loading (downloading weights and transferring to GPU memory) takes 1-10 mi
 
 ---
 
-## 13. Case Study: Migrating from OpenAI API to Self-Hosted vLLM
+## 14. Case Study: Migrating from OpenAI API to Self-Hosted vLLM
 
 **Problem:** SaaS startup spending $50K/month on OpenAI API for their writing assistant. Want to reduce costs and eliminate vendor dependency.
 

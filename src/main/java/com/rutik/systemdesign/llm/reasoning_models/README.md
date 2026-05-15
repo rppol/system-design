@@ -522,7 +522,7 @@ A: Best-of-N with PRM reranking: generate N reasoning chains (N=10-50) with temp
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Use reasoning models selectively** — profile which queries benefit from extended thinking, route only those to o1/o3.
 2. **Expose reasoning traces** — for trust and debugging, show users the thinking process (o1 hides it; R1 shows it — R1's approach is more transparent).
@@ -532,7 +532,7 @@ A: Best-of-N with PRM reranking: generate N reasoning chains (N=10-50) with temp
 
 ---
 
-## 13. Case Study: Automated Math Competition Solver
+## 14. Case Study: Automated Math Competition Solver
 
 **Problem:** Educational platform wants to provide step-by-step solutions for AMC/AIME competition math. Previous LLM (GPT-4o) solved ~40% of AMC 12 problems.
 

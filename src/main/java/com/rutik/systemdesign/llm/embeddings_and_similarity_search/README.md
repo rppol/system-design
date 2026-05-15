@@ -386,7 +386,7 @@ Evaluate embeddings on retrieval metrics specific to your RAG use case, not gene
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Use Matryoshka-trained models** for flexible dimension/quality tradeoffs in production.
 2. **Always fine-tune embedding models** on domain-specific data if you have labeled pairs — even 1000 pairs helps significantly.
@@ -398,7 +398,7 @@ Evaluate embeddings on retrieval metrics specific to your RAG use case, not gene
 
 ---
 
-## 13. Case Study: Semantic Search for 50M Product Catalog
+## 14. Case Study: Semantic Search for 50M Product Catalog
 
 **Problem:** E-commerce platform with 50M products. Users type natural language queries ("warm jacket for hiking in winter") but product descriptions use different vocabulary. BM25 keyword search misses semantically relevant results.
 

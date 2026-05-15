@@ -321,7 +321,7 @@ Training data composition directly determines model strengths — models are wha
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Deduplicate aggressively** — both exact duplicates (substring match) and near-duplicates (MinHash). Repeated data hurts generalization.
 2. **Use high-quality data for the final 10% of training** — LIMA-style: the last few billion tokens of high-quality data disproportionately shapes the model's "final personality."
@@ -332,7 +332,7 @@ Training data composition directly determines model strengths — models are wha
 
 ---
 
-## 13. Case Study: Pre-Training a 7B Parameter Model for Legal Domain
+## 14. Case Study: Pre-Training a 7B Parameter Model for Legal Domain
 
 **Problem:** Law firm wants an LLM specialized for legal reasoning. Publicly available legal text: 50B tokens (case law, statutes, contracts). Budget: ~$200K compute.
 

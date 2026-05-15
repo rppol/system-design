@@ -403,7 +403,7 @@ A: No model can hold a 500K LOC repository in context. Strategies: (1) Semantic 
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Always run generated code** — never deploy without testing; treat generations as drafts.
 2. **Use tests as specification** — write tests first; have the LLM write code to pass them (TDD + LLM = great).
@@ -414,7 +414,7 @@ A: No model can hold a 500K LOC repository in context. Strategies: (1) Semantic 
 
 ---
 
-## 13. Case Study: Building a Repository-Level Code Assistant
+## 14. Case Study: Building a Repository-Level Code Assistant
 
 **Problem:** Dev team at startup wants an AI assistant that understands their entire codebase and can answer questions like "How does payment processing work?" and generate new features consistent with existing patterns.
 

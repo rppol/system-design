@@ -480,7 +480,7 @@ A: Typical overhead by tier: Tier 1 (regex/rules) <1ms; Tier 2 (BERT classifiers
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Run input and output guardrails in parallel** where possible to minimize latency impact.
 2. **Tier your guardrails**: fast rules first, slower classifiers only if rules pass.
@@ -492,7 +492,7 @@ A: Typical overhead by tier: Tier 1 (regex/rules) <1ms; Tier 2 (BERT classifiers
 
 ---
 
-## 13. Case Study: HIPAA-Compliant Medical Chatbot Guardrails
+## 14. Case Study: HIPAA-Compliant Medical Chatbot Guardrails
 
 **Context:** Healthcare company deploys a patient-facing chatbot to answer questions about appointments, medications, and health education. Must comply with HIPAA.
 

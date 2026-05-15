@@ -405,7 +405,7 @@ Graceful degradation requires a fallback chain and circuit breaker pattern. Impl
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Version control all prompts** — treat system prompts as code; use semantic versioning.
 2. **A/B test every major change** — prompt changes, model upgrades, parameter tuning.
@@ -417,7 +417,7 @@ Graceful degradation requires a fallback chain and circuit breaker pattern. Impl
 
 ---
 
-## 13. Case Study: Production LLM Platform for 10M Users
+## 14. Case Study: Production LLM Platform for 10M Users
 
 **Context:** Consumer app has 10M monthly active users, 100K daily active users using an LLM feature (writing assistant).
 

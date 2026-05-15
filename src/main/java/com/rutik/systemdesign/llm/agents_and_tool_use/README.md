@@ -173,6 +173,10 @@ Agents specialized for software engineering tasks: writing, executing, debugging
 
 LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, and Semantic Kernel provide reusable abstractions for agent loops, tool management, memory, and multi-agent coordination. Framework choice matters: LangGraph for complex stateful workflows; LlamaIndex for data-heavy RAG agents; CrewAI for quick role-based crews. See [Agentic Frameworks](../agentic_frameworks/README.md) for framework comparison and when to build custom.
 
+Key framework references for agent patterns:
+- **LangChain LCEL tool-calling agents**: [langchain_and_lcel.md](../agentic_frameworks/langchain_and_lcel.md) — LCEL tool-calling agent via `create_tool_calling_agent`, LCEL vs legacy AgentExecutor, prompt caching for long system prompts, streaming structured outputs.
+- **LangGraph stateful agents**: [langgraph.md](../agentic_frameworks/langgraph.md) — StateGraph, human-in-the-loop with `interrupt()`, multi-agent supervisor pattern, subgraph composition, custom reducers, checkpoint strategy by scale.
+
 ---
 
 ## 4. Architecture Diagrams
@@ -444,6 +448,12 @@ A: Three-layer strategy: (1) Input validation — validate tool result schema be
 **Q: What metrics do you track for a production agent in steady state?**
 A: Core: (1) task success rate — binary or LLM-scored; alert if drops >5% (rolling 7-day); (2) cost per task — $/task; alert if exceeds budget threshold; (3) P95 latency — wall time; alert on SLA breach; (4) step count per task — rising count indicates quality degradation or inefficiency; (5) tool error rate — fraction of tool calls returning errors. Supporting: human escalation rate (for HITL agents), token usage per step, retry rate. Set alert thresholds during a 2-week baseline period then alert on >2 standard deviation shifts. LLM judge on 5% of production traces gives qualitative quality signal without evaluating every call.
 
+**Q: When should you use LangChain LCEL for an agent versus LangGraph?**
+A: Use LCEL (`create_tool_calling_agent` + `AgentExecutor`) when the agent loop is simple: one LLM + a fixed set of tools + no persistent state across sessions. LCEL agents terminate after each invocation; state must be passed in fresh each time. Use LangGraph when: (1) the agent needs to persist state across multiple user turns (checkpointing); (2) the workflow has loops that depend on runtime conditions (tool retry, iterative refinement); (3) human-in-the-loop approval is required at specific steps; (4) multi-agent coordination with explicit routing between specialized agents; (5) you need to stream intermediate state transitions to a UI. Rule of thumb: if you can model the agent as `while True: call_llm(); if done: break`, use LCEL. If you need `if human_approved: continue`, persistent thread state, or parallel sub-agents, use LangGraph.
+
+**Q: How does LCEL's AgentExecutor compare to creating an agent loop in LangGraph?**
+A: `AgentExecutor` is LCEL's high-level agent runner that handles the Thought-Action-Observation loop for you: it automatically calls tools, injects results back into messages, and loops until the model produces a final answer or `max_iterations` is reached. LangGraph's equivalent is a `StateGraph` with an agent node and a tool node connected by a conditional edge. Key differences: AgentExecutor is simpler to set up (5 lines vs 30 lines for LangGraph) but has hard-to-customize loop logic; LangGraph exposes every step as a node you can modify, add logging, or interrupt. For production agents where you need visibility into each loop iteration, LangGraph's explicit graph is superior. AgentExecutor is deprecated in LangChain 0.3+ in favor of LangGraph's patterns.
+
 ---
 
 ## Strategy Deep-Dives
@@ -458,6 +468,7 @@ In-depth coverage of specific agent topics. Each file follows the standard modul
 | Agent Memory | [agent_memory.md](./agent_memory.md) | 4 memory types, MemGPT paging, context compression, token budgets, Mem0 |
 | Agent Evaluation & Benchmarking | [agent_evaluation_and_benchmarking.md](./agent_evaluation_and_benchmarking.md) | GAIA, SWE-bench, AgentBench, trajectory eval, LLM-as-judge, cost metrics |
 | Computer Use & Browser Agents | [computer_use_and_browser_agents.md](./computer_use_and_browser_agents.md) | Anthropic Computer Use, browser-use, Playwright, vision+action loop, grounding |
+| Agent Reliability | [agent_reliability.md](./agent_reliability.md) | Timeout/circuit breaker, retry backoff, progress checkpointing, dead-loop detection, human handoff |
 
 Related standalone modules:
 
@@ -470,7 +481,7 @@ Related standalone modules:
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Design tools carefully** — clear names, specific descriptions, strict typing; poor tool specs lead to wrong tool selection.
 2. **Log all agent steps** — every thought, action, and observation; essential for debugging production agents.
@@ -481,7 +492,7 @@ Related standalone modules:
 
 ---
 
-## 13. Case Study: Automated Research Agent for Competitive Intelligence
+## 14. Case Study: Automated Research Agent for Competitive Intelligence
 
 **Problem:** Sales team wants an agent that, given a prospect company name, produces a competitive intelligence brief: company overview, recent news, product comparison, and pricing analysis.
 

@@ -129,7 +129,7 @@ Current modules under `src/main/java/com/rutik/systemdesign/llm/`:
 | `advanced_rag/` | Agentic RAG, Graph RAG, multimodal RAG, evaluation | agentic_rag, corrective_rag, graph_rag, multimodal_rag, query_transformation, self_rag |
 | `reasoning_models/` | o1/o3, test-time compute, MCTS, DeepSeek-R1, PRM/ORM | — |
 | `code_generation/` | FIM, CodeLLaMA, Copilot architecture, SWE-bench, code agents | — |
-| `agents_and_tool_use/` | Function calling, ReAct, plan-and-execute, memory systems | function_calling_and_tool_design, react_and_reasoning_patterns, plan_and_execute, agent_memory, computer_use_and_browser_agents, agent_evaluation_and_benchmarking |
+| `agents_and_tool_use/` | Function calling, ReAct, plan-and-execute, memory systems | function_calling_and_tool_design, react_and_reasoning_patterns, plan_and_execute, agent_memory, computer_use_and_browser_agents, agent_evaluation_and_benchmarking, agent_reliability |
 | `agentic_frameworks/` | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, SK, Haystack, DSPy | langchain_and_lcel, langgraph, llamaindex, crewai, autogen, semantic_kernel, haystack, dspy, framework_observability, structured_outputs_and_instructor |
 | `multi_agent_systems/` | Orchestrator pattern, debate, ChatDev, MetaGPT, Swarm | — |
 | `inference_and_decoding/` | Sampling, KV cache, speculative decoding, continuous batching | — |
@@ -150,6 +150,7 @@ Current modules under `src/main/java/com/rutik/systemdesign/llm/`:
 | `llm_routing_and_model_selection/` | Multi-model routing, cascade patterns, confidence thresholds, cost optimization | — |
 | `token_economics_and_cost_optimization/` | Per-token pricing, prompt caching, batch APIs, self-hosting break-even | — |
 | `data_flywheels_and_continuous_learning/` | Production feedback loops, active learning, drift detection, A/B testing | — |
+| `llm_testing_strategies/` | Golden datasets, LLM-as-judge, regression eval, flakiness detection, CI/CD integration | — |
 
 Case studies in `llm/case_studies/`: design_chatgpt, design_copilot, design_rag_pipeline, design_ai_search_engine, design_llm_gateway, design_ai_coding_assistant, design_customer_support_bot.
 

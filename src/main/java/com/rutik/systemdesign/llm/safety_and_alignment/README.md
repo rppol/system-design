@@ -394,7 +394,7 @@ A layered content safety system uses multiple defense mechanisms at different po
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Red team before every major deployment** — don't rely on standard benchmarks alone.
 2. **Measure both harmful outputs AND over-refusal** — a model refusing 50% of benign requests is a safety failure too.
@@ -405,7 +405,7 @@ A layered content safety system uses multiple defense mechanisms at different po
 
 ---
 
-## 13. Case Study: Responding to a Novel Jailbreak Attack
+## 14. Case Study: Responding to a Novel Jailbreak Attack
 
 **Scenario:** A new jailbreak technique is discovered where users insert Unicode homoglyphs (visually identical characters from different scripts) in prompts to bypass keyword-based safety filters.
 

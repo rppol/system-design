@@ -497,7 +497,7 @@ A: Build custom when: (1) Your use case is simple enough that a framework adds m
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Start simple** — a 50-line custom RAG is often better than a complex LangChain pipeline for simple use cases.
 2. **Add observability on day 1** — connect LangSmith or Langfuse before writing any logic.
@@ -508,7 +508,7 @@ A: Build custom when: (1) Your use case is simple enough that a framework adds m
 
 ---
 
-## 13. Case Study: Refactoring from LangChain to LangGraph
+## 14. Case Study: Refactoring from LangChain to LangGraph
 
 **Problem:** Production support agent built with LangChain ReActAgent was unreliable — it would loop indefinitely, lose state between steps, and was hard to debug in production.
 

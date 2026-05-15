@@ -141,6 +141,7 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 | [Mixture of Experts](src/main/java/com/rutik/systemdesign/llm/mixture_of_experts/) | MoE routing, Mixtral, DeepSeek-V3, load balancing, sparse activation |
 | [MCP (Model Context Protocol)](src/main/java/com/rutik/systemdesign/llm/mcp_model_context_protocol/) | Universal LLM-tool protocol, servers/clients, JSON-RPC, A2A |
 | [Data Flywheels & Continuous Learning](src/main/java/com/rutik/systemdesign/llm/data_flywheels_and_continuous_learning/) | Production feedback loops, active learning, drift detection, A/B testing |
+| [LLM Testing Strategies](src/main/java/com/rutik/systemdesign/llm/llm_testing_strategies/) | Golden datasets, LLM-as-judge, regression eval, flakiness detection, CI/CD integration |
 
 #### LLM Case Studies
 | Case Study | What It Covers |

@@ -457,7 +457,7 @@ Held-out evaluation tests the model on a fixed dataset before deployment, while 
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Evaluate on task-specific data, not just general benchmarks** — your production metric is the truth.
 2. **Use multiple evaluation methods** — combine automated + human + LLM-as-judge for complete picture.
@@ -468,7 +468,7 @@ Held-out evaluation tests the model on a fixed dataset before deployment, while 
 
 ---
 
-## 13. Case Study: Evaluating a Code Review LLM
+## 14. Case Study: Evaluating a Code Review LLM
 
 **Product:** LLM that reviews code PRs and identifies bugs, security issues, and style violations.
 

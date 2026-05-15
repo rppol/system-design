@@ -354,7 +354,7 @@ Communication overhead in distributed training comes from gradient synchronizati
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Profile first** — use PyTorch Profiler or NVIDIA Nsight to identify bottlenecks before optimizing.
 2. **Maximize MFU** — aim for >40% Model FLOP Utilization; <30% indicates a communication or scheduling problem.
@@ -365,7 +365,7 @@ Communication overhead in distributed training comes from gradient synchronizati
 
 ---
 
-## 13. Case Study: Training a 70B Model on 1000 GPUs
+## 14. Case Study: Training a 70B Model on 1000 GPUs
 
 **Setup:** 1000 × H100 80GB (125 nodes × 8 GPUs)
 

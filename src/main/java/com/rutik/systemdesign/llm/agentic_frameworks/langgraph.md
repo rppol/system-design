@@ -369,6 +369,141 @@ graph.add_conditional_edges("plan", generate_research_topics)
 # All research_topic nodes run in parallel; results aggregated in next node
 ```
 
+### Subgraph State Communication
+
+When composing a parent graph with a subgraph, states do not share the same TypedDict. LangGraph maps parent state fields to subgraph input and merges output back into parent state via schema mappings:
+
+```python
+from langgraph.graph import StateGraph, END
+from typing import TypedDict, Annotated
+from langgraph.graph.message import add_messages
+
+# Subgraph has its own isolated state
+class ResearchSubgraphState(TypedDict):
+    query: str              # input from parent
+    search_results: list    # internal state
+    summary: str            # output to parent
+
+def build_research_subgraph():
+    sg = StateGraph(ResearchSubgraphState)
+    sg.add_node("search", search_node)
+    sg.add_node("summarize", summarize_node)
+    sg.set_entry_point("search")
+    sg.add_edge("search", "summarize")
+    sg.add_edge("summarize", END)
+    return sg.compile()
+
+# Parent graph state — different fields
+class ParentState(TypedDict):
+    messages: Annotated[list, add_messages]
+    research_query: str     # maps to subgraph's "query"
+    research_summary: str   # subgraph's "summary" maps here
+
+# Add compiled subgraph as a node; LangGraph infers state key mapping
+# by matching field names: parent["research_query"] -> subgraph["query"]
+research_subgraph = build_research_subgraph()
+
+parent = StateGraph(ParentState)
+parent.add_node(
+    "research",
+    research_subgraph,
+    # Explicit mapping: parent_key -> subgraph_key (for non-matching names)
+    input={"query": lambda s: s["research_query"]},
+    output={"research_summary": lambda o: o["summary"]}
+)
+parent.set_entry_point("research")
+```
+
+Key rule: subgraph state is isolated. Parent state fields do not bleed into the subgraph unless explicitly mapped. Subgraph output is merged into parent state only for the explicitly mapped fields — unrelated parent state fields are preserved unchanged.
+
+### Custom Reducers
+
+Beyond `add_messages`, you can define custom reducer functions for any state field:
+
+```python
+from typing import Annotated
+import operator
+
+# Custom reducer: merge dicts (later values win for duplicate keys)
+def merge_dicts(existing: dict, update: dict) -> dict:
+    return {**existing, **update}
+
+# Custom reducer: keep highest-priority item from a list
+def priority_merge(existing: list, new_items: list) -> list:
+    combined = existing + new_items
+    return sorted(combined, key=lambda x: x.get("priority", 0), reverse=True)[:10]
+
+class AgentState(TypedDict):
+    messages: Annotated[list, add_messages]          # built-in: appends
+    metadata: Annotated[dict, merge_dicts]           # custom: merges dicts
+    findings: Annotated[list, priority_merge]        # custom: priority-ranked list
+    step_count: int                                  # no reducer: replaced each time
+
+# Validation: custom reducers must handle None gracefully (first call has no existing)
+def safe_merge_dicts(existing: dict | None, update: dict) -> dict:
+    return {**(existing or {}), **update}
+```
+
+Custom reducer requirements: the function signature must be `(existing_value, new_value) -> merged_value`. LangGraph calls it when a node returns a partial update for that key. If `existing` is `None` (first time the field is set), your reducer receives `None` — handle it explicitly.
+
+### Dynamic Breakpoints
+
+Control interrupts dynamically based on routing logic, timeouts, or multi-level approval requirements:
+
+```python
+from langgraph.graph import StateGraph, END
+from langgraph.types import interrupt
+
+class WorkflowState(TypedDict):
+    action: str
+    risk_level: str       # "low", "medium", "high"
+    approval_count: int
+    approved: bool
+
+def risk_assessment_node(state: WorkflowState) -> dict:
+    """Assess risk and interrupt if approval needed."""
+    risk = assess_risk(state["action"])
+
+    if risk == "high":
+        # Dynamic interrupt: pause graph, surface state to human
+        # This raises GraphInterrupt — graph saves state and returns to caller
+        human_decision = interrupt({
+            "message": f"High-risk action requires approval: {state['action']}",
+            "action": state["action"],
+            "risk_level": risk
+        })
+        # After human resumes, human_decision contains the human's input
+        if not human_decision.get("approved"):
+            return {"approved": False, "risk_level": risk}
+
+    return {"risk_level": risk, "approved": True}
+
+def dual_approval_node(state: WorkflowState) -> dict:
+    """Requires 2 separate approvals for critical actions."""
+    if state["approval_count"] < 2:
+        human_input = interrupt({
+            "message": f"Approval {state['approval_count'] + 1}/2 required",
+            "approvals_received": state["approval_count"]
+        })
+        if human_input.get("approved"):
+            return {"approval_count": state["approval_count"] + 1}
+        else:
+            return {"approved": False}
+
+    return {"approved": True}
+
+# Timeout-based interrupt: use interrupt() with a timestamp check
+def timeout_sensitive_node(state: WorkflowState) -> dict:
+    import time
+    if time.time() - state.get("started_at", time.time()) > 300:  # 5 min timeout
+        human_input = interrupt({"message": "Task taking too long — continue or abort?"})
+        if not human_input.get("continue"):
+            return {"approved": False}
+    return {}
+```
+
+`interrupt()` is LangGraph 0.1.x's preferred API over `interrupt_before`/`interrupt_after` at compile time — it allows dynamic, condition-based interrupts at any point in a node's execution, with full access to the node's current state at that moment.
+
 ---
 
 ## 7. Real-World Examples
@@ -576,6 +711,15 @@ Three strategies: (1) Message trimming: add a node that runs every N turns and r
 **Q: How does LangGraph integrate with LangSmith for observability?**
 LangGraph automatically traces to LangSmith when `LANGSMITH_TRACING=true` is set. Each graph invocation creates a top-level trace; each node creates a child span with start time, input state, output state update, and duration. Tool calls within nodes are nested further. The LangSmith UI shows the full execution tree: which nodes ran, in what order, with what state at each step. For multi-agent graphs, each subgraph appears as a nested trace. Filtering: by `thread_id` to see all runs in a conversation, by node name to find slow nodes, by error status to find failures.
 
+**Q: How do subgraphs communicate state with parent graphs in LangGraph?**
+Subgraph state is isolated — each graph defines its own TypedDict. LangGraph maps parent state to subgraph input and subgraph output back to parent state via two mechanisms: (1) automatic name matching — if the parent has a field `query` and the subgraph has a field `query`, LangGraph maps them automatically; (2) explicit mapping — pass `input={"subgraph_key": lambda s: s["parent_key"]}` and `output={"parent_key": lambda o: o["subgraph_key"]}` when adding the subgraph as a node. Parent state fields not included in the mapping are preserved unchanged across the subgraph call. This isolation prevents subgraph-internal fields from polluting parent state and lets each subgraph be tested independently without a parent graph.
+
+**Q: How do custom reducers work in LangGraph and when should you define them?**
+A reducer is a function `(existing, update) -> merged` called when a node returns a partial state update. Define custom reducers when the default behaviors (replace for scalar fields, append for `add_messages`) do not fit your semantics. Examples: merge dicts (for accumulating metadata from multiple nodes), priority-sorted lists (for findings where importance matters more than order), set union (for tag accumulation). Attach reducers with `Annotated[type, reducer_function]` in your TypedDict. Important: reducers must handle `None` as `existing` for the first write (no prior state). Custom reducers enable nodes to return partial updates independently (e.g., multiple parallel nodes all writing to `findings`) without overwriting each other's results — LangGraph calls the reducer for each update in order.
+
+**Q: What is LangGraph Cloud and when should you use it?**
+LangGraph Cloud is a managed deployment service for LangGraph applications. It provides: hosted graph execution with horizontal scaling, managed checkpointer (no need to set up PostgreSQL), built-in LangSmith integration, REST API for invoking graphs and resuming interrupted runs, and a visual studio for debugging graph execution. Use it when: you want to skip infrastructure setup for LangGraph deployment, you need the streaming + checkpoint API without building your own server. Self-host (FastAPI + PostgreSQL checkpointer) when: cost sensitivity, data residency requirements, or needing deep infrastructure customization. LangGraph Cloud pricing is per-node-execution; at high volume (>1M executions/day), self-hosted PostgreSQL + vLLM is significantly cheaper.
+
 ---
 
 ## 13. Best Practices
@@ -586,10 +730,21 @@ LangGraph automatically traces to LangSmith when `LANGSMITH_TRACING=true` is set
 4. **Use MemorySaver in tests, real checkpointer in production** — prevents state leakage between tests.
 5. **Generate thread IDs as `{user_id}:{session_uuid}`** — prevents cross-user state collisions.
 6. **Keep large data in external storage** — only store IDs/references in graph state; large state blobs slow checkpointing.
-7. **Prefer `interrupt_before` over `interrupt_after`** for human review — node hasn't run yet, safer to modify state.
+7. **Prefer `interrupt()` inside nodes over compile-time `interrupt_before`** — dynamic interrupts allow condition-based pauses with full node context.
 8. **Stream with `stream_mode="updates"`** not `"values"` — sends only deltas, not full state on every step.
 9. **Test routing functions independently** — they are pure functions; easy to unit test.
 10. **Use `recursion_limit` and step counters together** — belt and suspenders for runaway agents.
+11. **Track cost per node with LangSmith custom metadata** — add `metadata={"node": node_name, "token_count": count}` to each LLM call's run config; filter LangSmith traces by node name to find expensive nodes and optimize them.
+12. **Select checkpointer by scale**:
+
+| Scale | Checkpointer | Reason |
+|-------|-------------|--------|
+| Development / local | `MemorySaver` | Zero setup, no persistence needed |
+| Single-process, low traffic | `SqliteSaver` (file) | Simple, no external dependency |
+| Multi-process, moderate traffic | `PostgresSaver` | ACID, concurrent access, horizontal scale |
+| High-throughput with TTL | Redis | Sub-millisecond reads, auto-expiry for short sessions |
+
+Use `PostgresSaver` for any production multi-instance deployment; `SqliteSaver` is not safe for concurrent writes from multiple processes.
 
 ---
 

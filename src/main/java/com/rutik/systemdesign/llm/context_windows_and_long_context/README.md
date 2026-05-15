@@ -438,7 +438,7 @@ Sliding window attention limits each token to attend only to the W most recent t
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Use Flash Attention 2 or 3** — no reason not to; required for any context >8K.
 2. **Place most important information at start and end** — counteract "lost in the middle."
@@ -449,7 +449,7 @@ Sliding window attention limits each token to attend only to the W most recent t
 
 ---
 
-## 13. Case Study: Codebase Analysis System
+## 14. Case Study: Codebase Analysis System
 
 **Problem:** Enterprise team wants an AI assistant that understands their entire 500K-token codebase and answers architecture questions, traces data flows, and suggests refactorings.
 

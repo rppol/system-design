@@ -384,7 +384,7 @@ Measuring dataset diversity requires multiple complementary metrics. (1) Instruc
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Verify wherever possible** — run generated code, check math answers with symbolic computation.
 2. **Use diverse prompt templates** — single template → format overfitting; use 10+ templates for the same task type.
@@ -396,7 +396,7 @@ Measuring dataset diversity requires multiple complementary metrics. (1) Instruc
 
 ---
 
-## 13. Case Study: Building a Customer Support Fine-Tuning Dataset
+## 14. Case Study: Building a Customer Support Fine-Tuning Dataset
 
 **Goal:** Create 50K instruction-following examples for a customer support domain (SaaS product).
 

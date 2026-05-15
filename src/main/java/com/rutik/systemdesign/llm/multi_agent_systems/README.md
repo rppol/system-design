@@ -402,7 +402,7 @@ A: A central token bucket or semaphore manages concurrent access. (1) Rate limit
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Define clear agent boundaries** — each agent should have a single, clear responsibility; avoid overlap.
 2. **Use structured inter-agent communication** — JSON with explicit fields beats natural language messages for reliability.
@@ -413,7 +413,7 @@ A: A central token bucket or semaphore manages concurrent access. (1) Rate limit
 
 ---
 
-## 13. Case Study: Multi-Agent Technical Writing System
+## 14. Case Study: Multi-Agent Technical Writing System
 
 **Problem:** Enterprise software company needs to auto-generate technical documentation from source code changes. Single agent attempt: hallucinations, inconsistent style, missing coverage.
 

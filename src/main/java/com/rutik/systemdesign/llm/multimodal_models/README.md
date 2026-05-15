@@ -377,7 +377,7 @@ Evaluate on four dimensions specific to document understanding: (1) OCR accuracy
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Use high-detail mode for dense images** — charts, documents, screenshots need maximum resolution.
 2. **Preprocess images** — crop to relevant region, adjust contrast for poor-quality images.
@@ -388,7 +388,7 @@ Evaluate on four dimensions specific to document understanding: (1) OCR accuracy
 
 ---
 
-## 13. Case Study: Automated Insurance Claim Processing with VLM
+## 14. Case Study: Automated Insurance Claim Processing with VLM
 
 **Problem:** Insurance company receives 5,000 photo claims/day (car accidents, property damage). Human adjusters spend 20 minutes per claim reviewing photos, estimating damage.
 

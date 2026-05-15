@@ -337,7 +337,7 @@ Tokenizers can dramatically affect code and math performance because poor tokeni
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Always use the model's own tokenizer** — never mix tokenizers from different model families.
 2. **Pre-compute token counts** for long documents before sending to API to avoid exceeding context limits.
@@ -348,7 +348,7 @@ Tokenizers can dramatically affect code and math performance because poor tokeni
 
 ---
 
-## 13. Case Study: Tokenizer Design for a Code-Specialized LLM
+## 14. Case Study: Tokenizer Design for a Code-Specialized LLM
 
 **Problem:** Building a code-specialized LLM. The base model uses a 32K vocabulary that tokenizes Python identifiers like `self.model.forward()` into 8 tokens. We want to reduce this for efficiency.
 

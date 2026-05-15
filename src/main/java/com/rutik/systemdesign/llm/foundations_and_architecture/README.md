@@ -529,7 +529,7 @@ Attention sink refers to the observation that transformer models assign dispropo
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Use Flash Attention** — always enable it; saves 2-4x memory and speeds training significantly.
 2. **Pre-norm over post-norm** — pre-norm (normalize before sublayer) is more stable for deep models.
@@ -541,7 +541,7 @@ Attention sink refers to the observation that transformer models assign dispropo
 
 ---
 
-## 13. Case Study: Designing a Scaled Transformer for 100B Parameters
+## 14. Case Study: Designing a Scaled Transformer for 100B Parameters
 
 **Problem:** Team wants to train a 100B parameter model on 2T tokens of text. Design the training setup.
 

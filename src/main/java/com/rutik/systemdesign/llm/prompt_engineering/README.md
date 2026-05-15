@@ -412,7 +412,7 @@ ReAct (Reasoning + Acting) interleaves reasoning traces with tool-use actions, w
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Specify output format explicitly** — "Respond in JSON with keys: name, age, location" eliminates parsing issues.
 2. **Use XML tags for complex prompts** — `<context>`, `<instructions>`, `<examples>` clearly delineate sections.
@@ -424,7 +424,7 @@ ReAct (Reasoning + Acting) interleaves reasoning traces with tool-use actions, w
 
 ---
 
-## 13. Case Study: Optimizing Prompts for a Legal Document Analyzer
+## 14. Case Study: Optimizing Prompts for a Legal Document Analyzer
 
 **Goal:** Extract key clauses (parties, payment terms, termination conditions) from contracts. Initial zero-shot performance: 62% field accuracy.
 

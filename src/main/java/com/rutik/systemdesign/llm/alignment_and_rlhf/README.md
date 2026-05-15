@@ -371,7 +371,7 @@ A reward model is a classifier trained on human preference data to predict which
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Start with high-quality SFT before DPO** — DPO needs a good reference model; a weak SFT leads to poor alignment.
 2. **Use diverse prompts** — alignment training data should cover safety, helpfulness, and harmlessness equally.
@@ -382,7 +382,7 @@ A reward model is a classifier trained on human preference data to predict which
 
 ---
 
-## 13. Case Study: Aligning a Customer Service LLM
+## 14. Case Study: Aligning a Customer Service LLM
 
 **Problem:** Fine-tune LLaMA 3 8B for a bank's customer service. Requirements: helpful for account questions, refuse to give financial advice (regulatory requirement), professional tone, never reveal system prompt.
 

@@ -423,7 +423,7 @@ Each fine-tuning method has a comprehensive standalone reference with 10+ senior
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Match training and inference formats exactly** — including special tokens, whitespace, and template structure.
 2. **Mask loss on instruction tokens** — only compute loss on the response portion.
@@ -435,7 +435,7 @@ Each fine-tuning method has a comprehensive standalone reference with 10+ senior
 
 ---
 
-## 13. Case Study: Fine-Tuning LLaMA 3 8B for SQL Generation
+## 14. Case Study: Fine-Tuning LLaMA 3 8B for SQL Generation
 
 **Goal:** Build a model that converts natural language to SQL queries for a specific database schema. Target: 90%+ execution accuracy on a held-out test set.
 
