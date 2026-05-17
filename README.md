@@ -1,6 +1,6 @@
 # System Design Master Repository
 
-A comprehensive, one-stop repository for learning **Low-Level Design (LLD)**, **High-Level Design (HLD)**, and **Large Language Models (LLM)** — with practical examples, real-world scenarios, and interview preparation material.
+A comprehensive, one-stop repository for learning **Low-Level Design (LLD)**, **High-Level Design (HLD)**, **Large Language Models (LLM)**, **Machine Learning (ML)**, **Java**, **Spring**, **Backend Engineering**, and **Database Engineering** — with practical examples, real-world scenarios, and interview preparation material.
 
 ---
 
@@ -450,6 +450,92 @@ A laser-focused, principal-engineer-level reference for database internals, sele
 | [Monolith to Polyglot Migration](src/main/java/com/rutik/systemdesign/database/case_studies/design_monolith_to_polyglot_migration/) | MySQL, PostgreSQL, Elasticsearch, ClickHouse | Strangler fig, CDC, dual-write, validation, zero-downtime migration | Expert |
 
 See the [Database Engineering Master Index](src/main/java/com/rutik/systemdesign/database/README.md) for the full 7-phase learning path, version matrix, and cross-reference map.
+
+---
+
+### Machine Learning (ML) — Senior ML/AI Engineer & Interview Prep Guide
+
+A comprehensive, senior-engineer-level guide to Machine Learning — from mathematical foundations through production MLOps. Covers classical algorithms, deep learning, ML system design, domain specializations (CV, RecSys, NLP, RL, time series), and 10 end-to-end case studies. Deliberately scoped to not overlap with the LLM section (which handles transformers, fine-tuning, RAG, and agents).
+
+#### Phase 1 — Mathematical Foundations
+| Module | Key Concepts |
+|--------|-------------|
+| [Linear Algebra and Calculus](src/main/java/com/rutik/systemdesign/ml/linear_algebra_and_calculus/) | Vectors, matrices, eigendecomposition, SVD, gradients, Jacobians, Hessians, chain rule |
+| [Probability and Statistics](src/main/java/com/rutik/systemdesign/ml/probability_and_statistics/) | Distributions, Bayes theorem, MLE, MAP, hypothesis testing, confidence intervals, CLT |
+| [Optimization Theory](src/main/java/com/rutik/systemdesign/ml/optimization_theory/) | SGD, momentum, Adam, AdamW, LR schedules, convexity, saddle points, second-order methods |
+| [Information Theory](src/main/java/com/rutik/systemdesign/ml/information_theory/) | Entropy, cross-entropy loss derivation, KL divergence, mutual information, information gain |
+
+#### Phase 2 — Classical ML (Most Interview-Tested)
+| Module | Key Concepts |
+|--------|-------------|
+| [Supervised Learning](src/main/java/com/rutik/systemdesign/ml/supervised_learning/) | Linear/logistic regression, SVM, decision trees, KNN, Naive Bayes — with 4 deep-dive sub-files |
+| [Ensemble Methods](src/main/java/com/rutik/systemdesign/ml/ensemble_methods/) | Random Forest, XGBoost, LightGBM, CatBoost, stacking, blending — with 4 deep-dive sub-files |
+| [Unsupervised Learning](src/main/java/com/rutik/systemdesign/ml/unsupervised_learning/) | k-means, DBSCAN, hierarchical clustering, PCA, t-SNE, UMAP |
+| [Feature Engineering](src/main/java/com/rutik/systemdesign/ml/feature_engineering/) | Encoding, scaling, imputation, target encoding, feature selection, Pipeline patterns |
+| [Model Evaluation and Selection](src/main/java/com/rutik/systemdesign/ml/model_evaluation_and_selection/) | Cross-validation, AUC-ROC/AUC-PR, calibration, bias-variance, Optuna hyperparameter search |
+
+#### Phase 3 — Deep Learning Foundations
+| Module | Key Concepts |
+|--------|-------------|
+| [Neural Network Fundamentals](src/main/java/com/rutik/systemdesign/ml/neural_network_fundamentals/) | MLPs, backpropagation, activations, weight initialization, batch norm, dropout |
+| [Convolutional Neural Networks](src/main/java/com/rutik/systemdesign/ml/convolutional_neural_networks/) | Conv2D, pooling, ResNet skip connections, EfficientNet compound scaling, transfer learning |
+| [Recurrent Neural Networks](src/main/java/com/rutik/systemdesign/ml/recurrent_neural_networks/) | LSTM, GRU, vanishing gradients, bidirectional, seq2seq, teacher forcing, CTC loss |
+| [Training Deep Networks](src/main/java/com/rutik/systemdesign/ml/training_deep_networks/) | LR warmup, gradient clipping, mixed precision, data augmentation, gradient accumulation |
+| [Generative Models](src/main/java/com/rutik/systemdesign/ml/generative_models/) | VAEs, GANs, Diffusion (DDPM), mode collapse, FID score, classifier-free guidance |
+
+#### Phase 4 — Domain Specializations
+| Module | Key Concepts |
+|--------|-------------|
+| [Computer Vision](src/main/java/com/rutik/systemdesign/ml/computer_vision/) | Object detection, segmentation, ViT, CLIP, self-supervised vision — with 4 deep-dive sub-files |
+| [Natural Language Processing](src/main/java/com/rutik/systemdesign/ml/natural_language_processing/) | Word2Vec, GloVe, TF-IDF, text classification, NER (BIO tagging), CRF, topic modeling |
+| [Recommender Systems](src/main/java/com/rutik/systemdesign/ml/recommender_systems/) | Two-tower retrieval, collaborative filtering, LTR ranking, bandits — with 5 deep-dive sub-files |
+| [Time Series Forecasting](src/main/java/com/rutik/systemdesign/ml/time_series_forecasting/) | ARIMA, Prophet, DeepAR, Temporal Fusion Transformer, walk-forward validation |
+| [Reinforcement Learning](src/main/java/com/rutik/systemdesign/ml/reinforcement_learning/) | MDP, Q-learning, DQN, PPO, actor-critic, reward shaping, RLHF connection |
+
+#### Phase 5 — ML Systems and Infrastructure
+| Module | Key Concepts |
+|--------|-------------|
+| [ML System Design](src/main/java/com/rutik/systemdesign/ml/ml_system_design/) | 6-step design framework, feature stores, A/B testing, latency budgets — with 5 deep-dive sub-files |
+| [Data Pipelines and Processing](src/main/java/com/rutik/systemdesign/ml/data_pipelines_and_processing/) | PySpark, Great Expectations, DVC, schema evolution, data validation, Lambda vs Kappa |
+| [Distributed Training](src/main/java/com/rutik/systemdesign/ml/distributed_training/) | PyTorch DDP, FSDP, DeepSpeed ZeRO stages, gradient accumulation, mixed precision BF16 |
+| [Experiment Tracking and Versioning](src/main/java/com/rutik/systemdesign/ml/experiment_tracking_and_versioning/) | MLflow, W&B, Optuna TPE, DVC, reproducibility checklist, hyperparameter sweeps |
+| [GPU and Hardware Optimization](src/main/java/com/rutik/systemdesign/ml/gpu_and_hardware_optimization/) | CUDA, tensor cores, memory hierarchy, profiling, gradient checkpointing, DataLoader tuning |
+
+#### Phase 6 — Production ML Engineering
+| Module | Key Concepts |
+|--------|-------------|
+| [Model Serving and Inference](src/main/java/com/rutik/systemdesign/ml/model_serving_and_inference/) | TorchServe, ONNX, gRPC, dynamic batching, A/B testing, canary, shadow mode |
+| [Model Compression and Efficiency](src/main/java/com/rutik/systemdesign/ml/model_compression_and_efficiency/) | PTQ, QAT, pruning, knowledge distillation, TensorRT, low-rank factorization |
+| [Monitoring and Drift Detection](src/main/java/com/rutik/systemdesign/ml/monitoring_and_drift_detection/) | Data drift, concept drift, PSI, KS test, SHAP attribution drift, delayed label handling |
+| [MLOps and CI/CD](src/main/java/com/rutik/systemdesign/ml/mlops_and_ci_cd/) | MLflow Registry, Kubeflow Pipelines, Vertex AI, canary deployment, rollback, data validation gates |
+
+#### Phase 7 — Advanced Topics
+| Module | Key Concepts |
+|--------|-------------|
+| [Graph Neural Networks](src/main/java/com/rutik/systemdesign/ml/graph_neural_networks/) | GCN, GraphSAGE, GAT, GIN, message passing, oversmoothing, PyTorch Geometric |
+| [Self-Supervised and Contrastive Learning](src/main/java/com/rutik/systemdesign/ml/self_supervised_and_contrastive_learning/) | NT-Xent, InfoNCE, BYOL, ELECTRA, graph SSL, tabular SSL (SCARF) |
+| [Causal Inference and ML](src/main/java/com/rutik/systemdesign/ml/causal_inference_and_ml/) | Potential outcomes, propensity scores, uplift modeling, CausalForest, Double ML |
+
+#### Phase 8 — Interview Consolidation
+| Module | Key Concepts |
+|--------|-------------|
+| [ML Interview Patterns](src/main/java/com/rutik/systemdesign/ml/ml_interview_patterns/) | 6-step design framework, debug checklist, system design templates, tradeoff tables |
+
+#### ML Case Studies
+| Case Study | Core ML Concepts |
+|------------|-----------------|
+| [Design Recommendation Engine](src/main/java/com/rutik/systemdesign/ml/case_studies/design_recommendation_engine.md) | Two-tower retrieval, LightGBM ranking, FAISS ANN, MMR diversity, cold start |
+| [Design Fraud Detection](src/main/java/com/rutik/systemdesign/ml/case_studies/design_fraud_detection.md) | Imbalanced classification, SMOTE, Flink streaming features, threshold optimization |
+| [Design Search Ranking](src/main/java/com/rutik/systemdesign/ml/case_studies/design_search_ranking.md) | LambdaMART, BM25 + dense hybrid, RRF, IPW position bias, LTR |
+| [Design Image Classification Pipeline](src/main/java/com/rutik/systemdesign/ml/case_studies/design_image_classification_pipeline.md) | EfficientNet, DDP training, ONNX, TorchServe batching, drift detection |
+| [Design Ads CTR Prediction](src/main/java/com/rutik/systemdesign/ml/case_studies/design_ads_click_prediction.md) | DeepFM, feature hashing, Platt calibration, real-time serving, online learning |
+| [Design Anomaly Detection](src/main/java/com/rutik/systemdesign/ml/case_studies/design_anomaly_detection.md) | Isolation Forest, Autoencoder, STL decomposition, CUSUM, alert correlation |
+| [Design Demand Forecasting](src/main/java/com/rutik/systemdesign/ml/case_studies/design_demand_forecasting.md) | Global LightGBM, lag features, MinT reconciliation, cold start, walk-forward CV |
+| [Design Content Feed Ranking](src/main/java/com/rutik/systemdesign/ml/case_studies/design_content_feed_ranking.md) | MMOE multi-task, DPP diversity, position bias IPW, feedback loop handling |
+| [Design Autonomous Driving Perception](src/main/java/com/rutik/systemdesign/ml/case_studies/design_autonomous_driving_perception.md) | Sensor fusion, Kalman filter, Hungarian tracking, 3D detection, safety margins |
+| [Design ML Platform](src/main/java/com/rutik/systemdesign/ml/case_studies/design_ml_platform.md) | Feature store, Kubeflow, MLflow registry, A/B routing, GPU cost tracking |
+
+See the [ML Master Index](src/main/java/com/rutik/systemdesign/ml/README.md) for the full 8-phase learning path, sub-files index, and LLM/ML non-overlap boundary.
 
 ---
 

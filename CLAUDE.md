@@ -5,7 +5,8 @@
 A comprehensive system design study repository covering:
 - **LLD** — Design patterns (GoF), SOLID, anti-patterns
 - **HLD** — Distributed system concepts (CAP, caching, queues, sharding, etc.) + case studies
-- **LLM** — Complete LLM engineering guide (34 modules, 7 case studies, 31 deep-dive sub-files across 5 topics)
+- **LLM** — Complete LLM engineering guide (38 modules, 13 case studies, 32 deep-dive sub-files across 5 topics)
+- **ML** — Complete Machine Learning guide (32 modules, 10 case studies, 22 deep-dive sub-files across 5 topics)
 - **Java** — Pure Java senior-engineer + interview prep guide (17 modules, 4 case studies)
 - **Spring** — Spring Framework senior-engineer + interview prep guide (23 modules, 5 case studies)
 
@@ -34,7 +35,9 @@ All content is Markdown — no runnable application. Java source files under `sr
     │   └── case_studies/
     ├── java/                          ← Pure Java guide
     │   └── case_studies/
-    └── spring/                        ← Spring Framework guide
+    ├── spring/                        ← Spring Framework guide
+    │   └── case_studies/
+    └── ml/                            ← Machine Learning guide
         └── case_studies/
 ```
 
@@ -220,6 +223,59 @@ Current modules under `src/main/java/com/rutik/systemdesign/spring/`:
 | `spring_performance/` | 8 | HikariCP tuning, lazy init, GraalVM native, virtual threads |
 
 Case studies in `spring/case_studies/`: multitenant API, event-driven microservice, API gateway, batch pipeline, distributed caching.
+
+---
+
+## ML Section Module List
+
+Current modules under `src/main/java/com/rutik/systemdesign/ml/`:
+
+| Module Directory | Phase | Key Concepts | Sub-files |
+|-----------------|-------|-------------|-----------|
+| `linear_algebra_and_calculus/` | 1 | Vectors, matrices, eigendecomposition, SVD, gradients, chain rule | — |
+| `probability_and_statistics/` | 1 | Distributions, Bayes, MLE, MAP, hypothesis testing, CLT | — |
+| `optimization_theory/` | 1 | SGD, momentum, Adam, AdamW, LR schedules, convexity, saddle points | — |
+| `information_theory/` | 1 | Entropy, cross-entropy, KL divergence, mutual information | — |
+| `supervised_learning/` | 2 | Linear/logistic regression, SVM, decision trees, KNN, Naive Bayes | linear_models, support_vector_machines, decision_trees, bayesian_methods |
+| `ensemble_methods/` | 2 | Random Forest, XGBoost, LightGBM, CatBoost, stacking, blending | random_forests, gradient_boosting, xgboost_lightgbm, stacking_and_blending |
+| `unsupervised_learning/` | 2 | k-means, DBSCAN, hierarchical, PCA, t-SNE, UMAP | — |
+| `feature_engineering/` | 2 | Encoding, scaling, imputation, target encoding, feature selection | — |
+| `model_evaluation_and_selection/` | 2 | Cross-validation, AUC-ROC/PR, calibration, bias-variance, Optuna | — |
+| `neural_network_fundamentals/` | 3 | MLPs, backprop, activations, weight init, batch norm, dropout | — |
+| `convolutional_neural_networks/` | 3 | Conv2D, pooling, ResNet, EfficientNet, transfer learning | — |
+| `recurrent_neural_networks/` | 3 | LSTM, GRU, vanishing gradients, seq2seq, teacher forcing | — |
+| `training_deep_networks/` | 3 | LR warmup, gradient clipping, mixed precision, augmentation | — |
+| `generative_models/` | 3 | VAEs, GANs, Diffusion (DDPM), mode collapse, FID | — |
+| `computer_vision/` | 4 | Object detection, segmentation, ViT, CLIP, SSL | object_detection, image_segmentation, vision_transformers, self_supervised_vision |
+| `natural_language_processing/` | 4 | Word2Vec, GloVe, TF-IDF, NER, CRF, topic modeling | — |
+| `recommender_systems/` | 4 | Two-tower, collaborative filtering, LTR, bandits | collaborative_filtering, deep_learning_recommenders, retrieval_and_ranking, content_and_hybrid, online_learning_and_bandits |
+| `time_series_forecasting/` | 4 | ARIMA, Prophet, DeepAR, Temporal Fusion Transformer | — |
+| `reinforcement_learning/` | 4 | MDP, Q-learning, DQN, PPO, actor-critic, RLHF | — |
+| `ml_system_design/` | 5 | 6-step framework, feature stores, A/B testing, latency | design_framework, feature_store_design, training_pipeline_design, ab_testing_for_ml, latency_and_throughput_optimization |
+| `data_pipelines_and_processing/` | 5 | PySpark, Great Expectations, DVC, schema evolution | — |
+| `distributed_training/` | 5 | DDP, FSDP, DeepSpeed ZeRO, gradient accumulation | — |
+| `experiment_tracking_and_versioning/` | 5 | MLflow, W&B, Optuna, DVC, reproducibility | — |
+| `gpu_and_hardware_optimization/` | 5 | CUDA, tensor cores, profiling, gradient checkpointing | — |
+| `model_serving_and_inference/` | 6 | TorchServe, ONNX, dynamic batching, canary, shadow mode | — |
+| `model_compression_and_efficiency/` | 6 | PTQ, QAT, pruning, knowledge distillation, TensorRT | — |
+| `monitoring_and_drift_detection/` | 6 | Data/concept drift, PSI, KS test, SHAP monitoring | — |
+| `mlops_and_ci_cd/` | 6 | MLflow Registry, Kubeflow Pipelines, canary, rollback | — |
+| `graph_neural_networks/` | 7 | GCN, GraphSAGE, GAT, GIN, message passing, PyG | — |
+| `self_supervised_and_contrastive_learning/` | 7 | NT-Xent, BYOL, ELECTRA, graph SSL, tabular SSL | — |
+| `causal_inference_and_ml/` | 7 | Potential outcomes, propensity scores, uplift, CausalForest | — |
+| `ml_interview_patterns/` | 8 | Design framework, debug checklist, tradeoff templates | — |
+
+Case studies in `ml/case_studies/`: design_recommendation_engine, design_fraud_detection, design_search_ranking, design_image_classification_pipeline, design_ads_click_prediction, design_anomaly_detection, design_demand_forecasting, design_content_feed_ranking, design_autonomous_driving_perception, design_ml_platform.
+
+Master index: `ml/README.md` (topics table + Sub-Files Index + LLM non-overlap boundary).
+
+### Adding an ML module specifically:
+- Create `src/main/java/com/rutik/systemdesign/ml/<module_name>/README.md`
+- Follow the 14-section template; minimum 10 Q&As (15+ for sub-files)
+- All code in Python with type hints (3.10+ style)
+- Update `ml/README.md` module table
+- Update root `README.md` ML phase table
+- Update this CLAUDE.md ML module table
 
 ---
 
