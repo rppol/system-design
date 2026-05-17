@@ -5,8 +5,8 @@
 A comprehensive system design study repository covering:
 - **LLD** — Design patterns (GoF), SOLID, anti-patterns
 - **HLD** — Distributed system concepts (CAP, caching, queues, sharding, etc.) + case studies
-- **LLM** — Complete LLM engineering guide (38 modules, 13 case studies, 32 deep-dive sub-files across 5 topics)
-- **ML** — Complete Machine Learning guide (32 modules, 10 case studies, 22 deep-dive sub-files across 5 topics)
+- **LLM** — Complete LLM engineering guide (38 modules, 13 case studies, 35 deep-dive sub-files across 6 topics)
+- **ML** — Complete Machine Learning guide (32 modules, 10 case studies, 26 deep-dive sub-files across 6 topics)
 - **Java** — Pure Java senior-engineer + interview prep guide (17 modules, 4 case studies)
 - **Spring** — Spring Framework senior-engineer + interview prep guide (23 modules, 5 case studies)
 
@@ -119,7 +119,7 @@ Current modules under `src/main/java/com/rutik/systemdesign/llm/`:
 
 | Module Directory | Topic | Sub-files |
 |-----------------|-------|-----------|
-| `foundations_and_architecture/` | Transformers, self-attention, scaling laws, GPT vs BERT | — |
+| `foundations_and_architecture/` | Transformers, self-attention, scaling laws, GPT vs BERT | attention_mechanisms, positional_encoding, training_dynamics |
 | `tokenization_and_embeddings/` | BPE, WordPiece, SentencePiece, vocabulary design | — |
 | `embeddings_and_similarity_search/` | Sentence embeddings, HNSW, IVF, Matryoshka, FAISS | — |
 | `pre_training/` | CLM, MLM, data curation, training dynamics, compute | — |
@@ -247,7 +247,7 @@ Current modules under `src/main/java/com/rutik/systemdesign/ml/`:
 | `training_deep_networks/` | 3 | LR warmup, gradient clipping, mixed precision, augmentation | — |
 | `generative_models/` | 3 | VAEs, GANs, Diffusion (DDPM), mode collapse, FID | — |
 | `computer_vision/` | 4 | Object detection, segmentation, ViT, CLIP, SSL | object_detection, image_segmentation, vision_transformers, self_supervised_vision |
-| `natural_language_processing/` | 4 | Word2Vec, GloVe, TF-IDF, NER, CRF, topic modeling | — |
+| `natural_language_processing/` | 4 | Word2Vec, GloVe, TF-IDF, NER, CRF, topic modeling | bert_and_pretrained_models, attention_and_seq2seq, text_representation_and_retrieval, nlp_evaluation_and_metrics |
 | `recommender_systems/` | 4 | Two-tower, collaborative filtering, LTR, bandits | collaborative_filtering, deep_learning_recommenders, retrieval_and_ranking, content_and_hybrid, online_learning_and_bandits |
 | `time_series_forecasting/` | 4 | ARIMA, Prophet, DeepAR, Temporal Fusion Transformer | — |
 | `reinforcement_learning/` | 4 | MDP, Q-learning, DQN, PPO, actor-critic, RLHF | — |

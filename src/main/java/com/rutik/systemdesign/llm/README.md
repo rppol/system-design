@@ -18,7 +18,7 @@ A comprehensive, one-stop reference for understanding everything about Large Lan
 
 ## What This Section Covers
 
-This section is organized into **38 topic directories** plus **13 real-world case studies**, covering the full LLM lifecycle. Five topics have **deep-dive sub-files** (see the Sub-Files Index below):
+This section is organized into **38 topic directories** plus **13 real-world case studies**, covering the full LLM lifecycle. Six topics have **deep-dive sub-files** (35 sub-files total, see the Sub-Files Index below):
 
 - How models are built (architecture, tokenization, pre-training, fine-tuning, alignment)
 - How to use models effectively (prompting, RAG, reasoning, code generation)
@@ -33,7 +33,7 @@ This section is organized into **38 topic directories** plus **13 real-world cas
 
 | # | Topic | Key Concepts | Difficulty |
 |---|-------|-------------|------------|
-| 1 | [Foundations & Architecture](foundations_and_architecture/README.md) | Transformers, self-attention, scaling laws, GPT vs BERT | Intermediate |
+| 1 | [Foundations & Architecture](foundations_and_architecture/README.md) | Transformers, self-attention, scaling laws, GPT vs BERT — 3 sub-files: attention derivations, positional encoding, training dynamics | Intermediate |
 | 2 | [Tokenization & Embeddings](tokenization_and_embeddings/README.md) | BPE, WordPiece, SentencePiece, vocabulary design | Beginner |
 | 3 | [Embeddings & Similarity Search](embeddings_and_similarity_search/README.md) | Sentence embeddings, HNSW, IVF, Matryoshka, FAISS | Intermediate |
 | 4 | [Pre-Training](pre_training/README.md) | CLM, MLM, data curation, training dynamics, compute | Advanced |
@@ -77,6 +77,13 @@ This section is organized into **38 topic directories** plus **13 real-world cas
 ## Sub-Files Index
 
 Topics marked with sub-files above contain individual deep-dive files in addition to their README. Each sub-file follows the full 14-section module template with 15+ interview Q&As.
+
+### Foundations & Architecture (`foundations_and_architecture/`)
+| File | Topic |
+|------|-------|
+| [attention_mechanisms.md](foundations_and_architecture/attention_mechanisms.md) | Flash Attention internals, online softmax, MQA/GQA/MLA, sparse/linear attention, derivations |
+| [positional_encoding.md](foundations_and_architecture/positional_encoding.md) | RoPE derivation (complex plane proof), ALiBi, NTK-aware scaling, YaRN, context extension |
+| [training_dynamics.md](foundations_and_architecture/training_dynamics.md) | Warmup theory, WSD schedule, loss spikes, BF16/FP16, critical batch size, muP, data mixing |
 
 ### Fine-Tuning (`fine_tuning/`)
 | File | Topic |

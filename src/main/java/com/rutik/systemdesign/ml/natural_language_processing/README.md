@@ -4,6 +4,17 @@
 
 ---
 
+## Deep Dive Files
+
+| File | Topic | Q&As |
+|------|-------|------|
+| [bert_and_pretrained_models.md](bert_and_pretrained_models.md) | BERT, RoBERTa, DeBERTa, DistilBERT, ModernBERT fine-tuning | 15+ |
+| [attention_and_seq2seq.md](attention_and_seq2seq.md) | Attention mechanisms, encoder-decoder transformers, beam search | 15+ |
+| [text_representation_and_retrieval.md](text_representation_and_retrieval.md) | BM25, Sentence-BERT, ColBERT, hybrid search, RRF | 15+ |
+| [nlp_evaluation_and_metrics.md](nlp_evaluation_and_metrics.md) | BLEU, ROUGE, BERTScore, entity-level F1, calibration | 15+ |
+
+---
+
 ## 1. Concept Overview
 
 Natural Language Processing (NLP) is the field of enabling machines to understand, interpret, and generate human language. Classical NLP builds from hand-crafted features and statistical models; deep learning NLP uses learned representations (embeddings) and sequence models (RNNs, LSTMs, CNNs) before the transformer era.
@@ -56,6 +67,9 @@ Key insight: TF-IDF and logistic regression still outperform fine-tuned BERT on 
 | Word2Vec (SGNS) | 300d dense | Semantic similarity, analogies | No OOV handling, polysemy ignored |
 | GloVe | 300d dense | Global co-occurrence captured | Static, no OOV |
 | FastText | 300d + subword | Handles OOV, morphology | Larger model size |
+| Sentence-BERT | 768d dense | Semantic sentence similarity, retrieval | Requires GPU, domain fine-tuning needed |
+
+See [text_representation_and_retrieval.md](text_representation_and_retrieval.md) for BM25 derivation, Sentence-BERT siamese training, ColBERT, and hybrid search.
 
 ### 4.3 Text Classification Models
 
@@ -65,6 +79,9 @@ Key insight: TF-IDF and logistic regression still outperform fine-tuned BERT on 
 | Logistic Regression + TF-IDF | O(n*d) | Production baseline, interpretable |
 | TextCNN | O(n*k*d) | Phrase-level features, fast inference |
 | BiLSTM + Attention | O(n*h) | Longer sequences, sentiment |
+| BERT fine-tuned | O(n²*L) | >10K labeled examples, highest accuracy |
+
+See [bert_and_pretrained_models.md](bert_and_pretrained_models.md) for BERT/RoBERTa/DeBERTa fine-tuning, variants, and production guidance.
 
 ### 4.4 Sequence Labeling (NER)
 
@@ -398,6 +415,10 @@ def train_lda(
 
 **NY Times topic discovery:** LDA with 150 topics over 20 years of articles. Topics drift over time (e.g., "internet" topic words shift from "modem/dial-up" to "broadband/streaming"). Requires periodic retraining or dynamic topic models.
 
+**Stack Overflow search (hybrid retrieval):** BM25 over title+body indexes for exact keyword matching, combined with Sentence-BERT bi-encoder for semantic similarity via FAISS. BM25 alone achieves NDCG@10 of 0.45 on technical queries; adding dense retrieval and RRF fusion (k=60) pushes NDCG@10 to 0.58. Cross-encoder reranking of top-20 results raises MRR@10 by a further 12%. See [text_representation_and_retrieval.md](text_representation_and_retrieval.md) for implementation.
+
+**Salesforce customer intent classification with DeBERTa-v3-base:** A support ticket router with 47 intent classes (billing, outage, feature request, etc.) replaced a LogisticRegression+TF-IDF baseline. DeBERTa-v3-base fine-tuned for 5 epochs (LR 2e-5, batch 32) on 80K labeled tickets achieved 94.1% accuracy vs 87.4% for the baseline. Inference served via TorchServe with dynamic batching (max_batch_delay=50ms) sustains 2,000 RPS on two A10G GPUs. See [bert_and_pretrained_models.md](bert_and_pretrained_models.md) for fine-tuning details.
+
 ---
 
 ## 8. Tradeoffs
@@ -531,6 +552,18 @@ The distributional hypothesis states that words appearing in similar contexts ha
 
 **Q: Explain why pre-trained word embeddings can hurt performance on specialized domains.**
 Pre-trained embeddings (Word2Vec on Google News, GloVe on Common Crawl) embed words according to general English usage. In a biomedical context, "cold" primarily means a respiratory infection, but in general English it means low temperature. Fine-tuning only the output layer on top of frozen general embeddings will not correct this semantic mismatch. Solutions: (1) train domain-specific embeddings from scratch on domain corpus; (2) continue training (fine-tune) pre-trained embeddings on domain data; (3) use subword models like FastText which are more robust to domain terminology.
+
+**Q: When would you use BERT fine-tuning over TF-IDF + Logistic Regression for text classification?**
+Use BERT fine-tuning when you have more than 10K labeled examples, a GPU is available, and accuracy is more important than latency. BERT's bidirectional context captures meaning that TF-IDF cannot — "bank" near "river" vs "bank" near "loan" get different representations. For fewer than 5K examples, TF-IDF + LR usually generalizes better because BERT overfits without sufficient data. For latency under 5ms or CPU-only environments, TF-IDF + LR is the only practical choice. DistilBERT is a middle ground: 60% of BERT's parameter count, 40% faster inference, and within 3% of BERT accuracy on most GLUE tasks. See [bert_and_pretrained_models.md](bert_and_pretrained_models.md) for detailed guidance.
+
+**Q: What is BM25 and when does it outperform dense embedding retrieval?**
+BM25 (Best Match 25) is a probabilistic term-frequency ranking function that scores documents by TF saturation (k1=1.2, so additional occurrences of a term yield diminishing returns), length normalization (b=0.75, penalizing verbose documents), and IDF (inverse document frequency, downweighting common terms). BM25 outperforms dense retrieval when queries contain rare terms, product codes, or proper nouns not seen in the embedding model's training data; when queries are exact keyword lookups ("error code 0x80070057"); and when the document collection is very large and un-indexed (FAISS requires memory proportional to corpus size). Dense retrieval wins on paraphrase and semantic matching tasks. Hybrid (BM25 + dense, fused with RRF) is the production standard for general search. See [text_representation_and_retrieval.md](text_representation_and_retrieval.md) for full derivation.
+
+**Q: How do sentence embeddings differ from word embeddings, and why can't you just average word2vec vectors?**
+Sentence embeddings represent an entire sentence as a single fixed-length vector capturing sentence-level semantics, not individual word semantics. Averaging word2vec vectors loses word order and composition — "dog bites man" and "man bites dog" have the same average embedding. Additionally, word2vec embeddings are context-independent, so "bank" always has one vector regardless of whether it means river bank or financial institution. Sentence-BERT (SBERT) uses a siamese BERT network trained on NLI (natural language inference) triplets with contrastive loss, producing embeddings where cosine similarity directly measures semantic similarity. SBERT cosine similarity achieves Spearman r=0.86 on STS-B vs 0.20 for averaged GloVe. See [text_representation_and_retrieval.md](text_representation_and_retrieval.md) for training details.
+
+**Q: What is BLEU and what are its most significant weaknesses?**
+BLEU (Bilingual Evaluation Understudy) measures the geometric mean of modified n-gram precision (n=1 to 4) between a hypothesis and one or more reference translations, multiplied by a brevity penalty to penalize short outputs. Modified precision clips each n-gram count by its maximum occurrence in any reference, preventing trivial repetition. Weaknesses: BLEU is a corpus-level metric that correlates poorly with human judgment at the sentence level; it penalizes valid paraphrases not matching any reference (a correct translation using "automobile" when the reference says "car" scores zero for that bigram); it rewards n-gram overlap regardless of grammatical coherence; and it is computed differently across implementations (smoothing methods vary). ROUGE-L is preferred for summarization (recall-oriented, based on longest common subsequence). BERTScore is preferred when semantic equivalence matters over lexical matching. See [nlp_evaluation_and_metrics.md](nlp_evaluation_and_metrics.md) for full derivations.
 
 ---
 

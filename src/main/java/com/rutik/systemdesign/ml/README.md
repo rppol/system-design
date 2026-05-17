@@ -18,7 +18,7 @@ Key insight: the majority of ML failures are not algorithm failures — they are
 
 ## What This Section Covers
 
-Thirty-two modules organized across eight learning phases take you from linear algebra through production MLOps. Five topics contain deep-dive sub-files (22 sub-files total) that follow the same 14-section template used throughout this repository. Ten end-to-end case studies — each covering a real-world ML system — demonstrate how individual concepts combine into full system designs. The section is structured so it can be read sequentially as a learning curriculum or used as a reference when preparing for a specific interview topic.
+Thirty-two modules organized across eight learning phases take you from linear algebra through production MLOps. Six topics contain deep-dive sub-files (26 sub-files total) that follow the same 14-section template used throughout this repository. Ten end-to-end case studies — each covering a real-world ML system — demonstrate how individual concepts combine into full system designs. The section is structured so it can be read sequentially as a learning curriculum or used as a reference when preparing for a specific interview topic.
 
 ---
 
@@ -41,7 +41,7 @@ Thirty-two modules organized across eight learning phases take you from linear a
 | 13 | [Training Deep Networks](training_deep_networks/README.md) | Regularization, dropout, gradient clipping, mixed precision, distributed training basics | 3 — Deep Learning Foundations | Intermediate |
 | 14 | [Generative Models](generative_models/README.md) | VAEs, GANs, normalizing flows, diffusion models, mode collapse, FID score | 3 — Deep Learning Foundations | Advanced |
 | 15 | [Computer Vision](computer_vision/README.md) | Object detection, segmentation, vision transformers, self-supervised vision | 4 — Domain Specializations | Intermediate |
-| 16 | [Natural Language Processing](natural_language_processing/README.md) | Text preprocessing, word2vec, GloVe, sentiment analysis, NER, classical NLP pipelines | 4 — Domain Specializations | Intermediate |
+| 16 | [Natural Language Processing](natural_language_processing/README.md) | Text preprocessing, word2vec, GloVe, sentiment analysis, NER, classical NLP pipelines — 4 sub-files: BERT fine-tuning, attention/seq2seq, retrieval, evaluation | 4 — Domain Specializations | Intermediate |
 | 17 | [Recommender Systems](recommender_systems/README.md) | Collaborative filtering, content-based, matrix factorization, deep recommenders, ranking | 4 — Domain Specializations | Intermediate |
 | 18 | [Time Series Forecasting](time_series_forecasting/README.md) | ARIMA, Prophet, temporal CNNs, LSTMs for time series, anomaly detection in streams | 4 — Domain Specializations | Intermediate |
 | 19 | [Reinforcement Learning](reinforcement_learning/README.md) | MDP, Q-learning, policy gradients, PPO, actor-critic, reward shaping, exploration | 4 — Domain Specializations | Advanced |
@@ -102,6 +102,15 @@ Twenty-two deep-dive sub-files provide topic-level detail beyond what a single R
 | [content_and_hybrid.md](recommender_systems/content_and_hybrid.md) | Content-Based and Hybrid | TF-IDF features, item embeddings, hybrid architectures, cold-start, exploration-exploitation |
 | [online_learning_and_bandits.md](recommender_systems/online_learning_and_bandits.md) | Online Learning and Bandits | Multi-armed bandits, epsilon-greedy, UCB, Thompson sampling, contextual bandits, LinUCB |
 
+### natural_language_processing/ (4 sub-files)
+
+| File | Topic | Key Concepts |
+|------|-------|-------------|
+| [bert_and_pretrained_models.md](natural_language_processing/bert_and_pretrained_models.md) | BERT and Pre-trained Models | MLM, NSP, WordPiece, fine-tuning, RoBERTa, DeBERTa, ALBERT, DistilBERT, ModernBERT |
+| [attention_and_seq2seq.md](natural_language_processing/attention_and_seq2seq.md) | Attention and Seq2Seq | Bahdanau, Luong attention, encoder-decoder transformers, beam search, nucleus sampling |
+| [text_representation_and_retrieval.md](natural_language_processing/text_representation_and_retrieval.md) | Text Representation and Retrieval | BM25 derivation, inverted index, Sentence-BERT, FAISS, ColBERT, RRF hybrid search |
+| [nlp_evaluation_and_metrics.md](natural_language_processing/nlp_evaluation_and_metrics.md) | NLP Evaluation and Metrics | BLEU, ROUGE, METEOR, BERTScore, entity-level F1, ECE, text augmentation |
+
 ### ml_system_design/ (5 sub-files)
 
 | File | Topic | Key Concepts |
@@ -161,7 +170,8 @@ Phase 3 — Deep Learning Foundations
         v
 Phase 4 — Domain Specializations
   computer_vision      -->  [sub-files: object_detection, image_segmentation, vision_transformers, self_supervised_vision]
-  natural_language_processing
+  natural_language_processing  -->  [sub-files: bert_and_pretrained_models, attention_and_seq2seq,
+                               text_representation_and_retrieval, nlp_evaluation_and_metrics]
   recommender_systems  -->  [sub-files: collaborative_filtering, deep_learning_recommenders,
                              retrieval_and_ranking, content_and_hybrid, online_learning_and_bandits]
   time_series_forecasting

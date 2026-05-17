@@ -1,5 +1,15 @@
 # Foundations & Architecture
 
+## Deep Dive Files
+
+| File | Topic | Q&As |
+|------|-------|------|
+| [attention_mechanisms.md](attention_mechanisms.md) | Flash Attention internals, MQA/GQA/MLA, sparse/linear attention, derivations | 15+ |
+| [positional_encoding.md](positional_encoding.md) | RoPE derivation, ALiBi, YaRN, NTK scaling, context extension | 15+ |
+| [training_dynamics.md](training_dynamics.md) | Warmup theory, loss spikes, BF16/FP16, batch scaling, muP, data mixing | 15+ |
+
+---
+
 ## 1. Concept Overview
 
 Large Language Models (LLMs) are neural networks trained on massive text corpora to predict the next token in a sequence. The "large" refers to both the number of parameters (billions to trillions) and the scale of training data (trillions of tokens). The dominant architecture powering all modern LLMs is the **Transformer**, introduced by Vaswani et al. in "Attention Is All You Need" (2017).

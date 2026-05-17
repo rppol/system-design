@@ -84,7 +84,7 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 #### Foundations
 | Topic | Key Concepts |
 |-------|-------------|
-| [Foundations & Architecture](src/main/java/com/rutik/systemdesign/llm/foundations_and_architecture/) | Transformers, self-attention, MoE, scaling laws, GPT/LLaMA/DeepSeek |
+| [Foundations & Architecture](src/main/java/com/rutik/systemdesign/llm/foundations_and_architecture/) | Transformers, self-attention, MoE, scaling laws, GPT/LLaMA/DeepSeek — with 3 deep-dive sub-files (Flash Attention, RoPE, training dynamics) |
 | [Tokenization & Embeddings](src/main/java/com/rutik/systemdesign/llm/tokenization_and_embeddings/) | BPE, WordPiece, SentencePiece, tiktoken, vocabulary design |
 | [Embeddings & Similarity Search](src/main/java/com/rutik/systemdesign/llm/embeddings_and_similarity_search/) | Sentence embeddings, contrastive learning, HNSW, FAISS, Matryoshka |
 
@@ -487,7 +487,7 @@ A comprehensive, senior-engineer-level guide to Machine Learning — from mathem
 | Module | Key Concepts |
 |--------|-------------|
 | [Computer Vision](src/main/java/com/rutik/systemdesign/ml/computer_vision/) | Object detection, segmentation, ViT, CLIP, self-supervised vision — with 4 deep-dive sub-files |
-| [Natural Language Processing](src/main/java/com/rutik/systemdesign/ml/natural_language_processing/) | Word2Vec, GloVe, TF-IDF, text classification, NER (BIO tagging), CRF, topic modeling |
+| [Natural Language Processing](src/main/java/com/rutik/systemdesign/ml/natural_language_processing/) | Word2Vec, GloVe, TF-IDF, text classification, NER (BIO tagging), CRF, topic modeling — with 4 deep-dive sub-files (BERT, attention/seq2seq, retrieval, evaluation) |
 | [Recommender Systems](src/main/java/com/rutik/systemdesign/ml/recommender_systems/) | Two-tower retrieval, collaborative filtering, LTR ranking, bandits — with 5 deep-dive sub-files |
 | [Time Series Forecasting](src/main/java/com/rutik/systemdesign/ml/time_series_forecasting/) | ARIMA, Prophet, DeepAR, Temporal Fusion Transformer, walk-forward validation |
 | [Reinforcement Learning](src/main/java/com/rutik/systemdesign/ml/reinforcement_learning/) | MDP, Q-learning, DQN, PPO, actor-critic, reward shaping, RLHF connection |
