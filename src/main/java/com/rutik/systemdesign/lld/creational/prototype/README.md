@@ -479,6 +479,246 @@ a1.getBehaviorTree().setState("targetId", 42);
 System.out.println(a2.getBehaviorTree().getState("targetId")); // prints 0 — correct: fully independent
 ```
 
+### Anti-Pattern 2: Calling clone() on a Class That Does Not Implement Cloneable
+
+Java's `Object.clone()` requires the calling class to implement `java.lang.Cloneable`. If a subclass
+adds fields and forgets to declare `implements Cloneable`, `Object.clone()` throws
+`CloneNotSupportedException` at runtime — even if the superclass implements `Cloneable`. This is a
+direct consequence of the broken contract in `java.lang.Cloneable`: the interface declares no methods,
+so there is nothing the compiler can check. The only enforcement is a runtime guard inside native
+`Object.clone()`. Josh Bloch called this "one of Java's biggest design mistakes" (Effective Java Item 13).
+
+```java
+// BROKEN: BaseConfig implements Cloneable but its subclass ExtendedConfig forgets to.
+// super.clone() throws CloneNotSupportedException at runtime — not caught at compile time.
+
+public class BaseConfig implements Cloneable {
+    protected int timeout;  // milliseconds
+
+    public BaseConfig(int timeout) {
+        this.timeout = timeout;
+    }
+
+    @Override
+    public BaseConfig clone() {
+        try {
+            return (BaseConfig) super.clone(); // works for BaseConfig instances
+        } catch (CloneNotSupportedException e) {
+            throw new AssertionError("Should never happen — we implement Cloneable", e);
+        }
+    }
+}
+
+// Subclass forgets implements Cloneable — Object.clone() will throw at runtime.
+public class ExtendedConfig extends BaseConfig {
+    private String region; // new field not in BaseConfig
+
+    public ExtendedConfig(int timeout, String region) {
+        super(timeout);
+        this.region = region;
+    }
+
+    // No override of clone() — inherits BaseConfig.clone() which calls super.clone().
+    // Object.clone() checks the actual runtime class (ExtendedConfig), not BaseConfig.
+    // ExtendedConfig does NOT implement Cloneable → CloneNotSupportedException is thrown.
+}
+
+// At runtime:
+ExtendedConfig original = new ExtendedConfig(5000, "us-east-1");
+ExtendedConfig copy = (ExtendedConfig) original.clone(); // throws CloneNotSupportedException
+```
+
+```java
+// FIX option A: add implements Cloneable to the subclass AND override clone().
+// Overriding clone() ensures the subclass fields are copied correctly.
+
+public class ExtendedConfig extends BaseConfig implements Cloneable { // explicitly declare
+    private String region;
+
+    public ExtendedConfig(int timeout, String region) {
+        super(timeout);
+        this.region = region;
+    }
+
+    @Override
+    public ExtendedConfig clone() {
+        try {
+            ExtendedConfig copy = (ExtendedConfig) super.clone(); // shallow copy — primitives OK
+            // region is a String (immutable) — safe to share the reference
+            return copy;
+        } catch (CloneNotSupportedException e) {
+            throw new AssertionError("ExtendedConfig implements Cloneable", e);
+        }
+    }
+}
+
+// FIX option B (preferred, Effective Java Item 13): avoid Cloneable entirely.
+// Use a copy constructor — explicit, compiler-checked, works without Cloneable.
+
+public class ExtendedConfig extends BaseConfig {
+    private String region;
+
+    public ExtendedConfig(int timeout, String region) {
+        super(timeout);
+        this.region = region;
+    }
+
+    // Copy constructor — no Cloneable, no CloneNotSupportedException, no ambiguity
+    public ExtendedConfig(ExtendedConfig other) {
+        super(other.timeout);
+        this.region = other.region;
+    }
+}
+
+// Usage:
+ExtendedConfig original = new ExtendedConfig(5000, "us-east-1");
+ExtendedConfig copy     = new ExtendedConfig(original); // clean, explicit, compiler-safe
+```
+
+### Anti-Pattern 3: Using clone() for Deep Copy When the Object Graph Has Cycles
+
+A naive recursive deep-clone visits each nested object and recursively clones it. If the graph
+contains a cycle — object A references B, and B references A, or a shared root is reachable from
+multiple paths — the clone recurses infinitely and throws `StackOverflowError`. This is a real
+failure mode in e-commerce engines where domain objects share pricing rules across multiple order
+items.
+
+Scenario: an order-item discount graph where each `OrderItem` holds a reference to a shared
+`PriceRule`. Multiple `OrderItem` instances reference the same `PriceRule` root. If the `PriceRule`
+also holds back-references to the items that use it (for audit), the graph is cyclic. A naive clone
+never terminates.
+
+```java
+// BROKEN: cyclic graph — Order -> OrderItem -> PriceRule -> OrderItem (back-ref) -> ...
+// DeepClone recurses infinitely → StackOverflowError.
+
+public class PriceRule {
+    private String ruleId;
+    private double discountPct;
+    private List<OrderItem> applicableItems; // back-reference — creates the cycle
+
+    public PriceRule(String ruleId, double discountPct) {
+        this.ruleId          = ruleId;
+        this.discountPct     = discountPct;
+        this.applicableItems = new ArrayList<>();
+    }
+
+    public PriceRule deepClone() {
+        PriceRule copy = new PriceRule(this.ruleId, this.discountPct);
+        for (OrderItem item : applicableItems) {
+            copy.applicableItems.add(item.deepClone()); // recurses into OrderItem
+        }
+        return copy;
+    }
+
+    public void addItem(OrderItem item) { applicableItems.add(item); }
+}
+
+public class OrderItem {
+    private String     sku;
+    private int        quantity;
+    private PriceRule  priceRule; // reference to shared rule
+
+    public OrderItem(String sku, int quantity, PriceRule priceRule) {
+        this.sku       = sku;
+        this.quantity  = quantity;
+        this.priceRule = priceRule;
+        priceRule.addItem(this); // creates the back-reference — cycle is formed
+    }
+
+    public OrderItem deepClone() {
+        // BROKEN: clones priceRule, which in turn clones this item again → infinite loop
+        return new OrderItem(this.sku, this.quantity, this.priceRule.deepClone());
+    }
+}
+
+// At runtime:
+PriceRule rule  = new PriceRule("SUMMER20", 0.20);
+OrderItem item1 = new OrderItem("SKU-001", 2, rule); // rule.applicableItems now contains item1
+OrderItem item2 = new OrderItem("SKU-002", 1, rule);
+
+OrderItem cloned = item1.deepClone(); // StackOverflowError: item1 -> rule -> item1 -> rule -> ...
+```
+
+```java
+// FIX: use a clone registry (IdentityHashMap) to detect already-cloned objects and break cycles.
+// This is the same strategy used internally by Java object serialization.
+// Pass the registry through every clone call — when a node is encountered a second time,
+// return the existing clone instead of recursing again.
+
+public class PriceRule {
+    private String          ruleId;
+    private double          discountPct;
+    private List<OrderItem> applicableItems;
+
+    public PriceRule(String ruleId, double discountPct) {
+        this.ruleId          = ruleId;
+        this.discountPct     = discountPct;
+        this.applicableItems = new ArrayList<>();
+    }
+
+    public PriceRule deepClone(IdentityHashMap<Object, Object> registry) {
+        // If this PriceRule has already been cloned in this clone operation, return the clone.
+        if (registry.containsKey(this)) {
+            return (PriceRule) registry.get(this);
+        }
+        PriceRule copy = new PriceRule(this.ruleId, this.discountPct);
+        registry.put(this, copy); // register BEFORE recursing — breaks the cycle
+        for (OrderItem item : applicableItems) {
+            copy.applicableItems.add(item.deepClone(registry));
+        }
+        return copy;
+    }
+
+    public void addItem(OrderItem item) { applicableItems.add(item); }
+    public String getRuleId()           { return ruleId; }
+    public double getDiscountPct()      { return discountPct; }
+}
+
+public class OrderItem {
+    private String    sku;
+    private int       quantity;
+    private PriceRule priceRule;
+
+    public OrderItem(String sku, int quantity, PriceRule priceRule) {
+        this.sku       = sku;
+        this.quantity  = quantity;
+        this.priceRule = priceRule;
+        priceRule.addItem(this);
+    }
+
+    public OrderItem deepClone(IdentityHashMap<Object, Object> registry) {
+        if (registry.containsKey(this)) {
+            return (OrderItem) registry.get(this);
+        }
+        // Allocate clone with placeholder priceRule first, register immediately
+        OrderItem copy = new OrderItem(this.sku, this.quantity,
+                                       this.priceRule.deepClone(registry));
+        registry.put(this, copy);
+        return copy;
+    }
+
+    // Public entry point — allocates the registry and starts the clone
+    public OrderItem deepClone() {
+        return deepClone(new IdentityHashMap<>());
+    }
+
+    public String    getSku()       { return sku; }
+    public int       getQuantity()  { return quantity; }
+    public PriceRule getPriceRule() { return priceRule; }
+}
+
+// Usage — no StackOverflowError, shared PriceRule is cloned exactly once:
+PriceRule rule   = new PriceRule("SUMMER20", 0.20);
+OrderItem item1  = new OrderItem("SKU-001", 2, rule);
+OrderItem item2  = new OrderItem("SKU-002", 1, rule);
+
+OrderItem clone1 = item1.deepClone(); // terminates correctly
+// clone1.getPriceRule() is a new PriceRule object, independent of the original rule.
+// The cloned PriceRule's applicableItems list contains the cloned OrderItem — graph is intact.
+System.out.println(clone1.getPriceRule().getRuleId()); // prints "SUMMER20" — correct
+```
+
 ### Spring Framework Prototype Scope: Framework-Level Prototype Pattern (Spring Boot 3.2+)
 
 ```java
