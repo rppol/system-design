@@ -181,17 +181,260 @@ Key insight: `someOperation()` is the template. `factoryMethod()` is the hook th
 
 ## 14. Real-World Usage
 
-| Framework / Library | Usage |
-|--------------------|-------|
-| **`java.util.Iterator`** | Collections implement `iterator()` — a factory method that returns the appropriate concrete iterator. |
-| **`java.util.Collection.iterator()`** | Each `List`, `Set` implementation returns its own iterator subclass. |
-| **`javax.xml.parsers.DocumentBuilderFactory`** | `newDocumentBuilder()` is a factory method — subclasses return the appropriate parser. |
-| **Spring Framework** | `FactoryBean<T>` — Spring beans can implement `getObject()` as a factory method to produce other beans. |
-| **`java.net.URLStreamHandlerFactory`** | `createURLStreamHandler(protocol)` returns a handler for each protocol. |
-| **Hibernate** | `SessionFactory.openSession()` returns a concrete Session implementation. |
-| **`javax.persistence.Persistence`** | `createEntityManagerFactory()` returns a provider-specific implementation. |
-| **Android** | `Fragment.onCreateView()` is a factory method subclasses override to return their view. |
-| **`java.nio.charset.Charset`** | `newDecoder()` / `newEncoder()` are factory methods returning charset-specific coders. |
+### Production Scenario: JDBC DriverManager and High-Throughput Connection Pools
+
+`java.sql.DriverManager.getConnection()` is the canonical Factory Method in the Java platform.
+The caller provides a JDBC URL string; the DriverManager determines which registered driver
+can handle it and delegates construction of the `Connection` to that driver's `connect()` method.
+At no point does the caller reference `MySQLConnection`, `PgConnection`, or any concrete class.
+
+HikariCP — the most widely used JDBC connection pool (default in Spring Boot) — uses this pattern
+to create new physical connections when the pool is exhausted. At a throughput of 10,000
+transactions per second with a pool size of 10, the factory is called rarely (only on pool growth),
+but each call must return a correctly configured, authenticated connection in under 50ms.
+
+```
+Application (10,000 TPS)
+       |
+       v
+HikariCP Connection Pool (default size: 10 connections)
+       |
+       | pool exhausted? create new connection
+       v
++-----------------------------------------------+
+|   DriverManager.getConnection(jdbcUrl, props) |  <-- Factory Method
++-----------------------------------------------+
+       |
+       | DriverManager iterates registered drivers
+       | first driver where driver.acceptsURL(url) == true wins
+       v
++----------------------------+    +---------------------------+
+| com.mysql.cj.jdbc.Driver   |    | org.postgresql.Driver     |
+| .connect(url, props)       |    | .connect(url, props)      |
++----------------------------+    +---------------------------+
+       |                                  |
+       v                                  v
+MySQLConnection (concrete)       PgConnection (concrete)
+  both returned as java.sql.Connection (interface)
+```
+
+### Famous Codebase Usages
+
+| Framework / Library | Class / Method | Pattern Role |
+|--------------------|---------------|-------------|
+| `java.sql.DriverManager` | `getConnection(url, props)` | Creator; delegates to `Driver.connect()` factory method | Java 1.1+ |
+| `java.util.Collection` | `iterator()` — declared in Collection, overridden in ArrayList, LinkedList, HashSet | Factory Method; returns concrete iterator | Java 2+ |
+| `javax.xml.parsers.DocumentBuilderFactory` | `newDocumentBuilder()` — abstract; Xerces/Crimson override it | GoF textbook Factory Method | Java 1.4+ |
+| Spring Framework 6 | `FactoryBean<T>.getObject()` — bean implements this to produce another bean via factory method | Factory Method for bean construction | Spring 6.0+ |
+| Hibernate 6.x | `SessionFactory.openSession()` — returns `SessionImpl`; caller sees `Session` interface | Factory Method for session lifecycle | Hibernate 6.0+ |
+| `java.nio.charset.Charset` | `newDecoder()` / `newEncoder()` — each Charset subclass returns its own coder | Factory Method for codec creation | Java 1.4+ |
+| Android SDK | `Fragment.onCreateView()` — framework calls; subclass returns the Fragment's view | Framework-level Factory Method | Android API 11+ |
+
+### Production-Grade Code: JDBC Factory Method with HikariCP (Java 17 LTS, Spring Boot 3.2+)
+
+```java
+// Java 17 LTS — demonstrating how DriverManager.getConnection() acts as a factory method.
+// This is the actual pattern HikariCP uses internally when growing the pool.
+// See: com.zaxxer.hikari.pool.PoolBase#newConnection() in HikariCP 5.x source.
+
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.util.Properties;
+
+// AbstractConnectionCreator = Creator
+// JDBC Driver implementations = ConcreteCreators
+// java.sql.Connection = Product interface
+// MySQLConnection / PgConnection = ConcreteProducts (never referenced by caller)
+
+public abstract class AbstractConnectionCreator {
+    // Template Method that calls the Factory Method
+    public Connection createAndValidate() throws SQLException {
+        Connection conn = createConnection(); // factory method call
+        if (!conn.isValid(2)) {
+            conn.close();
+            throw new SQLException("Connection validation failed within 2s");
+        }
+        return conn;
+    }
+
+    // Factory Method — subclasses decide which concrete Connection to produce
+    protected abstract Connection createConnection() throws SQLException;
+}
+
+// ConcreteCreator A — MySQL via DriverManager (delegates to mysql.cj.jdbc.Driver internally)
+public class MysqlConnectionCreator extends AbstractConnectionCreator {
+    private final String url;
+    private final Properties props;
+
+    public MysqlConnectionCreator(String host, int port, String db, String user, String pass) {
+        this.url = String.format("jdbc:mysql://%s:%d/%s?useSSL=true&serverTimezone=UTC", host, port, db);
+        this.props = new Properties();
+        this.props.setProperty("user", user);
+        this.props.setProperty("password", pass);
+        this.props.setProperty("connectTimeout", "5000");
+        this.props.setProperty("socketTimeout", "30000");
+    }
+
+    @Override
+    protected Connection createConnection() throws SQLException {
+        // DriverManager.getConnection is itself a factory method: it picks the right Driver
+        return DriverManager.getConnection(url, props);
+    }
+}
+
+// ConcreteCreator B — PostgreSQL
+public class PostgresConnectionCreator extends AbstractConnectionCreator {
+    private final String url;
+    private final Properties props;
+
+    public PostgresConnectionCreator(String host, int port, String db, String user, String pass) {
+        this.url = String.format("jdbc:postgresql://%s:%d/%s?ssl=true", host, port, db);
+        this.props = new Properties();
+        this.props.setProperty("user", user);
+        this.props.setProperty("password", pass);
+        this.props.setProperty("loginTimeout", "5");
+        this.props.setProperty("socketTimeout", "30");
+    }
+
+    @Override
+    protected Connection createConnection() throws SQLException {
+        return DriverManager.getConnection(url, props);
+    }
+}
+```
+
+### Anti-Pattern 1: Using `new` Instead of Factory — Breaks Dependency Injection and Testability
+
+```java
+// BROKEN: hard-coded new inside business logic
+// This was the dominant pattern in pre-Spring enterprise Java (2000-2005).
+// Still seen in legacy codebases and junior code.
+public class OrderService {
+    public void processOrder(Order order) {
+        // Direct instantiation: OrderService is now coupled to MySQLConnection forever.
+        // You cannot test OrderService without a live MySQL instance.
+        // Switching to PostgreSQL requires editing OrderService.
+        Connection conn = new com.mysql.cj.jdbc.ConnectionImpl(host, port, props); // WRONG
+        // ... use conn
+    }
+}
+```
+
+```java
+// FIX: accept the factory method (or a DataSource) via constructor injection
+// Now OrderService is testable with any Connection implementation.
+public class OrderService {
+    private final AbstractConnectionCreator connectionCreator;
+
+    // Java 17: injection via constructor (preferred over field injection)
+    public OrderService(AbstractConnectionCreator connectionCreator) {
+        this.connectionCreator = connectionCreator;
+    }
+
+    public void processOrder(Order order) throws SQLException {
+        try (Connection conn = connectionCreator.createAndValidate()) {
+            // business logic — completely decoupled from MySQL/PostgreSQL
+        }
+    }
+}
+
+// In production:
+OrderService svc = new OrderService(new MysqlConnectionCreator(host, port, db, user, pass));
+
+// In unit tests:
+OrderService testSvc = new OrderService(new FakeConnectionCreator()); // no database needed
+```
+
+### Anti-Pattern 2: Static if-else "Factory" — Violates Open/Closed Principle
+
+```java
+// BROKEN: static factory with if-else — adding a new database type requires editing this class.
+// Every new database type forces a modification. This is O(n) maintenance pain.
+public class BadConnectionFactory {
+    public static Connection create(String dbType, String host, int port) throws SQLException {
+        if ("mysql".equals(dbType)) {
+            return DriverManager.getConnection("jdbc:mysql://" + host + ":" + port + "/app");
+        } else if ("postgres".equals(dbType)) {
+            return DriverManager.getConnection("jdbc:postgresql://" + host + ":" + port + "/app");
+        } else if ("oracle".equals(dbType)) {
+            return DriverManager.getConnection("jdbc:oracle:thin:@" + host + ":" + port + ":app");
+        }
+        // Adding SQLite requires editing this class — violates Open/Closed Principle
+        throw new IllegalArgumentException("Unknown DB type: " + dbType);
+    }
+}
+```
+
+```java
+// FIX: Factory Method via polymorphism — adding SQLite = adding one new class, not editing existing.
+public class SqliteConnectionCreator extends AbstractConnectionCreator {
+    private final String filePath;
+
+    public SqliteConnectionCreator(String filePath) {
+        this.filePath = filePath;
+    }
+
+    @Override
+    protected Connection createConnection() throws SQLException {
+        return DriverManager.getConnection("jdbc:sqlite:" + filePath);
+    }
+}
+// Zero changes to AbstractConnectionCreator, MysqlConnectionCreator, or OrderService.
+```
+
+### Anti-Pattern 3: Factory Method Returns a Concrete Type
+
+```java
+// BROKEN: factory method leaks concrete type — callers now depend on MySQLConnection
+public class BadMysqlCreator {
+    public com.mysql.cj.jdbc.ConnectionImpl createConnection() throws SQLException { // WRONG return type
+        return (com.mysql.cj.jdbc.ConnectionImpl) DriverManager.getConnection(url, props);
+    }
+    // Callers that import ConnectionImpl cannot switch to PostgreSQL without a rewrite.
+}
+```
+
+```java
+// FIX: always return the Product interface (java.sql.Connection)
+public class CorrectMysqlCreator extends AbstractConnectionCreator {
+    @Override
+    protected Connection createConnection() throws SQLException { // returns interface
+        return DriverManager.getConnection(url, props);
+    }
+}
+```
+
+### Performance Numbers
+
+- HikariCP 5.x pool growth (factory method call per new physical connection): 15–50ms typical,
+  under 200ms including TLS handshake to a remote DB — acceptable because pool growth is rare.
+- `Collection.iterator()` factory method dispatch: ~1–2 ns — JIT inlines the virtual call after
+  10,000 invocations (C2 compiler threshold), eliminating dispatch overhead at steady state.
+- `FactoryBean.getObject()` in Spring Boot 3.2+: called once at startup per singleton-scoped
+  FactoryBean; result is cached. Prototype-scoped FactoryBeans pay the factory method cost per
+  `getBean()` call — typically < 1 microsecond for simple construction.
+
+### Migration Story: Moving from `new` to Factory Method for Testability
+
+A common migration path in enterprise Java teams (2018-2023):
+
+Phase 1 (legacy, common before 2010): `new ConcreteClass()` scattered throughout service classes.
+Integration tests require a running database; unit tests do not exist or use in-memory H2 with
+schema compatibility bugs.
+
+Phase 2 (extract factory method): Identify all `new` calls that produce swappable objects.
+Extract to a protected factory method in the same class. Subclass in tests to return fakes.
+This is the minimal refactoring — no new classes required.
+
+Phase 3 (introduce Creator hierarchy): If multiple strategies are genuinely needed in production
+(MySQL in prod, SQLite for embedded analytics, H2 for testing), formalize AbstractConnectionCreator.
+At this point, dependency injection (Spring Boot 3.x `@Bean` method = factory method) is usually
+the cleaner path.
+
+Phase 4 (move to DI framework): Once the team has Spring Boot 3.x, `@Bean` methods on
+`@Configuration` classes ARE factory methods: they are overridable in test slices via
+`@TestConfiguration`, satisfying Open/Closed without any hand-rolled Creator hierarchy.
 
 ---
 
