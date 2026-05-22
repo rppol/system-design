@@ -312,7 +312,7 @@ public class ConfigRegistry {
 // serialize session objects to Redis and back.
 public class TokenCache implements Serializable {
     private static final TokenCache INSTANCE = new TokenCache();
-    private static TokenCache getInstance() { return INSTANCE; }
+    public static TokenCache getInstance() { return INSTANCE; }
 
     // Deserializing this object produces a NEW TokenCache — singleton violated.
     // Two microservice nodes could end up with divergent caches after failover.

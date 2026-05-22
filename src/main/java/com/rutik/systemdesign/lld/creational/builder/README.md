@@ -421,7 +421,7 @@ public class OrderProcessor {
 // 500ms later — far from the null origin, hard to debug.
 
 @Builder  // generates: Builder.orderId(), Builder.customerId(), Builder.build()
-@Data
+@Value   // Lombok immutable class: generates @AllArgsConstructor(access=PRIVATE) + getters + equals/hashCode
 public class Payment {
     private final String orderId;      // Lombok allows null — no validation
     private final String customerId;   // Lombok allows null — no validation

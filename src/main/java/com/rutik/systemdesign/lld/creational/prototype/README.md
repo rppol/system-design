@@ -400,14 +400,14 @@ public class GameServerBootstrap {
 
         // Load Archer prototype once — 40ms total (disk + compile + DB)
         byte[] archerSprite = Files.readAllBytes(Path.of("sprites/archer.atlas")); // 20ms
-        BehaviorTree archerAI = BehaviorTree.compile("scripts/archer.btree");       // 10ms
-        PhysicsBody archerBody = PhysicsBody.fromDatabase("archer");                // 10ms
+        BehaviorTree archerAI = BehaviorTree.compile("scripts/archer.btree");       // 10ms — static factory, implementation elided
+        PhysicsBody archerBody = PhysicsBody.fromDatabase("archer");                // 10ms — static factory, implementation elided
         registry.register("archer", new GameEntity("archer", archerSprite, archerAI, archerBody));
 
         // Load Dragon prototype once — 120ms total
         byte[] dragonSprite = Files.readAllBytes(Path.of("sprites/dragon.atlas"));  // 80ms
-        BehaviorTree dragonAI = BehaviorTree.compile("scripts/dragon.btree");        // 15ms
-        PhysicsBody dragonBody = PhysicsBody.fromDatabase("dragon");                 // 25ms
+        BehaviorTree dragonAI = BehaviorTree.compile("scripts/dragon.btree");        // 15ms — static factory, implementation elided
+        PhysicsBody dragonBody = PhysicsBody.fromDatabase("dragon");                 // 25ms — static factory, implementation elided
         registry.register("dragon", new GameEntity("dragon", dragonSprite, dragonAI, dragonBody));
 
         return registry;
@@ -426,7 +426,7 @@ public class GameServerBootstrap {
 public class BrokenGameEntity implements Cloneable {
     private final String       entityType;
     private final byte[]       spriteAtlas;
-    private final BehaviorTree behaviorTree; // MUTABLE — must be deep copied
+    final BehaviorTree behaviorTree; // package-private so demo code can access directly; MUTABLE — must be deep copied
 
     private int health;
 
@@ -479,101 +479,127 @@ a1.getBehaviorTree().setState("targetId", 42);
 System.out.println(a2.getBehaviorTree().getState("targetId")); // prints 0 — correct: fully independent
 ```
 
-### Anti-Pattern 2: Calling clone() on a Class That Does Not Implement Cloneable
+### Anti-Pattern 2: Forgetting to Override clone() in a Subclass That Adds Mutable Fields
 
-Java's `Object.clone()` requires the calling class to implement `java.lang.Cloneable`. If a subclass
-adds fields and forgets to declare `implements Cloneable`, `Object.clone()` throws
-`CloneNotSupportedException` at runtime — even if the superclass implements `Cloneable`. This is a
-direct consequence of the broken contract in `java.lang.Cloneable`: the interface declares no methods,
-so there is nothing the compiler can check. The only enforcement is a runtime guard inside native
-`Object.clone()`. Josh Bloch called this "one of Java's biggest design mistakes" (Effective Java Item 13).
+When a subclass adds new mutable reference fields but does NOT override `clone()`, the inherited
+`clone()` from the parent does a shallow copy of those fields — the new mutable fields are shared
+between the original and the clone. The clone compiles and runs without any exception (unlike the
+common misconception that `Cloneable` inheritance causes a runtime error — `Cloneable` is inherited
+just like any interface), but the shared mutable field creates a silent data integrity bug.
+
+This is the same root problem as Anti-Pattern 1 (shared mutable state), but harder to spot because
+the subclass author sees `clone()` in the parent and assumes it handles everything. It doesn't — each
+subclass must deep-copy its own new mutable fields. Josh Bloch dedicated Effective Java Item 13
+("Override clone judiciously") to this exact class of mistakes: "In practice, a class implementing
+Cloneable is expected to provide a properly functioning public clone method."
 
 ```java
-// BROKEN: BaseConfig implements Cloneable but its subclass ExtendedConfig forgets to.
-// super.clone() throws CloneNotSupportedException at runtime — not caught at compile time.
+// BROKEN: BaseDocument deep-copies its own tags list — that part is correct.
+// But RichDocument adds a mutable List<Annotation> and forgets to override clone().
+// The inherited clone() does a shallow copy of annotations — they are SHARED.
 
-public class BaseConfig implements Cloneable {
-    protected int timeout;  // milliseconds
+import java.util.*;
 
-    public BaseConfig(int timeout) {
-        this.timeout = timeout;
+public class BaseDocument implements Cloneable {
+    private String title;
+    private List<String> tags; // mutable — BaseDocument correctly deep-copies this
+
+    public BaseDocument(String title, List<String> tags) {
+        this.title = title;
+        this.tags  = new ArrayList<>(tags);
     }
 
     @Override
-    public BaseConfig clone() {
+    public BaseDocument clone() {
         try {
-            return (BaseConfig) super.clone(); // works for BaseConfig instances
-        } catch (CloneNotSupportedException e) {
-            throw new AssertionError("Should never happen — we implement Cloneable", e);
-        }
-    }
-}
-
-// Subclass forgets implements Cloneable — Object.clone() will throw at runtime.
-public class ExtendedConfig extends BaseConfig {
-    private String region; // new field not in BaseConfig
-
-    public ExtendedConfig(int timeout, String region) {
-        super(timeout);
-        this.region = region;
-    }
-
-    // No override of clone() — inherits BaseConfig.clone() which calls super.clone().
-    // Object.clone() checks the actual runtime class (ExtendedConfig), not BaseConfig.
-    // ExtendedConfig does NOT implement Cloneable → CloneNotSupportedException is thrown.
-}
-
-// At runtime:
-ExtendedConfig original = new ExtendedConfig(5000, "us-east-1");
-ExtendedConfig copy = (ExtendedConfig) original.clone(); // throws CloneNotSupportedException
-```
-
-```java
-// FIX option A: add implements Cloneable to the subclass AND override clone().
-// Overriding clone() ensures the subclass fields are copied correctly.
-
-public class ExtendedConfig extends BaseConfig implements Cloneable { // explicitly declare
-    private String region;
-
-    public ExtendedConfig(int timeout, String region) {
-        super(timeout);
-        this.region = region;
-    }
-
-    @Override
-    public ExtendedConfig clone() {
-        try {
-            ExtendedConfig copy = (ExtendedConfig) super.clone(); // shallow copy — primitives OK
-            // region is a String (immutable) — safe to share the reference
+            BaseDocument copy = (BaseDocument) super.clone();
+            copy.tags = new ArrayList<>(this.tags); // correct deep copy of tags
             return copy;
         } catch (CloneNotSupportedException e) {
-            throw new AssertionError("ExtendedConfig implements Cloneable", e);
+            throw new AssertionError("BaseDocument implements Cloneable", e);
         }
     }
+
+    public List<String> getTags() { return tags; }
 }
 
-// FIX option B (preferred, Effective Java Item 13): avoid Cloneable entirely.
-// Use a copy constructor — explicit, compiler-checked, works without Cloneable.
-
-public class ExtendedConfig extends BaseConfig {
-    private String region;
-
-    public ExtendedConfig(int timeout, String region) {
-        super(timeout);
-        this.region = region;
-    }
-
-    // Copy constructor — no Cloneable, no CloneNotSupportedException, no ambiguity
-    public ExtendedConfig(ExtendedConfig other) {
-        super(other.timeout);
-        this.region = other.region;
-    }
+public static class Annotation {
+    String text;
+    Annotation(String text) { this.text = text; }
 }
 
-// Usage:
-ExtendedConfig original = new ExtendedConfig(5000, "us-east-1");
-ExtendedConfig copy     = new ExtendedConfig(original); // clean, explicit, compiler-safe
+// Subclass adds a new mutable field but forgets to override clone().
+// Cloneable IS inherited — no CloneNotSupportedException is thrown.
+// Object.clone() copies the annotations reference as-is — shallow copy.
+public class RichDocument extends BaseDocument {
+    private List<Annotation> annotations; // NEW mutable field — not deep-copied
+
+    public RichDocument(String title, List<String> tags, List<Annotation> annotations) {
+        super(title, tags);
+        this.annotations = new ArrayList<>(annotations);
+    }
+
+    // BUG: no clone() override — inherits BaseDocument.clone().
+    // BaseDocument.clone() calls super.clone() which shallow-copies ALL fields including
+    // annotations. The new List<Annotation> reference is shared between original and clone.
+
+    public List<Annotation> getAnnotations() { return annotations; }
+}
+
+// Demonstration: clone compiles and runs — no exception thrown.
+// But clone.annotations and original.annotations are the SAME object.
+RichDocument original = new RichDocument("Design Doc",
+    List.of("architecture"), new ArrayList<>(List.of(new Annotation("review me"))));
+
+RichDocument clone = (RichDocument) original.clone(); // succeeds — no exception
+
+System.out.println(clone.getAnnotations() == original.getAnnotations()); // true — BUG: shared list
+
+clone.getAnnotations().add(new Annotation("approved")); // mutating clone's list
+System.out.println(original.getAnnotations().size()); // prints 2 — original is also affected
 ```
+
+```java
+// FIX: RichDocument overrides clone() and deep-copies its own new mutable field.
+// Every subclass that adds mutable fields MUST do this — the parent's clone() cannot
+// know about fields it does not declare. (Effective Java Item 13)
+
+public class RichDocument extends BaseDocument {
+    private List<Annotation> annotations;
+
+    public RichDocument(String title, List<String> tags, List<Annotation> annotations) {
+        super(title, tags);
+        this.annotations = new ArrayList<>(annotations);
+    }
+
+    @Override
+    public RichDocument clone() {
+        RichDocument copy = (RichDocument) super.clone(); // calls BaseDocument.clone() — tags are already deep-copied
+        // Deep-copy annotations — each element is mutable, so copy the list AND the elements
+        copy.annotations = new ArrayList<>();
+        for (Annotation a : this.annotations) {
+            copy.annotations.add(new Annotation(a.text)); // copy constructor for Annotation
+        }
+        return copy;
+    }
+
+    public List<Annotation> getAnnotations() { return annotations; }
+}
+
+// Now mutations in clone do not affect original:
+RichDocument original = new RichDocument("Design Doc",
+    List.of("architecture"), new ArrayList<>(List.of(new Annotation("review me"))));
+RichDocument clone = original.clone();
+
+System.out.println(clone.getAnnotations() == original.getAnnotations()); // false — independent lists
+
+clone.getAnnotations().add(new Annotation("approved"));
+System.out.println(original.getAnnotations().size()); // prints 1 — original unaffected
+```
+
+Note: the preferred fix in greenfield code is to replace `Cloneable` entirely with a copy constructor
+(`public RichDocument(RichDocument other)`) — it is explicit, compiler-checked, and inheritance-safe.
+The `clone()` approach is shown here for completeness when maintaining an existing `Cloneable` contract.
 
 ### Anti-Pattern 3: Using clone() for Deep Copy When the Object Graph Has Cycles
 
@@ -641,12 +667,56 @@ OrderItem cloned = item1.deepClone(); // StackOverflowError: item1 -> rule -> it
 ```
 
 ```java
-// FIX: use a clone registry (IdentityHashMap) to detect already-cloned objects and break cycles.
-// This is the same strategy used internally by Java object serialization.
-// Pass the registry through every clone call — when a node is encountered a second time,
-// return the existing clone instead of recursing again.
+// FIX: two-phase deep clone with pre-registration.
+// Phase 1: pre-allocate the clone and register it in the IdentityHashMap BEFORE any recursive call.
+// Phase 2: set the deep-cloned references on the pre-allocated clone (safe — it is already in registry).
+// This is the same strategy used internally by Java object serialization to handle cycles.
 
-public class PriceRule {
+public class OrderItem implements DeepCloneable {
+    private String    itemId;
+    private int       quantity;
+    private PriceRule priceRule;
+
+    // Standard constructor used at runtime
+    public OrderItem(String itemId, int quantity, PriceRule priceRule) {
+        this.itemId    = itemId;
+        this.quantity  = quantity;
+        this.priceRule = priceRule;
+        priceRule.addItem(this); // back-reference — creates the cycle
+    }
+
+    // Private constructor for pre-allocation during clone: priceRule intentionally null
+    private OrderItem(String itemId, int quantity) {
+        this.itemId    = itemId;
+        this.quantity  = quantity;
+        // priceRule intentionally null — set in second phase
+    }
+
+    @Override
+    public OrderItem deepClone(IdentityHashMap<Object, Object> registry) {
+        OrderItem existing = (OrderItem) registry.get(this);
+        if (existing != null) return existing;
+
+        // Phase 1: pre-allocate and register BEFORE any recursive call
+        OrderItem copy = new OrderItem(this.itemId, this.quantity);
+        registry.put(this, copy); // registered before recursing into priceRule
+
+        // Phase 2: populate references (safe — copy is already in registry)
+        copy.priceRule = this.priceRule.deepClone(registry);
+        return copy;
+    }
+
+    // Public entry point — allocates the registry and starts the clone
+    public OrderItem deepClone() {
+        return deepClone(new IdentityHashMap<>());
+    }
+
+    public String    getItemId()    { return itemId; }
+    public int       getQuantity()  { return quantity; }
+    public PriceRule getPriceRule() { return priceRule; }
+}
+
+public class PriceRule implements DeepCloneable {
     private String          ruleId;
     private double          discountPct;
     private List<OrderItem> applicableItems;
@@ -657,66 +727,49 @@ public class PriceRule {
         this.applicableItems = new ArrayList<>();
     }
 
+    // Private constructor for pre-allocation: applicableItems initialized empty
+    private PriceRule(String ruleId, double discountPct, boolean preallocate) {
+        this.ruleId          = ruleId;
+        this.discountPct     = discountPct;
+        this.applicableItems = new ArrayList<>();
+    }
+
+    @Override
     public PriceRule deepClone(IdentityHashMap<Object, Object> registry) {
-        // If this PriceRule has already been cloned in this clone operation, return the clone.
-        if (registry.containsKey(this)) {
-            return (PriceRule) registry.get(this);
-        }
-        PriceRule copy = new PriceRule(this.ruleId, this.discountPct);
-        registry.put(this, copy); // register BEFORE recursing — breaks the cycle
-        for (OrderItem item : applicableItems) {
+        PriceRule existing = (PriceRule) registry.get(this);
+        if (existing != null) return existing;
+
+        // Phase 1: pre-allocate and register BEFORE recursing into items
+        PriceRule copy = new PriceRule(this.ruleId, this.discountPct, true);
+        registry.put(this, copy);
+
+        // Phase 2: deep clone items (each will find copy in registry if already started)
+        for (OrderItem item : this.applicableItems) {
             copy.applicableItems.add(item.deepClone(registry));
         }
         return copy;
     }
 
-    public void addItem(OrderItem item) { applicableItems.add(item); }
-    public String getRuleId()           { return ruleId; }
-    public double getDiscountPct()      { return discountPct; }
+    public void   addItem(OrderItem item) { applicableItems.add(item); }
+    public String getRuleId()             { return ruleId; }
+    public double getDiscountPct()        { return discountPct; }
 }
 
-public class OrderItem {
-    private String    sku;
-    private int       quantity;
-    private PriceRule priceRule;
-
-    public OrderItem(String sku, int quantity, PriceRule priceRule) {
-        this.sku       = sku;
-        this.quantity  = quantity;
-        this.priceRule = priceRule;
-        priceRule.addItem(this);
-    }
-
-    public OrderItem deepClone(IdentityHashMap<Object, Object> registry) {
-        if (registry.containsKey(this)) {
-            return (OrderItem) registry.get(this);
-        }
-        // Allocate clone with placeholder priceRule first, register immediately
-        OrderItem copy = new OrderItem(this.sku, this.quantity,
-                                       this.priceRule.deepClone(registry));
-        registry.put(this, copy);
-        return copy;
-    }
-
-    // Public entry point — allocates the registry and starts the clone
-    public OrderItem deepClone() {
-        return deepClone(new IdentityHashMap<>());
-    }
-
-    public String    getSku()       { return sku; }
-    public int       getQuantity()  { return quantity; }
-    public PriceRule getPriceRule() { return priceRule; }
+// Interface for the two-phase contract
+public interface DeepCloneable {
+    Object deepClone(IdentityHashMap<Object, Object> registry);
 }
 
 // Usage — no StackOverflowError, shared PriceRule is cloned exactly once:
-PriceRule rule   = new PriceRule("SUMMER20", 0.20);
-OrderItem item1  = new OrderItem("SKU-001", 2, rule);
-OrderItem item2  = new OrderItem("SKU-002", 1, rule);
+PriceRule rule  = new PriceRule("SUMMER20", 0.20);
+OrderItem item1 = new OrderItem("SKU-001", 2, rule); // rule.applicableItems now contains item1
+OrderItem item2 = new OrderItem("SKU-002", 1, rule);
 
 OrderItem clone1 = item1.deepClone(); // terminates correctly
-// clone1.getPriceRule() is a new PriceRule object, independent of the original rule.
+// clone1.getPriceRule() is a new PriceRule, independent of the original.
 // The cloned PriceRule's applicableItems list contains the cloned OrderItem — graph is intact.
 System.out.println(clone1.getPriceRule().getRuleId()); // prints "SUMMER20" — correct
+System.out.println(clone1.getPriceRule() == rule);     // prints false — independent copy
 ```
 
 ### Spring Framework Prototype Scope: Framework-Level Prototype Pattern (Spring Boot 3.2+)
