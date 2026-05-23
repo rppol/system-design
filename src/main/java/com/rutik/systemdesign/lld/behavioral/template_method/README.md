@@ -204,28 +204,321 @@ AbstractClass (reference)  --> calls templateMethod()
 
 ## 14. Real-World Usage
 
-### Java Standard Library
-- **`java.io.InputStream`**: `read(byte[], int, int)` is the template; the single-byte `read()` is the abstract primitive that concrete streams implement.
-- **`java.util.AbstractList`**: `get(int)` and `size()` are abstract; `iterator()`, `indexOf()`, `contains()` etc. are template methods built on top.
-- **`java.util.AbstractMap`**: Similar to AbstractList — `entrySet()` is abstract; dozens of concrete methods are implemented using it.
-- **`javax.servlet.HttpServlet`**: `service()` is the template method that dispatches to `doGet()`, `doPost()`, `doPut()`, etc., which subclasses override.
+### Production Scenario: Spring JdbcTemplate at 10k queries/sec (connection pool of 20)
 
-### Spring Framework
-- **`JdbcTemplate`**: `execute()` handles connection acquisition, statement creation, exception translation, and connection release. You provide a callback for the query/update logic.
-- **`AbstractController` / `AbstractFormController`**: The request handling lifecycle (security check -> handle -> render) is the template; `handleRequestInternal()` is the hook.
-- **`AbstractBatchJobLauncher`**: Job lifecycle management with hooks for pre/post processing.
-- **`RestTemplate` / `WebClient`**: HTTP request/response lifecycle with hooks for interceptors and error handling.
+Spring's `JdbcTemplate` is the canonical production usage of Template Method in the Java ecosystem.
+The template defines the invariant algorithm: acquire connection from HikariCP pool, prepare statement,
+execute, map results, release connection, and translate any `SQLException` to a Spring
+`DataAccessException`. The caller provides only the variable part: the SQL string and a `RowMapper`.
 
-### Testing Frameworks
-- **JUnit 3's `TestCase`**: `runTest()` is surrounded by `setUp()` and `tearDown()` — a classic Template Method.
-- **TestNG**: `@BeforeMethod` / `@AfterMethod` effectively implement the same pattern at the framework level.
+At 10,000 queries/sec through a HikariCP pool of 20 connections, each connection services ~500
+queries/sec. `JdbcTemplate.query()` ensures that connections are always returned to the pool —
+even when `RowMapper.mapRow()` throws a `RuntimeException`. Without this template guarantee,
+a single buggy mapper would exhaust the 20-connection pool in seconds, causing a full service outage.
 
-### Build Tools
-- **Maven's lifecycle**: `clean`, `validate`, `compile`, `test`, `package`, `install`, `deploy` is a template method. Plugins implement the individual steps (mojos).
-- **Gradle's task lifecycle**: `doFirst`, `doLast`, `execute` follow the same pattern.
+**Scale numbers:**
+- 10,000 queries/sec; HikariCP default pool size 10 (production tuned to 20)
+- Connection acquisition: < 1 ms from HikariCP pool under normal load
+- JdbcTemplate overhead vs raw JDBC: ~5 us per query (reflection for exception translation)
+- RowMapper call frequency: once per row; 1,000-row result set = 1,000 mapRow() calls per query
+- AbstractBatchConfiguration batch job: 50,000 items/chunk, 200 chunks/job = 10M records/job
 
-### Android
-- **`Activity` lifecycle**: `onCreate()`, `onStart()`, `onResume()`, etc. are hook methods called by the Android framework's template method (`performCreate`, `performStart`, etc.).
+```
+JdbcTemplate — Template Method in Production
+=============================================
+
+  Caller (Service layer)
+       |
+       | jdbcTemplate.query(sql, rowMapper, args...)
+       |
+  +----+-------------------------------+
+  |         JdbcTemplate.query()       |  <-- TEMPLATE METHOD (final-like sequence)
+  |                                    |
+  |  1. dataSource.getConnection()     |  invariant: acquire from HikariCP pool
+  |  2. prepareStatement(sql, args)    |  invariant: bind parameters safely
+  |  3. executeQuery()                 |  invariant: run against DB
+  |  4. while(rs.next())              |
+  |       rowMapper.mapRow(rs, rowNum) |  <-- HOOK: caller-provided variable step
+  |  5. rs.close() / stmt.close()     |  invariant: release resources (finally block)
+  |  6. conn returned to pool          |  invariant: always, even on exception
+  |  7. translate SQLException         |  invariant: wrap in DataAccessException hierarchy
+  +------------------------------------+
+       |
+  [ List<T> result returned to caller ]
+```
+
+```java
+// Java 17 LTS — JdbcTemplate RowMapper as a Template Method hook
+// The template (JdbcTemplate.query) is invariant; only mapRow() varies per use case.
+
+@Repository
+public class OrderRepository {
+
+    private final JdbcTemplate jdbc;
+
+    public OrderRepository(JdbcTemplate jdbc) { this.jdbc = jdbc; }
+
+    // RowMapper is the hook — caller provides only the variable part (column -> object mapping)
+    private static final RowMapper<Order> ORDER_MAPPER = (rs, rowNum) -> new Order(
+        rs.getString("order_id"),
+        rs.getString("status"),
+        rs.getLong("amount_cents"),
+        rs.getTimestamp("created_at").toInstant()
+    );
+
+    public List<Order> findByStatus(String status) {
+        // JdbcTemplate handles: connection, PreparedStatement, execute, iterate, release, translate
+        return jdbc.query(
+            "SELECT order_id, status, amount_cents, created_at FROM orders WHERE status = ?",
+            ORDER_MAPPER,
+            status
+        );
+    }
+
+    // NamedParameterJdbcTemplate variant — same template, different SQL binding hook
+    public int countByMerchant(String merchantId) {
+        return jdbc.queryForObject(
+            "SELECT COUNT(*) FROM orders WHERE merchant_id = ?",
+            Integer.class,
+            merchantId
+        );
+    }
+}
+```
+
+```java
+// Java 17 LTS — Spring Batch AbstractBatchConfiguration as Template Method
+// Template defines the batch lifecycle; subclass provides Reader, Processor, Writer hooks
+
+@Configuration
+@EnableBatchProcessing
+public class OrderExportBatchConfig extends DefaultBatchConfigurer {
+
+    // DefaultBatchConfigurer.createJobRepository() is the template method:
+    // it calls getDataSource(), getTransactionManager() — hooks the subclass can override.
+    // Subclass does NOT override the full job-launch sequence, only specific steps.
+
+    @Bean
+    public Job orderExportJob(JobBuilderFactory jobs, Step exportStep) {
+        return jobs.get("orderExportJob")
+            .incrementer(new RunIdIncrementer())
+            .flow(exportStep)
+            .end()
+            .build();
+    }
+
+    @Bean
+    public Step exportStep(StepBuilderFactory steps,
+                           ItemReader<Order> reader,
+                           ItemProcessor<Order, OrderCsv> processor,
+                           ItemWriter<OrderCsv> writer) {
+        return steps.get("exportStep")
+            .<Order, OrderCsv>chunk(50_000)   // chunk = one template iteration unit
+            .reader(reader)        // hook: what to read (DB cursor)
+            .processor(processor)  // hook: how to transform (Order -> OrderCsv)
+            .writer(writer)        // hook: where to write (S3 CSV)
+            .build();
+        // Spring Batch template: open reader, iterate chunks, process, write, commit, close
+        // Caller provides only the 3 hooks; retry, skip, and transaction logic are invariant.
+    }
+}
+```
+
+### Famous Codebase Usages
+
+- **`java.io.InputStream.read(byte[], int, int)`**: the template method implemented using the
+  single-byte abstract `read()` hook; `FileInputStream`, `ByteArrayInputStream`, `GZIPInputStream`
+  each implement `read()` — the loop logic in the 3-arg version is invariant across all.
+- **`java.util.AbstractList`**: `get(int)` and `size()` are the abstract hooks; `iterator()`,
+  `indexOf()`, `subList()`, `contains()`, `toArray()` are all concrete template methods built
+  on top. `ArrayList`, `LinkedList`, `UnmodifiableList` only implement the two hooks.
+- **`javax.servlet.HttpServlet.service()`**: dispatches to `doGet()`, `doPost()`, `doPut()`,
+  `doDelete()` based on HTTP method — the dispatch logic is the template; each `doXxx()` is a hook.
+- **`JdbcTemplate.execute(ConnectionCallback<T>)`**: wraps the connection lifecycle around the
+  caller's `ConnectionCallback.doInConnection()` — the original 2003 Spring template method.
+- **`AbstractBatchJobLauncher`** (Spring Batch): `run(Job, JobParameters)` is the template;
+  hooks `JobRepository.createJobExecution()`, `job.execute()`, `handleStep()` are overridable.
+- **JUnit 4 `TestCase.runBare()`**: calls `setUp()` before and `tearDown()` after `runTest()` —
+  the first widely-known Java template method for test lifecycle management.
+
+---
+
+### Anti-Pattern 1: Subclass Overrides the Template Method Itself
+
+```java
+// BROKEN — subclass overrides execute() (the template), bypassing the invariant sequence.
+// Connection acquisition and release are skipped; connections leak under exception paths.
+// The entire purpose of JdbcTemplate (resource safety) is defeated.
+
+public class UnsafeOrderRepository extends JdbcTemplate {
+
+    @Override
+    public <T> T execute(ConnectionCallback<T> action) {
+        // WRONG: subclass re-implements the template, skipping finally-block cleanup
+        Connection conn = getDataSource().getConnection();
+        return action.doInConnection(conn);
+        // conn is never returned to pool if action throws — pool exhausted in seconds
+    }
+}
+```
+
+```java
+// FIX — make the template method final; subclasses can only override declared hooks.
+// Production code never subclasses JdbcTemplate; it injects it as a dependency.
+
+@Repository
+public class SafeOrderRepository {
+    private final JdbcTemplate jdbc;  // injected — not extended
+
+    public SafeOrderRepository(JdbcTemplate jdbc) { this.jdbc = jdbc; }
+
+    public List<Order> findAll() {
+        return jdbc.query("SELECT * FROM orders", ORDER_MAPPER);
+        // JdbcTemplate.query() is effectively final in design intent;
+        // all connection lifecycle is handled inside the template.
+    }
+}
+// Rule: prefer composition (inject JdbcTemplate) over inheritance (extend JdbcTemplate).
+```
+
+---
+
+### Anti-Pattern 2: Hook Method With Too Much Mandatory Behavior (Forced super() Call)
+
+```java
+// BROKEN — base class hook has non-trivial mandatory behavior.
+// Subclass MUST call super.beforeQuery() at exactly the right moment.
+// Forgetting or calling it at the wrong time silently corrupts metrics or skips auth.
+
+public abstract class BaseRepository {
+    protected void beforeQuery(String sql) {
+        MetricsRegistry.startTimer(sql);     // MANDATORY — subclass must call this
+        SecurityContext.checkReadPermission(); // MANDATORY — subclass must call this
+    }
+
+    protected abstract List<?> executeQuery(String sql);
+
+    public List<?> query(String sql) {
+        beforeQuery(sql);   // What if a subclass overrides beforeQuery and forgets super?
+        return executeQuery(sql);
+    }
+}
+
+public class OrderRepository extends BaseRepository {
+    @Override
+    protected void beforeQuery(String sql) {
+        // Forgot super.beforeQuery() — metrics never recorded, auth check skipped
+        log.debug("Querying: {}", sql);
+    }
+}
+```
+
+```java
+// FIX — template method is final; mandatory behavior is in the template, not the hook.
+// Hooks are protected and optional (no super() contract).
+
+public abstract class BaseRepository {
+
+    // FINAL template — mandatory steps are locked, hooks are explicit extension points
+    public final List<?> query(String sql) {
+        MetricsRegistry.startTimer(sql);      // mandatory — always runs
+        SecurityContext.checkReadPermission(); // mandatory — always runs
+        try {
+            return executeQuery(sql);         // hook — subclass provides the variable part
+        } finally {
+            MetricsRegistry.stopTimer(sql);   // mandatory — always runs, even on exception
+        }
+    }
+
+    // Hook — subclass implements this ONLY; no super() call needed or expected
+    protected abstract List<?> executeQuery(String sql);
+}
+```
+
+---
+
+### Anti-Pattern 3: Template With Too Many Abstract Methods (Forces Subclass to Implement Everything)
+
+```java
+// BROKEN — 20 abstract methods force every subclass to implement all of them,
+// even when 15 are irrelevant to the subclass's use case.
+// Adding a new abstract method breaks all existing subclasses (compile error).
+
+public abstract class DataPipeline {
+    protected abstract void validateSchema();
+    protected abstract void connectSource();
+    protected abstract void connectSink();
+    protected abstract void transformRow(Row r);
+    protected abstract void handleDuplicates();
+    protected abstract void handleNulls();
+    protected abstract void auditLog();
+    protected abstract void sendAlerts();
+    protected abstract void retryOnFailure();
+    protected abstract void compressOutput();
+    // ... 10 more abstract methods
+    // Every subclass implements ALL 20, even trivial pipelines that need only 3.
+}
+```
+
+```java
+// FIX — only truly mandatory hooks are abstract; optional hooks have no-op defaults.
+// Subclasses override only what they need; adding a new optional hook is non-breaking.
+
+public abstract class DataPipeline {
+
+    // FINAL template method — sequence is invariant
+    public final void run() {
+        connectSource();    // mandatory — always called
+        connectSink();      // mandatory — always called
+        while (hasNext()) {
+            Row row = nextRow();
+            handleNulls(row);    // optional hook — no-op default
+            row = transformRow(row);  // mandatory — always called
+            handleDuplicates(row);   // optional hook — no-op default
+            writeSink(row);
+        }
+        auditLog();   // optional hook — no-op default
+        cleanup();    // mandatory
+    }
+
+    // Mandatory hooks — subclasses MUST implement these
+    protected abstract void connectSource();
+    protected abstract void connectSink();
+    protected abstract Row transformRow(Row row);
+
+    // Optional hooks — default implementations do nothing; override only if needed
+    protected void handleNulls(Row row) {}        // no-op default
+    protected void handleDuplicates(Row row) {}   // no-op default
+    protected void auditLog() {}                  // no-op default
+    protected void cleanup() {}                   // no-op default
+}
+// SimplePipeline extends DataPipeline and implements only the 3 mandatory hooks.
+```
+
+---
+
+### Performance and Correctness Numbers
+
+| Metric | Value |
+|---|---|
+| JdbcTemplate overhead vs raw JDBC | ~5 us per query (exception translation reflection) |
+| HikariCP connection acquisition | < 1 ms under normal load (pool size 20) |
+| Connection leak prevention | 100% — JdbcTemplate finally block always releases |
+| Spring Batch chunk processing | 50,000 items/chunk; 10M records/job at ~500k items/min |
+| AbstractList template overhead | ~0 ns — get()/size() called directly, no dispatch indirection |
+
+### Migration Story
+
+**Move TO Template Method when:**
+- Multiple classes share an identical sequence of steps with only 1-2 variable steps.
+- The invariant steps involve resource acquisition/release that must never be skipped
+  (JDBC connections, file handles, locks).
+- You own the base class and all subclasses — inheritance requires this control.
+
+**Move AWAY FROM Template Method (to Strategy) when:**
+- The algorithm needs to be selected at runtime or injected externally — inheritance is compile-time.
+- The hierarchy grows beyond 2 levels (AbstractA -> AbstractB -> Concrete) — prefer composition.
+- You cannot control the base class (third-party library) — inject a Strategy callback instead.
 
 ---
 

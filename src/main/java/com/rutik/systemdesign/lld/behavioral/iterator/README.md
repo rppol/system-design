@@ -220,27 +220,289 @@ Iterable<T>  <----  Collection<T>  <----  ArrayList<T>
 
 ## 14. Real-World Usage
 
-### Java Standard Library
-- `java.util.Iterator<E>` — the foundational interface for all Java collection traversal.
-- `java.util.ListIterator<E>` — bidirectional iterator for Lists with `hasPrevious()`, `previous()`, `add()`, `set()`.
-- `java.util.Scanner` — tokenizes input streams; implements `Iterator<String>`.
-- `java.nio.file.DirectoryStream<Path>` — iterates over directory entries lazily.
-- `java.sql.ResultSet` — iterates over database query results (forward-only cursor).
-- `java.util.Spliterator` — parallel-aware splittable iterator used by Java Streams.
+### Production Scenario: Custom Spliterator for Lazy Paginated Database Cursor (50M records)
 
-### Spring Framework
-- `org.springframework.core.io.support.PathMatchingResourcePatternResolver` uses iterators internally.
-- Spring Data `Streamable<T>` — extends Iterable with Stream conversion.
-- Spring Batch `ItemReader` — a Command/Iterator hybrid for reading batch processing items.
+A data export pipeline must stream 50 million order records from PostgreSQL without loading all
+rows into heap memory. Loading all 50M rows at once would require ~25 GB heap (500 bytes/row);
+a paginated cursor fetches 1,000 rows per page, keeping heap usage to ~500 KB at any moment.
 
-### Java Collections Framework
-- Every `Collection` is `Iterable`; every `Collection` provides an `Iterator`.
-- `TreeSet`/`TreeMap` iterators provide sorted order.
-- `LinkedHashMap` iterator provides insertion-order traversal.
+The implementation wraps a JDBC `ResultSet` in a custom `Spliterator<Order>` that fetches the
+next page lazily on `tryAdvance()`. This plugs directly into `StreamSupport.stream()`, enabling
+Java Stream operations (filter, map, collect) over the 50M-row dataset with full backpressure.
+`trySplit()` partitions the key range for parallel stream processing: 8 parallel threads each
+own a non-overlapping `[minId, maxId)` range, achieving ~500k records/sec throughput.
 
-### Google Guava
-- `Iterators` and `Iterables` utility classes for transforming, filtering, and composing iterators.
-- `AbstractIterator` — a base class simplifying custom iterator implementation.
+**Scale numbers:**
+- 50M records; page size 1,000 rows; 50,000 JDBC fetches total
+- Memory footprint: ~500 KB (one page in memory at a time; GC'd after processing)
+- Throughput: 500,000 records/sec at p99 < 2 ms per page fetch from local PostgreSQL
+- Parallel stream with 8 threads: ~4,000,000 records/sec (linear scaling to thread count)
+- `Spliterator.trySplit()` overhead: ~0.1 ms per split (range arithmetic only)
+- `ConcurrentModificationException` from modifying a list during for-each: thrown in < 1 us
+
+```
+Paginated DB Spliterator — Iterator in Production
+==================================================
+
+  PostgreSQL (50M orders table)
+       |
+       | JDBC: SELECT * FROM orders WHERE id > ? ORDER BY id LIMIT 1000
+       |
+  +----+------------------+
+  | OrderPageSpliterator  |   implements Spliterator<Order>
+  |  - currentPage: List  |   (holds one page of 1000 rows)
+  |  - pageIndex: int     |
+  |  - lastId: long       |   tracks cursor position across pages
+  |  - minId / maxId      |   for trySplit() parallel partitioning
+  +----+------------------+
+       |
+       | StreamSupport.stream(spliterator, parallel=true)
+       |
+  +----+--------+
+  | Java Stream |   filter / map / collect — standard Stream API
+  +-------------+
+       |
+  [ S3 CSV export / Kafka producer / aggregate count ]
+```
+
+```java
+// Java 17 LTS — Custom Spliterator for lazy paginated PostgreSQL cursor
+// Streams 50M records with constant ~500 KB heap usage
+
+public class OrderPageSpliterator implements Spliterator<Order> {
+
+    private static final int PAGE_SIZE = 1_000;
+
+    private final JdbcTemplate jdbc;
+    private final long minId;
+    private final long maxId;
+
+    private List<Order> currentPage = Collections.emptyList();
+    private int pageIndex = 0;
+    private long lastSeenId;
+
+    public OrderPageSpliterator(JdbcTemplate jdbc, long minId, long maxId) {
+        this.jdbc = jdbc;
+        this.minId = minId;
+        this.maxId = maxId;
+        this.lastSeenId = minId - 1;
+    }
+
+    @Override
+    public boolean tryAdvance(Consumer<? super Order> action) {
+        if (pageIndex >= currentPage.size()) {
+            // Fetch next page lazily — only when current page is exhausted
+            currentPage = fetchPage(lastSeenId);
+            pageIndex = 0;
+            if (currentPage.isEmpty()) return false;  // no more data
+        }
+        Order order = currentPage.get(pageIndex++);
+        lastSeenId = order.id();
+        action.accept(order);
+        return true;
+    }
+
+    private List<Order> fetchPage(long afterId) {
+        // Keyset pagination — avoids OFFSET performance degradation on large tables
+        return jdbc.query(
+            "SELECT * FROM orders WHERE id > ? AND id <= ? ORDER BY id LIMIT ?",
+            ORDER_MAPPER,
+            afterId, maxId, PAGE_SIZE
+        );
+    }
+
+    @Override
+    public Spliterator<Order> trySplit() {
+        long remaining = maxId - lastSeenId;
+        if (remaining < PAGE_SIZE * 2) return null;  // too small to split further
+        long midId = lastSeenId + remaining / 2;
+        // This half: [lastSeenId, midId]; new split: [midId, maxId]
+        Spliterator<Order> split = new OrderPageSpliterator(jdbc, midId, maxId);
+        this.maxId = midId;   // shrink our range
+        return split;         // parallel stream processes the split independently
+    }
+
+    @Override
+    public long estimateSize() {
+        return (maxId - lastSeenId) / 2;  // rough estimate for ForkJoinPool work stealing
+    }
+
+    @Override
+    public int characteristics() {
+        return ORDERED | NONNULL | IMMUTABLE;
+    }
+}
+
+// Usage — parallel stream over 50M rows with constant memory
+public class OrderExportService {
+
+    public void exportAllOrders(long minId, long maxId) {
+        Spliterator<Order> spliterator = new OrderPageSpliterator(jdbc, minId, maxId);
+        StreamSupport.stream(spliterator, /* parallel= */ true)
+            .filter(o -> "DELIVERED".equals(o.status()))
+            .map(orderCsvMapper::convert)
+            .forEach(s3Writer::write);
+        // 8 ForkJoinPool threads; each owns [minId..maxId) range; ~4M records/sec
+    }
+}
+```
+
+### Famous Codebase Usages
+
+- **`java.util.Iterator<E>`**: foundational interface; `hasNext()` + `next()` + `remove()`.
+  `ArrayList.Itr`, `HashMap.KeyIterator`, `TreeMap.KeyIterator` are inner-class implementations
+  with fail-fast `modCount` checks.
+- **`java.util.Spliterator<T>`**: parallel-aware splittable iterator driving all Java Streams.
+  `ArrayList.ArrayListSpliterator` carries `SIZED | SUBSIZED | ORDERED`; `trySplit()` halves
+  the index range — the `ForkJoinPool` uses this to steal work across threads.
+- **`java.util.Scanner`**: implements `Iterator<String>`; tokenizes `InputStream`, `File`, or
+  `String` lazily — `next()` fetches the next token on demand.
+- **`java.nio.file.DirectoryStream<Path>`**: lazy iterator over filesystem directory entries;
+  closing the stream is mandatory (implements `Closeable`) to release the OS directory handle.
+- **`java.sql.ResultSet`**: forward-only database cursor; `next()` advances the row pointer
+  one row at a time; the JVM does not load all rows — the JDBC driver fetches by `fetchSize`.
+- **Guava `AbstractIterator<T>`** (`com.google.common.collect`): abstract base that requires
+  only `computeNext()` — handles `hasNext()` caching and `endOfData()` termination.
+- **Spring Data `Streamable<T>`**: extends `Iterable<T>`; `stream()` converts to a Java Stream;
+  used by Spring Data repository return types for lazy collection processing.
+- **Spring Batch `ItemReader<T>`**: `read()` returns one item at a time (null = end of input) —
+  an iterator contract without `hasNext()`, relying on null-termination instead.
+
+---
+
+### Anti-Pattern 1: ConcurrentModificationException — Modifying During For-Each
+
+```java
+// BROKEN — removing elements from a List while iterating with for-each (enhanced for loop).
+// ArrayList.Itr checks modCount on every next(); structural modification increments modCount.
+// Result: ConcurrentModificationException thrown after the first remove().
+
+List<Order> orders = new ArrayList<>(loadOrders());
+for (Order order : orders) {
+    if ("CANCELLED".equals(order.status())) {
+        orders.remove(order);  // BROKEN — modifies list while Itr is live
+        // ConcurrentModificationException: expected modCount=5, found modCount=6
+    }
+}
+```
+
+```java
+// FIX Option A — use Iterator.remove() which is structurally safe (updates modCount internally)
+Iterator<Order> it = orders.iterator();
+while (it.hasNext()) {
+    Order order = it.next();
+    if ("CANCELLED".equals(order.status())) {
+        it.remove();   // safe — Iterator updates its own modCount expectation
+    }
+}
+
+// FIX Option B — Java 8+ Collection.removeIf() (uses Iterator internally)
+orders.removeIf(o -> "CANCELLED".equals(o.status()));
+
+// FIX Option C — Stream filter into a new list (immutable source, no CME possible)
+List<Order> active = orders.stream()
+    .filter(o -> !"CANCELLED".equals(o.status()))
+    .collect(Collectors.toList());
+```
+
+---
+
+### Anti-Pattern 2: External Iterator State Leaking — Shared Across Threads
+
+```java
+// BROKEN — Iterator is created in one thread and shared with another.
+// ArrayList.Itr is NOT thread-safe; concurrent next() calls produce wrong elements or NPE.
+// No synchronization; race condition on cursor (int cursor) field.
+
+// Thread A and Thread B both received the SAME iterator reference
+Iterator<Order> sharedIterator = orders.iterator();
+
+// Thread A:
+while (sharedIterator.hasNext()) {
+    Order o = sharedIterator.next();   // Thread B also calls next() concurrently
+    process(o);                        // Both threads read cursor, race on increment
+}
+```
+
+```java
+// FIX — each thread creates its own Iterator; OR use Spliterator.trySplit() for parallel work.
+// Iterator is a local variable — never shared between threads.
+
+// Option A: each thread gets its own iterator (partition data beforehand)
+List<List<Order>> partitions = Lists.partition(orders, orders.size() / 8);
+partitions.parallelStream().forEach(partition -> {
+    Iterator<Order> localIterator = partition.iterator();  // thread-local iterator
+    while (localIterator.hasNext()) process(localIterator.next());
+});
+
+// Option B: use Spliterator.trySplit() — the correct parallel iteration API
+Spliterator<Order> root = orders.spliterator();
+Spliterator<Order> split = root.trySplit();  // splits ownership — no shared state
+// root and split are now independent; safe for parallel ForkJoinPool execution
+```
+
+---
+
+### Anti-Pattern 3: Fail-Fast Iterator on Shared Collection in Long Transaction
+
+```java
+// BROKEN — iterator used inside a long-running @Transactional method.
+// Another thread modifies the collection (or Hibernate flushes) mid-iteration.
+// Fail-fast iterator throws ConcurrentModificationException inside the transaction.
+// Transaction rolls back; all work lost.
+
+@Transactional
+public void processAllOrders() {
+    List<Order> orders = orderRepo.findAll();  // returns live Hibernate collection
+    for (Order order : orders) {               // fail-fast iterator on live collection
+        // Hibernate auto-flush may modify the underlying collection here
+        orderService.process(order);           // triggers flush -> CME -> rollback
+    }
+}
+```
+
+```java
+// FIX Option A — take a snapshot (new ArrayList) to decouple iteration from live collection
+@Transactional
+public void processAllOrders() {
+    List<Order> snapshot = new ArrayList<>(orderRepo.findAll());  // defensive copy
+    for (Order order : snapshot) {
+        orderService.process(order);  // modifying DB does not affect snapshot iterator
+    }
+}
+
+// FIX Option B — use CopyOnWriteArrayList when read-heavy, write-rare, and thread contention exists
+// CopyOnWriteArrayList iterator is a snapshot; structural modifications create a new array.
+// Note: CopyOnWriteArrayList iterator.remove() throws UnsupportedOperationException.
+// Suitable for: event listener lists, configuration lists. NOT for high-write collections (O(n) writes).
+
+// FIX Option C — use Spring Batch ItemReader for 50M-record scenarios (page-by-page, no full load)
+```
+
+---
+
+### Performance and Correctness Numbers
+
+| Iterator Type | Thread Safety | Modification During Iteration | Memory Cost |
+|---|---|---|---|
+| `ArrayList.Itr` (fail-fast) | None | `ConcurrentModificationException` | ~32 bytes |
+| `CopyOnWriteArrayList` iterator | Safe (snapshot) | Allowed (new array created) | O(n) per write |
+| `Spliterator` (parallel) | Safe via `trySplit()` ownership | Not allowed post-split | ~64 bytes |
+| Custom paginated Spliterator | Safe per thread | N/A (reads from DB) | ~500 KB (1 page) |
+| `java.sql.ResultSet` (JDBC) | Not thread-safe | N/A (DB cursor) | Controlled by fetchSize |
+
+### Migration Story
+
+**Move TO custom Spliterator when:**
+- You need to stream data larger than available heap (database cursors, file streams,
+  external API pagination) and want to use standard Java Stream operations.
+- You need parallel processing of a large dataset without loading all data into memory.
+
+**Move AWAY FROM custom Iterator/Spliterator (to Reactor/RxJava) when:**
+- The data source is inherently reactive (HTTP/2 push, WebSocket, Kafka consumer) — a
+  pull-based Iterator does not model backpressure; use `Publisher<T>` (Project Reactor) instead.
+- Iteration involves async I/O — blocking `next()` calls inside a virtual thread pool are
+  acceptable (Java 21+), but reactive pipelines give finer backpressure control.
 
 ---
 

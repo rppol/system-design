@@ -188,16 +188,641 @@ Concrete Subjects hold state. Concrete Observers react to notifications. Neither
 
 ## 14. Real-World Usage
 
-| Framework / Library | Usage |
-|---|---|
-| **Java SDK** | `java.util.Observable` / `java.util.Observer` (deprecated in Java 9, but the canonical reference). `PropertyChangeListener` / `PropertyChangeSupport` in JavaBeans is an Observer implementation. |
-| **Java Swing/AWT** | `ActionListener`, `MouseListener`, `KeyListener` — all Observer pattern implementations. Every `addXxxListener()` method is `attach()`. |
-| **Spring Framework** | `ApplicationEventPublisher` / `ApplicationListener` — Spring's event system is Observer. `@EventListener` annotation. |
-| **Android** | `LiveData` + `Observer` in Android Architecture Components. `BroadcastReceiver` is a system-level Observer. |
-| **RxJava / Reactor** | `Observable`/`Flowable` (RxJava) and `Flux`/`Mono` (Reactor) are reactive extensions of the Observer pattern with backpressure support. |
-| **JavaScript** | `EventEmitter` (Node.js), `addEventListener` in the DOM, Redux store subscriptions. |
-| **JPA / Hibernate** | `@EntityListeners`, `@PostPersist`, `@PreUpdate` — entity lifecycle callbacks. |
-| **Guava** | `EventBus` — a type-safe, annotation-driven Observer implementation that decouples subscriber registration from event dispatch. |
+### Production Scenario: Payment Processing Fan-Out with Guava EventBus (50k events/sec)
+
+A payment processing service at fintech scale handles 50,000 payment events per second at peak.
+Each payment event must fan out to 8 downstream subscribers: audit log, fraud check, ledger update,
+notification service, analytics pipeline, compliance recorder, retry queue, and dead-letter handler.
+The naive approach calls each subscriber inline on the payment thread, so a 300ms fraud-check timeout
+blocks the payment response and causes P99 latency to spike to 2.4 seconds.
+
+The solution uses Guava `EventBus` (synchronous, single-threaded) for in-process fan-out in
+development/staging, then promotes to `AsyncEventBus` backed by a bounded `ThreadPoolExecutor`
+for production. The payment thread posts the event and returns immediately — each subscriber
+processes asynchronously within its own executor thread.
+
+**Scale numbers:**
+- 50,000 payment events/sec peak throughput
+- Guava `EventBus` (sync, no I/O): ~900,000 dispatches/sec on a single core
+- `AsyncEventBus` with 16-thread pool: payment thread post latency drops from 800ms to <1ms
+- Bounded queue (capacity 10,000): back-pressure prevents OOM during subscriber lag spikes
+- Memory: each `@Subscribe` registration costs ~80 bytes (method handle + WeakReference wrapper)
+- Fraud subscriber SLA: 200ms; async executor isolates timeout from payment thread
+
+```
+Production Architecture — Payment Event Fan-Out via AsyncEventBus
+==================================================================
+
+  [ Payment API Thread ]
+         |
+         | paymentEventBus.post(PaymentEvent)   <-- returns in < 1ms
+         |
+  +------+------+
+  | AsyncEventBus|  (Guava, backed by BoundedExecutor, 16 threads, queue=10000)
+  +------+------+
+         |
+    fan-out to 8 @Subscribe handlers (each runs on executor thread pool)
+         |
+   +-----+------+------+------+------+------+------+------+
+   |     |      |      |      |      |      |      |      |
+ Audit Fraud Ledger Notify Analyt Comply Retry  DLQ
+  Log  Check Update  Svc  Pipeline Rcrdr Queue Handler
+  (DB) (HTTP)(DB)  (SMTP) (Kafka) (S3)  (Redis)(SQS)
+```
+
+```java
+// Java 17 LTS — Guava 32.x AsyncEventBus with bounded executor
+// Production payment event fan-out
+
+import com.google.common.eventbus.AsyncEventBus;
+import com.google.common.eventbus.EventBus;
+import com.google.common.eventbus.Subscribe;
+
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+
+public record PaymentEvent(
+    String paymentId,
+    String merchantId,
+    long amountCents,
+    String currency,
+    String status,       // AUTHORISED, SETTLED, DECLINED, REFUNDED
+    long epochMillis
+) {}
+
+// --- EventBus configuration (Spring @Configuration bean) ---
+@Configuration
+public class PaymentEventBusConfig {
+
+    @Bean
+    public AsyncEventBus paymentEventBus() {
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(
+            8,                              // corePoolSize
+            16,                             // maximumPoolSize
+            60, TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(10_000),  // bounded — back-pressure
+            new ThreadPoolExecutor.CallerRunsPolicy()  // slow payment thread if queue full
+        );
+        return new AsyncEventBus("payment-bus", executor);
+    }
+}
+
+// --- Payment service posts events ---
+@Service
+public class PaymentService {
+
+    private final AsyncEventBus eventBus;
+
+    public PaymentService(AsyncEventBus eventBus) {
+        this.eventBus = eventBus;
+    }
+
+    public PaymentResult process(PaymentRequest req) {
+        PaymentResult result = chargeProcessor(req);
+        // post() returns immediately — all 8 subscribers run on executor threads
+        eventBus.post(new PaymentEvent(
+            result.id(), req.merchantId(), req.amountCents(),
+            req.currency(), result.status(), System.currentTimeMillis()
+        ));
+        return result;  // response returned before any subscriber finishes
+    }
+}
+
+// --- One of 8 subscribers (fraud check) ---
+@Component
+public class FraudCheckSubscriber {
+
+    private final FraudClient fraudClient;
+
+    public FraudCheckSubscriber(AsyncEventBus eventBus, FraudClient fraudClient) {
+        this.fraudClient = fraudClient;
+        eventBus.register(this);  // explicit registration — must match explicit unregister
+    }
+
+    @Subscribe
+    public void onPayment(PaymentEvent event) {
+        // Runs on AsyncEventBus executor thread, never on payment API thread
+        fraudClient.score(event.paymentId(), event.amountCents());
+    }
+
+    @PreDestroy
+    public void destroy(AsyncEventBus eventBus) {
+        eventBus.unregister(this);  // prevents memory leak
+    }
+}
+```
+
+### Famous Codebase Usages
+
+- **Guava `EventBus` / `AsyncEventBus`** (`com.google.common.eventbus`): annotation-driven subscriber
+  registration via `@Subscribe`; `AsyncEventBus` wraps any `Executor`; used extensively in Android apps
+  and backend services for in-process event decoupling.
+- **Spring `ApplicationEventPublisher`**: `AbstractApplicationContext.publishEvent()` dispatches
+  `ApplicationEvent` objects to all `ApplicationListener<E>` beans; `@TransactionalEventListener`
+  guarantees delivery only after the surrounding transaction commits (eliminates phantom events).
+- **Java Swing `EventListenerList`** (`javax.swing.event`): stores `(type, listener)` pairs in a flat
+  array for O(1) iteration; `fireStateChanged()` in `AbstractButton` iterates this list directly.
+- **Java `PropertyChangeSupport`** (`java.beans`): `firePropertyChange(name, old, new)` is the JDK's
+  built-in observer for JavaBeans; used by Swing `JComponent` for bound properties.
+- **RxJava `Observable.subscribe()`**: reactive push-based observer with backpressure, error channels,
+  and completion signals; `Subject` classes (`PublishSubject`, `BehaviorSubject`) act as both
+  Observable and Observer.
+
+---
+
+### Anti-Pattern 1: Synchronous Observer Exception Blocks Subject Thread
+
+```java
+// BROKEN — Java 17 LTS
+// If FraudCheckObserver throws a RuntimeException, the payment thread propagates it
+// and the remaining 7 subscribers (ledger, notification, analytics...) never run.
+
+public class PaymentSubject {
+    private final List<PaymentObserver> observers = new ArrayList<>();
+
+    public void notifyObservers(PaymentEvent event) {
+        for (PaymentObserver observer : observers) {
+            observer.onPayment(event);  // throws => loop aborts, partial notification
+        }
+    }
+}
+```
+
+```java
+// FIX — defensive notification with per-observer try/catch and structured logging
+// Java 17 LTS
+
+public class PaymentSubject {
+    private final List<PaymentObserver> observers = new CopyOnWriteArrayList<>();
+    private static final Logger log = LoggerFactory.getLogger(PaymentSubject.class);
+
+    public void notifyObservers(PaymentEvent event) {
+        for (PaymentObserver observer : observers) {
+            try {
+                observer.onPayment(event);
+            } catch (Exception e) {
+                // Log and continue — one broken subscriber must not block others
+                log.error("Observer {} failed for payment {}: {}",
+                    observer.getClass().getSimpleName(), event.paymentId(), e.getMessage(), e);
+            }
+        }
+    }
+}
+// Better yet: use AsyncEventBus — subscriber exceptions are caught internally by
+// EventBus.SubscriberExceptionHandler, isolated per-subscriber, never propagated to poster.
+```
+
+---
+
+### Anti-Pattern 2: Observer Registered but Never Unregistered (Memory Leak)
+
+```java
+// BROKEN — observer registered in constructor, never deregistered
+// The EventBus holds a strong reference; the subscriber object is never GC'd
+// even after the screen/component it belongs to is "gone".
+// In a payment service redeploying config at runtime, this leaks 8 MB/hour.
+
+@Component
+public class AnalyticsSubscriber {
+    public AnalyticsSubscriber(EventBus bus) {
+        bus.register(this);  // strong reference stored in EventBus.subscribers map
+        // no corresponding bus.unregister(this) anywhere
+    }
+}
+```
+
+```java
+// FIX Option A — explicit lifecycle with @PreDestroy (Spring beans)
+@Component
+public class AnalyticsSubscriber {
+    private final EventBus bus;
+
+    public AnalyticsSubscriber(EventBus bus) {
+        this.bus = bus;
+        bus.register(this);
+    }
+
+    @PreDestroy
+    public void cleanup() {
+        bus.unregister(this);
+    }
+}
+
+// FIX Option B — WeakReference subscriber wrapper for non-Spring contexts
+// Guava does NOT do this automatically; you must wrap if lifecycle is uncontrolled.
+// The safest production approach: always pair register() with an explicit unregister()
+// in a try-finally or AutoCloseable pattern.
+public class WeakSubscriberWrapper implements AutoCloseable {
+    private final WeakReference<Object> ref;
+    private final EventBus bus;
+
+    public WeakSubscriberWrapper(EventBus bus, Object subscriber) {
+        this.bus = bus;
+        this.ref = new WeakReference<>(subscriber);
+        bus.register(subscriber);
+    }
+
+    @Override
+    public void close() {
+        Object sub = ref.get();
+        if (sub != null) bus.unregister(sub);
+    }
+}
+```
+
+---
+
+### Anti-Pattern 3: Stale Snapshot — Observer Reads Current State Instead of Event State
+
+```java
+// BROKEN — pull model: observer captures a reference to the subject,
+// then calls subject.getStatus() in the handler.
+// Between the event fire and the handler execution (async gap), the subject
+// status may have changed: SETTLED -> REFUNDED.
+// The fraud observer records the wrong state.
+
+public class FraudObserver implements PaymentObserver {
+    private final PaymentSubject subject;  // reference to live object
+
+    @Override
+    public void onPayment() {
+        // WRONG: reads *current* state, not state at event-fire time
+        String status = subject.getStatus();
+        fraudClient.record(subject.getPaymentId(), status);
+    }
+}
+```
+
+```java
+// FIX — push model: carry all required state inside the event object (record/value object).
+// The observer receives a snapshot of state at event-fire time; no subject reference needed.
+
+public record PaymentEvent(
+    String paymentId,
+    String status,         // state AT THE MOMENT OF PUBLISHING — immutable snapshot
+    long amountCents,
+    long epochMillis
+) {}
+
+public class FraudObserver {
+    @Subscribe
+    public void onPayment(PaymentEvent event) {
+        // event.status() is the status when the event was published — always correct
+        fraudClient.record(event.paymentId(), event.status());
+    }
+    // No subject reference, no stale-read risk, fully testable with just a record instance.
+}
+```
+
+---
+
+### Performance and Correctness Numbers
+
+| Approach | Post latency | Subscriber isolation | Memory per subscriber |
+|---|---|---|---|
+| Synchronous EventBus (no I/O) | ~1 us | None — exception aborts loop | ~80 bytes |
+| Synchronous EventBus (with DB write) | 200-800 ms | None | ~80 bytes |
+| AsyncEventBus, 16-thread pool | < 1 ms | Full — exception caught by handler | ~80 bytes + thread stack |
+| Spring @TransactionalEventListener | < 1 ms (post-commit) | Full per-listener | ~200 bytes (proxy) |
+| RxJava Observable.subscribe() | < 1 ms | Full per stream | ~300 bytes (subscription) |
+
+### Migration Story
+
+**Move TO Observer when:**
+- A single domain event triggers 3 or more downstream actions and you want to add/remove
+  subscribers without touching the publisher.
+- You need transactional event delivery (Spring `@TransactionalEventListener`).
+- Fan-out count grows over time — each new subscriber should be a separate class, not another
+  method call added to a growing `processPayment()` method.
+
+**Move AWAY FROM Observer (to a message broker) when:**
+- Subscribers are in different processes or services — use Kafka or RabbitMQ instead of
+  in-process EventBus.
+- You need at-least-once delivery guarantees across restarts — in-process EventBus loses
+  events on JVM crash; use a durable queue.
+- The number of event types exceeds ~20 — Guava EventBus uses runtime type dispatch which
+  becomes hard to audit; switch to explicit Kafka topics with schema registry.
+
+---
+
+        v
+  [ OrderService ]
+        |
+        | ApplicationEventPublisher.publishEvent(OrderPlacedEvent)
+        |
+        v
+  [ Spring ApplicationContext Event Bus ]
+        |
+   +----+----+----+----+
+   |    |    |    |    |
+   v    v    v    v    v
+[Inv] [Bil] [Email] [Ship] [Analytics]
+ svc   svc   svc     svc    svc
+  |     |     |       |       |
+  DB   PSP  SMTP    3PL     DWH
+
+ @TransactionalEventListener(phase=AFTER_COMMIT)
+ ensures observers fire only after TX commits
+ — no phantom events on rollback
+```
+
+### Code 1: Spring `@TransactionalEventListener` (Java 17 LTS, Spring Boot 3.x)
+
+```java
+// Event record (Java 16+ record, immutable value object)
+public record OrderPlacedEvent(
+    String orderId,
+    String customerId,
+    BigDecimal amount,
+    String currency,
+    Instant occurredAt
+) {}
+
+// Publisher — OrderService fires the event INSIDE the transaction
+@Service
+@RequiredArgsConstructor
+public class OrderService {
+
+    private final OrderRepository orderRepository;
+    private final ApplicationEventPublisher eventPublisher;
+
+    @Transactional
+    public Order placeOrder(PlaceOrderRequest request) {
+        Order order = Order.create(request);
+        orderRepository.save(order);  // persisted but TX not yet committed
+
+        // Event published to ApplicationContext; AFTER_COMMIT listeners
+        // will not receive this if the TX rolls back.
+        eventPublisher.publishEvent(new OrderPlacedEvent(
+            order.getId(),
+            order.getCustomerId(),
+            order.getAmount(),
+            order.getCurrency(),
+            Instant.now()
+        ));
+
+        return order;
+    }
+}
+
+// Inventory listener — fires AFTER DB commit, so order is visible to all readers
+@Component
+@Slf4j
+public class InventoryReservationListener {
+
+    private final InventoryService inventoryService;
+
+    public InventoryReservationListener(InventoryService inventoryService) {
+        this.inventoryService = inventoryService;
+    }
+
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    @Async("orderEventExecutor")   // off the main request thread
+    public void onOrderPlaced(OrderPlacedEvent event) {
+        log.info("Reserving inventory for order={}", event.orderId());
+        inventoryService.reserve(event.orderId());
+    }
+}
+
+// Analytics listener — also AFTER_COMMIT, separate thread pool
+@Component
+public class AnalyticsListener {
+
+    private final AnalyticsClient analyticsClient;
+
+    public AnalyticsListener(AnalyticsClient analyticsClient) {
+        this.analyticsClient = analyticsClient;
+    }
+
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    @Async("analyticsExecutor")
+    public void onOrderPlaced(OrderPlacedEvent event) {
+        analyticsClient.track("order_placed", Map.of(
+            "order_id", event.orderId(),
+            "amount",   event.amount(),
+            "currency", event.currency()
+        ));
+    }
+}
+
+// Async executor configuration
+@Configuration
+public class AsyncConfig {
+
+    @Bean("orderEventExecutor")
+    public Executor orderEventExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(4);
+        executor.setMaxPoolSize(20);
+        executor.setQueueCapacity(500);
+        executor.setThreadNamePrefix("order-event-");
+        executor.setRejectedExecutionHandler(new CallerRunsPolicy());
+        executor.initialize();
+        return executor;
+    }
+}
+```
+
+### Code 2: Guava `EventBus` with `@Subscribe` and Dead-Event Handling
+
+```java
+// Guava EventBus (guava 32.x) — synchronous in-process event bus
+// Use AsyncEventBus for async dispatch to an Executor
+@Configuration
+public class EventBusConfig {
+
+    @Bean
+    public EventBus orderEventBus() {
+        return new EventBus(
+            // Dead-event handler: fires when no subscriber handles an event type
+            (exception, context) -> log.error(
+                "EventBus exception in subscriber={} on event={}",
+                context.getSubscriber(),
+                context.getEvent(),
+                exception
+            )
+        );
+    }
+}
+
+// Subscriber — register with the EventBus
+@Component
+public class BillingSubscriber {
+
+    private final BillingService billingService;
+    private final EventBus eventBus;
+
+    public BillingSubscriber(BillingService billingService, EventBus eventBus) {
+        this.billingService = billingService;
+        this.eventBus = eventBus;
+        // Register on construction; Spring manages lifecycle
+        this.eventBus.register(this);
+    }
+
+    @PreDestroy
+    public void destroy() {
+        // Critical: unregister on bean destruction to avoid memory leak
+        eventBus.unregister(this);
+    }
+
+    @Subscribe  // Guava routes events by parameter type
+    public void onOrderPlaced(OrderPlacedEvent event) {
+        billingService.charge(event.orderId(), event.amount(), event.currency());
+    }
+
+    // Dead-event handler: catches any unhandled event type
+    @Subscribe
+    public void onDeadEvent(DeadEvent deadEvent) {
+        log.warn("No subscriber for event type={}", deadEvent.getEvent().getClass().getName());
+    }
+}
+```
+
+### Famous Codebase Usages
+
+| Framework / Library | Class / Method | Notes |
+|---|---|---|
+| **Java SDK** | `java.beans.PropertyChangeSupport` | `firePropertyChange()` notifies all `PropertyChangeListener`s; used in JavaBeans/Swing data binding |
+| **Java Swing/AWT** | `AbstractButton.addActionListener()` | Every `addXxxListener()` = `attach()`; listener list = `EventListenerList` (thread-safe) |
+| **Spring Framework** | `SimpleApplicationEventMulticaster.multicastEvent()` | Synchronous default; becomes async if `taskExecutor` is set |
+| **RxJava** | `Observable.subscribe(Observer)` | Reactive Observer with `onNext`, `onError`, `onComplete`; adds backpressure via `Flowable` |
+| **Reactor** | `Flux.subscribe(CoreSubscriber)` | Project Reactor's reactive Observer; `publishOn` / `subscribeOn` control thread dispatch |
+| **Guava** | `EventBus.register()` / `EventBus.post()` | Routes by event type; `AsyncEventBus` posts to an `Executor` |
+| **Hibernate** | `@EntityListeners`, `@PostPersist` | Entity lifecycle Observer; used in auditing (`@CreatedDate`, `@LastModifiedDate`) |
+| **Android** | `LiveData.observe(LifecycleOwner, Observer)` | Lifecycle-aware Observer; auto-unregisters on DESTROYED to prevent leaks |
+
+### Anti-Patterns with Broken and Fix
+
+**Anti-Pattern 1: Observer Never Unregistered (Memory Leak)**
+
+```java
+// BROKEN: Subject holds a strong reference to Observer.
+// If Observer is a UI component or short-lived bean, it will never be GC'd
+// as long as Subject (long-lived singleton) holds the reference.
+public class MetricsSubject {
+    private final List<MetricsObserver> observers = new ArrayList<>();
+
+    public void addObserver(MetricsObserver o) {
+        observers.add(o);   // strong reference — Observer is never GC'd
+    }
+    // No removeObserver() method provided
+}
+
+// FIX 1: Provide removeObserver() and call it in the component's lifecycle hook
+public class MetricsSubject {
+    private final List<MetricsObserver> observers = new CopyOnWriteArrayList<>();
+
+    public void addObserver(MetricsObserver o)    { observers.add(o); }
+    public void removeObserver(MetricsObserver o) { observers.remove(o); }
+}
+
+// In the Observer (Spring bean):
+@Component
+public class DashboardWidget implements MetricsObserver, DisposableBean {
+    private final MetricsSubject subject;
+
+    public DashboardWidget(MetricsSubject subject) {
+        this.subject = subject;
+        subject.addObserver(this);
+    }
+
+    @Override
+    public void destroy() {
+        subject.removeObserver(this);  // explicit cleanup on Spring context shutdown
+    }
+}
+
+// FIX 2: WeakReference in the observer list so GC can collect unreachable Observers
+private final List<WeakReference<MetricsObserver>> observers = new CopyOnWriteArrayList<>();
+
+public void notifyAll(Metric m) {
+    observers.removeIf(ref -> ref.get() == null);  // purge dead refs
+    observers.stream()
+             .map(WeakReference::get)
+             .filter(Objects::nonNull)
+             .forEach(o -> o.onMetric(m));
+}
+```
+
+**Anti-Pattern 2: Observer Modifies Subject State Mid-Notification (`ConcurrentModificationException`)**
+
+```java
+// BROKEN: notifyObservers iterates observers list; one Observer calls
+// subject.removeObserver(itself) inside update() => ConcurrentModificationException
+public void notifyObservers() {
+    for (Observer o : observers) {   // plain ArrayList — not thread-safe
+        o.update(this);              // Observer calls removeObserver() here => CME
+    }
+}
+
+// FIX: Copy the list before iterating (snapshot), or use CopyOnWriteArrayList
+// Option A — snapshot copy
+public void notifyObservers() {
+    List<Observer> snapshot = new ArrayList<>(observers);  // O(n) copy
+    for (Observer o : snapshot) {
+        o.update(this);   // safe: iterating the snapshot, not the live list
+    }
+}
+
+// Option B — CopyOnWriteArrayList (zero-copy read, O(n) write)
+// Best when reads (notifications) far outnumber writes (register/unregister)
+private final List<Observer> observers = new CopyOnWriteArrayList<>();
+// No change needed in notifyObservers(); COW guarantees safe iteration
+```
+
+**Anti-Pattern 3: Synchronous Observer Doing Slow I/O Blocks Notification Thread**
+
+```java
+// BROKEN: Email observer sends SMTP inline; a 500ms SMTP handshake stalls
+// every other observer and blocks the caller's thread for the duration.
+@Component
+public class EmailObserver implements OrderObserver {
+    @Override
+    public void onOrderPlaced(OrderPlacedEvent event) {
+        emailService.sendConfirmation(event.customerId()); // ~500ms blocking SMTP call
+    }
+}
+
+// FIX: Use @Async so the email dispatch runs in a separate thread pool.
+// The main notification loop returns in <1ms; email is fire-and-forget.
+@Component
+public class EmailObserver implements OrderObserver {
+
+    @Async("orderEventExecutor")   // Spring Boot 3.x thread pool bean
+    @Override
+    public void onOrderPlaced(OrderPlacedEvent event) {
+        emailService.sendConfirmation(event.customerId());
+        // runs in orderEventExecutor thread pool; caller returns immediately
+    }
+}
+// Result: notification latency drops from ~800ms to ~2ms
+// Email failures do not affect inventory or billing observers
+```
+
+### Performance Numbers
+
+| Measurement | Value | Notes |
+|---|---|---|
+| Guava `EventBus.post()` throughput | ~1,000,000 events/sec | Single-threaded, no I/O, synthetic benchmark |
+| Spring `ApplicationEventPublisher.publishEvent()` | ~500,000 events/sec | Synchronous multicaster, no async executor |
+| `@Async` dispatch overhead | ~2ms | Thread pool handoff latency at low contention |
+| Synchronous SMTP observer latency | ~800ms | Blocks entire notification chain |
+| `CopyOnWriteArrayList` read (no lock) | ~10ns | Best for read-heavy observer lists |
+| `CopyOnWriteArrayList` write (copy) | O(n) | ~1µs for 100 observers — acceptable for infrequent register/unregister |
+| `WeakReference.get()` overhead | ~1ns | Negligible; use when Observers may be GC'd |
+
+### Migration Story
+
+**Adopt Observer when:**
+- 2 or more independent consumers react to the same state change (e.g., inventory + billing + email all care about "order placed")
+- The publisher should not know the identity of its consumers
+- You need to add consumers at runtime without modifying the publisher
+
+**Migrate away from Observer when:**
+- Consumers need guaranteed ordering, exactly-once delivery, or durability — use a message broker (Kafka, RabbitMQ) instead
+- Event fan-out crosses process boundaries — replace `EventBus` with an outbox pattern + async messaging
+- Observer graph becomes cyclic (A notifies B, B notifies A) — switch to a mediator or event-driven state machine
 
 ---
 

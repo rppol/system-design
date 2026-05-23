@@ -182,15 +182,280 @@ Extract each algorithm into its own class that implements a common `Strategy` in
 
 ## 14. Real-World Usage
 
-| Framework / Library | Usage |
-|---|---|
-| **Java SDK** | `java.util.Comparator<T>` — the canonical Strategy for sorting. `java.util.concurrent.RejectedExecutionHandler` — strategy for how `ThreadPoolExecutor` handles rejected tasks. `javax.servlet.Filter` chain is strategy-based. |
-| **Spring Framework** | `ResourceLoader` strategy for resource access. `TransactionManager` — `PlatformTransactionManager` is a strategy. `AuthenticationProvider` in Spring Security is a strategy for how to authenticate. `MessageConverter` in Spring MVC. |
-| **Hibernate/JPA** | `NamingStrategy` for mapping class names to table names. `IdentifierGenerator` is a strategy for primary key generation. |
-| **Java Collections** | `Comparator` passed to `Collections.sort()`, `TreeMap`, `PriorityQueue`. |
-| **Apache Commons** | `Transformer`, `Predicate`, `Closure` in Commons Collections are Strategy interfaces. |
-| **Java Executor** | `ThreadFactory` — strategy for creating threads in a `ThreadPoolExecutor`. |
-| **Gson / Jackson** | Custom `TypeAdapter` (Gson) and `JsonSerializer`/`JsonDeserializer` (Jackson) are strategies for serialization. |
+### Production Scenario: Payment Gateway Routing at Scale (1M transactions/day)
+
+A payment platform routes 1 million transactions per day across three payment processors:
+Stripe, Adyen, and Braintree. Routing decisions depend on currency, card network (Visa/MC/Amex),
+country of issuance, processor availability (circuit breaker state), and merchant contract tiers.
+Over three years the routing logic grew to a 400-line `if-else` chain inside
+`PaymentController.processPayment()`. Every new processor integration required two engineers,
+a 6-hour deploy cycle (full regression suite), and three hotfixes in the week after launch.
+
+The Strategy pattern extracted each processor into a standalone class implementing
+`PaymentStrategy`. A `StrategySelector` registry chose the right strategy at runtime. New
+processors became separate Maven modules with no changes to existing code — deploy cycle dropped
+from 6 hours to 45 minutes; regression scope narrowed to the new strategy module only.
+
+**Scale numbers:**
+- 1,000,000 transactions/day = ~11.6 TPS average, ~80 TPS at peak
+- Each strategy selection: < 0.5 ms (hash-map registry lookup, no I/O)
+- Stateless strategy objects: zero GC pressure — shared singletons across all threads
+- Adding Processor 4: 1 new class, 1 registry entry, 0 changes to existing strategies
+- Before Strategy refactor: 6-hour deploy cycle; After: 45-minute deploy cycle
+
+```
+Payment Gateway — Strategy Routing Architecture
+================================================
+
+  [ Payment Request ]
+         |
+         v
+  +-------------------+
+  | StrategySelector  |  (currency + country + cardNetwork + availability)
+  | registry: Map<K,  |
+  |   PaymentStrategy>|
+  +-------------------+
+         |
+   selects one of:
+         |
+   +-----+----------+----------+
+   |                |          |
+ StripeStrategy  AdyenStrategy  BraintreeStrategy
+ (EU/Visa/MC)   (APAC/Amex)    (US/Discover)
+   (stateless)   (stateless)    (stateless)
+         |
+   [ Processor HTTP Call ]  200ms SLA, circuit-breaker gated
+```
+
+```java
+// Java 17 LTS — Payment strategy interface and registry
+// Each strategy is a stateless singleton injected by Spring
+
+public interface PaymentStrategy {
+    PaymentResult charge(PaymentRequest request);
+    boolean supports(PaymentRequest request);   // guard — tells registry if applicable
+}
+
+@Component
+public class StripeStrategy implements PaymentStrategy {
+
+    private final StripeClient client;
+
+    public StripeStrategy(StripeClient client) { this.client = client; }
+
+    @Override
+    public boolean supports(PaymentRequest req) {
+        return Set.of("USD", "EUR", "GBP").contains(req.currency())
+            && req.availability().stripe() > 0.95;
+    }
+
+    @Override
+    public PaymentResult charge(PaymentRequest req) {
+        return client.createCharge(req.amountCents(), req.currency(), req.token());
+    }
+}
+
+@Component
+public class AdyenStrategy implements PaymentStrategy {
+    // ... similar structure for APAC + Amex routing
+    @Override
+    public boolean supports(PaymentRequest req) {
+        return "SGD".equals(req.currency()) || "JPY".equals(req.currency());
+    }
+    @Override
+    public PaymentResult charge(PaymentRequest req) { /* Adyen API */ return null; }
+}
+
+// StrategySelector — the registry; strategies injected as a list by Spring
+@Component
+public class PaymentStrategySelector {
+
+    private final List<PaymentStrategy> strategies;
+
+    public PaymentStrategySelector(List<PaymentStrategy> strategies) {
+        this.strategies = strategies;
+    }
+
+    public PaymentStrategy select(PaymentRequest req) {
+        return strategies.stream()
+            .filter(s -> s.supports(req))
+            .findFirst()
+            .orElseThrow(() -> new NoSuitableStrategyException(req.currency()));
+    }
+}
+
+// Payment service — no if-else, no processor knowledge
+@Service
+public class PaymentService {
+    private final PaymentStrategySelector selector;
+
+    public PaymentResult process(PaymentRequest req) {
+        PaymentStrategy strategy = selector.select(req);
+        return strategy.charge(req);
+    }
+}
+```
+
+### Famous Codebase Usages
+
+- **`java.util.Comparator<T>`**: the canonical Strategy for sort order. `List.sort(comparator)`,
+  `TreeMap(comparator)`, `PriorityQueue(comparator)` all accept a Comparator strategy object.
+  `Comparator.comparing()` + `thenComparing()` composes strategies with function references.
+- **`java.util.concurrent.RejectedExecutionHandler`**: pluggable strategy for how
+  `ThreadPoolExecutor` handles tasks submitted when the queue is full. Built-in strategies:
+  `AbortPolicy`, `CallerRunsPolicy`, `DiscardPolicy`, `DiscardOldestPolicy`.
+- **Spring `PlatformTransactionManager`**: `DataSourceTransactionManager`, `JpaTransactionManager`,
+  `KafkaTransactionManager` are interchangeable strategies; `@Transactional` resolves the right one.
+- **Spring Security `AuthenticationProvider`**: `DaoAuthenticationProvider`, `LdapAuthenticationProvider`,
+  `JwtAuthenticationProvider` are strategies for the `AuthenticationManager.authenticate()` template.
+- **Spring MVC `HttpMessageConverter`**: `MappingJackson2HttpMessageConverter`, `StringHttpMessageConverter`,
+  `ByteArrayHttpMessageConverter` — Spring selects the right converter strategy based on `Accept` header.
+- **Hibernate `IdentifierGenerator`** (`org.hibernate.id`): `SequenceStyleGenerator`, `TableGenerator`,
+  `UUIDGenerator` — pluggable strategy for primary key generation.
+
+---
+
+### Anti-Pattern 1: if-else Strategy Selection Violates Open/Closed Principle
+
+```java
+// BROKEN — 400-line method after 3 years of processor additions.
+// Adding Processor 4 means touching this method, re-testing all branches,
+// and owning the regression risk for all 3 existing processors.
+
+public PaymentResult processPayment(PaymentRequest req) {
+    if ("USD".equals(req.currency()) && req.cardNetwork() == Visa) {
+        if (stripeAvailability > 0.95) {
+            return stripeClient.charge(req);
+        } else {
+            return braintreeClient.charge(req);
+        }
+    } else if ("EUR".equals(req.currency())) {
+        if (adyenAvailability > 0.90) {
+            return adyenClient.charge(req);
+        } else {
+            // fallback...
+        }
+    }
+    // ... 380 more lines
+}
+```
+
+```java
+// FIX — Strategy registry: adding a new processor = 1 new class + 1 Spring @Component.
+// Zero changes to PaymentService, zero regression risk for existing strategies.
+// Open for extension, closed for modification.
+
+@Component
+public class BraintreeStrategy implements PaymentStrategy {
+    @Override public boolean supports(PaymentRequest req) { /* new rules */ return false; }
+    @Override public PaymentResult charge(PaymentRequest req) { /* Braintree API */ return null; }
+}
+// Spring auto-discovers @Component; PaymentStrategySelector.strategies list grows automatically.
+```
+
+---
+
+### Anti-Pattern 2: Stateful Strategy Shared Across Threads
+
+```java
+// BROKEN — strategy holds mutable instance state (lastCurrency).
+// Shared singleton across all payment threads; race condition corrupts routing decisions.
+
+@Component  // singleton by default in Spring
+public class StripeStrategy implements PaymentStrategy {
+    private String lastCurrency;  // MUTABLE INSTANCE FIELD — NOT THREAD-SAFE
+
+    @Override
+    public PaymentResult charge(PaymentRequest req) {
+        lastCurrency = req.currency();   // Thread A writes "USD"
+        // Thread B writes "EUR" here before Thread A reads below
+        if (!"USD".equals(lastCurrency)) throw new IllegalStateException("wrong currency");
+        return stripeClient.charge(req);
+    }
+}
+```
+
+```java
+// FIX — strategies must be stateless. All state lives in the request object or local variables.
+// Stateless strategies are safe as Spring singletons shared across 200 Tomcat threads.
+
+@Component
+public class StripeStrategy implements PaymentStrategy {
+    // NO instance fields except injected collaborators (thread-safe)
+    private final StripeClient client;
+
+    public StripeStrategy(StripeClient client) { this.client = client; }
+
+    @Override
+    public PaymentResult charge(PaymentRequest req) {
+        // All state is in req (method-local) — fully thread-safe
+        return client.charge(req.amountCents(), req.currency());
+    }
+}
+```
+
+---
+
+### Anti-Pattern 3: Strategy Selection at the Wrong Layer (Controller)
+
+```java
+// BROKEN — Controller makes the routing decision.
+// Business logic (processor selection) leaks into the HTTP layer.
+// Unit-testing the selection logic requires a full Spring MVC test context.
+// A CLI or batch job calling the same logic cannot reuse the selection.
+
+@RestController
+public class PaymentController {
+    private final StripeStrategy stripe;
+    private final AdyenStrategy adyen;
+
+    @PostMapping("/pay")
+    public PaymentResult pay(@RequestBody PaymentRequest req) {
+        // Strategy selection in the wrong layer
+        if ("SGD".equals(req.currency())) return adyen.charge(req);
+        return stripe.charge(req);
+    }
+}
+```
+
+```java
+// FIX — Controller is a thin adapter; all selection logic in PaymentStrategySelector (service layer).
+// StrategySelector is a plain POJO — unit-tested without Spring context.
+
+@RestController
+public class PaymentController {
+    private final PaymentService paymentService;
+
+    @PostMapping("/pay")
+    public PaymentResult pay(@RequestBody PaymentRequest req) {
+        return paymentService.process(req);  // controller knows nothing about strategies
+    }
+}
+// PaymentService delegates to PaymentStrategySelector — tested with @MockBean, no HTTP layer.
+```
+
+---
+
+### Performance and Correctness Numbers
+
+| Approach | Lines changed per new processor | Deploy cycle | Thread safety | Test scope |
+|---|---|---|---|---|
+| if-else monolith | 30-80 (touch existing) | 6 hours (full regression) | N/A | All branches |
+| Strategy registry | 1 new class | 45 min (module only) | Stateless = safe | New class only |
+| Strategy + feature flag | 1 new class + config | 15 min (flag only) | Stateless = safe | Canary traffic |
+
+### Migration Story
+
+**Move TO Strategy when:**
+- You have 3 or more variations of the same algorithm and a new variation arrives every few months.
+- The selection logic (if-else) and the algorithm implementations are growing together in one class.
+- You need to swap algorithms at runtime (A/B testing, feature flags, canary rollouts).
+
+**Move AWAY FROM Strategy when:**
+- There is only one algorithm and no realistic chance of variation — the pattern adds indirection
+  with no payoff.
+- The "strategies" share so much state with Context that extracting them requires passing 15
+  parameters — consider Template Method (inheritance) or simply extracting private methods.
 
 ---
 

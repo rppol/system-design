@@ -196,15 +196,292 @@ Each concrete state class contains:
 
 ## 14. Real-World Usage
 
-| Framework / Library | Usage |
+### Production Scenario: Order Lifecycle State Machine in E-Commerce (500k orders/day)
+
+An e-commerce platform processes 500,000 orders per day. Each order transitions through:
+CREATED -> PAYMENT_PENDING -> PAID -> FULFILLING -> SHIPPED -> DELIVERED, with side branches
+to CANCELLED (from CREATED, PAYMENT_PENDING, or PAID) and REFUNDED (from DELIVERED).
+
+The original implementation handled all states with a 1,200-line `OrderService` containing
+nested `if-else` blocks keyed on `order.getStatus()`. Adding a new state (PARTIAL_REFUND, 2022)
+required three engineers, 4 weeks, and produced two P1 production incidents from missed
+transition guards. Illegal transitions (SHIPPED -> CREATED) were silently ignored — no exception,
+no log, just a no-op that left the database in an inconsistent state.
+
+The State pattern extracted each state into a separate class. Adding PARTIAL_REFUND required
+one new class and one line in the transition registry — zero changes to existing states.
+
+**Scale numbers:**
+- 500,000 orders/day = ~5.8 orders/sec average, ~40 orders/sec at peak
+- State object per order: ~64 bytes (singleton flyweight states, not per-order instances)
+- Illegal transition detection: < 0.1 ms (guard throws `IllegalStateTransitionException`)
+- Adding new state (PARTIAL_REFUND): 1 new class, 1 test file, 0 existing class changes
+- Before State pattern: 1,200-line OrderService; After: 8 state classes x ~80 lines each
+
+```
+Order Lifecycle State Machine
+==============================
+
+  CREATED -----> PAYMENT_PENDING -----> PAID -----> FULFILLING -----> SHIPPED -----> DELIVERED
+     |                 |                 |                                               |
+     v                 v                 v                                               v
+ CANCELLED         CANCELLED         CANCELLED                                       REFUNDED
+                                         |
+                                         v
+                                    PARTIAL_REFUND (new 2022 — 1 class, 0 existing changes)
+
+  Context: Order (holds reference to current OrderState)
+  State:   each enum value IS a class (or a separate class in full State pattern)
+  Guard:   each state's cancel()/pay()/ship() either transitions or throws
+```
+
+```java
+// Java 17 LTS — Order state machine with explicit guard enforcement
+
+public interface OrderState {
+    OrderState pay(Order order);
+    OrderState ship(Order order);
+    OrderState deliver(Order order);
+    OrderState cancel(Order order);
+    OrderState refund(Order order);
+    String name();
+}
+
+// Singleton flyweight state — one instance shared across all orders in this state
+public enum OrderStates implements OrderState {
+
+    CREATED {
+        @Override public OrderState pay(Order order) {
+            order.recordEvent("payment_initiated");
+            return PAYMENT_PENDING;
+        }
+        @Override public OrderState cancel(Order order) {
+            order.recordEvent("cancelled_before_payment");
+            return CANCELLED;
+        }
+        // All other transitions are illegal
+        @Override public OrderState ship(Order order)    { throw illegal("CREATED", "SHIPPED"); }
+        @Override public OrderState deliver(Order order) { throw illegal("CREATED", "DELIVERED"); }
+        @Override public OrderState refund(Order order)  { throw illegal("CREATED", "REFUNDED"); }
+        @Override public String name() { return "CREATED"; }
+    },
+
+    PAYMENT_PENDING {
+        @Override public OrderState pay(Order order) {
+            order.recordEvent("payment_confirmed");
+            return PAID;
+        }
+        @Override public OrderState cancel(Order order) {
+            order.recordEvent("cancelled_pending_payment");
+            return CANCELLED;
+        }
+        @Override public OrderState ship(Order order)    { throw illegal("PAYMENT_PENDING", "SHIPPED"); }
+        @Override public OrderState deliver(Order order) { throw illegal("PAYMENT_PENDING", "DELIVERED"); }
+        @Override public OrderState refund(Order order)  { throw illegal("PAYMENT_PENDING", "REFUNDED"); }
+        @Override public String name() { return "PAYMENT_PENDING"; }
+    },
+
+    PAID {
+        @Override public OrderState ship(Order order) {
+            order.recordEvent("fulfillment_started");
+            return FULFILLING;
+        }
+        @Override public OrderState cancel(Order order) {
+            order.recordEvent("cancelled_post_payment");
+            order.triggerRefund();   // payment must be reversed
+            return CANCELLED;
+        }
+        @Override public OrderState pay(Order order)     { throw illegal("PAID", "PAYMENT_PENDING"); }
+        @Override public OrderState deliver(Order order) { throw illegal("PAID", "DELIVERED"); }
+        @Override public OrderState refund(Order order)  { throw illegal("PAID", "REFUNDED"); }
+        @Override public String name() { return "PAID"; }
+    };
+
+    // Remaining states (FULFILLING, SHIPPED, DELIVERED, CANCELLED, REFUNDED) follow same pattern
+
+    protected static IllegalStateTransitionException illegal(String from, String to) {
+        return new IllegalStateTransitionException(
+            String.format("Illegal transition: %s -> %s", from, to));
+    }
+}
+
+// Context — delegates all behavior to current state
+@Entity
+public class Order {
+    @Id private String orderId;
+    @Enumerated(EnumType.STRING)
+    private OrderStates currentState = OrderStates.CREATED;
+
+    public void pay()     { currentState = (OrderStates) currentState.pay(this); }
+    public void ship()    { currentState = (OrderStates) currentState.ship(this); }
+    public void deliver() { currentState = (OrderStates) currentState.deliver(this); }
+    public void cancel()  { currentState = (OrderStates) currentState.cancel(this); }
+    public void refund()  { currentState = (OrderStates) currentState.refund(this); }
+
+    public void recordEvent(String event) { /* audit log */ }
+    public void triggerRefund() { /* payment reversal */ }
+}
+```
+
+### Famous Codebase Usages
+
+- **`java.lang.Thread.State`** enum: `NEW`, `RUNNABLE`, `BLOCKED`, `WAITING`, `TIMED_WAITING`,
+  `TERMINATED` — JVM thread scheduling is a state machine; `Thread.getState()` queries current state.
+- **`javax.swing.ButtonModel`**: `isArmed()`, `isPressed()`, `isRollover()`, `isSelected()`,
+  `isEnabled()` — Swing button behavior depends on which combination of states is active.
+- **JPA/Hibernate entity lifecycle**: `Transient -> Managed -> Detached -> Removed`; each state
+  has different behavior for `persist()`, `merge()`, `remove()`, `detach()` calls on `EntityManager`.
+- **Spring State Machine** (`org.springframework.statemachine`): explicit `StateMachineConfig<S,E>`
+  with guard conditions, actions on entry/exit, and transition event types; used for order workflows,
+  approval chains, and IoT device lifecycle management.
+- **Java NIO `SelectionKey`**: `OP_ACCEPT`, `OP_CONNECT`, `OP_READ`, `OP_WRITE` — channel
+  readiness state drives which operations the selector dispatches.
+- **Camunda / Activiti BPMN engines**: process token state machines map directly to State pattern;
+  each BPMN task is a state; transitions are sequence flows with guard expressions.
+
+---
+
+### Anti-Pattern 1: Illegal Transitions Silently Ignored
+
+```java
+// BROKEN — transition to an invalid state is a silent no-op.
+// Order stays in SHIPPED state; caller believes delivery was recorded.
+// Database is now inconsistent: order shows SHIPPED but fulfillment system shows DELIVERED.
+
+public class OrderService {
+    public void deliver(Order order) {
+        if (!order.getStatus().equals("SHIPPED")) {
+            return;  // SILENT NO-OP — no exception, no log, no metric
+        }
+        order.setStatus("DELIVERED");
+    }
+}
+// Calling deliver() on a CREATED order: silently does nothing.
+// No alert fires. Fulfillment team sees DELIVERED; payment team sees CREATED.
+```
+
+```java
+// FIX — every state implementation throws for invalid transitions.
+// The calling service layer catches IllegalStateTransitionException and returns HTTP 409.
+
+public enum OrderStates implements OrderState {
+    CREATED {
+        @Override
+        public OrderState deliver(Order order) {
+            // Explicit exception — surfaces immediately in logs, metrics, and caller response
+            throw new IllegalStateTransitionException(
+                "Cannot deliver order in CREATED state. orderId=" + order.getOrderId());
+        }
+        // ...
+    }
+}
+// IllegalStateTransitionException is caught by @ControllerAdvice -> HTTP 409 Conflict.
+// On-call engineer sees the alert within 30 seconds, not after a silent data inconsistency.
+```
+
+---
+
+### Anti-Pattern 2: State as String/Enum Without Encapsulated Behavior (Giant if-else in Context)
+
+```java
+// BROKEN — state stored as String; all behavior lives in OrderService as a 1,200-line if-else.
+// Adding PARTIAL_REFUND state requires modifying OrderService, touching all existing branches.
+
+public class OrderService {
+    public void transition(Order order, String event) {
+        if ("CREATED".equals(order.getStatus())) {
+            if ("PAY".equals(event)) order.setStatus("PAYMENT_PENDING");
+            else if ("CANCEL".equals(event)) order.setStatus("CANCELLED");
+            // ...
+        } else if ("PAYMENT_PENDING".equals(order.getStatus())) {
+            // 200 more lines
+        } else if ("PAID".equals(order.getStatus())) {
+            // 200 more lines
+        }
+        // 1,200 lines total — 3 engineers to add 1 new state
+    }
+}
+```
+
+```java
+// FIX — state enum delegates behavior; OrderService becomes a 5-line pass-through.
+// Adding PARTIAL_REFUND = 1 new enum constant with its own transition methods.
+// Zero changes to CREATED, PAYMENT_PENDING, PAID, etc.
+
+public class OrderService {
+    public void pay(Order order)     { order.pay(); }     // delegates to current state
+    public void ship(Order order)    { order.ship(); }
+    public void deliver(Order order) { order.deliver(); }
+    public void cancel(Order order)  { order.cancel(); }
+    public void refund(Order order)  { order.refund(); }
+}
+```
+
+---
+
+### Anti-Pattern 3: State Object Holding Context Reference — Serialization Break
+
+```java
+// BROKEN — State holds a reference to Order (Context).
+// When Order is serialized (JPA, JSON, session replication), the State also tries to serialize
+// its Order reference, creating a circular reference. Jackson throws StackOverflowError.
+// JPA entity graph becomes unresolvable.
+
+public class PaidState implements OrderState {
+    private final Order order;  // CIRCULAR REFERENCE
+
+    public PaidState(Order order) { this.order = order; }
+
+    @Override
+    public OrderState ship() {
+        order.setFulfillmentStarted(true);  // mutates via stored reference
+        return new FulfillingState(order);
+    }
+}
+```
+
+```java
+// FIX — State is stateless (flyweight singleton); Context is passed as a parameter to each method.
+// No circular reference; State objects are safe to use as Spring beans or enum constants.
+
+public enum OrderStates implements OrderState {
+    PAID {
+        @Override
+        public OrderState ship(Order order) {   // Order passed in, not stored
+            order.setFulfillmentStarted(true);  // mutates via parameter — no circular ref
+            return FULFILLING;                  // returns new state, does not hold Order
+        }
+        // ...
+    }
+}
+// Order (JPA @Entity) serializes cleanly — no reference to any State object.
+// State enum constants are static singletons; 1 instance shared across 500k orders.
+```
+
+---
+
+### Performance and Correctness Numbers
+
+| Metric | Value |
 |---|---|
-| **Java TCP/IP (NIO)** | `SelectionKey` states (OP_ACCEPT, OP_READ, OP_WRITE, OP_CONNECT) — channel behavior depends on readiness state. |
-| **Spring State Machine** | Explicit State Machine framework for Spring applications. Models workflows, order processing, and approval flows. |
-| **Android** | `Fragment` lifecycle (created, started, resumed, paused, stopped, destroyed) — each lifecycle callback is a state-specific method. `MediaPlayer` states. |
-| **javax.swing** | `ButtonModel` has states: armed, pressed, rollover, selected, enabled — classic State pattern in Swing. |
-| **JPA / Hibernate** | Entity lifecycle states: Transient, Managed, Detached, Removed. Each state has different behavior for persistence operations. |
-| **Java Thread** | `Thread.State` enum (NEW, RUNNABLE, BLOCKED, WAITING, TIMED_WAITING, TERMINATED) — JVM thread scheduling is a state machine. |
-| **Workflow engines** | Activiti, Camunda, jBPM all model process states and transitions using State-pattern-like structures. |
+| State enum flyweight memory | ~64 bytes per state constant (8 states = ~512 bytes total) |
+| Illegal transition detection | < 0.1 ms (local throw, no I/O) |
+| Adding new state (PARTIAL_REFUND) | 1 new class, 1 test, 0 existing changes |
+| Before State pattern: OrderService | 1,200 lines, 3 engineers per new state |
+| After State pattern: per-state class | ~80 lines each, 1 engineer per new state |
+
+### Migration Story
+
+**Move TO State pattern when:**
+- A `switch` or `if-else` on a status field exceeds ~150 lines or spans multiple methods.
+- Adding a new state requires modifying 3 or more existing methods/classes.
+- Illegal transitions are silently ignored or produce inconsistent data.
+
+**Move AWAY FROM State pattern (to Spring State Machine or Camunda) when:**
+- Transitions require persistence (persisted state machine with audit trail) and retry on restart.
+- Business users need to configure transitions at runtime (BPMN editor) without code changes.
+- The state machine spans multiple microservices (sagas) — Spring State Machine with Redis
+  persister or Camunda with a process engine is more appropriate than in-process State objects.
 
 ---
 

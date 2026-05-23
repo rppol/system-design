@@ -220,26 +220,341 @@ Redo:    pop from redoStack, call cmd.execute(), push to historyStack
 
 ## 14. Real-World Usage
 
-### Java Standard Library
-- `java.lang.Runnable` — the classic Command interface (`run()` = `execute()`).
-- `java.util.concurrent.Callable` — Command with a return value.
-- `java.awt.event.ActionListener` — `actionPerformed()` is `execute()`.
-- `javax.swing.Action` — extends ActionListener; includes name, icon, enabled state — a full Command.
+### Production Scenario: Collaborative Document Editor — Undo/Redo Command Log (100k ops/hour)
 
-### Spring Framework
-- **Spring Batch** — each `Step` is a command; steps can be composed into `Job`s.
-- **Spring Integration** — `MessageHandler` follows the Command pattern.
-- **Spring `@Transactional`** — conceptually wraps method execution in a command with commit/rollback.
+A collaborative document editor processes 100,000 edit operations per hour from concurrent users.
+Every operation — insert text, delete text, apply bold, change font size — is a Command object
+persisted to an append-only command log. Undo replays the log in reverse (calling `undo()` on
+each command); redo replays forward (calling `execute()` again). Commands are compacted after
+1,000 entries per document to prevent unbounded memory growth.
 
-### Java Enterprise
-- **JMS MessageListener** — `onMessage()` processes a queued command.
-- **EJB Timer Service** — `@Timeout` methods are deferred commands.
+At 100k ops/hour across 10,000 active documents, average 10 ops/hour per document. Each Command
+object is ~200 bytes in memory (text snapshot + metadata); a 1,000-command log per document costs
+~200 KB. Compaction reduces this to the net document state (typically < 10 KB).
 
-### Android
-- `AsyncTask.doInBackground()` — a Command executed on a background thread.
+**Scale numbers:**
+- 100,000 edit operations/hour = ~28 ops/sec sustained
+- Command object size: ~200 bytes (text delta + position + userId + timestamp)
+- Undo/redo response time: < 5 ms (local log replay, no network)
+- Command log compaction trigger: every 1,000 commands (reduces 200 KB to < 10 KB net state)
+- Spring `@Async` task executor: `Callable` commands submitted to `ThreadPoolTaskExecutor`
+  achieve 10,000 concurrent background tasks at < 2 ms dispatch latency
 
-### Database Migrations
-- Flyway/Liquibase migration scripts — each migration is a Command with `up` (execute) and `down` (undo).
+```
+Collaborative Editor — Command Log Architecture
+================================================
+
+  [ User Keystroke ]
+         |
+         v
+  +----------------+
+  | CommandFactory | creates InsertTextCommand / DeleteTextCommand / FormatCommand
+  +----------------+
+         |
+         v
+  +-------------------+
+  | CommandInvoker    |
+  | - executeStack[]  |  <-- undo history (ring buffer, max 1000)
+  | - redoStack[]     |  <-- redo candidates
+  +-------------------+
+         |
+   execute(cmd)  -->  cmd.execute()  -->  DocumentEditor.applyDelta()
+   undo()        -->  cmd.undo()     -->  DocumentEditor.revertDelta()
+         |
+  +----------------+
+  | CommandLog     |  persisted to Redis Sorted Set (score = sequenceNum)
+  | (append-only)  |  compacted to snapshot every 1000 commands
+  +----------------+
+```
+
+```java
+// Java 17 LTS — Command interface and concrete implementations
+// Collaborative document editor undo/redo
+
+public interface DocumentCommand {
+    void execute(DocumentEditor editor);
+    void undo(DocumentEditor editor);
+    String commandId();    // UUID for log deduplication
+}
+
+public final class InsertTextCommand implements DocumentCommand {
+
+    private final int position;
+    private final String text;
+    private final String commandId;
+    private final String userId;
+
+    public InsertTextCommand(int position, String text, String userId) {
+        this.position = position;
+        this.text = text;
+        this.commandId = UUID.randomUUID().toString();
+        this.userId = userId;
+    }
+
+    @Override
+    public void execute(DocumentEditor editor) {
+        editor.insert(position, text);
+    }
+
+    @Override
+    public void undo(DocumentEditor editor) {
+        editor.delete(position, text.length());
+        // pre-state is fully encoded in this Command — no external lookup needed
+    }
+
+    @Override public String commandId() { return commandId; }
+}
+
+// CommandInvoker — manages execute/undo/redo stacks
+public class DocumentCommandInvoker {
+
+    private static final int MAX_HISTORY = 1_000;
+
+    // ArrayDeque as bounded ring buffer (remove oldest when full)
+    private final Deque<DocumentCommand> undoStack = new ArrayDeque<>(MAX_HISTORY);
+    private final Deque<DocumentCommand> redoStack = new ArrayDeque<>();
+    private final DocumentEditor editor;
+
+    public DocumentCommandInvoker(DocumentEditor editor) {
+        this.editor = editor;
+    }
+
+    public void execute(DocumentCommand cmd) {
+        if (undoStack.size() == MAX_HISTORY) {
+            undoStack.pollFirst();  // compact: discard oldest, trigger snapshot asynchronously
+        }
+        cmd.execute(editor);
+        undoStack.push(cmd);
+        redoStack.clear();  // new command invalidates redo future
+    }
+
+    public void undo() {
+        if (undoStack.isEmpty()) return;
+        DocumentCommand cmd = undoStack.pop();
+        cmd.undo(editor);
+        redoStack.push(cmd);
+    }
+
+    public void redo() {
+        if (redoStack.isEmpty()) return;
+        DocumentCommand cmd = redoStack.pop();
+        cmd.execute(editor);
+        undoStack.push(cmd);
+    }
+}
+```
+
+```java
+// Java 17 LTS — Spring @Async + Callable as Command pattern
+// Background export job using Callable (Command with return value)
+
+@Service
+public class DocumentExportService {
+
+    private final ThreadPoolTaskExecutor executor;
+
+    public DocumentExportService(ThreadPoolTaskExecutor executor) {
+        this.executor = executor;
+    }
+
+    // Callable<ExportResult> IS a Command — encapsulates the "export document" request
+    public Future<ExportResult> submitExport(String documentId, ExportFormat format) {
+        Callable<ExportResult> exportCommand = () -> {
+            byte[] bytes = renderDocument(documentId, format);
+            return new ExportResult(documentId, bytes, format);
+        };
+        return executor.submit(exportCommand);  // Callable dispatched as a task command
+    }
+}
+```
+
+### Famous Codebase Usages
+
+- **`java.lang.Runnable`**: the minimal Command interface — `run()` is `execute()`. Used by
+  `Thread`, `ExecutorService.execute(Runnable)`, `CompletableFuture.runAsync()`.
+- **`java.util.concurrent.Callable<V>`**: Command with a return value and checked exception.
+  `ExecutorService.submit(Callable)` returns a `Future<V>` — queuing and async execution of commands.
+- **`javax.swing.Action`** (`javax.swing`): extends `ActionListener`; carries name, icon,
+  enabled/disabled state — a full Command object wired to a menu item or toolbar button.
+- **Spring Batch `Step`**: each `Step` (comprising `ItemReader`, `ItemProcessor`, `ItemWriter`)
+  is a Command object composed into a `Job`; supports restart, skip, retry — built-in undo analogue.
+- **Spring Integration `MessageHandler`**: `handleMessage(Message<?>)` is a Command that processes
+  a queued message; handlers compose into integration flows.
+- **Flyway / Liquibase migrations**: each migration script is a Command with `up` (execute) and
+  `down` (undo/rollback) — the canonical enterprise undo pattern.
+
+---
+
+### Anti-Pattern 1: Command Without Pre-State — Undo Impossible
+
+```java
+// BROKEN — DeleteTextCommand does not record what text was deleted.
+// After execute(), the deleted text is gone from the editor; undo() cannot restore it.
+
+public class DeleteTextCommand implements DocumentCommand {
+    private final int position;
+    private final int length;
+
+    @Override
+    public void execute(DocumentEditor editor) {
+        editor.delete(position, length);  // text is gone — not stored anywhere
+    }
+
+    @Override
+    public void undo(DocumentEditor editor) {
+        // IMPOSSIBLE — we do not know what text to re-insert
+        throw new UnsupportedOperationException("undo not implemented");
+    }
+}
+```
+
+```java
+// FIX — capture the deleted text (pre-state) inside the command before executing.
+// Command is now a self-contained snapshot: execute + undo are fully symmetric.
+
+public final class DeleteTextCommand implements DocumentCommand {
+    private final int position;
+    private final int length;
+    private final String commandId = UUID.randomUUID().toString();
+    private String deletedText;  // captured during execute(), used in undo()
+
+    public DeleteTextCommand(int position, int length) {
+        this.position = position;
+        this.length = length;
+    }
+
+    @Override
+    public void execute(DocumentEditor editor) {
+        deletedText = editor.getText(position, length);  // snapshot pre-state first
+        editor.delete(position, length);
+    }
+
+    @Override
+    public void undo(DocumentEditor editor) {
+        editor.insert(position, deletedText);   // restore using captured pre-state
+    }
+
+    @Override public String commandId() { return commandId; }
+}
+```
+
+---
+
+### Anti-Pattern 2: Fat Command with Business Logic (500-line execute())
+
+```java
+// BROKEN — Command implements 500 lines of business logic inline.
+// Unit-testing requires constructing the entire command with all its dependencies.
+// The Command layer now owns domain rules that belong in a domain service.
+
+public class ProcessOrderCommand implements DocumentCommand {
+    private final Order order;
+    private final InventoryService inventory;
+    private final BillingService billing;
+    private final NotificationService notifications;
+    // ...
+
+    @Override
+    public void execute(DocumentEditor ignored) {
+        // 500 lines: validate order, check inventory, reserve stock, charge card,
+        // send email, update analytics, trigger fulfillment...
+        // This is a domain service disguised as a Command.
+    }
+}
+```
+
+```java
+// FIX — Command is a thin dispatcher that delegates to a domain service.
+// Business logic lives in OrderFulfillmentService (unit-testable without Command).
+// Command's job: record intent, capture pre-state for undo, delegate to service.
+
+public final class ProcessOrderCommand implements DocumentCommand {
+    private final String orderId;
+    private final String commandId = UUID.randomUUID().toString();
+    private OrderSnapshot preState;  // for undo
+
+    // Injected via constructor, not created inside Command
+    private final OrderFulfillmentService fulfillmentService;
+
+    @Override
+    public void execute(DocumentEditor editor) {
+        preState = fulfillmentService.snapshot(orderId);  // capture before mutation
+        fulfillmentService.fulfill(orderId);              // delegate — 1 line
+    }
+
+    @Override
+    public void undo(DocumentEditor editor) {
+        fulfillmentService.restore(orderId, preState);
+    }
+
+    @Override public String commandId() { return commandId; }
+}
+```
+
+---
+
+### Anti-Pattern 3: Command Log Growing Unbounded in Memory
+
+```java
+// BROKEN — ArrayList accumulates all commands ever executed.
+// A document with 10,000 edits holds 10,000 Command objects (~2 MB).
+// After 1 hour of active editing across 10,000 documents: ~20 GB heap.
+
+public class DocumentCommandInvoker {
+    private final List<DocumentCommand> history = new ArrayList<>();  // unbounded
+
+    public void execute(DocumentCommand cmd) {
+        cmd.execute(editor);
+        history.add(cmd);  // grows forever — OOM risk in long sessions
+    }
+}
+```
+
+```java
+// FIX — ring buffer capped at MAX_HISTORY; compact to a snapshot when full.
+// Users rarely need more than 50 undo steps; 1000 is a generous upper bound.
+
+public class DocumentCommandInvoker {
+    private static final int MAX_HISTORY = 1_000;
+    private final Deque<DocumentCommand> undoStack = new ArrayDeque<>(MAX_HISTORY);
+    private final SnapshotService snapshotService;
+
+    public void execute(DocumentCommand cmd) {
+        if (undoStack.size() == MAX_HISTORY) {
+            undoStack.pollFirst();  // evict oldest command
+            // Optionally: trigger async snapshot so oldest state is still recoverable from DB
+            snapshotService.persistSnapshotAsync(documentId, currentState());
+        }
+        cmd.execute(editor);
+        undoStack.push(cmd);
+    }
+}
+```
+
+---
+
+### Performance and Correctness Numbers
+
+| Metric | Value |
+|---|---|
+| Command object allocation | ~200 bytes (text delta + 2 String fields + UUID) |
+| Undo/redo latency (in-memory) | < 5 ms for 1,000-command log |
+| Command log compaction (1,000 cmds) | 200 KB -> < 10 KB net document state |
+| Spring Callable dispatch latency | < 2 ms to `ThreadPoolTaskExecutor` queue |
+| Flyway migration undo safety | 100% reproducible rollback with recorded down() script |
+
+### Migration Story
+
+**Move TO Command when:**
+- You need undo/redo — Command is the canonical pattern for reversible operations.
+- You need deferred execution, queuing, or scheduling of operations.
+- You want to log all user actions for audit trails or replay (event sourcing).
+
+**Move AWAY FROM Command when:**
+- Operations are fire-and-forget with no undo requirement — `Runnable` suffices.
+- The "undo" requirement is actually database rollback — use `@Transactional` instead.
+- Command objects become large because they capture too much pre-state — consider
+  Memento as a separate pattern to handle state snapshots, and keep Commands thin.
 
 ---
 
