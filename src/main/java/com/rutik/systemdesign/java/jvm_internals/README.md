@@ -508,36 +508,121 @@ A safepoint is a program execution point where all JVM threads are paused for op
 
 ## 14. Case Study
 
-### Diagnosing a Production Memory Leak
+### Diagnosing a G1GC Mixed-GC Pause Storm in a 32GB-Heap Service (Java 17 LTS)
 
-**Symptoms**: Java service heap grows from 1GB to 4GB over 8 hours, then OOM crash.
+**Scenario.** A config-aggregation service on Java 17 (LTS) runs with `-Xmx32g` using G1GC. After ~6 hours of uptime, it enters a **mixed-GC pause storm**: 2-second stop-the-world pauses every ~5 minutes, blowing the 200ms pause target and tripping the load balancer's health timeout. Restarts clear it for another 6 hours — the signature of a slow leak filling the old generation until G1 thrashes trying to reclaim it. The service handles ~3,000 config lookups/sec; each lookup parses and *caches* a config object in a `static Map` that is never evicted.
 
-**Investigation Steps**:
 ```
-1. Capture heap dump before crash:
-   jmap -dump:live,format=b,file=heap_$(date +%H%M).hmp <pid>
-   (live: only live objects; smaller dump)
-
-2. Open in Eclipse MAT:
-   - Run "Leak Suspects Report"
-   - Check dominator tree: what objects retain most memory?
-   - Look for unexpectedly large collections
-
-3. Finding: HashMap$Entry[] with 2M entries, all from "RequestContext"
-   - RequestContext was stored in a static ConcurrentHashMap for "request tracking"
-   - Keys were request IDs (String); values were RequestContext objects
-   - Remove on request completion never called for timed-out requests
-   - Each RequestContext held a reference chain to large response objects
-
-4. Fix:
-   - Replace static Map with ConcurrentHashMap + TTL eviction
-   - Or use WeakHashMap (keys GC'd when no strong reference)
-   - Or use Guava Cache with expireAfterWrite(5, MINUTES)
-   - Add monitoring: map.size() gauge in Prometheus
-
-5. Verify fix:
-   - Re-run load test; heap should plateau
-   - Check GC logs for major GC frequency returning to baseline
+  heap (32GB)
+  old gen fill -->  [#########################........]  -> mixed GC churns, 2s pauses
+                            ^ static Map<String,Config> grows unbounded
+  Fix: WeakReference map -> old gen plateaus -> pauses < 200ms
 ```
 
-**Key JVM concepts**: heap dump analysis, dominator tree, retained heap, static reference chains, WeakReference.
+#### Investigation commands
+
+```bash
+# 1. Confirm GC behavior live (Java 17): unified logging.
+java -Xlog:gc*:file=gc.log:time,uptime,level,tags -Xmx32g ... 
+#    grep for "Pause Young (Mixed)" durations > 1000ms
+
+# 2. Low-overhead flight recording in production (continuous, ~1% overhead).
+jcmd <pid> JFR.start name=leak settings=profile maxsize=512m
+jcmd <pid> JFR.dump  name=leak filename=leak.jfr
+#    Open in JDK Mission Control -> Memory -> "Old Object Sample" shows leaking type
+
+# 3. Live heap histogram - which class is growing?
+jcmd <pid> GC.class_histogram | head -20
+#    -> [C (char[]) and Config dominate; Config count climbs every snapshot
+
+# 4. Full heap dump for MAT dominator-tree confirmation.
+jmap -dump:live,format=b,file=heap.hprof <pid>
+```
+
+MAT's dominator tree showed a single `static final Map<String,Config> CACHE` retaining 24GB — every distinct config key ever seen, held by a strong reference, pinned in old gen forever.
+
+#### Broken cache, then fix
+
+```java
+// BROKEN: unbounded static strong-reference cache. Entries never leave old gen.
+public final class ConfigCache {
+    private static final Map<String, Config> CACHE = new ConcurrentHashMap<>();
+    public static Config get(String key) {
+        return CACHE.computeIfAbsent(key, ConfigCache::parse);   // grows forever
+    }
+}
+```
+
+```java
+// FIX: bound the cache so the GC can reclaim cold entries.
+// Option A - size+TTL bounded cache (preferred; predictable footprint):
+private static final Cache<String, Config> CACHE = Caffeine.newBuilder()
+        .maximumSize(50_000)
+        .expireAfterWrite(Duration.ofMinutes(10))
+        .build();
+
+// Option B - WeakReference values: GC may evict when memory is tight.
+private static final Map<String, WeakReference<Config>> CACHE = new ConcurrentHashMap<>();
+```
+
+After deploying the bounded cache, old-gen occupancy plateaued, mixed GCs returned to **sub-200ms** (G1's default `-XX:MaxGCPauseMillis=200`), and the 6-hour restart cycle disappeared.
+
+**Sizing reference numbers:** G1 default pause target 200ms; ZGC delivers sub-1ms pauses at the cost of throughput and is the alternative when 200ms is still too high on a 32GB+ heap. For comparison, a virtual thread stack is ~few KB versus a platform thread's ~1MB; an unrelated HikariCP pool defaults to 10 connections — none of these were the leak, which is why the histogram, not intuition, found it.
+
+### Common Pitfalls (production war stories)
+
+**1. `System.gc()` in production triggered full STW pauses.** A "cleanup" endpoint called `System.gc()`, forcing a full stop-the-world collection on the 32GB heap (multi-second). Removed it and added `-XX:+DisableExplicitGC` so library calls cannot trigger it either.
+
+**2. `-Xmx` set larger than physical RAM minus OS headroom.** A node with 32GB RAM ran `-Xmx30g`; with off-heap (Metaspace, thread stacks, direct buffers) the process exceeded RAM and the OS began swapping. GC pauses ballooned to 10s+ because the collector touched swapped-out pages. Fix: leave ~25% headroom (`-Xmx24g` on 32GB).
+
+**3. `finalize()` resurrected objects and delayed reclamation.** A legacy class overrode `finalize()`, which moves objects onto a single finalizer queue and defers their collection by at least one GC cycle, bloating old gen. Replaced with `Cleaner` / try-with-resources (`AutoCloseable`).
+
+**4. ClassLoader leak filling Metaspace.** A plugin system loaded classes with new ClassLoaders but a static listener held a reference to each, so the loaders (and their classes) never unloaded. Metaspace grew until `OutOfMemoryError: Metaspace`. Found via `jcmd <pid> GC.class_stats`; fixed by clearing the listener on undeploy.
+
+#### Tuning flags applied and what they did
+
+```bash
+# G1 baseline for the 32GB service (Java 17 LTS):
+-Xms32g -Xmx32g                 # fixed heap: avoid resize pauses + OS commit churn
+-XX:MaxGCPauseMillis=200        # G1's soft pause goal (default 200ms)
+-XX:+UseG1GC                    # default since Java 9, explicit for clarity
+-XX:+DisableExplicitGC          # neutralize stray System.gc() calls
+-XX:InitiatingHeapOccupancyPercent=45  # start concurrent mark earlier to avoid evacuation failure
+-Xlog:gc*:file=gc.log:time,uptime,level,tags:filecount=5,filesize=20m
+
+# Heap and GC headroom math for this node:
+#   32GB physical RAM
+#   - ~24GB -Xmx (75% leaves room for off-heap)
+#   - Metaspace (~256MB), thread stacks (platform ~1MB each), direct buffers
+#   Setting -Xmx30g caused swapping; -Xmx24g eliminated it.
+```
+
+Before the cache fix, GC logs showed `Pause Young (Mixed)` events of 1,800-2,100ms every ~5 min. After the bounded cache, the same log line read 60-150ms and mixed collections became infrequent because old-gen occupancy stopped climbing.
+
+#### Verifying the fix
+
+```bash
+# Re-run the soak test for 12 hours and confirm old-gen plateaus.
+jstat -gcutil <pid> 5s            # watch O (old %) stop trending upward
+jcmd <pid> GC.class_histogram | grep Config   # Config count should stabilize, not grow
+```
+
+The success criterion is not "no GC" but "old-gen occupancy is flat over the soak window" — a leak is a *trend*, and only a sustained run proves it is gone.
+
+### Interview Discussion Points
+
+**What is a G1 mixed GC and why does it pause longer over time?** Mixed GC collects young regions plus a selection of old regions in one pause. As the old gen fills with live (un-reclaimable) data, each cycle must scan and evacuate more, so pauses lengthen and frequency rises — the classic leak signature.
+
+**Heap dump vs JFR — when do you use each?** JFR (Old Object Sample) is continuous and low-overhead (~1%), good for catching the leaking allocation site in production without a pause. A heap dump is a full snapshot you analyze in MAT for the dominator tree and retained sizes — heavier, taken when you already suspect a leak.
+
+**What is the difference between retained heap and shallow heap?** Shallow heap is the memory of the object itself; retained heap is everything that would be freed if that object were collected (the object plus all it exclusively dominates). The leak culprit is usually whatever has the largest *retained* heap.
+
+**When would you switch from G1 to ZGC?** When even a well-tuned 200ms G1 pause violates your latency SLA on a large heap. ZGC keeps pauses sub-1ms regardless of heap size, trading some throughput and more CPU/memory overhead for concurrent collection.
+
+**Why is `WeakReference` not a complete fix on its own?** Weak entries are reclaimed only at the GC's discretion and only under memory pressure, giving unpredictable hit rates and no upper bound on entry count between collections. A size+TTL bounded cache gives a deterministic footprint, which is usually what production wants.
+
+**Why fix `-Xms` equal to `-Xmx`?** A growing heap incurs resize pauses and lazily commits OS pages, causing latency jitter as the heap expands under load. Fixing both to the same value commits the full heap at startup, trading a slower boot for predictable steady-state behavior — standard for latency-sensitive services.
+
+**What is the difference between `OutOfMemoryError: Java heap space` and `: Metaspace`?** Heap-space OOM means live objects exceed `-Xmx` (a data leak like our cache). Metaspace OOM means class metadata exceeds the Metaspace limit, almost always a ClassLoader leak where loaded classes can never unload. They have different root causes and different diagnostics (`class_histogram` vs `GC.class_stats`).
+
+**Why is `InitiatingHeapOccupancyPercent` relevant to a pause storm?** IHOP controls when G1 starts the concurrent marking cycle. If it starts too late, the old gen fills before marking completes and G1 falls back to a costly full GC (evacuation failure). Lowering it starts reclamation earlier, smoothing pauses while the leak is being fixed.

@@ -528,61 +528,128 @@ A memory-mapped file maps a region of a file into the process's virtual address 
 
 ## 14. Case Study
 
-### Safe Configuration File Loader with Hot-Reload
+### A Config File Watcher Hot-Reloading 500 Microservice Instances
 
-**Problem**: Load configuration from a properties file at startup; watch for changes and reload without restart.
+**Scenario.** A platform runs **500 microservice instances** that load runtime config (feature flags, rate limits, routing tables) from a properties file mounted via a shared volume / ConfigMap. Operators push a config change and expect every instance to pick it up **without a restart** — restarting 500 instances drops in-flight requests and takes ~10 minutes of rolling deploys. Each instance runs a `WatchService` (Java NIO.2, Java 7+) loop that detects file changes and atomically swaps the config reference. The tricky parts are that the editor/writer fires **multiple `MODIFY` events per save** (one per buffer flush) and that an empty `catch` would silently swallow a parse failure, leaving the fleet running stale config believing it reloaded.
+
+```
+   operator updates config.properties (atomic rename)
+        |
+        v  (per instance)
+   WatchService.take()  --> debounce 200ms --> reload + parse
+        |                                          |
+   coalesces N MODIFY events into 1 reload     ConfigParseException on bad value
+        v                                          |
+   volatile swap of Properties reference       -> keep old config, alarm, do NOT swap
+```
+
+#### Domain exception hierarchy with structured error codes
 
 ```java
-public class ConfigLoader implements AutoCloseable {
-    private final Path configPath;
-    private volatile Properties config;
-    private final WatchService watcher;
-    private final Thread watchThread;
-
-    public ConfigLoader(Path configPath) throws IOException {
-        this.configPath = configPath;
-        this.config = load(configPath);
-        this.watcher = FileSystems.getDefault().newWatchService();
-        configPath.getParent().register(watcher, ENTRY_MODIFY);
-
-        this.watchThread = Thread.ofVirtual().start(() -> {
-            while (!Thread.currentThread().isInterrupted()) {
-                try {
-                    WatchKey key = watcher.take();
-                    for (WatchEvent<?> event : key.pollEvents()) {
-                        Path changed = (Path) event.context();
-                        if (configPath.getFileName().equals(changed)) {
-                            this.config = load(configPath);
-                            System.out.println("Config reloaded");
-                        }
-                    }
-                    key.reset();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                } catch (IOException e) {
-                    System.err.println("Reload failed: " + e.getMessage());
-                }
-            }
-        });
+public sealed class ConfigException extends RuntimeException
+        permits ConfigParseException, ConfigNotFoundException {
+    private final String code;
+    protected ConfigException(String code, String msg, Throwable cause) {
+        super(msg, cause);            // PRESERVE the cause -> keeps the original stack trace
+        this.code = code;
     }
-
-    private Properties load(Path path) throws IOException {
-        Properties p = new Properties();
-        try (InputStream in = Files.newInputStream(path)) {
-            p.load(in);
-        }
-        return p;
+    public String code() { return code; }
+}
+public final class ConfigParseException extends ConfigException {
+    public ConfigParseException(String msg, Throwable cause) {
+        super("CFG-PARSE-001", msg, cause);
     }
-
-    public String get(String key) { return config.getProperty(key); }
-
-    @Override
-    public void close() throws Exception {
-        watchThread.interrupt();
-        watcher.close();
+}
+public final class ConfigNotFoundException extends ConfigException {
+    public ConfigNotFoundException(String path) {
+        super("CFG-NOTFOUND-002", "Config not found: " + path, null);
     }
 }
 ```
 
-**Key concepts**: `try-with-resources` on streams, `volatile` on config reference (visibility), `WatchService` for hot-reload, virtual thread for the watch loop, `AutoCloseable` for proper cleanup.
+#### Watch loop with debouncing and try-with-resources
+
+```java
+public final class ConfigWatcher implements AutoCloseable {
+    private final Path file;
+    private volatile Properties config;            // visibility across reader threads
+    private final WatchService watcher;
+    private final Thread loop;
+
+    public ConfigWatcher(Path file) throws IOException {
+        this.file = file;
+        this.config = load(file);
+        this.watcher = FileSystems.getDefault().newWatchService();
+        file.getParent().register(watcher, StandardWatchEventKinds.ENTRY_MODIFY);
+        this.loop = Thread.ofVirtual().start(this::watchLoop);
+    }
+
+    private void watchLoop() {
+        while (!Thread.currentThread().isInterrupted()) {
+            WatchKey key;
+            try { key = watcher.take(); }                      // try-with-resources on the key below
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+            try {
+                Thread.sleep(200);                             // DEBOUNCE: let burst of MODIFYs settle
+                boolean changed = key.pollEvents().stream()
+                        .anyMatch(ev -> file.getFileName().equals(ev.context()));
+                if (changed) {
+                    try { config = load(file); }               // atomic reference swap on success
+                    catch (ConfigParseException pe) {
+                        log.error("Reload {} failed; keeping previous config", pe.code(), pe);
+                        // do NOT swap: a bad file must not blank out live config
+                    }
+                }
+            } catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+            finally { key.reset(); }                           // re-arm the key, always
+        }
+    }
+
+    private Properties load(Path path) {
+        Properties p = new Properties();
+        try (InputStream in = Files.newInputStream(path)) {    // try-with-resources closes the FD
+            p.load(in);
+        } catch (NoSuchFileException e) {
+            throw new ConfigNotFoundException(path.toString());
+        } catch (IOException e) {
+            throw new ConfigParseException("Cannot read " + path, e);  // chain the cause
+        }
+        return p;
+    }
+
+    public String get(String k) { return config.getProperty(k); }
+    @Override public void close() throws IOException { loop.interrupt(); watcher.close(); }
+}
+```
+
+### Common Pitfalls (production war stories)
+
+**1. Empty catch block hid the production error.** An early loader had `catch (IOException e) {}`. A malformed config silently failed to load; the fleet ran 6 hours on stale flags before anyone noticed, because nothing logged or alarmed. Always log with the exception object (not just `getMessage()`) or rethrow.
+
+```java
+catch (IOException e) { }                              // BROKEN: silent failure
+catch (IOException e) { throw new ConfigParseException("load failed", e); }  // FIX
+```
+
+**2. `FileInputStream` leaked file descriptors.** Pre-NIO code did `InputStream in = new FileInputStream(f); p.load(in);` with `close()` only on the happy path. Parse exceptions skipped the close, leaking an FD per failed reload; after enough failures the JVM hit `Too many open files`. try-with-resources closes on every path.
+
+**3. Catching `Throwable` swallowed `Error`.** A defensive `catch (Throwable t)` around the reload caught `OutOfMemoryError` and `StackOverflowError`, masking JVM-fatal conditions and letting the process limp on corrupted. Catch the specific checked/runtime types you can actually handle.
+
+**4. Breaking the exception chain.** A wrapper did `throw new ConfigException(e.getMessage())`, discarding the original cause — logs showed "Cannot read config" with no underlying stack trace, so root-causing took hours.
+
+```java
+throw new ConfigException(e.getMessage());     // BROKEN: loses cause + stack trace
+throw new ConfigParseException("load failed", e);  // FIX: cause preserved, full trace in logs
+```
+
+### Interview Discussion Points
+
+**Why does saving a file fire multiple `MODIFY` events, and how do you handle it?** Editors and OS buffers flush in chunks, and an atomic save (write temp + rename) can produce several `ENTRY_MODIFY`/`ENTRY_CREATE` events. Debouncing (coalesce events within a short window, e.g. 200ms, then reload once) prevents reloading mid-write and avoids redundant parses.
+
+**When should an exception be checked vs unchecked?** Checked for recoverable conditions the caller is expected to handle (e.g. `IOException`); unchecked for programming errors or unrecoverable domain failures. Here `ConfigException` is unchecked because a misconfigured file is not something each call site can sensibly recover from — it is logged and the old config is retained.
+
+**Why is preserving the cause critical?** Passing the original `Throwable` to the wrapper's constructor keeps the full causal chain (`Caused by:` in the stack trace), which is the single most important artifact for debugging a production failure. Copying only `getMessage()` throws away the line where it actually broke.
+
+**Why a `volatile` reference for the config?** Readers on many threads must see the new `Properties` object immediately after a reload swaps the reference. `volatile` provides the visibility (happens-before) guarantee; the swap itself is a single atomic reference assignment, so no lock is needed for the read path.
+
+**Why never catch `Throwable` broadly?** `Throwable` includes `Error` subclasses (`OutOfMemoryError`, `StackOverflowError`) that signal JVM-level failures you cannot meaningfully recover from. Swallowing them keeps a doomed process running in a corrupt state; catch `Exception` or the specific types instead.

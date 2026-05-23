@@ -419,44 +419,135 @@ A variable captured by a lambda must be effectively final — either explicitly 
 
 ## 14. Case Study
 
-### Building a Real-Time Sales Dashboard with Streams
+### Rewriting a User-Profile ETL from Imperative Loops to Streams + Optional
 
-**Problem**: Process a list of `Sale` objects and produce: total revenue per region, top-5 products by volume, percentage of sales above threshold.
+**Scenario.** A user-profile service ingests **10M profile records/day** (~115 records/sec sustained, ~2,000/sec peak during nightly batch). The legacy enrichment job is a 200-line imperative ETL: nested `for` loops, manual null checks at every level (`profile -> address -> city -> zipCode`), and a hand-rolled `HashMap` grouping by country. It throws ~4,000 `NullPointerException`s/day (profiles with partial addresses) which abort whole batches, forcing reruns. The rewrite to Java 8 (LTS) Streams + Optional eliminates the NPEs and cuts the code to ~40 lines.
+
+```
+  10M records/day
+        |
+        v
+  [ read ] --> Stream<Profile>
+        |
+        +--> map: Optional chain (profile -> address -> city -> zipCode)
+        |        never throws NPE; missing levels collapse to Optional.empty()
+        |
+        +--> filter: keep valid, enrichable profiles
+        |
+        +--> collect: groupingBy(country) -> Map<Country, List<EnrichedProfile>>
+                          |
+                          v
+                  downstream sink
+```
+
+#### Null-safe nested access with chained Optional
 
 ```java
-record Sale(String region, String product, int quantity, double price) {}
+record Address(String city, String zipCode) {}
+record Profile(String userId, Address address, String country) {}
 
-class SalesDashboard {
-    public Map<String, Double> revenueByRegion(List<Sale> sales) {
-        return sales.stream()
-            .collect(Collectors.groupingBy(
-                Sale::region,
-                Collectors.summingDouble(s -> s.quantity() * s.price())
-            ));
-    }
-
-    public List<String> top5Products(List<Sale> sales) {
-        return sales.stream()
-            .collect(Collectors.groupingBy(Sale::product, Collectors.summingInt(Sale::quantity)))
-            .entrySet().stream()
-            .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
-            .limit(5)
-            .map(Map.Entry::getKey)
-            .collect(Collectors.toList());
-    }
-
-    public double percentageAboveThreshold(List<Sale> sales, double threshold) {
-        long above = sales.stream()
-            .filter(s -> s.price() > threshold)
-            .count();
-        return sales.isEmpty() ? 0.0 : (double) above / sales.size() * 100;
-    }
+// BROKEN (legacy): pyramid of null checks; one missed branch = NPE that aborts batch
+String zip;
+if (profile != null && profile.address() != null
+        && profile.address().city() != null) {
+    zip = profile.address().zipCode();      // still NPE if address present but zip null
+} else {
+    zip = "UNKNOWN";
 }
 ```
 
-**Key Java 8 concepts used**:
-- `groupingBy` + `summingDouble` for aggregation
-- `Map.Entry.comparingByValue().reversed()` for sorting map entries
-- `limit()` for top-N
-- `count()` + arithmetic for percentage
-- Records (Java 16) for the data carrier
+```java
+// FIX: flat Optional chain. Any missing link short-circuits to the default.
+String zip = Optional.ofNullable(profile)
+        .map(Profile::address)
+        .map(Address::zipCode)
+        .filter(z -> !z.isBlank())
+        .orElse("UNKNOWN");           // never throws, never returns null
+```
+
+#### Grouping 10M records by country in one pass
+
+```java
+Map<String, List<Profile>> byCountry = profiles.stream()
+        .filter(p -> p.address() != null)              // enrichable only
+        .collect(Collectors.groupingBy(
+                p -> Optional.ofNullable(p.country()).orElse("UNKNOWN"),
+                Collectors.toList()));
+
+// Or a count histogram in the same idiom:
+Map<String, Long> countByCountry = profiles.stream()
+        .collect(Collectors.groupingBy(Profile::country, Collectors.counting()));
+```
+
+The 200-line imperative ETL collapses to a single declarative pipeline. JMH on a representative 1M-record slice showed the Stream version within ~5% of the hand-tuned loop (the JIT inlines the lambdas), while eliminating the entire class of NPE batch aborts — the operational win dwarfs the micro-benchmark difference.
+
+#### The full enrichment pipeline, end to end
+
+```java
+record EnrichedProfile(String userId, String country, String zip, String tier) {}
+
+List<EnrichedProfile> enriched = profiles.stream()
+        .filter(p -> p.address() != null)                      // drop un-enrichable
+        .map(p -> new EnrichedProfile(
+                p.userId(),
+                Optional.ofNullable(p.country()).orElse("UNKNOWN"),
+                Optional.ofNullable(p.address())               // chained Optional, no NPE
+                        .map(Address::zipCode)
+                        .filter(z -> !z.isBlank())
+                        .orElse("UNKNOWN"),
+                tierFor(p)))                                   // pure function, easily testable
+        .collect(Collectors.toList());
+```
+
+Each stage is independently unit-testable, and the missing-data handling is uniform: a null at any level of the address chain collapses to `"UNKNOWN"` instead of aborting the batch. Before the rewrite, a single malformed record killed the whole 10M-record run; now it produces one `UNKNOWN`-filled row.
+
+#### Aggregating with `Collectors` downstream collectors
+
+```java
+// Average zip-completeness per country in one declarative pass.
+Map<String, Double> completenessByCountry = enriched.stream()
+        .collect(Collectors.groupingBy(
+                EnrichedProfile::country,
+                Collectors.averagingDouble(e -> e.zip().equals("UNKNOWN") ? 0.0 : 1.0)));
+```
+
+### Common Pitfalls (production war stories)
+
+**1. `Optional.get()` without a presence check.** A developer wrote `findFirst().get()` to fetch a "primary" address. For users with no address it threw `NoSuchElementException`, aborting the batch — the exact failure mode Optional was meant to remove.
+
+```java
+Address a = list.stream().filter(Address::isPrimary).findFirst().get();   // BROKEN
+Address a = list.stream().filter(Address::isPrimary).findFirst()
+                .orElse(Address.empty());                                 // FIX
+```
+
+**2. `parallel()` on an I/O-bound stage.** Someone parallelized the enrichment stage, which made a blocking REST call per record. All tasks ran on the shared common `ForkJoinPool` (size = cores - 1, ~7 threads), so the unrelated nightly report stream — also using the common pool — starved and missed its SLA. Fix: keep I/O off the common pool; use a dedicated `ExecutorService` or `CompletableFuture` with your own pool.
+
+**3. `Collectors.toMap()` throwing on duplicate keys.** Grouping profiles into `toMap(Profile::userId, p -> p)` threw `IllegalStateException: Duplicate key` because a few user IDs appeared twice in a day's feed.
+
+```java
+.collect(Collectors.toMap(Profile::userId, p -> p));                     // BROKEN on dup
+.collect(Collectors.toMap(Profile::userId, p -> p, (a, b) -> b));        // FIX: merge fn
+```
+
+**4. Nested stream inside a parallel stream.** An inner `inner.parallelStream()` nested within an outer `outer.parallelStream()` flooded the common pool with re-entrant tasks, causing thread-starvation deadlock-like stalls. Keep at most one level of parallelism; make the inner stream sequential.
+
+### Interview Discussion Points
+
+**When should you NOT use `parallel()`?** When the work is I/O-bound, the dataset is small (< ~10k elements), the per-element cost is tiny, or the pipeline is stateful/order-dependent. Parallel streams use the shared common ForkJoinPool, so blocking tasks there harm every other parallel stream in the JVM.
+
+**Is `Optional` meant for fields and method parameters?** No (Effective Java Item 55). It is designed for return types where "no result" is a normal outcome. As a field it adds an allocation and serialization headaches; as a parameter it just pushes null-handling to the caller.
+
+**Why does `Collectors.toMap` throw on duplicates but `groupingBy` does not?** `toMap` produces one value per key and has no defined way to combine collisions unless you supply a merge function. `groupingBy` accumulates all values for a key into a downstream collector, so duplicates are expected and handled by design.
+
+**What is the difference between `map` and `flatMap` on Optional?** `map` wraps the result: `Optional<Optional<T>>` if the mapper returns an Optional. `flatMap` flattens one level, so chaining methods that themselves return `Optional` uses `flatMap` to avoid nesting.
+
+**Why did the imperative version throw NPEs the Stream version avoids?** Each `Optional.map` step internally checks presence before invoking the next mapper and short-circuits to `empty()` on any null. The pyramid of manual `!= null` checks is easy to get partially wrong (e.g. checking `address` but not `zipCode`); the chain makes the null-propagation uniform and total.
+
+**What is the difference between `orElse` and `orElseGet`?** `orElse(x)` always evaluates `x`, even when the Optional is present, so a costly default is computed needlessly. `orElseGet(supplier)` invokes the supplier only on absence. Use `orElseGet` whenever the default is expensive or has side effects.
+
+**Why is `averagingDouble`/`summingDouble` preferable to mapping then averaging manually?** The downstream collector folds each element directly into the running aggregate in a single traversal, avoiding an intermediate collection and keeping the operation parallel-safe via the collector's combiner.
+
+**Does the Stream rewrite hurt throughput at 10M records/day?** No meaningfully — at ~115 records/sec sustained the bottleneck is I/O and downstream calls, not stream overhead, and JMH showed the in-memory transform within ~5% of a hand loop. The correctness and readability gains dominate, which is the typical real-world tradeoff for Java 8 stream adoption.
+
+**When would you keep an imperative loop instead?** For tight numeric inner loops where you need fine control over allocation and early-exit, or where a stream's lambda capture and boxing would add overhead the JIT cannot remove. Profile with JMH before assuming streams are slower — they usually are not for I/O-bound ETL.

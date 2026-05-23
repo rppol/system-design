@@ -355,40 +355,132 @@ Record's auto-generated `equals()` is field-by-field comparison using `Objects.e
 
 ## 14. Case Study
 
-### Custom `Collector` for Histogram Bucketing
+### A Composable Report-Generation Pipeline
 
-**Problem**: Given a stream of response latencies (ms), produce a histogram with configurable bucket sizes.
+**Scenario.** A finance team runs a nightly report job over ~5M transactions. The pipeline has five stages: load from DB, filter (settled, non-test), transform (normalize currency), aggregate (total/avg/min/max/top-10 merchants), and format to CSV. The original code was one monolithic method that was impossible to unit-test or reorder. The rewrite models each stage as a `Function<T, R>` composed with `andThen()`, computes all aggregates in a single pass via a custom `Collector`, and memoizes an expensive pure FX-rate lookup with `ConcurrentHashMap.computeIfAbsent()`. The composed pipeline is testable stage-by-stage and the single-pass collector touches 5M rows once instead of five times.
 
-```java
-public class HistogramCollector {
-
-    public static Collector<Long, ?, Map<String, Long>> toHistogram(long bucketSize) {
-        return Collector.of(
-            () -> new TreeMap<String, Long>(),
-
-            (map, latency) -> {
-                long bucket = (latency / bucketSize) * bucketSize;
-                String label = bucket + "-" + (bucket + bucketSize);
-                map.merge(label, 1L, Long::sum);
-            },
-
-            (map1, map2) -> {
-                map2.forEach((k, v) -> map1.merge(k, v, Long::sum));
-                return map1;
-            },
-
-            Function.identity(),
-            Collector.Characteristics.UNORDERED  // order within combiner doesn't matter
-        );
-    }
-}
-
-// Usage:
-Map<String, Long> histogram = latencies.stream()
-    .parallel()  // combiner makes this parallel-safe
-    .collect(HistogramCollector.toHistogram(100));
-
-// Output: {"0-100"=45, "100-200"=128, "200-300"=37, "300-400"=10, ...}
+```
+  loadFromDb : Function<Query, List<Txn>>
+       andThen filter        : List<Txn> -> List<Txn>
+       andThen normalizeFx   : List<Txn> -> List<Txn>   (memoized rate lookups)
+       andThen aggregate     : List<Txn> -> Report      (one-pass custom Collector)
+       andThen toCsv         : Report    -> String
+            = Function<Query, String>   (the whole pipeline as one value)
 ```
 
-**Key concepts**: Custom Collector with combiner for parallel safety, TreeMap for sorted buckets, `merge()` for count aggregation, `UNORDERED` characteristic.
+#### Stage composition with `andThen`
+
+```java
+Function<Query, List<Txn>>  load      = db::query;
+Function<List<Txn>, List<Txn>> filter = txns -> txns.stream()
+        .filter(t -> t.settled() && !t.isTest()).toList();
+Function<List<Txn>, List<Txn>> normalize = fx::normalizeAll;
+Function<List<Txn>, Report> aggregate = txns -> txns.stream().collect(toReport());
+Function<Report, String>    toCsv     = Report::toCsv;
+
+// Compose once; the order of andThen is the order of execution (left to right).
+Function<Query, String> pipeline =
+        load.andThen(filter).andThen(normalize).andThen(aggregate).andThen(toCsv);
+
+String csv = pipeline.apply(nightlyQuery);
+```
+
+#### Single-pass custom Collector (total/avg/min/max/top-10)
+
+```java
+record Report(long count, double total, double min, double max, List<String> top10) {
+    double average() { return count == 0 ? 0 : total / count; }
+}
+static Collector<Txn, ?, Report> toReport() {
+    record Acc(double[] tot, double[] min, double[] max, long[] n, Map<String,Double> byMerchant) {}
+    return Collector.of(
+        () -> new Acc(new double[1], new double[]{Double.MAX_VALUE},
+                      new double[]{-Double.MAX_VALUE}, new long[1], new HashMap<>()),
+        (a, t) -> { a.tot()[0] += t.amount(); a.n()[0]++;
+                    a.min()[0] = Math.min(a.min()[0], t.amount());
+                    a.max()[0] = Math.max(a.max()[0], t.amount());
+                    a.byMerchant().merge(t.merchant(), t.amount(), Double::sum); },
+        (a, b) -> { a.tot()[0] += b.tot()[0]; a.n()[0] += b.n()[0];
+                    a.min()[0] = Math.min(a.min()[0], b.min()[0]);
+                    a.max()[0] = Math.max(a.max()[0], b.max()[0]);
+                    b.byMerchant().forEach((k,v) -> a.byMerchant().merge(k,v,Double::sum)); return a; },
+        a -> new Report(a.n()[0], a.tot()[0], a.min()[0], a.max()[0],
+                        a.byMerchant().entrySet().stream()
+                            .sorted(Map.Entry.<String,Double>comparingByValue().reversed())
+                            .limit(10).map(Map.Entry::getKey).toList()));
+}
+```
+
+#### Memoizing a pure, expensive function
+
+```java
+private final Map<String, Double> rateCache = new ConcurrentHashMap<>();
+double rate(String currency) {
+    // computeIfAbsent runs the costly lookup once per currency, then serves from cache.
+    return rateCache.computeIfAbsent(currency, c -> expensiveFxLookup(c));
+}
+```
+
+A generic memoizer that wraps any pure `Function`:
+
+```java
+static <T, R> Function<T, R> memoize(Function<T, R> fn) {
+    Map<T, R> cache = new ConcurrentHashMap<>();
+    return t -> cache.computeIfAbsent(t, fn);   // pure fn => safe to cache by argument
+}
+
+// Usage: turn an expensive pure function into a cached one without touching its body.
+Function<String, Double> cachedRate = memoize(this::expensiveFxLookup);
+```
+
+Memoization is only correct for *pure* functions (same input -> same output, no side effects). Applying it to `nextSequenceNumber()` would freeze the first value forever — the discipline of functional purity is what makes the optimization safe.
+
+#### Why single-pass aggregation matters at 5M rows
+
+```
+  Approach                      Passes over 5M rows   Wall time (illustrative)
+  4 separate stream pipelines   4 (20M element reads)  ~2.0s
+  1 custom Collector            1 (5M element reads)   ~0.6s
+```
+
+The custom collector folds total, min, max, count, and the per-merchant map in one traversal, so the source is read once and stays warm in cache. Four separate `stream()` calls re-iterate the list four times with cold-cache re-reads each pass.
+
+### Common Pitfalls (production war stories)
+
+**1. `compose()` vs `andThen()` reversed the pipeline.** A refactor swapped `andThen` for `compose` to "tidy" the chain, silently reversing stage order: `f.compose(g)` runs `g` *then* `f`, the opposite of `f.andThen(g)`. The report formatted *before* normalizing, producing garbage currency values. Rule: `andThen` = same order as written; `compose` = reverse order.
+
+```java
+load.compose(filter).compose(normalize);   // BROKEN: runs normalize, filter, load (reversed)
+load.andThen(filter).andThen(normalize);    // FIX: runs load, filter, normalize
+```
+
+**2. Capturing mutable state in a lambda.** Someone summed with `double[] total = {0}; list.forEach(t -> total[0] += t.amount());` to dodge the effectively-final rule. It compiled, but under a parallel stream the unsynchronized array write produced lost updates and a wrong total. Use a `Collector` or `reduce`, not captured mutable state.
+
+**3. Reusing a stream after a terminal operation.** A helper returned a `Stream` that the caller consumed twice; the second terminal op threw `IllegalStateException: stream has already been operated upon or closed`. Streams are single-use — return a `List` or a `Supplier<Stream<T>>` if multiple traversals are needed.
+
+**4. `Comparator.comparing` with a null-unsafe key extractor.** Sorting merchants by an optional region threw NPE when a region was null: `comparing(Txn::region)`. Fix with `nullsLast`.
+
+```java
+.sorted(Comparator.comparing(Txn::region));                         // BROKEN: NPE on null
+.sorted(Comparator.comparing(Txn::region, Comparator.nullsLast(naturalOrder())));  // FIX
+```
+
+### Interview Discussion Points
+
+**What is the difference between `Function.andThen` and `Function.compose`?** `f.andThen(g)` applies `f` first then `g` (left-to-right, matching reading order). `f.compose(g)` applies `g` first then `f` (right-to-left, matching mathematical g(f(x)) notation reversed). Mixing them up silently reorders a pipeline.
+
+**Why must lambdas capture only effectively-final variables?** Captured variables are copied into the lambda's closure; allowing reassignment would create ambiguity about which value is seen, and would be unsafe across threads. The restriction pushes you toward immutable data or proper accumulators, which are parallel-safe.
+
+**Why is a single-pass custom Collector preferable to five separate stream passes?** It touches each element once (O(n) vs O(5n)) with better cache locality and a single traversal of a 5M-row dataset, and its combiner makes it parallel-safe. Separate passes re-iterate the source each time.
+
+**How does `computeIfAbsent` give you memoization for free?** It atomically checks the cache and, only on a miss, runs the mapping function and stores the result — so a pure function is evaluated at most once per key even under concurrency, which is exactly memoization.
+
+**Why can't you reuse a stream?** A stream is a one-shot view over a source bound to a single terminal operation; after the terminal op it is consumed/closed. For repeated traversal, collect to a reusable collection or wrap the source in a `Supplier<Stream<T>>` that produces a fresh stream each call.
+
+**When is memoization safe, and when does it cause bugs?** Safe only for pure functions where the output depends solely on the argument and there are no side effects. Memoizing an impure function (one reading mutable state, doing I/O, or returning time/sequence-dependent values) caches a stale or wrong result forever. Purity is the precondition.
+
+**Why model stages as `Function` objects rather than just calling methods in sequence?** Treating stages as first-class values lets you compose, reorder, unit-test, and conditionally insert stages (e.g. a debug logger) without rewriting the pipeline. The whole pipeline becomes a single `Function<Query, String>` value that can be passed, stored, and tested in isolation.
+
+**How does a custom Collector stay correct under `parallel()`?** Through its associative combiner: the framework splits the source, runs the accumulator on each chunk into a separate accumulator instance, then merges them pairwise with the combiner. As long as the combiner is associative and the supplier yields fresh state, the parallel result equals the sequential one.
+
+**What is the risk of `Comparator.comparing` extractors that return null?** The natural-order comparison invoked on a null key throws NPE mid-sort, which can corrupt the sort or abort the job. Wrap the key comparator with `Comparator.nullsFirst`/`nullsLast` to define where nulls land, making the sort total.

@@ -602,51 +602,128 @@ AQS is the framework underlying all major JUC synchronizers. Core structure: `vo
 
 ## 14. Case Study
 
-### Building a Thread-Safe Request Rate Limiter
+### A Request-Coalescing Cache at 100k RPS
 
-**Problem**: Limit API calls to N requests per second, thread-safe, high-throughput.
+**Scenario.** A read-heavy product API serves **100,000 requests/sec** across the fleet, ~95% served from an in-process cache. The danger is the **cache stampede** (a.k.a. thundering herd): when a hot key expires, every concurrent request for it misses simultaneously. Without coalescing, 1,000 concurrent misses on one key fire **1,000 identical DB queries** in the same millisecond, the DB connection pool (HikariCP default 10) saturates, latency spikes, and the outage cascades. With coalescing, the first miss starts exactly **one** DB lookup; the other 999 callers attach to the same in-flight `CompletableFuture` and wake when it completes.
+
+```
+  1000 concurrent requests for key "P-42" (just expired)
+        |
+   ConcurrentHashMap.computeIfAbsent("P-42", k -> startAsyncLoad(k))
+        |                         |
+   first caller wins         999 callers receive the SAME CompletableFuture
+   starts 1 DB query              |
+        v                         v
+   DB: 1 query  <-------- all 1000 complete from one result
+```
+
+#### Coalescing with `computeIfAbsent` returning a shared future
 
 ```java
-public class RateLimiter {
-    private final int maxTokens;
-    private final long refillIntervalNanos;
-    private final AtomicLong tokens;
-    private volatile long lastRefillTime;
+public final class CoalescingCache<K, V> {
+    private final ConcurrentHashMap<K, CompletableFuture<V>> inFlight = new ConcurrentHashMap<>();
+    private final Function<K, V> loader;
+    private final Executor pool;
 
-    public RateLimiter(int ratePerSecond) {
-        this.maxTokens = ratePerSecond;
-        this.refillIntervalNanos = TimeUnit.SECONDS.toNanos(1) / ratePerSecond;
-        this.tokens = new AtomicLong(ratePerSecond);
-        this.lastRefillTime = System.nanoTime();
+    public CoalescingCache(Function<K, V> loader, Executor pool) {
+        this.loader = loader; this.pool = pool;
     }
 
-    public boolean tryAcquire() {
-        refillIfNeeded();
-        // CAS loop: decrement if > 0
-        long current;
-        do {
-            current = tokens.get();
-            if (current <= 0) return false;
-        } while (!tokens.compareAndSet(current, current - 1));
-        return true;
-    }
-
-    private void refillIfNeeded() {
-        long now = System.nanoTime();
-        long elapsed = now - lastRefillTime;
-        if (elapsed >= refillIntervalNanos) {
-            long tokensToAdd = elapsed / refillIntervalNanos;
-            long newValue = Math.min(maxTokens,
-                tokens.get() + tokensToAdd);
-            // Best effort: race condition here is acceptable
-            // (slightly over/under refill is fine for rate limiting)
-            tokens.set(newValue);
-            lastRefillTime = now;
-        }
+    public CompletableFuture<V> get(K key) {
+        // computeIfAbsent's mapping function runs atomically per key:
+        // exactly one thread builds the future; the rest receive the same instance.
+        return inFlight.computeIfAbsent(key, k ->
+            CompletableFuture
+                .supplyAsync(() -> loader.apply(k), pool)
+                .whenComplete((v, ex) -> inFlight.remove(k)));  // allow re-load next miss
     }
 }
 ```
 
-**Concurrency techniques used**: `AtomicLong` + CAS loop for lock-free token decrement; `volatile` for `lastRefillTime` visibility; token bucket algorithm.
+The atomicity of `computeIfAbsent` per key is what makes this safe: even with 1,000 threads hitting the same key, the mapping function executes once, so only one `supplyAsync` (one DB query) is created. The `whenComplete` removes the entry so a *future* miss can reload — without it, the cache would serve one permanently stale value.
 
-**Tradeoffs**: Slightly imprecise refill under concurrent access (atomic CAS on refill would be more precise but slower). For high-precision production use, see the full case study in `case_studies/design_rate_limiter_java.md`.
+#### Measured impact
+
+```
+            DB queries on 1000-way concurrent miss   p99 latency under stampede
+no coalesce            1000                            900ms (pool exhausted)
+coalesce                  1                            70ms  (1 query + future wake)
+```
+
+#### Why the entry must be removed on completion (negative cache hazard)
+
+```java
+// If a load FAILS and you leave the failed future in the map, every future caller
+// receives the SAME failed future forever -- a "negative cache" that never recovers.
+.whenComplete((v, ex) -> inFlight.remove(key));   // remove on BOTH success and failure
+```
+
+Removing on completion turns the map into a *coalescing* structure (dedupe concurrent in-flight loads) rather than a *result* cache. The actual value cache (with TTL) sits behind the loader; the coalescing map only prevents duplicate concurrent work. This separation is what lets a transient DB error self-heal on the next request instead of being pinned.
+
+#### Bounding blast radius with a timeout
+
+```java
+public V getOrThrow(K key, Duration timeout) {
+    try {
+        return get(key).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+    } catch (TimeoutException e) {
+        inFlight.remove(key);          // don't let a hung load poison followers
+        throw new CacheLoadTimeout(key, e);
+    } catch (ExecutionException | InterruptedException e) {
+        throw new CacheLoadFailed(key, e);
+    }
+}
+```
+
+Without the timeout, a single hung downstream call would block all 1,000 coalesced callers indefinitely — coalescing concentrates the risk into one future, so that future must have a deadline.
+
+### Common Pitfalls (production war stories)
+
+**1. Plain `HashMap` shared across threads.** An early cache used a `HashMap`. Under concurrent `put`, a JDK 7 resize formed a circular linked list in a bucket and a reader spun at 100% CPU forever (infinite loop). Even on JDK 8 (which fixed the cycle) concurrent writes still lose entries and throw `ConcurrentModificationException`.
+
+```java
+private final Map<K, V> cache = new HashMap<>();          // BROKEN: corrupts under writes
+private final Map<K, V> cache = new ConcurrentHashMap<>();// FIX
+```
+
+**2. `volatile` used for a compound check-then-act.** A "load once" guard used `if (!loaded) { load(); loaded = true; }` with `volatile boolean loaded`. `volatile` gives visibility but not atomicity, so two threads both saw `false` and both loaded. Fix: `computeIfAbsent` or a lock around the compound action.
+
+**3. `ThreadLocal` not removed in a pooled thread.** A per-request `ThreadLocal<UserContext>` was set but never cleared. Because the request ran on a reused pool thread, the context leaked into the next request (data exposure) and the objects were never GC'd (memory leak). Always `remove()` in a `finally`.
+
+```java
+try { CTX.set(user); handle(); } finally { CTX.remove(); }   // FIX
+```
+
+**4. Double-checked locking without `volatile`.** A lazy singleton used DCL on a non-`volatile` field. A second thread could observe the field as non-null while the constructor's writes were not yet visible, handing out a **half-constructed** object.
+
+```java
+private static Service inst;                       // BROKEN: missing volatile
+// FIX: volatile establishes happens-before so writes in the constructor are visible.
+private static volatile Service inst;
+static Service get() {
+    if (inst == null) synchronized (Service.class) {
+        if (inst == null) inst = new Service();
+    }
+    return inst;
+}
+```
+
+### Interview Discussion Points
+
+**Why does `computeIfAbsent` solve the stampede where a plain `get`-then-`put` does not?** `computeIfAbsent` runs the mapping function atomically with respect to the key's bin, so concurrent callers for the same key see a single computation. A `get` followed by `put` is a check-then-act race: many threads see the miss and each starts its own load.
+
+**Why store a `CompletableFuture` instead of the value itself?** The future is created instantly and shared; late callers attach to the in-flight computation rather than starting their own. If you cached the value, the slow load would still happen N times before the first value is stored.
+
+**What guarantees does `volatile` give and not give?** It guarantees visibility (a write is seen by subsequent reads) and ordering (happens-before across the volatile access), but not atomicity of compound operations like increment or check-then-act. Use atomics or locks for those.
+
+**Why must the DCL field be `volatile`?** Without it, the publishing write of the reference can be reordered before the object's fields are initialized, so another thread may read a non-null reference to a partially constructed object. `volatile` forbids that reordering and publishes the fully built object.
+
+**How do you prevent ThreadLocal leaks in a thread pool?** Always pair `set` with `remove` in a `finally` block, because pool threads outlive the request and would otherwise carry stale values into the next task and prevent GC of the held objects.
+
+**For high-precision rate limiting, where does this differ?** The token-bucket limiter (see `case_studies/design_rate_limiter_java.md`) uses an `AtomicLong` CAS loop for lock-free decrement and `volatile` for refill-time visibility; it tolerates slight refill imprecision in exchange for throughput, a different tradeoff than the exactness the coalescing cache needs.
+
+**Why must a coalescing future have a timeout?** Coalescing concentrates 1,000 callers onto one in-flight future. If the underlying load hangs, all 1,000 hang with it — the very concentration that helps under load becomes a single point of failure without a deadline. A timeout caps the worst-case wait and removes the poisoned entry.
+
+**Why remove the entry on failure, not just success?** Leaving a completed-exceptionally future in the map creates a negative cache: every subsequent caller receives the same failed future and the key can never reload, so a transient error becomes permanent. Removing on any completion lets the next request retry fresh.
+
+**Is `computeIfAbsent` safe to call recursively or with a slow mapping function?** No — the mapping function runs while holding the bin lock, so a long-running or re-entrant `computeIfAbsent` on the same map can block other writers to that bin or deadlock. Keep the mapping function fast; here it only *creates* the future (`supplyAsync` returns immediately) rather than performing the load inline.

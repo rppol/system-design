@@ -558,7 +558,112 @@ All three are short-circuit terminal operations. `anyMatch(p)`: returns `true` i
 
 ## 14. Case Study
 
-### Building a Multi-Dimensional Sales Report in One Stream Pass
+### A 100GB/day Log-Analytics Pipeline with Custom Spliterator + Collector
+
+**Scenario.** An edge fleet emits **100GB of access logs/day** (~100M log lines). A nightly analytics job must compute a response-code histogram, p99 latency per endpoint, and bytes-served per host. The job runs on an 8-core machine with a 6GB heap. Loading 100GB into a `List` is impossible, so the pipeline streams lazily from disk via a custom `Spliterator`, aggregates with a custom `Collector`, and parallelizes onto a dedicated 8-thread `ForkJoinPool` (never the shared common pool). Measured throughput: ~500MB/sec, finishing 100M lines in ~45 minutes.
+
+```
+  access.log.gz (100GB)
+        |
+   [ LineSpliterator ]  lazy, splits on file regions, never materializes whole file
+        |
+        v
+   Stream<LogLine> --parallel(dedicatedPool=8)-->
+        |
+   [ HistogramCollector ]  per-thread accumulators merged by combiner
+        |
+        v
+   Map<Integer, Long>  (200->8.2M, 404->410k, 500->12k, ...)
+```
+
+#### Custom lazy Spliterator (bounded memory)
+
+```java
+final class LineSpliterator implements Spliterator<String> {
+    private final BufferedReader reader;
+    LineSpliterator(BufferedReader reader) { this.reader = reader; }
+
+    @Override public boolean tryAdvance(Consumer<? super String> action) {
+        try {
+            String line = reader.readLine();      // one line in memory at a time
+            if (line == null) return false;
+            action.accept(line);
+            return true;
+        } catch (IOException e) { throw new UncheckedIOException(e); }
+    }
+    // Sequential read; split is handled by partitioning files upstream.
+    @Override public Spliterator<String> trySplit() { return null; }
+    @Override public long estimateSize() { return Long.MAX_VALUE; }
+    @Override public int characteristics() { return ORDERED | NONNULL; }
+}
+```
+
+For real parallelism the upstream partitions the 100GB into N shards (one per file/byte-range) and runs one `LineSpliterator` per shard; the histograms are then merged with the same combiner the `Collector` uses.
+
+#### Custom Collector — response-code histogram
+
+```java
+static Collector<LogLine, ?, Map<Integer, Long>> toCodeHistogram() {
+    return Collector.of(
+        () -> new HashMap<Integer, Long>(),                       // per-thread accumulator
+        (map, line) -> map.merge(line.statusCode(), 1L, Long::sum),
+        (a, b) -> { b.forEach((k, v) -> a.merge(k, v, Long::sum)); return a; }, // combiner
+        Collector.Characteristics.UNORDERED);
+}
+```
+
+#### Running on a dedicated pool (not the common pool)
+
+```java
+ForkJoinPool pool = new ForkJoinPool(8);
+Map<Integer, Long> histogram = pool.submit(() ->
+    StreamSupport.stream(new LineSpliterator(reader), true)   // parallel = true
+        .map(LogLine::parse)
+        .collect(toCodeHistogram())
+).get();
+```
+
+Submitting the parallel pipeline through `pool.submit(...)` makes the ForkJoinTasks execute on *that* pool's workers, isolating the heavy job from any other parallel stream in the JVM.
+
+### Common Pitfalls (production war stories)
+
+**1. `collect(toList())` then post-grouping in a parallel stream caused contention.** The first version collected all 100M lines to a list, then grouped — both an OOM risk and a synchronized-merge bottleneck. Switching to a concurrent collector kept memory flat and removed the merge contention.
+
+```java
+.collect(Collectors.groupingBy(LogLine::host));                 // BROKEN under parallel
+.collect(Collectors.groupingByConcurrent(LogLine::host));       // FIX: CONCURRENT collector
+```
+
+**2. Stateful lambda in `filter()` broke parallel correctness.** Someone deduplicated with `Set<String> seen = ...; .filter(seen::add)`. Under `parallel()` the unsynchronized `HashSet` corrupted and the line count was non-deterministic across runs. Stream operations must be stateless; dedup belongs in `distinct()` or a concurrent set.
+
+**3. `findFirst()` on a parallel stream silently serialized.** A query used `parallel().filter(...).findFirst()` expecting speed-up. `findFirst` must honor encounter order, so it forces coordination and is effectively sequential. Use `findAny()` when any match is acceptable.
+
+```java
+parallel().filter(p).findFirst();    // BROKEN: order constraint kills parallelism
+parallel().filter(p).findAny();      // FIX: any match, fully parallel
+```
+
+**4. Stream over a file not closed.** `Files.lines(path)` was used without try-with-resources; each invocation leaked a file descriptor, and after ~1,000 runs the process hit `Too many open files`. `Stream` is `AutoCloseable` when backed by I/O — close it.
+
+```java
+try (Stream<String> lines = Files.lines(path)) { ... }          // FIX: closes the FD
+```
+
+### Interview Discussion Points
+
+**When do you write a custom Spliterator instead of using `Files.lines`?** When you need control over splitting (parallel file regions), custom characteristics for optimization, or to wrap a non-standard source. For simple line reading, `Files.lines` already returns a well-behaved, closeable stream.
+
+**Why supply a combiner in a custom Collector?** The combiner merges per-thread partial accumulators in a parallel stream. Without a correct, associative combiner the parallel result is wrong. In sequential streams the combiner is never called, which is why bugs there only surface under load.
+
+**What does the `UNORDERED` characteristic buy you?** It tells the framework that encounter order does not affect the result, allowing it to skip ordering work and merge partial results more freely — a real speed-up for histogram/aggregation collectors.
+
+**Why isolate the heavy job on a dedicated ForkJoinPool?** Parallel streams default to the shared common pool used by every parallel stream in the JVM. A 45-minute log job on the common pool would starve every other parallel operation. Submitting through your own pool confines the work.
+
+**How do you keep memory bounded over 100GB?** The lazy Spliterator reads one line at a time and the Collector folds each line into fixed-size accumulators, so peak heap is O(distinct keys), not O(lines). Never call `collect(toList())` on an unbounded source.
+
+---
+
+### Appendix: Multi-Dimensional Sales Report in One Stream Pass
 
 **Problem**: Given a list of `Sale` records, produce a full report in a single stream pass: total revenue, per-region revenue, top 3 products by quantity, count of large orders (> $500).
 

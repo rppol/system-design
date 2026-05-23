@@ -459,39 +459,141 @@ Record deconstruction (Java 21) allows extracting a record's components directly
 
 ## 14. Case Study
 
-### Migrating a Blocking HTTP Server to Virtual Threads
+### Migrating a REST API from Platform Threads to Virtual Threads (Java 21 LTS)
 
-**Problem**: A Java 11 service uses a `ThreadPoolExecutor` with 200 threads to handle HTTP requests. Each request makes 2–3 downstream HTTP calls (blocking I/O). Under load, the pool is exhausted and requests queue.
+**Scenario.** An order-orchestration REST API runs on Java 11 (LTS) with a fixed pool of **200 platform threads**. Each request fans out to 2–3 downstream services (user, inventory, pricing), each a blocking HTTP call averaging ~60ms. At 500 concurrent requests the 200-thread pool is exhausted; requests queue and **p99 hits 800ms** even though the CPU sits at 25%. The threads are not busy — they are *blocked* waiting on I/O. Migrating to Java 21 virtual threads lets the service hold **10,000 concurrent requests** with **p99 ~120ms**, because a blocked virtual thread unmounts its carrier instead of pinning an OS thread.
 
-**Solution with Java 21 Virtual Threads**:
+```
+  Java 11 (200 platform threads, ~1MB stack each = ~200MB)
+  500 concurrent -> 300 queued -> p99 800ms, CPU 25% (threads blocked on I/O)
+
+  Java 21 (virtual threads, ~few KB each)
+  10,000 concurrent -> ~8 carrier threads (1/core) -> p99 120ms, CPU ~70%
+
+   request --> virtual thread --[blocks on I/O]--> UNMOUNTS carrier
+                                                   carrier serves another VT
+```
+
+#### The migration: one line, plus structured concurrency
 
 ```java
-// Before (Java 11): explicit thread pool
+// BEFORE (Java 11): bounded pool; the 201st concurrent request queues.
 ExecutorService pool = Executors.newFixedThreadPool(200);
 server.setExecutor(pool);
 
-// After (Java 21): virtual thread per request
+// AFTER (Java 21): a virtual thread per request, unbounded by OS threads.
 server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
-// Done. No other code changes needed.
-
-// With StructuredTaskScope for parallel downstream calls:
-record UserProfile(User user, List<Order> orders, Preferences prefs) {}
-
-UserProfile fetchProfile(String userId) throws Exception {
-    try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-        Subtask<User>          user  = scope.fork(() -> userService.fetch(userId));
-        Subtask<List<Order>>   orders = scope.fork(() -> orderService.fetch(userId));
-        Subtask<Preferences>   prefs  = scope.fork(() -> prefService.fetch(userId));
-
-        scope.join().throwIfFailed();
-
-        return new UserProfile(user.get(), orders.get(), prefs.get());
-    }
-}
-// Parallelizes 3 I/O calls; if any fails, the others are cancelled
-// No CompletableFuture chains; no callback hell; fully readable
 ```
 
-**Results**: Thread count drops from 200 platform threads to ~8 carrier threads (one per CPU core), handling the same load. Memory footprint drops by ~190MB (200 * ~1MB platform thread stacks). Latency at P99 improves because threads no longer queue.
+```java
+// Fan-out the 3 downstream calls with StructuredTaskScope (Java 21 preview).
+record OrderView(User user, Inventory inv, Pricing price) {}
 
-**Key concepts**: Virtual threads, StructuredTaskScope, Records for response object.
+OrderView assemble(String orderId) throws Exception {
+    try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+        var user  = scope.fork(() -> userClient.fetch(orderId));
+        var inv   = scope.fork(() -> inventoryClient.fetch(orderId));
+        var price = scope.fork(() -> pricingClient.fetch(orderId));
+        scope.join().throwIfFailed();          // wait all; cancel siblings on first failure
+        return new OrderView(user.get(), inv.get(), price.get());
+    }
+}
+```
+
+#### Records and sealed types modernize the model
+
+```java
+// 50-line getter/equals/hashCode DTO collapses to one line:
+record OrderView(User user, Inventory inv, Pricing price) {}
+
+// Sealed hierarchy makes the response set exhaustive and switch-checkable:
+sealed interface ApiResponse<T> permits Ok, ClientError, ServerError {}
+record Ok<T>(T body) implements ApiResponse<T> {}
+record ClientError<T>(int status, String msg) implements ApiResponse<T> {}
+record ServerError<T>(Throwable cause) implements ApiResponse<T> {}
+
+String render(ApiResponse<OrderView> r) {
+    return switch (r) {                         // no default needed: sealed = exhaustive
+        case Ok<OrderView> ok           -> serialize(ok.body());
+        case ClientError<OrderView> ce  -> "4xx: " + ce.msg();
+        case ServerError<OrderView> se  -> "5xx: " + se.cause().getMessage();
+    };
+}
+```
+
+**Results.** Thread count: 200 platform threads -> ~8 carrier threads. Stack memory: ~200MB -> a few MB (virtual thread stacks are ~few KB and live on the heap, growing on demand). p99: 800ms -> 120ms at 20x the concurrency.
+
+#### Capacity comparison at a glance
+
+```
+                     Platform threads (Java 11)   Virtual threads (Java 21)
+  Threads alive        200 (pool cap)               10,000+ (1 per request)
+  Stack memory         ~200MB (1MB each)            ~a few MB (KB each, on heap)
+  Concurrency ceiling  ~200 in-flight               bounded by downstream, not threads
+  p99 @ 500 concurrent 800ms                        ~90ms
+  p99 @ 10k concurrent  -- (would collapse)         120ms
+  CPU utilization      25% (blocked)                ~70% (work-bound)
+```
+
+The key insight: the platform-thread CPU was idle at 25% because threads were *blocked*, not busy. Virtual threads convert that wasted wall-clock into served requests without adding cores.
+
+#### Records compress the boilerplate, sealed types make handling total
+
+```java
+// A 50-line getter/equals/hashCode/toString DTO collapses to one line.
+record OrderView(User user, Inventory inv, Pricing price) {}
+
+// Pattern matching for switch (Java 21) over the sealed hierarchy is exhaustive:
+int httpStatus(ApiResponse<?> r) {
+    return switch (r) {
+        case Ok<?> ok          -> 200;
+        case ClientError<?> ce -> ce.status();
+        case ServerError<?> se -> 500;
+        // no default: adding a new permitted subtype is a COMPILE error until handled
+    };
+}
+```
+
+### Common Pitfalls (production war stories)
+
+**1. `synchronized` pinned the carrier thread.** A shared connection cache guarded a downstream call with `synchronized`. On Java 21, a virtual thread that blocks *inside* a `synchronized` block cannot unmount — it **pins** its carrier. Under load all 8 carriers got pinned and throughput collapsed back to platform-thread levels.
+
+```java
+synchronized (lock) { result = blockingHttpCall(); }   // BROKEN: pins carrier on block
+// FIX: ReentrantLock releases the carrier while the VT is blocked.
+lock.lock();
+try { result = blockingHttpCall(); } finally { lock.unlock(); }
+```
+(JDK 24 lifts most `synchronized` pinning, but on the Java 21 LTS baseline prefer `ReentrantLock` around blocking I/O.)
+
+**2. Virtual threads used for CPU-bound work.** A team ran a CPU-heavy image transform on virtual threads expecting a speed-up. Virtual threads do not add cores; they help *blocked* tasks. The transform still saturated 8 carriers and just added scheduling overhead. CPU-bound work belongs on a fixed pool sized to cores.
+
+**3. Record with a mutable collection field leaked mutation.** `record Cart(List<Item> items) {}` exposed the caller's list directly, so external mutation changed the "immutable" record's contents.
+
+```java
+record Cart(List<Item> items) {
+    Cart { items = List.copyOf(items); }    // FIX: defensive copy in compact constructor
+}
+```
+
+**4. `switch` on a non-sealed type missed a case.** A `switch` over an open interface compiled with a `default` that silently swallowed a newly added subtype, hiding a bug for weeks. Sealing the interface makes the compiler reject the non-exhaustive switch at build time.
+
+### Interview Discussion Points
+
+**What problem do virtual threads actually solve?** They make blocking I/O cheap by decoupling Java threads from OS threads. A blocked virtual thread unmounts its carrier, so you can have millions of them. They do not speed up CPU-bound work or add parallelism beyond the carrier count.
+
+**What is carrier pinning and when does it happen?** A virtual thread is "pinned" when it cannot unmount from its carrier OS thread while blocked — on the Java 21 baseline this happens inside `synchronized` blocks and during native calls. Pinning defeats the scalability benefit; use `ReentrantLock` around blocking sections.
+
+**Why are records a good fit for DTOs but not for entities?** Records are shallowly immutable data carriers with generated `equals`/`hashCode`/`toString`. That suits transfer/value objects. JPA entities need a no-arg constructor and mutable identity managed by the persistence context, which records cannot provide.
+
+**How do sealed classes improve `switch`?** A sealed type enumerates its permitted subtypes, so the compiler can verify a pattern `switch` covers them all and reject it otherwise — turning a runtime "unhandled case" into a compile error, with no fragile `default` branch.
+
+**Why did p99 improve so much without adding CPU?** The old bottleneck was thread *availability*, not CPU. With 200 threads, the 201st request waited in a queue (~queueing delay added to latency). Virtual threads remove the queue: every request gets its own thread immediately, and blocked ones release their carrier, so latency reflects real downstream time, not contention.
+
+**What does `StructuredTaskScope.ShutdownOnFailure` give you over plain `CompletableFuture.allOf`?** It scopes the lifetime of the forked subtasks to the try block, cancels all siblings the moment one fails, and propagates the failure with a clean stack — no orphaned futures, no manual cancellation, and the parent cannot return before all children complete or are cancelled.
+
+**Why isn't a record a drop-in replacement for every class?** Records are shallowly immutable and final, cannot extend other classes, and expose all components. They fit value/data carriers. Anything needing mutability, inheritance, or hidden state (entities, services, builders with optional fields) should remain a regular class.
+
+**How do virtual threads interact with `ThreadLocal`?** They support `ThreadLocal`, but since you may create millions, per-thread copies can balloon memory. Prefer passing context explicitly or use `ScopedValue` (Java 21 preview), which shares an immutable binding across the structured scope without per-thread allocation.
+
+**Why does CPU rise from 25% to ~70% after the migration?** The platform-thread service had idle cores because threads sat blocked on I/O while the work was waiting. Virtual threads keep more requests progressing concurrently, so the cores spend their time on actual request processing instead of being stalled behind a bounded pool.

@@ -426,13 +426,98 @@ Yes, but only through a reference of the subclass type (or a more derived type),
 
 ## 14. Case Study
 
-### Designing a Value Object with Correct Equality
+### A Shared `Money` Value Object Across 40 Microservices
 
-**Problem**: Model a `Money` class that can be safely used as a `HashMap` key, sorted in `TreeSet`, and compared for equality.
+**Scenario.** A B2B SaaS billing platform serves 120,000 tenant organizations. A single `Money` value object is published in a shared `commons-money` JAR (Java 17 LTS) and consumed by 40 microservices: invoicing, ledger, tax, FX, dunning, reporting. It is used as:
+
+- a `HashMap<Money, LineItem>` key in the pricing engine (peak ~8,000 lookups/sec/instance),
+- a `TreeSet<Money>` member in the tiered-discount resolver (sorted ranges),
+- a Kafka message field serialized 4M times/day across the ledger topic.
+
+Because the type crosses 40 service boundaries, a single defect in `equals`/`hashCode`/`compareTo` does not fail in one place — it silently corrupts maps, drops set members, and produces inconsistent sort orders across the fleet. The contract MUST be airtight.
+
+```
+        Pricing Engine                    Discount Resolver
+   HashMap<Money,LineItem>            TreeSet<Money> (sorted)
+            |  lookup by hashCode+equals     |  navigation by compareTo
+            v                                v
+   +---------------------------------------------------+
+   |          commons-money.jar : Money (final)        |
+   |  amount:BigDecimal(normalized) | currency:Currency|
+   |  equals  hashCode  compareTo  toString            |
+   +---------------------------------------------------+
+            ^                                ^
+   Kafka ledger topic                 FX conversion service
+   (4M serializations/day)            (compareTo for thresholds)
+```
+
+#### Broken patterns, then fixes
+
+**1. `equals()` comparing BigDecimal with `==` (and scale-sensitive `.equals`).**
+
+```java
+// BROKEN: reference comparison; "10.00" and "10.0" are different objects AND
+//         BigDecimal.equals() treats 10.00 and 10.0 as NOT equal (scale differs).
+public boolean equals(Object o) {
+    Money m = (Money) o;                 // also throws ClassCastException for non-Money
+    return this.amount == m.amount       // == on BigDecimal: almost always false
+        && this.currency == m.currency;
+}
+```
+
+```java
+// FIX: instanceof guard (no ClassCastException), value equality, normalized scale.
+@Override
+public boolean equals(Object o) {
+    if (this == o) return true;
+    if (!(o instanceof Money m)) return false;   // pattern variable, Java 16+
+    return amount.equals(m.amount) && currency.equals(m.currency);
+}
+```
+
+Normalization happens once in the constructor so `equals` and `hashCode` see canonical values: `new BigDecimal("10.00")` and `new BigDecimal("10.0")` both become the same stripped value.
+
+**2. `hashCode()` computed over a mutable / non-normalized field.**
+
+```java
+// BROKEN: hashing the raw (un-normalized) amount. If two equal Money values have
+//         different scales, equals() says equal but hashCode() differs -> the
+//         HashMap stores the second under a different bucket and getOrDefault misses.
+public int hashCode() { return rawAmount.hashCode(); }   // contract violation
+```
+
+```java
+// FIX: hash exactly the fields equals() uses, post-normalization.
+@Override
+public int hashCode() { return Objects.hash(amount, currency); }
+```
+
+**3. `compareTo()` using integer subtraction (overflow + type mismatch).**
+
+```java
+// BROKEN: subtraction overflows for large/negative values, and cents->int truncates.
+public int compareTo(Money other) {
+    return (int) (this.amount.longValue() - other.amount.longValue()); // overflow
+}
+```
+
+```java
+// FIX: delegate to BigDecimal.compareTo (scale-insensitive, no overflow).
+@Override
+public int compareTo(Money other) {
+    if (!currency.equals(other.currency))
+        throw new IllegalArgumentException("Cannot compare " + currency + " to " + other.currency);
+    return amount.compareTo(other.amount);   // returns -1/0/1, never overflows
+}
+```
+
+Note `compareTo` is consistent with `equals` only within the same currency. The cross-currency throw is deliberate: returning an arbitrary order would let a `TreeSet` silently treat `10 USD` and `10 EUR` as duplicates.
+
+#### Final, correct implementation
 
 ```java
 public final class Money implements Comparable<Money> {
-    private final BigDecimal amount;
+    private final BigDecimal amount;     // always stripTrailingZeros'd
     private final Currency currency;
 
     public Money(BigDecimal amount, Currency currency) {
@@ -440,40 +525,55 @@ public final class Money implements Comparable<Money> {
         this.currency = Objects.requireNonNull(currency, "currency");
     }
 
-    @Override
-    public boolean equals(Object o) {
+    @Override public boolean equals(Object o) {
         if (this == o) return true;
-        if (!(o instanceof Money)) return false;
-        Money m = (Money) o;
+        if (!(o instanceof Money m)) return false;
         return amount.equals(m.amount) && currency.equals(m.currency);
     }
-
-    @Override
-    public int hashCode() {
-        return Objects.hash(amount, currency);
+    @Override public int hashCode()   { return Objects.hash(amount, currency); }
+    @Override public int compareTo(Money other) {
+        if (!currency.equals(other.currency))
+            throw new IllegalArgumentException("Currency mismatch");
+        return amount.compareTo(other.amount);
     }
-
-    @Override
-    public int compareTo(Money other) {
-        if (!this.currency.equals(other.currency))
-            throw new IllegalArgumentException("Cannot compare different currencies");
-        return this.amount.compareTo(other.amount);  // BigDecimal.compareTo is null-safe
-    }
-
-    @Override
-    public String toString() {
+    @Override public String toString() {
         return amount.toPlainString() + " " + currency.getCurrencyCode();
     }
-
-    // Static factory (Effective Java Item 1)
-    public static Money of(String amount, String currencyCode) {
-        return new Money(new BigDecimal(amount), Currency.getInstance(currencyCode));
+    public static Money of(String amount, String code) {       // Effective Java Item 1
+        return new Money(new BigDecimal(amount), Currency.getInstance(code));
     }
 }
 ```
 
-**Key decisions**:
-- `final class` — Money is a value; no benefit from subclassing, enables JIT optimization
-- `stripTrailingZeros()` — ensures `1.00` and `1` are equal (BigDecimal's `equals()` is scale-sensitive)
-- Throws on cross-currency comparison — rather than silently returning wrong result
-- Static factory method — named constructor with validation
+A `record Money(BigDecimal amount, Currency currency)` (Java 16+) would auto-generate `equals`/`hashCode`/`toString`, but you still need a compact constructor to normalize the scale and you still must hand-write `compareTo` — the record default does not implement `Comparable`.
+
+**Key decisions:** `final` class (value semantics, JIT devirtualization); constructor-time normalization so the contract holds regardless of caller-supplied scale; static factory for validated construction; deterministic cross-currency failure rather than silent wrong order.
+
+### Common Pitfalls (production war stories)
+
+**1. `==` on `String` passes unit tests, fails in production.** A currency-code comparison used `code == "USD"`. Tests passed because string literals are interned and share one reference. In production the code arrived from JSON deserialization (a fresh heap `String`), so `==` returned `false` and every non-literal lookup missed.
+
+```java
+if (code == "USD") { ... }          // BROKEN: interned literal vs heap string
+if ("USD".equals(code)) { ... }     // FIX: value comparison, null-safe on the literal side
+```
+
+**2. `equals()` overridden without `hashCode()`.** An early `Money` defined `equals` only. `HashMap<Money,...>` placed equal keys in different buckets, so a `put` followed by `get` of an equal-but-different instance returned `null`. Pricing double-charged. Rule (Effective Java Item 11): always override both together.
+
+**3. Mutable object used as a HashMap key.** A `MutableMoney` with a setter was used as a key, then mutated after insertion. Its bucket was computed from the old `hashCode`; after mutation the entry became unreachable — `containsKey` returned `false` for a key that was in the map. Fix: make keys immutable (the `final` fields above).
+
+**4. Missing `instanceof` causing `ClassCastException`.** A hand-written `equals` cast directly: `Money m = (Money) o;`. When a `HashSet<Object>` compared a `Money` against a `String` during a hash collision, it threw at runtime. The `instanceof` guard returns `false` for foreign types instead.
+
+### Interview Discussion Points
+
+**Why does `BigDecimal.equals()` consider `2.0` and `2.00` unequal, and how do you handle it?** `equals` compares both unscaled value AND scale, so `2.0` (scale 1) differs from `2.00` (scale 2). Normalize with `stripTrailingZeros()` in the constructor, or compare with `compareTo() == 0` when you only care about numeric value.
+
+**What are the five clauses of the `equals` contract?** Reflexive, symmetric, transitive, consistent, and non-null (`x.equals(null)` is `false`). The `instanceof` check satisfies the null clause for free, since `null instanceof Money` is `false`.
+
+**Why must `compareTo` ideally be consistent with `equals`?** Sorted collections (`TreeSet`, `TreeMap`) use `compareTo`, not `equals`, to detect duplicates. If `compareTo` returns `0` for two objects that are not `equals`, the set silently drops one. Our `Money` keeps them consistent within a currency and throws across currencies to avoid undefined ordering.
+
+**Why is integer subtraction a buggy `compareTo` idiom?** `a - b` overflows when the values straddle the int/long range (e.g. `Integer.MAX_VALUE - (-1)` wraps negative), producing the opposite sign. Use the type's own `compareTo` or `Integer.compare(a, b)`.
+
+**Why is immutability essential for a HashMap key?** The bucket index is derived from `hashCode()` at insertion time. If a field used by `hashCode` changes afterward, the entry sits in the wrong bucket and becomes unreachable. `final` fields and no setters guarantee a stable hash for the key's lifetime.
+
+**Should you use a record here?** A record removes the `equals`/`hashCode`/`toString` boilerplate, but you must still add a compact constructor for scale normalization and implement `Comparable` manually. Records are a good fit precisely because the type is an immutable data carrier.
