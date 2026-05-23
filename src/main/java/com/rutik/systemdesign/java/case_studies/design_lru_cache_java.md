@@ -411,3 +411,213 @@ Lazy eviction: check TTL in `get()` — if expired, remove and return `null`. Op
 
 **Q: How would you make this cache distributed (across multiple JVM nodes)?**
 Replace the in-memory `LinkedHashMap`/`ConcurrentHashMap` with calls to Redis (using LPOS + ZADD for LRU) or Memcached. Use Redis' `EXPIRE` for TTL. Consistency challenge: LRU ordering across nodes requires a distributed coordination mechanism — typically you accept that each node has independent LRU order (good enough). For truly distributed LRU: use a distributed cache like Hazelcast with near-cache, or Redis sorted set with score = access timestamp. This is the transition from in-process cache to distributed cache architecture.
+
+---
+
+## Failure Scenarios
+
+| Component | Failure | Symptom | Recovery | Time-to-Recovery |
+|-----------|---------|---------|----------|------------------|
+| Cache process | Restart -> cold start | DB overwhelmed by reload traffic | Write-through persistence + warm-up | minutes |
+| Loader (DB call) | Slow/failing | Threads pile up in `getOrLoad` | Per-key lock + load timeout + negative cache | seconds |
+| Eviction | Working set > capacity | Thrashing, hit-rate collapse | Resize / frequency-based eviction | immediate after resize |
+| Heap | Cache too big | GC pauses / OOM | Cap entries; off-heap or distributed | depends |
+
+### Cache process restart -> cold start stampede
+
+BROKEN — an empty cache lets every concurrent miss hit the DB for the same key:
+
+```java
+// BROKEN: cold cache + no per-key coordination => thundering herd
+public Value get(Key k) {
+    Value v = map.get(k);
+    if (v == null) {
+        v = db.load(k);     // 10,000 concurrent requests for hot key k all hit the DB
+        map.put(k, v);
+    }
+    return v;
+}
+// After restart: 10M entries gone; full production traffic stampedes the DB.
+```
+
+FIX — write-through persistence plus a startup warm-up of the hottest keys, and single-flight loading:
+
+```java
+// FIX: warm the top-N keys on startup; single-flight per key avoids herd
+void warmUp() {
+    // load the 1,000 most-accessed keys (tracked in Redis sorted set by hit count)
+    redis.zrevrange("cache:hot", 0, 999).forEach(k -> map.put(k, db.load(k)));
+}
+
+public Value getOrLoad(Key k) {
+    Value v = map.get(k);
+    if (v != null) return v;
+    // single-flight: only ONE thread per key calls the DB; others wait on the future
+    CompletableFuture<Value> f = inflight.computeIfAbsent(k, key ->
+        CompletableFuture.supplyAsync(() -> db.load(key)));
+    try {
+        v = f.get();
+        map.put(k, v);
+        redisWriteThrough(k, v);   // persistent L2 survives restarts
+        return v;
+    } finally {
+        inflight.remove(k, f);
+    }
+}
+```
+
+Recovery procedure: on restart, warm-up seeds the top-1000 keys before accepting full traffic (or behind a slow-ramp load balancer); the persistent L2 (Redis) absorbs misses so the primary DB is never hit by a cold-start stampede. Time-to-recovery is the warm-up duration (seconds to a couple of minutes), not the time to organically refill 10M entries under load.
+
+---
+
+## Capacity Planning Math
+
+### Heap budget for 10M entries
+
+```
+Payload:        10,000,000 entries x 500 bytes avg value = 5,000,000,000 = ~5.0 GB
+Per-entry overhead (LinkedHashMap.Entry on a 64-bit JVM, compressed oops):
+   object header        16 bytes
+   key/value/hash/next  references
+   before/after ptrs    (LinkedHashMap adds two extra refs for the access-order list)
+   ~24 bytes effective overhead per entry (conservative)
+Overhead:       10,000,000 x 24 bytes = 240,000,000 = ~240 MB
+Total live:     ~5.0 GB + ~0.24 GB = ~5.25 GB
+```
+
+### Heap sizing for G1GC
+
+```
+Rule of thumb: heap = cache_size x 1.5  (room for allocation, survivor space, headroom)
+heap = 5.25 GB x 1.5 = ~8 GB  ->  -Xmx8g
+
+G1GC at 8 GB:
+   target pause ~200ms default; a 5GB+ long-lived cache is mostly "old gen" survivors,
+   so keep allocation rate low (avoid per-get allocations) to limit mixed-GC pressure.
+   Consider -XX:MaxGCPauseMillis tuning and ensuring the cache lives in old gen quickly.
+```
+
+If 8 GB heap is unacceptable, move the cache off-heap (e.g., a byte-buffer backed store) or distribute it — see Evolution.
+
+---
+
+## Benchmark Comparisons — Concurrency Strategy
+
+JMH-style, mixed 80/20 get/put, Zipfian key distribution, 32 threads, Java 17:
+
+| Implementation | Throughput | Notes |
+|----------------|-----------|-------|
+| Single-lock `LinkedHashMap` (baseline) | ~45k ops/sec | Every `get` needs the write lock (access-order reorders the list) |
+| Segmented (16 segments) | ~320k ops/sec | Lock striping; ~7x baseline; per-segment LRU is approximate |
+| Caffeine (W-TinyLFU) | ~650k ops/sec | Lock-free reads via ring buffers; frequency+recency eviction |
+
+Why Caffeine's W-TinyLFU beats pure LRU on real workloads: production access follows a Zipf distribution — a few keys are extremely hot, a long tail is rarely touched. Pure LRU admits any recently-touched key and can evict a frequently-used key during a burst of one-time scans (cache pollution from a sequential scan). W-TinyLFU keeps a compact frequency sketch (Count-Min) and only admits a new key if it is estimated to be accessed more than the victim it would evict, giving scan resistance and a higher hit rate for the same capacity. Caffeine also records reads in per-thread ring buffers and replays them asynchronously, so `get` is effectively lock-free — eliminating the LRU reorder-on-read bottleneck that caps the single-lock design.
+
+---
+
+## Production War Stories
+
+### War story 1 — LRU eviction thrashing (working set larger than cache)
+
+Symptom: hit rate below 5% despite a "large" cache; DB read load near 100%; cache CPU high from constant eviction churn.
+
+BROKEN — cache sized far below the working set, so every access evicts something still needed:
+
+```java
+// BROKEN: maxSize 10,000 but working set is ~200,000 distinct hot keys
+LruCache<Key, Value> cache = new LruCache<>(10_000);
+// Each access misses, loads, and evicts a key that will be needed momentarily.
+// Pure LRU + a scan over 200k keys => 100% miss after one pass (thrash).
+```
+
+FIX — measure the working set, size to it, and switch to frequency-aware eviction:
+
+```java
+// FIX: size to working set; use Caffeine's W-TinyLFU for scan resistance
+Cache<Key, Value> cache = Caffeine.newBuilder()
+    .maximumSize(250_000)              // >= measured working set
+    .recordStats()                     // monitor hitRate() continuously
+    .build();
+// W-TinyLFU refuses to evict a hot key just because a one-off scan touched a cold key.
+```
+
+Lesson: a sub-5% hit rate is almost never "the cache is broken" — it is the working set exceeding capacity, or pure LRU being polluted by scans. Profile access patterns first; resize and choose frequency-based eviction second.
+
+### War story 2 — equals()/hashCode() bug in the cache key
+
+Symptom: cache hit rate ~0% for a specific key type; DB hammered; two "identical" lookups never coalesced.
+
+BROKEN — a value-object key overrides `equals` but not `hashCode` (or neither), so logically equal keys land in different buckets:
+
+```java
+// BROKEN: equals overridden, hashCode NOT -> violates the equals/hashCode contract
+final class CacheKey {
+    final String tenant; final long id;
+    CacheKey(String t, long id) { this.tenant = t; this.id = id; }
+    @Override public boolean equals(Object o) {
+        return o instanceof CacheKey k && k.tenant.equals(tenant) && k.id == id;
+    }
+    // hashCode() inherited from Object -> identity-based -> equal keys hash differently
+}
+// map.put(new CacheKey("acme", 7), v); map.get(new CacheKey("acme", 7)) -> MISS
+```
+
+FIX — always override both, consistently:
+
+```java
+// FIX (Java 16+ record gives correct equals/hashCode for free)
+record CacheKey(String tenant, long id) {}
+// records generate equals() AND hashCode() from all components -> equal keys hash equally.
+// Pre-16: override hashCode() = Objects.hash(tenant, id) alongside equals().
+```
+
+Lesson: the `equals`/`hashCode` contract is load-bearing for every hash-based cache. A missing or inconsistent `hashCode` silently disables the cache. Prefer records or `Objects.hash`/`Objects.equals` and never override one without the other.
+
+---
+
+## Evolution / Scalability at 10x Load
+
+At 100M entries / 50GB working set, a single-JVM heap cache is no longer viable (GC and memory limits). The architecture tiers:
+
+```
+   App instance
+   +-----------------------------+
+   |  L1: local Caffeine cache   |  <- near-cache, microsecond hits, small (hot subset)
+   +-----------------------------+
+            | miss
+            v
+   +-----------------------------+
+   |  L2: Redis Cluster          |  <- sharded by key, ~0.5ms, large capacity
+   |  (slots 0-16383, N shards)  |     invalidation via pub/sub to L1
+   +-----------------------------+
+            | miss
+            v
+   +-----------------------------+
+   |  System of record (DB)      |
+   +-----------------------------+
+```
+
+1. Distributed cache (Redis Cluster) — shard the keyspace across nodes (16384 hash slots) so capacity scales horizontally; per-node LRU/LFU eviction. Accept independent eviction order per shard.
+2. L1 local + L2 remote (near-cache) — keep a small Caffeine L1 in each app for microsecond hits on the hottest keys, backed by Redis L2. Invalidate L1 via Redis pub/sub or short L1 TTLs to bound staleness.
+3. Near-cache consistency — the hard problem is L1 invalidation. Options: short L1 TTL (bounded staleness, simple), or pub/sub invalidation messages (fresher, more moving parts). Choose based on tolerance for stale reads.
+
+Technical debt to track: the in-process cache has no cross-node invalidation and its single-lock LRU caps concurrency. Before scaling out, instrument `hitRate()`/`evictionCount()` and migrate to Caffeine for L1; the hand-rolled `LinkedHashMap` cache is a teaching/embedded artifact, not a fleet-scale tier.
+
+---
+
+## Additional Interview Questions
+
+**Q: Estimate the heap for a 10M-entry LRU cache with 500-byte values.**
+Payload is `10M x 500 bytes = 5.0 GB`; per-entry JVM overhead (object header plus the extra before/after references LinkedHashMap adds for access order) is roughly 24 bytes, so `10M x 24 = ~240 MB` more, totaling about 5.25 GB live. Apply a 1.5x factor for allocation and GC headroom, giving `-Xmx8g` on G1GC. If 8 GB is unacceptable, go off-heap or distributed.
+
+**Q: Why does W-TinyLFU outperform pure LRU on production traffic?**
+Real access is Zipfian — a few hot keys, a long cold tail — and pure LRU is polluted by sequential scans that evict hot keys in favor of one-time touches. W-TinyLFU keeps a compact Count-Min frequency sketch and only admits a new key if it is likely hotter than the victim, giving scan resistance and a higher hit rate for the same capacity. It also makes reads effectively lock-free via per-thread ring buffers, removing the LRU reorder-on-read bottleneck.
+
+**Q: Your cache hit rate is under 5%. What's wrong and how do you fix it?**
+Almost always the working set exceeds the cache capacity (so every access evicts a key you still need) or pure LRU is being thrashed by scans. Measure the distinct-hot-key count, size the cache to at least the working set, and switch to frequency-aware eviction (Caffeine) for scan resistance. It is rarely a code bug in the cache itself — though a broken key `hashCode` can also produce near-zero hits.
+
+**Q: How do you prevent a cold-start stampede after a cache restart?**
+Combine a persistent L2 (write-through to Redis) so misses don't reach the primary DB, single-flight loading (one DB call per key while others await the same future), and a startup warm-up that seeds the top-N most-accessed keys before taking full traffic. Optionally ramp traffic via the load balancer while the cache fills. This caps DB load to one load per key rather than one per concurrent request.
+
+**Q: What's the consistency challenge with an L1/L2 near-cache, and how do you bound it?**
+The L1 in each app can serve stale data after the underlying value changes, because writes go to L2/DB but L1 copies linger. Bound staleness with a short L1 TTL (simple, accepts a fixed staleness window) or invalidate L1 entries via Redis pub/sub on writes (fresher, but adds messaging and ordering concerns). Pick based on how much stale-read tolerance the use case allows.

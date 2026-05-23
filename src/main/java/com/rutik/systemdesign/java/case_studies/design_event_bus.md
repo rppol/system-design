@@ -325,3 +325,217 @@ When posting an event of type `OrderPlaced` (which implements `DomainEvent`), th
 
 **Q: What is the thread safety model of this event bus?**
 `ConcurrentHashMap` for the top-level type→handlers map: thread-safe concurrent access. `CopyOnWriteArrayList` for handler lists: lock-free reads, copy-on-write for modifications — safe for concurrent publish + subscribe. The `dispatch()` method is fully re-entrant (no locks held): multiple threads can publish simultaneously. The dead-entry cleanup (`removeAll`) is safe because `CopyOnWriteArrayList.removeAll()` is synchronized on write (but the check for dead handlers during iteration is on the read path, using the snapshot).
+
+---
+
+## Failure Scenarios
+
+| Component | Failure | Symptom | Recovery | Time-to-Recovery |
+|-----------|---------|---------|----------|------------------|
+| Handler | Throws unchecked exception | Other handlers skipped (broken) | Per-handler try-catch + DLQ | immediate |
+| Async executor | Pool saturated by slow handler | Latency spike, rejected tasks | Per-subscriber queue + circuit breaker | seconds |
+| Dead-letter queue | Fills up | Memory growth | Bounded DLQ + drain/alert | until drained |
+| Publish thread | Blocks on sync handler | Caller stalls | Timeout + move handler to async | immediate |
+
+### Handler throws an unchecked exception
+
+BROKEN — one bad handler aborts dispatch for everyone after it:
+
+```java
+// BROKEN: an unchecked exception escapes dispatch and kills the loop/thread
+public void dispatch(Event e) {
+    for (EventHandler<Event> h : handlersFor(e.getClass())) {
+        h.handle(e);   // if handler #2 throws NPE, handlers #3..N never run
+    }
+}
+```
+
+FIX — isolate each handler; route failures to a dead-letter queue:
+
+```java
+// FIX: each handler invocation is isolated; failures captured, not propagated
+public void dispatch(Event e) {
+    for (EventHandler<Event> h : handlersFor(e.getClass())) {
+        try {
+            h.handle(e);
+        } catch (Exception ex) {                       // catch Exception, not Throwable
+            deadLetterQueue.offer(new DeadLetter(e, h, ex, Instant.now()));
+            log.error("handler {} failed for {}", h, e, ex);
+            // continue to the next handler
+        }
+    }
+}
+```
+
+Recovery procedure: a background drainer retries dead letters with backoff (transient failures recover), and permanently failing entries are surfaced to an operator. Time-to-recovery for the dispatch path is immediate — the bus never stops delivering to healthy handlers because of one sick handler.
+
+---
+
+## Capacity Planning Math
+
+### Thread pool sizing for async dispatch
+
+```
+Throughput:     50,000 events/sec
+Fan-out:        8 subscribers per event
+Invocations:    50,000 x 8 = 400,000 handler calls/sec
+Per-handler:    0.1 ms CPU+IO  (= 0.0001 s)
+
+Service demand: 400,000 x 0.0001 s = 40 handler-seconds of work per wall-clock second
+=> need ~40 threads busy continuously just to keep up (utilization = 1.0)
+```
+
+You never run at utilization 1.0. Apply a headroom factor and the I/O-aware variant of the pool formula:
+
+```
+threads = cores * targetUtilization * (1 + waitTime/serviceTime)
+
+If handlers are 50% I/O (waitTime == serviceTime), W/S = 1:
+threads = 40 * (1 + 1) = 80 to absorb the same throughput with I/O waits.
+```
+
+So a bounded pool of ~80 threads with a bounded queue handles the load; size the queue for a burst budget (e.g., 1 second of slack = up to 50k queued events before rejection).
+
+### Backpressure / memory budget
+
+```
+Bounded queue capacity 50,000 events x ~256 bytes/event ref+payload = ~12.8 MB headroom.
+When full -> CallerRunsPolicy (publisher executes the task) applies natural backpressure
+            instead of OOM from an unbounded queue.
+```
+
+---
+
+## Benchmark Comparisons — Dispatch Strategy
+
+JMH-style, single-event publish with fan-out, Java 21:
+
+| Strategy | Throughput | Latency | Ordering | When to use |
+|----------|-----------|---------|----------|-------------|
+| Synchronous (chosen for ordering) | ~80k events/sec | 0.01 ms | Strict per-publisher | Audit/order-sensitive flows; simplest |
+| Async bounded queue (ExecutorService) | ~400k events/sec | 0.5 ms | None across handlers | High fan-out, order-independent handlers |
+| LMAX Disruptor ring buffer | ~6M events/sec | 0.05 ms | Strict (single producer) | Ultra-low-latency, mechanical-sympathy hot paths |
+
+Synchronous dispatch was chosen as the default because it preserves per-publisher ordering and is trivial to reason about: when `publish()` returns, all handlers have run. Async multiplies throughput ~5x by decoupling the publisher from handler latency, at the cost of ordering and observability (failures happen off-thread). The Disruptor's ring buffer avoids per-event allocation and lock contention entirely (single-writer principle, cache-line padding), reaching millions/sec — reserve it for genuine hot paths where the complexity is justified.
+
+---
+
+## Production War Stories
+
+### War story 1 — Subscriber registered N times causing duplicate payments
+
+Symptom: every order produced 4 audit records and, worse, 4 payment captures.
+
+BROKEN — a new controller instance subscribed on each construction, and the framework created the controller per request:
+
+```java
+// BROKEN: subscribe() runs in the constructor; controller is created repeatedly
+public class CheckoutController {
+    public CheckoutController(EventBus bus) {
+        bus.subscribe(PaymentEvent.class, this::capturePayment); // accumulates duplicates
+    }
+    void capturePayment(PaymentEvent e) { gateway.capture(e.amount()); }
+}
+// After 4 requests -> 4 live handlers -> one PaymentEvent captured 4 times
+```
+
+FIX — de-duplicate by subscriber identity and warn on double registration:
+
+```java
+// FIX: subscribe is idempotent per (eventType, handlerIdentity); warn on dup
+public <E extends Event> void subscribe(Class<E> type, EventHandler<E> h) {
+    var list = handlers.computeIfAbsent(type, k -> new CopyOnWriteArrayList<>());
+    if (list.stream().anyMatch(existing -> existing.identity().equals(h.identity()))) {
+        log.warn("duplicate subscription ignored for {} by {}", type, h.identity());
+        return;
+    }
+    list.add(h);
+}
+```
+
+Better structural fix: subscribe singletons once at startup, not per-request objects; or have handlers carry a stable identity (class + method) used for de-duplication. Lesson: registration with side effects in per-request constructors silently multiplies handlers.
+
+### War story 2 — Slow subscriber exhausting the shared async pool
+
+Symptom: at only 100 events/sec the 20-thread async pool saturated and unrelated handlers (notifications, metrics) stopped firing.
+
+BROKEN — all subscribers share one pool; a 200ms fraud handler hogs every thread:
+
+```java
+// BROKEN: one shared pool; slow handler starves fast handlers
+ExecutorService pool = Executors.newFixedThreadPool(20);
+void dispatchAsync(Event e) {
+    for (var h : handlersFor(e.getClass())) {
+        pool.submit(() -> h.handle(e));   // fraudHandler @200ms ties up threads
+    }
+}
+// 100 events/sec x fraud 0.2s = 20 thread-seconds/sec -> pool fully consumed.
+```
+
+FIX — per-subscriber bounded queue + circuit breaker to shed slow subscribers:
+
+```java
+// FIX: isolate each subscriber on its own bounded executor; trip a breaker if it falls behind
+class SubscriberChannel {
+    final ExecutorService exec;            // dedicated, bounded queue
+    final CircuitBreaker breaker;          // opens when reject-rate/latency exceeds threshold
+
+    void submit(Event e, EventHandler<Event> h) {
+        if (breaker.isOpen()) { deadLetterQueue.offer(new DeadLetter(e, h, "breaker open")); return; }
+        try {
+            exec.submit(() -> { long t=System.nanoTime(); h.handle(e); breaker.record(System.nanoTime()-t); });
+        } catch (RejectedExecutionException rex) {
+            breaker.onReject();            // queue full -> count toward tripping
+            deadLetterQueue.offer(new DeadLetter(e, h, rex));
+        }
+    }
+}
+```
+
+This is the bulkhead pattern: a slow fraud handler can fall behind or be temporarily disabled without affecting the notification or metrics handlers, each on its own channel. Lesson: never let independent subscribers share a single unbounded queue/pool.
+
+---
+
+## Evolution / Scalability at 10x Load
+
+At 500k events/sec across many JVMs, an in-process bus no longer fits — events must cross process and machine boundaries:
+
+```
+   Producers (services)                   Consumers (services)
+        |                                       ^
+        v                                       |
+   +-------------------------------------------------+
+   |   Kafka (partitioned, replicated topics)        |
+   |   partition key = aggregate id -> per-key order |
+   +-------------------------------------------------+
+        |                                       |
+   +-----------+                          +-----------+
+   |  Schema   |  validates on produce    | Consumer  |  offset commits,
+   |  Registry |  + consume (compat rules)| groups    |  at-least-once delivery
+   +-----------+                          +-----------+
+```
+
+1. Distributed event bus (Kafka) — replace in-JVM dispatch with partitioned topics. Per-partition ordering replaces per-publisher ordering; choose the partition key (e.g., aggregate id) to preserve the ordering you actually need. Delivery becomes at-least-once, so handlers must be idempotent (de-dupe by event id) — directly informed by war story 1.
+2. Event sourcing — persist events as the source of truth; rebuild state by replay. Enables audit, time-travel, and rebuilding read models, at the cost of replay complexity and snapshotting.
+3. Schema registry — version events with backward/forward-compatible schemas (Avro/Protobuf). Producers and consumers evolve independently; the registry rejects incompatible changes at publish time.
+
+Technical debt to track: the in-process bus has no durability — a crash loses in-flight async events and the DLQ (unless persisted). Before going distributed, persist the DLQ and make handlers idempotent, since at-least-once delivery and redelivery are unavoidable in the Kafka world.
+
+---
+
+## Additional Interview Questions
+
+**Q: How many threads do you need for 50k events/sec with 8 subscribers at 0.1ms each?**
+Total work is `50,000 x 8 x 0.0001 s = 40` handler-seconds per wall-clock second, so you need roughly 40 fully-busy threads just to break even. Because you never run at 100% utilization and handlers often do I/O, apply the formula `cores * utilization * (1 + wait/service)` — for 50% I/O handlers that doubles to about 80 threads. Pair that with a bounded queue sized for a one-second burst and a `CallerRunsPolicy` for backpressure.
+
+**Q: Synchronous vs async dispatch — what do you trade?**
+Synchronous dispatch preserves per-publisher ordering and gives you a simple guarantee — when `publish()` returns, all handlers ran and any exception is on your thread — but it caps throughput (~80k/sec) and couples the publisher to the slowest handler. Async decouples them for ~5x throughput but loses ordering and moves failures off-thread, so you need a DLQ and idempotent handlers. Choose sync for audit/payment-style ordered flows and async for high-fan-out, order-independent work.
+
+**Q: Why must distributed-bus handlers be idempotent?**
+Kafka and most message buses guarantee at-least-once delivery, so a handler can legitimately see the same event twice (consumer rebalance, redelivery after a failed commit). If the handler captures a payment or writes an audit row without de-duplication, you get duplicates — exactly the in-process war story, now unavoidable. De-dupe by a stable event id (idempotency key) persisted in the handler's store.
+
+**Q: How do you stop one slow subscriber from degrading the whole bus?**
+Apply the bulkhead pattern: give each subscriber its own bounded executor/queue rather than a shared pool, so a 200ms fraud handler cannot starve fast handlers. Add a circuit breaker per subscriber that opens on rising latency or queue rejections, shedding events to the DLQ until the subscriber recovers. This isolates failure and latency to the misbehaving subscriber.
+
+**Q: How do you evolve event schemas without breaking consumers?**
+Use a schema registry with compatibility rules (backward/forward) and a binary format like Avro or Protobuf; the registry rejects incompatible producer changes at publish time. Add only optional fields with defaults for backward compatibility, and never repurpose field tags. This lets producers and consumers deploy independently, which is essential once they live in separate services.
