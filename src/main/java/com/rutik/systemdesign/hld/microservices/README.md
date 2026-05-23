@@ -805,3 +805,190 @@ Isolate resources (thread pools, connection pools) per external dependency. If S
 
 **Q12: When should you NOT migrate to microservices?**
 When the team is small (< 8 engineers), the product is in early-stage with changing requirements, there is no DevOps infrastructure (CI/CD, K8s, observability), or latency budgets are tight. The complexity tax of distributed systems is only justified when the pain of the monolith exceeds it.
+
+---
+
+## Case Study: Netflix Monolith-to-Microservices Migration (2008–2012)
+
+### Problem Statement
+
+In August 2008, Netflix suffered a 3-day outage when database corruption took down its monolithic Oracle deployment. DVD shipments stopped; streaming was in its infancy. The incident forced a rethink. By 2012, Netflix had migrated to 700+ microservices on AWS and was serving:
+
+- 30M+ subscribers (today 250M+)
+- 500M+ API requests/day
+- 30% of North American internet traffic at peak
+- 99.99% availability target (≤52 min downtime/year)
+- p99 API latency budget: 250 ms end-to-end for the playback start path
+- Multi-region failover capability (US-East ↔ US-West)
+
+The migration challenges: decompose tightly coupled modules, eliminate the shared database, build distributed-systems primitives (service discovery, load balancing, fault tolerance) that did not exist on AWS in 2008, and do all of this while serving live traffic.
+
+### Architecture Overview
+
+```
+   Mobile / smart TV / browser clients
+                 │
+                 ▼
+       ┌─────────────────────┐
+       │   Zuul (API gateway)│  ◀── auth, routing, aggregation
+       └──────────┬──────────┘
+                  │
+                  ▼
+       ┌─────────────────────┐
+       │   Eureka (discovery)│  ◀── service registry, heartbeats
+       └──────────┬──────────┘
+                  │
+       ┌──────────┼──────────┬──────────┬──────────┐
+       ▼          ▼          ▼          ▼          ▼
+   ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐
+   │ User │  │Playbk│  │Recomm│  │Billing  │Search│
+   │ svc  │  │ svc  │  │ svc  │  │  svc  │  │ svc  │
+   └──┬───┘  └──┬───┘  └──┬───┘  └──┬───┘  └──┬───┘
+      │         │         │         │         │
+      ▼         ▼         ▼         ▼         ▼
+   ┌──────────────────────────────────────────────┐
+   │   Per-service data stores                    │
+   │   Cassandra (viewing history, recs)          │
+   │   MySQL (billing, subscriptions)             │
+   │   EVCache (Memcached, sessions, hot data)    │
+   └──────────────────────────────────────────────┘
+                  │
+                  ▼
+       ┌─────────────────────┐
+       │   Hystrix dashboards│  ◀── circuit breaker state
+       │   Atlas / metrics    │
+       └─────────────────────┘
+```
+
+### Key Design Decisions
+
+1. **API gateway (Zuul) for aggregation** — Mobile clients on slow networks made 20+ API calls per screen. Zuul aggregates into a single response (one request, one round-trip). Reduced mobile data usage by 60% and TTFB by 200 ms.
+   - *Alternative rejected*: per-client BFF (backend-for-frontend) only — added later for device-specific shaping but Zuul remained the front door.
+
+2. **Each service owns its data store** — No shared schema. Inter-service data exchange is via APIs or events. Eliminates the corruption-blast-radius that caused the 2008 outage.
+   - *Alternative rejected*: shared schema with per-service tables — caused the 2008 outage; rejected by mandate.
+
+3. **Eventual consistency for viewing history** — Cassandra (AP) over RDBMS (CP). Showing "you're on episode 4" off by one second is acceptable; total unavailability is not. Embraces the CAP availability side.
+
+4. **Client-side load balancing (Ribbon)** — Each service calls Eureka to get the live list of instances of its dependencies, then load-balances locally. Eliminates the LB tier as a bottleneck/SPOF; saves a network hop.
+   - *Alternative rejected*: AWS ELB only — single point of failure, slower to react to instance failures.
+
+5. **Hystrix circuit breakers + bulkheads** — Every external call is wrapped in a Hystrix command with thread pool isolation. A slow downstream service trips its breaker; calls fail fast with fallbacks (e.g., return cached recommendations).
+
+6. **Chaos Monkey (and the Simian Army)** — Randomly terminates production instances during business hours to force resilience. Failures discovered in testing, not at 3 AM.
+
+7. **Multi-region active-active with Cassandra cross-region replication** — Two regions serve 50% of traffic each. A region failure triggers DNS failover and the other region absorbs full load within 7 minutes.
+
+### Implementation
+
+Hystrix command wrapping an external dependency:
+
+```java
+public class GetRecommendationsCommand extends HystrixCommand<List<Recommendation>> {
+
+    private final long userId;
+    private final RecommendationClient client;
+
+    public GetRecommendationsCommand(long userId, RecommendationClient c) {
+        super(Setter.withGroupKey(HystrixCommandGroupKey.Factory.asKey("Recs"))
+            .andCommandPropertiesDefaults(HystrixCommandProperties.Setter()
+                .withExecutionTimeoutInMilliseconds(300)
+                .withCircuitBreakerRequestVolumeThreshold(20)
+                .withCircuitBreakerErrorThresholdPercentage(50)
+                .withCircuitBreakerSleepWindowInMilliseconds(5000))
+            .andThreadPoolPropertiesDefaults(HystrixThreadPoolProperties.Setter()
+                .withCoreSize(10)));
+        this.userId = userId;
+        this.client = c;
+    }
+
+    @Override
+    protected List<Recommendation> run() {
+        return client.getRecommendations(userId);
+    }
+
+    @Override
+    protected List<Recommendation> getFallback() {
+        return CachedPopularContent.forUser(userId);  // degraded response
+    }
+}
+```
+
+Ribbon client-side load balancing config:
+
+```yaml
+recommendation-service:
+  ribbon:
+    NIWSServerListClassName: com.netflix.niws.loadbalancer.DiscoveryEnabledNIWSServerList
+    NFLoadBalancerRuleClassName: com.netflix.loadbalancer.AvailabilityFilteringRule
+    ConnectTimeout: 200
+    ReadTimeout: 500
+    MaxAutoRetries: 1
+    MaxAutoRetriesNextServer: 2
+```
+
+Eureka registration (Spring Boot):
+
+```java
+@SpringBootApplication
+@EnableEurekaClient
+public class PlaybackServiceApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(PlaybackServiceApplication.class, args);
+    }
+}
+```
+
+### Tradeoffs
+
+| Aspect | Monolith | Microservices (Netflix) |
+|--------|----------|------------------------|
+| Deploy frequency | Weekly, all-or-nothing | 1000s/day per service |
+| Failure blast radius | Entire site down | One service degraded |
+| Operational complexity | Low | Very high (700 services) |
+| Latency overhead | In-process | Network hops + serialization |
+| Team autonomy | Coordinated releases | Independent ownership |
+| Required headcount | Small platform team | Large platform org (~100) |
+
+### Metrics & Results
+
+- p50 playback start latency: 80 ms; p99: 220 ms (SLA: 250 ms)
+- Availability: 99.99% sustained over 2012–2015 (after migration stabilized)
+- Deployments: 4000+ per day across all services by 2015
+- Regional failover (US-East → US-West): 6 min 30 sec measured (target: 7 min)
+- Chaos Monkey-induced incidents: 0 customer-facing in production (resilience worked)
+- Infrastructure: ~100k EC2 instances at peak
+- Migration duration: 4 years (2008–2012); some legacy continued past 2014
+
+### Common Pitfalls / Lessons Learned
+
+1. **Distributed monolith via shared database** — Broken: early microservices still shared an Oracle schema "for migration speed." A schema migration on `viewing_history` broke 12 services simultaneously. Fix: enforced "each service owns its schema" with no exceptions; cross-service data needs went through APIs or Kafka events. Took 18 months to fully decouple.
+
+2. **Cascading failure from one slow dependency** — Broken: the recommendation service became slow (200 ms → 4 seconds). Calling services held threads waiting; their thread pools filled; they became unresponsive; their callers held threads; the whole site went read-only within 90 seconds. Fix: Hystrix circuit breaker + bulkhead — each dependency gets its own thread pool. A slow downstream now trips a breaker, returns fallback, never exhausts upstream threads.
+
+3. **Eureka registry staleness during rolling deploy** — Broken: instances took 30 seconds to deregister after termination. Clients kept sending requests to dead instances; connection failures spiked. Fix: tuned heartbeat to 10s, registry refresh to 5s, and added client-side AvailabilityFilteringRule that excludes hosts after 3 consecutive failures. Also added pre-deregistration drain (deregister, wait 30s, then SIGTERM).
+
+4. **Synchronous chain of 8 service calls = 8 × p99 latency** — Broken: a single API request fan-out: User → Auth → Profile → Recs → Catalog → Pricing → DRM → Logging. Each at 50 ms p99; chained p99 was 1200 ms. Fix: parallelized non-dependent calls with `CompletableFuture`, moved logging async via Kafka, pre-fetched auth and profile into the request context, cached pricing.
+
+### Interview Discussion Points
+
+**Q1: What forced Netflix to abandon the monolith?**
+The August 2008 database corruption incident — 3 days of downtime for DVD shipments. The monolithic Oracle database was a single point of failure: corruption blast-radius was the entire business. The move to microservices on AWS (announced 2009, completed 2012) was both a technical decoupling and a removal of single-vendor dependency.
+
+**Q2: Why did Netflix build its own service discovery (Eureka) instead of using DNS or ZooKeeper?**
+DNS TTLs make instance churn slow (30s+ to propagate dead hosts). ZooKeeper prioritizes consistency over availability — a quorum loss makes it unavailable, which would cascade to every service. Eureka prioritizes availability (AP): clients can still call cached registrations even if Eureka itself is partitioned, matching Netflix's "stay up at all costs" philosophy.
+
+**Q3: How does Hystrix prevent cascading failures?**
+Three mechanisms: (a) timeout — every call has a max duration, after which it fails immediately rather than blocking a thread; (b) thread pool isolation (bulkhead) — each dependency has its own thread pool, so a slow downstream can't exhaust threads needed for other calls; (c) circuit breaker — when failure rate exceeds threshold, calls fast-fail with fallback for a cooldown period, giving the downstream time to recover.
+
+**Q4: What's the role of an API gateway in a microservices architecture?**
+Cross-cutting concerns: authentication, rate limiting, request routing, response aggregation, protocol translation (HTTP to gRPC), and observability injection (trace IDs). For mobile clients, aggregation is the biggest win — turning 20 chatty calls into 1 fat call cuts mobile latency and battery use dramatically.
+
+**Q5: Why does Netflix tolerate eventual consistency on viewing history?**
+The business value of "shows always available" exceeds the cost of "your resume-point might be a few seconds stale." Cassandra's AP design fits this perfectly: writes succeed even during network partitions, replicas converge later. The alternative (RDBMS with synchronous replication) would force read-only mode during partitions — totally unacceptable for a streaming product.
+
+**Q6: How does Chaos Monkey actually improve reliability?**
+By forcing failures during business hours when engineers are present. If a service can't survive a random instance termination during 10am PT on a Tuesday, it certainly can't survive at 3am on Sunday. Engineers fix the resilience gap immediately. Over years this builds a culture where every service assumes its dependencies will fail and codes accordingly.
+
+**Q7: When should a team avoid the Netflix architecture?**
+When you don't have: (a) 100+ engineers, (b) mature CI/CD for hundreds of services, (c) deep observability (metrics, logs, traces), (d) on-call rotation discipline, (e) a platform team to build the primitives. A 10-person startup running 30 microservices is paying enormous coordination tax with no operational benefit — they should run a modular monolith and extract services only when forced by scale.

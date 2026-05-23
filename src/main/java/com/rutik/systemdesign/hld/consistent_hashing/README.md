@@ -736,3 +736,175 @@ Implement using a TreeMap keyed by hash position. Monitor: (a) arc size per phys
 
 **Q12: What happens during a network partition in a consistent hash ring?**
 Consistent hashing defines data placement but not consistency guarantees. During a partition, different nodes may disagree on ring membership. Systems like Dynamo/Cassandra use gossip protocols for eventual membership convergence and quorum reads/writes to tolerate node unavailability. The ring itself does not provide consistency — the application layer (quorum, vector clocks, conflict resolution) handles split-brain scenarios.
+
+---
+
+## Case Study: Cassandra Ring Partitioning for a 20-Node User-Event Cluster
+
+### Problem Statement
+
+A SaaS analytics platform stores user-event data (page views, clicks, conversions) for 50M end-users across 20 Cassandra nodes. Scale:
+
+- Data volume: 10 TB total, growing 20 GB/day
+- Write throughput: 80k events/sec sustained, 200k/sec peak
+- Read throughput: 15k queries/sec (point lookups on user_id + time range)
+- Latency SLA: p99 write < 10 ms, p99 read < 25 ms
+- Availability: 99.99% (allowed downtime: ~52 min/year)
+- Replication factor: 3 with rack-awareness across 3 AZs
+
+Cassandra distributes data using consistent hashing on the partition key. The Murmur3 partitioner maps keys to a 64-bit token space. Each node owns multiple token ranges via virtual nodes (vnodes) for balanced load.
+
+### Architecture Overview
+
+```
+                  ┌──────────────────────────────────┐
+   Write/Read ───▶│   Coordinator (any Cassandra)    │
+                  └──────────────┬───────────────────┘
+                                 │ partition_key → murmur3 → token
+                                 ▼
+              ┌────────────────────────────────────────────┐
+              │   Token Ring (range 2^-63 .. 2^63 - 1)     │
+              │                                            │
+              │     N1(vnodes)─N2─N3─N4─...─N20─N1         │
+              │      ▲          ▲          ▲               │
+              │      │          │          │               │
+              │   Replica 1  Replica 2  Replica 3          │
+              │   (AZ-a)     (AZ-b)     (AZ-c)             │
+              └────────────────────────────────────────────┘
+                                 │
+                                 ▼
+              ┌────────────────────────────────────────────┐
+              │  Gossip protocol (1s tick) for membership   │
+              │  Hinted handoff for transient failures      │
+              │  Read repair + anti-entropy (Merkle trees)  │
+              └────────────────────────────────────────────┘
+```
+
+### Key Design Decisions
+
+1. **256 vnodes per physical node** — With 20 nodes × 256 vnodes = 5120 token ranges, std dev of arc size is ~6% of mean. With only 1 vnode per node, std dev would be ~22% — one node would own 30%+ of data.
+   - *Alternative rejected*: 32 vnodes (Cassandra 4.0 default). Lower repair amplification but worse balance for clusters this small.
+
+2. **Murmur3 partitioner over RandomPartitioner (MD5)** — Murmur3 hashes ~3x faster than MD5 (cryptographic overhead unnecessary). At 80k writes/sec the CPU saving is ~8% per node.
+   - *Alternative rejected*: ByteOrderedPartitioner enables range scans but causes catastrophic hot spots on monotonic keys (timestamp, user_id auto-increment).
+
+3. **Partition key = `(user_id, day_bucket)`** — Pure `user_id` would create unbounded partitions for power users; pure timestamp would hotspot. Composite key bounds partition size to ~1 day of one user's events (~50 KB).
+   - *Alternative rejected*: `event_id` (UUID) — every read becomes scatter-gather across all partitions.
+
+4. **Replication factor 3 with NetworkTopologyStrategy** — RF=3 across 3 AZs tolerates an entire AZ failure. QUORUM (2/3) reads and writes preserve consistency.
+   - *Alternative rejected*: RF=2 saves 33% storage but loses availability on any single node failure during quorum operations.
+
+5. **Coordinator pattern, no dedicated proxy** — Any node accepts client requests, forwards to replicas. Eliminates a single point of failure. Client driver uses token-aware routing to pick the coordinator on the replica set (skips one network hop).
+
+6. **Gossip for membership, no external ZooKeeper** — Reduces operational dependency. Convergence in ~5s for 20 nodes is acceptable given the failure-rate budget.
+
+7. **Streaming-based bootstrap for new nodes** — A joining node streams its share of ranges from existing replicas before being marked UP. Bootstrap of a 500 GB node takes ~90 min on 10 GbE.
+
+### Implementation
+
+Token assignment with vnodes (Cassandra `cassandra.yaml`):
+
+```yaml
+cluster_name: 'event-analytics'
+num_tokens: 256
+partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+endpoint_snitch: GossipingPropertyFileSnitch
+seed_provider:
+  - class_name: org.apache.cassandra.locator.SimpleSeedProvider
+    parameters:
+      - seeds: "10.0.1.10,10.0.2.10,10.0.3.10"
+```
+
+Schema with composite partition key:
+
+```sql
+CREATE KEYSPACE events
+  WITH replication = {
+    'class': 'NetworkTopologyStrategy',
+    'dc1': 3
+  };
+
+CREATE TABLE events.user_events (
+    user_id      uuid,
+    day_bucket   date,
+    event_time   timestamp,
+    event_type   text,
+    payload      text,
+    PRIMARY KEY ((user_id, day_bucket), event_time)
+) WITH CLUSTERING ORDER BY (event_time DESC)
+  AND compaction = {'class': 'TimeWindowCompactionStrategy',
+                    'compaction_window_size': '1',
+                    'compaction_window_unit': 'DAYS'};
+```
+
+Token-aware client routing (Java DataStax driver):
+
+```java
+CqlSession session = CqlSession.builder()
+    .addContactPoints(seeds)
+    .withLocalDatacenter("dc1")
+    .withConfigLoader(DriverConfigLoader.programmaticBuilder()
+        .withString(DefaultDriverOption.LOAD_BALANCING_POLICY_CLASS,
+            "DefaultLoadBalancingPolicy")
+        .withString(DefaultDriverOption.REQUEST_CONSISTENCY, "LOCAL_QUORUM")
+        .build())
+    .build();
+
+PreparedStatement ps = session.prepare(
+    "INSERT INTO events.user_events (user_id, day_bucket, event_time, " +
+    "event_type, payload) VALUES (?, ?, ?, ?, ?)");
+
+session.execute(ps.bind(userId, today, Instant.now(), "click", json));
+```
+
+### Tradeoffs
+
+| Approach | Add-node cost | Load balance | Read complexity | Best for |
+|----------|--------------|--------------|-----------------|----------|
+| Consistent hash + 256 vnodes (chosen) | O(1/N) data moves | std dev ~6% | O(1) coordinator hop | Cassandra/Dynamo-style |
+| Range sharding (HBase) | Manual split, expensive | Hotspot-prone | O(1) but skew issues | Sequential scans |
+| Modulo hashing | O(N) data moves on resize | Perfect when stable | O(1) | Fixed cluster sizes |
+| Rendezvous hashing | O(1/N) | Naturally balanced | O(N) per lookup | Small N (CDN routing) |
+
+### Metrics & Results
+
+- p50 write latency: 1.8 ms, p99: 7.4 ms (SLA: 10 ms)
+- p50 read latency: 3.2 ms, p99: 18 ms (SLA: 25 ms)
+- Sustained throughput: 95k writes/sec without degradation
+- Data balance across nodes: 480–530 GB per node (std dev 4.8%)
+- Bootstrap of new node: 87 min for 500 GB at 10 Gbps
+- Single-AZ failure drill: zero data loss, p99 read rose to 32 ms during recovery
+- Cost: ~$8,400/month for 20× i3.2xlarge EC2 instances
+
+### Common Pitfalls / Lessons Learned
+
+1. **Too few vnodes** — Broken: started with 8 vnodes per node "for faster repair." One node ended up with 31% of the data, hit disk-IOPS limit, p99 spiked to 200 ms. Fix: increased to 256 vnodes, decommissioned the hot node, let cluster rebalance over 6 hours.
+
+2. **Bootstrapping a node without waiting for streaming completion** — Broken: an operator marked a new node UP via JMX before it finished streaming. The node received reads, returned empty results, and clients saw missing data. Fix: never override `auto_bootstrap` to false on a new node; always wait for `nodetool netstats` to show streaming complete.
+
+3. **Hot partition: events keyed only by `date:2024-01-01`** — Broken: a daily-aggregate job wrote all events to a single partition key. That partition grew to 8 GB, compaction blocked the node, write latency spiked. Fix: salt the key with `date:2024-01-01:bucket_<0..15>` to spread writes across 16 partitions, then aggregate downstream.
+
+4. **Cross-AZ replication lag during network blips** — Broken: assumed RF=3 across AZs meant zero data loss. A 30s cross-AZ network blip caused hinted handoff to fill disk on one node, taking it down. Fix: monitor `pending_hints_size`, alert > 1 GB, and tune `max_hint_window_in_ms` (default 3h is too long for large clusters).
+
+### Interview Discussion Points
+
+**Q1: Why 256 vnodes specifically? Why not 4096?**
+Empirically, 256 vnodes give std dev ~6% on a 20-node cluster — diminishing returns above that. More vnodes increase repair time (more Merkle trees), gossip overhead, and streaming complexity. Cassandra 4.0 lowered default to 16 due to repair-amplification issues, but 256 remains right for clusters that prioritize balance over repair speed.
+
+**Q2: How does Cassandra route a write to the correct replica set?**
+The coordinator computes `token = murmur3(partition_key)`, finds the first vnode clockwise on the ring, and identifies the next RF-1 distinct physical nodes (skipping replicas of the same node) as the replica set. The DataStax client driver replicates this logic so it can send the write directly to a node in the replica set, saving one hop.
+
+**Q3: What happens when you add a 21st node to a 20-node ring?**
+The new node generates 256 random tokens, gossips them to peers, and streams the data for those tokens from current owners. Only ~1/21 of data moves (the new node's share). Other nodes' data is untouched. Total bootstrap time ~90 min for 500 GB; cluster serves reads/writes throughout.
+
+**Q4: How does rack-awareness (NetworkTopologyStrategy) interact with consistent hashing?**
+After computing the natural replica set from the ring, Cassandra adjusts replica selection to spread copies across racks/AZs. If two consecutive ring positions are in the same rack, it skips to the next ring position in a different rack. This guarantees rack-level fault tolerance without modifying the token ring itself.
+
+**Q5: How would you detect and resolve a hot partition?**
+Use `nodetool tablehistograms` to find partitions with abnormal size or read count. Set partition-size alerts at 100 MB. To resolve, redesign the partition key (add salt or time bucket), backfill data into new partitions, and dual-write during cutover. Cassandra 4.0+ also exposes per-partition metrics via `system_views`.
+
+**Q6: How does Cassandra handle a permanent node failure?**
+Use `nodetool removenode <host_id>` (or `assassinate` for unreachable nodes). The surviving replicas stream the dead node's ranges to other nodes that become new replicas to maintain RF=3. Hinted handoff covers writes during the gap. Anti-entropy repair (`nodetool repair`) reconciles any divergence afterward.
+
+**Q7: Why does Cassandra use Murmur3 instead of a cryptographic hash?**
+Speed and distribution quality. Murmur3 is ~3x faster than MD5 with comparable uniformity for the non-adversarial workload of partition keys. Cryptographic resistance is irrelevant — an attacker cannot bias partition placement in a meaningful way. The CPU savings compound at high write rates (80k+/sec).

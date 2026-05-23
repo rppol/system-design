@@ -632,3 +632,178 @@ Use Kafka's idempotent producer (enable.idempotence=true) and transactional API 
 
 **Q12: What happens when a Kafka broker fails?**
 Kafka replicates each partition across multiple brokers (replication factor, typically 3). One replica is the leader; others are followers. If the leader fails, one of the in-sync replicas (ISR) is elected as the new leader. Producers and consumers reconnect and continue with minimal interruption.
+
+---
+
+## Case Study: Uber Kafka Pipeline for Ride State Events
+
+### Problem Statement
+
+Uber must propagate every ride state transition (REQUESTED → DRIVER_ASSIGNED → EN_ROUTE → ARRIVED → IN_PROGRESS → COMPLETED → PAID) to multiple independent consumers in real time. Scale:
+
+- 15M rides/day × ~6 state events = 90M events/day
+- Throughput: 1,000 events/sec sustained, 5,000/sec during commute peaks
+- Latency SLA: p99 producer-to-consumer < 200 ms
+- Durability: zero event loss for payment-critical events
+- Ordering: events for the same ride must be processed in order
+- Consumers (independent processing): pricing/surge, push notifications, analytics, fraud detection, payments/revenue
+- Retention: 7 days for replay; long-term archival to S3
+
+Each consumer team owns their service and consumes at their own pace. A producer outage in one consumer must not block ride events from flowing.
+
+### Architecture Overview
+
+```
+   Ride state machine service
+              │
+              │ produce: key=ride_id, value=state_event
+              ▼
+   ┌───────────────────────────────────────────────┐
+   │   Kafka cluster: 12 brokers, RF=3             │
+   │                                               │
+   │   Topic: ride.state.events                    │
+   │   Partitions: 96 (partitioned by ride_id)    │
+   │   Retention: 7 days                           │
+   └────┬──────────┬──────────┬──────────┬─────────┘
+        │          │          │          │
+        ▼          ▼          ▼          ▼
+   ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
+   │pricing │ │notify  │ │fraud   │ │payments│
+   │ group  │ │ group  │ │ group  │ │ group  │
+   │ 8 cons │ │16 cons │ │ 8 cons │ │ 4 cons │
+   └────────┘ └────────┘ └────────┘ └────────┘
+                                       │
+                                       ▼
+                              ┌────────────────┐
+                              │  DLQ topic     │
+                              │  (failed msgs) │
+                              └────────────────┘
+```
+
+### Key Design Decisions
+
+1. **Partition key = `ride_id`** — All events for one ride land on the same partition, guaranteeing in-order delivery per ride. Different rides can be processed in parallel.
+   - *Alternative rejected*: partition by `driver_id` — would serialize unrelated rides by the same driver and starve some partitions.
+
+2. **96 partitions** — Allows up to 96 consumers per consumer group. Sized for 4x current peak (1250 events/sec/partition headroom). More than the consumer count gives room to scale up without rebalancing the topic.
+
+3. **Replication factor 3, min.insync.replicas=2** — Tolerates one broker failure without losing writes. Combined with `acks=all`, every committed write is durable on at least 2 brokers.
+
+4. **Independent consumer groups, not a shared queue** — Each downstream system reads independently with its own offset. A slow consumer (fraud) cannot back up the others.
+   - *Alternative rejected*: RabbitMQ fanout — harder to replay history, weaker throughput at this scale.
+
+5. **Idempotent producer with `enable.idempotence=true`** — Eliminates duplicates on producer retries (one of Kafka's exactly-once primitives).
+
+6. **Exactly-once semantics for the payments consumer** — Uses Kafka transactions: read offset + write to Postgres + commit offset, all in one atomic Kafka-DB transaction (via Debezium-style outbox or KafkaTransactionManager).
+
+7. **Dead-letter topic per consumer group** — On processing failure (e.g., bad payload), the consumer publishes to `<group>.dlq` and commits the offset. A separate replay tool inspects DLQ messages for manual intervention.
+
+8. **Events carry deltas, not full state** — Each event carries `ride_id`, `from_state`, `to_state`, `timestamp`, and minimal context (e.g., `assigned_driver_id`). Full ride state is fetched from the source-of-truth service if needed, reducing message size from ~5 KB to ~400 bytes.
+
+### Implementation
+
+Producer configuration (Java):
+
+```java
+Properties props = new Properties();
+props.put("bootstrap.servers", "kafka-1:9092,kafka-2:9092,kafka-3:9092");
+props.put("key.serializer",   "org.apache.kafka.common.serialization.StringSerializer");
+props.put("value.serializer", "io.confluent.kafka.serializers.KafkaAvroSerializer");
+props.put("acks", "all");
+props.put("enable.idempotence", "true");
+props.put("max.in.flight.requests.per.connection", "5");
+props.put("compression.type", "lz4");
+props.put("linger.ms", "10");
+props.put("batch.size", "32768");
+
+KafkaProducer<String, RideStateEvent> producer = new KafkaProducer<>(props);
+
+producer.send(new ProducerRecord<>(
+    "ride.state.events",
+    rideId,                       // partition key
+    event));
+```
+
+Consumer with manual commit and DLQ:
+
+```java
+consumer.subscribe(List.of("ride.state.events"));
+while (running) {
+  ConsumerRecords<String, RideStateEvent> recs = consumer.poll(Duration.ofMillis(500));
+  for (ConsumerRecord<String, RideStateEvent> rec : recs) {
+    try {
+      pricingService.recalculateSurge(rec.value());
+    } catch (PoisonPillException e) {
+      dlqProducer.send(new ProducerRecord<>("pricing.dlq", rec.key(), rec.value()));
+    } catch (TransientException e) {
+      // Don't commit; will be re-polled
+      return;
+    }
+  }
+  consumer.commitSync();
+}
+```
+
+Topic creation:
+
+```bash
+kafka-topics.sh --create \
+  --topic ride.state.events \
+  --partitions 96 \
+  --replication-factor 3 \
+  --config min.insync.replicas=2 \
+  --config retention.ms=604800000 \
+  --config compression.type=lz4
+```
+
+### Tradeoffs
+
+| Approach | Throughput | Ordering | Replay | Operational complexity |
+|----------|-----------|----------|--------|----------------------|
+| Kafka (chosen) | Very high (10M+/s) | Per-partition | Yes (offset reset) | High (broker ops) |
+| RabbitMQ | Medium (50k/s) | Per-queue FIFO | Limited | Medium |
+| AWS SQS | Medium (3k/s/queue) | FIFO queue only | No | Low (managed) |
+| AWS Kinesis | High | Per-shard | 7-day | Medium (managed) |
+
+### Metrics & Results
+
+- p50 producer-to-consumer latency: 35 ms
+- p99 producer-to-consumer latency: 140 ms (SLA: 200 ms)
+- Sustained throughput: 1,200 events/sec; peak handled: 5,400 events/sec
+- Consumer lag: < 500 messages per partition at steady state
+- Zero data loss in 18 months of production operation
+- Broker failover (1 broker killed): consumers paused ~3 seconds during leader election
+- Storage: 1.2 TB across 12 brokers (7-day retention, RF=3, LZ4 compression)
+
+### Common Pitfalls / Lessons Learned
+
+1. **Fraud consumer lag during demand spikes** — Broken: fraud detection (heavy ML inference) consumed at 800 events/sec while peak was 5,000/sec; lag grew to 2M messages in 30 minutes. Fix: scaled the consumer group from 4 to 16 instances (matching partition count), and offloaded the heaviest ML model to async batch scoring. Lag now stays under 10k messages.
+
+2. **Ordering violation: COMPLETED before IN_PROGRESS** — Broken: a transient broker error caused the producer to retry IN_PROGRESS; without idempotence, it was buffered behind COMPLETED. Consumer saw out-of-order events and skipped state validation. Fix: enabled `enable.idempotence=true` (which forces `max.in.flight.requests.per.connection ≤ 5` with per-partition sequence numbers, preserving order across retries).
+
+3. **5 KB events crushing the network** — Broken: producers embedded the full ride object (driver profile, route polyline, fare breakdown) in every event. At 5,000 events/sec × 5 KB = 25 MB/s per partition; brokers saturated. Fix: events now carry only deltas (~400 bytes); consumers fetch full state from the ride-service REST API when needed. Network use dropped 12x.
+
+4. **`acks=1` and a broker crash** — Broken: in early deployment, producers used `acks=1` (leader-only ack) for "performance." A broker crashed before replicating a batch of 800 payment events; those events were lost permanently. Fix: switched all payment-critical topics to `acks=all` + `min.insync.replicas=2`. p99 latency rose by 8 ms — acceptable for durability.
+
+### Interview Discussion Points
+
+**Q1: Why partition by ride_id rather than driver_id or city?**
+ride_id provides the right granularity: per-ride ordering is preserved (state machine integrity) while different rides parallelize naturally. driver_id would serialize unrelated rides of the same driver and create hotspots on busy drivers. city would create extreme hotspots (NYC traffic dwarfs smaller cities).
+
+**Q2: How do you ensure exactly-once processing for payment events?**
+Use Kafka's transactional API. The payment consumer reads an event, writes the charge to Postgres, and commits the consumer offset — all within a single Kafka transaction (`KafkaTransactionManager` in Spring). If any step fails, the transaction aborts and nothing is committed. Alternatively use the outbox pattern with a `processed_event_ids` table for idempotency.
+
+**Q3: What happens when a consumer is too slow?**
+Lag grows. Kafka exposes `consumer-lag` metric per partition. Alert when lag exceeds N or when wall-clock lag exceeds T seconds. Mitigations: scale consumer instances up to partition count, increase consumer compute, batch processing, or shed non-critical work. If lag exceeds retention (7 days), oldest messages are lost — the consumer skips ahead to the earliest available offset.
+
+**Q4: Why 96 partitions specifically?**
+Enough headroom for 4x growth in consumer count (currently 16 max in the largest group). Each partition handles ~1.5 MB/s comfortably (well under the ~10 MB/s/partition guideline). More partitions = more file handles, more metadata in ZK/KRaft, longer rebalance times — so don't over-provision (avoid 10,000 partitions unless needed).
+
+**Q5: How does Kafka guarantee at-least-once delivery?**
+The producer retries on errors (with idempotence to avoid duplicates). The consumer commits the offset only after successful processing. If the consumer crashes between processing and committing, on restart it re-reads from the last committed offset — replaying the unprocessed message. This is at-least-once. Exactly-once requires transactions or idempotent processing on the consumer side.
+
+**Q6: What's the consequence of `min.insync.replicas=2` with RF=3?**
+At least 2 of 3 replicas must acknowledge writes. If 2 brokers are unavailable, the partition becomes unavailable for writes (preserves consistency). With `min.insync=1` + 2 broker failures, writes might succeed and then be lost when the leader recovers. The tradeoff is availability vs durability — Uber chooses durability for payment events.
+
+**Q7: How would you replay events from the past 24 hours into a new consumer?**
+Create a new consumer group with the desired ID. Use `kafka-consumer-groups.sh --reset-offsets --to-datetime <ISO-8601>` to set its offsets to 24 hours ago. Start the consumer; it replays from that point. Because each consumer group has independent offsets, this does not affect existing consumers.

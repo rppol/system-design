@@ -444,3 +444,187 @@ A: OLTP (Online Transaction Processing): high-throughput short transactions, nor
 8. **Read scaling** → PostgreSQL read replicas for user/order reads. Redis caching for product detail pages (cache-aside, 5-minute TTL).
 
 **Result:** Product pages at 8ms P99 (Redis hit), order placement at 120ms P99 (DB write), full-text search at 30ms P99 (Elasticsearch).
+
+---
+
+## Case Study: Airbnb Monolithic MySQL to Vitess Migration
+
+### Problem Statement
+
+Airbnb operated a monolithic MySQL database for its listings, bookings, and reviews. By 2018 the database had hit IOPS limits at 70% capacity; a hardware upgrade would extend runway by ~12 months but would not solve the underlying scaling ceiling. Scale at migration time:
+
+- 100M listings, 500M reviews, 200M user accounts
+- Data volume: 2 TB on the primary MySQL instance
+- Write throughput: 30k QPS sustained, 50k QPS peak (booking surges)
+- Read throughput: 250k QPS (after caching layer)
+- Latency SLA: p99 read < 20 ms, p99 booking write < 100 ms
+- Availability target: 99.99% during migration (zero-downtime requirement)
+- Growth rate: 40% YoY for both data volume and QPS
+
+The goal was to shard while keeping MySQL wire-protocol compatibility so the existing 600+ application services and ORM (Active Record / JDBC) would not need to be rewritten. Vitess (the YouTube-originated sharding layer) was selected.
+
+### Architecture Overview
+
+```
+   App services (Rails/Java) ─── MySQL wire protocol
+                  │
+                  ▼
+        ┌────────────────────────┐
+        │      VTGate (proxy)    │  ◀── routes by VSchema
+        │   stateless, autoscale │
+        └──────────┬─────────────┘
+                   │
+       ┌───────────┼───────────┐
+       ▼           ▼           ▼
+   ┌────────┐ ┌────────┐ ┌────────┐
+   │VTTablet│ │VTTablet│ │VTTablet│
+   │ shard0 │ │ shard1 │ │ shard2 │  (16 shards total)
+   │ MySQL  │ │ MySQL  │ │ MySQL  │
+   └────────┘ └────────┘ └────────┘
+       │           │           │
+       └───────────┴───────────┘
+                   │
+                   ▼
+        ┌────────────────────────┐
+        │   Topology service     │  (etcd/ZooKeeper)
+        │   - VSchema            │
+        │   - Shard map          │
+        │   - Tablet health      │
+        └────────────────────────┘
+```
+
+### Key Design Decisions
+
+1. **Vitess for MySQL wire-protocol compatibility** — VTGate speaks MySQL protocol. Application code, ORMs, and admin tools (mysqldump, mysqlshell) work unchanged. Avoided rewriting 600+ services.
+   - *Alternative rejected*: CockroachDB (Postgres dialect; required ORM rewrite, untested at this write QPS in 2018).
+
+2. **Shard key = `user_id` (host_id for listings, guest_id for bookings)** — Collocates a host's listings, calendar, and reviews on one shard so the most common query (host dashboard) is single-shard. Avoided sharding on `listing_id` which would scatter a single host's data.
+   - *Alternative rejected*: `listing_id` — scatters by listing; host dashboard becomes 16-shard scatter-gather.
+
+3. **16 logical shards initially, designed for expansion to 256** — Vitess supports online resharding by hash-prefix splits. Starting at 16 leaves headroom for 16x growth without re-architecting. Each shard ~125 GB initially.
+
+4. **Vertical column splitting: hot vs cold** — Hot columns (price, availability, title, photo_url) in `listings_hot` table; cold/large columns (full description, amenity JSON blob, full review text) in `listings_cold`. Hot table fits in buffer pool entirely.
+
+5. **VReplication for online migration** — Vitess's MoveTables workflow copies data from the source MySQL to sharded targets in real time, then performs a coordinated cutover. Took 6 weeks for the full dataset; zero downtime.
+
+6. **Read replicas dedicated to analytics** — Replicate from each shard to a single MariaDB instance for analyst ad-hoc queries (which cannot run on production shards without risking IOPS spikes).
+
+7. **VSchema for cross-shard queries** — Defines lookup vindexes for non-shard-key lookups (e.g., find listing by `listing_id`). The lookup table maps `listing_id → user_id` and is itself stored in a lookup keyspace, replicated to all shards via materialized view.
+
+### Implementation
+
+VSchema definition for the listings keyspace:
+
+```json
+{
+  "sharded": true,
+  "vindexes": {
+    "hash": { "type": "hash" },
+    "listing_lookup": {
+      "type": "consistent_lookup_unique",
+      "params": {
+        "table": "lookup.listing_to_user",
+        "from": "listing_id",
+        "to": "user_id"
+      },
+      "owner": "listings"
+    }
+  },
+  "tables": {
+    "listings": {
+      "column_vindexes": [
+        { "column": "user_id", "name": "hash" },
+        { "column": "listing_id", "name": "listing_lookup" }
+      ]
+    }
+  }
+}
+```
+
+Vertical split schema:
+
+```sql
+-- Hot table, fits in buffer pool
+CREATE TABLE listings_hot (
+  listing_id BIGINT PRIMARY KEY,
+  user_id    BIGINT NOT NULL,
+  title      VARCHAR(120),
+  price_usd  DECIMAL(10,2),
+  available  BOOLEAN,
+  updated_at TIMESTAMP,
+  KEY idx_user (user_id)
+) ENGINE=InnoDB;
+
+-- Cold table, accessed only on detail page
+CREATE TABLE listings_cold (
+  listing_id    BIGINT PRIMARY KEY,
+  user_id       BIGINT NOT NULL,
+  description   MEDIUMTEXT,
+  amenities     JSON,
+  house_rules   TEXT,
+  FOREIGN KEY (listing_id) REFERENCES listings_hot(listing_id)
+) ENGINE=InnoDB;
+```
+
+Online schema change with pt-online-schema-change:
+
+```bash
+pt-online-schema-change \
+  --alter "ADD COLUMN cancellation_policy ENUM('flex','mod','strict') DEFAULT 'mod'" \
+  --execute \
+  --max-load Threads_running=50 \
+  --critical-load Threads_running=200 \
+  D=airbnb,t=listings_hot
+```
+
+### Tradeoffs
+
+| Approach | Schema flexibility | Migration complexity | App rewrite | Operational maturity |
+|----------|-------------------|---------------------|-------------|---------------------|
+| Vitess (chosen) | MySQL DDL | Medium (VReplication) | None | High (YouTube proven) |
+| CockroachDB | Postgres DDL | High (full cutover) | Heavy (ORM changes) | Medium (newer) |
+| Application sharding | Any | Very high | Heavy | Low (homegrown) |
+| Stay on monolith + scale up | Any | None | None | Low headroom |
+
+### Metrics & Results
+
+- p99 read latency: 14 ms (was 22 ms on monolith)
+- p99 write latency: 38 ms (was 90 ms during peaks)
+- Sustained QPS capacity: 8x of monolith (16 shards × ~50% headroom each)
+- Migration duration: 6 weeks of VReplication + 30-second cutover per keyspace
+- Zero data loss, zero downtime during cutover (verified by row-count diffs)
+- Infrastructure cost: +35% vs monolith (16 shard hosts vs 1 large + replicas), justified by 8x capacity
+- Storage per shard: 110–145 GB (std dev 8%)
+
+### Common Pitfalls / Lessons Learned
+
+1. **Cross-shard JOINs as scatter-gather** — Broken: a "trip search" query joined `bookings` and `listings` across all 16 shards; p99 climbed to 800 ms. Fix: denormalized the booking row to include `listing_title`, `listing_city`, `host_id` so search runs on a single shard (or hits the Elasticsearch index entirely).
+
+2. **Hotspot shard from a power host** — Broken: one property-management company controlled 12M listings under one user_id; that shard's storage hit 800 GB and write QPS was 4x the others. Fix: detected the outlier via per-shard size metrics, split the company into 50 sub-accounts (one per region), and reshuffled to balance.
+
+3. **Schema migration locking a 100M-row table** — Broken: an `ALTER TABLE` to add an index on `listings` blocked all writes for 45 minutes. Fix: switched to pt-online-schema-change (Percona) which creates a ghost copy, triggers to keep it in sync, then swaps atomically. New migration time: 4 hours but zero downtime.
+
+4. **Forgetting to update VSchema after adding a column** — Broken: a new `listing_uuid` column was added but no vindex was created. Reads by `listing_uuid` became scatter-gather across all 16 shards. Fix: enforce in CI that every column used in a WHERE clause must have an entry in VSchema or be the shard key itself.
+
+### Interview Discussion Points
+
+**Q1: Why shard on user_id instead of listing_id?**
+Because most queries are scoped to a single host or single guest (dashboard, calendar, message thread, payouts). Sharding on user_id keeps all of a host's data on one shard, so these queries hit one node. Sharding on listing_id would split a host's listings across shards, making every host-level query a scatter-gather.
+
+**Q2: How does Vitess handle a query that doesn't include the shard key?**
+VTGate parses the query, consults VSchema, and chooses a strategy: (a) if a lookup vindex exists for the WHERE column, it queries the lookup keyspace to resolve to a shard key, then routes; (b) otherwise it broadcasts to all shards (scatter), aggregates results in VTGate. Scatter queries are expensive — design VSchema to minimize them.
+
+**Q3: How was the migration done without downtime?**
+Vitess's VReplication continuously copied source data to sharded tablets, transforming rows according to the shard key. Once lag was < 1 second, a 30-second cutover atomically (a) stopped writes on the source, (b) drained in-flight replication, (c) flipped VTGate routing to the sharded keyspace. Application services pointed at VTGate throughout — they saw a brief pause but no errors.
+
+**Q4: Why split listings into hot and cold tables?**
+The hot table (price, availability, title) is queried on every search result; the cold table (full description, JSON amenities) is only loaded on detail page view. Keeping hot at ~5 GB lets it fit fully in the InnoDB buffer pool; queries hit memory, not disk. This is a column-store technique applied within row-oriented MySQL.
+
+**Q5: How would you detect a hotspot shard early?**
+Monitor per-shard: storage size, write QPS, replication lag, CPU. Alert when any shard exceeds 1.5x the cluster median on any of these. Also instrument the application to track top-N user_ids by row count and request rate — a 100x outlier is a future hotspot. Stripe and Slack publish similar runbooks.
+
+**Q6: What's the difference between Vitess and a simple PgBouncer/ProxySQL?**
+PgBouncer/ProxySQL are connection poolers and basic read/write splitters — they don't understand sharding or VSchema. Vitess is a full sharding layer: query parsing, vindex routing, online resharding, schema migration coordination, and topology management. PgBouncer would not have solved Airbnb's IOPS ceiling.
+
+**Q7: When is the right time to migrate from a monolith DB to sharding?**
+When (a) you're consistently at 60%+ of IOPS or storage on the largest available instance, (b) vertical scaling has < 18 months of runway, and (c) your traffic growth makes ceiling-hit predictable. Migrating earlier wastes effort; migrating later means doing it under fire when the database is already failing.

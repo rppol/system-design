@@ -783,3 +783,181 @@ A shard that holds 5TB of data takes days to rebuild from backup or migrate. Aim
 
 ### 8. Use a Sharding Proxy
 Putting sharding logic in application code creates a maintenance nightmare as routing tables change. Use a sharding proxy (Vitess, Citus) to abstract this. The proxy handles routing, connection pooling, and schema changes transparently.
+
+---
+
+## Case Study: Instagram Photo Database Sharding
+
+### Problem Statement
+
+Instagram stores photo metadata for 1B users with 100B photos. Photos are immutable after upload, simplifying consistency. Scale:
+
+- Users: 1B accounts, 500M monthly actives
+- Photos: 100B records, 5M new uploads/day, ~50M/day peak
+- Photo metadata size: ~500 bytes (id, user_id, caption, location, timestamps, S3 URL); blob in S3
+- Read QPS: 200k (profile views, feed loads)
+- Write QPS: 600/sec sustained, 6k/sec peak (post upload spikes)
+- Latency SLA: p99 metadata read < 5 ms, p99 write < 30 ms
+- Availability: 99.99%
+
+The strategy: 1000 logical shards mapped to 100 physical PostgreSQL instances (10 shards/instance). Shard key is `user_id`, so all of a user's photos live on one shard, enabling profile-page queries with a single shard hit. The logical-to-physical mapping is stored in a lookup table cached in Redis, so resharding is a metadata-only operation (remap logical shards to physical hosts) rather than data movement.
+
+### Architecture Overview
+
+```
+   Mobile/web client
+        │
+        ▼
+   ┌───────────────────────────────┐
+   │   API server (Django)         │
+   │   shard_id = user_id % 1000   │
+   └──────────────┬────────────────┘
+                  │ lookup shard_id → host
+                  ▼
+   ┌───────────────────────────────┐
+   │  Redis (logical→physical map) │
+   │  shard_42 → pg-host-04        │
+   │  TTL 1 day; warm at startup   │
+   └──────────────┬────────────────┘
+                  │
+                  ▼
+   ┌─────────────────────────────────────────────────┐
+   │   100 PostgreSQL hosts × 10 shards each         │
+   │   ┌─────┐ ┌─────┐ ┌─────┐ ... ┌─────┐           │
+   │   │pg-01│ │pg-02│ │pg-03│     │pg-99│           │
+   │   │s0-9 │ │s10-19│ │s20-29│   │s990-9│          │
+   │   └─────┘ └─────┘ └─────┘     └─────┘           │
+   └─────────────────────────────────────────────────┘
+                  │
+                  ▼
+        ┌────────────────────┐
+        │   S3 (photo blobs) │
+        └────────────────────┘
+```
+
+### Key Design Decisions
+
+1. **Shard key = `user_id`** — Collocates all of a user's photos on one shard. Profile page (most common query) hits one shard. Feed assembly fans out, but that's already inherent to social feeds.
+   - *Alternative rejected*: shard by `photo_id` — every profile page becomes scatter-gather across 1000 shards.
+
+2. **1000 logical shards over 100 physical hosts** — Logical shards provide flexibility: rebalance by remapping shard→host without data movement. Adding capacity = split a host's 10 shards across 2 new hosts (5 each), then move the data.
+   - *Alternative rejected*: 100 shards (1 per host) — no room for rebalancing without splitting shards (expensive).
+
+3. **Immutable photos simplify consistency** — No updates means no write-write conflicts, no cross-shard transactions for photo data. Edits (caption change) are rare and handled as new versions.
+
+4. **Separate metadata (PG) from blobs (S3)** — Metadata is small and indexed; blobs are large and benefit from object storage's cheap durability and CDN edges. Keeps PG row size small (fits more rows per page).
+
+5. **Lookup table cached in Redis with 1-day TTL** — Avoids hitting a single config DB on every request. Resharding events write through to Redis and invalidate stale entries.
+
+6. **Pre-generated ID with embedded shard hint** — Instagram's 64-bit ID scheme: 41 bits timestamp + 13 bits shard_id + 10 bits sequence. The shard_id is embedded in the photo_id so given a photo_id you can route to the correct shard without a lookup.
+
+7. **No cross-shard JOINs** — Feed assembly is done at the application layer: query each followee's shard for recent photos, merge in memory. Acceptable because the followee count for a typical user is bounded (median ~200).
+
+### Implementation
+
+ID generation scheme:
+
+```python
+import time
+
+EPOCH_MS = 1314220021721  # Instagram epoch
+SHARD_BITS = 13
+SEQUENCE_BITS = 10
+
+def generate_photo_id(user_id: int, sequence: int) -> int:
+    now_ms = int(time.time() * 1000) - EPOCH_MS
+    shard_id = user_id % 1000  # 1000 logical shards
+    photo_id = (now_ms << 23) | (shard_id << 10) | (sequence & 0x3FF)
+    return photo_id
+
+def shard_from_photo_id(photo_id: int) -> int:
+    return (photo_id >> 10) & 0x1FFF
+```
+
+Schema on each shard:
+
+```sql
+CREATE TABLE photos (
+    photo_id      BIGINT PRIMARY KEY,
+    user_id       BIGINT NOT NULL,
+    s3_key        TEXT NOT NULL,
+    caption       TEXT,
+    location_id   BIGINT,
+    created_at    TIMESTAMP NOT NULL DEFAULT NOW(),
+    INDEX idx_user_created (user_id, created_at DESC)
+);
+
+-- Per-shard sequence for monotonic IDs
+CREATE SEQUENCE photo_seq INCREMENT 1 START 1;
+```
+
+Shard router with Redis cache:
+
+```java
+public class ShardRouter {
+    private final JedisPool redis;
+    private final ConcurrentHashMap<Integer, DataSource> hostPools;
+
+    public DataSource routeByUserId(long userId) {
+        int logicalShard = (int)(userId % 1000);
+        String host = redis.getResource().get("shard:" + logicalShard);
+        if (host == null) {
+            host = fetchFromConfigDb(logicalShard);
+            redis.getResource().setex("shard:" + logicalShard, 86400, host);
+        }
+        return hostPools.get(host.hashCode());
+    }
+}
+```
+
+### Tradeoffs
+
+| Approach | Profile query cost | Resharding cost | Hot-key risk | Best for |
+|----------|-------------------|----------------|--------------|----------|
+| Shard by user_id (chosen) | 1 shard hit | Logical remap | Celebrities | Social media |
+| Shard by photo_id | 1000-shard scatter | Logical remap | None | Random-access only |
+| Shard by date | 1 shard for today | New shards over time | Today's shard hot | Time-series |
+| Single MySQL + read replicas | 0 routing | None | All on primary | Small scale |
+
+### Metrics & Results
+
+- p50 profile load: 3 ms; p99: 11 ms (SLA: 50 ms end-to-end)
+- p99 photo upload metadata write: 24 ms
+- 10B photo metadata rows, ~50 GB per physical host
+- Resharding from 50 to 100 hosts: 4 hours of data movement, zero downtime
+- Redis cache hit rate on shard lookup: 99.97%
+- Cost: ~$45k/month for 100 PG hosts (db.r5.xlarge) + S3 storage
+- Throughput headroom: 4x current load before next reshard
+
+### Common Pitfalls / Lessons Learned
+
+1. **Initial shard key was `photo_id`** — Broken: profile page issued queries to all 1000 shards. p99 was 800 ms. Fix: re-shard to `user_id`; required a 3-week migration with dual-writes during cutover. Lesson: pick the shard key based on the dominant query pattern, not the natural primary key.
+
+2. **Celebrity hotspot (Cristiano Ronaldo)** — Broken: a single user_id with 10M photos and 500k follower-feed reads/sec collapsed onto one shard, peaking at 90% CPU. Fix: detect users above a threshold (100k photos or 100k follower reads/min), promote them to a "celebrity shard" with dedicated hardware (db.r5.4xlarge) and aggressive caching.
+
+3. **Lookup table as single point of failure** — Broken: the config DB holding shard→host mapping became a bottleneck during deploys when caches were cold; thousands of services hit it simultaneously. Fix: cache in Redis with 1-day TTL, pre-warm caches at service startup, and gossip mapping updates via pub/sub instead of cold reads.
+
+4. **Cross-shard JOIN for the home feed** — Broken: tried JOINing photos with follower lists across shards; p99 hit 2 seconds. Fix: fan-out-on-write architecture — push photo_ids into each follower's feed table at upload time. Tradeoff: more storage, but read is O(1) per shard.
+
+### Interview Discussion Points
+
+**Q1: Why 1000 logical shards instead of 100 physical shards?**
+Logical shards let you remap (shard_42 → new_host) without moving data initially; you only move data when you split (shard_42 → shard_42a + shard_42b). This decouples capacity addition from physical migrations. Starting with more logical shards than you need leaves headroom for years of growth.
+
+**Q2: How do you handle a hot shard caused by a celebrity user?**
+Detect via per-user metrics (photo count, read QPS) and promote celebrities to a dedicated shard with larger hardware and a higher read-replica count. Front the celebrity shard with a CDN-edge cache (5-minute TTL on profile data). For extreme cases (Beyoncé level), shard a single user's photos across multiple shards by photo_id range.
+
+**Q3: How does fan-out-on-write differ from fan-out-on-read for feeds?**
+Fan-out-on-write: at upload time, push photo_id into every follower's feed table. Read is O(1), write is O(followers). Fan-out-on-read: at read time, query each followee's recent photos and merge. Read is O(followees), write is O(1). Instagram uses fan-out-on-write for most users, fan-out-on-read for celebrities (would explode storage otherwise).
+
+**Q4: How is a new shard added to the cluster?**
+Provision a new physical host. Pick a heavily loaded host with 10 shards; move 5 shards to the new host using PostgreSQL logical replication or pg_dump/restore. Update the Redis mapping. Old host now serves 5 shards, new host serves 5 — same logical shard count, double the capacity for those users.
+
+**Q5: Why are photos immutable, and how do edits work?**
+Immutable photos mean no write-write conflicts, no cross-shard transactions, no need for distributed locks. Caption edits create a new metadata row (versioned) while the old row remains. Deletes are soft (a `deleted_at` flag) so backfills and analytics still see history.
+
+**Q6: How would you detect that you need to reshard?**
+Monitor per-physical-host: storage utilization, write IOPS, replication lag, query latency. Alert when any host crosses 70% of any limit. Also track per-shard size and QPS — if one logical shard is 5x the median, it's a candidate for split before the whole host degrades.
+
+**Q7: Why embed shard_id in the photo_id?**
+Given a photo_id (e.g., a permalink URL), you can route to the correct shard without an extra DB lookup. The 13-bit shard_id supports up to 8192 shards, far beyond the current 1000. The 41-bit timestamp gives 69 years of unique IDs; the 10-bit sequence handles 1024 photos/ms per shard.

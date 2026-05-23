@@ -729,3 +729,198 @@ Developers integrating with your API need to know limits upfront. Document per-e
 
 ### 10. Consider Client-Side Rate Limiting
 Provide SDK helpers that track and respect rate limits proactively, sending `X-RateLimit-Remaining` values to application code so clients can self-throttle before hitting 429s.
+
+---
+
+## Case Study: Stripe API Rate Limiting with Redis Token Bucket
+
+### Problem Statement
+
+Stripe processes payments and exposes a public REST API used by millions of integrations. Rate limiting must protect the platform from abuse and from accidental client bugs (runaway loops, retry storms) while not blocking legitimate bursty traffic. Scale:
+
+- Total API calls: 5M/day baseline, 50M/day during shopping holidays
+- API keys: ~500k active across all merchants
+- Requests/sec global: 60 baseline, 600 peak (Black Friday)
+- Per-key limit: 1000 requests/minute (default), customizable per customer tier
+- Rate-limit check overhead budget: < 1 ms (so it never dominates a 30 ms API call)
+- Availability: 99.99% — rate limiter outage must not block API requests (fail-open with logging)
+- Distributed across 3 datacenters, requests can land on any of them
+
+The mechanism: a token bucket per API key per endpoint stored in Redis. A Lua script executes atomically (single Redis command) to refill and decrement, so two concurrent requests cannot both consume the last token.
+
+### Architecture Overview
+
+```
+   Merchant integrations
+            │
+            ▼
+   ┌────────────────────┐
+   │   API Gateway      │  ◀── authenticates, extracts key
+   │   (NGINX + Lua)    │
+   └─────────┬──────────┘
+             │ EVALSHA <script_sha> 1 key:<key>:<endpoint>
+             ▼
+   ┌────────────────────────────────────────┐
+   │   Redis Cluster (6 nodes, RF=2)        │
+   │                                        │
+   │   Sharded by API key hash:             │
+   │   key:sk_live_abc:charges → node 2     │
+   │   key:sk_live_xyz:refunds → node 5     │
+   │                                        │
+   │   Token bucket Lua script (atomic):    │
+   │   if tokens >= 1 then dec; allow       │
+   │   else return 429 + retry_after        │
+   └────────────────┬───────────────────────┘
+                    │ allow / deny + headers
+                    ▼
+           ┌─────────────────────┐
+           │   API service       │
+           │   (charges, etc.)   │
+           └─────────────────────┘
+```
+
+### Key Design Decisions
+
+1. **Token bucket over sliding window** — Token bucket allows burst up to capacity (good UX for legitimate bursty workloads like batch invoicing) and uses constant memory per key. Sliding window log uses O(N) memory per key (one entry per request).
+   - *Alternative rejected*: fixed window — allows 2x bursts at boundaries (1000 at 0:59 + 1000 at 1:00).
+
+2. **Redis Lua for atomicity** — A single Lua script reads bucket state, refills based on elapsed time, decrements, and writes back — atomically. Avoids MULTI/EXEC transactions and the race conditions of GET-then-SET.
+   - *Alternative rejected*: WATCH + MULTI — works but adds round-trips and retry logic.
+
+3. **API-key-level limits, not IP** — Stripe customers (e.g., Shopify) front many merchants behind one IP/load balancer. IP-based limits would penalize big customers and miss attackers using rotating IPs.
+
+4. **Per-endpoint limits** — POST /charges (expensive) limited to 100/min; GET /charges (cheap, read-replica) at 1000/min; webhooks unlimited. Keys are `<api_key>:<endpoint_class>` so a noisy GET loop doesn't starve a critical POST.
+
+5. **429 response with `Retry-After` header** — Clients know exactly when to retry. SDKs auto-retry with exponential backoff. Also include `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` so well-behaved clients self-throttle.
+
+6. **Sharded Redis cluster on API key hash** — Spreads load across 6 nodes. A single rogue key cannot saturate one Redis instance (only consumes that shard's CPU, ~16% of total).
+
+7. **Fail-open on Redis outage** — If Redis is unreachable for > 100 ms, the limiter allows the request and logs the bypass. Rationale: payment availability matters more than enforcing limits during a Redis incident; Stripe can detect abuse post-hoc.
+
+### Implementation
+
+Token bucket Lua script (executed via `EVALSHA`):
+
+```lua
+-- KEYS[1] = bucket key (e.g., "rl:sk_live_abc:charges")
+-- ARGV[1] = capacity (tokens)
+-- ARGV[2] = refill_rate (tokens per second)
+-- ARGV[3] = now_ms (server time from redis.call('TIME'))
+-- ARGV[4] = requested tokens (usually 1)
+
+local key       = KEYS[1]
+local capacity  = tonumber(ARGV[1])
+local rate      = tonumber(ARGV[2])
+local now_ms    = tonumber(ARGV[3])
+local requested = tonumber(ARGV[4])
+
+local bucket = redis.call('HMGET', key, 'tokens', 'last_refill')
+local tokens      = tonumber(bucket[1]) or capacity
+local last_refill = tonumber(bucket[2]) or now_ms
+
+-- Refill based on elapsed time
+local elapsed_sec = (now_ms - last_refill) / 1000.0
+tokens = math.min(capacity, tokens + elapsed_sec * rate)
+
+local allowed = 0
+local retry_after_ms = 0
+if tokens >= requested then
+    tokens = tokens - requested
+    allowed = 1
+else
+    retry_after_ms = math.ceil((requested - tokens) / rate * 1000)
+end
+
+redis.call('HMSET', key, 'tokens', tokens, 'last_refill', now_ms)
+redis.call('PEXPIRE', key, 120000)  -- evict idle keys after 2 min
+
+return {allowed, math.floor(tokens), retry_after_ms}
+```
+
+Java caller using Lettuce/Jedis:
+
+```java
+public RateLimitResult check(String apiKey, String endpoint) {
+    String key = "rl:" + apiKey + ":" + endpoint;
+    EndpointPolicy p = policies.get(endpoint);
+
+    long[] time = jedis.time();  // Redis server time for clock-skew safety
+    long nowMs = time[0] * 1000L + time[1] / 1000L;
+
+    List<Long> result = (List<Long>) jedis.evalsha(
+        SCRIPT_SHA,
+        List.of(key),
+        List.of(String.valueOf(p.capacity),
+                String.valueOf(p.refillPerSec),
+                String.valueOf(nowMs),
+                "1"));
+
+    return new RateLimitResult(
+        result.get(0) == 1L,
+        result.get(1).intValue(),
+        result.get(2).intValue());
+}
+```
+
+NGINX response wiring:
+
+```
+location /v1/ {
+    access_by_lua_block { ratelimit.check_or_429() }
+    proxy_set_header X-RateLimit-Limit     $rl_limit;
+    proxy_set_header X-RateLimit-Remaining $rl_remaining;
+    proxy_pass http://api_upstream;
+}
+```
+
+### Tradeoffs
+
+| Approach | Burst handling | Memory/key | Atomicity | Best for |
+|----------|---------------|-----------|-----------|----------|
+| Token bucket (chosen) | Up to capacity | O(1) — 2 fields | Lua atomic | Bursty APIs |
+| Leaky bucket | Smoothed only | O(1) | Lua atomic | Constant-rate flows |
+| Sliding window log | Exact | O(N) per window | ZADD/ZREMRANGEBYSCORE | Compliance audit |
+| Fixed window counter | 2x burst at boundary | O(1) | INCR (atomic) | Coarse limits |
+
+### Metrics & Results
+
+- p50 rate-limit check: 0.4 ms; p99: 0.9 ms (SLA: < 1 ms)
+- Throughput: 8k checks/sec sustained per Redis shard; 48k cluster-wide
+- 99.93% of legitimate requests succeed without 429s (per Stripe public data)
+- During Black Friday 2024: peak 600 req/sec, zero rate-limiter incidents
+- Memory per active key: ~80 bytes; 500k keys × 80 = 40 MB per shard
+- Cost: ~$1,200/month for 6× cache.r6g.large Redis nodes
+- Mean time to detect abuse (post-rate-limit alert): 8 min
+
+### Common Pitfalls / Lessons Learned
+
+1. **Rate limiting at the app layer instead of the edge** — Broken: early implementation ran rate limit checks inside the Java API server. A 100k req/sec DDoS still hit the app servers (and the Redis check itself), driving CPU to 100%. Fix: moved the rate-limit check into NGINX/OpenResty at the edge; bad traffic gets 429 before reaching app servers. App CPU during attacks dropped 95%.
+
+2. **Shared bucket across all of a customer's API keys** — Broken: Shopify generates a key per merchant (~1M keys). A single misbehaving merchant's integration consumed the shared bucket, blocking all other merchants for the parent account. Fix: per-key limits by default, with optional account-level shared quota for billing/visibility but not throttling.
+
+3. **Clock skew between rate-limit nodes** — Broken: API servers in 3 datacenters each used their local clock when computing the bucket refill. Clock drift of 500 ms caused buckets to "refill in the past" on some nodes, granting extra tokens. Effective limit became ~1100/min instead of 1000. Fix: always pass `redis.call('TIME')` as the timestamp; Redis is the single source of time truth for all buckets.
+
+4. **No fail-open behavior on Redis outage** — Broken: when Redis became unreachable, the rate limiter threw exceptions and the API gateway returned 500 to every request. A 30-second Redis blip caused a 30-second total API outage. Fix: wrap rate-limit check with a 100 ms timeout + fallback that allows requests and logs `rate_limiter_bypassed`. Post-incident analysis covers any abuse during the bypass window.
+
+### Interview Discussion Points
+
+**Q1: Why use Lua scripting in Redis for rate limiting?**
+Lua scripts execute atomically on the Redis single thread — no interleaving with other commands. This means a check-and-decrement is one indivisible operation, eliminating the race condition where two concurrent requests both see the last token available. Without Lua, you'd need MULTI/EXEC with WATCH + retry loops, adding round-trips and complexity.
+
+**Q2: How does the token bucket handle bursts vs sustained traffic?**
+The bucket holds up to `capacity` tokens (e.g., 1000). A client that's been idle has a full bucket and can burst 1000 requests instantly. Sustained traffic is throttled to `refill_rate` (e.g., 1000/60 = 16.67/sec). This matches real API usage patterns: idle SDKs occasionally burst, abusers send steady high-rate traffic.
+
+**Q3: Why per-endpoint limits rather than one global limit per key?**
+Different endpoints have different costs and abuse potential. POST /charges hits payment processors (real money, fraud risk); GET /charges hits a read replica (cheap). One global limit forces tradeoffs: low enough to protect /charges throttles legitimate read traffic; high enough for reads enables charge abuse. Per-endpoint lets you tune each.
+
+**Q4: How do you handle a customer who legitimately needs more than the default limit?**
+Stripe exposes higher tiers (Enterprise) with custom `capacity` and `refill_rate` stored in a per-key policy table loaded into Redis at the start of each request. The policy is also cached in-process for ~30 seconds to avoid lookup overhead. Self-service quota requests are processed via a Slack-integrated approval workflow.
+
+**Q5: What's the difference between rate limiting and throttling?**
+Rate limiting hard-rejects requests above the limit (429 response). Throttling queues or slows requests but eventually serves them. Stripe uses hard rate limiting because queueing payment requests can cause client timeouts and duplicate charges (the client retries while the queued request is still pending). For lower-stakes APIs (e.g., metrics ingestion), throttling can be appropriate.
+
+**Q6: How would you detect abuse despite the rate limiter?**
+Look for patterns the limiter doesn't catch: 429-rate spikes per key (someone is hammering against the limit), distribution of requests across endpoints (an actor probing the API), geographic anomalies (key suddenly used from a new country), and request payload similarity (replay attacks). Feed these into a fraud detection pipeline that can revoke keys or apply stricter limits.
+
+**Q7: Why fail-open instead of fail-closed when Redis is down?**
+For Stripe specifically, payment availability outweighs the risk of brief unmetered traffic. A 30-second Redis outage at fail-closed = 30 seconds of failed payments globally = millions in lost merchant revenue. Fail-open = potential overuse by a small number of clients, detectable and recoverable post-hoc. For systems where abuse is more harmful than unavailability (e.g., authentication endpoints), fail-closed is correct.
