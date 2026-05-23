@@ -533,91 +533,116 @@ An immutable object has no mutable state after construction: all fields are `fin
 
 ## 14. Case Study
 
-### Designing a Plugin-Based Report Engine
+### An E-Commerce Order Engine Composing Five GoF Patterns
 
-**Problem**: A report engine that reads from multiple data sources (CSV, JSON, DB), applies different transformations (filter, aggregate, format), and outputs to multiple sinks (HTML, PDF, Kafka). The set of sources and sinks grows over time.
+**Scenario.** An order-processing engine handles **500k orders/day** (~6/sec average, ~50/sec at flash-sale peak). It composes five GoF patterns, each solving a distinct axis of change: **Strategy** selects the payment processor, **Decorator** layers tax and discount on the base price, **Observer** fans an `OrderCompleted` event out to inventory/notification/audit listeners, **Command** turns each saga step into an undoable command, and a **Facade** (`OrderService`) hides six subsystems behind one method. The patterns reinforce one another — adding a new payment scheme, a new price modifier, or a new post-order listener each touches exactly one class and zero call sites (Open-Closed Principle).
 
-**Pattern composition**:
-
-```java
-// Factory Method: create appropriate reader
-interface ReportReader {
-    List<Row> read(Path source);
-}
-class CsvReportReader  implements ReportReader { ... }
-class JsonReportReader implements ReportReader { ... }
-
-class ReportReaderFactory {
-    public static ReportReader create(String format) {
-        return switch (format) {
-            case "csv"  -> new CsvReportReader();
-            case "json" -> new JsonReportReader();
-            default -> throw new IllegalArgumentException("Unknown: " + format);
-        };
-    }
-}
-
-// Decorator: stack transformations on the reader
-interface RowTransformer {
-    List<Row> transform(List<Row> rows);
-}
-class FilterTransformer implements RowTransformer {
-    private final Predicate<Row> predicate;
-    FilterTransformer(Predicate<Row> p) { this.predicate = p; }
-    public List<Row> transform(List<Row> rows) {
-        return rows.stream().filter(predicate).collect(Collectors.toList());
-    }
-}
-class AggregateTransformer implements RowTransformer { ... }
-
-// Builder: assemble the report pipeline
-class ReportPipeline {
-    private final ReportReader reader;
-    private final List<RowTransformer> transformers;
-    private final ReportWriter writer;
-
-    private ReportPipeline(Builder b) {
-        this.reader = b.reader;
-        this.transformers = List.copyOf(b.transformers);
-        this.writer = b.writer;
-    }
-
-    public void execute(Path source, Path destination) {
-        List<Row> rows = reader.read(source);
-        for (RowTransformer t : transformers) rows = t.transform(rows);
-        writer.write(rows, destination);
-    }
-
-    static class Builder {
-        private ReportReader reader;
-        private final List<RowTransformer> transformers = new ArrayList<>();
-        private ReportWriter writer;
-
-        public Builder reader(ReportReader r) { this.reader = r; return this; }
-        public Builder transform(RowTransformer t) { transformers.add(t); return this; }
-        public Builder writer(ReportWriter w) { this.writer = w; return this; }
-        public ReportPipeline build() {
-            if (reader == null || writer == null)
-                throw new IllegalStateException("reader and writer required");
-            return new ReportPipeline(this);
-        }
-    }
-}
-
-// Usage:
-ReportPipeline pipeline = new ReportPipeline.Builder()
-    .reader(ReportReaderFactory.create("csv"))
-    .transform(new FilterTransformer(row -> row.get("status").equals("PAID")))
-    .transform(new AggregateTransformer("region", "amount"))
-    .writer(new HtmlReportWriter())
-    .build();
-pipeline.execute(Path.of("sales.csv"), Path.of("report.html"));
+```
+   client ---> OrderService.placeOrder(cart)          (FACADE: hides 6 subsystems)
+                    |
+       +------------+-----------------------------------------------+
+       v            v                v               v              v
+   PriceEngine   PaymentSvc      SagaRunner      InventorySvc   AuditSvc
+   (DECORATOR)   (STRATEGY)      (COMMAND)        (OBSERVER subscribers)
+   base price    pick processor  [reserve,        on OrderCompleted:
+   + TaxDecorator by scheme       charge,           inventory.deduct()
+   + DiscountDec                  ship] cmds        notify.email()
+                                  each undoable     audit.record()
 ```
 
-**Patterns used**:
-- Factory Method: `ReportReaderFactory.create(format)` — open for new formats without modifying the pipeline
-- Decorator chain: multiple `RowTransformer` stacked — each adds one transformation
-- Builder: `ReportPipeline.Builder` — defers validation, readable construction
-- Strategy: `Predicate<Row>` in `FilterTransformer` — injectable filter logic
+### How the Patterns Compose (Most Complex Interaction)
 
-**Key insight**: Each pattern solves a specific extensibility axis. When you add a new data source, only `ReportReaderFactory` and a new class change. When you add a new transformation, only a new `RowTransformer` implementation is added. No existing code changes — Open-Closed Principle.
+The trickiest seam is the saga: each **Command** runs a step, and a failure triggers compensating `undo()` in reverse; on success the final command fires the **Observer** event, whose listener order must not matter.
+
+```java
+// STRATEGY: payment processor chosen at runtime, behind one interface
+interface PaymentProcessor { Receipt charge(Order o); }
+final class CardProcessor   implements PaymentProcessor { /* ... */ }
+final class WalletProcessor implements PaymentProcessor { /* ... */ }
+
+// DECORATOR: price modifiers wrap a base PriceComponent; each adds one rule
+interface PriceComponent { long cents(); }
+final class BasePrice implements PriceComponent {
+    private final long cents; BasePrice(long c){this.cents=c;}
+    public long cents(){ return cents; }
+}
+final class TaxDecorator implements PriceComponent {
+    private final PriceComponent inner; private final double rate;
+    TaxDecorator(PriceComponent in, double r){ this.inner=in; this.rate=r; }
+    public long cents(){ return inner.cents() + Math.round(inner.cents()*rate); }
+}
+final class DiscountDecorator implements PriceComponent {
+    private final PriceComponent inner; private final long off;
+    DiscountDecorator(PriceComponent in, long off){ this.inner=in; this.off=off; }
+    public long cents(){ return Math.max(0, inner.cents() - off); }
+}
+
+// COMMAND: each saga step is a command with execute + compensating undo
+interface OrderCommand { void execute(); void undo(); }
+
+// FACADE: one entry point hides PriceEngine, PaymentSvc, Saga, Inventory, Notify, Audit
+final class OrderService {
+    private final PaymentProcessor payment;          // injected Strategy
+    private final List<OrderListener> listeners;     // Observer subscribers (CopyOnWrite)
+
+    Receipt placeOrder(Cart cart) {
+        // Decorator chain builds the final price
+        PriceComponent price = new DiscountDecorator(
+                new TaxDecorator(new BasePrice(cart.subtotalCents()), 0.08), cart.couponCents());
+
+        // Command saga with rollback
+        Deque<OrderCommand> done = new ArrayDeque<>();
+        try {
+            for (OrderCommand cmd : List.of(reserveStock(cart), charge(price), ship(cart))) {
+                cmd.execute(); done.push(cmd);
+            }
+        } catch (RuntimeException ex) {
+            while (!done.isEmpty()) done.pop().undo();   // compensate in reverse
+            throw ex;
+        }
+        // Observer fan-out: order matters to NO listener (see pitfall below)
+        OrderCompleted evt = new OrderCompleted(cart.orderId(), price.cents());
+        for (OrderListener l : listeners) l.onCompleted(evt);
+        return new Receipt(cart.orderId(), price.cents());
+    }
+}
+```
+
+### Common Pitfalls
+
+**Pattern overuse — Singleton on every service kills testability.**
+```java
+// BROKEN: hard-coded singleton makes the dependency un-mockable in tests
+class OrderService { void run(){ InventorySvc.INSTANCE.deduct(...); } } // cannot stub
+// FIX: inject the collaborator -> tests pass a mock, prod passes the real one
+class OrderService { OrderService(InventorySvc inv){ this.inv = inv; } }
+```
+
+**Strategy with mutable shared state across threads.** A `PaymentProcessor` cached as a field that accumulates per-request data corrupts under concurrency.
+```java
+// BROKEN: instance field mutated per call, shared by 50 concurrent requests
+class CardProcessor { private Order current; Receipt charge(Order o){ this.current=o; ... } }
+// FIX: strategies must be stateless; pass all per-call data as method arguments
+class CardProcessor { Receipt charge(Order o){ /* use only o + locals */ } }
+```
+
+**Observer notification-order dependency.** If the audit listener assumes inventory already ran, reordering subscribers (or one throwing) silently breaks it. Make listeners independent and idempotent, and isolate failures so one bad listener cannot abort the rest:
+```java
+for (OrderListener l : listeners) {
+    try { l.onCompleted(evt); } catch (RuntimeException e) { log.error("listener {}", l, e); }
+}
+```
+
+**Decorator breaking `equals()`/identity.** A decorated `PriceComponent` is a different object than its wrapped base, so code that compares wrapped vs unwrapped instances with `==` or relies on the base's `equals()` misbehaves. Keep decorators behavioral (compute and delegate); never use them where object identity is part of the contract.
+
+### Interview Discussion Points
+
+**Why is Decorator preferable to subclassing for tax and discount rules?** Subclassing produces a combinatorial explosion (`TaxedDiscountedPrice`, `DiscountedTaxedPrice`, ...) and fixes the combination at compile time; decorators compose at runtime in any order and any count, each adding exactly one responsibility.
+
+**How does the Command pattern enable the saga rollback you showed?** Each step is reified as an object holding both `execute()` and a compensating `undo()`; the runner pushes successfully executed commands on a stack and, on failure, pops them to invoke `undo()` in reverse order — turning an ad-hoc try/catch into a uniform, testable rollback.
+
+**What problem does the Facade solve that the other four patterns do not?** It collapses a six-subsystem orchestration into a single coarse-grained `placeOrder` call, decoupling clients from subsystem wiring and ordering; the internal patterns handle variation, while the Facade handles the surface area clients depend on.
+
+**When does combining patterns become an anti-pattern?** When the indirection exceeds the variability it serves — applying Strategy, Factory, and Builder to a class with one implementation that never changes adds layers, interfaces, and cognitive load with no payoff; patterns earn their keep only where a real axis of change exists.
+
+**How do you keep Strategy and Observer thread-safe at 50 orders/sec peak?** Strategies must be stateless (all per-request data passed as arguments), and the observer list should be a `CopyOnWriteArrayList` so concurrent fan-out reads never collide with rare subscribe/unsubscribe writes; listeners themselves must be idempotent and order-independent.

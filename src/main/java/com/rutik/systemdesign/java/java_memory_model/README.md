@@ -483,64 +483,125 @@ The `StoreLoad` barrier ensures that all stores before the barrier complete and 
 
 ## 14. Case Study
 
-### Implementing a Lock-Free Single-Writer Queue with Correct Memory Visibility
+### Safe Publication of a Configuration Cache Across Threads
 
-**Problem**: A single producer thread and single consumer thread share a circular buffer. The producer writes items; the consumer reads them. Make it correct per the JMM without any locks.
+**Scenario.** A trading service hot-reloads its configuration without restarting. A single background **Thread A** (the reloader) builds a fresh immutable `Config` snapshot every 30 seconds from a config server; **dozens of request-handling threads (B)** read the current config on every request — roughly **40k reads/sec**. The naive first version stored the reference in a plain field; under load on ARM hardware, request threads occasionally saw a `Config` object whose reference was visible but whose **fields were still default/zero** — a half-constructed object — causing intermittent "0% margin" mispricings that vanished on retry. The root cause and the fix are pure Java Memory Model.
+
+```
+   Thread A (reloader, every 30s)            Threads B (40k reads/sec)
+   --------------------------------          --------------------------
+   Config c = new Config(...)   // (1)        Config snap = configRef;  // (4)
+   // fields written            // (2)        use snap.marginRate()      // (5)
+   configRef = c;  // volatile  // (3)
+        |                                          ^
+        | volatile write (3) -- happens-before --> volatile read (4)
+        +------------------------------------------+
+   So (1)+(2) [before the write in program order] are visible at (5). SAFE.
+```
+
+### Broken: Plain Reference Lets a Half-Constructed Object Escape
 
 ```java
-// Single-Producer Single-Consumer (SPSC) queue
-// Uses volatile for the sequence numbers to establish hb edges.
-public class SpscQueue<T> {
-    private final Object[] buffer;
-    private final int mask;  // capacity - 1 (capacity must be power of 2)
+// BROKEN — non-volatile reference. The JMM permits the publishing write to
+// configRef to become visible to other threads BEFORE the writes to the new
+// Config's fields. Reader sees a non-null reference but zeroed fields.
+class ConfigCache {
+    private Config configRef = Config.defaults();   // plain field
 
-    // These are written by producer and read by consumer (or vice versa).
-    // volatile write hb subsequent volatile read -> visibility guaranteed.
-    private volatile long head = 0;  // next write position (producer owns)
-    private volatile long tail = 0;  // next read position (consumer owns)
-
-    public SpscQueue(int capacity) {
-        if (Integer.bitCount(capacity) != 1)
-            throw new IllegalArgumentException("capacity must be power of 2");
-        this.buffer = new Object[capacity];
-        this.mask = capacity - 1;
+    void reload(Map<String,String> raw) {
+        configRef = new Config(raw);   // construction + publication NOT ordered for readers
     }
+    Config current() { return configRef; }           // may return a partly-built object
+}
+```
 
-    // Called by PRODUCER ONLY
-    public boolean offer(T item) {
-        long h = head;          // plain read: producer owns head
-        long t = tail;          // volatile read: consumer updates tail
-        // hb: consumer's last volatile write to tail hb this read
+The constructor writes (`this.marginRate = ...`) and the publishing write (`configRef = ...`) have no happens-before edge to the reader, so a reader thread may observe them out of order and read `marginRate == 0.0`.
 
-        if ((h - t) >= buffer.length) return false;  // full
+### Fix: `volatile` Reference Gives Safe Publication
 
-        buffer[(int)(h & mask)] = item;  // write before volatile write to head
-        head = h + 1;  // volatile write: hb consumer's next volatile read of head
-        return true;
+```java
+// FIX — volatile reference. A volatile WRITE happens-before every subsequent
+// volatile READ of the same field. Everything the writer did before the write
+// (the whole constructor) is therefore visible to any reader that sees the new ref.
+class ConfigCache {
+    private volatile Config configRef = Config.defaults();   // volatile
+
+    void reload(Map<String,String> raw) {
+        Config c = new Config(raw);   // (1) fully constructed first
+        configRef = c;                // (2) volatile publish: hb for all readers
     }
+    Config current() { return configRef; }   // sees a fully-built Config, always
+}
+```
 
-    // Called by CONSUMER ONLY
-    @SuppressWarnings("unchecked")
-    public T poll() {
-        long t = tail;          // plain read: consumer owns tail
-        long h = head;          // volatile read: producer updates head
-        // hb: producer's last volatile write to head hb this read
+### Double-Checked Locking: Broken Without `volatile`, Then Fixed (Item 83)
 
-        if (h == t) return null;  // empty
+The same hazard underlies the classic DCL singleton.
 
-        T item = (T) buffer[(int)(t & mask)];  // read after volatile read of head
-        tail = t + 1;  // volatile write: hb producer's next volatile read of tail
-        return item;
+```java
+// BROKEN — DCL without volatile. Another thread can see a non-null `instance`
+// whose fields are not yet written (reordered construction). Java 5+ requires volatile.
+class Lazy {
+    private static Lazy instance;                 // missing volatile
+    static Lazy get() {
+        if (instance == null) {
+            synchronized (Lazy.class) {
+                if (instance == null) instance = new Lazy(); // publish may precede init
+            }
+        }
+        return instance;
+    }
+}
+```
+
+```java
+// FIX — volatile makes the second read safe; or just use the simpler idioms below.
+class Lazy {
+    private static volatile Lazy instance;        // Java 5+ DCL is correct WITH volatile
+    static Lazy get() {
+        Lazy r = instance;                        // single volatile read
+        if (r == null) {
+            synchronized (Lazy.class) {
+                r = instance;
+                if (r == null) instance = r = new Lazy();
+            }
+        }
+        return r;
     }
 }
 
-// JMM correctness analysis:
-// PRODUCER: writes item to buffer, then volatile-writes head
-// CONSUMER: volatile-reads head, then reads item from buffer
-// hb edge: producer's volatile write to head hb consumer's volatile read of head
-// Therefore: producer's write to buffer[(h & mask)] hb (program order) write to head
-//             hb (volatile) consumer's read of head hb (program order) read of buffer
-// Consumer is guaranteed to see the item written by producer. CORRECT.
+// SIMPLER: enum singleton needs no volatile, no locking, and is the preferred form.
+enum Cfg { INSTANCE; private final Config config = Config.defaults(); }
 ```
 
-**Key JMM concepts**: volatile write establishes hb; buffer writes are visible to consumer via transitivity of hb; no locks needed for single-producer single-consumer.
+### Concrete Numbers (modern x86-64)
+
+| Operation | Approx cost | Why |
+|-----------|-------------|-----|
+| non-volatile read | ~0.3 ns | L1 cache hit, no fence |
+| `volatile` read/write | ~5-10 ns | memory fence / no reorder across it |
+| uncontended `synchronized` block | ~20-50 ns | monitor enter/exit |
+
+At 40k reads/sec the `volatile` read cost is ~0.4 ms/sec total — negligible against eliminating mispricing incidents.
+
+### Common Pitfalls
+
+**`volatile` on an array reference does not protect the elements.** `volatile Config[] arr` makes the *reference* visible, but a write to `arr[3].field` has no volatile semantics. Use `AtomicReferenceArray` or publish a fresh immutable array on each update.
+
+**64-bit `long`/`double` reads/writes are non-atomic on 32-bit JVMs.** Without `volatile`, a 32-bit JVM may tear a `long` into two 32-bit halves, so a reader can see a mix of old high bits and new low bits. Declaring the field `volatile` guarantees atomicity for `long`/`double` even on 32-bit.
+
+**Misunderstanding happens-before transitivity.** Developers assume "Thread A wrote X before Y, so a reader sees both" — but without a release/acquire edge (volatile write paired with volatile read, lock release/acquire, or `final` field publication) there is no ordering at all between threads. The edge must be explicit.
+
+**Forgetting that `final` fields are safely published without `volatile` (Java 5+).** A correctly constructed object whose state is all `final` is visible to other threads after the constructor finishes, even if the reference itself is published non-volatilely — provided `this` did not escape during construction. This is why immutable objects are the cheapest safe-publication mechanism.
+
+### Interview Discussion Points
+
+**What exactly does a `volatile` write guarantee for the reader?** It establishes a happens-before edge: every action the writing thread performed *before* the volatile write (in program order) is visible to any thread that *subsequently* performs a volatile read of the same field — which is why publishing a fully-constructed object through a volatile reference is safe.
+
+**Why does plain DCL break, and why does `volatile` fix it?** Object construction and the publishing assignment can be reordered so another thread sees a non-null reference before the constructor's field writes are visible; `volatile` forbids that reordering and supplies the happens-before edge, making the second null check observe a fully-initialized object.
+
+**When can you publish an object safely without `volatile`?** When all its fields are `final` and `this` does not escape during construction, the JMM's final-field semantics (Java 5+) guarantee visibility after the constructor completes; immutable objects exploit exactly this, costing nothing at read time.
+
+**Is `volatile` enough to make a counter increment thread-safe?** No. `count++` is read-modify-write, three operations; `volatile` makes each read and write visible but does not make the trio atomic, so two threads can lose an update. Use `AtomicInteger`/`AtomicLong` or a lock.
+
+**Why is the enum singleton preferable to a volatile DCL singleton?** It is initialized once by the classloader with happens-before guarantees and no application-level synchronization, it cannot be duplicated by reflection or deserialization, and it removes the subtle volatile/reordering reasoning entirely — strictly less to get wrong.

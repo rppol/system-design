@@ -527,39 +527,135 @@ The default JIT inline threshold is approximately 35 bytecodes (`-XX:MaxInlineSi
 
 ## 14. Case Study
 
-### Diagnosing and Fixing a Latency Regression After Deploy
+### Tuning a Financial Risk Engine: 45s -> 4s per Batch (Java 17 LTS)
 
-**Symptoms**: P99 latency doubled from 50ms to 100ms after a new deploy. No obvious code change in the hot path.
-
-**Investigation**:
+**Scenario.** A nightly Value-at-Risk (VaR) service revalues a portfolio of **10M positions** per batch. The original implementation took **45 seconds** per batch; with 600 batches across desks the nightly window blew past its SLA. Target hardware: 16-core x86-64, each core with a **32 KB L1 data cache** and **64-byte cache lines**, 32 GB heap on Java 17 with G1GC (`-XX:MaxGCPauseMillis=200`). After profiling-driven changes — JMH validation, struct-of-arrays layout, eliminating `BigDecimal` in the hot loop, and devirtualizing a megamorphic callsite — the batch dropped to **4 seconds**, a 10x improvement, with full-GC pauses gone.
 
 ```
-Step 1: Check GC logs
-  Before: Pause Young 3-5ms every 2s
-  After:  Pause Young 3-5ms every 2s + Pause Full 2.5s every 10 minutes!
+   nightly window
+   |-- desk batches x600 ----------------------------------------------|
+        each batch = 10M positions
+        45s ------------------------------------------------>  (FAIL SLA)
 
-Step 2: Diagnose full GC trigger
-  GC log shows "GC(N) Concurrent Mark Abort" before each Full GC
-  → G1 can't mark fast enough: objects promoted to old gen too fast
-  → InitiatingHeapOccupancyPercent threshold reached too late
-
-Step 3: Find allocation hotspot
-  async-profiler -e alloc -d 30 -f alloc.html <pid>
-  Flame graph shows: JSON serialization allocating byte[] for every response
-  -> ObjectMapper creates a new byte[] per call; 10MB responses → lots of promotion
-
-Step 4: Fix
-  Option A: Object pool for byte[] buffers (recycle across requests)
-  Option B: Streaming serialization (never materialize full response in memory)
-  Option C: Tune G1: -XX:InitiatingHeapOccupancyPercent=30 (start marking earlier)
-
-  Chose Option B: streaming reduced allocation 90%
-  Also added: -XX:InitiatingHeapOccupancyPercent=35 as safety net
-
-Step 5: Verify
-  P99 back to 45ms (better than before — streaming is faster)
-  No more full GC in GC logs
-  Minor GC frequency unchanged
+   after tuning:
+        4s --->  (PASS)
+        breakdown of the 11x gain:
+          BigDecimal -> long cents .......... ~3.0x  (allocation + arithmetic)
+          AoS -> SoA cache layout ........... ~2.0x  (L1/L2 hit rate)
+          devirtualize instanceof callsite .. ~1.4x  (JIT inlining restored)
+          G1 IHOP + region sizing ........... removes 2.5s full-GC stalls
 ```
 
-**Key tools used**: GC log analysis, async-profiler allocation profiling, G1 GC tuning flags.
+### Step 1 — Measure With JMH, Not a Stopwatch
+
+A hand-rolled `System.nanoTime()` micro-benchmark reported the new arithmetic as "free" because the JIT dead-code-eliminated the result. JMH (`Blackhole`, warmup, fork) gave the real number.
+
+```java
+@BenchmarkMode(Mode.Throughput)
+@OutputTimeUnit(TimeUnit.MILLISECONDS)
+@State(Scope.Benchmark)
+@Warmup(iterations = 5, time = 1)     // let the JIT compile & reach steady state
+@Measurement(iterations = 5, time = 1)
+@Fork(2)                              // fresh JVM per fork, isolates JIT noise
+public class RevalBench {
+    private long[] notionalCents;
+    private double[] factor;
+
+    @Setup public void setup() {
+        notionalCents = new long[10_000_000];
+        factor        = new double[10_000_000];
+        // ... populate ...
+    }
+
+    @Benchmark
+    public void reval(Blackhole bh) {            // Blackhole prevents DCE
+        long sum = 0;
+        for (int i = 0; i < notionalCents.length; i++)
+            sum += (long) (notionalCents[i] * factor[i]);
+        bh.consume(sum);
+    }
+}
+// Reading results: Throughput ops/ms, higher is better. Compare CIs (the +/- error);
+// if intervals overlap, the "improvement" is noise.
+```
+
+### Step 2 — Array-of-Structs vs Struct-of-Arrays (Cache Locality)
+
+The hot loop touched only two fields of a fat `Position` object, but AoS forced the CPU to drag whole 200-byte objects through the cache, evicting useful lines.
+
+```java
+// BROKEN for the hot path: array-of-structs. One Position ~200 bytes spans
+// 3-4 cache lines; the loop uses 16 bytes of them -> ~92% of each loaded line wasted.
+class Position { long id; String book; long notionalCents; double factor; /* +20 fields */ }
+Position[] positions;                 // sequential access still cache-hostile
+
+long sum = 0;
+for (Position p : positions) sum += (long)(p.notionalCents * p.factor);
+```
+
+```java
+// FIX: struct-of-arrays. The two arrays are contiguous; one 64-byte line holds
+// 8 longs / 8 doubles -> ~8 positions per line, near-100% useful bytes.
+long[]   notionalCents;               // hot
+double[] factor;                      // hot
+// cold fields (id, book, ...) live in parallel arrays touched only when needed
+long sum = 0;
+for (int i = 0; i < notionalCents.length; i++)
+    sum += (long)(notionalCents[i] * factor[i]);
+// Measured: L1d miss rate 38% -> 4% (perf stat); loop wall time ~2x faster.
+```
+
+### Step 3 — A Megamorphic instanceof Defeating JIT Inlining
+
+A pricing dispatch used `instanceof` chains. With 5+ concrete types hitting one callsite, the call became **megamorphic**, the JIT stopped inlining, and the method exceeded the **325-bytecode inlining threshold** so it never inlined upward either.
+
+```java
+// BROKEN: megamorphic callsite. JIT cannot speculate a single target; deoptimizes.
+double price(Instrument x) {
+    if (x instanceof Bond b)        return priceBond(b);
+    else if (x instanceof Swap s)   return priceSwap(s);
+    else if (x instanceof Option o) return priceOption(o);   // 5+ branches...
+    // C2 sees >2 types -> bimorphic/megamorphic -> no inline -> virtual call cost
+}
+```
+
+```java
+// FIX: monomorphic per-type via a polymorphic method on the type itself, OR
+// split the batch by type so each loop sees ONE concrete class (monomorphic).
+Map<Class<?>, List<Instrument>> byType = positions stream grouped by getClass();
+for (var entry : byType.entrySet())
+    for (Instrument x : entry.getValue()) total += x.price();  // monomorphic per loop
+// Restored inlining; the per-loop callsite sees a single type -> direct, inlined call.
+```
+
+### Concrete Numbers
+
+| Change | Metric | Before | After |
+|--------|--------|--------|-------|
+| BigDecimal -> long cents | allocations/batch | ~30M `BigDecimal` | ~0 |
+| AoS -> SoA | L1d miss rate | 38% | 4% |
+| Devirtualize | hot-loop CPI | 1.9 | 0.8 |
+| G1 IHOP=35 + region 16m | full-GC pauses | 2.5s every ~10min | none |
+| Overall | batch time | 45s | 4s |
+
+### Common Pitfalls
+
+**Benchmarking without JMH — dead-code elimination.** A loop whose result is unused is legally deleted by C2, so the "optimized" version times at 0ns. Always consume results with `Blackhole.consume(...)` and return values; never trust a raw `nanoTime()` loop for nanosecond-scale work.
+
+**Optimizing cold code.** The team first rewrote the report formatter, which the JFR profile later showed was 0.4% of CPU. Profile first (`async-profiler -e cpu`, JFR `jfr print`), then optimize the top frames only.
+
+**String concatenation in a loop creating millions of objects.** `msg = msg + position.id()` inside the 10M loop allocated ~1M intermediate `String`s and dominated young-gen churn. Use a single `StringBuilder` sized up front, or better, avoid building strings in the hot path at all.
+
+**`BigDecimal` in a tight loop.** Each `multiply`/`add` allocates a new immutable `BigDecimal` plus an internal `BigInteger`; 30M of them per batch dominated GC. For fixed-scale money, store **`long` cents** and do integer arithmetic, converting to `BigDecimal` only at the reporting boundary.
+
+### Interview Discussion Points
+
+**Why does a JMH benchmark fork a new JVM and run warmup iterations?** Forking isolates JIT-profile pollution from previous benchmarks in the same JVM; warmup lets C2 compile the hot methods and reach steady state so you measure compiled code, not the interpreter or C1.
+
+**What makes struct-of-arrays faster than array-of-structs for a hot loop?** SoA packs the only fields the loop reads contiguously, so each 64-byte cache line carries ~8 useful elements instead of one fat object's worth; this raises L1/L2 hit rate and lets the hardware prefetcher stream linearly.
+
+**What is a megamorphic callsite and how does it hurt performance?** A virtual call that observes more than two receiver types at runtime; the JIT cannot speculate a single target, so it emits a real virtual dispatch, stops inlining the callee, and may deoptimize — costing both the call overhead and the lost cross-method optimizations.
+
+**Why prefer `long` cents over `BigDecimal` in a numeric hot loop?** `BigDecimal` is immutable, so every operation allocates; in a 10M-iteration loop that is tens of millions of short-lived objects driving young-gen GC. `long` arithmetic is register-resident, allocation-free, and exact for fixed two-decimal money.
+
+**How do you tune G1 to eliminate the full GCs you saw, and what is the risk?** Lower `-XX:InitiatingHeapOccupancyPercent` so concurrent marking starts earlier (e.g. 35 instead of 45) and size regions to fit your object distribution; the risk is starting marking too early, spending CPU on concurrent work and reducing mutator throughput, so validate with GC logs that pauses drop without throughput regressing.

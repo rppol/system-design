@@ -511,99 +511,114 @@ When a `Runnable` submitted to an `ExecutorService` throws an unchecked exceptio
 
 ## 14. Case Study
 
-### Testing an Order Processing Service with Full Coverage
+### Unit-Testing a PaymentService Against Three External Dependencies
 
-**Scenario**: `OrderService` has `placeOrder(userId, items)` which: validates items, saves to repository, sends confirmation email, publishes to event bus.
+**Scenario.** A `PaymentService` orchestrates three collaborators that must never run in a unit test: a `PaymentGateway` (external HTTP, costs real money), an `AuditRepository` (a database), and a `FraudDetector` (a remote ML service, ~200ms/call). The team enforces a **test pyramid of roughly 80% unit / 15% integration / 5% end-to-end**; this class is the unit tier, so all three collaborators are mocked with Mockito and the suite runs **~1,200 unit tests in under 8 seconds** on Java 17. The load-bearing assertion is an `ArgumentCaptor` check that the *exact* audit record (amount, status, fraud score) was written — a previous incident shipped a transposed amount/score with no test to catch it.
+
+```
+            +------------------- unit under test -------------------+
+   test --> |  PaymentService.charge(req)                           |
+            |     |-> fraudDetector.score(req)    [@Mock, stubbed]   |
+            |     |-> gateway.charge(req)         [@Mock, stubbed]   |
+            |     |-> auditRepo.save(record)      [@Mock, captured]  |
+            +-------------------------------------------------------+
+   pyramid:   unit 80% (here) | integration 15% | e2e 5%
+```
+
+### The Test Class
 
 ```java
-@ExtendWith(MockitoExtension.class)
-class OrderServiceTest {
+@ExtendWith(MockitoExtension.class)           // JUnit 5 wiring; strict stubbing by default
+class PaymentServiceTest {
 
-    @Mock private OrderRepository orderRepo;
-    @Mock private EmailService emailService;
-    @Mock private EventBus eventBus;
-    @Mock private UserRepository userRepo;
-    @InjectMocks private OrderService orderService;
+    @Mock private PaymentGateway gateway;
+    @Mock private AuditRepository auditRepo;
+    @Mock private FraudDetector fraudDetector;
+    @InjectMocks private PaymentService service;   // constructor-injects the 3 mocks
 
-    @Captor private ArgumentCaptor<Order> orderCaptor;
-    @Captor private ArgumentCaptor<OrderPlacedEvent> eventCaptor;
-
-    private User testUser;
-
-    @BeforeEach
-    void setUp() {
-        testUser = new User(1L, "Alice", "alice@example.com");
-        when(userRepo.findById(1L)).thenReturn(Optional.of(testUser));
-    }
+    @Captor private ArgumentCaptor<AuditRecord> auditCaptor;
 
     @Test
-    @DisplayName("Successfully placed order saves, emails, and publishes event")
-    void placeOrder_happyPath_savesEmailsAndPublishes() {
+    @DisplayName("Approved charge writes an audit record with the exact amount and score")
+    void charge_approved_writesExactAuditRecord() {
         // Arrange
-        List<Item> items = List.of(new Item("SKU-1", 2), new Item("SKU-2", 1));
-        when(orderRepo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        ChargeRequest req = new ChargeRequest("acct-1", 10_000L, "USD");
+        when(fraudDetector.score(req)).thenReturn(0.12);          // below threshold
+        when(gateway.charge(req)).thenReturn(Receipt.approved("txn-9"));
 
         // Act
-        Order result = orderService.placeOrder(1L, items);
+        ChargeResult result = service.charge(req);
 
-        // Assert — verify the order was saved with correct content
-        verify(orderRepo).save(orderCaptor.capture());
-        Order savedOrder = orderCaptor.getValue();
-        assertAll("saved order",
-            () -> assertEquals(1L, savedOrder.userId()),
-            () -> assertEquals(2, savedOrder.items().size()),
-            () -> assertEquals(OrderStatus.PENDING, savedOrder.status())
-        );
+        // Assert outcome
+        assertEquals(Status.APPROVED, result.status());
 
-        // Verify email sent to correct address
-        verify(emailService).send(eq("alice@example.com"), contains("Order confirmation"));
+        // Assert the EXACT record written (load-bearing: catches transposed fields)
+        verify(auditRepo).save(auditCaptor.capture());
+        AuditRecord rec = auditCaptor.getValue();
+        assertAll("audit record",
+            () -> assertEquals(10_000L, rec.amountCents()),
+            () -> assertEquals("txn-9", rec.transactionId()),
+            () -> assertEquals(0.12, rec.fraudScore(), 1e-9),
+            () -> assertEquals(Status.APPROVED, rec.status()));
 
-        // Verify event published with order ID
-        verify(eventBus).publish(eventCaptor.capture());
-        assertNotNull(eventCaptor.getValue().orderId());
+        // Order: fraud check must precede the (costly) gateway call
+        InOrder order = inOrder(fraudDetector, gateway);
+        order.verify(fraudDetector).score(req);
+        order.verify(gateway).charge(req);
     }
 
     @Test
-    @DisplayName("Empty items list throws IllegalArgumentException")
-    void placeOrder_emptyItems_throws() {
-        IllegalArgumentException ex = assertThrows(
-            IllegalArgumentException.class,
-            () -> orderService.placeOrder(1L, List.of())
-        );
-        assertEquals("Order must have at least one item", ex.getMessage());
-        verify(orderRepo, never()).save(any());
-        verify(emailService, never()).send(any(), any());
-    }
+    @DisplayName("High fraud score blocks the charge and never calls the gateway")
+    void charge_highFraud_skipsGateway() {
+        ChargeRequest req = new ChargeRequest("acct-2", 50_000L, "USD");
+        when(fraudDetector.score(req)).thenReturn(0.97);          // above threshold
 
-    @Test
-    @DisplayName("User not found throws UserNotFoundException")
-    void placeOrder_unknownUser_throws() {
-        when(userRepo.findById(99L)).thenReturn(Optional.empty());
-        assertThrows(UserNotFoundException.class,
-            () -> orderService.placeOrder(99L, List.of(new Item("SKU-1", 1))));
+        ChargeResult result = service.charge(req);
+
+        assertEquals(Status.BLOCKED, result.status());
+        verify(gateway, never()).charge(any());                  // negative verification
+        verify(auditRepo).save(any());                           // still audited
     }
 
     @ParameterizedTest
-    @CsvSource({"0,SKU-1", "-1,SKU-2"})
-    @DisplayName("Non-positive quantities throw IllegalArgumentException")
-    void placeOrder_invalidQuantity_throws(int qty, String sku) {
-        List<Item> items = List.of(new Item(sku, qty));
-        assertThrows(IllegalArgumentException.class,
-            () -> orderService.placeOrder(1L, items));
-    }
-
-    @Test
-    @DisplayName("Repository failure rolls back and rethrows")
-    void placeOrder_repoFailure_doesNotSendEmail() {
-        List<Item> items = List.of(new Item("SKU-1", 1));
-        doThrow(new DatabaseException("disk full")).when(orderRepo).save(any());
-
-        assertThrows(DatabaseException.class,
-            () -> orderService.placeOrder(1L, items));
-        verify(emailService, never()).send(any(), any());
-        verify(eventBus, never()).publish(any());
+    @CsvSource({"0, USD", "-1, USD", "100, ''"})
+    @DisplayName("Invalid requests fail fast before any collaborator is touched")
+    void charge_invalidInput_failsFast(long cents, String currency) {
+        ChargeRequest bad = new ChargeRequest("acct-3", cents, currency);
+        assertThrows(IllegalArgumentException.class, () -> service.charge(bad));
+        verifyNoInteractions(fraudDetector, gateway, auditRepo);
     }
 }
 ```
 
-**Patterns demonstrated**: AAA structure, `@BeforeEach` for shared setup, `assertAll()` for multi-field verification, `ArgumentCaptor` for complex argument inspection, `verify(mock, never())` for negative verification, `@ParameterizedTest` for input variations, `doThrow()` for error path testing.
+### Common Pitfalls
+
+**Mocking the class under test.** Spying or mocking `PaymentService` itself tests the mock's stubbed behavior, not the real logic.
+```java
+// BROKEN: this asserts nothing about real code
+PaymentService svc = mock(PaymentService.class);
+when(svc.charge(req)).thenReturn(approved);   // you stubbed the answer you assert
+// FIX: instantiate the real service with mocked DEPENDENCIES (@InjectMocks above)
+```
+
+**`@InjectMocks` silently not injecting.** With constructor injection, if the constructor signature does not match the available mocks, Mockito quietly falls back to field/setter injection and may leave a dependency `null`, hiding a wiring bug until an NPE at runtime.
+```java
+// FIX: prefer explicit constructor wiring in the test so a mismatch fails loudly
+service = new PaymentService(gateway, auditRepo, fraudDetector);
+```
+
+**`verify()` without `times()` means exactly 1, not "at least once".** `verify(gateway).charge(req)` fails if the gateway was called twice. If a retry can legitimately call it more than once, state it: `verify(gateway, atLeastOnce()).charge(req)` or `verify(gateway, times(2)).charge(req)`.
+
+**Mocking a `final` class or method needs `mockito-inline`.** Plain Mockito cannot subclass a `final` class, so `mock(FinalGateway.class)` throws. Enable the inline mock maker (`mockito-inline` artifact, or the `org.mockito.plugins.MockMaker` resource set to `mock-maker-inline`) — but prefer extracting an interface so you mock an abstraction instead.
+
+### Interview Discussion Points
+
+**Why mock the gateway, repository, and fraud detector instead of using real ones?** A unit test must be fast, deterministic, and free of side effects; the real gateway charges money, the repository needs a database, and the fraud service adds 200ms and network flakiness — mocking isolates `PaymentService` logic so a failure points at that class, not at infrastructure.
+
+**When do you use `ArgumentCaptor` versus argument matchers in `verify()`?** Use matchers (`eq`, `any`) when you only need to assert the call happened with values matching a predicate; use a captor when you must inspect a complex object's internal fields after the fact — as with the audit record, where the bug was a transposed field that a simple `eq` would not have surfaced.
+
+**What is strict stubbing and why does `MockitoExtension` enable it?** Strict stubbing fails the test if a `when(...).thenReturn(...)` is never used (`UnnecessaryStubbingException`), catching dead setup and tests that drifted from the code they exercise; it pushes you toward stubbing only what the path under test actually calls.
+
+**How do you verify an ordering constraint between mocks?** Use `InOrder` over the relevant mocks and call `verify` on it in sequence; this proved the fraud check runs before the costly gateway call, a business rule that a set of unordered `verify` calls would not enforce.
+
+**Why does the test pyramid put 80% of tests at the unit level?** Unit tests are the cheapest to run and the most precise at localizing failures; integration and e2e tests are slower and flakier, so you keep them few and reserve them for wiring and contract coverage that mocks cannot prove — inverting the ratio (the "ice-cream cone") yields slow, brittle suites.

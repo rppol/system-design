@@ -413,69 +413,100 @@ With virtual threads (Java 21), blocking I/O calls like `socket.read()` are reim
 
 ## 14. Case Study
 
-### Building a Parallel API Aggregator
+### Migrating from HttpURLConnection to Java 11 HttpClient
 
-**Problem**: A service must call 3 downstream APIs in parallel, aggregate results, and respond within 2 seconds total.
+**Scenario.** A pricing service makes **~50,000 external API calls/day** to a partner enrichment API (peak ~5/sec, bursts to 40/sec). The legacy code used `HttpURLConnection` (the Java 1.1 API): one new TCP+TLS connection per call, blocking I/O, and manual stream handling. A connection-leak bug — unclosed input streams under error paths — periodically exhausted ephemeral ports and produced `Too many open files`, paging on-call ~twice a month. The migration to the **Java 11 `HttpClient`** delivered HTTP/2 multiplexing (many concurrent requests over **one** TCP connection instead of thousands), a `CompletableFuture`-based async API, and built-in connection pooling — and the leak class disappeared because the new API manages the body lifecycle.
 
-```java
-public class UserProfileAggregator {
-    private final HttpClient client;
-
-    UserProfileAggregator() {
-        this.client = HttpClient.newBuilder()
-            .version(HttpClient.Version.HTTP_2)
-            .connectTimeout(Duration.ofSeconds(2))
-            .executor(Executors.newVirtualThreadPerTaskExecutor())
-            .build();
-    }
-
-    record UserProfile(User user, List<Order> orders, Preferences prefs) {}
-
-    UserProfile fetchProfile(String userId) {
-        HttpRequest userReq  = buildRequest("/users/" + userId);
-        HttpRequest orderReq = buildRequest("/orders?userId=" + userId);
-        HttpRequest prefReq  = buildRequest("/preferences/" + userId);
-
-        // Fire all three in parallel
-        CompletableFuture<User>          userFuture  = fetch(userReq,  User.class);
-        CompletableFuture<List<Order>>   orderFuture = fetchList(orderReq, Order.class);
-        CompletableFuture<Preferences>   prefFuture  = fetch(prefReq,  Preferences.class);
-
-        // Wait for all; fail fast if any fails
-        CompletableFuture.allOf(userFuture, orderFuture, prefFuture)
-            .orTimeout(2, TimeUnit.SECONDS)  // overall timeout
-            .join();
-
-        return new UserProfile(userFuture.join(), orderFuture.join(), prefFuture.join());
-    }
-
-    private <T> CompletableFuture<T> fetch(HttpRequest request, Class<T> type) {
-        return client.sendAsync(request, BodyHandlers.ofString())
-            .thenApply(resp -> {
-                if (resp.statusCode() != 200)
-                    throw new RuntimeException("HTTP " + resp.statusCode() + " for " + request.uri());
-                return deserialize(resp.body(), type);
-            });
-    }
-
-    private HttpRequest buildRequest(String path) {
-        return HttpRequest.newBuilder()
-            .uri(URI.create("https://internal-api.company.com" + path))
-            .header("Authorization", "Bearer " + getToken())
-            .timeout(Duration.ofMillis(1500))
-            .GET()
-            .build();
-    }
-
-    @SuppressWarnings("unchecked")
-    private <T> T deserialize(String json, Class<T> type) {
-        // JSON deserialization via Jackson or Gson
-        return objectMapper.readValue(json, type);
-    }
-}
-// With virtual threads executor: all 3 HTTP calls run in parallel virtual threads
-// .orTimeout(2, SECONDS): CompletableFuture fails if not all complete within 2s
-// .join() on CompletableFuture.allOf: blocks the calling virtual thread (free — no carrier thread wasted)
+```
+   BEFORE (HttpURLConnection, HTTP/1.1)        AFTER (HttpClient, HTTP/2)
+   --------------------------------------      --------------------------------
+   call 1 -> TCP+TLS handshake -> conn 1       call 1 ---\
+   call 2 -> TCP+TLS handshake -> conn 2       call 2 ----+--> 1 TCP conn,
+   ...      (no reuse, leak risk)              ...        |    multiplexed streams
+   50k calls -> 50k handshakes                 call N ---/     + pooled reuse
 ```
 
-**Performance**: 3 sequential calls × 400ms avg = 1200ms. 3 parallel calls = ~400ms (limited by slowest). Well within 2s SLA.
+### Broken: HttpURLConnection Leaking Connections
+
+```java
+// BROKEN — input stream not closed on the error path; on HTTP 500 the body
+// stream stays open, the underlying socket is never released, FDs/ports leak.
+String fetch(String url) throws IOException {
+    HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+    conn.setConnectTimeout(5000);
+    InputStream in = conn.getInputStream();          // throws on >=400, leaving conn open
+    return new String(in.readAllBytes(), UTF_8);     // and `in` never closed even on success
+}
+// Symptom under load: java.net.SocketException: Too many open files
+```
+
+### Fix: Java 11 HttpClient with Pooling, Timeouts, and Async
+
+```java
+public final class EnrichmentClient {
+    private final HttpClient client;
+
+    public EnrichmentClient(ExecutorService callbackPool) {
+        this.client = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_2)        // multiplex over one connection
+            .connectTimeout(Duration.ofSeconds(5))     // never hang on connect
+            .executor(callbackPool)                    // controls async callback threads
+            .build();                                  // connection pool is built-in
+    }
+
+    // Async: returns immediately, completes when the response (and body) arrive.
+    CompletableFuture<Enrichment> enrichAsync(String id) {
+        HttpRequest req = HttpRequest.newBuilder()
+            .uri(URI.create("https://partner.example.com/enrich/" + id))
+            .timeout(Duration.ofSeconds(3))            // per-REQUEST timeout (vs connect)
+            .header("Accept", "application/json")
+            .GET()
+            .build();
+        return client.sendAsync(req, HttpResponse.BodyHandlers.ofString())
+            .thenApply(resp -> {                        // body fully read & managed by client
+                if (resp.statusCode() != 200)
+                    throw new EnrichException("HTTP " + resp.statusCode());
+                return parse(resp.body());
+            });
+    }
+}
+```
+
+### Concrete Numbers
+
+| Metric | HttpURLConnection (HTTP/1.1) | HttpClient (HTTP/2) |
+|--------|------------------------------|----------------------|
+| TCP connections for 50 concurrent calls | up to 50 | 1 (multiplexed) |
+| TLS handshakes/day | ~50,000 (no reuse) | a handful (pooled) |
+| connection-leak incidents/month | ~2 | 0 |
+| API style | blocking only | sync `send` + async `sendAsync` |
+
+### Common Pitfalls
+
+**`HttpURLConnection` input stream not closed -> connection/pool leak.** On both success and error paths the body stream must be drained and closed (or the error stream consumed) for the socket to return to the keep-alive pool. The Java 11 `HttpClient` removes this footgun: the `BodyHandler` reads and releases the body for you.
+
+**Blocking `send()` on the common ForkJoinPool.** Calling the synchronous `client.send(...)` from inside a `parallelStream()` or a `CompletableFuture.supplyAsync(...)` (which default to the common pool) parks a shared carrier thread; enough blocked calls starve every other parallel task in the JVM.
+```java
+// BROKEN: blocks a shared common-pool thread
+CompletableFuture.supplyAsync(() -> client.send(req, ofString()));   // default pool!
+// FIX (Java 21 LTS): run blocking calls on virtual threads, or use sendAsync
+var vt = Executors.newVirtualThreadPerTaskExecutor();
+CompletableFuture.supplyAsync(() -> client.send(req, ofString()), vt);  // cheap to block
+```
+A blocking `send()` on a *virtual thread* (Java 21) is fine — it unmounts from its carrier while parked, so no platform thread is wasted.
+
+**`SSLHandshakeException` from a missing intermediate certificate.** When the partner serves a leaf cert but not the intermediate, the default trust store cannot build a chain. Fix by supplying a custom `SSLContext` whose trust manager includes the intermediate/root, passed via `HttpClient.newBuilder().sslContext(ctx)` — never by disabling verification.
+
+**No request timeout -> indefinite hang.** `connectTimeout` only bounds connection establishment; a server that accepts the connection then stalls will hang forever without a per-request `.timeout(...)`. Always set both, and treat a `HttpTimeoutException` as a retryable failure with backoff.
+
+### Interview Discussion Points
+
+**What does HTTP/2 multiplexing buy a high-volume client?** Many concurrent requests share a single TCP connection as independent streams, eliminating per-request handshakes and head-of-line blocking at the connection level; for 50 concurrent calls that is 1 connection instead of up to 50, slashing TLS cost and FD pressure.
+
+**Difference between `connectTimeout` and a request `timeout`?** `connectTimeout` (on the `HttpClient`) bounds only the TCP/TLS connection setup; the per-request `.timeout(...)` (on the `HttpRequest`) bounds the whole exchange including the response body — you need both, because a connected-but-stalled server defeats the connect timeout.
+
+**Why is blocking `send()` dangerous on the common ForkJoinPool but fine on a virtual thread?** The common pool has a small fixed number of carrier threads; a blocked `send()` pins one and starves all other parallel work. A virtual thread unmounts from its carrier while blocked on I/O, so thousands can block concurrently without consuming platform threads — making blocking the simpler, correct choice in Java 21.
+
+**How do you handle a `SSLHandshakeException` for a missing intermediate cert correctly?** Build a custom `SSLContext` initialized with a trust manager that contains the full chain (intermediate + root) and pass it to the client; disabling certificate validation to "make it work" turns a config bug into a man-in-the-middle vulnerability.
+
+**Why prefer `sendAsync` over wrapping `send` in your own threads?** `sendAsync` uses the client's non-blocking I/O and its managed executor, returning a `CompletableFuture` you can compose (`allOf`, `thenApply`, `orTimeout`) without dedicating a thread per in-flight request, which is both more scalable and less error-prone than hand-rolled threading around the blocking API.

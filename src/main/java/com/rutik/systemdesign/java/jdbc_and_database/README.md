@@ -461,84 +461,116 @@ A `Savepoint` marks a point within a transaction to which you can partially roll
 
 ## 14. Case Study
 
-### High-Throughput Order Insertion with HikariCP + Batch
+### Sizing HikariCP and Killing N+1 in a Payment Service
 
-**Problem**: A flash sale system must insert up to 50,000 orders in a 10-second window. Single-row inserts with `DriverManager` were taking 8 minutes for 50,000 orders.
+**Scenario.** A payment service runs **20 application instances** behind a load balancer, all talking to one PostgreSQL primary with `max_connections = 200`. Naive sizing (each instance opening 50 connections) would demand 1,000 connections against a 200 limit, so the database rejects connections under load. The correct math is **200 / 20 = 10 connections per instance**, which happens to be HikariCP's default pool size. The incident that triggered the review: an order-history endpoint with an **N+1 query pattern** — one query for 1,000 orders, then a separate query per order to fetch its payment — issued **1,001 queries in a single HTTP request**, draining the 10-connection pool, queuing waiters, and spiking **p99 from 80ms to 30s** (the connection-acquire timeout).
 
-```java
-public class OrderBatchInserter {
-    private final HikariDataSource dataSource;
-    private static final int BATCH_SIZE = 500;
+```
+   20 instances x pool=10 = 200 conns  <= PostgreSQL max_connections=200  OK
+        (50/instance would be 1000 -> rejected)
 
-    OrderBatchInserter(HikariDataSource ds) { this.dataSource = ds; }
-
-    public void insertOrders(List<Order> orders) throws SQLException {
-        String sql = """
-            INSERT INTO orders (id, user_id, amount, status, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT (id) DO NOTHING
-            """;
-
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-
-            conn.setAutoCommit(false);
-            int batchCount = 0;
-            List<Long> failedOrderIds = new ArrayList<>();
-
-            for (int i = 0; i < orders.size(); i++) {
-                Order o = orders.get(i);
-                ps.setLong(1, o.id());
-                ps.setLong(2, o.userId());
-                ps.setBigDecimal(3, o.amount());
-                ps.setString(4, o.status().name());
-                ps.setTimestamp(5, Timestamp.from(o.createdAt()));
-                ps.addBatch();
-                batchCount++;
-
-                if (batchCount == BATCH_SIZE) {
-                    executeBatchSafely(ps, orders, i - batchCount + 1, failedOrderIds);
-                    conn.commit();
-                    batchCount = 0;
-                }
-            }
-
-            // Execute remaining rows
-            if (batchCount > 0) {
-                executeBatchSafely(ps, orders, orders.size() - batchCount, failedOrderIds);
-                conn.commit();
-            }
-
-            if (!failedOrderIds.isEmpty()) {
-                log.warn("Failed to insert {} orders: {}", failedOrderIds.size(), failedOrderIds);
-            }
-        }
-    }
-
-    private void executeBatchSafely(PreparedStatement ps, List<Order> orders,
-                                    int batchStart, List<Long> failedIds) throws SQLException {
-        try {
-            ps.executeBatch();
-        } catch (BatchUpdateException e) {
-            int[] counts = e.getUpdateCounts();
-            for (int j = 0; j < counts.length; j++) {
-                if (counts[j] == Statement.EXECUTE_FAILED) {
-                    failedIds.add(orders.get(batchStart + j).id());
-                }
-            }
-        }
-    }
-}
-
-// HikariCP configuration for this workload:
-HikariConfig config = new HikariConfig();
-config.setMaximumPoolSize(10);           // formula: 4 cores * 2 + 1 = 9, round up
-config.setMinimumIdle(5);
-config.setConnectionTimeout(5000);       // 5s max wait
-config.setMaxLifetime(1_800_000);
-config.addDataSourceProperty("reWriteBatchedInserts", "true");  // PostgreSQL: merge batch into single INSERT
+   N+1 inside ONE request:
+     SELECT * FROM orders WHERE user_id=?      -> 1000 rows
+     for each order: SELECT * FROM payments WHERE order_id=?   x1000
+        => 1001 queries, all needing the pool -> exhaustion -> p99 30s
+   FIX: SELECT * FROM payments WHERE order_id IN (?, ?, ...)   -> 1 query (2 total)
 ```
 
-**Results**: 50,000 orders in ~4 seconds (500 rows × 100 batches, each batch ~40ms with PostgreSQL `reWriteBatchedInserts`). Connection pool: 10 connections handles the load with no exhaustion.
+### Broken: N+1 Exhausting the Pool
 
-**Key optimizations**: HikariCP pooling (no TCP handshake per order), batch insert (100 round trips vs 50,000), chunked commits (limits rollback size), PostgreSQL `reWriteBatchedInserts` (merges into single multi-row INSERT statement), `ON CONFLICT DO NOTHING` (idempotent — safe for retry).
+```java
+// BROKEN — one query per order. 1000 orders => 1001 round trips, each grabbing/
+// releasing a pooled connection; under concurrency the pool empties and callers
+// block at getConnection() until the 30s connectionTimeout fires.
+List<OrderView> loadHistory(long userId) throws SQLException {
+    List<Order> orders = query("SELECT * FROM orders WHERE user_id = ?", userId);
+    List<OrderView> views = new ArrayList<>();
+    for (Order o : orders) {
+        // separate DB round trip PER order -> the N+1
+        Payment p = queryOne("SELECT * FROM payments WHERE order_id = ?", o.id());
+        views.add(new OrderView(o, p));
+    }
+    return views;
+}
+```
+
+```java
+// FIX — collapse N+1 to a single IN-list query (2 queries total regardless of N).
+List<OrderView> loadHistory(long userId) throws SQLException {
+    try (Connection c = ds.getConnection()) {                  // ONE connection
+        List<Order> orders = query(c, "SELECT * FROM orders WHERE user_id = ?", userId);
+        if (orders.isEmpty()) return List.of();
+
+        String placeholders = orders.stream().map(o -> "?")
+                                    .collect(Collectors.joining(","));
+        String sql = "SELECT * FROM payments WHERE order_id IN (" + placeholders + ")";
+        Map<Long, Payment> byOrder;
+        try (PreparedStatement ps = c.prepareStatement(sql)) {
+            int i = 1;
+            for (Order o : orders) ps.setLong(i++, o.id());     // bind each id
+            byOrder = index(ps.executeQuery());                 // 1 round trip
+        }
+        return orders.stream()
+                     .map(o -> new OrderView(o, byOrder.get(o.id())))
+                     .toList();
+    }
+}
+// p99 back to ~80ms; pool never exhausted because each request uses 1-2 connections.
+```
+
+### Batch Insert: PreparedStatement Beats Single Inserts 200x
+
+```java
+// 10k single inserts: 10k round trips ~= 8 seconds. Batched: 1 trip ~= 40ms.
+try (Connection c = ds.getConnection();
+     PreparedStatement ps = c.prepareStatement(
+         "INSERT INTO payments (order_id, amount_cents, status) VALUES (?,?,?)")) {
+    c.setAutoCommit(false);
+    for (Payment p : payments) {
+        ps.setLong(1, p.orderId());
+        ps.setLong(2, p.amountCents());
+        ps.setString(3, p.status().name());
+        ps.addBatch();                       // accumulate, no round trip yet
+    }
+    ps.executeBatch();                       // ONE round trip for all rows
+    c.commit();
+}
+// 10,000 rows: ~8s (single) -> ~40ms (batched), with reWriteBatchedInserts=true.
+```
+
+### Isolation Level: a Phantom Read Causing a Double-Charge
+
+Under `READ_COMMITTED`, two concurrent "charge if not already charged" transactions can both pass the existence check (a phantom: the row each is about to insert is invisible to the other) and both insert, double-charging the customer.
+
+```java
+// BROKEN at READ_COMMITTED: check-then-insert races -> two charges
+// SELECT count(*) FROM payments WHERE order_id=? AND status='CAPTURED'  -> 0 in BOTH txns
+// INSERT ... -> BOTH succeed
+// FIX option A: raise to REPEATABLE_READ / SERIALIZABLE for this txn
+conn.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
+// FIX option B (preferred): a unique constraint makes the second insert fail-fast
+//   ALTER TABLE payments ADD CONSTRAINT uq_capture UNIQUE (order_id, status)
+//   -> the losing txn gets a constraint violation, never a double charge.
+```
+
+### Common Pitfalls
+
+**Connection not returned in a `finally`/try-with-resources -> pool exhaustion.** Any path (especially an exception) that skips `connection.close()` permanently removes a connection from the pool; ten leaks empties a default pool. Always acquire connections in try-with-resources so `close()` (which returns them to the pool, not closes the socket) runs on every path.
+
+**`Statement` instead of `PreparedStatement`.** String-concatenated `Statement` is open to SQL injection and forces the database to parse and plan every query afresh; `PreparedStatement` parameterizes inputs (closing the injection hole) and lets the driver/DB cache the plan.
+
+**`autoCommit=true` for a multi-step operation.** With auto-commit on, each statement commits independently, so a failure midway through a debit-then-credit leaves the database half-updated. Wrap multi-statement units of work in `setAutoCommit(false)` ... `commit()`/`rollback()`.
+
+**`ResultSet`/`Connection` held open across an HTTP request boundary.** Returning a lazily-loaded `ResultSet` (or an open JPA session) to be iterated by the view layer pins the connection for the whole request, defeating pooling and causing exhaustion under load. Materialize results into DTOs and release the connection before returning.
+
+### Interview Discussion Points
+
+**How do you size a connection pool across many instances?** Bound the total by the database's `max_connections` minus headroom for admin/replication, then divide by the number of instances; with 20 instances and a 200-connection limit, 10 per instance is the ceiling — oversizing each pool simply moves the queue from your app to the database and gets connections refused.
+
+**Why does N+1 specifically threaten the connection pool, not just latency?** Each of the N follow-up queries acquires and releases a pooled connection; under concurrent requests the sheer query count empties the pool, so callers block at `getConnection()` until the acquire timeout, turning a latency problem into an availability outage.
+
+**When is a unique constraint a better fix than raising the isolation level?** A unique constraint enforces the invariant at the database for all writers regardless of isolation and is cheaper than `SERIALIZABLE` (which adds locking/retry overhead and serialization failures); raise isolation only when the invariant cannot be expressed as a constraint, such as cross-row aggregate checks.
+
+**Why is batched `PreparedStatement` insert orders of magnitude faster?** It collapses N network round trips into one (or a few), amortizes statement parsing/planning, and with PostgreSQL `reWriteBatchedInserts=true` rewrites the batch into a single multi-row `INSERT`; the dominant cost in single inserts is per-statement round-trip latency, not the database work itself.
+
+**What does `connection.close()` actually do with HikariCP?** It returns the connection to the pool rather than closing the physical socket, so try-with-resources is the correct idiom precisely because "close" means "release back to pool"; failing to call it leaks the connection for `maxLifetime` or forever, which is why leaks manifest as gradual pool exhaustion.

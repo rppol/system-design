@@ -420,78 +420,144 @@ Three approaches: (1) `Objects.requireNonNull(param, "name")` in constructor/met
 
 ## 14. Case Study
 
-### Interview Exercise: Design an Immutable Money Transfer Record
+### A Payment Library Composing Four Canonical Patterns
 
-**Problem**: Design a `MoneyTransfer` class that is: immutable, safe to use as a Map key, comparable, serializable, and thread-safe for concurrent reads.
+**Scenario.** A reusable `payments-core` library processes **5M payments/day** (~58/sec average, ~600/sec peak) across a fleet. It composes four interview-staple patterns into one coherent flow: an **immutable `Payment`** value object (Effective Java Item 17), a **Builder** for safe construction (Item 2), an **enum singleton** registry of payment gateways (Item 3), and a **factory method** that selects a processor by scheme. After replacing mutable DTOs with immutable value objects, the team logged **zero NullPointerExceptions in the payment path over 18 months** — the fail-fast `build()` validation moved every "missing field" bug to construction time, where a unit test catches it.
+
+```
+   client code
+      |
+      v
+   Payment.builder()           (Item 2: Builder)
+      .amount(10000)           validates at build(): amount>0, currency set
+      .currency("USD")
+      .scheme(VISA)
+      .build()  ----> Payment  (Item 17: immutable, final fields, no setters)
+                         |
+                         v
+   PaymentGateway.INSTANCE     (Item 3: enum singleton registry)
+      .process(payment)
+                         |
+                         v
+   ProcessorFactory.forScheme(VISA)  (factory method -> returns interface)
+      -> CardProcessor (impl hidden behind PaymentProcessor interface)
+```
+
+### Composing the Four Patterns
 
 ```java
-public final class MoneyTransfer implements Comparable<MoneyTransfer>, Serializable {
-    private static final long serialVersionUID = 1L;
+// Item 17: immutable value object. final class, all-final fields, no setters,
+// validation in the (private) constructor, defensive handling of any mutable input.
+public final class Payment {
+    private final long amountCents;        // long cents, not BigDecimal in hot path
+    private final String currency;
+    private final Scheme scheme;
+    private final Instant createdAt;
 
-    private final String fromAccount;
-    private final String toAccount;
-    private final BigDecimal amount;
-    private final Currency currency;
-    private final Instant timestamp;
-
-    // Private constructor — use static factory
-    private MoneyTransfer(String from, String to, BigDecimal amount,
-                          Currency currency, Instant timestamp) {
-        this.fromAccount = Objects.requireNonNull(from, "fromAccount");
-        this.toAccount   = Objects.requireNonNull(to, "toAccount");
-        this.amount      = Objects.requireNonNull(amount, "amount").stripTrailingZeros();
-        this.currency    = Objects.requireNonNull(currency, "currency");
-        this.timestamp   = Objects.requireNonNull(timestamp, "timestamp");
+    private Payment(Builder b) {           // only the Builder constructs us
+        this.amountCents = b.amountCents;
+        this.currency    = b.currency;
+        this.scheme      = b.scheme;
+        this.createdAt   = b.createdAt;    // Instant is immutable -> no copy needed
     }
 
-    // Static factory (Effective Java Item 1)
-    public static MoneyTransfer of(String from, String to,
-                                    BigDecimal amount, Currency currency) {
-        if (amount.compareTo(BigDecimal.ZERO) <= 0)
-            throw new IllegalArgumentException("Amount must be positive");
-        return new MoneyTransfer(from, to, amount, currency, Instant.now());
-    }
+    public long amountCents() { return amountCents; }
+    public String currency()  { return currency; }
+    public Scheme scheme()     { return scheme; }
+    public Instant createdAt() { return createdAt; }
 
-    // Accessors (no setters — immutable)
-    public String getFromAccount() { return fromAccount; }
-    public String getToAccount()   { return toAccount; }
-    public BigDecimal getAmount()  { return amount; } // BigDecimal is immutable
-    public Currency getCurrency()  { return currency; } // Currency is immutable
-    public Instant getTimestamp()  { return timestamp; } // Instant is immutable
+    public static Builder builder() { return new Builder(); }
 
-    @Override
-    public boolean equals(Object o) {
-        if (this == o) return true;
-        if (!(o instanceof MoneyTransfer)) return false;
-        MoneyTransfer t = (MoneyTransfer) o;
-        return fromAccount.equals(t.fromAccount)
-            && toAccount.equals(t.toAccount)
-            && amount.compareTo(t.amount) == 0  // BigDecimal: not scale-sensitive
-            && currency.equals(t.currency)
-            && timestamp.equals(t.timestamp);
-    }
+    // Item 2: Builder. Required fields validated at build(), not silently defaulted.
+    public static final class Builder {
+        private long amountCents = -1;     // sentinel -> forces caller to set it
+        private String currency;
+        private Scheme scheme;
+        private Instant createdAt = Instant.now();
 
-    @Override
-    public int hashCode() {
-        return Objects.hash(fromAccount, toAccount, amount.stripTrailingZeros(),
-                            currency, timestamp);
-    }
+        public Builder amount(long cents) { this.amountCents = cents; return this; }
+        public Builder currency(String c) { this.currency = c; return this; }
+        public Builder scheme(Scheme s)   { this.scheme = s; return this; }
 
-    @Override
-    public int compareTo(MoneyTransfer other) {
-        // Sort by timestamp; equal timestamps by amount desc
-        int cmp = this.timestamp.compareTo(other.timestamp);
-        if (cmp != 0) return cmp;
-        return other.amount.compareTo(this.amount); // reversed = desc
-    }
-
-    @Override
-    public String toString() {
-        return "MoneyTransfer{from=" + fromAccount + ", to=" + toAccount
-             + ", amount=" + amount.toPlainString() + " " + currency.getCurrencyCode()
-             + ", at=" + timestamp + "}";
+        public Payment build() {
+            if (amountCents <= 0) throw new IllegalArgumentException("amount must be > 0");
+            Objects.requireNonNull(currency, "currency");
+            Objects.requireNonNull(scheme, "scheme");
+            return new Payment(this);
+        }
     }
 }
 ```
 
-**Patterns demonstrated**: final class + final fields (immutability), private constructor + static factory (Item 1), `Objects.requireNonNull` (fail-fast validation), `BigDecimal.compareTo` (not `equals` for monetary comparison), `Objects.hash` (correct hashCode), `Integer.compare`-equivalent for compareTo, serialVersionUID, all-immutable fields (no defensive copy needed for `BigDecimal`, `Currency`, `Instant`, `String`).
+```java
+// Item 3: enum singleton — the gateway registry. Serialization-safe and
+// reflection-proof for free (the JVM forbids reflective enum instantiation).
+public enum PaymentGateway {
+    INSTANCE;
+
+    public Receipt process(Payment p) {
+        PaymentProcessor proc = ProcessorFactory.forScheme(p.scheme()); // factory method
+        return proc.charge(p);
+    }
+}
+
+// Factory method returns the INTERFACE, not the concrete class -> callers
+// depend on an abstraction and new schemes drop in without touching call sites.
+final class ProcessorFactory {
+    static PaymentProcessor forScheme(Scheme s) {       // return type = interface
+        return switch (s) {
+            case VISA, MASTERCARD -> new CardProcessor();
+            case ACH              -> new AchProcessor();
+            case WALLET           -> new WalletProcessor();
+        };
+    }
+}
+
+// Putting it together, one line, fully type-safe and validated:
+Receipt r = PaymentGateway.INSTANCE.process(
+        Payment.builder().amount(10_000).currency("USD").scheme(Scheme.VISA).build());
+```
+
+### Why the Enum Singleton Resists Reflection (Show Why)
+
+A classic private-constructor singleton can be broken by reflection; an enum cannot.
+
+```java
+// BROKEN classic singleton — reflection bypasses the private constructor:
+Constructor<ClassicSingleton> c = ClassicSingleton.class.getDeclaredConstructor();
+c.setAccessible(true);
+ClassicSingleton second = c.newInstance();   // a SECOND instance! singleton violated
+
+// Enum: Constructor.newInstance() on an enum throws IllegalArgumentException:
+//   "Cannot reflectively create enum objects"
+// and readResolve is handled by the JVM, so deserialization also returns INSTANCE.
+```
+
+### Common Pitfalls
+
+**Immutable class with a mutable field — broken contract.** Storing a `Date` or `List` and returning it directly lets a caller mutate your internals.
+```java
+// BROKEN: caller can mutate our internal list after construction
+public List<String> tags() { return tags; }
+// FIX: store an unmodifiable copy and return it (or List.copyOf in the ctor)
+this.tags = List.copyOf(builderTags);    // defensive copy in; immutable out
+public List<String> tags() { return tags; }   // already unmodifiable
+```
+
+**Builder with required fields but no validation at `build()`.** If `build()` does not check, a half-filled object escapes and fails later as an NPE deep in processing. Validate every required field in `build()` with `Objects.requireNonNull` and range checks so the failure points at the construction site.
+
+**Assuming the classic singleton is safe — it is not against reflection/serialization.** Use the enum singleton (Item 3) which the JVM guarantees single-instance across reflection and deserialization; only fall back to a lazy holder class when the singleton must implement an interface from a hierarchy that cannot be an enum.
+
+**Factory method returning the concrete type.** Returning `CardProcessor` instead of `PaymentProcessor` couples every caller to the implementation, defeating the point of the factory. Always declare the factory's return type as the interface so new implementations are drop-in.
+
+### Interview Discussion Points
+
+**Why is an enum the best singleton in Java?** It is initialized once by the class loader (thread-safe with no locking), the JVM forbids reflective instantiation, and serialization returns the same instance automatically — eliminating the three ways classic singletons get duplicated.
+
+**When do you need a Builder instead of a constructor or static factory?** When a class has many optional parameters (the telescoping-constructor problem) or requires multi-field invariant validation; the Builder gives readable named arguments and a single `build()` choke point to enforce invariants, at the cost of one extra object.
+
+**An immutable class has a `List` field — what must you do?** Take a defensive copy on the way in (`List.copyOf`) and expose only an unmodifiable view on the way out; otherwise either the constructor argument or the getter return value gives a caller a handle to mutate your "immutable" state.
+
+**Why store money as `long` cents in the value object but convert to `BigDecimal` at the edge?** `long` is allocation-free and exact for fixed-scale arithmetic in the hot path, while `BigDecimal` is needed only for display and division at the reporting boundary; this keeps the high-throughput path GC-friendly without losing precision.
+
+**How do these four patterns reinforce each other here?** The Builder guarantees the immutable `Payment` is always fully valid, immutability makes it safe to pass through the singleton gateway across threads with no copying, and the factory method lets the gateway pick a processor by scheme without the caller — or the `Payment` — knowing any concrete implementation.

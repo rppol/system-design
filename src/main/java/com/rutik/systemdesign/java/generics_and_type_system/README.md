@@ -527,30 +527,149 @@ A `MethodHandle` (Java 7, `java.lang.invoke.MethodHandles`) is a typed, executab
 
 ## 14. Case Study
 
-### Building a Type-Safe Event Bus with Generics and Dynamic Proxy
+### A Type-Safe Event Bus Library Across 30 Microservices
+
+**Scenario.** A shared `event-bus` library is published as a JAR and consumed by 30 microservices. Each service publishes domain events (`OrderPlaced`, `PaymentCaptured`, `ShipmentDispatched`) and subscribes to events it cares about. The library handles roughly 80k events/sec at peak across the fleet. Before generics were tightened, the team shipped three production `ClassCastException` incidents in one quarter caused by raw types and unsafe casts in the bus internals. The redesign goal: make every unsafe routing a compile-time error, not a 3am page.
+
+```
+                        EventBus<E extends Event>
+   publisher side                                      subscriber side
+   ------------------                                  -------------------
+   publish(List<? extends E>)  ---> [ Map<Class<?>,     ---> subscribe(
+        PECS: producer                CopyOnWrite          Consumer<? super E>)
+        "? extends" reads             List<...>> ]              PECS: consumer
+        from the list                                          "? super" writes
+                                                               into the consumer
+   OrderEvent (E)                                       Consumer<Event>  (super)
+     |  OrderPlaced                                      accepts OrderEvent  OK
+     |  OrderCancelled                                   Consumer<Object>    OK
+```
+
+### PECS — Producer-Extends, Consumer-Super
+
+The canonical mnemonic first, then applied to the bus. A `copy` utility reads from a source (producer) and writes to a destination (consumer):
 
 ```java
-// Event bus where subscribers are type-safe by event type
-public class TypedEventBus {
-    private final Map<Class<?>, List<Consumer<Object>>> handlers = new ConcurrentHashMap<>();
-
-    @SuppressWarnings("unchecked")
-    public <T> void subscribe(Class<T> eventType, Consumer<T> handler) {
-        handlers.computeIfAbsent(eventType, k -> new CopyOnWriteArrayList<>())
-            .add((Consumer<Object>) handler);  // safe: handler accepts T, we check type below
-    }
-
-    public <T> void publish(T event) {
-        List<Consumer<Object>> consumers = handlers.get(event.getClass());
-        if (consumers != null) consumers.forEach(h -> h.accept(event));
+// Effective Java Item 31. The source PRODUCES Numbers we read -> extends.
+// The dest CONSUMES Numbers we write -> super.
+public static void copy(List<? extends Number> src, List<? super Number> dest) {
+    for (Number n : src) {       // read as Number: any subtype works
+        dest.add(n);             // write a Number: any supertype container works
     }
 }
 
-// Usage:
-TypedEventBus bus = new TypedEventBus();
-bus.subscribe(OrderPlaced.class, order -> processOrder(order));
-bus.subscribe(UserCreated.class, user -> sendWelcomeEmail(user));
-bus.publish(new OrderPlaced("order-123"));  // routes to OrderPlaced handler only
+// Caller flexibility this buys:
+List<Integer> ints   = List.of(1, 2, 3);          // ? extends Number  OK
+List<Object>  sink   = new ArrayList<>();          // ? super Number    OK
+copy(ints, sink);                                  // compiles, type-safe
 ```
 
-**Key generics concepts**: parameterized type-safe API, raw type in internal map (with documented safety), unchecked cast (justified and annotated), `CopyOnWriteArrayList` for concurrent modification safety.
+Applied to the bus, the same rule lets a publisher hand in a `List<OrderPlaced>` to a `publish(List<? extends OrderEvent>)`, and lets a subscriber register a `Consumer<Event>` for an `OrderEvent` stream via `subscribe(Consumer<? super OrderEvent>)`:
+
+```java
+public final class EventBus<E extends Event> {
+    private final List<Consumer<? super E>> subscribers = new CopyOnWriteArrayList<>();
+
+    // Producer position: we only READ events out of the incoming list.
+    public void publish(List<? extends E> events) {
+        for (E e : events) {
+            for (Consumer<? super E> s : subscribers) s.accept(e);
+        }
+    }
+
+    // Consumer position: the handler will RECEIVE (consume) events of type E.
+    public void subscribe(Consumer<? super E> handler) {
+        subscribers.add(handler);
+    }
+}
+
+EventBus<OrderEvent> bus = new EventBus<>();
+bus.subscribe(System.out::println);          // Consumer<Object> accepts OrderEvent
+bus.subscribe(new AuditLogger());            // Consumer<Event>  accepts OrderEvent
+bus.publish(List.of(new OrderPlaced("o-1"))); // List<OrderPlaced> is List<? extends OrderEvent>
+```
+
+### Heap Pollution: Broken Raw Type, Then the Fix
+
+The original bus used a raw `Map` and an unchecked cast. This compiles with a warning and then explodes at runtime far from the cast site — classic heap pollution.
+
+```java
+// BROKEN — raw type + unchecked cast lets a String handler receive an Integer event
+class UnsafeBus {
+    private final Map handlers = new HashMap();   // raw type: no type checking
+
+    @SuppressWarnings("unchecked")
+    void subscribe(Class type, Consumer handler) { handlers.put(type, handler); }
+
+    @SuppressWarnings("unchecked")
+    void publish(Object event) {
+        Consumer h = (Consumer) handlers.get(event.getClass());
+        if (h != null) h.accept(event);   // ClassCastException erupts INSIDE the handler
+    }
+}
+// Consumer<String> registered under String.class, then someone publishes
+// a subclass mismatch -> the cast inside the lambda throws, with a stack trace
+// pointing at user code, not at the bus. Hours lost.
+```
+
+```java
+// FIX — a typed container that re-checks at the boundary using the Class token
+final class TypedBus {
+    private final Map<Class<?>, List<Consumer<?>>> handlers = new ConcurrentHashMap<>();
+
+    <T> void subscribe(Class<T> type, Consumer<? super T> handler) {
+        handlers.computeIfAbsent(type, k -> new CopyOnWriteArrayList<>()).add(handler);
+    }
+
+    @SuppressWarnings("unchecked")     // safe: cast guarded by the Class<T> key invariant
+    <T> void publish(Class<T> type, T event) {
+        List<Consumer<?>> hs = handlers.get(type);
+        if (hs != null) for (Consumer<?> h : hs) ((Consumer<? super T>) h).accept(event);
+    }
+}
+```
+
+### Type Erasure and the Class<T> Token Workaround
+
+At runtime `List<String>` and `List<Integer>` are the *same* class — `java.util.ArrayList`. Erasure removes the parameter, so you cannot overload, `instanceof`, or `new T[]` on it.
+
+```java
+List<String>  a = new ArrayList<>();
+List<Integer> b = new ArrayList<>();
+System.out.println(a.getClass() == b.getClass());   // true — both ArrayList.class
+
+// You CANNOT do: if (a instanceof List<String>)  // compile error, erasure
+// Workaround: carry the type at runtime with a Class<T> token (super type token
+// for generics-of-generics via TypeReference, as Jackson does).
+static <T> T parse(String json, Class<T> token) {  // token survives erasure
+    return mapper.readValue(json, token);
+}
+```
+
+### Common Pitfalls
+
+**The invariance trap — `List<Dog>` is NOT a `List<Animal>`.**
+```java
+List<Dog> dogs = new ArrayList<>();
+// List<Animal> animals = dogs;   // COMPILE ERROR — and that error is protecting you:
+// animals.add(new Cat());        // would have polluted the dog list -> CCE on read
+// FIX: use a wildcard for read-only views: List<? extends Animal> view = dogs;
+```
+
+**Unchecked cast from a raw type introduces heap pollution.** A `@SuppressWarnings("unchecked")` on a raw-to-parameterized cast silences the only warning the compiler can give you. Confine the cast to the smallest possible scope, never blanket a whole method, and document the invariant that makes it safe (the `Class<T>` key above).
+
+**`instanceof` on a generic type fails at runtime.** `obj instanceof List<String>` does not compile; `obj instanceof List` (raw) compiles but tells you nothing about elements. To branch on element type you must inspect an element or carry a `Class<T>` token.
+
+**Capturing a wildcard in a helper.** A method body cannot `add` to a `List<?>` because the capture type is unknown. Extract a generic helper with a named type variable so the compiler can *capture* the wildcard: `private <T> void swap(List<T> l, int i, int j)` called from `void swap(List<?> l, ...)`.
+
+### Interview Discussion Points
+
+**Why does `List<? extends Number>` reject `add(1)` but allow `get()` as a `Number`?** Because the capture could be `List<Long>` and adding an `Integer` would corrupt it; the compiler only knows the elements are *some* unknown subtype of `Number`, which is enough to read them as `Number` but not enough to write any specific subtype safely.
+
+**What is heap pollution and how does it arise without an explicit cast?** Heap pollution is a variable of a parameterized type referring to an object that is not of that type. It arises through raw types, unchecked casts, and varargs of generics (`@SafeVarargs`); the JVM, having erased the type, does not catch it until a later implicit cast fails — far from the cause.
+
+**How would you store heterogeneous typed values in one map safely?** A typesafe heterogeneous container (Effective Java Item 33): `Map<Class<?>, Object>` with `<T> void put(Class<T> t, T v)` and `<T> T get(Class<T> t) { return t.cast(map.get(t)); }`. The `Class<T>` token re-establishes the type the erasure removed, and `Class.cast` makes the unchecked cast checked.
+
+**Why are arrays covariant but generics invariant, and why does that matter?** Arrays are reified and covariant (`Object[] a = new String[1]`), so a bad store throws `ArrayStoreException` at runtime. Generics are erased and invariant, pushing the same class of error to compile time. Mixing them (`List<String>[]`) is forbidden precisely because it would let heap pollution slip past the compiler.
+
+**When is `@SuppressWarnings("unchecked")` acceptable in a published library?** Only when you can prove the cast is safe from a surrounding invariant (such as a `Class<T>` key controlling the value type), the annotation is on the narrowest scope possible (ideally a single local variable, not a method), and you add a comment stating why it is safe so the next maintainer does not have to re-derive the proof.
