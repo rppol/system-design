@@ -549,3 +549,192 @@ CDN (CloudFront / Fastly) — serves all media globally
 - Celebrity threshold: 10K followers for hybrid switch
 - Redis timeline: 800 tweet_ids per user
 - Snowflake ID: 64-bit, 41-bit timestamp
+
+---
+
+## 18. Failure Scenarios and Recovery
+
+### Failure 1: Timeline Redis Cluster Master Loss
+**Scenario**: A Redis master holding ~5% of users' precomputed home timelines crashes (process kill, hardware failure, OOM from a hot key).
+
+**Behavior**:
+- Sentinel detects master failure in 10–15 seconds (configurable failover-timeout).
+- A replica is promoted; client libraries (Jedis/Lettuce with Sentinel support) re-resolve the master endpoint.
+- Writes that hit the failed master in the gap window are buffered in the fan-out service's local in-memory queue with retry.
+- Stale reads possible during the 30s window: a user might miss a tweet posted right before failover.
+
+**TTR**: 30–45 seconds for full read/write recovery. Tweet itself is never lost (durable in Manhattan/MySQL); only the precomputed timeline index needs rebuild.
+
+**Mitigation at scale**: Sharded Redis with replication factor 2 (1 master + 2 replicas per shard); failover impacts only ~0.5% of users at any moment.
+
+### Failure 2: Timeline Cache Cold Start (Thundering Herd)
+**Scenario**: Entire Redis tier restarted after a config change or OS patch. All ~300M home timeline caches are empty. Each user login triggers a full fan-out reconstruction.
+
+**Cost of rebuild per user**: Fetch latest 800 tweets from followees (avg 200 followees × 4 recent tweets each via Manhattan) → ~10ms per user.
+
+**Behavior without mitigation**:
+- 1M users/sec attempt to load home timelines.
+- Each triggers a Manhattan read storm: 1M × 200 = 200M reads/sec → 6× normal load → Manhattan latency explodes → cascading failure.
+
+**Mitigation**:
+- **Warm-up procedure**: Pre-rebuild timelines for top 10% most-active users *before* restoring traffic (1 hour batch job using Hadoop/Spark).
+- **Request coalescing**: If 1000 requests for the same user's timeline arrive within a 100ms window, only one rebuild executes; others wait on the resulting promise.
+- **Graceful degradation**: Serve "last known good" timeline from a backup Cassandra cache (1-hour stale), then async-refresh.
+
+**TTR**: 30–60 minutes to fully warm cache for active users; passive users warm on first login.
+
+### Failure 3: Manhattan KV Store Hot Partition (Celebrity Tweet)
+**Scenario**: An A-list celebrity (100M followers) tweets. The fan-out service writes the tweet ID to 100M home timeline indexes. The Manhattan shards holding those indexes get hammered.
+
+**Behavior**:
+- Manhattan shards holding the celebrity's followers see a 100× write spike.
+- p99 latency on those shards jumps from 5ms to 200ms.
+- Fan-out backlog grows; lag visible in "tweet appears in followers' timelines" metric.
+
+**Mitigation**:
+- **Hybrid timeline**: For users with >10K followers, *don't* push on write. Pull on read instead.
+- For users in the 1K–10K range: fan-out with rate limiting (max 50K writes/sec per tweet).
+- For sub-1K users: immediate fan-out.
+
+**TTR**: Tweets from celebrities are visible to followers within 5–30 seconds (vs. <1s for normal users). Acceptable tradeoff.
+
+### Failure 4: Cross-DC Network Partition
+**Scenario**: WAN link between US-East and EU-West fails. Twitter serves traffic from both DCs with cross-region replication.
+
+**Behavior**:
+- EU users continue to read tweets; new tweets posted in EU replicate locally but not to US.
+- US users miss EU-originated tweets until partition heals (asymmetric visibility).
+- Fan-out service queues cross-DC fan-outs in Kafka MirrorMaker; drained on recovery.
+
+**TTR**: User-visible eventual consistency: typically 1–5 minutes after partition heal for full convergence.
+
+### Failure 5: Snowflake ID Generator Clock Skew
+**Scenario**: NTP failure causes one Snowflake node's clock to drift backwards by 100ms.
+
+**Behavior**:
+- Snowflake refuses to generate IDs while the clock is behind its last-generated timestamp (prevents duplicate IDs).
+- That node returns errors for the drift duration (100ms).
+- Clients retry against a different Snowflake instance.
+
+**TTR**: < 1 second user-visible; node self-heals when clock catches up.
+
+---
+
+## 19. Capacity Planning Math (Bitly-Scale Twitter Numbers)
+
+### Tweet Storage
+- **500M tweets/day** × 280 chars (~ 1KB after metadata: user_id, timestamp, mentions, hashtags, media refs) = **500 GB/day** raw.
+- With RF=3 replication: **1.5 TB/day**.
+- Annual: 500 GB × 365 = **~180 TB/year** raw, **~540 TB/year** replicated.
+- 10-year retention: **~5.4 PB**.
+- Manhattan compression (LZ4 ~2×): **~2.7 PB** physical.
+
+### Read Throughput
+- **300K reads/sec** average; 1M reads/sec peak.
+- Each timeline read = 1 Redis GET (3 ms p99) + 20 Manhattan reads for tweet content (hydration).
+- Redis fleet: 300K req/sec / 100K req/sec/node = **3 Redis nodes** for timeline indices, plus replicas → ~20 nodes for HA.
+- Manhattan fleet: 300K × 20 = **6M reads/sec** hydration → ~200 Manhattan nodes.
+
+### Fan-Out Cost
+- 500M tweets/day, avg 200 followers/tweet (long tail dominated by small accounts).
+- **Total fan-out writes/day**: 500M × 200 = **100B writes/day** = ~1.16M writes/sec average.
+- Without celebrity pull-model: would be ~10× more (top accounts have 100M+ followers).
+- Fan-out service: 1.16M/sec ÷ 10K writes/sec/worker = **~120 fan-out workers** + 50% headroom.
+
+### Search Indexing (Earlybird)
+- All 500M tweets/day indexed in real-time into Lucene-based Earlybird shards.
+- Each tweet generates ~50 index terms (tokens + hashtags + entities).
+- **Index writes/day**: 500M × 50 = 25B postings/day = 290K postings/sec.
+- Earlybird hot tier holds 7 days of tweets in memory: 7 × 500GB = **3.5 TB RAM** spread across shards.
+
+### Media Storage
+- 25% of tweets have media: 125M media uploads/day.
+- Avg size 500KB (mostly images, some video) = **62.5 TB/day** ingest.
+- Annual: ~23 PB; long-term archived to cold storage at ~$0.005/GB-month.
+
+### Cost Envelope
+- Manhattan (~200 nodes), Redis (~20), Earlybird (~50), fan-out workers (~120), GQL/REST API tier (~500), edge cache (~100) ≈ **~1000 nodes** at $25K/year fully loaded = **$25M/year compute**.
+- Bandwidth egress: ~3 PB/day client traffic at $0.01/GB blended (heavy CDN offload) = **~$110M/year**.
+- Media storage (hot + cold): ~$15M/year.
+
+---
+
+## 20. Multi-Region and Global Deployment
+
+### Active-Active Architecture
+- Twitter operates primarily from **us-east-1** (Atlanta-area DCs historically, then GCP) and **eu-west** (Dublin), with smaller PoPs in APAC.
+- Both regions serve reads and writes; tweets replicate asynchronously.
+
+### GDPR Data Residency
+- EU users' PII (email, phone, IP logs) stored in EU DCs only.
+- Tweets themselves are public content — replicated globally for low-latency reads.
+- DM (direct messages) are stored in the originating user's home region; cross-region DM has slightly higher latency (~50ms vs. <10ms).
+
+### Replication Lag
+- Tweet write → global visibility: **2–5 seconds typical**, 10s p99.
+- Acceptable because Twitter UX doesn't promise read-your-writes globally (it does promise it within the user's home region via stickiness).
+
+### Conflict Resolution
+- Tweet content is immutable (no edits historically; edit feature added in 2022 with version vectors).
+- Retweet/like counters: eventually consistent via CRDT counter (G-counter).
+- Username availability: globally coordinated via consensus (etcd/Zookeeper).
+
+### Cross-Region Failover
+- Route 53 health checks every 10s; failover DNS TTL of 60s.
+- Full us-east-1 loss: traffic shifts to us-west and EU within 2–5 minutes.
+- Recent unreplicated tweets (~5 sec window) may be temporarily invisible until restored from snapshot.
+
+---
+
+## 21. Operational Concerns
+
+### Critical Alerts
+| Metric | Threshold | Response |
+|--------|-----------|----------|
+| Tweet write p99 latency | > 500ms | Page on-call; check Manhattan + Snowflake |
+| Fan-out lag (write → visible in followers' timelines) | > 30s | Check Kafka backlog, scale workers |
+| Home timeline read p99 | > 200ms | Redis health + Manhattan hydration latency |
+| Earlybird indexing lag | > 60s | Search shows stale results; scale indexers |
+| Fan-out service error rate | > 0.1% | Often signals celebrity-tweet thundering herd |
+| CDN cache hit rate (images) | < 90% | Check origin egress; possible cache pollution attack |
+
+### Deployment Strategy
+- **Canary**: 0.1% of traffic for 1 hour → 1% for 2 hours → 10% for 4 hours → 100%.
+- **Auto-rollback** triggers: error rate >0.5% above baseline, latency p99 >20% above baseline.
+- **Feature flags** via internal "Decider" service: enable per-country, per-user-bucket, gradually ramp.
+- Deployments are continuous: ~50 deploys/day across the microservice fleet at peak.
+
+### On-Call Runbook: Fan-Out Service Backlog
+1. Check Kafka consumer lag: `kafka-consumer-groups --describe --group fanout-workers`.
+2. If lag > 5 min and growing: a celebrity tweet may be amplifying. Look at recent high-follower tweets.
+3. Mitigation: temporarily lower the fan-out fan-out cap (e.g., from 100K to 10K) to shed load.
+4. Scale workers: HPA based on Kafka lag metric typically auto-scales, but manual bump may be needed.
+5. Verify Manhattan write latency isn't the actual bottleneck.
+
+### On-Call Runbook: Timeline Reads Returning Empty
+1. Reproduce with a known test account.
+2. Check Redis cluster: `INFO replication` — is the user's shard healthy?
+3. If shard is down: failover to replica (usually automatic via Sentinel).
+4. If shard is empty (cache lost): trigger rebuild from Manhattan; user sees fallback timeline.
+5. Long-term: enable Redis AOF persistence to avoid full rebuilds.
+
+---
+
+## 22. Evolution and Future Improvements
+
+### At 10× Scale (3B MAU, 5B tweets/day)
+- Manhattan would need re-sharding to 10K+ nodes; gossip overhead becomes prohibitive. Migration to a hierarchical sharding scheme (region → shard → micro-shard).
+- Fan-out economics break down further: pure pull-model timeline (Facebook News Feed style) with aggressive caching would replace push-based fan-out for all users, not just celebrities.
+- Earlybird search would migrate to a distributed inverted-index store like Apache Pinot or ClickHouse for sub-second analytical queries.
+
+### Technical Debt
+- **Legacy Rails monolith remnants**: Some admin tooling and internal dashboards still hit a Rails app from 2010. Slow migration to Scala/JVM.
+- **Manhattan's lack of secondary indexes**: forces denormalization everywhere; modern alternative would be FoundationDB or TiKV.
+- **Fan-out heuristic constants** (10K-follower threshold) are hand-tuned; ML-based dynamic threshold per user behavior would improve efficiency.
+
+### Future Capabilities
+- **Edit window beyond 30 min**: Requires versioned tweet storage and view-time resolution; trade-off with retweet semantics (does a retweet show v1 or v2?).
+- **Long-form posts (Notes, 4000+ chars)**: Already launched; requires different ranking signals because dwell-time is the engagement metric vs. instant scroll.
+- **End-to-end encrypted DMs**: Twitter announced E2E DMs in 2023; full rollout requires key management infrastructure similar to WhatsApp's.
+- **AI-generated timeline ranking**: Move from heuristic + simple ML to LLM-based "explainable" ranking ("why am I seeing this tweet?").
+

@@ -632,3 +632,213 @@ function is_rate_limited(user_id, limit=100, window=3600):
 - 80/20 rule: 20% of URLs = 80% of traffic
 - Cache size for hot 20%: ~2 GB (fits easily in Redis)
 - Rate limit: 100 URLs/hour for free tier
+
+---
+
+## 18. Failure Scenarios and Recovery
+
+### Failure 1: Primary Database Loss
+**Scenario**: The primary MySQL/Postgres holding the URL mapping table fails (hardware, network, or accidental DROP).
+
+**Behavior**:
+- Read traffic continues from read replicas (10–30 of them in production).
+- Write traffic (new URL creation) pauses for 30–60s while a replica is promoted.
+- Short code generation pauses during this window (counter state lives in DB or in Zookeeper).
+- Already-generated codes still work because Redis serves 95%+ of redirect traffic.
+
+**TTR**: 30–60s for write recovery via auto-failover (e.g., Orchestrator, Patroni); manual intervention can take 5–15 min if automation fails.
+
+### Failure 2: Redis Cache Tier Wipeout (Cold Cache)
+**Scenario**: Redis cluster restarted (config change, OOM, OS patch). All 20K reads/sec peak load now hits the database directly.
+
+**Math of the catastrophe**:
+- DB historically handles ~1K reads/sec comfortably; suddenly receives 20× load.
+- Connection pool exhausts; queries queue up; p99 latency explodes from 5ms to 5s.
+- Cascading: API gateway timeouts, client retries amplify load further.
+
+**Mitigation**:
+- **Cache warming**: Before re-enabling traffic post-Redis restart, run a batch job to pre-populate top 20% of URLs (those that account for 80% of traffic) from Postgres.
+- **Request coalescing**: 1000 simultaneous misses for the same short code result in a single DB query (singleflight pattern).
+- **Probabilistic early expiration**: Keys near TTL expiry have a small chance of being treated as expired by individual requests, spreading refresh load.
+
+**TTR**: With proper warming, <5 min. Without: 30 min of degraded service.
+
+### Failure 3: Counter Coordinator (Zookeeper) Failure
+**Scenario**: Zookeeper ensemble (managing ID ranges for short code generation) loses quorum.
+
+**Behavior**:
+- Each application server has a pre-allocated range of IDs (e.g., 1M IDs).
+- Servers continue generating short codes until their local range exhausts.
+- Once exhausted, new URL creations fail with retryable error.
+
+**TTR**: Zookeeper quorum recovery typically <5 min; until then, ~1 hour of creation capacity from pre-allocated ranges.
+
+### Failure 4: Cache Stampede on Viral Link
+**Scenario**: A celebrity tweets a shortened URL; 100K requests/sec hit a single short code that's not yet cached.
+
+**Behavior without mitigation**:
+- All 100K requests miss Redis simultaneously.
+- All 100K queries hit Postgres for the same key → DB melts down.
+
+**Mitigation**:
+- **Singleflight**: Application layer ensures only 1 of the 100K concurrent requests actually queries the DB; the rest wait for the result.
+- After first response, populate Redis with longer TTL for viral keys (auto-detected by request rate).
+- Edge CDN (CloudFlare/Fastly) caches 301/302 responses at PoP; second request to same PoP is served at edge without origin hit.
+
+**TTR**: 100ms for first request; subsequent requests served from edge cache at 0ms latency.
+
+### Failure 5: Abuse Storm (Phishing Campaign)
+**Scenario**: An attacker creates 10M short URLs all pointing to phishing pages in a 1-hour burst.
+
+**Behavior**:
+- Rate limits (100 URLs/hour per IP for free tier) cap individual attackers.
+- Attacker uses botnet (10K IPs × 100 URLs = 1M URLs/hour); still detectable.
+
+**Mitigation**:
+- **Async malicious URL scanning**: Every new URL submitted to a Kafka topic; consumers check against Google Safe Browsing API and a custom phishing classifier.
+- Flagged URLs are blocked (redirect to a warning page) within minutes.
+- Domains with >5% phishing rate (e.g., a new TLD abused) are added to a domain-level blocklist.
+- Repeat-offender IPs/accounts banned automatically.
+
+**TTR**: 1–5 minutes to flag and block individual URLs; minutes to hours to detect campaigns.
+
+### Failure 6: Analytics Pipeline Backlog
+**Scenario**: Kafka → Flink → ClickHouse analytics pipeline lags due to Flink job failure.
+
+**Behavior**:
+- Redirects continue working (analytics is async, not on critical path).
+- Click count dashboards show stale data.
+- Real-time analytics (e.g., "trending URLs") shows data from N minutes ago.
+
+**TTR**: Flink job restart from checkpoint: 2–10 min; backlog drains at 2-3× normal throughput.
+
+---
+
+## 19. Capacity Planning Math
+
+### URL Generation
+- **300M URLs/month** (Bitly public number) = 300M / 30 / 86400 = **~115 URLs/sec average**, ~1K/sec peak.
+- 6-character base62: 62^6 = **56.8 billion combinations**.
+- At 300M/month = 3.6B/year, exhaustion approaches in ~16 years.
+- **Birthday-paradox collision math**: 50% collision probability at ~sqrt(56.8B) = ~240K codes generated (for *random* generation). At 1% collision rate: ~33M codes.
+- **Conclusion**: random 6-char generation is impractical past ~10M URLs without retry-on-collision. Use 7-char (3.5 trillion combos) or sequential-counter-encoded-to-base62.
+
+### Storage
+- 6-char short code (6 bytes) + URL (~150 bytes average) + metadata (user_id, created_at, expires_at, click_count: ~50 bytes) = **~200 bytes/record**.
+- With indexes and overhead: **~500 bytes/record**.
+- **1 year of generation**: 3.6B URLs × 500 bytes = **1.8 TB**.
+- **5 years**: ~9 TB.
+- With RF=3: **27 TB**.
+
+### Read Traffic
+- **10B redirects/month** = 3,800/sec average, **~20K/sec peak**.
+- 80/20 rule: 20% of URLs (720M URLs) generate 80% of clicks (8B/month = 3K/sec).
+- Hot 20%: 720M × 500 bytes = **~360 GB** → fits in a 500GB Redis cluster (4-8 nodes).
+- Cache hit rate target: >95%.
+- Cache misses to DB: 20K × 0.05 = 1K/sec → easily handled by a single Postgres replica.
+
+### Bandwidth
+- Each redirect response: ~500 bytes (HTTP headers + Location header).
+- 20K/sec × 500 = **10 MB/sec egress** at peak.
+- Trivial bandwidth; CDN offloads most of it.
+
+### Analytics
+- 10B click events/month = **3,800 events/sec average, 20K peak**.
+- Each event: ~200 bytes (short_code, timestamp, IP, user agent, referrer, geo).
+- Kafka throughput: easily handled by 3 brokers (~50K events/sec capacity each).
+- ClickHouse storage: 10B events × 200 bytes × 5 years compression 5× = **~2 TB** raw analytics store; with redundancy ~6 TB.
+
+### Cost Envelope
+- App servers (URL gen + redirect handling): ~20 servers at $5K/year = **$100K/year**.
+- Redis cluster: 8 nodes at $10K/year = **$80K/year**.
+- Postgres/MySQL primary + 10 replicas: **$200K/year**.
+- Kafka + Flink + ClickHouse: **$150K/year**.
+- CDN egress: ~$50K/year.
+- **Total**: ~$600K/year for a Bitly-scale system. Order-of-magnitude cheaper than the WhatsApp/Netflix scale.
+
+---
+
+## 20. Multi-Region and Global Deployment
+
+### Edge-First Architecture
+- URL shorteners are read-heavy and globally consumed → **CDN at edge is critical**.
+- 301/302 redirects cached at CloudFlare/Fastly PoPs (200+ globally).
+- **Cache hit at edge**: 0ms origin latency, ~10ms p99 globally.
+- **Cache miss**: ~15ms to origin (regional) + ~5ms DB/cache lookup = **~20ms p99**.
+
+### Active-Active Origins
+- 3 origin regions (us-east, eu-west, ap-southeast).
+- Each region has its own Redis tier + read replicas.
+- Writes (URL creation) go to a primary region; eventually replicated to others.
+- Reads served from local region only (no cross-region read needed because edge cache handles freshness).
+
+### Replication
+- Postgres logical replication or DB-specific (Patroni for HA, BDR for multi-master) cross-region.
+- Replication lag: typically 50–500ms; acceptable because edge cache hides this.
+- Redis cross-region: not replicated; each region builds its own cache on read.
+
+### Conflict Resolution
+- Short codes are immutable once assigned: no conflict possible.
+- Counter ranges: Zookeeper or a global counter service allocates non-overlapping ranges to each region (e.g., us-east gets [0, 1B], eu-west gets [1B, 2B]).
+- User-supplied custom aliases (e.g., bit.ly/my-link): globally coordinated to prevent duplicates; uses a global lookup before assignment.
+
+### Data Residency
+- GDPR: EU user click analytics (IP, geo, user agent) stored only in EU.
+- URL records themselves are not PII (just URL strings), replicated globally for low-latency lookup.
+
+---
+
+## 21. Operational Concerns
+
+### Critical Alerts
+| Metric | Threshold | Why |
+|--------|-----------|-----|
+| Redirect p99 latency | > 50ms (at edge) | UX degradation; clicks abandoned |
+| Redis cache hit ratio | < 90% | DB about to be overloaded |
+| URL creation error rate | > 0.1% | DB or counter issue |
+| Counter range exhaustion warning | < 10% remaining | Run out of IDs imminent |
+| Phishing flag rate | > 1% of new URLs | Abuse campaign in progress |
+| Analytics pipeline lag | > 5 min | Stale dashboards; OK for hours, not days |
+| CDN egress cost spike | > 2× baseline | Possible attack or viral URL |
+
+### Deployment Strategy
+- **Blue/green**: Two parallel fleets; LB cuts over after smoke tests.
+- **Canary**: 1% traffic to new build for 1 hour; auto-rollback on error rate or latency regression.
+- **Feature flags** for new URL features (custom aliases, branded short domains, expiration policies).
+- **Schema migrations**: backward-compatible only; multi-step (add column → backfill → switch reads → drop old column) to avoid downtime.
+
+### On-Call Runbook: Redirect Latency Spike
+1. Check edge CDN dashboards: is cache hit rate dropping?
+2. If yes: check for a viral URL or attacker pattern (lots of misses for non-existent codes).
+3. If origin-side: check Redis health, then DB health.
+4. Mitigation: increase edge cache TTL temporarily (e.g., from 1 hour to 24 hours); accept some staleness.
+
+### On-Call Runbook: Phishing Campaign Detected
+1. Identify pattern: same destination domain, same creator IP, same user account?
+2. Block at source: ban account, IP, or destination domain.
+3. Bulk-flag existing URLs from the same source.
+4. Notify abuse@ team and partners (Google Safe Browsing).
+5. Post-mortem: did our auto-detector miss the pattern? Tune classifier.
+
+---
+
+## 22. Evolution and Future Improvements
+
+### At 10× Scale (3B URLs/month, 100B redirects/month)
+- Edge caching becomes existential: 1M redirects/sec average; without 99%+ edge cache hit, origin cost explodes.
+- Database sharding required for URL table; Cassandra or Cosmos DB candidates.
+- Counter coordination shifts to a distributed sequence service (Twitter Snowflake-style with per-DC range allocation).
+- Analytics moves from ClickHouse to a streaming-only architecture (Materialize, RisingWave) for sub-second freshness.
+
+### Technical Debt
+- Custom short codes (vanity URLs) bypass the counter scheme — separate code path with global coordination overhead.
+- Click analytics schemas evolved organically; many legacy columns retained for backward compatibility.
+- Multi-domain support (bit.ly + custom branded domains) complicates routing logic.
+
+### Future Capabilities
+- **Dynamic destination**: Short code resolves to different URLs based on context (geo, device, time of day, A/B test bucket). E.g., `bit.ly/promo` → mobile app store on phones, web page on desktop.
+- **Programmable redirects**: User-defined logic via WASM at the edge.
+- **Privacy-preserving analytics**: Differential privacy on aggregated click counts; no raw IP logging.
+- **Decentralized short URLs**: IPFS-based or blockchain-anchored short URLs that don't depend on a central service.
+- **AI-powered abuse detection**: LLM-based phishing detection beyond URL pattern matching; analyzes landing page content in real time.
+

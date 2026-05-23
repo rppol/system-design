@@ -600,3 +600,188 @@ Fallback for recommendation service failure:
 - 30+ encoded variants per title
 - 80% of views come from recommendations
 - Spot instances: 60-90% cheaper than on-demand for encoding
+
+---
+
+## 17. Failure Scenarios and Recovery
+
+### Failure 1: Full AWS Region Loss (Chaos Kong Drill)
+**Scenario**: us-east-1 becomes unavailable (real-world precedent: the September 2015 DynamoDB outage that took down half of AWS for hours). Netflix's "Chaos Kong" simulates this monthly.
+
+**Response sequence**:
+1. **Detection** (T+0 to T+60s): Atlas metrics show elevated error rates from us-east-1; Mantis (real-time event stream) confirms cross-AZ failure pattern.
+2. **Traffic shift** (T+60s to T+5min): Zuul (edge gateway) and Denominator (multi-CDN DNS abstraction) reweight traffic to us-west-2 and eu-west-1. DNS TTLs are 60s; most clients shift within 2 min.
+3. **Data tier failover** (T+2min to T+6min): EVCache (Memcached fork) clusters in healthy regions warm from Cassandra; Cassandra remains available because it's multi-region replicated with RF=3 per region.
+4. **Personalization degradation** (T+0 to T+30min): Recommendation models for users normally served from us-east are cold in other regions. Users see "popular in your country" lists rather than personalized rows for ~30 minutes.
+
+**TTR**: < 6 minutes for streaming traffic to fully shift; ~30 minutes for personalization quality to fully recover. **Zero stream interruption** for currently-playing sessions (the video chunks come from Open Connect, not AWS).
+
+### Failure 2: Open Connect Appliance (OCA) Failure at an ISP
+**Scenario**: A Comcast head-end's OCA fails during peak hours; 100K subscribers' streams need a new source.
+
+**Behavior**:
+- Each client periodically reports its current CDN endpoint to the steering service.
+- Steering re-routes affected clients to:
+  1. A neighboring OCA in the same ISP (lowest preference change).
+  2. A regional OCA in the IX (Internet Exchange Point).
+  3. AWS-hosted fill servers (S3-backed) as last resort.
+- ABR (adaptive bitrate) algorithm on the client detects throughput change and drops bitrate if necessary to avoid rebuffer.
+
+**TTR**: <30 seconds for new client connections; existing streams continue from chunk buffer (~30s ahead) and seamlessly re-bind to new origin.
+
+### Failure 3: Cassandra Region-Wide Slow-Down
+**Scenario**: Compaction storm or GC pause on a Cassandra cluster causes p99 reads to spike from 5ms to 500ms.
+
+**Behavior**:
+- Hystrix circuit breakers (or its successor Resilience4j) open on the calling service.
+- Fallback paths kick in: serve from EVCache stale data, or serve a default UI ("Recently Watched" instead of personalized "Top Picks").
+- Cassandra heals: typically within 5–15 minutes for transient compaction storms.
+
+**TTR**: User-visible impact zero for cacheable paths; some advanced personalization features may show fallback UI for 10–15 min.
+
+### Failure 4: License Server (DRM) Outage
+**Scenario**: Widevine license server cluster experiences a failure; new playback sessions cannot decrypt content.
+
+**Behavior**:
+- Existing streams continue (license is cached client-side for the session duration, typically 1-24 hours).
+- New streams fail at the license-acquisition step with a clear error code.
+- DRM service is regionally replicated; failover via DNS within 2 minutes.
+- For Netflix's revenue impact: DRM is on the critical path for *new* play starts (~10K/sec at peak); 2-minute outage = ~1.2M failed play starts.
+
+**TTR**: 1–3 minutes via regional failover.
+
+### Failure 5: Encoding Pipeline Stalls
+**Scenario**: A new title is uploaded but the encoding pipeline (built on Spinnaker + custom orchestrator) stalls due to a bug in the dynamic-optimizer service.
+
+**Behavior**:
+- Title remains in "ingest pending" state; not visible in catalog.
+- Existing titles unaffected.
+- On-call engineer rolls back the dynamic-optimizer deployment; reprocesses the title.
+
+**TTR**: 1–4 hours for fix + reprocess; user impact is *delayed* availability, not stream failure.
+
+---
+
+## 18. Capacity Planning Math
+
+### Streaming Bandwidth
+- **238M subscribers**, average concurrent viewers at peak ~10% = **~24M concurrent streams**.
+- Bitrate mix: 30% mobile (1.5 Mbps), 40% HD (5 Mbps), 25% 4K (15 Mbps), 5% 4K HDR (25 Mbps).
+- Weighted average: ~7 Mbps per stream.
+- **Peak aggregate bandwidth**: 24M × 7 Mbps = **168 Tbps** ≈ **21 TB/sec** of egress.
+- This is why Open Connect exists: serving this from AWS at $0.05/GB would cost **~$2.7M/hour** = **$1.6B/month** in egress alone. Open Connect pushes 95%+ of this to ISP-embedded boxes at near-zero marginal cost.
+
+### Content Storage
+- ~17,000 titles in catalog.
+- Each title encoded into ~120 variants (multiple codecs × bitrate ladders × audio tracks × languages × HDR/SDR).
+- Avg title size all variants: ~3 TB.
+- **Total catalog size**: 17,000 × 3 TB = **~50 PB**.
+- Cached on **15,000+ OCAs globally**; not every OCA has the full catalog (popularity-tiered: top 1% titles on every OCA, long tail on regional/AWS-backed fills).
+
+### Metadata Storage (Cassandra)
+- User profile, watch history, ratings, queue: ~5KB/user.
+- 238M × 5KB = ~1.2 TB of hot metadata.
+- With RF=3 across 3 regions: ~11 TB total.
+- Watch event log (every play/pause/seek for analytics): 50 events/user/day × 238M × 200 bytes = **~2.4 TB/day** → 870 TB/year, sampled and archived to S3.
+
+### Compute Footprint
+- Microservices: ~1,000 services running ~100,000 EC2 instances at peak (auto-scaled down off-peak).
+- Encoding fleet: ~300,000 vCPU-hours/day burst on EC2 Spot (60–90% cheaper) for new title encoding.
+- Recommendation training: ~5,000 GPU-hours/day on GPU instances.
+
+### Cost Envelope
+- Compute on AWS: **~$1B/year** (publicly disclosed AWS spend).
+- Open Connect (capex): ~15,000 OCAs at ~$30K each amortized over 5 years = **~$90M/year capex**, plus ~$50M/year colocation/power.
+- Content licensing/production: $17B/year (separate from infra; included for context).
+- Total infra: **~$1.2B/year** for serving 238M subscribers = ~$5/subscriber/year.
+
+---
+
+## 19. Multi-Region and Global Deployment
+
+### Three-Region Active-Active
+- **us-east-1** (Virginia): Primary historically; serves Americas.
+- **us-west-2** (Oregon): Active failover for Americas; pre-warmed for instant takeover.
+- **eu-west-1** (Dublin): Serves EMEA.
+- **ap-southeast-1** (Singapore): Serves APAC (added later).
+- Each region has full microservice stack + Cassandra replicas; no single region is critical.
+
+### Cross-Region Cassandra Replication
+- Cassandra `NetworkTopologyStrategy` with RF=3 in each region.
+- Writes use **LOCAL_QUORUM** (2/3 local replicas) for low latency.
+- Cross-region async replication; typical lag 50–200ms.
+- Read repair and hinted handoff keep eventual consistency strong.
+
+### Open Connect: ISP-Embedded CDN
+- Netflix offers OCAs (custom-built FreeBSD storage servers, ~280 TB each) to ISPs **for free**.
+- ISPs install them in their head-ends; Netflix traffic never traverses the public internet for that ISP's subscribers.
+- ~95% of Netflix's bytes are served from OCAs; only 5% from AWS-backed fill clusters at internet exchanges.
+- Pre-positioning: new content is pushed to OCAs during off-peak hours (3-6 AM local), based on predicted demand from the recommendation system.
+
+### Per-Title Encoding (Dynamic Optimizer)
+- Traditional CDN: fixed bitrate ladder (e.g., 235/375/560/750/1050/1750/2350/3000 kbps) applied to all titles.
+- Netflix's innovation: **per-title encoding**. The dynamic optimizer analyzes each title scene-by-scene and picks the optimal bitrate ladder per scene.
+- A high-motion action scene needs more bits; a static dialog scene needs few. Result: **~20% bandwidth reduction** for equivalent quality.
+- Stranger Things season premiere encoded with 27 thumbnail variants tested via A/B for click-through rate optimization.
+
+### Data Residency
+- EU subscriber PII (email, payment, viewing history) stored only in eu-west-1.
+- Catalog is global; recommendations are global model but personalized per region.
+
+---
+
+## 20. Operational Concerns
+
+### Critical Alerts
+| Metric | Threshold | Why |
+|--------|-----------|-----|
+| SPS (Starts Per Second) deviation from forecast | > 20% | Best leading indicator of system health |
+| Play start failure rate | > 0.1% | Direct revenue impact |
+| Rebuffer ratio | > 0.5% | Streaming quality degradation |
+| Hystrix open circuit count | > 100 services | Cascading failure forming |
+| Cassandra p99 read | > 50ms | Cache miss path slow |
+| Open Connect cache hit ratio | < 90% | Bandwidth bill spiking; possibly origin attack |
+| EVCache hit ratio | < 95% | Cassandra load about to spike |
+
+### Deployment Strategy
+- **Spinnaker pipelines**: every commit auto-deploys to canary cluster (1% traffic) for 1 hour, then gradual ramp.
+- **Red/black deployment** (Netflix's term for blue/green): new ASG launched in parallel; traffic flipped via ELB; old ASG kept for 30 min for fast rollback.
+- **Chaos Monkey** randomly kills instances in production daily; **Chaos Kong** simulates full-region loss monthly. If your service can't survive these, it's not production-ready.
+- **A/B testing** is the default: every new feature, ranking algorithm, even UI element is gated behind an experiment.
+
+### On-Call Runbook: SPS Drop Detected
+1. Look at Atlas dashboards: which region(s) is the drop in?
+2. Check upstream services: Zuul errors? Authentication failures? CDN issues?
+3. Check downstream: Cassandra latency? DRM service? Image service for box art?
+4. If region-localized: consider preemptive failover via Denominator (DNS reweighting).
+5. If global: roll back recent deployments via Spinnaker (one click).
+
+### On-Call Runbook: Open Connect Capacity Crisis at an ISP
+1. Check OCA fleet health for that ISP in the steering dashboard.
+2. If an OCA is unhealthy: re-route via steering.
+3. If aggregate ISP bandwidth saturated (e.g., during a big launch): coordinate with ISP to provision more OCAs.
+4. Activate AWS-backed fill as overflow.
+
+---
+
+## 21. Evolution and Future Improvements
+
+### At 10× Scale (2.4B Subscribers — Hypothetical)
+- Open Connect would need ~150,000 OCAs globally; logistics of physical deployment dominate.
+- AV1 (or successor) adoption critical for bandwidth: ~30% reduction over H.265.
+- Recommendation training would move to on-device personalization (TFLite/Core ML) for privacy + freshness.
+- Cassandra would be replaced by FoundationDB or similar (Cassandra's gossip overhead doesn't scale past ~5,000 nodes per cluster).
+
+### Technical Debt
+- Java 8 legacy services still present in some corners (most migrated to Java 17/21 with virtual threads).
+- Hystrix is deprecated upstream; migration to Resilience4j ongoing.
+- Custom CDN steering (in-house) competes with mature solutions (Cloudflare, Akamai); building vs. buying tradeoff continually re-evaluated.
+- Erlang/Elixir for some legacy systems (e.g., the original Roku integration) — limited talent pool.
+
+### Future Capabilities
+- **Cloud Gaming integration**: Streaming gameplay requires <50ms latency end-to-end; current CDN architecture optimized for one-way video, needs WebRTC for interactive.
+- **Interactive content (Black Mirror: Bandersnatch successor)**: Requires player-side state machine and dynamic stream switching at decision points.
+- **Live streaming at scale**: Netflix's first major live event (Chris Rock special, 2023) revealed gaps in their VOD-optimized architecture. Migration to low-latency HLS / DASH-LL is in progress.
+- **Generative AI for content**: AI-generated dubbing (preserving original actor voice), automated trailer generation, personalized thumbnails per user.
+- **On-device personalization**: Move recommendation inference to client to reduce server cost and improve privacy.
+
