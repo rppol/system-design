@@ -498,50 +498,174 @@ Consistent hashing places servers on a virtual ring. Each key maps to the neares
 
 ## Case Study: Load Balancing a High-Traffic E-Commerce Platform
 
-### Scenario
-An e-commerce site with 500 app servers needs to handle 50,000 requests per second at peak (Black Friday). They also need to route `/api/*` differently from `/static/*`, support zero-downtime deployments, and handle WebSocket connections for real-time inventory updates.
+### Problem Statement
 
-### Architecture Decision
+An e-commerce platform preparing for Black Friday:
 
-**Layer**: L7 (AWS ALB) — needed for content-based routing and WebSocket support.
+- **App servers:** 500 instances across 3 AZs (us-east-1a/b/c)
+- **Peak traffic:** 50,000 req/sec, 8M concurrent users
+- **Traffic mix:** 60% static (product images), 30% API, 10% WebSocket (live inventory)
+- **Latency SLA:** p99 < 200ms for API, p99 < 50ms for static
+- **Availability target:** 99.99% (52 min downtime/year budget)
+- **Deployment cadence:** 8 deploys/day, zero downtime required
+- **Hot products:** 1 SKU may receive 80% of read traffic during a flash sale
 
-**Algorithms**:
-- `/api/*` — Least Connections (API request duration varies; checkout takes 500ms, product page takes 50ms)
-- `/static/*` — Round Robin (all requests are identical cost; fast, no need for connection tracking)
-- WebSocket endpoint — Sticky Sessions with cookie affinity (WebSocket connections are long-lived)
-
-### Load Balancer Configuration
+### Architecture Overview
 
 ```
-ALB Listener: HTTPS :443
-  |
-  +-- Rule 1: Path is /api/*       -> Target Group: api-servers   (Least Connections)
-  |
-  +-- Rule 2: Path is /ws/*        -> Target Group: ws-servers    (Sticky Sessions)
-  |
-  +-- Rule 3: Path is /static/*    -> Target Group: static-servers (Round Robin)
-  |
-  +-- Default Rule                 -> Target Group: web-servers   (Round Robin)
-
-Health Check:
-  - Protocol: HTTP
-  - Path: /health (checks: DB connection, Redis ping)
-  - Interval: 10s
-  - Healthy threshold: 2
-  - Unhealthy threshold: 3
-
-Connection Draining: 60 seconds (allows in-flight requests to complete during deployments)
+                       Route 53 (latency-based)
+                                |
+                                v
+                  +-------------+-------------+
+                  |   AWS ALB (L7) :443       |
+                  |   - TLS terminate          |
+                  |   - Path/host routing      |
+                  +--+----------+----------+--+
+                     |          |          |
+        /api/*       |          |          | /ws/*
+        Least-Conn   |          | Round    | Consistent
+                     v          | Robin    | Hashing
+            +--------+------+   v          v
+            | API target    | static    +-------+
+            | group (200)   | group     | WS TG |
+            +-------+-------+ (150)     | (150) |
+                    |                   +---+---+
+                    v                       |
+            +----------------+      Sticky by user_id hash
+            | Hot-key NLB    |
+            | (consistent    |   Blue Group  +---+---+---+
+            |  hashing on    |   (current)   | A | B | C |
+            |  product_id)   |               +---+---+---+
+            +----------------+   Green Group +---+---+---+
+                                 (new ver)   | A'| B'| C'|
+                                             +---+---+---+
 ```
 
-### Deployment Process (Zero Downtime)
-1. Deploy new version to a new target group
-2. ALB: Shift 5% of traffic to new target group (canary)
-3. Monitor error rate and latency for 10 minutes
-4. If healthy, shift 50% then 100%
-5. Deregister old target group (connection draining ensures no dropped requests)
+### Key Design Decisions
 
-### Black Friday Scaling
-- Auto Scaling Group behind the ALB: min 10, max 500 instances
-- Scale-out trigger: ALB `TargetResponseTime` P99 > 200ms for 3 consecutive minutes
-- Pre-warm: scheduled scaling adds 200 instances at 11:45pm on Thanksgiving
-- Result: handled 52,000 RPS peak with P99 < 180ms and zero downtime
+1. **L7 (ALB) over L4 (NLB) at the edge.** Need content-based routing for `/api/*` vs `/static/*` and WebSocket upgrade detection. *Alternative rejected:* L4 NLB — cannot inspect HTTP path, would require separate IPs per route.
+
+2. **Least-Connections for `/api/*`.** API duration varies 50ms (product page) to 800ms (checkout). Round-robin would overload servers handling long checkouts. *Alternative rejected:* round-robin — observed 3x latency variance across hot/cold servers during load tests.
+
+3. **Consistent hashing for WebSocket (by `user_id`).** Long-lived (avg 30 min) connections must survive deploys; consistent hashing keeps the same user on the same server until that server leaves the pool. *Alternative rejected:* cookie-based sticky sessions — cookie loss (incognito mode, app reinstall) breaks session affinity.
+
+4. **Blue/Green deployment with 30s deregistration delay.** New target group registered, traffic shifted via weighted target groups (5% → 50% → 100%), old group deregistered with 30s drain. *Alternative rejected:* rolling deploy in-place — risk of mid-request termination during JVM restart.
+
+5. **Health checks: HTTP `/health`, interval 10s, threshold 2/3.** Health endpoint validates DB connection + Redis + downstream payment service. *Alternative rejected:* TCP-only check — passes even when JVM is in long GC pause and unable to serve traffic.
+
+6. **Hot-key NLB layer for flash-sale SKUs.** A dedicated NLB with consistent hashing routes `/product/{id}` so all reads for one SKU hit a small subset of cache-warm servers. *Alternative rejected:* uniform distribution — cache miss rate climbed to 60% during flash sales as every server cold-loaded the hot SKU.
+
+7. **Circuit breaker (Resilience4j) at app tier behind LB.** When downstream payment p99 > 1s, breaker opens and ALB receives 503; ALB removes the instance from rotation after 3 consecutive 503s. *Alternative rejected:* LB-only failure detection — slow-but-alive servers continue receiving traffic.
+
+### Implementation
+
+ALB target group config (Terraform):
+
+```hcl
+resource "aws_lb_target_group" "api" {
+  name                 = "ecom-api-tg"
+  port                 = 8080
+  protocol             = "HTTP"
+  vpc_id               = var.vpc_id
+  deregistration_delay = 30
+  load_balancing_algorithm_type = "least_outstanding_requests"
+
+  health_check {
+    path                = "/health"
+    interval            = 10
+    timeout             = 3
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    matcher             = "200"
+  }
+
+  stickiness {
+    enabled = false
+  }
+}
+```
+
+Java health endpoint with grace period for GC pauses:
+
+```java
+@RestController
+public class HealthController {
+    private final AtomicLong lastGcEndMs = new AtomicLong(System.currentTimeMillis());
+    private static final long GC_GRACE_MS = 5000;
+
+    @GetMapping("/health")
+    public ResponseEntity<?> health() {
+        if (System.currentTimeMillis() - lastGcEndMs.get() < GC_GRACE_MS) {
+            return ResponseEntity.ok("warming up");        // tolerate post-GC pause
+        }
+        if (!db.isConnected() || !redis.ping() || circuitBreaker.isOpen()) {
+            return ResponseEntity.status(503).body("unhealthy");
+        }
+        return ResponseEntity.ok("ok");
+    }
+}
+```
+
+Blue/Green traffic shift (AWS CLI):
+
+```bash
+aws elbv2 modify-listener --listener-arn $LISTENER \
+  --default-actions Type=forward,ForwardConfig='{
+    "TargetGroups":[
+      {"TargetGroupArn":"'$BLUE'","Weight":50},
+      {"TargetGroupArn":"'$GREEN'","Weight":50}]}'
+```
+
+### Tradeoffs
+
+| Strategy             | Round Robin | Least-Conn  | Consistent Hash | IP Hash |
+|----------------------|-------------|-------------|-----------------|---------|
+| Distribution evenness| Excellent   | Good        | Fair            | Poor    |
+| Long-conn affinity   | None        | None        | Strong          | Strong  |
+| Cache warmth         | Poor        | Poor        | Excellent       | Good    |
+| Reshuffling on scale | None        | None        | Minimal (~1/N)  | High    |
+| Latency-variance fit | Poor        | Excellent   | Poor            | Poor    |
+| Use case             | Static      | API         | WebSocket/Cache | Legacy  |
+
+### Metrics & Results
+
+- **Peak throughput:** 52,400 req/sec sustained for 6 hours (Black Friday)
+- **p99 latency:** API 178ms, static 38ms, WebSocket connect 95ms
+- **Cache hit rate during flash sales:** improved from 41% to 94% after hot-key NLB
+- **Zero-downtime deploys:** 1,247 deploys YTD, 0 customer-impacting incidents
+- **Server utilization variance:** dropped from 35% to 8% after switch to least-connections
+- **Auto-scale events:** scaled from 50 to 487 instances in 14 minutes during Black Friday surge
+
+### Common Pitfalls / Lessons Learned
+
+1. **Sticky session overload on viral product.** A TikTok-driven flash sale sent 80% of traffic to one product page; cookie-based stickiness pinned all those users to 6 servers (12% of fleet), pushing them to 100% CPU while the other 88% sat idle.
+   - *Broken:* `stickiness { enabled = true; type = "lb_cookie"; duration = 3600 }`
+   - *Fix:* removed cookie stickiness for `/product/*`, added an NLB with consistent hashing on `product_id` — distributes hot product across 12 servers (a subset chosen by hash ring) while preserving cache warmth.
+
+2. **Health-check flapping during GC pause.** A 4-second G1 mixed-GC pause failed two 10s health checks, marking the server unhealthy. The LB pulled it out, traffic spiked on remaining servers, triggering more GC pauses — cascading failure.
+   - *Broken:* `healthy_threshold = 2; unhealthy_threshold = 2;` (4s flap window)
+   - *Fix:* raise `unhealthy_threshold = 3` (30s grace) + the post-GC `warming up` 200 response above, giving the JVM time to stabilize before removal.
+
+3. **Connection draining not configured.** During a deploy, in-flight checkout requests were killed when the instance terminated, causing duplicate orders when clients retried.
+   - *Broken:* `deregistration_delay = 0` (immediate)
+   - *Fix:* `deregistration_delay = 30` + SIGTERM handler that completes in-flight requests and returns `Connection: close`, allowing graceful shutdown.
+
+### Interview Discussion Points
+
+**Q: Why not use a single LB algorithm for everything?**
+Workload heterogeneity. Static assets are uniform-cost (round-robin is optimal). API requests have 16x duration variance (least-connections wins). WebSockets are long-lived (consistent hashing preserves affinity). One algorithm cannot serve all three well.
+
+**Q: How do you avoid a thundering herd when 487 new instances boot during auto-scale?**
+Three layers: (1) pre-warm the JVM by hitting `/warmup` before registering with the LB, (2) `slow_start = 60s` on the target group ramps traffic linearly over 60 seconds, (3) connection pools pre-initialized with min-idle = 10 to avoid lazy connect storms.
+
+**Q: What happens if a whole AZ fails?**
+Route 53 health checks detect the failed regional ALB endpoint in ~30s and remove it from DNS. ALB is multi-AZ by default, so traffic shifts to remaining AZs. Auto-scaling adds capacity to surviving AZs. Total recovery: ~2 minutes with no manual intervention.
+
+**Q: How do you load-balance gRPC?**
+ALB does not support HTTP/2 for backend connections to gRPC, so we use NLB + client-side load balancing via gRPC's `round_robin` policy with `xDS` service discovery from Envoy. ALB is HTTP/1.1 only on the backend side as of 2024.
+
+**Q: Why consistent hashing over modulo hashing for the cache tier?**
+Modulo hashing (`server = hash(key) % N`) reshuffles ~all keys when N changes (scale-out, server failure). Consistent hashing reshuffles only `1/N` of keys. At 200 servers, scale-out moves 0.5% of keys vs 100% with modulo.
+
+**Q: How do you handle LB itself becoming a SPOF?**
+ALB is regionally redundant by design — AWS runs it across all AZs. For multi-region failover, Route 53 health checks + DNS failover. For belt-and-suspenders, some teams run dual LBs (ALB + CloudFront) so a full ALB regional outage still has CloudFront paths.

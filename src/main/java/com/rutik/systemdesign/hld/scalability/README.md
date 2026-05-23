@@ -476,62 +476,183 @@ Deploy instances in multiple geographic regions (AWS regions or GCP regions). Us
 
 ---
 
-## Case Study: Scaling a Social Photo-Sharing App
+## Case Study: Scaling Discord to 1M Concurrent Users per Channel
 
-### Scenario
-A social photo-sharing app starts with 10,000 users. It has a single EC2 server running Rails, a single PostgreSQL database, and images stored on local disk. It goes viral and needs to handle 1,000,000 users within 3 months.
+### Problem Statement
 
-### Phase 1: Quick Wins (Week 1)
-**Problems**: Images on local disk can't scale. Session in memory can't scale. No caching.
+Discord scaling its real-time messaging platform for major gaming events (game launches, esports tournaments):
 
-**Actions**:
-- Move images from local disk to S3
-- Move sessions from in-process memory to Redis
-- Add Cloudfront CDN in front of S3 for image delivery
-- Add database indexes on `user_id`, `created_at` for feed queries
+- **Peak concurrent users per channel:** 1M (single Pokemon Go community server)
+- **Total daily message volume:** 2.5 billion messages/day
+- **Active servers (guilds):** 19M servers, 6.7M of which have > 100 members
+- **Latency SLA:** p99 message delivery < 100ms in-region, < 250ms cross-region
+- **Voice/video calls:** 4M concurrent voice sessions, requires < 80ms WebRTC RTT
+- **Availability:** 99.95% (4.4 hours downtime/year budget)
+- **Reconnection storm scale:** 1M users may reconnect within 60s after backend deploy
 
-**Result**: System is now horizontally scalable, static assets served from CDN.
+### Architecture Overview
 
-### Phase 2: Scale the App Tier (Week 2-3)
-**Problems**: Single app server is CPU-bound at peak.
+```
+                  Cloudflare (DDoS, TLS, anycast)
+                              |
+                              v
+                  +-----------+-----------+
+                  | API Gateway (Go)      |
+                  | - REST /api/v9/*      |
+                  | - WS /gateway         |
+                  +-----+-----------+-----+
+                        |           |
+                        v           v
+            +-----------+--+   +----+------------+
+            | Session Svc  |   | Gateway WS Pool |
+            | (sticky by   |   | (sharded by     |
+            |  user_id)    |   |  guild_id)      |
+            +------+-------+   +--------+--------+
+                   |                    |
+                   v                    v
+         +---------+--------+   +-------+--------+
+         | Guild Shard (Erlang/Elixir actor)     |
+         | - one process per guild               |
+         | - holds member presence in memory     |
+         | - routes msg -> connected members     |
+         +-----+----------+-----+----------------+
+               |          |     |
+               v          v     v
+        Cassandra    ScyllaDB    Redis presence
+        (messages)   (members)   (online status)
+```
 
-**Actions**:
-- Set up an Application Load Balancer
-- Create an Auto Scaling Group with 2-10 instances
-- Set scale-out trigger at 60% CPU, scale-in at 20%
-- Configure health checks — unhealthy instances removed automatically
+### Key Design Decisions
 
-**Result**: App tier scales from 1 to 10 instances automatically. No SPOF.
+1. **Erlang/Elixir actor model per guild.** Each guild is a lightweight BEAM process (2KB stack). 19M guilds run as 19M concurrent actors across a fleet of 200 nodes. *Alternative rejected:* thread-per-guild in JVM — 1MB stack x 19M = 19TB RAM, infeasible.
 
-### Phase 3: Scale the Database (Week 3-6)
-**Problems**: PostgreSQL primary is handling all reads, high connection count.
+2. **Guild sharding by `guild_id % N`.** Each guild lives on exactly one shard; all members of that guild connect to that shard. Eliminates cross-shard fan-out for in-guild messages. *Alternative rejected:* random sharding — every message would require N-way fan-out lookup.
 
-**Actions**:
-- Add 2 PostgreSQL read replicas
-- Route all read queries to replicas via PgBouncer
-- Add Redis caching for user profiles (TTL: 5 min) and photo metadata (TTL: 1 min)
-- Move email notifications and image processing to background jobs (Sidekiq + Redis)
-- Deploy PgBouncer for connection pooling
+3. **Presence-aware fan-out.** Messages are pushed only to currently connected WebSocket sessions (from in-memory presence map), not to all guild members. *Alternative rejected:* broadcast to all members — a message to 500k-member guild would trigger 500k Cassandra writes; only ~50k are online at any time.
 
-**Result**: Database read load reduced by 70% (reads from replicas + cache). Write load on primary reduced by removing non-critical synchronous operations.
+4. **WebSocket sticky routing via `Sec-WebSocket-Key` hash.** Gateway LB hashes by user_id to keep the user on the same gateway node, preserving the connection and avoiding session migration. *Alternative rejected:* round-robin WS — every reconnect rebuilds presence state from Cassandra (50ms cold start).
 
-### Phase 4: Global Scale (Month 2-3)
-**Problems**: Users in Europe and Asia experience high latency (app is US-only).
+5. **Cassandra for messages, ScyllaDB for members.** Cassandra optimized for write-heavy append (messages); ScyllaDB (C++ rewrite) for the high-read member-list workload that bottlenecked on Cassandra's JVM GC. *Alternative rejected:* single store — Cassandra's read p99 at 200k QPS exceeded 50ms during compaction.
 
-**Actions**:
-- Deploy read replicas in EU and APAC regions
-- Deploy app tier in EU and APAC with Route 53 latency-based routing
-- Write traffic still goes to US primary (accept slight write latency for consistency)
-- CDN serves photos from edge nodes globally (already in place)
+6. **Backpressure-aware push.** Each WS session has a 1024-message bounded queue; if a client cannot drain (slow network), additional messages are dropped from queue head with `MISSED_MESSAGES_RESYNC` signal. *Alternative rejected:* unbounded buffer — slow clients cause OOM on gateway nodes.
 
-**Result**: P50 latency for European users drops from 180ms to 35ms.
+7. **Exponential backoff + jitter on reconnect.** After a gateway restart, clients reconnect with `delay = min(rand(0.5, 1.5) * 2^attempt seconds, 60s)`. *Alternative rejected:* immediate reconnect — observed a 1M-RPS reconnect storm taking down the entire gateway fleet for 8 minutes.
 
-### Final Architecture
-- 2-10 app servers (auto-scaled) in 3 regions
-- 1 PostgreSQL primary (US) + 4 read replicas (2 US, 1 EU, 1 APAC)
-- Redis cluster for sessions and caching
-- S3 + CloudFront for images
-- Sidekiq workers for background jobs
-- PgBouncer for connection pooling
+### Scaling Inflection Points
 
-**Outcome**: Successfully scaled from 10K to 1M users with no downtime, at 3x the original infrastructure cost (not 100x, because of smart scaling choices).
+| Phase | Users      | Bottleneck                          | Architectural change                             |
+|-------|------------|-------------------------------------|--------------------------------------------------|
+| 1     | 0 - 25K    | Single Go server, in-memory state   | None — vertical scaling sufficed                 |
+| 2     | 25K - 100K | C10K limit, OS file descriptors     | Sharded gateway by user_id, tuned `ulimit`       |
+| 3     | 100K - 5M  | Per-guild fan-out cost              | Migrated guild logic to Elixir actor model       |
+| 4     | 5M+        | Cassandra read latency under GC     | Member list moved to ScyllaDB (C++, no GC)       |
+
+### Implementation
+
+Elixir guild actor (simplified):
+
+```elixir
+defmodule Discord.GuildActor do
+  use GenServer
+
+  def init(guild_id) do
+    {:ok, %{guild_id: guild_id, sessions: %{}}}
+  end
+
+  # Member connects — register their session pid
+  def handle_cast({:connect, user_id, session_pid}, state) do
+    Process.monitor(session_pid)
+    {:noreply, put_in(state.sessions[user_id], session_pid)}
+  end
+
+  # Incoming message — fan out only to connected sessions
+  def handle_cast({:publish, msg}, state) do
+    Enum.each(state.sessions, fn {_uid, pid} ->
+      send(pid, {:dispatch, msg})    # bounded mailbox, non-blocking
+    end)
+    Cassandra.write_async(state.guild_id, msg)
+    {:noreply, state}
+  end
+
+  # Cleanup on session death
+  def handle_info({:DOWN, _ref, _, pid, _}, state) do
+    sessions = state.sessions
+               |> Enum.reject(fn {_, p} -> p == pid end)
+               |> Map.new()
+    {:noreply, %{state | sessions: sessions}}
+  end
+end
+```
+
+Reconnect with jittered backoff (client-side TypeScript):
+
+```typescript
+async function connectWithBackoff(maxAttempts = 10): Promise<WebSocket> {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await openWebSocket("wss://gateway.discord.gg");
+    } catch (err) {
+      const jitter = 0.5 + Math.random();             // [0.5, 1.5)
+      const delay = Math.min(jitter * Math.pow(2, attempt) * 1000, 60_000);
+      await sleep(delay);
+    }
+  }
+  throw new Error("gateway unreachable");
+}
+```
+
+### Tradeoffs
+
+| Approach           | Single Server | Sharded Gateway | Actor Model (chosen) | Microservices |
+|--------------------|---------------|-----------------|----------------------|---------------|
+| Max concurrent     | ~10K          | ~500K           | 1M+ per channel      | Limited by RPC|
+| State location     | In-process    | Per-shard       | Per-actor (BEAM)     | External store|
+| Failure blast      | All users     | 1/N users       | 1 guild              | Service-wide  |
+| Operational ease   | Easy          | Medium          | Hard (BEAM ops)      | Hard          |
+| Cost per million   | Infeasible    | $20k/mo         | $8k/mo               | $35k/mo       |
+
+### Metrics & Results
+
+- **Peak concurrent users (single channel):** 1.05M (Pokemon Go community, July 2016)
+- **Message delivery p99:** 78ms in-region, 220ms cross-region
+- **Daily messages:** 2.5B sent, 14B delivered (with fan-out)
+- **Gateway nodes:** 850 instances handling 11M concurrent WS connections
+- **Cost per 1M messages delivered:** $0.0008 (industry avg ~$0.005)
+- **Reconnect storm recovery:** previously 8 min downtime; now 95% reconnected within 45s
+
+### Common Pitfalls / Lessons Learned
+
+1. **Vertical scaling wall at 100k concurrent users.** Original Go gateway used a single process; OS file-descriptor limit and event-loop saturation capped it at ~100k connections per box. Adding bigger boxes (32-core, 256GB RAM) helped only marginally.
+   - *Broken:* `runtime.GOMAXPROCS(32); /* one giant server */`
+   - *Fix:* horizontal sharding by user_id across 200 gateway nodes, each handling ~50k connections.
+
+2. **Fan-out storm on large-server message.** A message to a 500k-member guild triggered 500k WebSocket writes in a tight loop, monopolizing the gateway's event loop for 4 seconds during which all other messages stalled.
+   - *Broken:* `for member in guild.members: send_ws(member, msg)`
+   - *Fix:* presence-filtered fan-out — `for session in presence.online(guild_id): send_ws(session, msg)`. Reduced 500k writes to ~30k (only currently-connected).
+
+3. **Thundering herd on reconnect after gateway deploy.** A rolling restart triggered 1M simultaneous reconnects; gateway nodes accepted 1M `INIT` requests, each spawning a Cassandra presence-load query — cassandra collapsed under 1M QPS.
+   - *Broken:* `client.on('disconnect', () => connect());`
+   - *Fix:* client-side exponential backoff with jitter (snippet above) spreads reconnects over 60s. Server-side: presence cache in Redis warmed before accepting new connections.
+
+### Interview Discussion Points
+
+**Q: Why Elixir/Erlang instead of Go or Java?**
+BEAM (Erlang VM) supports millions of lightweight processes with preemptive scheduling and per-process garbage collection — a slow GC in one guild doesn't block others. Go's goroutines share a single GC; a 200ms STW pause stalls all guilds. JVM threads are too heavy (1MB stacks).
+
+**Q: How do you handle a guild with 1M members?**
+The guild actor itself stays on one node. Member-list reads are paginated and cached client-side. Voice/video for that guild use a separate Mediasoup SFU cluster (one SFU per voice channel, not per guild). The actor only fans out to currently-connected sessions, which is typically 5-10% of members.
+
+**Q: What's the consistency model for messages?**
+Eventual consistency at the per-channel level — messages may arrive out of order across regions during partition. Each message has a Snowflake ID (timestamp-based), so clients can re-sort. For strict ordering, Discord uses Cassandra's per-partition write order within a single guild.
+
+**Q: How do you migrate a guild between shards?**
+Manually triggered for re-balancing: pause writes to the guild (clients see brief "rate limited"), replicate state to the target shard, atomically update the routing table in ZooKeeper, resume writes. Takes ~5s per guild; done off-peak.
+
+**Q: What happens if BEAM node hosting a popular guild crashes?**
+Erlang supervisors restart the actor on another node; presence is rebuilt from Redis (warm cache, < 200ms). Clients see a 1-2s message delivery gap. Cassandra-backed message history is unaffected. Recovery is automatic.
+
+**Q: Why sticky sessions when you could use stateless workers?**
+WebSocket connections are stateful (TCP). Even with stateless app servers, the TCP socket lives on one machine. Sticky routing avoids the cost of state migration on every message. Discord pushes 14B messages/day — even a 1ms state-lookup cost adds 14M CPU-seconds/day.
+
+**Q: How do you load-test a 1M concurrent-user channel?**
+Custom load generator (Tsung-derived) simulating 1M WebSocket clients across 500 EC2 instances. Each generator sends randomized presence updates, chat messages, and reconnect events. Measures per-message delivery latency from publish to last receiver acknowledgment.

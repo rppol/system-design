@@ -447,3 +447,198 @@ Linearizability is a consistency model for individual operations — once an ope
 - The payment step uses a CP service (inventory lock + payment processing) — the AP cart feeds into a CP checkout
 
 **Outcome:** Cart is always available, never loses data, eventual consistency is acceptable for the browsing/adding flow. The CP boundary is drawn at checkout, where consistency is critical.
+
+---
+
+## Case Study: Choosing Between CP and AP for a Financial Ledger
+
+### Problem Statement
+
+A FinTech startup (digital wallet, B2C) migrating from a single-region PostgreSQL primary to a distributed database.
+
+- **Users:** 12M wallets, 800k DAU
+- **Volume:** 4M ledger writes/day (deposits, withdrawals, transfers), 60M reads/day (balance + activity feed)
+- **Peak QPS:** 2200 writes/sec, 14k reads/sec
+- **Latency SLA:** balance read p99 < 100ms; transfer commit p99 < 300ms
+- **Hard correctness invariants:**
+  - Wallet balance must never go negative (overdraft = regulatory violation)
+  - No money is created or destroyed (sum of deltas = current balance)
+  - Cross-wallet transfers atomic (debit + credit succeed or fail together)
+- **Soft requirements:** activity feed, search, transaction history — eventual consistency acceptable (~5s lag OK)
+- **Regions:** us-east, us-west, eu-west (regulatory data residency)
+
+### Architecture Overview
+
+```
+                  Client (mobile/web)
+                          |
+                          v
+                  +-------+-------+
+                  | API Gateway   |
+                  +---+-------+---+
+                      |       |
+            balance/  |       | activity
+            transfer  |       | feed
+                      v       v
+              +-------+--+   ++----------+
+              | Ledger   |   | Feed Svc  |
+              | Service  |   | (AP)      |
+              | (CP)     |   +----+------+
+              +-----+----+        |
+                    |             v
+                    v       +-----+----+
+              +-----+----+  | DynamoDB |  multi-region replication
+              | Spanner  |  | Global   |  eventual consistency
+              | (extern. |  | Tables   |  ~1-5s lag
+              |  consist)|  +----------+
+              +-----+----+
+                    |
+              event-sourced bridge (Kafka)
+              +-----+--------------------------+
+              | Outbox table -> Kafka -> Feed |
+              +--------------------------------+
+```
+
+### Key Design Decisions
+
+1. **Spanner (CP) for the ledger.** TrueTime + Paxos provide external consistency for cross-region transfers. A debit in us-east and credit in eu-west commit as one atomic transaction. *Alternative rejected:* DynamoDB transactions — single-region only; cross-region transfer requires Saga pattern with compensation, hard to keep invariant under partition.
+
+2. **DynamoDB Global Tables (AP) for activity feed.** Reads must be fast and locally available even during inter-region partition. Eventual consistency (1-5s lag) acceptable for feed display. *Alternative rejected:* Spanner for everything — read latency 4x higher, cost ~3x higher, and feed doesn't need strong consistency.
+
+3. **Outbox pattern bridges Spanner -> DynamoDB.** Every Spanner transaction also writes to an `outbox` table in the same transaction; a Kafka Connect job streams outbox rows to DynamoDB. *Alternative rejected:* dual write (write to both) — non-atomic, can leave feed missing entries on partial failure.
+
+4. **Read-your-writes on the feed.** After a transfer, the client receives a feed `lsn` token and includes it on subsequent feed reads; the feed service waits up to 2s for that lsn to be applied. *Alternative rejected:* show stale feed silently — user perceives the transfer as "failed" and retries, causing support load.
+
+5. **CHECK constraint enforces non-negative balance.** Spanner SQL `CHECK (balance >= 0)` rejects writes that would overdraw; application code never bypasses. *Alternative rejected:* application-level check — race window between read and write allows TOCTOU, leading to overdraft under concurrent withdrawals.
+
+6. **Regional read replicas with `EXACT_STALENESS 5s` for non-critical reads.** Account-summary screens (display only) use bounded-stale reads to cut latency from 40ms to 8ms. *Alternative rejected:* always-strong reads — unnecessary cost; user does not perceive 5s staleness on a static summary view.
+
+7. **Explicit accept of higher write latency.** Cross-region transfer p99 is 80ms (Spanner 2PC across 2 regions), accepted as the cost of correctness. *Alternative rejected:* single-region writes with async replication — risk of lost commits on regional failover.
+
+### Implementation
+
+Spanner schema with invariant enforcement:
+
+```sql
+CREATE TABLE Wallets (
+  wallet_id   STRING(36) NOT NULL,
+  user_id     STRING(36) NOT NULL,
+  balance     INT64 NOT NULL,
+  version     INT64 NOT NULL,                      -- optimistic concurrency
+  updated_at  TIMESTAMP NOT NULL OPTIONS (allow_commit_timestamp=true),
+  CONSTRAINT balance_non_negative CHECK (balance >= 0),
+) PRIMARY KEY (wallet_id);
+
+CREATE TABLE LedgerEntries (
+  wallet_id   STRING(36) NOT NULL,
+  entry_id    STRING(36) NOT NULL,
+  delta       INT64 NOT NULL,
+  reason      STRING(64) NOT NULL,
+  created_at  TIMESTAMP NOT NULL OPTIONS (allow_commit_timestamp=true),
+) PRIMARY KEY (wallet_id, entry_id),
+  INTERLEAVE IN PARENT Wallets ON DELETE CASCADE;
+
+CREATE TABLE Outbox (
+  outbox_id   STRING(36) NOT NULL,
+  event_type  STRING(64) NOT NULL,
+  payload     JSON NOT NULL,
+  created_at  TIMESTAMP NOT NULL OPTIONS (allow_commit_timestamp=true),
+) PRIMARY KEY (outbox_id);
+```
+
+Atomic cross-wallet transfer (Java + Spanner client):
+
+```java
+public TransferResult transfer(String from, String to, long amount) {
+    return spanner.readWriteTransaction().run(tx -> {
+        long fromBalance = tx.readRow("Wallets", Key.of(from),
+                                      List.of("balance")).getLong(0);
+        if (fromBalance < amount) {
+            throw new InsufficientFundsException();
+        }
+        long toBalance = tx.readRow("Wallets", Key.of(to),
+                                    List.of("balance")).getLong(0);
+
+        tx.buffer(List.of(
+            Mutation.newUpdateBuilder("Wallets")
+                .set("wallet_id").to(from)
+                .set("balance").to(fromBalance - amount)
+                .build(),
+            Mutation.newUpdateBuilder("Wallets")
+                .set("wallet_id").to(to)
+                .set("balance").to(toBalance + amount)
+                .build(),
+            Mutation.newInsertBuilder("LedgerEntries")
+                .set("wallet_id").to(from)
+                .set("delta").to(-amount).build(),
+            Mutation.newInsertBuilder("LedgerEntries")
+                .set("wallet_id").to(to)
+                .set("delta").to(amount).build(),
+            Mutation.newInsertBuilder("Outbox")
+                .set("event_type").to("transfer")
+                .set("payload").to(Value.json(buildPayload(from, to, amount)))
+                .build()
+        ));
+        return new TransferResult(/* commit timestamp */);
+    });
+}
+```
+
+### Tradeoffs
+
+| Choice              | DynamoDB only (AP) | Spanner only (CP)  | Hybrid (chosen)         |
+|---------------------|--------------------|--------------------|-------------------------|
+| Overdraft risk      | Possible           | Impossible         | Impossible (CP ledger)  |
+| Write p99 (regional)| 2ms                | 10ms               | 10ms (ledger)           |
+| Cross-region write  | Saga (~200ms)      | 80ms atomic        | 80ms                    |
+| Read scale          | Excellent          | Good (replicas)    | Excellent (feed via AP) |
+| Availability target | 99.999%            | 99.999% in-region  | 99.99% (weakest link)   |
+| Monthly cost        | $8k                | $48k               | $19k                    |
+| Operational complex.| Low                | Medium             | High (Kafka bridge)     |
+
+### Metrics & Results
+
+- **Overdraft incidents:** 0 (vs 7/month under PostgreSQL with optimistic locking)
+- **Transfer commit p99:** 78ms (in-region), 240ms (cross-region us-east <-> eu-west)
+- **Feed read p99:** 28ms (DynamoDB local read), 92% within-region
+- **Bridge lag (outbox -> DynamoDB):** p50 1.2s, p99 4.8s
+- **Cost:** $19k/month total ($14k Spanner + $4k DynamoDB + $1k Kafka)
+- **Migration duration:** 9 months (dual-write phase 4 months, cutover 1 month)
+- **Reconciliation discrepancies:** 0 cents across $2.3B settled over 6 months
+
+### Common Pitfalls / Lessons Learned
+
+1. **Trying to make an AP system CP with app-level locks.** Initial design used DynamoDB plus a Redis distributed lock per wallet to enforce non-negative balance. During a Redis failover, two concurrent withdrawals on the same wallet both got the lock (split-brain), causing an overdraft.
+   - *Broken:* `redisLock(wallet); if (balance >= amount) debit(); release();`
+   - *Fix:* moved to Spanner. Distributed locks are not a substitute for database-level serializability; they fail under the same partition the database would tolerate.
+
+2. **Confusing partition tolerance with optional.** Architecture review claimed "we're CA — we don't need partition tolerance because we use a single region." But a single region still has network partitions (rack outage, AZ failure, switch reboot). The first AZ failure caused a 22-minute outage as the leader could not be re-elected.
+   - *Broken:* assumed CA system can exist within a single region.
+   - *Fix:* in any distributed system, partitions WILL happen. Real choice is CP vs AP during partition. Spanner is CP — it sacrifices availability for consistency during partition.
+
+3. **Eventual consistency for financial totals caused money "disappearance".** Pre-Spanner, the team used Cassandra with last-write-wins. Two concurrent updates to the same wallet from different regions produced LWW conflict; the losing write was silently dropped. $14k of customer balance vanished over 3 months before reconciliation caught it.
+   - *Broken:* `cassandra.update(wallet, newBalance);` with LWW resolution.
+   - *Fix:* Spanner with `INSERT ... LedgerEntries` + materialized `balance` updated atomically. Lost writes are now impossible because Spanner uses Paxos consensus, not LWW.
+
+### Interview Discussion Points
+
+**Q: Why not use Spanner for everything since it gives strong consistency?**
+Cost and latency. Spanner is ~6x more expensive than DynamoDB for equivalent storage; cross-region reads add 50-100ms. Feed reads do not need strong consistency — a 2s stale activity feed is invisible to users, but a 60ms-vs-10ms balance load is not.
+
+**Q: How do you handle a Spanner regional outage?**
+Spanner is multi-region by configuration. The `nam3` config replicates across us-east1/us-central1/us-east4. A region loss promotes a replica via Paxos in ~15s; no application action needed. During the failover window, transfers see elevated latency (~500ms) but do not lose commits.
+
+**Q: Why is the outbox needed instead of writing to both directly?**
+Atomicity. Writing to Spanner and DynamoDB in app code is two non-atomic operations — if the DynamoDB write fails, the feed misses the entry; if you reverse the order and Spanner fails, the feed shows a fictitious transfer. The outbox couples the secondary write to the primary transaction.
+
+**Q: What CAP letter does the bridge between Spanner and DynamoDB sacrifice?**
+The combined system is effectively AP for the feed (DynamoDB) and CP for the ledger (Spanner). The bridge is asynchronous, so during a Kafka outage the feed becomes stale but the ledger remains consistent. We surface the feed lag via a `last_updated_at` field so the client can show "syncing..." UX.
+
+**Q: How do you reconcile the two stores?**
+Daily batch job sums all `LedgerEntries` deltas per wallet from Spanner and compares to materialized `Wallets.balance`; any mismatch is a P0 alert. Separately, a feed-completeness job compares Spanner outbox rows vs DynamoDB feed entries — any missing entry is a Kafka lag issue, not a data corruption.
+
+**Q: PACELC says: P→A/C, else L/C. What's your choice in normal operation?**
+Else-Latency for the feed (DynamoDB favors latency over consistency in normal operation — 5ms reads from local replica with potential 1s stale). Else-Consistency for the ledger (Spanner favors consistency, accepting 10ms commits over 2ms eventual writes).
+
+**Q: How is this different from event sourcing?**
+We use event sourcing for the ledger (`LedgerEntries` is the source of truth; `Wallets.balance` is a materialized projection). The outbox is the event log for downstream consumers. Pure event sourcing would eliminate `Wallets.balance` and recompute on read, but at our QPS (14k reads/sec) the materialized view is essential for latency.

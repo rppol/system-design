@@ -667,3 +667,196 @@ Always verify:
 
 ### 8. Use Cache Tags for Targeted Invalidation
 Tag related content (all pages using a specific product image, all pages in a category) with surrogate keys. When content changes, purge by tag rather than URL-by-URL.
+
+---
+
+## Case Study: Cloudflare CDN for an Image-Heavy Media Platform
+
+### Problem Statement
+
+A photo-sharing platform (Unsplash-like) delivers images globally with on-the-fly transformations.
+
+- **Traffic:** 10M req/sec peak (87 billion req/day) for image assets
+- **Catalog:** 8B images, 300TB total origin storage
+- **Transformations:** WEBP/AVIF conversion, dynamic resize (50+ size variants per image), EXIF stripping, watermarking
+- **Latency SLA:** p99 < 100ms globally, p50 < 30ms in-region
+- **Cache hit-rate target:** > 95% (origin bandwidth budget is 500k req/sec max)
+- **Origin egress cost:** $0.09/GB vs CDN egress $0.02/GB — a 95% hit rate saves $14M/year
+- **PoPs:** Cloudflare's 310+ edge locations
+- **Cert coverage:** 1.4M customer subdomains (white-label sites pointing CNAMEs at us)
+
+### Architecture Overview
+
+```
+              Client (mobile/web, worldwide)
+                          |
+                          v
+               +----------+----------+
+               | Cloudflare Anycast  |
+               | DNS -> nearest PoP  |
+               +----------+----------+
+                          |
+                          v
+            +-------------+-------------+
+            | Edge PoP                  |
+            | +----------------------+  |
+            | | Tier-1 cache (NVMe) | |  |
+            | | 200TB per PoP        |  |
+            | +----------+-----------+  |
+            |            | miss          |
+            |            v                |
+            | +----------+-----------+  |
+            | | Workers (V8 isolate)|   |
+            | | - resize, WEBP conv |   |
+            | | - EXIF strip        |   |
+            | +----------+-----------+  |
+            +------------+--------------+
+                         | miss
+                         v
+              +----------+----------+
+              | Tier-2 (regional)   |
+              | Argo / tiered cache |
+              +----------+----------+
+                         | miss
+                         v
+              +----------+----------+
+              | Origin (S3)         |
+              | 300TB of originals  |
+              +---------------------+
+```
+
+### Key Design Decisions
+
+1. **Tiered cache (edge -> regional -> origin).** 310 edge PoPs cache locally; regional Argo tier consolidates misses, multiplexing 1000 edge misses into 1 origin fetch for the same asset. *Alternative rejected:* flat edge-only — cold edges hammer origin in parallel; tiered cache reduces origin requests by 60%.
+
+2. **Cloudflare Workers for on-the-fly image transformation.** Resize/format conversion runs at the edge in a V8 isolate (~5ms cold start, ~50ms transform). *Alternative rejected:* pre-generate all variants at upload — 50 variants x 8B images = 400B objects, 15PB storage, infeasible.
+
+3. **Content-addressed URLs with `immutable` Cache-Control.** Asset URL contains sha256 of bytes (`/img/<hash>/800x600.webp`). Once cached, never invalidated; new versions get a new URL. Header: `Cache-Control: public, max-age=31536000, immutable`. *Alternative rejected:* mutable URLs — cache invalidation storms on every reupload.
+
+4. **Stale-while-revalidate for dynamic thumbnails.** `Cache-Control: max-age=3600, stale-while-revalidate=86400` lets edge serve stale for 24h while refreshing in background. *Alternative rejected:* synchronous refresh — adds origin latency to every read after TTL expiry.
+
+5. **Normalized cache keys.** Cache key built from `host + path + Accept-format + Width-DPR` only, ignoring tracking query params (`utm_*`, `_t`, `fbclid`). *Alternative rejected:* full URL — every UTM-tagged share creates a new cache entry, fragmenting the cache.
+
+6. **Surrogate-key based purge (`Cache-Tag` header).** Each cached object tagged with `product:123, category:shoes, user:42`. Purge by tag instead of URL. *Alternative rejected:* URL-list purge — purging 200k URLs after a deploy takes 40 minutes; tag purge is < 5 seconds.
+
+7. **Wildcard cert + pre-provisioned ACM for white-label domains.** Wildcard `*.imgcdn.example` covers most paths; bespoke customer domains get cert pre-provisioned via Cloudflare for SaaS (issuance < 60s). *Alternative rejected:* per-domain cert at first request — 30-minute propagation delay caused HTTPS failures.
+
+### Implementation
+
+Cloudflare Worker for image transformation:
+
+```javascript
+addEventListener("fetch", (event) => event.respondWith(handle(event.request)));
+
+async function handle(request) {
+  const url = new URL(request.url);
+  const width = parseInt(url.searchParams.get("w")) || 800;
+  const accepts = request.headers.get("Accept") || "";
+  const format = accepts.includes("image/avif") ? "avif"
+               : accepts.includes("image/webp") ? "webp"
+               : "jpeg";
+
+  // Normalized cache key (strip tracking params)
+  const cacheUrl = new URL(`${url.origin}${url.pathname}?w=${width}&fmt=${format}`);
+  const cacheKey = new Request(cacheUrl.toString(), request);
+  const cache = caches.default;
+
+  let response = await cache.match(cacheKey);
+  if (response) return response;
+
+  // Fetch original from tier-2 / origin
+  const original = await fetch(`https://origin.example/${url.pathname}`, {
+    cf: { cacheTtl: 86400, cacheEverything: true }
+  });
+
+  // Transform via Cloudflare Images binding
+  const transformed = await fetch(original.url, {
+    cf: {
+      image: { width, format, metadata: "none" }   // strip EXIF
+    }
+  });
+
+  response = new Response(transformed.body, transformed);
+  response.headers.set("Cache-Control", "public, max-age=31536000, immutable");
+  response.headers.set("Cache-Tag", `img:${url.pathname.split("/")[2]}`);
+  event.waitUntil(cache.put(cacheKey, response.clone()));
+  return response;
+}
+```
+
+Cache-Control strategy by asset class:
+
+```nginx
+# Content-addressed (immutable)
+location ~ ^/img/[0-9a-f]{64}/ {
+    add_header Cache-Control "public, max-age=31536000, immutable";
+}
+
+# Dynamic resize (SWR)
+location ~ ^/render/ {
+    add_header Cache-Control "public, max-age=3600, stale-while-revalidate=86400";
+}
+
+# User-private (no edge cache)
+location ~ ^/user/ {
+    add_header Cache-Control "private, max-age=60";
+}
+```
+
+### Tradeoffs
+
+| Strategy                      | Pre-generate all  | On-demand at edge (chosen) | Origin transform |
+|-------------------------------|-------------------|----------------------------|------------------|
+| Storage cost                  | 15PB ($330k/mo)   | 300TB ($6.6k/mo)           | 300TB            |
+| First-byte latency (cold)     | 30ms              | 80ms (transform)           | 200ms (transit)  |
+| First-byte latency (warm)     | 25ms              | 25ms                       | 200ms            |
+| Adding a new variant          | Re-process 8B img | Free (next request)        | Free             |
+| Origin bandwidth              | 0 (all cached)    | 5% miss rate               | 100%             |
+| Compute cost                  | Big upfront batch | Per-request ($0.0001/req)  | Centralized      |
+
+### Metrics & Results
+
+- **Cache hit rate:** 96.2% (edge), 99.1% (combined edge+tier-2)
+- **Origin RPS:** 380k/sec sustained (within 500k budget)
+- **p50 / p99 latency:** 22ms / 85ms globally (TLS + connect + serve)
+- **Transformation latency at edge:** p50 38ms, p99 110ms
+- **Bandwidth cost:** $0.021/GB blended (CDN egress + origin egress * miss rate)
+- **Monthly cost:** $1.8M (vs estimated $11.4M for origin-only delivery)
+- **Cert provisioning:** 99.7% of new white-label domains live in < 90s
+
+### Common Pitfalls / Lessons Learned
+
+1. **Cache poisoning via unkeyed `Host` header.** A bug let attackers send a request with a spoofed `Host: evil.com` header; Workers stored the malicious response under the cache key for `imgcdn.example`. Subsequent legitimate users received the poisoned response for 6 hours.
+   - *Broken:* `cacheKey = path` (Host ignored in key)
+   - *Fix:* `cacheKey = host + path + normalizedQuery` — include Host in key and validate Host against allowlist before processing.
+
+2. **Purge storm wiped 200TB after a routine deploy.** Engineer ran `cf purge --everything` to clear stale CSS; this also evicted all 200TB of image cache. The next hour saw 500k RPS hitting origin, exceeding the 500k budget and triggering origin throttling. End-user p99 latency rose to 4s.
+   - *Broken:* `cf purge --everything` for any cache change.
+   - *Fix:* `cf purge --tag css:v423` — tag-based purge clears only CSS assets (200MB), leaving images intact. Combined with surrogate-key strategy enforced at deploy time.
+
+3. **HTTPS certificate propagation delay.** Onboarding a new white-label customer (`images.customer.com`) issued a per-domain cert; propagation across 310 PoPs took 30+ minutes. During that window, 12% of edges served HTTPS errors. Customer churn spiked.
+   - *Broken:* lazy per-domain cert issuance at first request.
+   - *Fix:* wildcard cert `*.imgcdn.example` for default CNAME path; Cloudflare for SaaS pre-provisions per-customer certs via background job; new customers go live in < 90s with valid HTTPS.
+
+### Interview Discussion Points
+
+**Q: Why not use S3 + CloudFront instead of a custom CDN?**
+For 90% of CDN workloads, CloudFront is the right choice. We chose Cloudflare specifically for: (1) Workers running V8 isolates (1ms cold start vs Lambda@Edge 100ms), (2) 310 PoPs vs CloudFront's 600+ but with lower egress price, (3) Cloudflare Images native transform API. The decision is workload-specific.
+
+**Q: How do you handle a viral image causing a hot key?**
+Cloudflare PoPs already shard the cache by hash within a PoP, so a single hot URL hits multiple cache nodes per PoP. For truly extreme cases (a single image at > 100k RPS in one PoP), Cloudflare's "tiered cache" plus Argo Smart Routing front-loads the response into all PoPs proactively.
+
+**Q: How do you invalidate a single image globally?**
+For content-addressed URLs, you don't — you publish a new URL. For mutable URLs, `cf purge --url https://...` propagates to all 310 PoPs within ~30 seconds via Cloudflare's central control plane. For larger invalidations, use surrogate-key purge to clear groups atomically.
+
+**Q: What is `stale-while-revalidate` and when should you use it?**
+SWR (RFC 5861) tells the cache to serve stale content immediately while fetching fresh in background. Use for content where staleness is acceptable but availability is critical — product thumbnails, profile avatars. Do NOT use for pricing, security tokens, or personalized content.
+
+**Q: What's the difference between `max-age` and `s-maxage`?**
+`max-age` applies to all caches (browser + CDN). `s-maxage` applies only to shared/CDN caches. Use `s-maxage=86400, max-age=3600` to cache aggressively at edge but conservatively at browser, letting you push updates via CDN purge without waiting for browser caches to expire.
+
+**Q: How do you debug a cache miss in production?**
+Cloudflare response headers: `cf-cache-status` (HIT/MISS/EXPIRED/DYNAMIC/BYPASS), `age` (seconds since cached), `cf-ray` (request trace ID). Logpush exports per-request logs to S3 for analysis; we run a daily job that buckets misses by `cf-cache-status` reason and alerts when MISS > 6%.
+
+**Q: How does HTTP/3 (QUIC) affect CDN design?**
+QUIC eliminates head-of-line blocking and runs over UDP, so a packet loss does not stall the whole connection — critical for mobile networks. It also has 0-RTT resumption (connection setup in 0 round trips for repeat visitors). Cloudflare auto-negotiates HTTP/3; our images load 12% faster on mobile after enabling it.

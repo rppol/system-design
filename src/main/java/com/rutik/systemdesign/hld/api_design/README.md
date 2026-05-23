@@ -463,3 +463,224 @@ All errors return a consistent shape:
 ```
 
 **Outcome:** An API that handles billions of dollars in transactions daily, with near-zero double-charge incidents, high developer adoption, and a support burden dramatically lower than the industry average.
+
+---
+
+## Case Study: Stripe's Idempotent Payment API
+
+### Problem Statement
+
+Design the `POST /v1/charges` endpoint at Stripe.
+
+- **Volume:** 1M payment requests/day, 25 req/sec average, 800 req/sec peak (Black Friday)
+- **Reliability:** every successful charge must be charged exactly once; clients retry on any 5xx or timeout
+- **Latency SLA:** p99 < 500ms, p50 < 120ms
+- **Correctness:** zero tolerance for double-charge — a single duplicate at $50k/incident credit cost
+- **Retry behavior:** clients (mobile SDK, server-side libs) retry on network timeout up to 3 times with exponential backoff
+- **Cross-region:** request may arrive in us-east-1 on attempt 1, us-west-2 on attempt 2 (DNS failover)
+- **Customers:** 4M businesses, request rate per customer ranges from 0.001 to 200 req/sec
+
+### Architecture Overview
+
+```
+       Client SDK (retries on timeout)
+              |
+              | Idempotency-Key: ik_4242
+              v
+     +--------+--------+
+     |  API Gateway    |
+     |  (rate limit,   |
+     |  auth)          |
+     +--------+--------+
+              |
+              v
+     +--------+----------------------------+
+     |  Idempotency Middleware             |
+     |  - key = sha256(account+ik+route)   |
+     |  - lookup in Redis                  |
+     +---+--------------+------------------+
+         | hit          | miss
+         |              |
+         v              v
+   +-----+----+   +-----+--------------------+
+   | return    |   | SET key=STARTED NX PX   |
+   | cached    |   | 60000 (distributed lock)|
+   | response  |   +-----+--------------------+
+   +-----------+         |
+                         v
+              +----------+----------+
+              | Payment State       |
+              | Machine (Saga)      |
+              +----+----------+-----+
+                   |          |
+                   v          v
+         +---------+--+  +----+-----+
+         | Postgres   |  | Card     |
+         | (charges)  |  | Network  |
+         +-----+------+  +----+-----+
+               |              |
+               v              v
+     +---------+--------------+--+
+     | Persist final response    |
+     | + result to Redis (24h)   |
+     +---------------------------+
+```
+
+### Key Design Decisions
+
+1. **Client-supplied `Idempotency-Key` header.** Client generates UUID for each logical request; resends same key on retry. *Alternative rejected:* server-generated dedup — client cannot signal that a retry IS the same operation.
+
+2. **Composite key namespace `account_id:route:idempotency_key`.** Prevents collision when two customers happen to choose the same UUID. *Alternative rejected:* global key space — UUID collisions theoretically possible, and a malicious customer could probe other customers' keys.
+
+3. **State machine: STARTED → SUCCEEDED / FAILED.** Recorded in Redis with 24h TTL and replicated to Postgres for durability. *Alternative rejected:* boolean done/not-done — cannot distinguish "in progress, please wait" from "completed, here's response".
+
+4. **Distributed lock during execution.** `SET key:lock STARTED NX PX 60000` blocks concurrent retries of the same key. Second request returns 409 `Conflict` with `retry_after`. *Alternative rejected:* allow parallel execution — both might call card network, causing double charge.
+
+5. **Payload hash validation.** Store sha256(body) with the key; reject 422 if a retry has a different payload. *Alternative rejected:* trust the key alone — broken client reusing a key for different requests would receive a stale, incorrect response.
+
+6. **Redis fail-closed.** If Redis is unreachable, return 503 rather than process without dedup check. *Alternative rejected:* fail-open (process anyway) — risks double-charge during Redis outage.
+
+7. **24h key TTL.** Long enough for client retries (max retry window = 30 min), short enough to bound Redis memory at ~40GB. *Alternative rejected:* permanent storage — unbounded growth, no business need beyond retry window.
+
+### Implementation
+
+Java idempotency middleware (Spring):
+
+```java
+@Component
+public class IdempotencyFilter extends OncePerRequestFilter {
+    private final RedisCommands<String, String> redis;
+    private static final Duration TTL = Duration.ofHours(24);
+    private static final long LOCK_MS = 60_000;
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest req,
+                                    HttpServletResponse res,
+                                    FilterChain chain) throws IOException, ServletException {
+        String ik = req.getHeader("Idempotency-Key");
+        if (ik == null) { chain.doFilter(req, res); return; }
+
+        String account = (String) req.getAttribute("account_id");
+        String body = readBody(req);
+        String bodyHash = sha256(body);
+        String key = "idem:" + account + ":" + req.getRequestURI() + ":" + ik;
+
+        // Check existing
+        Map<String, String> existing = redis.hgetall(key);
+        if (!existing.isEmpty()) {
+            if (!bodyHash.equals(existing.get("body_hash"))) {
+                res.setStatus(422);
+                res.getWriter().write("{\"error\":\"idempotency_key_payload_mismatch\"}");
+                return;
+            }
+            if ("STARTED".equals(existing.get("state"))) {
+                res.setStatus(409);
+                res.setHeader("Retry-After", "1");
+                return;
+            }
+            // Replay cached response
+            res.setStatus(Integer.parseInt(existing.get("status")));
+            res.getWriter().write(existing.get("response"));
+            return;
+        }
+
+        // Acquire lock
+        String ok = redis.set(key, "STARTED",
+                              SetArgs.Builder.nx().px(LOCK_MS));
+        if (ok == null) {
+            res.setStatus(409); res.setHeader("Retry-After", "1"); return;
+        }
+        redis.hset(key, Map.of("state", "STARTED", "body_hash", bodyHash));
+        redis.expire(key, TTL.toSeconds());
+
+        // Execute and capture response
+        ContentCachingResponseWrapper wrapper = new ContentCachingResponseWrapper(res);
+        try {
+            chain.doFilter(req, wrapper);
+            String responseBody = new String(wrapper.getContentAsByteArray());
+            redis.hset(key, Map.of(
+                "state", wrapper.getStatus() < 500 ? "SUCCEEDED" : "FAILED",
+                "status", String.valueOf(wrapper.getStatus()),
+                "response", responseBody));
+            wrapper.copyBodyToResponse();
+        } catch (Exception e) {
+            redis.hset(key, "state", "FAILED");
+            throw e;
+        }
+    }
+}
+```
+
+Postgres durability backstop:
+
+```sql
+CREATE TABLE idempotency_keys (
+    account_id   BIGINT NOT NULL,
+    route        TEXT   NOT NULL,
+    key          TEXT   NOT NULL,
+    body_hash    BYTEA  NOT NULL,
+    state        TEXT   NOT NULL,  -- STARTED/SUCCEEDED/FAILED
+    response     JSONB,
+    status_code  INT,
+    created_at   TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (account_id, route, key)
+) PARTITION BY RANGE (created_at);
+
+-- Async writer mirrors Redis state for durability beyond 24h Redis TTL
+```
+
+### Tradeoffs
+
+| Approach                  | No Idempotency | Server-Side Dedup | Client Idempotency Key (chosen) |
+|---------------------------|----------------|-------------------|---------------------------------|
+| Double-charge risk        | High           | Medium (false +)  | Near-zero                       |
+| Retry semantics           | Unsafe         | Hash-based guess  | Explicit, client-controlled     |
+| Storage cost              | None           | High (all reqs)   | Bounded by retry window         |
+| Client complexity         | None           | None              | Must generate+pass key          |
+| Cross-region behavior     | Unsafe         | Requires sync     | Works with shared Redis tier    |
+
+### Metrics & Results
+
+- **Duplicate-charge rate:** 1 in 110M requests (vs industry baseline ~1 in 50k)
+- **API p50/p99 latency:** 112ms / 480ms (idempotency adds ~3ms overhead)
+- **Cache hit rate (replayed retries):** 4.2% of all requests are retries
+- **Redis memory footprint:** 38GB across 24h window
+- **False 422 rate (payload mismatch):** 0.003% (mostly buggy SDK versions)
+- **Cost of idempotency layer:** ~$2k/month Redis + ~$5k/month Postgres partition storage
+
+### Common Pitfalls / Lessons Learned
+
+1. **Client reused key for different payload.** A migration script reused the same idempotency key for 500 different charges, accidentally treating them as one request. Stripe returned the cached first response for all 500 — until payload-hash validation caught it.
+   - *Broken:* store only the key, no body hash.
+   - *Fix:* `if (!bodyHash.equals(existing.get("body_hash"))) return 422;` — fail fast on mismatch with explicit error code.
+
+2. **Key collision across customers.** Customer A and Customer B both chose `Idempotency-Key: 1`. A's response leaked to B (data exposure + wrong amount).
+   - *Broken:* `key = ik`
+   - *Fix:* `key = account_id + ":" + route + ":" + ik` — namespace by tenant.
+
+3. **Redis outage caused open-retry storm.** When Redis was down, the middleware initially fell open (process without dedup check) — a network blip caused 12 customers to be double-charged before the on-call rolled back.
+   - *Broken:* `try { redis.get(); } catch { proceed; }`
+   - *Fix:* `try { redis.get(); } catch { return 503; }` — fail closed; brief unavailability is preferable to silent double-charges. Combined with Redis Sentinel for < 10s failover.
+
+### Interview Discussion Points
+
+**Q: Why not let the payment processor (card network) handle dedup?**
+Card networks have their own idempotency primitives (e.g., `transaction_id`), but they only protect the network leg. If our server crashes after charging the card but before persisting the charge record, the client retry would create a new card transaction. Application-layer idempotency covers the entire request lifecycle.
+
+**Q: How do you handle a request that times out mid-flight?**
+The server-side state stays in STARTED for up to 60s (lock TTL). A retry within that window sees STARTED and returns 409 with Retry-After. After the original completes, the state transitions to SUCCEEDED/FAILED and subsequent retries get the cached response. If the original truly dies (process crash), the lock expires and the next retry re-executes.
+
+**Q: What if the cached response is stale (e.g., charge later refunded)?**
+The idempotency response is the response from the original POST — it does not change. The current state of the resource is queried separately via GET. Idempotency is about replay safety of the operation, not about reflecting current state.
+
+**Q: Why 24-hour TTL specifically?**
+Empirically, > 99.9% of retries happen within 1 hour; the long tail (mobile clients going offline) extends to ~12 hours. 24h gives a safety margin. Beyond 24h, business logic considers the operation "final" — a new request with the same key is a new operation.
+
+**Q: How would you scale this to 10x traffic?**
+Redis cluster is the bottleneck. At 10x (8000 req/sec peak), shard Redis by `hash(account_id)` across N nodes. Postgres state table is already partitioned by created_at; add more partitions per day. The middleware itself is stateless — scale by adding API server instances.
+
+**Q: How do you test this?**
+Three layers: (1) unit tests force concurrent retries through CountDownLatch and verify only one execution, (2) integration tests with TestContainers Redis kill the Redis container mid-request and verify 503, (3) chaos tests in staging inject 500ms delays and verify exactly-once semantics under retry storms.
+
+**Q: What's the difference between idempotent and safe?**
+Safe (RFC 7231) means no side effects — GET, HEAD, OPTIONS. Idempotent means executing N times has the same effect as executing once — PUT, DELETE, and POST-with-idempotency-key. POST without idempotency is neither safe nor idempotent.

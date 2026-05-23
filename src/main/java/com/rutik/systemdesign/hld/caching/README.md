@@ -383,26 +383,179 @@ A: Hit rate, miss rate, eviction rate, memory usage, latency (p50/p99), connecti
 
 ---
 
-## 14. Case Study: Designing a Cache for a Social Media Feed
+## 14. Case Study: Designing a Cache for a Twitter-Scale Social Feed
 
-**Problem:** 500M users. Each user has a feed of posts from followed accounts. Reads: 1B/day. Writes: 50M posts/day. P99 latency target: <100ms.
+### Problem Statement
 
-**Approach:**
+Build the timeline cache for a Twitter-scale social network.
 
-1. **Feed generation strategy:** Pre-compute feeds for active users (fan-out on write). For users with huge follower counts (celebrities), use fan-out on read to avoid write amplification.
+- **Users:** 500M registered, 200M DAU
+- **Content:** 100B tweets stored, 500M new tweets/day
+- **Read traffic:** 300k req/sec peak (timeline reads)
+- **Write traffic:** 6k tweets/sec average, 150k/sec during major events (World Cup)
+- **Latency SLA:** p99 < 100ms for timeline read, p50 < 20ms
+- **Followers distribution:** median 200 followers, p99 = 50k, top 1000 accounts each > 1M followers
+- **Storage budget:** 50TB Redis cluster across 200 nodes (256GB each)
 
-2. **Cache layer:** Redis cluster with 10 shards. Key: `feed:{user_id}` → sorted set of post IDs with timestamp as score. TTL: 24 hours with jitter (±1 hour).
+### Architecture Overview
 
-3. **Eviction policy:** LRU (inactive users' feeds evicted first).
+```
+                   Client (mobile/web)
+                          |
+                          v
+                  +---------------+
+                  | API Gateway   |
+                  +-------+-------+
+                          |
+                          v
+               +----------+----------+
+               | Timeline Service    |
+               | (L1 Caffeine cache) |   <-- hot celebrity tweets, 100MB/node
+               +----+-----------+----+
+                    |           |
+        cache miss  |           | cache hit
+                    v           v
+            +-------+------+   return
+            | Redis Cluster |  pre-computed
+            | 200 shards    |  timeline
+            | feed:{uid} -> |
+            | sorted set    |
+            +-------+-------+
+                    | on miss
+                    v
+            +---------------+        +-------------------+
+            | Tweet DB      |<------>| Fan-out Worker    |
+            | (Manhattan)   |        | (Kafka consumer)  |
+            +---------------+        +---------+---------+
+                                               ^
+                                               |
+                                     +---------+---------+
+                                     | Tweet Write API   |
+                                     | -> Kafka topic    |
+                                     +-------------------+
+```
 
-4. **Write path:** On post, fan-out to followers' feed caches asynchronously via a message queue. Use write-through for the author's own feed.
+### Key Design Decisions
 
-5. **Read path:** Cache-aside. On miss, reconstruct feed from DB (expensive query), cache it.
+1. **Hybrid fan-out (write vs read).** Fan-out on write for normal users (< 10k followers): push tweet_id into each follower's `feed:{uid}` sorted set. Fan-out on read for celebrities (> 1M followers): timeline read merges follower's base feed with celebrity tweets fetched live. *Alternative rejected:* pure fan-out-on-write — Justin Bieber posting would queue 100M Redis writes, saturating the cluster.
 
-6. **Cache stampede protection:** Mutex lock per user_id on reconstruction. Serve stale feed (up to 60s) while refreshing in background.
+2. **Celebrity threshold detection.** Author with > 10k followers flagged at write time; > 1M followers skipped from fan-out entirely. *Alternative rejected:* static threshold for all users — sub-celebrities (50k followers) still benefit from pre-computation since their tweets are rare.
 
-7. **Hot key mitigation:** Celebrity accounts (>10M followers) use local in-process L1 cache on each app server (LRU, 10MB limit) backed by Redis L2.
+3. **Redis sorted sets with tweet_id as score.** ZADD with timestamp-derived score; ZREVRANGEBYSCORE returns latest N tweets in O(log N). Cap each timeline at 800 entries (ZREMRANGEBYRANK). *Alternative rejected:* Redis list (LPUSH/LTRIM) — sorted set allows efficient merge with celebrity tweets by timestamp.
 
-8. **Monitoring:** Alarm if hit rate drops below 85%. Track per-shard memory and eviction rate.
+4. **Two-tier caching (L1 Caffeine + L2 Redis).** Hot celebrity tweets cached in JVM-local Caffeine (100MB, 5s TTL). Eliminates ~80% of Redis hits for top 1000 accounts. *Alternative rejected:* Redis-only — single Redis shard holding a celebrity's tweet sees 50k QPS, exceeding the 100k single-key limit.
 
-**Result:** ~95% cache hit rate, 8ms P99 for feed reads, DB query rate reduced by 20x.
+5. **Jittered TTL + XFetch probabilistic early expiration.** Each timeline cached with TTL = 24h + uniform(-1h, +1h). Reads with `now > expiry - delta * log(rand())` trigger early background refresh. *Alternative rejected:* fixed 24h TTL — after a Redis failover, all 200M entries repopulate simultaneously (stampede).
+
+6. **Write-through invalidation on delete.** Tweet deletion publishes to a `tombstone` Kafka topic; fan-out workers ZREM the tweet from all follower timelines within 2s. *Alternative rejected:* TTL-based eventual cleanup — deleted tweets visible for up to 24h.
+
+7. **Per-key mutex for cache reconstruction.** On L2 miss, use `SET feed:{uid}:lock NX PX 5000` before rebuilding from DB. Other readers serve stale entry or block briefly. *Alternative rejected:* unbounded reconstruction — 1000 concurrent misses on the same key hammer the DB with identical queries.
+
+### Implementation
+
+Fan-out worker (write path):
+
+```java
+@KafkaListener(topics = "tweet-published")
+public void onTweet(TweetEvent ev) {
+    long authorFollowers = followGraph.countFollowers(ev.authorId());
+    if (authorFollowers > CELEBRITY_THRESHOLD) {
+        celebrityCache.put(ev.authorId(), ev);          // L1, skip fan-out
+        return;
+    }
+    double score = ev.timestampMs();
+    try (var pipeline = redis.pipelined()) {
+        followGraph.streamFollowers(ev.authorId()).forEach(followerId -> {
+            String key = "feed:" + followerId;
+            pipeline.zadd(key, score, String.valueOf(ev.tweetId()));
+            pipeline.zremrangeByRank(key, 0, -801);     // cap at 800
+            pipeline.expire(key, jitteredTtl());
+        });
+    }
+}
+
+private long jitteredTtl() {
+    return 86400 + ThreadLocalRandom.current().nextLong(-3600, 3600);
+}
+```
+
+Timeline read (XFetch + mutex):
+
+```java
+public List<Tweet> getTimeline(long userId) {
+    String key = "feed:" + userId;
+    CachedFeed cached = redis.getWithTtl(key);
+    if (cached != null && !shouldEarlyRefresh(cached)) {
+        return mergeCelebrities(userId, cached.tweetIds());
+    }
+    if (redis.set(key + ":lock", "1", SetParams.setParams().nx().px(5000))) {
+        CompletableFuture.runAsync(() -> rebuildAndCache(userId));
+    }
+    return cached != null
+        ? mergeCelebrities(userId, cached.tweetIds())   // serve stale
+        : rebuildAndCache(userId);                       // cold miss
+}
+
+private boolean shouldEarlyRefresh(CachedFeed c) {
+    double delta = 30.0;                                 // beta factor
+    double remaining = c.ttlSeconds();
+    return remaining < -delta * Math.log(Math.random());
+}
+```
+
+### Tradeoffs
+
+| Strategy           | Fan-out on Write | Fan-out on Read | Hybrid (chosen)  |
+|--------------------|------------------|-----------------|------------------|
+| Read latency       | ~5ms             | ~80ms           | ~15ms p50        |
+| Write amplification| O(followers)     | O(1)            | O(min(F, 10k))   |
+| Storage cost       | High (duplicated)| Low             | Medium           |
+| Celebrity scaling  | Broken           | Fine            | Fine             |
+| Code complexity    | Low              | Low             | High             |
+| Stale window       | None             | None            | Up to 5s         |
+
+### Metrics & Results
+
+- **Cache hit rate:** 96.4% (L1+L2 combined), 88% Redis-only
+- **Timeline read p50:** 18ms, p99: 72ms, p99.9: 140ms
+- **Fan-out latency:** 95% of followers receive tweet within 1.2s
+- **DB read QPS:** reduced from theoretical 300k to 11k (27x reduction)
+- **Redis memory:** 38TB used of 50TB budget (74% utilization)
+- **Cost:** $180k/month for Redis cluster vs estimated $2.1M/month if served from DB
+
+### Common Pitfalls / Lessons Learned
+
+1. **Synchronized cache expiry stampede.** After a Redis cluster restart, every key was re-loaded with the same default TTL, causing all to expire simultaneously 24h later — a 300k QPS DB spike took out Manhattan for 8 minutes.
+   - *Broken:* `redis.expire(key, 86400);`
+   - *Fix:* `redis.expire(key, 86400 + ThreadLocalRandom.current().nextLong(-3600, 3600));` plus XFetch early refresh.
+
+2. **Celebrity hot-key on a single Redis shard.** A K-pop star with 100M followers triggered a fan-out that targeted one shard (the followers happened to hash to a hot range), pushing that node to 100% CPU and breaking timeline reads cluster-wide.
+   - *Broken:* unconditional fan-out for all authors.
+   - *Fix:* `if (followers > 1_000_000) skipFanout(); else fanoutAsync();` plus L1 Caffeine layer on app servers for celebrity content.
+
+3. **Stale tweet count after delete.** Users reported deleted tweets appearing in their timeline for hours. Cache eviction relied on TTL expiry only.
+   - *Broken:* `deleteTweet(id); /* cache will expire eventually */`
+   - *Fix:* publish to `tombstone` topic, fan-out workers issue `ZREM feed:{uid} {tweetId}` across all affected timelines.
+
+### Interview Discussion Points
+
+**Q: Why sorted set instead of a list?**
+A sorted set lets you merge celebrity tweets (fetched separately) with the base timeline by score (timestamp) in a single pass. Lists force you to do an O(N) merge in application code, and inserting an out-of-order tweet costs O(N).
+
+**Q: How do you handle a user who follows 5000 celebrities?**
+You cap the celebrity merge: fetch the latest 50 tweets from each celebrity's per-author cache, then take the top 200 by timestamp. Worst case is 5000 GETs, but those keys are L1-cached on every app server, so it's effectively zero Redis traffic.
+
+**Q: Why not use write-through for everyone?**
+Write-through synchronously updates cache on every write, blocking the producer. For a viral tweet with 1M followers, the publisher would wait minutes. Fan-out via Kafka makes the write fast (50ms) and the cache update happens asynchronously.
+
+**Q: How would you handle a Redis shard failure?**
+Each shard has a replica; Redis Sentinel promotes the replica in ~10s. During failover, timeline reads on affected users fall back to DB reconstruction, protected by the per-key mutex to prevent stampede. The 800-tweet cap keeps reconstruction queries bounded.
+
+**Q: What's the memory cost per user timeline?**
+800 tweet IDs at 8 bytes each = 6.4KB raw, ~12KB with sorted-set overhead. 200M active users x 12KB = 2.4TB minimum. We provision 38TB to allow oversize celebrity-merge buffers and inactive user retention (last 30 days).
+
+**Q: How do you decide the celebrity threshold of 10k?**
+Empirically: at 10k followers, fan-out completes in < 500ms with our Kafka throughput. Beyond 1M followers, fan-out latency exceeds the user's expected freshness window, and storage cost becomes prohibitive. Between 10k and 1M, fan-out is degraded (async, lower priority) but still pre-computed.
+
+**Q: Could you use Memcached instead of Redis?**
+No — Memcached has no native sorted-set type, no atomic ZADD/ZREMRANGEBYRANK, no replication for failover, no Lua scripting for the XFetch logic. You'd end up reimplementing half of Redis in application code.
