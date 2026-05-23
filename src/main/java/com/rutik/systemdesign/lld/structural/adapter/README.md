@@ -214,27 +214,170 @@ The client is decoupled from the adaptee. Neither needs to know about the other.
 
 ## 14. Real-World Usage
 
-### Java Standard Library
-- `java.io.InputStreamReader` — adapts `InputStream` (byte stream) to `Reader` (character stream).
-- `java.io.OutputStreamWriter` — adapts `OutputStream` to `Writer`.
-- `java.util.Arrays.asList()` — adapts an array to the `List` interface.
-- `Collections.list(Enumeration)` — adapts old `Enumeration` to `ArrayList`.
-- `java.util.logging.Handler` adapters for SLF4J.
+### Production Anchor: Legacy LDAP -> OAuth2 Migration
 
-### Spring Framework
-- `HandlerAdapter` in Spring MVC — adapts various handler types (`@Controller`, `HttpRequestHandler`, `Servlet`) to a common `ModelAndView handle()` interface, so `DispatcherServlet` doesn't care what type of handler it's calling.
-- `MessageConverter` adapters for different media types (JSON, XML, etc.).
+A mid-size SaaS platform has 40 call sites scattered across 12 microservices invoking an in-house `LdapAuthService` running against an aging Active Directory cluster. Scale: ~500 auth requests/sec at peak, p99 latency 80ms, 99.95% availability requirement. Leadership decides to migrate to Okta OAuth2 over 6 months, but a flag-day cutover is impossible — different services have different release trains. Solution: introduce a new `AuthProvider` interface; build `OAuth2AuthProvider` (new) and `LdapAuthProviderAdapter` (wraps the legacy service). Callers depend only on `AuthProvider`; a feature flag routes between the two. Net result: zero changes to the 40 call sites during migration; rollback is a config flip.
 
-### Android SDK
-- `RecyclerView.Adapter` — adapts arbitrary data sources (arrays, databases, network) to the `RecyclerView`'s item view mechanism.
-- `CursorAdapter` — adapts a `Cursor` (database result) to a `ListView`.
+```
+                +----------------------+
+                |     CallSites (40)   |
+                +----------+-----------+
+                           |
+                           v
+                +----------------------+
+                |    AuthProvider      |  <-- target interface
+                |    (interface)       |
+                +----+-----------+-----+
+                     |           |
+        +------------+           +-------------+
+        |                                      |
+        v                                      v
++----------------+                  +-------------------------+
+| OAuth2Provider |                  | LdapAuthProviderAdapter |
+| (new code)     |                  |  - translates calls     |
++--------+-------+                  |  - maps exceptions      |
+         |                          +-----------+-------------+
+         v                                      |
+   Okta / IdP                                   v
+                                       +------------------+
+                                       | LdapAuthService  |  (legacy, untouched)
+                                       +------------------+
+```
 
-### Hibernate / JPA
-- `SessionFactory` adapters between different database dialects.
-- Type adapters converting between Java types and SQL types.
+```java
+// Target interface — what callers depend on
+public interface AuthProvider {
+    AuthResult authenticate(String username, String password) throws AuthException;
+    UserPrincipal lookup(String username) throws AuthException;
+}
 
-### Apache Commons
-- `IteratorUtils.asIterator(Enumeration)` — adapts old Java `Enumeration` to modern `Iterator`.
+// Adapter — wraps legacy LdapAuthService behind the new interface
+public final class LdapAuthProviderAdapter implements AuthProvider {
+    private final LdapAuthService legacy;          // adaptee
+    private final MeterRegistry metrics;
+
+    public LdapAuthProviderAdapter(LdapAuthService legacy, MeterRegistry metrics) {
+        this.legacy = Objects.requireNonNull(legacy);
+        this.metrics = metrics;
+    }
+
+    @Override
+    public AuthResult authenticate(String username, String password) throws AuthException {
+        Timer.Sample s = Timer.start(metrics);
+        try {
+            LdapBindResult r = legacy.bind(username, password.toCharArray());
+            return new AuthResult(r.getDn(), r.getGroups(), Instant.now().plusSeconds(3600));
+        } catch (LdapException e) {
+            // anti-pattern fix: do NOT leak LdapException to callers
+            throw mapException(e);
+        } finally {
+            s.stop(metrics.timer("auth.ldap.adapter"));
+        }
+    }
+
+    @Override
+    public UserPrincipal lookup(String username) throws AuthException {
+        try {
+            LdapEntry entry = legacy.searchByUid(username);
+            return new UserPrincipal(entry.getUid(), entry.getEmail(), entry.getGroups());
+        } catch (LdapException e) {
+            throw mapException(e);
+        }
+    }
+
+    private AuthException mapException(LdapException e) {
+        if (e.getResultCode() == 49) return new InvalidCredentialsException(e);   // LDAP 49 = invalidCredentials
+        if (e.getResultCode() == 32) return new UserNotFoundException(e);         // LDAP 32 = noSuchObject
+        return new AuthException("LDAP failure", e);
+    }
+}
+```
+
+```java
+// Wiring — feature flag selects implementation; callers never know
+@Configuration
+class AuthConfig {
+    @Bean
+    AuthProvider authProvider(@Value("${auth.provider}") String which,
+                              LdapAuthService ldap, OktaClient okta, MeterRegistry m) {
+        return switch (which) {
+            case "ldap"   -> new LdapAuthProviderAdapter(ldap, m);
+            case "oauth2" -> new OAuth2AuthProvider(okta, m);
+            default       -> throw new IllegalStateException("Unknown provider: " + which);
+        };
+    }
+}
+```
+
+### Famous Codebase Usages
+
+- `java.io.InputStreamReader` — adapts a byte `InputStream` to a character `Reader` using a `Charset`. Constructor: `new InputStreamReader(in, StandardCharsets.UTF_8)`.
+- `java.io.OutputStreamWriter` — symmetric `OutputStream` to `Writer` adapter.
+- `java.util.Arrays.asList(T...)` — adapts a varargs array to a fixed-size `List` view backed by the array (mutations write through; `add`/`remove` throw `UnsupportedOperationException`).
+- `Collections.list(Enumeration)` and `Collections.enumeration(Collection)` — bidirectional adapters between the legacy `Enumeration` and modern `Iterator`/`Collection`.
+- `org.slf4j.impl.Log4jLoggerAdapter` — adapts an Apache Log4j `Logger` to the SLF4J `Logger` interface so application code can stay on SLF4J while the backend is Log4j.
+- Spring MVC `org.springframework.web.servlet.HandlerAdapter` with implementations `RequestMappingHandlerAdapter`, `HttpRequestHandlerAdapter`, `SimpleControllerHandlerAdapter` — lets `DispatcherServlet` invoke any handler type through one `handle(req, resp, handler)` method.
+- Android `RecyclerView.Adapter` — adapts arbitrary backing data (List, Cursor, Room paging source) to `RecyclerView`'s `onBindViewHolder` contract.
+
+### Anti-patterns
+
+**1. Adapter doing business logic, not translation**
+```java
+// BROKEN — adapter validates, charges fees, logs audit events
+public class LegacyPaymentAdapter implements PaymentGateway {
+    public PaymentResult charge(Money amount, Card card) {
+        if (amount.isNegative()) throw new IllegalArgumentException();    // validation
+        Money withFee = amount.add(amount.multiply(0.029));               // business logic
+        auditLog.record("CHARGE", card.last4(), withFee);                 // cross-cutting
+        return legacy.doCharge(card.pan(), withFee.cents());
+    }
+}
+// FIX — adapter ONLY translates the interface; business stays where it belongs
+public class LegacyPaymentAdapter implements PaymentGateway {
+    private final LegacyPaymentClient legacy;
+    public PaymentResult charge(Money amount, Card card) {
+        LegacyTxn t = legacy.doCharge(card.pan(), amount.cents());
+        return new PaymentResult(t.id(), t.status() == 0 ? OK : DECLINED);
+    }
+}
+// Validation, fees, and auditing belong in PaymentService, which calls the adapter.
+```
+
+**2. Two-way adapter creating a circular dependency**
+```java
+// BROKEN — one class implements BOTH interfaces and translates each way
+public class BiDirAdapter implements NewApi, OldApi {
+    private NewApi newSide; private OldApi oldSide;     // both sides depend on this class
+    // Now NewApi callers and OldApi callers both transit the same hub; any change cascades both ways.
+}
+// FIX — two one-way adapters plus a pure mapper
+public class OldToNewAdapter implements NewApi { private final OldApi target; ... }
+public class NewToOldAdapter implements OldApi { private final NewApi target; ... }
+public final class PayloadMapper { static NewDto toNew(OldDto o) {...} static OldDto toOld(NewDto n) {...} }
+```
+
+**3. Adapter leaking adaptee exceptions**
+```java
+// BROKEN — LdapException propagates; every caller now transitively depends on the LDAP SDK
+public AuthResult authenticate(String u, String p) throws LdapException {   // <- leak
+    return new AuthResult(legacy.bind(u, p.toCharArray()).getDn());
+}
+// FIX — catch adaptee-specific exceptions, rethrow as domain exceptions
+public AuthResult authenticate(String u, String p) throws AuthException {
+    try { return new AuthResult(legacy.bind(u, p.toCharArray()).getDn()); }
+    catch (LdapException e) { throw mapException(e); }
+}
+```
+
+### Performance and Correctness Numbers
+
+- Adapter call overhead in the LDAP scenario: 1.2µs added per call (one virtual dispatch + exception mapping table lookup) — negligible vs. the 80ms LDAP bind latency.
+- The 40 call sites required zero edits during migration; the cutover PR changed only `application.yml` (`auth.provider: oauth2`).
+- Post-migration, removing the adapter and the legacy service was a 1-day cleanup with no behavior risk because the new provider had been exercised in production for 8 weeks behind the flag.
+
+### Migration Story
+
+Month 1: introduce `AuthProvider` interface; ship `LdapAuthProviderAdapter` as the default — production behavior unchanged. Month 2-3: add `OAuth2AuthProvider`; enable for 1% of internal users via flag; compare results in shadow mode (call both, log mismatches). Month 4: ramp OAuth2 to 50%, then 100%. Month 5: legacy LDAP routes deprecated, alarms removed. Month 6: delete adapter, delete `LdapAuthService`, remove `org.springframework.ldap` dependency. The Adapter pattern made the migration reversible at every step — a property worth far more than the 1.2µs of overhead.
 
 ---
 
