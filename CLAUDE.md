@@ -5,7 +5,7 @@
 A comprehensive system design study repository covering:
 - **LLD** — Design patterns (GoF), SOLID, anti-patterns
 - **HLD** — Distributed system concepts (CAP, caching, queues, sharding, etc.) + case studies
-- **LLM** — Complete LLM engineering guide (38 modules, 13 case studies, 35 deep-dive sub-files across 6 topics)
+- **LLM** — Complete LLM engineering guide (42 modules, 13 case studies, 65 deep-dive sub-files across 9 topics)
 - **ML** — Complete Machine Learning guide (32 modules, 10 case studies, 26 deep-dive sub-files across 6 topics)
 - **Java** — Pure Java senior-engineer + interview prep guide (17 modules, 4 case studies)
 - **Spring** — Spring Framework senior-engineer + interview prep guide (23 modules, 5 case studies)
@@ -132,9 +132,13 @@ Current modules under `src/main/java/com/rutik/systemdesign/llm/`:
 | `advanced_rag/` | Agentic RAG, Graph RAG, multimodal RAG, evaluation | agentic_rag, corrective_rag, graph_rag, multimodal_rag, query_transformation, self_rag |
 | `reasoning_models/` | o1/o3, test-time compute, MCTS, DeepSeek-R1, PRM/ORM | — |
 | `code_generation/` | FIM, CodeLLaMA, Copilot architecture, SWE-bench, code agents | — |
-| `agents_and_tool_use/` | Function calling, ReAct, plan-and-execute, memory systems | function_calling_and_tool_design, react_and_reasoning_patterns, plan_and_execute, agent_memory, computer_use_and_browser_agents, agent_evaluation_and_benchmarking, agent_reliability |
-| `agentic_frameworks/` | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, SK, Haystack, DSPy | langchain_and_lcel, langgraph, llamaindex, crewai, autogen, semantic_kernel, haystack, dspy, framework_observability, structured_outputs_and_instructor |
-| `multi_agent_systems/` | Orchestrator pattern, debate, ChatDev, MetaGPT, Swarm | — |
+| `agents_and_tool_use/` | Function calling, ReAct, plan-and-execute, memory, sub-agents, sandboxes, cost | function_calling_and_tool_design, react_and_reasoning_patterns, plan_and_execute, agent_memory, computer_use_and_browser_agents, agent_evaluation_and_benchmarking, agent_reliability, reflexion_and_self_correction, tree_of_thoughts_for_agents, tool_selection_at_scale, sandboxed_code_execution, subagents_and_delegation, agent_ux_patterns, durable_long_running_agents, agent_cost_and_token_budget |
+| `agentic_frameworks/` | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, SK, Haystack, DSPy, OpenAI Agents SDK, Anthropic API, PydanticAI, Smolagents, Strands, Mastra, LiteLLM | langchain_and_lcel, langgraph, llamaindex, crewai, autogen, semantic_kernel, haystack, dspy, framework_observability, structured_outputs_and_instructor, openai_agents_sdk, claude_agent_sdk, pydantic_ai, smolagents, strands_aws, mastra_typescript, litellm_routing |
+| `multi_agent_systems/` | Orchestrator, debate, ChatDev, MetaGPT, Swarm, Magentic-One, A2A | orchestrator_worker_pattern, agent_debate_and_consensus, chatdev_and_software_simulation, openai_swarm_and_handoffs, magentic_one_and_autogen_v04, agent_to_agent_protocols |
+| `agentic_workflow_patterns/` | Anthropic taxonomy — chaining, routing, parallelization, orchestrator-workers, evaluator-optimizer | — |
+| `coding_agents/` | SWE-agent, OpenHands, Aider, Devin, Cursor, Claude Code, SWE-bench | — |
+| `voice_agents/` | Realtime API, Gemini Live, STT→LLM→TTS, VAD, barge-in, telephony | — |
+| `browser_agents_deep_dive/` | Browser Use, Stagehand, Playwright MCP, DOM vs vision, WebArena | — |
 | `inference_and_decoding/` | Sampling, KV cache, speculative decoding, continuous batching | — |
 | `inference_engines/` | vLLM, TensorRT-LLM, llama.cpp, SGLang, Ollama, TGI | — |
 | `optimization_and_quantization/` | GPTQ, AWQ, Flash Attention, MoE, pruning, distillation | — |
@@ -147,7 +151,7 @@ Current modules under `src/main/java/com/rutik/systemdesign/llm/`:
 | `ai_applications/` | Healthcare, legal, finance, education, customer support | — |
 | `llm_ecosystem_and_landscape/` | Model families, licensing, cost analysis, timeline | — |
 | `vllm_deep_dive/` | PagedAttention, continuous batching, prefix caching, TP/PP | — |
-| `mcp_model_context_protocol/` | MCP protocol, servers/clients, resources/tools/prompts, JSON-RPC, A2A | — |
+| `mcp_model_context_protocol/` | MCP protocol, servers/clients, resources/tools/prompts, JSON-RPC, transports, security, registries | mcp_server_building, mcp_client_patterns, mcp_transports_and_jsonrpc, mcp_security, mcp_registries_and_ecosystem |
 | `small_language_models_and_edge_ai/` | Phi-3/4, Gemma, on-device inference, ONNX, Core ML, quantization | — |
 | `mixture_of_experts/` | MoE routing, Mixtral 8x7B, DeepSeek-V3, load balancing, sparse activation | — |
 | `llm_routing_and_model_selection/` | Multi-model routing, cascade patterns, confidence thresholds, cost optimization | — |

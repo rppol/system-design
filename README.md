@@ -145,6 +145,10 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 | [MCP (Model Context Protocol)](src/main/java/com/rutik/systemdesign/llm/mcp_model_context_protocol/) | Universal LLM-tool protocol, servers/clients, JSON-RPC, A2A |
 | [Data Flywheels & Continuous Learning](src/main/java/com/rutik/systemdesign/llm/data_flywheels_and_continuous_learning/) | Production feedback loops, active learning, drift detection, A/B testing |
 | [LLM Testing Strategies](src/main/java/com/rutik/systemdesign/llm/llm_testing_strategies/) | Golden datasets, LLM-as-judge, regression eval, flakiness detection, CI/CD integration |
+| [Agentic Workflow Patterns](src/main/java/com/rutik/systemdesign/llm/agentic_workflow_patterns/) | Anthropic taxonomy — chaining, routing, parallelization, orchestrator-workers, evaluator-optimizer |
+| [Coding Agents](src/main/java/com/rutik/systemdesign/llm/coding_agents/) | SWE-agent ACI, OpenHands, Aider, Devin, Cursor Composer, Claude Code, SWE-bench |
+| [Voice Agents](src/main/java/com/rutik/systemdesign/llm/voice_agents/) | OpenAI Realtime, Gemini Live, STT→LLM→TTS pipelines, VAD, barge-in, telephony |
+| [Browser Agents Deep Dive](src/main/java/com/rutik/systemdesign/llm/browser_agents_deep_dive/) | Browser Use, Stagehand, Playwright MCP, DOM vs vision, WebArena |
 
 #### LLM Case Studies
 | Case Study | What It Covers |
