@@ -103,6 +103,7 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 | [Prompt Engineering](src/main/java/com/rutik/systemdesign/llm/prompt_engineering/) | CoT, few-shot, ReAct, self-consistency, structured outputs |
 | [RAG Fundamentals](src/main/java/com/rutik/systemdesign/llm/rag_fundamentals/) | Chunking, hybrid retrieval, reranking, RAGAS evaluation |
 | [Advanced RAG](src/main/java/com/rutik/systemdesign/llm/advanced_rag/) | Graph RAG, Agentic RAG, HyDE, Self-RAG, multi-query expansion |
+| [Context Engineering](src/main/java/com/rutik/systemdesign/llm/context_engineering/) | Context budget allocation, "lost in the middle" fix, KV-cache-aware ordering, compaction, retrieval vs long-context decision matrix |
 | [Reasoning Models](src/main/java/com/rutik/systemdesign/llm/reasoning_models/) | o1/o3, DeepSeek-R1, test-time compute, PRM/ORM, MCTS |
 | [Code Generation](src/main/java/com/rutik/systemdesign/llm/code_generation/) | FIM, Copilot architecture, HumanEval, SWE-bench, StarCoder |
 
@@ -124,6 +125,8 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 | [LLM Routing & Model Selection](src/main/java/com/rutik/systemdesign/llm/llm_routing_and_model_selection/) | Multi-model routing, cascade patterns, confidence thresholds |
 | [Knowledge Distillation & Model Merging](src/main/java/com/rutik/systemdesign/llm/knowledge_distillation_and_model_merging/) | Teacher-student distillation, SLERP/TIES/DARE merging, structured pruning |
 | [LLM Observability & Monitoring](src/main/java/com/rutik/systemdesign/llm/llm_observability_and_monitoring/) | Tracing, quality monitoring, cost attribution, alerting, Langfuse |
+| [LLM Caching](src/main/java/com/rutik/systemdesign/llm/llm_caching/) | Exact-match, semantic cache, Anthropic/OpenAI prompt caching, vLLM APC, threshold tuning, invalidation |
+| [Prompt Management & PromptOps](src/main/java/com/rutik/systemdesign/llm/prompt_management_and_promptops/) | Prompt versioning, registries, eval-gated CI, A/B testing, aliases, injection-safe templates |
 
 #### Safety & Evaluation
 | Topic | Key Concepts |

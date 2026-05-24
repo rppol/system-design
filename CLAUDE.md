@@ -5,7 +5,7 @@
 A comprehensive system design study repository covering:
 - **LLD** — Design patterns (GoF), SOLID, anti-patterns
 - **HLD** — Distributed system concepts (CAP, caching, queues, sharding, etc.) + case studies
-- **LLM** — Complete LLM engineering guide (42 modules, 13 case studies, 65 deep-dive sub-files across 9 topics)
+- **LLM** — Complete LLM engineering guide (45 modules, 13 case studies, 65 deep-dive sub-files across 9 topics)
 - **ML** — Complete Machine Learning guide (32 modules, 10 case studies, 26 deep-dive sub-files across 6 topics)
 - **Java** — Pure Java senior-engineer + interview prep guide (17 modules, 4 case studies)
 - **Spring** — Spring Framework senior-engineer + interview prep guide (23 modules, 5 case studies)
@@ -161,6 +161,9 @@ Current modules under `src/main/java/com/rutik/systemdesign/llm/`:
 | `knowledge_distillation_and_model_merging/` | Teacher-student distillation, SLERP/TIES/DARE merging, structured pruning, SparseGPT | — |
 | `llm_observability_and_monitoring/` | Tracing, quality monitoring, cost attribution, alerting, Langfuse, Arize Phoenix | — |
 | `llm_security/` | Prompt injection, data extraction, model theft, supply chain, adversarial robustness, red teaming | — |
+| `prompt_management_and_promptops/` | Prompt versioning, registries, aliases, eval-gated CI, A/B testing, injection-safe templates | — |
+| `context_engineering/` | Context budget allocation, "lost in the middle", KV-cache-aware ordering, compaction, retrieval vs long-context decision matrix | — |
+| `llm_caching/` | Exact-match, semantic cache, provider prompt caching, vLLM APC, embedding cache, threshold tuning, invalidation | — |
 
 Case studies in `llm/case_studies/`: design_chatgpt, design_copilot, design_rag_pipeline, design_ai_search_engine, design_llm_gateway, design_ai_coding_assistant, design_customer_support_bot, design_ai_content_moderation, design_llm_fine_tuning_platform, design_notion_ai, design_ai_data_analyst, design_ai_code_review, design_real_time_translation.
 

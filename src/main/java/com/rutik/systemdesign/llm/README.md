@@ -18,7 +18,7 @@ A comprehensive, one-stop reference for understanding everything about Large Lan
 
 ## What This Section Covers
 
-This section is organized into **42 topic directories** plus **13 real-world case studies**, covering the full LLM lifecycle. Nine topics have **deep-dive sub-files** (65 sub-files total, see the Sub-Files Index below):
+This section is organized into **45 topic directories** plus **13 real-world case studies**, covering the full LLM lifecycle. Nine topics have **deep-dive sub-files** (65 sub-files total, see the Sub-Files Index below):
 
 - How models are built (architecture, tokenization, pre-training, fine-tuning, alignment)
 - How to use models effectively (prompting, RAG, reasoning, code generation)
@@ -75,6 +75,9 @@ This section is organized into **42 topic directories** plus **13 real-world cas
 | 40 | [Coding Agents](coding_agents/README.md) | SWE-agent ACI, OpenHands, Aider, Devin, Cursor Composer, Claude Code, SWE-bench | Advanced |
 | 41 | [Voice Agents](voice_agents/README.md) | OpenAI Realtime, Gemini Live, STT→LLM→TTS pipelines, VAD, barge-in, telephony | Advanced |
 | 42 | [Browser Agents Deep Dive](browser_agents_deep_dive/README.md) | Browser Use, Stagehand, Playwright MCP, DOM vs vision extraction, WebArena | Advanced |
+| 43 | [Prompt Management & PromptOps](prompt_management_and_promptops/README.md) | Prompt versioning, registries, aliases, eval-gated CI, A/B testing, prompt injection prevention | Intermediate |
+| 44 | [Context Engineering](context_engineering/README.md) | Context budget allocation, "lost in the middle", KV-cache-aware ordering, compaction, retrieval vs long-context decision matrix | Intermediate |
+| 45 | [LLM Caching](llm_caching/README.md) | Exact-match, semantic cache, provider prompt caching (Anthropic/OpenAI), vLLM APC, embedding cache, threshold tuning, invalidation | Advanced |
 
 ---
 
@@ -183,7 +186,8 @@ Topics marked with sub-files above contain individual deep-dive files in additio
 ```
 Foundations & Architecture  -->  Tokenization & Embeddings  -->  Embeddings & Similarity Search
 ```
-Understand what a transformer is, how text becomes tokens, and how semantic representations enable search.
+Understand what a transformer is, how text becomes tokens, and how semantic representations enable
+search.
 
 ### Phase 2 — Training
 ```
@@ -193,27 +197,60 @@ Follow the full pipeline from raw data to an aligned, instruction-following mode
 
 ### Phase 3 — Using LLMs
 ```
-Prompt Engineering  -->  RAG Fundamentals  -->  Advanced RAG  -->  Reasoning Models  -->  Code Generation
+Prompt Engineering  -->  RAG Fundamentals  -->  Advanced RAG  -->  Context Engineering  -->  Reasoning Models  -->  Code Generation
 ```
-Learn how to elicit the best behavior from existing models without retraining.
+Learn how to elicit the best behavior from existing models without retraining. Context Engineering
+(#44) covers context-window budget allocation, compaction, and the retrieval-vs-long-context
+decision matrix — essential before building agents or production systems.
 
 ### Phase 4 — Agents & Frameworks
 ```
-Agents & Tool Use  -->  Agentic Frameworks  -->  Multi-Agent Systems
+Agents & Tool Use  -->  Agentic Workflow Patterns  -->  Agentic Frameworks  -->  Multi-Agent Systems
+        |
+        +--> MCP (Model Context Protocol)
+        +--> Coding Agents  -->  Voice Agents  -->  Browser Agents Deep Dive
 ```
-Build autonomous systems that take actions, use tools, and coordinate with other agents.
+Build autonomous systems that take actions, use tools, and coordinate. Agentic Workflow Patterns
+(#39) covers the Anthropic taxonomy (chaining, routing, parallelization, orchestrator-workers,
+evaluator-optimizer) and should be read immediately after the core Agents & Tool Use module. MCP
+sits here because it is an agent tooling protocol, not an advanced research topic. Coding, Voice,
+and Browser Agents are specialized agent types best studied after the general agent foundations.
 
 ### Phase 5 — Production
+Production spans three concerns; read the sub-clusters in order:
+
+**5a — Serve (inference stack)**
 ```
-Inference & Decoding  -->  Context Windows & Long Context  -->  Inference Engines  -->  vLLM Deep Dive  -->  Optimization & Quantization  -->  Knowledge Distillation & Model Merging  -->  Deployment & MLOps  -->  LLM Observability & Monitoring  -->  Token Economics & Cost Optimization  -->  LLM Routing & Model Selection  -->  Evaluation & Benchmarks  -->  Guardrails & Content Safety
+Inference & Decoding  -->  Context Windows & Long Context  -->  Inference Engines  -->  vLLM Deep Dive
+        -->  Optimization & Quantization  -->  Knowledge Distillation & Model Merging
 ```
-Deploy LLMs efficiently, cheaply, and safely. Compress models via distillation and merging; instrument with observability; optimize costs with routing and caching; evaluate before hardening with guardrails.
+
+**5b — Operate (deployment and cost)**
+```
+Deployment & MLOps  -->  LLM Caching  -->  LLM Observability & Monitoring
+        -->  Token Economics & Cost Optimization  -->  LLM Routing & Model Selection
+        -->  Prompt Management & PromptOps
+```
+LLM Caching (#45) belongs here because caching decisions are tightly coupled with deployment
+architecture and cost optimization. Prompt Management (#43) closes the loop on the operational
+side: versioning, testing, and safe deployment of the prompts that drive your production systems.
+
+**5c — Quality gate**
+```
+Evaluation & Benchmarks  -->  LLM Testing Strategies  -->  Guardrails & Content Safety
+```
+LLM Testing Strategies (#35) sits between Evaluation and Guardrails: it covers the engineering
+side of evaluation (golden datasets, regression suites, CI/CD integration) that bridges benchmark
+methodology and production safety hardening.
 
 ### Phase 6 — Advanced Topics
 ```
-Safety & Alignment  -->  LLM Security  -->  Multimodal Models  -->  Small Language Models & Edge AI  -->  Mixture of Experts  -->  MCP (Model Context Protocol)  -->  AI Applications  -->  LLM Ecosystem & Landscape  -->  Data Flywheels & Continuous Learning
+Safety & Alignment  -->  LLM Security  -->  Multimodal Models  -->  Small Language Models & Edge AI
+        -->  Mixture of Experts  -->  AI Applications  -->  LLM Ecosystem & Landscape
+        -->  Data Flywheels & Continuous Learning
 ```
-Broaden understanding of safety, security threats and defenses, multimodal capabilities, small models, MoE architecture, tool protocols, domain applications, the full landscape, and continuous improvement.
+Broaden understanding of safety, security threats and defenses, multimodal capabilities, small
+models, MoE architecture, domain applications, the full landscape, and continuous improvement.
 
 ---
 
@@ -272,6 +309,9 @@ Step 5: Evaluate and Iterate
 | Security depth | More guardrails (safer) | Fewer guardrails (faster) | Latency vs. safety |
 | Observability | Full tracing (comprehensive) | Sampling (low overhead) | Cost vs. visibility |
 | Model compression | Distillation (quality) | Quantization (simplicity) | Quality retention vs. effort |
+| Caching | Semantic cache (higher hit rate) | Exact-match cache (zero false positives) | Query diversity vs. quality safety |
+| Prompt storage | Registry service (hot-swap) | Git files (simple, code-review) | Team size and iteration speed |
+| Context filling | Long context (simpler, complete) | RAG + context engineering (cost-efficient) | Corpus size and update frequency |
 
 ---
 
@@ -316,6 +356,9 @@ Step 5: Evaluate and Iterate
 | Knowledge Distillation & Model Merging | Optimization & Quantization, Fine-Tuning, Deployment & MLOps, Inference Engines |
 | LLM Observability & Monitoring | Deployment & MLOps, Evaluation & Benchmarks, LLM Testing Strategies, Token Economics |
 | LLM Security | Safety & Alignment, Guardrails & Content Safety, Prompt Engineering, Deployment & MLOps |
+| Prompt Management & PromptOps | LLM Observability & Monitoring, LLM Testing Strategies, Token Economics, Deployment & MLOps |
+| Context Engineering | Prompt Engineering, RAG Fundamentals, Agent Memory, Context Windows & Long Context, LLM Caching |
+| LLM Caching | Token Economics & Cost Optimization, Inference & Decoding, vLLM Deep Dive, LLM Routing, Deployment & MLOps |
 
 ---
 
