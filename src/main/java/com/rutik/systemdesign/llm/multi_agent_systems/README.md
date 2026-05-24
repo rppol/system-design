@@ -1,5 +1,18 @@
 # Multi-Agent Systems
 
+## Sub-Files — Deep Dives
+
+| File | Topic | Q&As |
+|------|-------|------|
+| [orchestrator_worker_pattern.md](orchestrator_worker_pattern.md) | Supervisor decomposition, task ledgers, result aggregation, Anthropic research system | 15+ |
+| [agent_debate_and_consensus.md](agent_debate_and_consensus.md) | Multi-agent debate, majority vote, judge agent, temperature diversity | 15+ |
+| [chatdev_and_software_simulation.md](chatdev_and_software_simulation.md) | ChatDev roles, MetaGPT SOPs, product→design→code→QA pipeline | 15+ |
+| [openai_swarm_and_handoffs.md](openai_swarm_and_handoffs.md) | Swarm primitives, Agents SDK, handoffs, routines, statelessness | 15+ |
+| [magentic_one_and_autogen_v04.md](magentic_one_and_autogen_v04.md) | Magentic-One orchestrator, GAIA benchmark, AutoGen v0.4 event-driven core | 15+ |
+| [agent_to_agent_protocols.md](agent_to_agent_protocols.md) | A2A protocol, ACP, ANP, agent cards, inter-agent auth | 15+ |
+
+---
+
 ## 1. Concept Overview
 
 Multi-agent systems decompose complex tasks across multiple specialized AI agents that collaborate, communicate, and coordinate to achieve goals that exceed any single agent's capabilities. Instead of one monolithic agent doing everything, multiple agents with distinct roles, knowledge, and tools work together — mimicking how human teams operate.
@@ -459,3 +472,107 @@ Human gate: If Reviewer scores < 7/10, escalate to human editor
 - First-pass acceptance by engineers: 79% (no edits needed)
 - Time per doc: 45 seconds (vs. 2 hours manual)
 - Hallucination rate (verified): 2.1% (reduced from 12% single-agent attempt)
+
+---
+
+**Additional war story — Orchestrator-worker deadlock in automated code review pipeline:**
+
+A ChatDev-style multi-agent code review system had three workers (security agent, style agent, logic agent) reporting results to an orchestrator agent that synthesized a final review. When the security agent returned a finding that required the logic agent to re-analyze a function, the orchestrator sent a task back to the logic agent. However, the logic agent was designed as a stateless worker that could only receive tasks from a queue — it had no mechanism to receive a mid-workflow re-task from the orchestrator. The orchestrator waited indefinitely; the pipeline deadlocked. Detection: 15-minute timeout alert firing 3x per day.
+
+```python
+# BROKEN: worker has no re-entry point — orchestrator blocks waiting for re-analysis
+class LogicAgent:
+    def analyze(self, code: str) -> dict:
+        # One-shot: no mechanism to receive follow-up task from orchestrator
+        return {"findings": self._run_analysis(code)}
+
+class Orchestrator:
+    def review(self, code: str) -> dict:
+        security_result = self.security_agent.analyze(code)
+        logic_result = self.logic_agent.analyze(code)
+        if security_result["requires_logic_review"]:
+            # BUG: logic_agent.re_analyze() does not exist — deadlock
+            deeper_result = self.logic_agent.re_analyze(
+                code, context=security_result["flagged_lines"]
+            )
+
+# FIX: workers accept optional context parameter; orchestrator sends context-enriched task
+class LogicAgentV2:
+    def analyze(self, code: str, security_context: dict | None = None) -> dict:
+        extra_prompt = ""
+        if security_context:
+            lines = security_context.get("flagged_lines", [])
+            extra_prompt = f"\nPay special attention to lines: {lines}"
+        return {"findings": self._run_analysis(code, extra_prompt)}
+
+class OrchestratorV2:
+    def review(self, code: str) -> dict:
+        security_result = self.security_agent.analyze(code)
+        # Pass security context upfront; logic agent handles it if present
+        logic_result = self.logic_agent.analyze(
+            code,
+            security_context=security_result if security_result.get("flagged_lines") else None
+        )
+        return self._synthesize(security_result, logic_result)
+```
+
+**Additional interview Q&As:**
+
+**What is the agent debate pattern and when does it improve output quality over a single agent?** Agent debate involves two or more LLM agents taking opposing positions on a question and iterating through challenge-response rounds until convergence or a judge agent selects the best answer. It improves output quality on tasks with genuine ambiguity (architectural decisions, policy analysis) and tasks where one-shot LLM responses are systematically biased toward the first plausible answer. Debate degrades quality on factual tasks (introduces false controversy) and adds 3-5x latency and cost. Use debate for high-stakes decisions requiring adversarial review, not routine generation.
+
+**How do you prevent a multi-agent system from amplifying errors across agents?** Use bounded error propagation: each agent outputs a confidence score; the orchestrator treats low-confidence outputs as optional context, not ground truth. Implement a verification agent that independently checks outputs from other agents on a sampling basis (5-10% of production tasks). Use checkpointing: the orchestrator saves intermediate results to a persistent store so that if a downstream agent produces a contradictory result, you can trace which upstream agent introduced the error. Avoid passing raw agent outputs as facts in subsequent agent prompts; instead frame them as "Agent A claimed X — verify this."
+
+**What is the A2A (Agent-to-Agent) protocol and why does it matter for multi-vendor agent systems?** A2A is a Google-proposed open protocol for agent interoperability — agents publish an "agent card" (JSON) describing their capabilities, input/output schemas, and authentication requirements. Other agents discover and invoke them via standardized HTTP+SSE messages without custom integration code. A2A matters because production multi-agent systems increasingly mix agents from different vendors (OpenAI Assistants, Claude agents, custom LangGraph agents), and without a standard protocol, each integration requires custom adapter code. A2A and MCP together form the emerging standard: MCP for tool access, A2A for agent-to-agent delegation.
+
+**Quick-reference table:**
+
+| Pattern | Best for | Trade-off |
+|---|---|---|
+| Orchestrator-worker (centralized) | Parallelizable subtasks with shared state synthesis | Single orchestrator is a bottleneck; all inter-agent communication routes through it |
+| Agent debate (adversarial critique) | High-stakes decisions, policy analysis, ambiguous architectural choices | 3-5x cost; does not improve factual accuracy; can introduce spurious controversy |
+| ChatDev-style simulation (role-play) | Code generation, document drafting with iterative review | Long multi-turn chains accumulate errors; hard to debug; role confusion in LLMs |
+| Swarm-style handoffs (flat, decentralized) | Customer support routing, sequential specialist delegation | No global state; hard to reason about system behavior; handoff context can be lost |
+
+**Pitfall — Orchestrator sends full conversation history to every worker, ballooning token cost.**
+
+```python
+# BROKEN: orchestrator blindly passes entire accumulated history to each worker
+# After 10 back-and-forth turns: 8000 tokens of context per worker call
+# 5 workers × 8000 tokens = 40,000 tokens per orchestration round
+
+async def dispatch_to_workers(history: list[Message], task: str) -> list[str]:
+    results = await asyncio.gather(*[
+        worker.run(messages=history + [{"role": "user", "content": task}])
+        for worker in workers
+    ])
+    return results   # each worker gets full history — expensive, slow
+
+# FIX: summarize history before dispatch; pass only task-relevant context per worker
+async def dispatch_smart(history: list[Message], task: str,
+                          worker_specs: list[WorkerSpec]) -> list[str]:
+    summary = await summarizer.summarize(history, max_tokens=500)
+    return await asyncio.gather(*[
+        spec.worker.run(messages=[
+            {"role": "system", "content": spec.system_prompt},
+            {"role": "user",   "content": f"Context: {summary}\n\nTask: {task}"}
+        ])
+        for spec in worker_specs
+    ])
+# Token cost: 40,000 → 5,000 tokens per round (8× reduction)
+```
+
+**How do you prevent agent debate systems from converging to the wrong answer via social pressure?** In multi-agent debate (Model A proposes, Model B critiques, they iterate), a high-confidence but incorrect argument from one agent can cause the other to capitulate — "sycophantic collapse." Mitigations: (1) blind debate — agents cannot see each other's confidence scores, only content; (2) majority voting — use N≥5 agents, take the majority answer rather than the final agreed answer; (3) adversarial role enforcement — explicitly assign one agent the role of devil's advocate with instructions to never agree until shown a proof. Empirically, 5-agent majority vote outperforms 2-agent debate by 8-12% on MATH and logic benchmarks.
+
+**What is the A2A (Agent-to-Agent) protocol and why does it matter for heterogeneous agent systems?** A2A is a standardized communication protocol (Google DeepMind open-source, 2024) that allows agents built on different frameworks (LangGraph, AutoGen, CrewAI) to communicate via a common message schema: task requests, progress updates, and results are wrapped in A2A envelopes with metadata (sender ID, task ID, priority). Without A2A, multi-framework agent systems require custom adapters between every pair of frameworks — O(N²) complexity. With A2A, each framework implements one A2A adapter — O(N) complexity. In practice: an orchestrator built in LangGraph can dispatch tasks to specialized workers built in AutoGen without custom glue code.
+
+---
+
+**Quick-reference decision table:**
+
+| Scenario | Recommended approach | Key constraint |
+|---|---|---|
+| < 10k training examples | LoRA / few-shot prompting | Data scarcity |
+| Latency < 100ms required | Quantized model + ONNX Runtime | Throughput > accuracy |
+| Multi-tenant, shared model | System prompt isolation + guardrails | Security boundary |
+| Domain shift from pre-training | Fine-tune with domain data | Catastrophic forgetting risk |
+| Cost reduction (10× target) | Smaller model + prompt optimization | Quality floor |

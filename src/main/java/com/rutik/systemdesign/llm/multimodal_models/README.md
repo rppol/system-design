@@ -388,41 +388,306 @@ Evaluate on four dimensions specific to document understanding: (1) OCR accuracy
 
 ---
 
-## 14. Case Study: Automated Insurance Claim Processing with VLM
 
-**Problem:** Insurance company receives 5,000 photo claims/day (car accidents, property damage). Human adjusters spend 20 minutes per claim reviewing photos, estimating damage.
+## 14. Case Study
 
-**Solution:**
+### Multimodal Visual-Language Search at E-Commerce Scale
+
+**Problem Statement and Scale**
+
+An e-commerce platform serving 80 million active users needs multimodal product search: users upload a photo of a product they own and ask "find me similar items under $50 in blue." The system must handle:
+- 12,000 visual search queries per second at peak (Black Friday)
+- Product catalog: 400 million items with images and text descriptions
+- p99 latency SLA: < 300ms end-to-end (image upload → ranked results)
+- Cold-start: new products indexed within 60 seconds of listing
+- Revenue requirement: visual search must achieve CTR within 15% of text search
+
+**Architecture Overview**
+
 ```
-Input: 3-10 photos per claim
-
-Step 1: Scene Understanding (GPT-4o, high-detail)
-  For each photo:
-    - Identify: vehicle make/model/year (cross-reference with claim)
-    - Damage assessment: location, severity (minor/moderate/severe/total loss)
-    - Affected parts list with confidence scores
-
-Step 2: Structured Extraction
-  JSON schema:
-  {
-    "vehicle": {"make": "Toyota", "model": "Camry", "year": 2021},
-    "damage_locations": ["front bumper", "hood", "left headlight"],
-    "severity": "moderate",
-    "estimated_repair_cost_range": "$3,000-$5,000",
-    "requires_human_review": false
-  }
-
-Step 3: Validation Rules
-  If severity == "total loss": always require human review
-  If vehicle identification confidence < 0.8: require human review
-  If repair estimate > $10,000: require human review
-
-Step 4: Queue for human adjuster review (flagged cases only)
+User Upload (jpg/png/webp)
+         |
+         v
+  [Image Validation]  ──── reject if >5MB, non-image MIME
+         |
+         v
+  [CLIP Vision Encoder]     ─── ViT-L/14, 224×224, fp16
+  [CLIP Text Encoder]       ─── same embedding space, 768-d
+         |
+         v
+  [Query Fusion Layer]      ─── concat(img_emb, text_emb) → MLP → 768-d
+         |
+    ┌────┴────────────────────────────────────┐
+    v                                         v
+[FAISS HNSW Index]                    [BM25 Text Index]
+400M product vectors, fp16            title+description tokens
+768-d, ef_search=128                  field-boosted (title ×3)
+    |                                         |
+    └────────────────┬────────────────────────┘
+                     v
+            [RRF Score Fusion]      ─── alpha=0.65 dense, 0.35 sparse
+                     |
+                     v
+            [Price + Category Filter]   ─── post-FAISS metadata filter
+                     |
+                     v
+            [Cross-Encoder Reranker]    ─── MiniLM-L12, top-50 → top-10
+                     |
+                     v
+            [Personalization Layer]     ─── user embedding ×0.2 blend
+                     |
+                     v
+              Ranked Results (10)
 ```
 
-**Results:**
-- 67% of claims auto-processed without human review
-- Human adjuster time reduced from 20 min to 8 min (verification only)
-- Accuracy: VLM vehicle identification 94%; damage assessment within 15% of human estimate
-- Processing time: 45 seconds per claim (vs. 20 minutes)
-- Annual savings: $3.2M in adjuster time
+**Key Design Decisions**
+
+1. **CLIP over domain-specific VLM**: CLIP ViT-L/14 (307M params) gives zero-shot generalization across product categories without per-category fine-tuning. Alternative rejected: BLIP-2 (15B params) — 50× larger, requires 8×A100 GPU per replica, latency > 800ms.
+
+2. **768-d shared embedding space**: CLIP's shared image-text embedding space allows direct cosine similarity between query photo and text-described products without a cross-modal bridge. Dimension choice: 768-d (not 512-d) — empirically +4% recall@10 on internal eval.
+
+3. **HNSW over flat FAISS**: HNSW gives O(log N) approximate nearest-neighbor at 400M scale. ef_search=128 gives 97% recall vs exact search at 8ms latency (flat index: 2,100ms). Trade-off: 3.2 GB HNSW graph overhead per 400M vectors.
+
+4. **Quantization: fp16 for embeddings, INT8 for CLIP inference**: fp16 embeddings halve memory (400M × 768 × 2 bytes = 614 GB) vs fp32 (1.2 TB). INT8 inference on CLIP encoder adds 1.2% recall loss but 2.4× throughput gain. Quantization applied post-normalization — cosine similarity is invariant to scale.
+
+5. **Cross-encoder reranker only on top-50**: Full cross-encoder on 400M items is infeasible (2.4M ms). Reranking top-50 from first-stage retrieval costs 18ms. MiniLM-L12 chosen over BERT-large — 87% of quality at 6× speed.
+
+6. **Incremental FAISS index updates**: New product listings use FAISS `IndexIDMap` with `add_with_ids` — no full rebuild needed. Rebuild triggered only when fragmentation > 15% (monitored via `index.ntotal` vs expected count).
+
+**Implementation**
+
+```python
+from __future__ import annotations
+
+import numpy as np
+import faiss
+import open_clip
+import torch
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class SearchResult:
+    product_id: str
+    score: float
+    image_url: str
+    title: str
+    price: float
+
+class MultimodalSearchEngine:
+    def __init__(
+        self,
+        index_path: str,
+        clip_model: str = "ViT-L-14",
+        pretrained: str = "openai",
+        device: str = "cuda",
+    ) -> None:
+        self.device = device
+        self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+            clip_model, pretrained=pretrained
+        )
+        self.model = self.model.to(device).half()  # fp16 inference
+        self.model.eval()
+        self.tokenizer = open_clip.get_tokenizer(clip_model)
+
+        # HNSW index: ef_search tuned for 97% recall @ 8ms
+        self.index = faiss.read_index(index_path)
+        if hasattr(self.index, "hnsw"):
+            self.index.hnsw.efSearch = 128
+
+        # Move index to GPU for batch queries
+        if device == "cuda":
+            res = faiss.StandardGpuResources()
+            self.index = faiss.index_cpu_to_gpu(res, 0, self.index)
+
+    @torch.inference_mode()
+    def encode_image(self, image_tensor: torch.Tensor) -> np.ndarray:
+        features = self.model.encode_image(image_tensor.to(self.device).half())
+        features = features / features.norm(dim=-1, keepdim=True)
+        return features.cpu().float().numpy()
+
+    @torch.inference_mode()
+    def encode_text(self, text: str) -> np.ndarray:
+        tokens = self.tokenizer([text]).to(self.device)
+        features = self.model.encode_text(tokens)
+        features = features / features.norm(dim=-1, keepdim=True)
+        return features.cpu().float().numpy()
+
+    def fuse_query(
+        self,
+        image_emb: np.ndarray,
+        text_emb: Optional[np.ndarray],
+        image_weight: float = 0.7,
+    ) -> np.ndarray:
+        if text_emb is None:
+            return image_emb
+        fused = image_weight * image_emb + (1 - image_weight) * text_emb
+        # Re-normalize after weighted combination
+        fused = fused / np.linalg.norm(fused, axis=-1, keepdim=True)
+        return fused
+
+    def search(
+        self,
+        query_emb: np.ndarray,
+        k: int = 50,
+        price_max: Optional[float] = None,
+        category: Optional[str] = None,
+    ) -> list[SearchResult]:
+        distances, ids = self.index.search(query_emb.astype(np.float32), k * 2)
+        results = []
+        for dist, pid in zip(distances[0], ids[0]):
+            if pid == -1:
+                continue
+            product = self._fetch_metadata(pid)
+            if price_max and product.price > price_max:
+                continue
+            if category and product.category != category:
+                continue
+            results.append(SearchResult(
+                product_id=str(pid),
+                score=float(dist),
+                image_url=product.image_url,
+                title=product.title,
+                price=product.price,
+            ))
+            if len(results) >= k:
+                break
+        return results
+```
+
+**BROKEN: Stale embeddings cause recall regression after catalog updates**
+
+```python
+# BROKEN: in-memory index never updated after product edits
+class SearchEngine:
+    def __init__(self):
+        self.index = faiss.read_index("products.index")  # loaded once at startup
+        # Problem: product title/image changes never reflected
+        # New products not indexed until server restart
+        # Stale embeddings → wrong results for updated items
+```
+
+**FIX: Incremental index update pipeline**
+
+```python
+import threading
+from collections import deque
+
+class IncrementalSearchEngine(MultimodalSearchEngine):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._pending: deque = deque()
+        self._lock = threading.Lock()
+        self._update_thread = threading.Thread(target=self._flush_loop, daemon=True)
+        self._update_thread.start()
+
+    def enqueue_update(self, product_id: int, new_embedding: np.ndarray) -> None:
+        with self._lock:
+            self._pending.append((product_id, new_embedding))
+
+    def _flush_loop(self) -> None:
+        import time
+        while True:
+            time.sleep(5)  # batch every 5 seconds
+            self._flush_pending()
+
+    def _flush_pending(self) -> None:
+        with self._lock:
+            if not self._pending:
+                return
+            batch = list(self._pending)
+            self._pending.clear()
+
+        ids = np.array([b[0] for b in batch], dtype=np.int64)
+        vecs = np.stack([b[1] for b in batch]).astype(np.float32)
+
+        # Remove stale vectors then re-add with updated embeddings
+        # IndexIDMap supports id-based removal
+        self.index.remove_ids(faiss.IDSelectorArray(ids))
+        self.index.add_with_ids(vecs, ids)
+```
+
+**BROKEN: CLIP text encoder not normalized — cosine similarity inflated for short queries**
+
+```python
+# BROKEN: missing L2 normalization on text side
+text_features = model.encode_text(tokens)  # raw logits, not unit vector
+# Dot product ≠ cosine similarity without normalization
+# Short 1-word queries have lower norm → artificially low similarity scores
+scores = (image_features @ text_features.T)  # wrong: mixing normalized + unnormalized
+```
+
+**FIX: Normalize both modalities before dot product**
+
+```python
+image_features = model.encode_image(images)
+image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+text_features = model.encode_text(tokens)
+text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+
+# Now dot product == cosine similarity (both on unit sphere)
+scores = (image_features @ text_features.T)
+```
+
+**Components Covered**
+
+| Module Section | Where It Appears in Case Study |
+|---|---|
+| VLMs / CLIP architecture | CLIP ViT-L/14 as the dual encoder for image+text queries |
+| Vision encoders (ViT) | ViT-L/14 patch-based image encoding at 224×224 |
+| Embedding similarity search | FAISS HNSW index, cosine similarity, ef_search=128 |
+| Multimodal fusion | Weighted combination of image + text embeddings |
+| Quantization (INT8/fp16) | fp16 embeddings, INT8 inference on CLIP encoder |
+| Reranking | MiniLM-L12 cross-encoder on top-50 candidates |
+| Diffusion models | Used offline for product image augmentation during indexing |
+
+**Tradeoffs and Alternatives**
+
+| Approach | Pros | Cons | When to Choose |
+|---|---|---|---|
+| CLIP ViT-L/14 (chosen) | Zero-shot, 307M params, 8ms | Less domain-specific accuracy | Large diverse catalog |
+| BLIP-2 (15B) | Higher accuracy for complex queries | 50× larger, 800ms latency | Small catalog, high-value items |
+| ResNet-50 + BERT separate | Simple to deploy | No shared embedding space — needs bridge | Baseline only |
+| Fine-tuned domain CLIP | +8% recall on in-domain | Needs 10M labeled pairs, monthly retrain | Single-category shops |
+
+**Metrics and Results**
+
+| Metric | Before (Text Only) | After (Multimodal) |
+|---|---|---|
+| Search CTR | 4.2% | 6.1% (+45%) |
+| p50 visual search latency | — | 89ms |
+| p99 visual search latency | — | 267ms |
+| Catalog recall@10 | 61% text-only | 83% multimodal |
+| GPU cost per 1M queries | — | $1.40 (A10G) |
+| Index size (400M products) | 2.1 GB (text BM25) | 614 GB (fp16 HNSW) |
+| New product indexing lag | < 5 min (text) | < 60 sec (incremental) |
+
+**Common Pitfalls**
+
+1. **Forgetting to normalize embeddings before dot product.** CLIP returns raw feature vectors, not unit vectors. Raw dot product is NOT cosine similarity and is heavily influenced by vector magnitude. Fix: always divide by L2 norm on both image and text sides before any similarity computation.
+
+2. **Using full FAISS flat index in production.** `IndexFlatL2` on 400M vectors requires exhaustive scan: 2,100ms per query. Switch to `IndexHNSWFlat` (8ms at 97% recall) or `IndexIVFFlat` (15ms at 94% recall) for any catalog > 1M items.
+
+3. **Image preprocessing mismatch between training and serving.** CLIP was trained with specific normalization (mean=[0.481, 0.457, 0.408], std=[0.268, 0.261, 0.275]). Using torchvision default normalization causes ~12% recall drop. Always use `open_clip.create_model_and_transforms` to get the exact preprocessing pipeline.
+
+4. **Serving both image and text encoders on the same GPU without batching.** Single-item CLIP inference wastes GPU bandwidth (82% underutilized). Implement dynamic batching: collect queries for 5ms, run as batch of 32–64. Throughput goes from 140 to 2,800 queries/sec on A10G.
+
+5. **Not accounting for HNSW memory in container sizing.** 400M × 768 × 2 bytes (fp16) = 614 GB for vectors alone. HNSW graph adds another ~3.2 GB. Containers must have 650+ GB RAM or use memory-mapped index files with sufficient swap.
+
+**Interview Discussion Points**
+
+**Q: How does CLIP's contrastive training enable zero-shot product classification?**
+CLIP is trained to maximize cosine similarity between matching image-text pairs and minimize similarity between non-matching pairs across 400M internet image-caption pairs. This forces the image and text encoders to learn a shared semantic embedding space where "a red running shoe" and a photo of a red running shoe map to nearby vectors. Zero-shot classification works by encoding candidate class labels as text, encoding the query image, and returning the label with highest cosine similarity — no labeled product data needed.
+
+**Q: How would you handle a user uploading a non-product image (e.g., a selfie) that still retrieves results?**
+CLIP will retrieve the closest products to whatever the user uploads — there is no "no match" threshold by default. Mitigation: (1) Train an out-of-distribution detector on product vs non-product images (binary classifier, AUC > 0.95 achievable with 10k labeled examples); (2) Add a minimum similarity threshold (cosine > 0.25 empirically); (3) Return an explicit "no matching products found" UX rather than low-confidence results. Threshold is tuned by plotting similarity score distribution for valid product queries vs non-product uploads.
+
+**Q: What happens to FAISS HNSW recall as the catalog grows beyond 1 billion products?**
+HNSW recall degrades gracefully with scale — at 1B vectors, recall@10 typically drops from 97% to 93% at ef_search=128. To compensate: (1) Increase ef_search to 256 (12ms vs 8ms — 50% latency trade-off for +3% recall); (2) Use product quantization (PQ) to compress vectors: PQ64 gives 12× compression (614 GB → 51 GB) at the cost of 5% recall. (3) Shard the index: partition products by category into separate FAISS indexes, then merge results. Sharding is the most scalable approach — 8 shards × 125M products each is more manageable than one 1B index.
+
+**Q: How would you evaluate whether the multimodal search improvement is causing real business value vs just gaming recall@10?**
+Recall@10 is a proxy metric — you care about revenue and engagement. Measure: (1) A/B test: 50% users get text-only, 50% get multimodal. Primary metric: 30-day purchase conversion rate from visual search sessions. (2) Guard rails: basket size (multimodal should not reduce average order value), return rate (better relevance → fewer returns). (3) Leading indicator: session depth (users viewing more products per session suggests better discovery). Recall@10 is only valid as a deployment gate — once in production, business metrics take precedence.
+
+**Q: How do you prevent the reranker from reordering results based on spurious features (e.g., product image background color)?**
+Cross-encoders can overfit to low-level visual features that correlate with engagement in training data. Mitigations: (1) Debias training data by stratifying on visual attributes (color, background) to ensure the cross-encoder sees examples where product similarity is driven by shape/function, not color; (2) Use multi-objective training loss that includes semantic similarity, not just click-through prediction; (3) Monitor per-attribute CTR — if CTR for "blue background products" spikes, investigate model attribution with SHAP or attention visualization.

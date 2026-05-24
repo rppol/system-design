@@ -348,30 +348,453 @@ Tokenizers can dramatically affect code and math performance because poor tokeni
 
 ---
 
-## 14. Case Study: Tokenizer Design for a Code-Specialized LLM
 
-**Problem:** Building a code-specialized LLM. The base model uses a 32K vocabulary that tokenizes Python identifiers like `self.model.forward()` into 8 tokens. We want to reduce this for efficiency.
+## 14. Case Study
 
-**Analysis:**
+**Scenario:** A multilingual e-commerce company (50M products across 40 languages, 200M monthly searches) needs to build a semantic search system over product descriptions. Existing system: BM25 keyword search, 23% null result rate for cross-lingual queries (user searches in Spanish for product listed in Portuguese), customer complaint rate 18% related to search. Goal: reduce null results to < 5%, support cross-lingual retrieval across all 40 languages, p99 query embedding latency < 30ms, embedding cost < $200/month.
+
+**Architecture:**
+
 ```
-"self.model.forward()" with 32K vocab:
-  ["self", ".", "model", ".", "for", "ward", "(", ")"] = 8 tokens
+  Query (any of 40 languages)
+         |
+         v
+  ┌───────────────────────────────────────────────────────────┐
+  │  Tokenizer: SentencePiece (multilingual BPE, 100k vocab)  │
+  │  - Automatic language detection via fastText              │
+  │  - Token fertility monitoring (tokens/word per language)  │
+  │  - OOV rate alert: < 0.1% unknown pieces target          │
+  └──────────────────────────┬────────────────────────────────┘
+                             │ token IDs
+                             v
+  ┌───────────────────────────────────────────────────────────┐
+  │  Embedding Model: multilingual-e5-large-instruct          │
+  │  (560M params, 1024-dim, supports 100 languages)          │
+  │  Instruction prefix: "Represent this product for search:" │
+  │  Batch size: 64 (GPU) / 8 (CPU fallback)                  │
+  │  Quantization: INT8 (2× speedup, < 0.5% quality loss)    │
+  └──────────────────────────┬────────────────────────────────┘
+                             │ 1024-dim embedding
+                             v
+  ┌───────────────────────────────────────────────────────────┐
+  │  HNSW Vector Index (Qdrant)                               │
+  │  - 50M product embeddings (1024-dim, float32)             │
+  │  - Index size: 50M × 1024 × 4 bytes = 200 GB             │
+  │  - Distributed: 5 shards × 40 GB per node                │
+  │  - HNSW params: M=32, ef_construction=200                 │
+  │  - Query ef: 128 (recall@10 = 97.3%)                     │
+  │  - p50 query: 8ms; p99: 24ms                              │
+  └──────────────────────────┬────────────────────────────────┘
+                             │ top-100 candidates
+                             v
+  ┌───────────────────────────────────────────────────────────┐
+  │  Cross-encoder Reranker (mMiniLM-L12-v2)                  │
+  │  - Rerank top-100 → top-10 for display                    │
+  │  - Cross-lingual: handles query-product language mismatch │
+  │  - Latency: 15ms for top-100 batch                        │
+  └──────────────────────────┬────────────────────────────────┘
+                             │ top-10 results
+                             v
+  ┌───────────────────────────────────────────────────────────┐
+  │  Offline Indexing Pipeline                                 │
+  │  - New products: embed within 5 min of listing            │
+  │  - Batch re-embedding: monthly (model update)             │
+  │  - Embedding worker: 8×A10G GPUs, 1.2M products/hour      │
+  └───────────────────────────────────────────────────────────┘
 
-With code-optimized 64K vocab:
-  ["self", ".model", ".forward", "()"] = 4 tokens
-
-2x more efficient representation of common code patterns
+Vocabulary Analysis (100k SentencePiece BPE):
+  Language    Fertility   OOV Rate   Notes
+  English     1.3 tok/wd  0.01%      Most coverage (training data dominant)
+  Spanish     1.5 tok/wd  0.02%      Good coverage
+  Portuguese  1.6 tok/wd  0.03%      Good coverage
+  Arabic      2.1 tok/wd  0.08%      Morphologically complex; still adequate
+  Thai        3.8 tok/wd  0.12%      Script-based; high fertility but acceptable
+  Swahili     1.8 tok/wd  0.31%      Limited training data; monitor closely
 ```
 
-**Approach:**
-1. Start with 32K general-purpose BPE vocabulary
-2. Train additional BPE merges on 500B tokens of GitHub code
-3. Add 32K code-specific tokens (common identifiers, operators, keywords)
-4. Fine-tune embedding layer on code while freezing other weights for 10B tokens
+**Key implementation — 3 Python code blocks:**
 
-**Results:**
-- Average fertility on Python: 1.8 tokens/word → 1.1 tokens/word
-- Effective context: 4096 tokens → ~7000 code tokens of actual content
-- HumanEval pass@1: +8% improvement from better context utilization alone
+Block 1 — Multilingual embedding pipeline with instruction prefix:
 
-**Lesson:** Domain-specific tokenizers can yield significant improvements without any architectural changes.
+```python
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Any
+import numpy as np
+import torch
+from transformers import AutoModel, AutoTokenizer
+
+
+@dataclass
+class EmbeddingConfig:
+    model_id: str = "intfloat/multilingual-e5-large-instruct"
+    max_length: int = 512
+    batch_size: int = 64
+    normalize: bool = True
+    device: str = "cuda"
+    # Instruction prefixes for different usage types
+    query_prefix: str = "Instruct: Represent this e-commerce search query for retrieval\nQuery: "
+    document_prefix: str = "Instruct: Represent this product description for retrieval\nQuery: "
+
+
+class MultilingualEmbedder:
+    """
+    Multilingual embedding model for cross-lingual product search.
+    Uses instruction-following E5 model — prefix changes embedding space behavior.
+    Asymmetric: queries and documents use different prefixes.
+    """
+
+    def __init__(self, config: EmbeddingConfig) -> None:
+        self.config = config
+        self.tokenizer = AutoTokenizer.from_pretrained(config.model_id)
+        self.model = AutoModel.from_pretrained(
+            config.model_id,
+            torch_dtype=torch.float16,
+        ).to(config.device).eval()
+
+    def embed_queries(self, texts: list[str]) -> np.ndarray:
+        prefixed = [self.config.query_prefix + t for t in texts]
+        return self._encode(prefixed)
+
+    def embed_documents(self, texts: list[str]) -> np.ndarray:
+        prefixed = [self.config.document_prefix + t for t in texts]
+        return self._encode(prefixed)
+
+    def _encode(self, texts: list[str]) -> np.ndarray:
+        all_embeddings: list[np.ndarray] = []
+        for i in range(0, len(texts), self.config.batch_size):
+            batch = texts[i : i + self.config.batch_size]
+            encoded = self.tokenizer(
+                batch,
+                padding=True,
+                truncation=True,
+                max_length=self.config.max_length,
+                return_tensors="pt",
+            ).to(self.config.device)
+
+            with torch.no_grad():
+                outputs = self.model(**encoded)
+
+            # Mean pooling over non-padding tokens
+            attention_mask = encoded["attention_mask"]
+            token_embeddings = outputs.last_hidden_state
+            input_mask_expanded = (
+                attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+            )
+            embeddings = torch.sum(token_embeddings * input_mask_expanded, dim=1)
+            embeddings /= torch.clamp(input_mask_expanded.sum(dim=1), min=1e-9)
+
+            if self.config.normalize:
+                embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+
+            all_embeddings.append(embeddings.cpu().float().numpy())
+
+        return np.concatenate(all_embeddings, axis=0)
+
+    def check_token_fertility(self, texts: list[str], language: str) -> dict[str, float]:
+        """Monitor tokenization quality per language."""
+        total_tokens = 0
+        total_words = 0
+        for text in texts:
+            tokens = self.tokenizer.encode(text, add_special_tokens=False)
+            words = len(text.split())
+            total_tokens += len(tokens)
+            total_words += max(words, 1)
+        fertility = total_tokens / total_words
+        return {
+            "language": language,
+            "fertility": fertility,
+            "token_count": total_tokens,
+            "word_count": total_words,
+            "alert": fertility > 4.0,   # high fertility signals coverage issues
+        }
+```
+
+Block 2 — OOV monitoring and tokenizer health checks (production concern):
+
+```python
+from __future__ import annotations
+from collections import defaultdict
+from dataclasses import dataclass, field
+import logging
+from transformers import PreTrainedTokenizer
+
+
+@dataclass
+class TokenizerHealthMonitor:
+    """
+    Monitor tokenizer health in production.
+    Track: OOV rates, fertility per language, truncation rates.
+    Alert if OOV rate > 0.1% (indicates domain drift or new product categories).
+    """
+
+    tokenizer: PreTrainedTokenizer
+    alert_oov_threshold: float = 0.001      # 0.1%
+    alert_fertility_threshold: float = 5.0  # tokens per word
+    alert_truncation_threshold: float = 0.05  # 5% of texts truncated
+
+    _stats: dict[str, list[float]] = field(default_factory=lambda: defaultdict(list))
+
+    def analyze_batch(
+        self,
+        texts: list[str],
+        language: str,
+        max_length: int = 512,
+    ) -> dict[str, Any]:
+        oov_count = 0
+        truncated_count = 0
+        total_tokens = 0
+        total_words = 0
+
+        unk_id = self.tokenizer.unk_token_id
+
+        for text in texts:
+            token_ids = self.tokenizer.encode(text, add_special_tokens=False)
+            total_tokens += len(token_ids)
+            total_words += len(text.split())
+
+            # Count OOV (unknown) tokens
+            oov_count += sum(1 for t in token_ids if t == unk_id)
+
+            # Check truncation
+            if len(token_ids) > max_length - 2:  # -2 for special tokens
+                truncated_count += 1
+
+        n = len(texts)
+        oov_rate = oov_count / max(total_tokens, 1)
+        fertility = total_tokens / max(total_words, 1)
+        truncation_rate = truncated_count / max(n, 1)
+
+        # Track history
+        self._stats[f"{language}/oov_rate"].append(oov_rate)
+        self._stats[f"{language}/fertility"].append(fertility)
+
+        alerts = []
+        if oov_rate > self.alert_oov_threshold:
+            alerts.append(
+                f"HIGH OOV: {language} OOV rate {oov_rate:.3%} > {self.alert_oov_threshold:.3%}"
+            )
+            logging.warning(alerts[-1])
+        if fertility > self.alert_fertility_threshold:
+            alerts.append(
+                f"HIGH FERTILITY: {language} fertility {fertility:.1f} tok/word"
+            )
+        if truncation_rate > self.alert_truncation_threshold:
+            alerts.append(
+                f"HIGH TRUNCATION: {language} {truncation_rate:.1%} texts truncated"
+            )
+
+        return {
+            "language": language,
+            "oov_rate": oov_rate,
+            "fertility": fertility,
+            "truncation_rate": truncation_rate,
+            "alerts": alerts,
+            "sample_size": n,
+        }
+
+    def should_retrain_tokenizer(self, language: str) -> bool:
+        """
+        Flag if OOV rate has drifted above threshold in recent windows.
+        Trigger: retrain tokenizer if sustained > 0.5% OOV for 7 days.
+        """
+        recent = self._stats.get(f"{language}/oov_rate", [])[-168:]  # 7 days hourly
+        if not recent:
+            return False
+        return sum(1 for r in recent if r > 0.005) > len(recent) * 0.8
+
+
+from typing import Any
+```
+
+Block 3 — BROKEN -> FIX: using wrong tokenizer for multilingual data and subword normalization:
+
+```python
+from __future__ import annotations
+from transformers import AutoTokenizer
+import unicodedata
+
+
+# BROKEN: Use English-only GPT-2 tokenizer (50k BPE, English trained) for Spanish queries.
+# Spanish word "niño" (child) tokenizes to: ['n', 'i', 'ñ', 'o'] — 4 tokens.
+# English vocab has no "ñ" entry; fertility for Spanish: 3.8 tok/word (too high).
+# Embedding model trained with multilingual tokenizer — tokenizer mismatch → garbage embeddings.
+def broken_tokenize_spanish(text: str) -> list[int]:
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")  # English-only
+    return tokenizer.encode(text)
+# "zapatillas de running" → 8 tokens (vs 4 with multilingual SentencePiece)
+# Embedding model: mismatch → lower recall on Spanish queries
+
+
+# FIX: Use the exact same tokenizer the embedding model was trained with.
+# multilingual-e5 uses XLM-RoBERTa's SentencePiece tokenizer (250k vocab, 100 languages).
+# Always load tokenizer from the same model hub path as the embedding model.
+def fixed_tokenize_multilingual(text: str, model_id: str) -> list[int]:
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    # SentencePiece handles "ñ" natively: "niño" → 2 tokens ["ni", "ño"]
+    return tokenizer.encode(text, add_special_tokens=False)
+
+
+# BROKEN: Pass raw user input to tokenizer without Unicode normalization.
+# User inputs "café" (cafe + combining accent) vs "caf\xe9" (é as single char).
+# Both look like "café" but tokenize differently — same query, different embeddings.
+# Nearest neighbor search returns different results depending on input encoding.
+def broken_embed_raw(text: str) -> None:
+    tokenizer = AutoTokenizer.from_pretrained("intfloat/multilingual-e5-large-instruct")
+    tokenizer.encode(text)   # raw — no normalization
+
+
+# FIX: NFC normalize all text before tokenization.
+# NFC (Canonical Decomposition, Canonical Composition) standardizes character representations.
+# "café" and "caf\xe9" both become "caf\xe9" after NFC.
+def fixed_normalize_and_embed(text: str, model_id: str) -> list[int]:
+    normalized = unicodedata.normalize("NFC", text).strip()
+    # Also: strip leading/trailing whitespace, collapse internal spaces
+    normalized = " ".join(normalized.split())
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    return tokenizer.encode(normalized, add_special_tokens=False)
+
+
+# BROKEN: Use symmetric embedding (same prefix for queries and documents).
+# Instruction-tuned E5 is designed for asymmetric retrieval:
+# queries should use "Instruct: ... Query:" prefix;
+# documents use a different (or no) prefix.
+# Using same prefix for both: 8% recall@10 degradation vs asymmetric.
+def broken_symmetric_embed(text: str, tokenizer: Any) -> None:
+    return tokenizer.encode("Query: " + text)   # same prefix for everything
+
+
+# FIX: Asymmetric prefixes.
+QUERY_PREFIX = "Instruct: Represent this e-commerce search query for retrieval\nQuery: "
+DOCUMENT_PREFIX = ""   # E5-instruct documents use no prefix (or minimal)
+
+def fixed_asymmetric_embed(text: str, is_query: bool, tokenizer: Any) -> list[int]:
+    prefix = QUERY_PREFIX if is_query else DOCUMENT_PREFIX
+    return tokenizer.encode(prefix + text, add_special_tokens=True)
+
+
+from typing import Any
+```
+
+**Pitfall 1 — Vocabulary imbalance across languages causes poor recall for low-resource languages:**
+
+```python
+# BROKEN: Train BPE tokenizer on English-dominated corpus.
+# Unigram frequency determines merge priority — English merges dominate.
+# Thai, Swahili, Yoruba get 3-5% of vocab allocation despite 10% of queries.
+# Swahili fertility: 6.2 tok/word (unacceptable — 3× embedding cost).
+
+# FIX: Language-balanced sampling at tokenizer training time.
+# Cap each language's training data contribution to max_fraction per language.
+# For 40 languages at 100k vocab: target 2500 tokens per language as floor.
+# Upsampling low-resource languages with temperature sampling (T=0.7 for mBERT style).
+from tokenizers import Tokenizer, models, trainers
+
+def train_balanced_tokenizer(
+    language_corpora: dict[str, list[str]],
+    vocab_size: int = 100_000,
+    min_language_fraction: float = 0.01,  # at least 1% of vocab per language
+) -> None:
+    # Upsample each language so no language has < 1% of training data
+    balanced_texts = []
+    target_per_lang = max(
+        len(texts) for texts in language_corpora.values()
+    ) * min_language_fraction
+    for lang, texts in language_corpora.items():
+        if len(texts) < target_per_lang:
+            # Oversample by repeating
+            factor = int(target_per_lang / len(texts)) + 1
+            texts = (texts * factor)[:int(target_per_lang)]
+        balanced_texts.extend(texts)
+    # Train SentencePiece BPE on balanced corpus
+    import sentencepiece as spm
+    spm.SentencePieceTrainer.train(
+        input=balanced_texts,
+        vocab_size=vocab_size,
+        model_type="bpe",
+        character_coverage=0.9995,   # cover rare Unicode chars
+        pad_id=0, unk_id=1, bos_id=2, eos_id=3,
+    )
+```
+
+**Pitfall 2 — Long product descriptions truncated, losing key attributes:**
+
+```python
+# BROKEN: Truncate to max_length=512 tokens — for a detailed product description,
+# this may cut off size, material, or color attributes (key search signals).
+# Recall@10 drops 12% for queries that match attributes in the truncated portion.
+def broken_embed_product(description: str, tokenizer: Any, model: Any) -> Any:
+    tokens = tokenizer(description, max_length=512, truncation=True)
+    return model(**tokens)  # last 20% of description silently dropped
+
+# FIX: Hierarchical embedding — embed structured fields separately.
+# Priority order: title > key_attributes > full_description.
+# For search, title+attributes often sufficient; full description for reranking.
+def fixed_embed_structured(
+    title: str,
+    attributes: dict[str, str],
+    description: str,
+    embedder: MultilingualEmbedder,
+) -> np.ndarray:
+    # Structured representation prioritizing search-relevant fields
+    structured = (
+        f"Product: {title}. "
+        + " ".join(f"{k}: {v}" for k, v in attributes.items())
+    )[:1000]  # attributes fit in 512 tokens
+    return embedder.embed_documents([structured])[0]
+```
+
+**Pitfall 3 — Not normalizing embeddings before cosine similarity:**
+
+```python
+# BROKEN: Return raw (unnormalized) embeddings from model.
+# Cosine similarity requires normalized vectors — raw vectors give L2 distance instead.
+# Results: low-quality products with verbose descriptions score higher
+# because their embedding vectors have larger magnitude.
+def broken_embed(text: str, model: Any) -> Any:
+    output = model(text)
+    return output.last_hidden_state.mean(dim=1)  # unnormalized
+
+# FIX: Always L2-normalize embeddings before indexing or querying.
+# Cosine similarity of normalized vectors equals dot product — faster HNSW search.
+import torch
+def fixed_embed_normalized(text: str, model: Any) -> torch.Tensor:
+    output = model(text)
+    embedding = output.last_hidden_state.mean(dim=1)
+    return torch.nn.functional.normalize(embedding, p=2, dim=-1)
+```
+
+**Metrics:**
+
+| Metric | BM25 baseline | + Multilingual Embeddings | + Cross-encoder Rerank |
+|--------|--------------|--------------------------|------------------------|
+| Null result rate | 23% | 4.1% | 3.8% |
+| Cross-lingual recall@10 | 12% | 71% | 84% |
+| NDCG@10 (same language) | 0.42 | 0.61 | 0.73 |
+| p50 query latency | 8ms | 28ms | 43ms |
+| p99 query latency | 22ms | 68ms | 89ms |
+| Embedding index size | — | 200 GB | — |
+| Monthly embedding API cost | — | $180 (self-hosted) | — |
+| OOV rate (all languages) | N/A | 0.06% avg | — |
+| Thai fertility | N/A | 3.8 tok/word | — |
+| Swahili OOV rate | N/A | 0.31% (flagged) | — |
+
+**Interview Q&As:**
+
+**Q: Why does BPE vocabulary size matter for multilingual tokenization quality?**
+BPE vocabulary size determines how many subword merge rules exist. A 32k vocabulary (like early GPT-2) works well for English — common words are single tokens, fertility is ~1.3 tokens/word. For 40 languages sharing the same vocabulary, each language gets far fewer tokens — common words in Thai or Arabic require many subword pieces, increasing fertility to 4-6 tokens/word. This doubles or triples the token cost for those languages and fragments semantic units the embedding model was trained to handle. Multilingual models use 100k-250k vocabulary (XLM-RoBERTa: 250k, multilingual-BERT: 120k) to provide adequate coverage per language.
+
+**Q: What is token fertility and why do you monitor it in production?**
+Token fertility is the ratio of tokens to words for a given language and tokenizer — "niño" tokenized as 1 piece has fertility 1.0; tokenized as 4 pieces has fertility 4.0. High fertility (> 4.0) indicates the tokenizer poorly covers that language: subwords are too small, increasing cost proportionally, and potentially fragmenting morphemes that the embedding model was trained to handle as units. In production, monitor fertility per language per product category — new product launches in a new geography may introduce vocabulary the tokenizer has never seen, spiking OOV rates and fertility, degrading search quality before you notice the recall drop.
+
+**Q: How does instruction-tuned embedding (E5-Instruct) differ from standard bi-encoder embedding?**
+Standard bi-encoders (sentence-transformers SBERT) encode text symmetrically — same model, same prefix for queries and documents. Instruction-tuned embedders (E5-Instruct, text-embedding-3) use a task description prefix to orient the embedding space: "Represent this query for retrieval:" places the embedding in a retrieval-optimized space. The document side uses a different (or no) prefix. Asymmetric retrieval — where the query and document embedding spaces are allowed to differ — consistently outperforms symmetric by 5-15% recall@10 on MTEB benchmarks. The instruction tells the model "optimize for retrieval" vs "optimize for clustering" vs "optimize for classification."
+
+**Q: What causes cross-lingual recall failures even with multilingual embedding models?**
+Four common causes: (1) Language imbalance in training data — the embedding model saw 95% English text, so English embeddings cluster densely while low-resource languages cluster sparsely; Spanish "zapatos" and English "shoes" are near in embedding space but "zapatos" in Swahili may not be. (2) Tokenizer OOV — if query words tokenize to [UNK], the embedding loses signal. (3) Domain shift — model trained on Wikipedia/Common Crawl, but product descriptions use specialized vocabulary ("breathable mesh upper") not well represented. (4) Character normalization — accented characters not normalized consistently cause the same word to produce different embeddings.
+
+**Q: How do you decide between a larger multilingual model (560M params) and distilled smaller model (120M params) for production embedding?**
+The decision is recall vs latency/cost. Larger models (560M) typically achieve 5-15% higher NDCG@10 on multilingual benchmarks. Smaller distilled models (120M) run 3-4× faster and cost 3-4× less to serve. For a 50M product index with 200M monthly queries, embedding queries at 200M × 120M model = $180/month vs 560M model = $720/month. If the recall difference translates to measurable revenue (A/B test needed), use the larger model. In practice, the reranking stage recovers much of the top-K recall gap — a smaller bi-encoder + cross-encoder reranker often beats a larger bi-encoder alone at similar cost.
+
+**Q: Why use HNSW instead of exact nearest neighbor search for 50M product embeddings?**
+Exact nearest neighbor search (exhaustive dot product over 50M vectors) requires 50M × 1024 × 4 bytes × 200M queries / month = 40 petaFLOPs per second of sustained compute — economically infeasible. HNSW (Hierarchical Navigable Small Worlds) achieves approximate nearest neighbor search in O(log N) per query by building a navigable graph of shortcut edges at multiple granularity levels. At ef=128, HNSW achieves 97%+ recall@10 with p99 latency under 25ms for 50M vectors — 1000× faster than exact search. The 3% recall gap is recovered by reranking the top-100 approximate results with an exact cross-encoder.

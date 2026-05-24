@@ -474,3 +474,114 @@ hardware:
 | GPT-4 fine-tuned | 94% | 2s/query |
 
 **Winner**: Fine-tuned 8B model — 91% accuracy at 10x lower latency and 100x lower cost than GPT-4.
+
+---
+
+**Additional war story — LoRA adapter rank mismatch causing silent quality regression after merge:**
+
+A medical Q&A product fine-tuned a 7B model with LoRA rank=16. After merging the adapter into the base weights for serving (`model.merge_and_unload()`), inference latency dropped from 220ms to 140ms as expected. However, accuracy on the held-out medical eval set dropped from 91% to 83% — the team discovered that the merge was performed on a quantized (INT8) checkpoint rather than the original BF16 checkpoint. Quantization error compounded with LoRA weight injection caused silent degradation.
+
+```python
+# BROKEN: merging LoRA adapter into a post-quantized model
+from peft import PeftModel
+import torch
+
+base = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-3-8B",
+    load_in_8bit=True,  # BUG: quantized before merge
+    device_map="auto",
+)
+model = PeftModel.from_pretrained(base, "./medical_lora_adapter")
+merged = model.merge_and_unload()  # merges into INT8 weights — precision loss
+
+# FIX: always merge in BF16, quantize after merge
+base_bf16 = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-3-8B",
+    torch_dtype=torch.bfloat16,  # full precision for merge
+    device_map="cpu",
+)
+model_bf16 = PeftModel.from_pretrained(base_bf16, "./medical_lora_adapter")
+merged_bf16 = model_bf16.merge_and_unload()
+merged_bf16.save_pretrained("./merged_bf16")
+
+# Then quantize the merged model separately with GPTQ or bitsandbytes
+```
+
+**Additional interview Q&As:**
+
+**When should you choose LoRA rank=4 vs rank=64 for fine-tuning?** Rank=4 is sufficient for style adaptation and instruction following on a well-pretrained model; rank=16-32 is appropriate for domain vocabulary adaptation (medical, legal); rank=64 is needed for significant capability expansion (teaching a model new reasoning patterns). Higher rank uses more GPU memory (rank=64 adds ~2% of 7B model parameters) and trains faster to convergence but risks overfitting on small datasets under 10,000 examples.
+
+**What is the difference between instruction tuning and domain adaptation in fine-tuning?** Instruction tuning trains the model to follow natural language commands using instruction-response pairs (e.g., Alpaca format) and primarily improves the model's output style and safety behavior without changing domain knowledge. Domain adaptation fine-tunes on domain-specific text (medical literature, legal contracts, code) and primarily improves the model's knowledge accuracy and terminology use in that domain. Production fine-tuning pipelines often combine both: domain adaptation first, then instruction tuning on domain-specific QA pairs.
+
+**How do you prevent catastrophic forgetting when fine-tuning a general-purpose model on a narrow domain?** Use LoRA or QLoRA instead of full fine-tuning (freezes base weights); add replay examples from the original pretraining distribution mixed into the fine-tuning batch (5-10% replay ratio); monitor performance on a held-out general benchmark (MMLU or HellaSwag) alongside the domain eval set and stop training if general benchmark drops more than 3%. EWC (Elastic Weight Consolidation) is theoretically sound but rarely used in practice due to the overhead of computing Fisher information matrices for 7B+ models.
+
+**Quick-reference table:**
+
+| Approach | Best for | Trade-off |
+|---|---|---|
+| LoRA rank=8, alpha=16 | Style/instruction adaptation | Insufficient for heavy domain knowledge injection |
+| QLoRA (4-bit base + BF16 adapters) | Fine-tuning 70B models on single A100 | 15-20% slower training than BF16 full LoRA; merge step requires BF16 reconstruction |
+| Full fine-tuning (last 2 layers only) | Adjusting output format/tokenizer head | Risks forgetting; only practical for models under 3B parameters |
+| Adapter merging with SLERP | Combining domain adapter + chat adapter | Interpolation ratio must be tuned (0.5 is not always optimal); evaluate both endpoints first |
+
+**Pitfall — LoRA rank too low causes underfitting on complex domain tasks.**
+
+```python
+# BROKEN: rank=4 LoRA for medical Q&A fine-tuning — too few trainable params
+# to capture medical terminology patterns; validation accuracy plateaus at 61%
+from peft import LoraConfig, get_peft_model
+
+config = LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj", "v_proj"])
+# Only 2M trainable params on a 7B model → underfits on 50k medical QA pairs
+
+# FIX: increase rank to 16-32 for complex domain; target more modules
+config = LoraConfig(
+    r=32,                    # 4→32: 8× more trainable params
+    lora_alpha=64,           # keep alpha = 2× rank for stable training
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],  # all attention
+    lora_dropout=0.1,
+)
+# Trainable params: 32M (0.4% of 7B) → validation accuracy 78% (+17pp)
+```
+
+**How do you decide between LoRA, QLoRA, and full fine-tuning?** Full fine-tuning updates all parameters — highest accuracy ceiling but requires multi-GPU (70B model needs 560GB at FP32). LoRA adds low-rank adapters (0.1-1% of params) — fits in 1-2 GPUs for 7B, minimal accuracy loss for knowledge tasks. QLoRA applies LoRA on a 4-bit quantized base model — enables 70B fine-tuning on a single A100 80GB, 1-3pp accuracy loss vs. LoRA. Rule of thumb: QLoRA for resource-constrained fine-tuning of large models; LoRA for medium models (7B-13B) with moderate data; full fine-tuning only when you have both data (1M+ examples) and compute, and need maximum task-specific accuracy.
+
+**What is catastrophic forgetting in fine-tuning and how do you mitigate it?** Catastrophic forgetting occurs when a model fine-tuned on a narrow task loses general capabilities — a medical LLM stops being able to write code or follow general instructions. Mitigations: (1) mix general instruction data (5-10%) with domain-specific data during fine-tuning; (2) use LoRA/PEFT — adapters preserve base model weights, so forgetting is limited to adapter behavior; (3) evaluate on a held-out general benchmark (MMLU, HellaSwag) alongside the domain task after each epoch — stop when general performance drops > 2pp.
+
+---
+
+**Quick-reference decision table:**
+
+| Scenario | Recommended approach | Key constraint |
+|---|---|---|
+| < 10k training examples | LoRA / few-shot prompting | Data scarcity |
+| Latency < 100ms required | Quantized model + ONNX Runtime | Throughput > accuracy |
+| Multi-tenant, shared model | System prompt isolation + guardrails | Security boundary |
+| Domain shift from pre-training | Fine-tune with domain data | Catastrophic forgetting risk |
+| Cost reduction (10× target) | Smaller model + prompt optimization | Quality floor |
+
+**Production checklist before shipping an LLM feature:**
+
+- [ ] Latency p99 measured under production load (not just median)
+- [ ] Fallback path tested: what happens when the LLM API is unavailable?
+- [ ] Cost per request calculated at current and 10× scale
+- [ ] Safety/guardrail evaluation on 200 adversarial prompts
+- [ ] Prompt versioned in code and tied to model version in experiment tracker
+- [ ] Human evaluation on 50 random production outputs before launch
+- [ ] Monitoring dashboard live: latency, error rate, cost, quality proxy metric
+
+**Interview Q&A supplement:**
+
+**How do you measure the real-world impact of a code generation feature beyond pass@k?** Track production metrics: (1) acceptance rate — what fraction of shown completions are accepted by developers (industry baseline: 25-35%); (2) retention rate — of accepted completions, how many survive the next commit without modification (high quality = > 70%); (3) time-to-completion — does the developer ship features faster? Measure via A/B test: feature team vs. control team, track story-point velocity over 8 weeks. These business metrics matter more than HumanEval pass@1 for evaluating real impact.
+
+**What is test-driven development integration for code generation agents?** An agentic code generation loop: (1) generate code from the spec; (2) run tests against it; (3) feed failing test output back to the model as context; (4) iterate until tests pass or N retries exceeded. SWE-agent and OpenHands use this pattern and achieve 20-35% solve rate on SWE-bench — dramatically higher than single-shot generation (~2%). The key engineering challenge: sandboxing (tests must run in an isolated environment that can't damage the host), test timeout enforcement (infinite loops in generated code must be killed), and retry budget management (each iteration costs tokens + time).
+
+**Key metric targets for production LLM systems:**
+
+| Metric | Typical target | How to measure |
+|---|---|---|
+| Latency p99 | < 2s for chat, < 500ms for autocomplete | Prometheus histogram |
+| Token cost per request | < $0.01 for most applications | Track input+output tokens × price |
+| Hallucination rate | < 5% on factual tasks | LLM-as-judge on sampled outputs |
+| Context utilization | > 60% of max context used | Avg tokens / max_context |
+| Cache hit rate | > 30% with prompt caching | Cache hit counter / total requests |

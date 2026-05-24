@@ -737,3 +737,104 @@ Deployment:
 - Merged with a domain-specialized model to recover quality that distillation alone could not match
 - Used structured pruning (remove heads) rather than unstructured because the deployment hardware (A10G) does not support sparse execution
 - Accepted 90% quality retention as the business approved a small quality-cost tradeoff for 10x cost savings
+
+---
+
+**Additional war story — Temperature calibration failure causing overconfident student model outputs after GPT-4 distillation:**
+
+A team distilled GPT-4 into a 7B student model for customer support. GPT-4 produces well-calibrated soft probability distributions across vocabulary — when uncertain, it assigns meaningful probability to multiple tokens. The student was trained with standard cross-entropy on GPT-4's top-1 outputs (hard labels converted from greedy sampling) rather than on GPT-4's logit distributions. The student model learned to be overconfident: it output hedging phrases like "I'm not sure" far less often than GPT-4 (12% rate vs 34% rate for ambiguous queries), causing customer escalations when the bot gave wrong answers confidently.
+
+```python
+# BROKEN: distillation on hard labels only — loses calibration signal
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+import torch.nn.functional as F
+
+def distill_step_broken(student_logits: torch.Tensor, teacher_output_ids: torch.Tensor):
+    # Only trains on teacher's top-1 token — loses all calibration information
+    loss = F.cross_entropy(student_logits, teacher_output_ids)
+    return loss
+
+# FIX: use KL divergence on teacher's full probability distribution (soft targets)
+def distill_step_soft(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    hard_labels: torch.Tensor,
+    temperature: float = 4.0,      # higher T = softer distribution = more calibration signal
+    alpha: float = 0.7,            # weight for soft loss vs hard loss
+) -> torch.Tensor:
+    # Soft targets: KL divergence between student and teacher distributions
+    soft_student = F.log_softmax(student_logits / temperature, dim=-1)
+    soft_teacher = F.softmax(teacher_logits / temperature, dim=-1)
+    soft_loss = F.kl_div(soft_student, soft_teacher, reduction="batchmean") * (temperature ** 2)
+
+    # Hard targets: standard cross-entropy on ground truth labels
+    hard_loss = F.cross_entropy(student_logits, hard_labels)
+
+    return alpha * soft_loss + (1 - alpha) * hard_loss
+
+# After distillation: validate calibration with ECE (Expected Calibration Error)
+def expected_calibration_error(confidences: list[float], accuracies: list[bool], n_bins: int = 10) -> float:
+    bins = [(i/n_bins, (i+1)/n_bins) for i in range(n_bins)]
+    ece = 0.0
+    for low, high in bins:
+        in_bin = [(c, a) for c, a in zip(confidences, accuracies) if low <= c < high]
+        if in_bin:
+            avg_conf = sum(c for c, _ in in_bin) / len(in_bin)
+            avg_acc = sum(a for _, a in in_bin) / len(in_bin)
+            ece += abs(avg_conf - avg_acc) * len(in_bin) / len(confidences)
+    return ece  # target < 0.05 for well-calibrated model
+```
+
+**Additional interview Q&As:**
+
+**What is the optimal distillation temperature and why does it matter?** Temperature controls the softness of the teacher's probability distribution used as training targets. At T=1, the distribution is sharply peaked (similar to hard labels). At T=4-8, the distribution spreads probability mass to near-synonym tokens, providing richer calibration signal to the student. Hinton's original paper showed T=4-8 works best for classification; for generative LLM distillation, T=2-4 is typical because excessively high temperatures introduce noise from low-probability tokens. The optimal value depends on the teacher's vocabulary size and task; calibrate by measuring student ECE at multiple temperature values on a held-out set.
+
+**How do you evaluate whether a distilled 7B model is ready to replace GPT-4 in production, and what acceptance criteria do you use?** Define a domain-specific evaluation set of 500-1,000 labeled examples covering all intent categories proportional to production traffic. Measure: (1) accuracy on domain eval (target: within 5% of teacher); (2) ECE < 0.05 for calibration; (3) P95 latency under target SLA; (4) cost per query at production RPS; (5) adversarial robustness (same jailbreak test set used for GPT-4). Run A/B test with 10% traffic for 2 weeks measuring downstream business metrics (resolution rate, CSAT, escalation rate). Accept only if all gates pass — partial passes require investigating the failing dimensions before full rollout.
+
+**What is SLERP model merging and when is it preferable to simple linear interpolation (LERP)?** SLERP (Spherical Linear Interpolation) interpolates between model weights along the surface of a high-dimensional sphere, preserving the magnitude of weight vectors during interpolation. LERP (Linear Interpolation) interpolates along a straight line, which shrinks weight magnitudes at the midpoint (by up to 29% for orthogonal vectors). For merging two fine-tuned LLM checkpoints that started from the same base model, SLERP produces better quality at the midpoint (t=0.5) because model weights lie in approximately spherical manifolds after pretraining. In practice, for models with billions of parameters, the quality difference between SLERP and LERP is small (1-3% on benchmarks) but SLERP is the default choice in MergeKit for production merges.
+
+**Quick-reference table:**
+
+| Technique | Quality retention | Cost to deploy | Best for |
+|---|---|---|---|
+| Logit distillation (soft targets, T=4) | 92-97% of teacher | 10-100x cheaper than teacher at inference | Domain adaptation where teacher logits available |
+| Data distillation (synthetic fine-tuning) | 85-93% of teacher | 10-100x cheaper | When teacher API-only (no logit access) |
+| SLERP merging (same base model) | 95-98% of better checkpoint | Same as single model | Combining domain adapter + chat adapter without quality loss |
+| Structured pruning (remove attention heads) | 80-90% after fine-tuning | 20-40% faster inference | Memory-constrained deployment; hardware without sparse compute support |
+
+**How does SLERP model merging work, and when does it outperform simple weight averaging?** SLERP (Spherical Linear Interpolation) interpolates between two model weight tensors along the surface of a hypersphere rather than linearly. For model merging, it treats the weight difference as a rotation: `SLERP(W_A, W_B, t) = sin((1-t)θ)/sin(θ) · W_A + sin(tθ)/sin(θ) · W_B` where θ is the angle between the weight vectors. SLERP outperforms linear interpolation when models are fine-tuned from the same base — the weights are close in magnitude but differ in direction, and SLERP preserves the direction change more faithfully. In practice, SLERP merging of two 7B LoRA-tuned models at t=0.5 typically outperforms either model alone by 1-3pp on the combined task distribution.
+
+**What is the risk of merging models with different training data, and how do you detect it post-merge?** Models fine-tuned on incompatible data (e.g., merging a "never discuss violence" safety model with an uncensored model) can produce inconsistent behavior — the merged model sometimes follows safety rules, sometimes doesn't, depending on which model's weights "won" for that layer. Detection: run a safety evaluation suite (200 adversarial prompts) and a capability suite (MMLU subset) on both source models and the merged model. If the merged model's safety score falls below min(safety_A, safety_B), the merge degraded safety alignment. TIES-MERGING resolves conflicts by only keeping consistently non-zero weight changes (trimming conflicting deltas), producing more predictable merged behavior than vanilla SLERP.
+
+---
+
+**Quick-reference decision table:**
+
+| Scenario | Recommended approach | Key constraint |
+|---|---|---|
+| < 10k training examples | LoRA / few-shot prompting | Data scarcity |
+| Latency < 100ms required | Quantized model + ONNX Runtime | Throughput > accuracy |
+| Multi-tenant, shared model | System prompt isolation + guardrails | Security boundary |
+| Domain shift from pre-training | Fine-tune with domain data | Catastrophic forgetting risk |
+| Cost reduction (10× target) | Smaller model + prompt optimization | Quality floor |
+
+**Production checklist before shipping an LLM feature:**
+
+- [ ] Latency p99 measured under production load (not just median)
+- [ ] Fallback path tested: what happens when the LLM API is unavailable?
+- [ ] Cost per request calculated at current and 10× scale
+- [ ] Safety/guardrail evaluation on 200 adversarial prompts
+- [ ] Prompt versioned in code and tied to model version in experiment tracker
+- [ ] Human evaluation on 50 random production outputs before launch
+- [ ] Monitoring dashboard live: latency, error rate, cost, quality proxy metric
+
+**Key metric targets for production LLM systems:**
+
+| Metric | Typical target | How to measure |
+|---|---|---|
+| Latency p99 | < 2s for chat, < 500ms for autocomplete | Prometheus histogram |
+| Token cost per request | < $0.01 for most applications | Track input+output tokens × price |
+| Hallucination rate | < 5% on factual tasks | LLM-as-judge on sampled outputs |
+| Context utilization | > 60% of max context used | Avg tokens / max_context |
+| Cache hit rate | > 30% with prompt caching | Cache hit counter / total requests |

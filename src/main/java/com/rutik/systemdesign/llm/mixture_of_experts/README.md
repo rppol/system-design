@@ -712,3 +712,83 @@ Estimated cost (on-demand H100 equivalent): ~$80/hour
 #### Interview Discussion Points
 
 This case study covers: expert parallelism topology decisions (NVLink vs InfiniBand), capacity factor tuning, continuous batching interaction with MoE, quantization tradeoffs specific to MoE (expert weights vs KV cache), replica scaling strategy, and production monitoring for MoE-specific failure modes (expert collapse drift, dropped tokens).
+
+---
+
+**Additional war story — Expert collapse in DeepSeek-V3-style MoE causing 80% of tokens routed to 2 of 256 experts:**
+
+A team fine-tuning a 236B MoE model (64 experts per layer, top-2 routing) for a domain-specific task observed that after 3,000 training steps, load monitoring showed 80% of tokens routing to 2 experts per layer. The remaining 62 experts were receiving near-zero gradient signal and becoming degenerate. The model's perplexity on the validation set had plateaued, but domain accuracy was 12 percentage points below baseline. Root cause: the auxiliary load balancing loss coefficient (alpha) was set to 0.001 — too low to overcome the positive feedback loop where popular experts receive more gradient and become more attractive to the router.
+
+```python
+# BROKEN: auxiliary loss coefficient too small — allows expert collapse
+import torch
+import torch.nn.functional as F
+
+def moe_loss_broken(
+    router_logits: torch.Tensor,   # shape: (batch * seq_len, num_experts)
+    expert_outputs: torch.Tensor,
+    labels: torch.Tensor,
+    num_experts: int = 64,
+    top_k: int = 2,
+) -> torch.Tensor:
+    # Standard language modeling loss
+    lm_loss = F.cross_entropy(expert_outputs, labels)
+    
+    # Auxiliary load balancing loss — BUG: alpha=0.001 too small
+    router_probs = F.softmax(router_logits, dim=-1)
+    tokens_per_expert = router_probs.mean(dim=0)  # ideal: uniform = 1/num_experts
+    aux_loss = num_experts * (tokens_per_expert * tokens_per_expert).sum()
+    
+    alpha = 0.001  # BUG: too small — collapse prevention is ineffective
+    return lm_loss + alpha * aux_loss
+
+# FIX: use DeepSeek-style bias-based load balancing with monitoring
+def moe_loss_with_monitoring(
+    router_logits: torch.Tensor,
+    expert_outputs: torch.Tensor,
+    labels: torch.Tensor,
+    expert_bias: torch.Tensor,   # learnable per-expert bias added to router logits
+    num_experts: int = 64,
+    top_k: int = 2,
+    alpha: float = 0.01,         # increased coefficient
+    collapse_threshold: float = 0.5,  # alert if any expert gets >50% of tokens
+) -> tuple[torch.Tensor, dict]:
+    lm_loss = F.cross_entropy(expert_outputs, labels)
+
+    # DeepSeek-V3 approach: add learnable bias to router logits for load balancing
+    biased_logits = router_logits + expert_bias.unsqueeze(0)
+    router_probs = F.softmax(biased_logits, dim=-1)
+    tokens_per_expert = router_probs.mean(dim=0)
+
+    # Auxiliary loss: minimize variance from uniform distribution
+    ideal = 1.0 / num_experts
+    aux_loss = ((tokens_per_expert - ideal) ** 2).sum()
+
+    # Monitor for expert collapse
+    max_expert_load = tokens_per_expert.max().item()
+    metrics = {
+        "max_expert_load": max_expert_load,
+        "expert_entropy": -(router_probs * router_probs.log()).sum(dim=-1).mean().item(),
+        "collapsed": max_expert_load > collapse_threshold,
+    }
+
+    total_loss = lm_loss + alpha * aux_loss
+    return total_loss, metrics
+```
+
+**Additional interview Q&As:**
+
+**What is the capacity factor in MoE routing and what happens when it is set too low?** Capacity factor (C) determines the maximum number of tokens each expert can process per batch: capacity = (tokens_in_batch / num_experts) × C. With C=1.0 (exact uniform distribution), any imbalance causes tokens to be dropped — the router tries to send token_i to expert_j, but expert_j is full, so token_i is processed without expert contribution (equivalent to passing through a zero gate). In practice C=1.25-1.5 is used to absorb routing imbalance; DeepSeek-V3 uses C=2.0 during training. Tokens dropped due to capacity overflow are a silent quality degradation — monitor drop rate as a training and inference metric; alert if it exceeds 2%.
+
+**How does expert parallelism interact with tensor parallelism in a large MoE deployment, and which should you use for a 236B model?** Tensor parallelism (TP) splits each expert's weight matrix across GPUs (e.g., 8-way TP splits a 4096×4096 matrix to 4096×512 per GPU); all GPUs participate in every expert computation with all-reduce communications per layer. Expert parallelism (EP) assigns different experts to different GPUs; each GPU runs only its assigned experts and uses all-to-all communication for routing. For 236B MoE with 64 experts: TP across 8 GPUs per expert group + EP across 8 expert groups = 64 GPUs total. EP has lower communication overhead than TP (all-to-all is more efficient than all-reduce for expert routing patterns) but requires careful load balancing to avoid some GPUs being idle. The standard production topology for large MoE is EP=num_experts/2 + TP=2 per expert group.
+
+**How do you implement prefix caching for MoE models where different experts activate for the same prefix?** MoE prefix caching is more complex than dense model KV caching because the same prefix token can activate different experts depending on the query suffix (the router uses the full hidden state, which is context-dependent). Effective prefix caching for MoE requires: (1) compute and cache KV states for the shared prefix using a fixed expert routing configuration (not query-dependent); (2) verify that prefix routing is stable for your use case (system prompts typically route consistently); (3) use SGLang's RadixAttention, which handles MoE prefix caching natively by caching per-expert KV blocks separately. For shared system prompts (>500 tokens), prefix caching reduces TTFT by 40-60% even for MoE models.
+
+**Quick-reference table:**
+
+| MoE parameter | Recommended value | What happens at extremes |
+|---|---|---|
+| Load balancing loss alpha | 0.01-0.02 | Too low (<0.001): expert collapse; too high (>0.1): forces uniform routing, kills specialization |
+| Capacity factor C | 1.25-1.5 (training), 1.0 (inference) | C<1.0: token dropping; C>2.0: wasted GPU memory allocation |
+| Top-K experts | 2 (standard), 1 (ultra-efficient), 8 (quality-focused) | K=1: routing instability; K=8: approaches dense model computation cost |
+| Number of experts per layer | 8-64 (practical range) | <8: insufficient specialization; >64: routing overhead dominates; expert collapse risk increases |

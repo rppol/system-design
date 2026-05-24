@@ -652,37 +652,444 @@ Held-out evaluation tests the model on a fixed dataset before deployment, while 
 
 ---
 
-## 14. Case Study: Evaluating a Code Review LLM
 
-**Product:** LLM that reviews code PRs and identifies bugs, security issues, and style violations.
+## 14. Case Study
 
-**Evaluation Design:**
+**Scenario:** A developer tools company ships an LLM-powered code review product. The model suggests code improvements for Python, JavaScript, Go, and Rust. They need an eval pipeline that catches regressions before release, measures quality improvement over model versions, costs < $500/eval run, and produces results in < 2 hours. Initial eval: MMLU (irrelevant) gave 78.3% — looked good, but production users reported poor JavaScript suggestions. They need task-specific evaluation.
+
+**Architecture:**
 
 ```
-Task-specific metrics:
-  1. Bug detection recall: % of real bugs found (ground truth from bug database)
-  2. False positive rate: % of flagged non-issues (human review sample)
-  3. Security issue recall: % of security vulnerabilities caught
-  4. Actionability: are suggestions specific enough to act on? (human rated)
+  Code Review Eval Pipeline
+  ┌────────────────────────────────────────────────────────────────┐
+  │  Golden Dataset (human-authored, never shown to model)         │
+  │  - 500 code snippets per language (Python, JS, Go, Rust)      │
+  │  - Each snippet has 3-5 expert-written review comments         │
+  │  - Snippet categories: security bugs, style, performance,      │
+  │    correctness, maintainability                                │
+  │  - Adversarial set: 100 already-good snippets (expect no issues│
+  │    raised, or only minor style suggestions)                    │
+  └──────────────────────────────┬─────────────────────────────────┘
+                                 │
+                                 v
+  ┌────────────────────────────────────────────────────────────────┐
+  │  Eval Runner (async, 50 concurrent requests)                   │
+  │  Input per example:                                            │
+  │    - Code snippet + language + context (file name, git diff)  │
+  │    - Reference expert reviews (gold standard)                  │
+  │  Model output: list of review comments with severity           │
+  └──────────────────────────────┬─────────────────────────────────┘
+                                 │
+                    ┌────────────┼──────────────────┐
+                    │            │                  │
+                    v            v                  v
+  ┌──────────────┐ ┌──────────────────┐ ┌──────────────────────────┐
+  │  Automated   │ │  LLM-as-Judge    │ │  Human Spot-Check         │
+  │  Metrics     │ │  (Claude Opus)   │ │  (20 examples/run)        │
+  │  - ExactMatch│ │  - Review quality│ │  - 2 senior engineers     │
+  │  - ROUGE-L   │ │  - Severity acc  │ │  - Rate 1-5 per example  │
+  │  - Issue type│ │  - False positive│ │  - Calibrates LLM judge  │
+  │    F1 score  │ │    rate          │ │    bias                   │
+  └──────────────┘ └──────────────────┘ └──────────────────────────┘
+                                 │
+                                 v
+  ┌────────────────────────────────────────────────────────────────┐
+  │  Regression Detection                                          │
+  │  - Compare to previous model version scores                    │
+  │  - Alert if any metric drops > 3% (block release)             │
+  │  - Track per-language, per-issue-type breakdown               │
+  │  - Trend dashboard: Grafana + PostgreSQL eval history          │
+  └────────────────────────────────────────────────────────────────┘
 
-Test set construction:
-  - 500 PRs with known bugs (from bug tracker — bug introduced before fix commit)
-  - 500 PRs with no bugs (high-quality reviewed PRs)
-  - 100 PRs with security vulnerabilities (CVE database)
-  - Human annotation: 2 engineers rate each suggestion (1-5 actionability)
-
-Automated evaluation:
-  Bug recall: model reviews buggy PRs → did it catch the known bug?
-    Evaluated by: string matching against bug location + LLM judge
-  False positive: model reviews clean PRs → count flags / total PRs
-  Security: model reviews vulnerable PRs → CVE recall
-
-LLM-as-judge for actionability:
-  Validated first: judge vs. human label agreement = 0.81 (good)
-  Then: judge 10× more reviews per week than human-only
-
-A/B test in production:
-  Model A (gpt-4o): bug recall 78%, FP rate 12%, actionability 3.9/5
-  Model B (fine-tuned gpt-4o on 5K code reviews): recall 86%, FP rate 8%, actionability 4.3/5
-  → Ship Model B
+Cost Breakdown (per eval run, 2000 examples):
+  Model under test (claude-sonnet-4-6):
+    2000 × 1500 tokens input = 3M tokens = $9
+  LLM Judge (claude-opus-4):
+    2000 × 2000 tokens = 4M tokens = $60
+  Human spot-check: 20 × $15/hour × 0.25 hr = $75
+  Total per run: $144 (well under $500 budget)
+  Runtime: 2000 examples / 50 concurrent / 3s avg = 2 min model
+           + 5 min judge + 2 min analysis = 9 min total
 ```
+
+**Key implementation — 3 Python code blocks:**
+
+Block 1 — LLM-as-judge evaluation framework:
+
+```python
+from __future__ import annotations
+import asyncio
+import json
+from dataclasses import dataclass, field
+from typing import Any
+import anthropic
+
+
+@dataclass
+class CodeReviewExample:
+    example_id: str
+    language: str
+    code_snippet: str
+    gold_reviews: list[dict[str, str]]   # [{type, severity, description}]
+    is_adversarial: bool = False          # True = no issues expected
+
+
+@dataclass
+class ModelOutput:
+    example_id: str
+    reviews: list[dict[str, str]]        # model's review comments
+    raw_response: str
+
+
+@dataclass
+class JudgeScore:
+    example_id: str
+    relevance: float         # 0-1: are reviews relevant to actual code?
+    accuracy: float          # 0-1: are identified issues real issues?
+    completeness: float      # 0-1: did model catch all gold issues?
+    false_positive_rate: float  # 0-1: how often does model raise non-issues?
+    severity_accuracy: float    # 0-1: severity labels correct?
+    overall: float           # weighted average
+    judge_reasoning: str
+
+
+async def judge_code_review(
+    client: anthropic.AsyncAnthropic,
+    example: CodeReviewExample,
+    model_output: ModelOutput,
+) -> JudgeScore:
+    """
+    Use Claude Opus as LLM judge to evaluate code review quality.
+    Judge sees: code, gold reviews, model reviews.
+    Rates: relevance, accuracy, completeness, false_positives, severity.
+    """
+    gold_block = "\n".join(
+        f"- [{r['severity'].upper()}] {r['type']}: {r['description']}"
+        for r in example.gold_reviews
+    )
+    model_block = "\n".join(
+        f"- [{r.get('severity', 'INFO').upper()}] {r.get('type', 'general')}: {r.get('description', '')}"
+        for r in model_output.reviews
+    ) if model_output.reviews else "(no issues found)"
+
+    adversarial_note = ""
+    if example.is_adversarial:
+        adversarial_note = "\nNOTE: This is a GOOD code snippet with no real issues. False positive rate is the primary metric."
+
+    prompt = f"""You are evaluating an AI code reviewer. Rate its performance on this {example.language} code snippet.{adversarial_note}
+
+Code:
+```{example.language}
+{example.code_snippet[:2000]}
+```
+
+Expert reviews (gold standard):
+{gold_block if not example.is_adversarial else "(none — this code is already correct)"}
+
+AI reviewer output:
+{model_block}
+
+Rate the AI reviewer on these dimensions (0.0 to 1.0):
+1. relevance: Are the AI's review comments relevant to actual code issues?
+2. accuracy: Are the identified issues real problems (not hallucinated)?
+3. completeness: Did the AI catch all the issues in the gold standard?
+4. false_positive_rate: What fraction of AI's comments are non-issues? (0.0 = no false positives, 1.0 = all false positives)
+5. severity_accuracy: Are the severity labels (critical/major/minor) correct?
+
+Return JSON: {{"relevance": 0.0, "accuracy": 0.0, "completeness": 0.0, "false_positive_rate": 0.0, "severity_accuracy": 0.0, "reasoning": "..."}}"""
+
+    response = await client.messages.create(
+        model="claude-opus-4-5",    # Use strongest model as judge for calibration
+        max_tokens=500,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    try:
+        data = json.loads(response.content[0].text)
+        relevance = float(data.get("relevance", 0))
+        accuracy = float(data.get("accuracy", 0))
+        completeness = float(data.get("completeness", 0))
+        fp_rate = float(data.get("false_positive_rate", 0))
+        sev_acc = float(data.get("severity_accuracy", 0))
+        overall = (
+            0.25 * relevance
+            + 0.30 * accuracy
+            + 0.25 * completeness
+            + 0.10 * (1 - fp_rate)   # lower FP rate is better
+            + 0.10 * sev_acc
+        )
+        return JudgeScore(
+            example_id=example.example_id,
+            relevance=relevance,
+            accuracy=accuracy,
+            completeness=completeness,
+            false_positive_rate=fp_rate,
+            severity_accuracy=sev_acc,
+            overall=overall,
+            judge_reasoning=data.get("reasoning", ""),
+        )
+    except (json.JSONDecodeError, KeyError):
+        return JudgeScore(
+            example_id=example.example_id,
+            relevance=0.5, accuracy=0.5, completeness=0.5,
+            false_positive_rate=0.5, severity_accuracy=0.5, overall=0.5,
+            judge_reasoning="parse_error",
+        )
+```
+
+Block 2 — Regression detection and eval CI integration (production concern):
+
+```python
+from __future__ import annotations
+import asyncio
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+import json
+import statistics
+
+
+@dataclass
+class EvalRunResult:
+    run_id: str
+    model_version: str
+    timestamp: str
+    scores_by_language: dict[str, dict[str, float]]   # lang -> {metric: score}
+    scores_by_issue_type: dict[str, dict[str, float]] # type -> {metric: score}
+    aggregate: dict[str, float]    # overall metrics
+    regression_detected: bool
+    blocking_regressions: list[str]
+
+
+@dataclass
+class RegressionDetector:
+    """
+    Compare current eval run against baseline (previous release).
+    Block release if any metric drops > 3% on overall or > 5% per language.
+    """
+
+    threshold_overall: float = 0.03     # 3% overall regression → block
+    threshold_per_language: float = 0.05  # 5% per-language regression → block
+    history_file: Path = Path("eval_history.jsonl")
+
+    def load_baseline(self, model_version: str) -> dict[str, float] | None:
+        """Load the most recent successful release scores for this model family."""
+        if not self.history_file.exists():
+            return None
+        records = []
+        for line in self.history_file.read_text().splitlines():
+            try:
+                r = json.loads(line)
+                if r.get("model_version", "").startswith(model_version.split(".")[0]):
+                    records.append(r)
+            except json.JSONDecodeError:
+                pass
+        if not records:
+            return None
+        # Return the most recent passing run
+        passing = [r for r in records if not r.get("regression_detected", True)]
+        return passing[-1]["aggregate"] if passing else None
+
+    def detect_regressions(
+        self,
+        current: EvalRunResult,
+        baseline: dict[str, float] | None,
+    ) -> list[str]:
+        if baseline is None:
+            return []   # no baseline = first run, no regression possible
+
+        regressions = []
+        # Check overall metrics
+        for metric, current_score in current.aggregate.items():
+            baseline_score = baseline.get(metric)
+            if baseline_score is None:
+                continue
+            drop = baseline_score - current_score
+            if drop > self.threshold_overall:
+                regressions.append(
+                    f"OVERALL {metric}: {baseline_score:.3f} → {current_score:.3f} "
+                    f"(drop: {drop:.1%}, threshold: {self.threshold_overall:.1%})"
+                )
+
+        # Check per-language breakdown
+        for lang, lang_scores in current.scores_by_language.items():
+            for metric, current_score in lang_scores.items():
+                baseline_lang = baseline.get(f"{lang}_{metric}")
+                if baseline_lang is None:
+                    continue
+                drop = baseline_lang - current_score
+                if drop > self.threshold_per_language:
+                    regressions.append(
+                        f"LANGUAGE {lang} {metric}: {baseline_lang:.3f} → {current_score:.3f}"
+                    )
+
+        return regressions
+
+    def save_run(self, result: EvalRunResult) -> None:
+        record = {
+            "run_id": result.run_id,
+            "model_version": result.model_version,
+            "timestamp": result.timestamp,
+            "aggregate": result.aggregate,
+            "scores_by_language": result.scores_by_language,
+            "regression_detected": result.regression_detected,
+        }
+        with self.history_file.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+```
+
+Block 3 — BROKEN -> FIX: benchmark contamination and judge bias:
+
+```python
+from __future__ import annotations
+
+
+# BROKEN: Use MMLU as the primary quality benchmark for a code review product.
+# MMLU tests general knowledge (history, science, law) — completely irrelevant
+# to code review quality. Model can score 78% MMLU and generate poor JS reviews.
+# "We improved MMLU from 78.3% to 79.1%" — meaningless for the product.
+def broken_eval_with_mmlu() -> dict[str, float]:
+    return {"mmlu_score": 0.783}   # irrelevant to product quality
+
+
+# FIX: Task-specific benchmark. For code review:
+# - Issue detection F1 (precision × recall on real code bugs)
+# - Language-specific scores (Python/JS/Go/Rust separately)
+# - Adversarial pass rate (no false positives on clean code)
+# - Severity classification accuracy (critical vs minor)
+def fixed_task_specific_eval() -> dict[str, float]:
+    return {
+        "python_issue_f1": 0.0,
+        "javascript_issue_f1": 0.0,
+        "go_issue_f1": 0.0,
+        "rust_issue_f1": 0.0,
+        "overall_false_positive_rate": 0.0,
+        "severity_accuracy": 0.0,
+        "adversarial_pass_rate": 0.0,  # clean code correctly identified as clean
+    }
+
+
+# BROKEN: LLM judge uses same model family as the model under test.
+# Evaluating Claude claude-sonnet-4-6 with a Claude judge → sycophancy bias.
+# Claude judge rates Claude claude-sonnet-4-6 outputs 8% higher than GPT-4 judges
+# on identical outputs — familial bias inflates scores.
+async def broken_judge_with_same_family(model_output: str, gold: str) -> float:
+    import anthropic
+    client = anthropic.AsyncAnthropic()
+    # Judge is claude-sonnet-4-6, same family as the model under test
+    response = await client.messages.create(
+        model="claude-sonnet-4-6",  # SAME family as tested model — biased
+        max_tokens=100,
+        messages=[{"role": "user", "content": f"Rate this: {model_output}. Gold: {gold}"}],
+    )
+    return 0.8   # inflated due to familial bias
+
+
+# FIX: Use a different model family as judge (GPT-4 judging Claude, or vice versa).
+# Alternatively: calibrate judge scores against human ratings on 500-example sample.
+# If judge scores consistently diverge from human scores by > 5%, apply calibration.
+async def fixed_cross_family_judge(model_output: str, gold: str) -> float:
+    import openai
+    client = openai.AsyncOpenAI()
+    response = await client.chat.completions.create(
+        model="gpt-4o",   # Different family from the Claude model under test
+        max_tokens=100,
+        messages=[{"role": "user", "content": f"Rate this code review: {model_output}. Gold: {gold}. Return 0.0-1.0."}],
+    )
+    return float(response.choices[0].message.content.strip())
+
+
+# BROKEN: Golden dataset used for both development and evaluation.
+# Team iterates model prompt on the "eval" set → data contamination.
+# Model implicitly overfits to eval patterns. Scores inflate; production quality doesn't improve.
+def broken_single_dataset() -> dict[str, list]:
+    full_dataset = _load_all_examples()
+    # Same dataset for dev AND eval — contamination
+    return {"dev": full_dataset, "eval": full_dataset}
+
+
+# FIX: Strict train/dev/eval splits. Eval set is LOCKED — never shown to developers
+# during model iteration. Dev set used for iteration; eval set used for release decisions only.
+def fixed_split_dataset(full_dataset: list) -> dict[str, list]:
+    import random
+    random.seed(42)   # reproducible split
+    random.shuffle(full_dataset)
+    n = len(full_dataset)
+    return {
+        "dev": full_dataset[:int(n * 0.7)],    # 70% for development
+        "val": full_dataset[int(n * 0.7):int(n * 0.9)],   # 20% for tuning
+        "eval": full_dataset[int(n * 0.9):],   # 10% LOCKED — release gate only
+    }
+
+
+def _load_all_examples() -> list:
+    return []   # placeholder
+```
+
+**Pitfall 1 — Golden dataset drift over time:**
+
+```python
+# BROKEN: Use same 2000-example golden set for 18 months.
+# Over time: (1) coding best practices evolve (ESLint rules change),
+# (2) new language features added (Python 3.12 walrus operator in more patterns),
+# (3) model's training distribution shifts with new data.
+# Eval scores stay stable but production quality drifts — the benchmark is stale.
+
+# FIX: Quarterly golden dataset refresh.
+# Add 200 new examples per quarter covering new patterns, frameworks, language versions.
+# Retire 200 oldest examples that no longer reflect current codebase patterns.
+# Re-baseline all historical model scores on the new dataset before comparing.
+# Never remove adversarial examples — these test for systematic failures that persist.
+```
+
+**Pitfall 2 — Not measuring false positive rate (only precision/recall on positive examples):**
+
+```python
+# BROKEN: Eval only on code snippets that DO have issues.
+# Model that flags every single line of code scores 100% recall.
+# False positive rate: unmeasured.
+# In production: model raises 12 issues per PR → engineers disable it after 2 days.
+
+# FIX: 20% of eval set should be adversarial — clean code with no real issues.
+# False positive rate measured separately: FP rate should be < 10%.
+# If model raises issues on clean code > 10% of the time → fails eval gate.
+def build_eval_set(positive_examples: list, clean_examples: list) -> list:
+    target_clean_fraction = 0.20
+    n_clean = int(len(positive_examples) * target_clean_fraction / (1 - target_clean_fraction))
+    import random
+    return positive_examples + random.sample(clean_examples, min(n_clean, len(clean_examples)))
+```
+
+**Metrics:**
+
+| Metric | Baseline (Claude claude-sonnet-4-6 v1) | v2 (prompt improved) | v3 (model updated) |
+|--------|-------------------------------------|---------------------|-------------------|
+| Python issue F1 | 0.61 | 0.71 | 0.74 |
+| JavaScript issue F1 | 0.43 | 0.58 | 0.69 |
+| Go issue F1 | 0.55 | 0.62 | 0.67 |
+| False positive rate | 22% | 14% | 9% |
+| Severity accuracy | 0.58 | 0.67 | 0.72 |
+| Adversarial pass rate | 71% | 83% | 89% |
+| Judge-human agreement | 0.78 | 0.79 | 0.81 |
+| Cost per eval run | $144 | $144 | $144 |
+| Runtime | 9 min | 9 min | 9 min |
+| Regressions caught (vs production) | — | 2 | 1 |
+
+**Interview Q&As:**
+
+**Q: Why is MMLU an inappropriate benchmark for most production LLM applications?**
+MMLU (Massive Multitask Language Understanding) tests knowledge across 57 academic domains including history, law, medicine, and science. It measures general knowledge breadth, not task-specific capability. A code review product needs high precision in identifying security vulnerabilities and style issues in Python — MMLU scores predict this capability poorly. The fundamental issue: capability on a general benchmark does not transfer reliably to specialized tasks. Always evaluate on your task distribution: code review → code review benchmarks; SQL generation → SQL benchmarks; customer support → customer support scenarios.
+
+**Q: What makes a good LLM judge for evaluation, and what are its failure modes?**
+A good LLM judge: uses a stronger model than the one being tested (judge should not struggle with the task being evaluated), uses a different model family to avoid sycophancy bias, operates on structured rubrics not vague "rate this" prompts, and is calibrated against human ratings on a representative sample. Failure modes: (1) Sycophancy — judge gives higher scores to the same text when told it's from a prestigious source; (2) Length bias — longer responses rated higher regardless of quality; (3) Position bias — first option in a comparison rated higher; (4) Familial bias — Claude judging Claude gives inflated scores. Mitigate by cross-family judging, multi-judge ensembles, and periodic human calibration.
+
+**Q: How do you design a golden evaluation dataset that remains valid over time?**
+Four principles: (1) Domain coverage — examples should cover all task types (security, style, performance, correctness) with intentional distribution control, not random sampling; (2) Difficulty distribution — include easy (blatant bugs), medium (subtle issues), and hard (architectural problems) examples; (3) Adversarial inclusion — 20% clean code to measure false positive rate; (4) Temporal refresh — add new examples quarterly reflecting current language versions and frameworks, retire stale examples. The eval set must be version-controlled alongside the model, never shown to developers during prompt iteration, and re-baselined when substantially refreshed.
+
+**Q: How do you prevent eval contamination when iterating on prompts?**
+Strict data splits with access controls: the eval set (10% of data) is stored separately, accessible only to the CI system, never loaded by development scripts. Engineers iterate on the dev set (70%) and validate on the val set (20%); the eval set is queried only during a release gate run. Operationally: store dev/val in one data store, eval in a separate repository with different credentials. If an engineer accidentally sees eval examples, retire those examples and replace with new ones. Treat eval set like production credentials — locked down, audited access.
+
+**Q: What is the right threshold for declaring an evaluation regression that should block a release?**
+Threshold should be calibrated based on: (1) The metric's variance across multiple eval runs on the same model (run the same eval 10 times on an unchanged model — the standard deviation sets the noise floor); (2) The minimum regression users would notice in production (instrument user feedback signals to learn this); (3) The severity of different metrics (false positive rate regression is more user-visible than recall regression — false positives cause users to disable the tool). Typical settings: 3% overall F1 regression blocks release; 5% per-language regression blocks release; any increase in false positive rate > 5% blocks release. Never set thresholds so tight that every release is blocked — this leads to threshold inflation.
+
+**Q: How do you evaluate LLM outputs when there is no single correct answer (open-ended generation)?**
+Three complementary methods: (1) Reference-based: ROUGE-L, BLEU, BERTScore measure similarity to gold references — fast and cheap but penalizes valid paraphrases. (2) LLM-as-judge: strong model rates outputs on a rubric — captures semantic quality beyond surface similarity but expensive (~$0.03/example) and needs calibration. (3) Human evaluation: highest signal but most expensive; use for calibrating LLM judges and for high-stakes decisions. For production eval pipelines, combine reference-based metrics (for regression detection speed) with LLM judge (for quality measurement) and human spot-check (for judge calibration). Weight the three methods based on cost-quality trade-off for your specific task.

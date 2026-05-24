@@ -441,3 +441,110 @@ Top-10 final results
 - NDCG@10: +31% vs pure BM25
 - Click-through rate: +18% in A/B test
 - Add-to-cart rate: +9%
+
+---
+
+**Additional war story — Matryoshka embedding dimension mismatch corrupting 500M-product search index:**
+
+An e-commerce platform trained Matryoshka embeddings at dimension 768 but stored only the first 256 dimensions in Pinecone to reduce index cost. After a model update, the team forgot to re-embed the catalog and truncated the new 768-dim vectors to 256. However, the new model's dimension ordering was different from the old model (different training run), so the first 256 dimensions no longer carried the same semantic weight. Result: search quality dropped 31% overnight, detected only when a merchandiser noticed "sneakers" returning "formal shoes" results.
+
+```python
+# BROKEN: truncating embeddings without version-gating the index
+def index_product(product_id: str, text: str, model) -> None:
+    embedding = model.encode(text)          # shape: (768,)
+    truncated = embedding[:256].tolist()    # BUG: assumes dimension order is stable across model versions
+    pinecone_index.upsert([(product_id, truncated)])
+
+# FIX: embed model version into vector metadata + gate re-indexing on version mismatch
+from dataclasses import dataclass
+import hashlib
+
+@dataclass
+class EmbeddingRecord:
+    vector: list[float]
+    model_version: str
+    dimension: int
+
+def index_product_safe(
+    product_id: str,
+    text: str,
+    model,
+    model_version: str,
+    truncate_dim: int = 256,
+) -> None:
+    embedding = model.encode(text, normalize_embeddings=True)
+    # Only truncate if model supports Matryoshka and dim order is validated
+    assert embedding.shape[0] >= truncate_dim, "Model output dimension too small"
+    truncated = embedding[:truncate_dim].tolist()
+    pinecone_index.upsert([(
+        product_id,
+        truncated,
+        {"model_version": model_version, "embedding_dim": truncate_dim}
+    )])
+
+# Before deploying a new model: validate that dimension ordering is consistent
+def validate_matryoshka_ordering(old_model, new_model, test_texts: list[str]) -> float:
+    """Verify top-256 dims of new model preserve ordering from old model."""
+    cosine_similarities = []
+    for text in test_texts:
+        old_emb = old_model.encode(text)[:256]
+        new_emb = new_model.encode(text)[:256]
+        sim = float(old_emb @ new_emb / (np.linalg.norm(old_emb) * np.linalg.norm(new_emb)))
+        cosine_similarities.append(sim)
+    return float(np.mean(cosine_similarities))  # expect > 0.90 for safe truncation
+```
+
+**Additional interview Q&As:**
+
+**What are Matryoshka Representation Learning (MRL) embeddings and when are they worth the training cost?** MRL trains a single embedding model to produce vectors where any prefix of dimensions (e.g., first 64, 128, 256, 768 dimensions) is independently semantically meaningful. This allows serving a single model at multiple precision/cost points: a fast retrieval pass with 128-dim vectors, then full 768-dim reranking. The training cost is approximately the same as standard embedding training with an additional loss term over truncated dimensions. MRL is worth it when you have both high-volume retrieval (millions of queries/second needing low cost) and high-accuracy ranking in the same system.
+
+**How do you choose between HNSW and IVF-PQ for a 500M product vector index?** HNSW (Hierarchical Navigable Small World) graphs provide better recall-vs-latency trade-offs for indices under ~100M vectors and support incremental inserts without rebuilding; it is the default for mutable catalogs. IVF-PQ (Inverted File Index with Product Quantization) compresses vectors 4-16x in memory at the cost of 5-15% recall loss and requires periodic index rebuilding; it is preferable for datasets over 100M vectors with memory constraints or read-heavy workloads. For 500M products, IVF-PQ with 64-byte codes (512-dim → 64B) reduces index from 2TB to 32GB, enabling in-memory deployment.
+
+**What is the embedding drift problem and how do you detect it in production?** Embedding drift occurs when the query distribution or product distribution shifts such that the embedding space no longer reflects user intent (e.g., seasonal vocabulary changes, new product categories added without re-embedding). Detection: track average cosine similarity between query embeddings and top-1 retrieval results (low similarity indicates drift); compare NDCG@10 on a weekly golden query set; monitor add-to-cart rate as a downstream proxy metric. Mitigation: incremental re-embedding of recently modified products (daily job), periodic full catalog re-embedding (monthly), and embedding model versioning with A/B shadowing before full rollout.
+
+**Quick-reference table:**
+
+| Approach | Best for | Trade-off |
+|---|---|---|
+| HNSW (exact graph traversal) | Mutable catalogs <100M vectors; high recall requirement | Memory: ~8 bytes/dim × N vectors; rebuild not required on insert |
+| IVF-PQ (compressed inverted index) | >100M vectors; memory-constrained deployment | 5-15% recall loss; requires periodic rebuilding; poor incremental insert support |
+| Matryoshka + two-stage retrieval | Systems needing both speed and accuracy | Model training complexity; dimension ordering must be validated on every update |
+| Hybrid BM25 + dense retrieval | Catalog with product codes, SKUs, model numbers | Fusion weight tuning required per category; adds BM25 infrastructure overhead |
+
+**Pitfall — Embedding model trained on short sentences performs poorly on long documents.**
+
+```python
+# BROKEN: using a sentence-transformer model (max 512 tokens) to embed
+# 5000-word product descriptions — truncation loses 90% of the content
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("all-MiniLM-L6-v2")  # 256-token max practical limit
+embedding = model.encode(long_product_description)  # silently truncated!
+# Retrieval recall@10 for detailed queries: 34% (truncation loses key attributes)
+
+# FIX: chunk long documents; embed chunks; aggregate with mean pooling
+def embed_long_doc(text: str, model: SentenceTransformer,
+                   chunk_size: int = 200, overlap: int = 50) -> np.ndarray:
+    words = text.split()
+    chunks = [" ".join(words[i:i+chunk_size])
+              for i in range(0, len(words), chunk_size - overlap)]
+    chunk_embeddings = model.encode(chunks)   # (n_chunks, dim)
+    return chunk_embeddings.mean(axis=0)      # mean-pool → single doc embedding
+# Recall@10: 34% → 71% after chunked mean-pooling
+```
+
+**What is Matryoshka Representation Learning (MRL) and why does it matter for production?** MRL trains a single embedding model to produce representations that are useful at multiple dimensionalities — the first 64 dimensions are meaningful for coarse retrieval, the full 1024 dimensions for fine-grained reranking. At serving time, you can truncate the embedding to a smaller dimension for ANN index search (faster, cheaper) then use full-dimension embeddings for reranking the top candidates. At 10M documents: 64-dim FAISS index fits in 640MB RAM (vs. 10GB for 1024-dim), search is 8× faster, with < 2% recall loss. OpenAI's `text-embedding-3` family uses MRL natively.
+
+**How do you handle multilingual embeddings in a single search index?** Multilingual models (LaBSE, multilingual-e5) embed text from 100+ languages into a shared vector space where semantically equivalent texts in different languages are close. This enables cross-lingual search (query in English retrieves French documents). Trade-offs: multilingual models have lower quality than monolingual models on any single language (typically 5-10% lower NDCG). Production pattern: use a multilingual model for the primary retrieval index; add language-specific models for reranking within the retrieved set if the primary language is known.
+
+---
+
+**Quick-reference decision table:**
+
+| Scenario | Recommended approach | Key constraint |
+|---|---|---|
+| < 10k training examples | LoRA / few-shot prompting | Data scarcity |
+| Latency < 100ms required | Quantized model + ONNX Runtime | Throughput > accuracy |
+| Multi-tenant, shared model | System prompt isolation + guardrails | Security boundary |
+| Domain shift from pre-training | Fine-tune with domain data | Catastrophic forgetting risk |
+| Cost reduction (10× target) | Smaller model + prompt optimization | Quality floor |

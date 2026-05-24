@@ -464,3 +464,117 @@ Result: 100% valid JSON (eliminating parsing errors),  89% field accuracy
 ```
 
 **Final result:** 89% accuracy at negligible added latency. Full fine-tuning would achieve ~93% but costs $10,000+ in annotation and training.
+
+---
+
+**Additional war story — Chain-of-thought prompt causing JSON parse failures in financial analysis copilot:**
+
+A financial copilot used chain-of-thought reasoning inside the same JSON object as the structured output. The model would sometimes write multi-sentence reasoning with embedded commas and quotes inside a `"reasoning"` field, breaking the JSON parser 8% of the time. The team discovered this only after 3 weeks in production when a nightly batch report was corrupted.
+
+```python
+# BROKEN: CoT reasoning embedded inside JSON — model escaping is unreliable
+BROKEN_PROMPT = """
+Analyze the financial statement and return JSON:
+{
+  "reasoning": "Think step by step about revenue trends...",
+  "recommendation": "BUY|SELL|HOLD",
+  "confidence": 0.0-1.0
+}
+"""
+# Model outputs: {"reasoning": "Revenue grew 12%, however, "adjusted" EBITDA...", ...}
+# JSON parse error: unexpected token at position 47
+
+# FIX: separate CoT from structured output using two-step prompting
+import anthropic
+import json
+
+client = anthropic.Anthropic()
+
+def analyze_financial(statement: str) -> dict:
+    # Step 1: free-form reasoning
+    reasoning_resp = client.messages.create(
+        model="claude-3-5-sonnet-20241022",
+        max_tokens=512,
+        messages=[{
+            "role": "user",
+            "content": f"Analyze this financial statement step by step:\n{statement}"
+        }]
+    )
+    reasoning = reasoning_resp.content[0].text
+
+    # Step 2: structured extraction from the reasoning
+    structured_resp = client.messages.create(
+        model="claude-3-5-sonnet-20241022",
+        max_tokens=128,
+        messages=[
+            {"role": "user", "content": f"Analysis:\n{reasoning}"},
+            {"role": "user", "content": 'Based on the analysis above, output only valid JSON: {"recommendation": "BUY|SELL|HOLD", "confidence": 0.0}'}
+        ]
+    )
+    return json.loads(structured_resp.content[0].text)
+```
+
+**Additional interview Q&As:**
+
+**What is the difference between zero-shot CoT ("think step by step") and few-shot CoT, and when should you use each?** Zero-shot CoT appends "think step by step" or "let's reason through this" to elicit reasoning without examples; it works well for arithmetic and logical tasks but produces inconsistent reasoning formats. Few-shot CoT provides 3-8 worked examples with explicit reasoning chains; it outperforms zero-shot on domain-specific tasks (legal analysis, financial modeling) by 15-25% on structured evals. Use zero-shot for rapid prototyping and few-shot when you have labeled examples and need consistent output format.
+
+**How does prompt caching interact with dynamic few-shot example selection, and what is the optimal architecture?** Dynamic few-shot selection (choosing examples per query using embedding similarity) breaks prompt caching because the prompt prefix changes every request. The optimal architecture is to use a static system prompt with fixed few-shot examples as the cache prefix (cached once, reused for all requests) and append the dynamic query at the end. This achieves 80-90% cache hit rate while sacrificing the 5-10% accuracy improvement of fully dynamic example selection.
+
+**What is self-consistency prompting and when does it outperform standard CoT?** Self-consistency samples multiple reasoning paths (typically 5-40) for the same question and takes a majority vote on the final answer. It outperforms single-path CoT by 5-15% on math benchmarks and multi-step reasoning tasks where individual chains can go wrong but the correct answer appears most frequently across paths. The trade-off is cost: 20 samples costs 20x more than a single inference. Use for high-stakes decisions (medical diagnosis, financial recommendations) where accuracy improvement justifies cost.
+
+**Quick-reference table:**
+
+| Approach | Best for | Trade-off |
+|---|---|---|
+| Zero-shot CoT ("think step by step") | Arithmetic, logic, rapid prototyping | Inconsistent reasoning format; less reliable on domain tasks |
+| Few-shot CoT (3-8 examples) | Domain-specific structured analysis | Requires curated examples; long prompts increase cost and latency |
+| Self-consistency (5-20 samples) | High-stakes decisions requiring accuracy | 5-20x cost increase; only justified when single-path error rate >10% |
+| Two-step CoT + structured extraction | JSON/structured output with reasoning | Doubles API calls; eliminates parse errors; enables caching of reasoning step |
+
+**Pitfall — Chain-of-thought prompting leaks reasoning steps to end users.**
+
+```python
+# BROKEN: CoT reasoning visible in the final response delivered to user
+# "Let me think step by step... First I calculate X... the answer is Y"
+# Users see internal reasoning which may contain incorrect intermediate steps
+# that undermine trust even when the final answer is correct
+
+response = llm.complete(f"{system_prompt}\nThink step by step.\n{user_query}")
+return response   # full reasoning + answer sent to user
+
+# FIX: use structured output to separate reasoning from the user-facing answer
+from pydantic import BaseModel
+
+class ReasonedResponse(BaseModel):
+    thinking: str        # internal CoT — NOT shown to user
+    answer: str          # only this field is returned to the user
+
+response = llm.complete_structured(prompt, response_model=ReasonedResponse)
+return response.answer   # clean, reasoning-free answer for the user
+```
+
+**How do you evaluate whether chain-of-thought prompting helps for a specific task?** Run an A/B comparison: 100 queries with standard prompting vs. 100 with CoT prompting. Measure: (1) accuracy on ground-truth answers (factual tasks); (2) human preference rating (1-5 scale) for open-ended tasks; (3) inference latency and token cost (CoT uses 2-5× more tokens). CoT helps most on: multi-step reasoning (math, logic), tasks requiring explicit knowledge retrieval, and complex instruction following. CoT does not help (and may hurt) for: simple classification, factual lookups where the answer is a single token, and tasks where the model is already at ceiling accuracy with direct prompting.
+
+**What is the risk of few-shot examples containing biased outputs, and how do you audit them?** Few-shot examples directly steer the model's output distribution — a biased example (e.g., a sentiment classification example that always labels neutral reviews as negative) is amplified across all similar queries. Audit by: (1) labeling each few-shot example independently with a second human annotator — flag disagreements; (2) running the prompt with and without each example and measuring output distribution shift (high shift → that example has outsized influence); (3) rotating examples across 3-5 different sets and measuring variance in final accuracy — low variance means robust prompt, high variance means you're overfitting to specific examples.
+
+---
+
+**Quick-reference decision table:**
+
+| Scenario | Recommended approach | Key constraint |
+|---|---|---|
+| < 10k training examples | LoRA / few-shot prompting | Data scarcity |
+| Latency < 100ms required | Quantized model + ONNX Runtime | Throughput > accuracy |
+| Multi-tenant, shared model | System prompt isolation + guardrails | Security boundary |
+| Domain shift from pre-training | Fine-tune with domain data | Catastrophic forgetting risk |
+| Cost reduction (10× target) | Smaller model + prompt optimization | Quality floor |
+
+**Production checklist before shipping an LLM feature:**
+
+- [ ] Latency p99 measured under production load (not just median)
+- [ ] Fallback path tested: what happens when the LLM API is unavailable?
+- [ ] Cost per request calculated at current and 10× scale
+- [ ] Safety/guardrail evaluation on 200 adversarial prompts
+- [ ] Prompt versioned in code and tied to model version in experiment tracker
+- [ ] Human evaluation on 50 random production outputs before launch
+- [ ] Monitoring dashboard live: latency, error rate, cost, quality proxy metric

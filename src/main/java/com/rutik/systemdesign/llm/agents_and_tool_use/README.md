@@ -1,5 +1,27 @@
 # Agents & Tool Use
 
+## Sub-Files — Deep Dives (15 total)
+
+| File | Topic | Q&As |
+|------|-------|------|
+| [function_calling_and_tool_design.md](function_calling_and_tool_design.md) | OpenAI/Anthropic tool use, schema design, parallel calls | 15+ |
+| [react_and_reasoning_patterns.md](react_and_reasoning_patterns.md) | ReAct — Thought/Action/Observation loop, chain-of-thought integration | 15+ |
+| [plan_and_execute.md](plan_and_execute.md) | Plan-and-execute — task decomposition, replanning, subgoal tracking | 15+ |
+| [agent_memory.md](agent_memory.md) | Short-term, long-term, episodic, semantic, working memory | 15+ |
+| [computer_use_and_browser_agents.md](computer_use_and_browser_agents.md) | Anthropic CUA, browser automation, screen understanding | 15+ |
+| [agent_evaluation_and_benchmarking.md](agent_evaluation_and_benchmarking.md) | SWE-bench, GAIA, WebArena, trajectory evaluation | 15+ |
+| [agent_reliability.md](agent_reliability.md) | Timeout/circuit breaker, retry, checkpointing, dead-loop detection | 15+ |
+| [reflexion_and_self_correction.md](reflexion_and_self_correction.md) | Reflexion verbal RL, Self-Refine, CRITIC, sycophancy | 15+ |
+| [tree_of_thoughts_for_agents.md](tree_of_thoughts_for_agents.md) | BFS/DFS/beam/MCTS for agent planning, value functions | 15+ |
+| [tool_selection_at_scale.md](tool_selection_at_scale.md) | RAG-over-tools, hierarchical menus, routing for N>50 tools | 15+ |
+| [sandboxed_code_execution.md](sandboxed_code_execution.md) | E2B, Riza, Daytona, Modal, isolation, resource limits | 15+ |
+| [subagents_and_delegation.md](subagents_and_delegation.md) | Parallel dispatch, context isolation, structured return contracts | 15+ |
+| [agent_ux_patterns.md](agent_ux_patterns.md) | Streaming, interrupt/resume, approval gates, artifacts, confidence | 15+ |
+| [durable_long_running_agents.md](durable_long_running_agents.md) | Temporal, Inngest, Restate, LangGraph checkpointing, idempotency | 15+ |
+| [agent_cost_and_token_budget.md](agent_cost_and_token_budget.md) | Per-task budgets, model cascading, compaction, caching, batch APIs | 15+ |
+
+---
+
 ## 1. Concept Overview
 
 An LLM agent is a system where a language model acts as the reasoning engine that decides which actions to take to accomplish a goal. Unlike a simple prompt-response interaction, an agent can call tools, execute code, browse the web, read/write files, and take multiple actions in sequence — autonomously working toward a goal until it's accomplished.
@@ -492,41 +514,420 @@ Related standalone modules:
 
 ---
 
-## 14. Case Study: Automated Research Agent for Competitive Intelligence
 
-**Problem:** Sales team wants an agent that, given a prospect company name, produces a competitive intelligence brief: company overview, recent news, product comparison, and pricing analysis.
 
-**Agent Design:**
+## 14. Case Study
+
+**Scenario:** A SaaS company's SRE team handles 120 P1/P2 incidents per month. Mean time to resolution (MTTR) is 47 minutes. They deploy a ReAct agent for automated incident response: the agent monitors PagerDuty alerts, queries Datadog metrics, searches runbooks, and takes remediation actions (restart services, scale pods, trigger rollbacks) with human approval for destructive actions. Goal: resolve 40%+ of incidents autonomously, reduce MTTR to < 15 minutes for auto-resolved cases, zero false-remediation rate.
+
+**Architecture:**
+
 ```
-Tools:
-  1. web_search(query) → top 5 result snippets
-  2. scrape_url(url) → webpage text (500 word limit)
-  3. get_crunchbase_data(company) → funding, headcount, founded year
-  4. analyze_pricing_page(url) → extract pricing tiers
+  PagerDuty Alert (P1/P2 triggered)
+         |
+         v
+  Incident Intake: classify known vs novel (runbook vector search)
+         |
+         v
+  ReAct Agent (Claude claude-sonnet-4-6):
 
-Agent loop (ReAct):
-  Thought: I need to find company overview first
-  Action: web_search("Acme Corp company overview products")
-  Observation: [search results]
+  Observation → Thought → Action → Observation → ... (max 20 steps)
 
-  Thought: I need recent news
-  Action: web_search("Acme Corp news 2024 site:techcrunch.com OR site:venturebeat.com")
-  Observation: [results]
+  READ-ONLY tools (no approval needed):
+  - datadog_query(metric, service, timerange)
+  - pagerduty_get_timeline(incident_id)
+  - github_get_recent_deploys(service, hours=2)
+  - runbook_search(query)
+  - kubectl_get_pod_logs(service, lines=100)
 
-  Thought: Get funding info
-  Action: get_crunchbase_data("Acme Corp")
-  Observation: [funding rounds, investors, headcount]
+  DESTRUCTIVE tools (human approval required):
+  - kubectl_restart_deployment(service)
+  - kubectl_scale_deployment(service, replicas)
+  - github_trigger_rollback(service, commit_sha)
 
-  Thought: Get pricing
-  Action: scrape_url("https://acmecorp.com/pricing")
-  Observation: [pricing tiers]
-
-  Thought: I have enough info to write the brief
-  Final Answer: [structured competitive intelligence brief]
+         |
+         v
+  Human Approval Gate (Slack, 5-min timeout, default reject)
+         |
+         v
+  Outcome tracking: MTTR, diagnosis accuracy, wrong remediation rate
 ```
 
-**Results:**
-- Average run: 6 steps, 45 seconds, $0.12 in API costs
-- Output quality: rated 8.1/10 by sales reps
-- Time saved: 2 hours/brief → 45 seconds automated
-- Deployed via Slack slash command: `/research Acme Corp`
+**Key implementation — 3 Python code blocks:**
+
+Block 1 — ReAct incident response agent loop:
+
+```python
+from __future__ import annotations
+import asyncio
+import json
+import time
+from dataclasses import dataclass, field
+from typing import Any
+import anthropic
+
+
+@dataclass
+class IncidentContext:
+    incident_id: str
+    service: str
+    alert_type: str
+    alert_message: str
+    severity: str
+
+
+@dataclass
+class AgentStep:
+    thought: str
+    action: str
+    action_input: dict[str, Any]
+    observation: str
+    step_number: int
+
+
+@dataclass
+class IncidentResolution:
+    incident_id: str
+    steps: list[AgentStep]
+    root_cause: str
+    remediation_proposed: str
+    remediation_approved: bool
+    resolved: bool
+    mttr_seconds: float
+    cost_usd: float
+
+
+SYSTEM_PROMPT = """You are an expert SRE agent for production incident response.
+
+Use ReAct: Thought → Action → Observation → repeat until diagnosed.
+
+RULES:
+1. Diagnose before proposing any remediation — minimum 4 tool calls covering metrics, logs, and recent deploys.
+2. Propose remediation ONLY with specific evidence (metric + log correlation).
+3. For restart/rollback: state exact evidence leading to this conclusion.
+4. If uncertain after 15 steps: escalate with current findings.
+5. Final answer format:
+   ROOT CAUSE: [one sentence]
+   EVIDENCE: [specific metrics/logs]
+   PROPOSED_REMEDIATION: [specific action] OR "ESCALATE: [reason]"
+
+CRITICAL: Never propose restarting a service without confirming it is the root cause (not a dependency)."""
+
+
+async def run_incident_agent(
+    incident: IncidentContext,
+    tools: dict[str, Any],
+    max_steps: int = 20,
+    cost_cap_usd: float = 3.00,
+) -> IncidentResolution:
+    client = anthropic.AsyncAnthropic()
+    t_start = time.monotonic()
+    steps: list[AgentStep] = []
+    total_cost = 0.0
+    loop_detector = LoopDetector()
+
+    tool_defs = [
+        {
+            "name": "datadog_query",
+            "description": "Query Datadog metrics. Returns timeseries data.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "metric": {"type": "string"},
+                    "service": {"type": "string"},
+                    "timerange": {"type": "string", "description": "e.g. '30m', '2h'"},
+                },
+                "required": ["metric", "service", "timerange"],
+            },
+        },
+        {
+            "name": "kubectl_get_pod_logs",
+            "description": "Get recent pod logs for a service.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "service": {"type": "string"},
+                    "lines": {"type": "integer", "default": 100},
+                },
+                "required": ["service"],
+            },
+        },
+        {
+            "name": "github_get_recent_deploys",
+            "description": "Get recent deployments for a service.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "service": {"type": "string"},
+                    "hours": {"type": "integer", "default": 2},
+                },
+                "required": ["service"],
+            },
+        },
+        {
+            "name": "runbook_search",
+            "description": "Search internal runbooks for similar incidents.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        },
+        {
+            "name": "kubectl_restart_deployment",
+            "description": "DESTRUCTIVE: Restart all pods. REQUIRES HUMAN APPROVAL.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"service": {"type": "string"}},
+                "required": ["service"],
+            },
+        },
+    ]
+
+    initial_message = (
+        f"INCIDENT: {incident.incident_id}\n"
+        f"Service: {incident.service} | Severity: {incident.severity}\n"
+        f"Alert: {incident.alert_type}\n"
+        f"Message: {incident.alert_message}\n\nBegin diagnosis."
+    )
+    messages = [{"role": "user", "content": initial_message}]
+    thought = ""
+
+    for step_num in range(1, max_steps + 1):
+        if total_cost >= cost_cap_usd:
+            break
+
+        response = await client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=2048,
+            system=SYSTEM_PROMPT,
+            tools=tool_defs,
+            messages=messages,
+        )
+
+        total_cost += (response.usage.input_tokens * 3 + response.usage.output_tokens * 15) / 1e9
+
+        tool_uses = [b for b in response.content if b.type == "tool_use"]
+        text_blocks = [b.text for b in response.content if hasattr(b, "text")]
+        thought = " ".join(text_blocks)
+
+        if not tool_uses:
+            break
+
+        tool_results = []
+        for tu in tool_uses:
+            # Loop detection
+            loop_warning = loop_detector.check_and_record(tu.name, tu.input)
+            if loop_warning:
+                observation = loop_warning
+            else:
+                tool_fn = tools.get(tu.name)
+                try:
+                    observation = await tool_fn(**tu.input) if tool_fn else f"Tool {tu.name} not found"
+                except Exception as e:
+                    observation = f"ERROR: {e}"
+
+            steps.append(AgentStep(
+                thought=thought, action=tu.name,
+                action_input=tu.input, observation=str(observation)[:500],
+                step_number=step_num,
+            ))
+            tool_results.append({
+                "type": "tool_result", "tool_use_id": tu.id,
+                "content": str(observation)[:2000],
+            })
+
+        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "user", "content": tool_results})
+
+    import re
+    def extract(text: str, field: str) -> str:
+        m = re.search(rf"{field}:\s*(.+?)(?:\n[A-Z]|$)", text, re.DOTALL)
+        return m.group(1).strip() if m else ""
+
+    return IncidentResolution(
+        incident_id=incident.incident_id, steps=steps,
+        root_cause=extract(thought, "ROOT CAUSE"),
+        remediation_proposed=extract(thought, "PROPOSED_REMEDIATION"),
+        remediation_approved=False, resolved=False,
+        mttr_seconds=time.monotonic() - t_start, cost_usd=total_cost,
+    )
+
+
+class LoopDetector:
+    def __init__(self, max_steps: int = 20) -> None:
+        self._history: dict[str, int] = {}
+
+    def check_and_record(self, tool: str, params: dict) -> str | None:
+        key = f"{tool}:{sorted(params.items())}"
+        count = self._history.get(key, 0) + 1
+        self._history[key] = count
+        if count >= 2:
+            return (
+                f"Already called {tool} with same params {count}x. "
+                "Check different data or make a diagnosis decision."
+            )
+        return None
+```
+
+Block 2 — Human approval gate with Slack and audit log:
+
+```python
+from __future__ import annotations
+import asyncio
+import time
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass
+class ApprovalRequest:
+    incident_id: str
+    action: str
+    action_params: dict[str, Any]
+    justification: str
+    evidence: str
+    requested_at: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not self.requested_at:
+            self.requested_at = time.time()
+
+
+class HumanApprovalGate:
+    """
+    Route all destructive actions through on-call engineer approval.
+    5-minute timeout defaults to rejection (conservative).
+    Every decision logged to audit trail.
+    """
+
+    TIMEOUT_SECONDS = 300
+
+    def __init__(self, slack_client: Any, approval_db: Any) -> None:
+        self._slack = slack_client
+        self._db = approval_db
+
+    async def request_approval(self, req: ApprovalRequest) -> tuple[bool, str]:
+        token = f"approval_{req.incident_id}_{int(req.requested_at)}"
+
+        msg = (
+            f":robot_face: *Incident {req.incident_id} — Remediation Approval Needed*\n"
+            f"*Action:* `{req.action}`\n"
+            f"*Service:* `{req.action_params.get('service', '?')}`\n"
+            f"*Justification:* {req.justification}\n"
+            f"*Evidence:* {req.evidence[:400]}\n"
+            f"✅ `/approve {token}` | ❌ `/reject {token} [reason]`\n"
+            f"_(Auto-reject in 5 min)_"
+        )
+        await self._slack.post_message(channel="#incidents-sre", text=msg)
+
+        deadline = time.time() + self.TIMEOUT_SECONDS
+        while time.time() < deadline:
+            decision = await self._db.get_approval_decision(token)
+            if decision:
+                approved, reason = decision["approved"], decision.get("reason", "engineer decision")
+                await self._log(req, approved, reason)
+                return approved, reason
+            await asyncio.sleep(5)
+
+        reason = "auto-rejected: 5-min timeout"
+        await self._log(req, False, reason)
+        return False, reason
+
+    async def _log(self, req: ApprovalRequest, approved: bool, reason: str) -> None:
+        await self._db.log_approval({
+            "incident_id": req.incident_id, "action": req.action,
+            "approved": approved, "reason": reason,
+            "latency_s": time.time() - req.requested_at,
+            "timestamp": time.time(),
+        })
+```
+
+Block 3 — BROKEN -> FIX: acting before diagnosing and missing dependency check:
+
+```python
+from __future__ import annotations
+
+
+# BROKEN: Agent restarts service immediately on first ERROR in logs.
+# No diagnosis — first observation triggers restart.
+# Result: payment service restarted mid-transaction → data inconsistency.
+async def broken_react_shortcut(logs: str, service: str) -> str:
+    if "ERROR" in logs:
+        await kubectl_restart(service)   # immediate — no diagnosis
+        return "restarted"
+    return "no action"
+
+
+# FIX: Enforce minimum diagnosis depth via system prompt + code check.
+# Agent MUST call: datadog_query, kubectl_get_pod_logs, github_get_recent_deploys
+# before proposing any remediation. Verified in code before executing tools.
+MIN_TOOLS_REQUIRED = {"datadog_query", "kubectl_get_pod_logs", "github_get_recent_deploys"}
+
+def validate_diagnosis(steps: list) -> tuple[bool, str]:
+    used = {s.action for s in steps}
+    missing = MIN_TOOLS_REQUIRED - used
+    if missing:
+        return False, f"Incomplete diagnosis: haven't checked {missing}"
+    return True, "ok"
+
+
+# BROKEN: Agent restarts service A when database (dependency) is the root cause.
+# Service A is slow because DB CPU is 95%. Agent sees slow A, restarts A.
+# After restart: A is fine for 60 sec, then slow again (DB still overloaded).
+# Unnecessary downtime + problem not fixed.
+async def broken_ignore_dependencies(service: str, tools: dict) -> str:
+    logs = await tools["kubectl_get_pod_logs"](service=service)
+    if "timeout" in logs.lower():
+        return f"restart {service}"  # assumes service is the problem
+    return "no action"
+
+
+# FIX: Always check upstream dependencies before concluding root cause is the service.
+async def fixed_check_dependencies(service: str, tools: dict) -> dict[str, float]:
+    """Check all known dependencies for error rates before attributing blame to service."""
+    # In production: service dependency map from service mesh (Istio/Linkerd)
+    known_deps = {
+        "payments-api": ["postgres-payments", "redis-sessions", "fraud-service"],
+        "user-service": ["postgres-users", "email-service"],
+    }
+    deps = known_deps.get(service, [])
+    health: dict[str, float] = {}
+    for dep in deps:
+        try:
+            result = await tools["datadog_query"](
+                metric="service.error_rate", service=dep, timerange="10m"
+            )
+            health[dep] = float(result.get("avg", 0.0))
+        except Exception:
+            health[dep] = -1.0   # unknown
+    # If any dependency error_rate > 5%: likely root cause is there, not the service
+    root_causes = [dep for dep, rate in health.items() if rate > 0.05]
+    return {"dependency_root_causes": root_causes, "health_by_dep": health}
+
+
+# BROKEN: Cost runaway — no per-incident cap.
+# During major outage with 50 concurrent incidents, each hitting max_steps=50:
+# 50 incidents × 50 steps × $0.04/step = $100 in 20 minutes.
+def broken_agent_config() -> dict:
+    return {"max_steps": 50, "cost_cap": None}  # unbounded
+
+
+# FIX: Hard caps per incident + monthly budget monitoring.
+def fixed_agent_config() -> dict:
+    return {
+        "max_steps": 20,
+        "cost_cap_usd": 3.00,
+        "monthly_budget_usd": 500,
+    }
+
+def check_monthly_budget(spent: float, cap: float = 500.0) -> str:
+    ratio = spent / cap
+    if ratio > 0.95:
+        return "BUDGET_EXHAUSTED"
+    if ratio > 0.80:
+        return "DIAGNOSTIC_ONLY"  # no remediation proposals
+    return "FULL_CAPABILITY"
+
+
+async def kubectl_restart(service: str) -> None: ...

@@ -709,3 +709,100 @@ Quality metrics:
 The 13% false positive rate on risk flags creates attorney review overhead. The alternative — tuning for higher precision — reduces recall and risks missing material clauses, which is the worse failure mode in M&A due diligence. The design deliberately accepts false positives to maintain 99% critical issue capture. As attorney correction data accumulates (each rejected flag is logged), the model is retrained quarterly and false positive rate has declined from 20% at launch to 13% at 9 months.
 
 An alternative architecture using only RAG over a clause risk taxonomy (without fine-tuned LegalBERT) was evaluated. It reduced segmentation accuracy to 81% clause recall, missing entire clause types in some contracts. The hybrid approach (fine-tuned segmentation + generative risk analysis) outperformed pure RAG by 13 percentage points on clause recall.
+
+---
+
+**Additional war story — Medical diagnosis assistant returning stale drug interaction data due to RAG index lag:**
+
+A hospital system deployed an LLM-powered medical diagnosis assistant with a RAG pipeline over a clinical knowledge base updated weekly. A new drug interaction warning (metformin + new GLP-1 agonist) was issued by the FDA on a Monday; the RAG index was not updated until Sunday (7-day lag). During the week, the assistant correctly retrieved older guidance that did not include the new interaction warning, and three physicians received recommendations that omitted the critical interaction. Detection came from a physician reporting a near-miss, not from monitoring.
+
+```python
+# BROKEN: weekly batch re-indexing with no freshness metadata or staleness alerts
+def index_knowledge_base(articles: list[dict]) -> None:
+    for article in articles:
+        embedding = embed(article["content"])
+        vector_db.upsert(article["id"], embedding, metadata={"title": article["title"]})
+        # BUG: no publication_date, source, or last_reviewed metadata stored
+
+# FIX: store freshness metadata + implement staleness detection in retrieval
+from datetime import datetime, timedelta
+import warnings
+
+def index_knowledge_base_safe(articles: list[dict]) -> None:
+    for article in articles:
+        embedding = embed(article["content"])
+        vector_db.upsert(
+            article["id"],
+            embedding,
+            metadata={
+                "title": article["title"],
+                "source": article["source"],              # FDA, PubMed, UpToDate
+                "publication_date": article["pub_date"],  # ISO 8601
+                "indexed_at": datetime.utcnow().isoformat(),
+                "guideline_type": article.get("type", "general"),  # drug_interaction, diagnosis, dosing
+            }
+        )
+
+def retrieve_with_freshness_check(
+    query: str,
+    max_age_days: int = 3,  # for drug interactions; 30 for stable clinical guidelines
+    top_k: int = 5,
+) -> tuple[list[dict], list[str]]:
+    results = vector_db.query(embed(query), top_k=top_k * 2)  # over-retrieve for filtering
+    now = datetime.utcnow()
+    fresh_results, stale_warnings = [], []
+    for r in results:
+        pub_date = datetime.fromisoformat(r["metadata"]["publication_date"])
+        age_days = (now - pub_date).days
+        if age_days > max_age_days and r["metadata"]["guideline_type"] == "drug_interaction":
+            stale_warnings.append(f"Warning: '{r['metadata']['title']}' is {age_days} days old")
+        fresh_results.append(r)
+        if len(fresh_results) == top_k:
+            break
+    return fresh_results, stale_warnings
+```
+
+**Additional interview Q&As:**
+
+**How do you balance recall and precision in a medical RAG system where false negatives (missed findings) are more dangerous than false positives?** Tune the retrieval recall threshold to maximize recall first (retrieve top-20 chunks instead of top-5), then use a reranker to select the most relevant among the recalled set. Accept a higher false positive rate in retrieved context (the LLM can reason around irrelevant context) but minimize false negatives (missing a critical contraindication). Measure recall on a labeled medical question set where ground truth relevant documents are known; target >95% recall at the retrieval stage. Monitor downstream: track cases where the LLM says "I could not find information on X" — each such case may indicate a retrieval false negative.
+
+**What are the regulatory considerations for deploying an LLM in a clinical decision support role, and how do they affect architecture?** In the US, FDA regulates clinical decision support (CDS) software: if the software provides recommendations that a clinician cannot independently review, it may require 510(k) clearance. Architecture implications: (1) all recommendations must cite sources so physicians can verify (citation grounding is a regulatory requirement, not a UX feature); (2) the system must not make final decisions — it must present options for physician review (human-in-the-loop is required, not optional); (3) audit logs of all queries, retrieved documents, and generated responses must be retained (HIPAA: 6 years minimum); (4) model updates must go through a re-validation process, not continuous deployment. These constraints typically force a slower deployment cycle (quarterly model updates) than commercial LLM products.
+
+**How do you measure the quality of an LLM medical assistant beyond accuracy, and what production metrics matter most?** Accuracy on closed-domain eval sets measures knowledge correctness but misses real-world quality dimensions: (1) calibration — does the model express appropriate uncertainty ("consult a specialist") for rare conditions?; (2) citation precision — are retrieved documents actually relevant to the claim being made?; (3) hallucination rate — measure with a factuality checker against a medical knowledge graph on 10% of production outputs; (4) physician override rate — when physicians edit or discard a recommendation, log the case; high override rates for specific intent categories signal model gaps; (5) time-to-diagnosis metric — does the assistant reduce the time physicians spend on research per case (target: 30% reduction)?
+
+**Quick-reference table:**
+
+| Approach | Best for | Trade-off |
+|---|---|---|
+| RAG over curated clinical knowledge base | Fact retrieval, drug interactions, dosing guidelines | Index freshness is a patient safety issue; requires SLA on update latency |
+| Fine-tuned domain model (medical LLM) | Domain terminology, structured report generation | Requires expensive labeled data; regulatory re-validation on every update |
+| LLM-as-judge for output validation | Catching hallucinations before physician sees them | Additional latency (200-500ms); additional cost per query; judge LLM can also hallucinate |
+| Human-in-the-loop review | High-risk recommendations, rare conditions | Reduces autonomy; creates physician review burden; latency increases to minutes |
+
+**Pitfall — LLM hallucination of medical dosages not caught before presenting to clinician.**
+
+```python
+# BROKEN: raw LLM response for drug dosage question presented to doctor without grounding
+async def answer_clinical_question(question: str) -> str:
+    return await llm.complete(f"Medical question: {question}")
+# LLM confidently states "Adult dosage of metformin: 500mg twice daily"
+# Correct answer: 500-2000mg/day in divided doses — the range matters clinically
+
+# FIX: ground every numerical claim against a structured drug database
+async def answer_grounded(question: str, drug_db: DrugDatabase) -> str:
+    raw_answer = await llm.complete(question)
+    # Extract claims about dosages, interactions, contraindications
+    claims = await extractor.extract_medical_claims(raw_answer)
+    verified = []
+    for claim in claims:
+        db_fact = drug_db.lookup(claim.drug, claim.property)
+        if db_fact and not db_fact.matches(claim.value):
+            verified.append(f"[CORRECTED] {db_fact.canonical_text}")
+        else:
+            verified.append(claim.text)
+    return "\n".join(verified) + "\n\n[Sources: FDA label, AHFS Drug Information]"
+```
+
+**How do you implement responsible AI disclosure for LLM-powered healthcare applications?** Regulatory bodies (FDA, EU MDR) require clear disclosure when AI contributes to a clinical decision. Implementation: (1) every LLM response includes a disclaimer ("AI-generated — requires clinical verification"); (2) log every query and response with the user ID, model version, timestamp, and response hash for audit; (3) implement a "report error" button that sends the query+response to a human expert review queue; (4) track disagreement rates (clinician overrides AI suggestion) per query type — high override rate (> 30%) signals the model is not calibrated for that use case. In the EU, AI systems providing medical advice are Class IIb medical devices requiring conformity assessment.
+
+**What is retrieval-augmented generation's role in reducing LLM hallucinations for domain-specific applications?** RAG grounds LLM responses in retrieved documents, providing verifiable sources for claims. For a medical knowledge base: instead of the LLM generating a drug dosage from training memory (potentially outdated or wrong), it retrieves the current FDA label section, feeds it as context, and generates a response that is traceable to the source document. Hallucination rate on RAG systems for factual Q&A: 8-15% vs. 30-45% for vanilla LLM (measured by fact-checking against ground-truth databases). The remaining 8-15% hallucinations in RAG are typically synthesis errors (LLM correctly quotes two facts but draws an incorrect inference from them) — mitigated by explicit chain-of-thought reasoning and source attribution.

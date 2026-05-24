@@ -365,29 +365,409 @@ Communication overhead in distributed training comes from gradient synchronizati
 
 ---
 
-## 14. Case Study: Training a 70B Model on 1000 GPUs
 
-**Setup:** 1000 × H100 80GB (125 nodes × 8 GPUs)
+## 14. Case Study
 
-**Parallelism Strategy:**
+**Scenario:** A research lab trains a 7B parameter dense decoder-only LLM on 1.5T tokens of curated web + code + math data. Hardware budget: 64 A100 80GB SXM GPUs (8 nodes × 8 GPUs) on InfiniBand HDR (200 Gb/s). Target: 3.5T token-hours of compute (Chinchilla-optimal for 7B), MFU > 45%, training wall-clock under 21 days, per-GPU OOM frequency < 0.1%.
+
+**Architecture:**
+
 ```
-Tensor Parallel (TP) = 8       (within each node, NVLink)
-Pipeline Parallel (PP) = 8     (across 8 nodes, InfiniBand)
-Data Parallel (DP) = ~15       (125 / (8 TP nodes) × 8 PP stages... adjusted)
+  64 A100 80GB SXM (8 nodes × 8 GPUs)
+  InfiniBand HDR 200 Gb/s inter-node
+  NVLink 600 GB/s intra-node
 
-Effective: TP=8, PP=8, DP=15 → 960 GPUs active
-  (40 GPUs spare for hot standby)
+  Parallelism Strategy:
+  ┌────────────────────────────────────────────────────────────┐
+  │  Tensor Parallel (TP) = 1 (7B fits on 1 GPU in BF16)      │
+  │  Pipeline Parallel (PP) = 1 (pipeline bubble < 5% at 7B)  │
+  │  Data Parallel (DP) = 64 (ZeRO Stage 2)                   │
+  │                                                            │
+  │  Choice rationale:                                         │
+  │  7B × 2 bytes (BF16) = 14 GB < 80 GB → no TP needed       │
+  │  Optimizer states (AdamW): 7B × 8 bytes = 56 GB           │
+  │  ZeRO Stage 2 shards optimizer+grads across 64 GPUs:       │
+  │    Per-GPU optimizer: 56 GB / 64 = 0.875 GB                │
+  │    Per-GPU gradients: 14 GB / 64 = 0.22 GB                 │
+  │    Model weights (full replica): 14 GB                     │
+  │    Activations (batch=4, seq=4096, grad ckpt): ~8 GB       │
+  │    Total per GPU: ~25 GB (fits in 80 GB, 69% utilized)     │
+  └────────────────────────────────────────────────────────────┘
+
+  Training Loop:
+  ┌──────────────────────────────────────────────────────────┐
+  │  Megatron-LM + DeepSpeed ZeRO Stage 2                   │
+  │  Global batch size: 4M tokens                            │
+  │  Micro-batch per GPU: 4 sequences × 4096 tokens = 16K    │
+  │  Gradient accumulation steps: 4M / (64 GPUs × 16K) = 4  │
+  │                                                          │
+  │  Data pipeline (asynchronous):                           │
+  │  ┌──────────┐    ┌──────────┐    ┌──────────────────┐   │
+  │  │ S3 data  │ →  │ tokenize │ →  │ GPU prefetch     │   │
+  │  │ shards   │    │ workers  │    │ (pinned memory)  │   │
+  │  └──────────┘    │ (8 CPU)  │    └──────────────────┘   │
+  │                  └──────────┘                            │
+  │  Data never bottlenecks GPU — 8 CPU workers saturate    │
+  │  InfiniBand at 20 GB/s; tokenizer throughput 800 MB/s   │
+  └──────────────────────────────────────────────────────────┘
+
+  Checkpoint Strategy:
+  Every 1B tokens (≈ 500 steps at 4M token batch):
+    - Full checkpoint: model + optimizer → NFS mount
+    - Checkpoint size: 14 GB (weights) + 56 GB (optim) = 70 GB
+    - Checkpoint write time: ~90s at 800 MB/s NFS throughput
+    - Retain last 3 checkpoints (210 GB total on NFS)
+    - Spot instance interruption: max 1B token loss (≈ 20 min of training)
+
+  Throughput Math:
+    A100 BF16 TFLOPS: 312 peak theoretical
+    MFU target: 45% → 140 TFLOPS per GPU effective
+    7B model FLOPs per token: 2 × 7B = 14B
+    Tokens/sec per GPU: 140e12 / 14e9 = 10,000 tokens/sec
+    Total (64 GPUs): 640,000 tokens/sec
+    1.5T tokens / 640K tok/s = 2,344,000 sec = 27 days (ideal)
+    With 85% availability (restarts, checkpointing): 27 / 0.85 = 32 days
+    → need MFU improvement or more GPUs for 21-day target
 ```
 
-**Memory per GPU:**
-- 70B params / 960 GPUs with FSDP: ~70B × 18 bytes / 960 = ~1.3GB/GPU for params+grads+optim
-- Activations (batch=2, seq=4096): ~8GB per GPU
-- Total: ~50GB per GPU (fits in 80GB with headroom)
+**Key implementation — 3 Python code blocks:**
 
-**Expected throughput:**
-- H100 BF16 TFLOPS: 1979 peak; ~50% MFU = ~990 TFLOPS per GPU
-- 70B model FLOPs per token: 2 × 70B = 140B FLOPs
-- Tokens/sec per GPU: 990e12 / 140e9 = ~7000 tokens/sec
-- Total: 1000 GPUs × 7000 = 7M tokens/sec
+Block 1 — ZeRO Stage 2 DeepSpeed configuration:
 
-**Training timeline for 1T tokens:** 1T / 7M = ~33 hours
+```python
+from __future__ import annotations
+import json
+from pathlib import Path
+
+
+def build_deepspeed_config(
+    output_dir: Path,
+    global_batch_size: int = 4_000_000,        # tokens
+    micro_batch_per_gpu: int = 4,              # sequences per GPU step
+    seq_len: int = 4096,
+    num_gpus: int = 64,
+    lr: float = 3e-4,
+    warmup_steps: int = 2_000,
+) -> dict:
+    tokens_per_gpu_step = micro_batch_per_gpu * seq_len
+    grad_accum_steps = global_batch_size // (num_gpus * tokens_per_gpu_step)
+
+    config = {
+        "train_batch_size": global_batch_size // seq_len,     # in sequences
+        "train_micro_batch_size_per_gpu": micro_batch_per_gpu,
+        "gradient_accumulation_steps": grad_accum_steps,      # 4
+        "gradient_clipping": 1.0,
+
+        "bf16": {"enabled": True},
+        "fp16": {"enabled": False},
+
+        "zero_optimization": {
+            "stage": 2,
+            "allgather_partitions": True,
+            "allgather_bucket_size": 2e8,        # 200 MB all-gather chunks
+            "overlap_comm": True,                # overlap comm with compute
+            "reduce_scatter": True,
+            "reduce_bucket_size": 2e8,
+            "contiguous_gradients": True,        # reduce memory fragmentation
+        },
+
+        "optimizer": {
+            "type": "AdamW",
+            "params": {
+                "lr": lr,
+                "betas": [0.9, 0.95],
+                "eps": 1e-8,
+                "weight_decay": 0.1,
+            },
+        },
+
+        "scheduler": {
+            "type": "WarmupDecayLR",
+            "params": {
+                "warmup_min_lr": 0,
+                "warmup_max_lr": lr,
+                "warmup_num_steps": warmup_steps,
+                "total_num_steps": 375_000,      # 1.5T / 4M token batch
+                "decay_style": "cosine",
+            },
+        },
+
+        "activation_checkpointing": {
+            "partition_activations": True,
+            "cpu_checkpointing": False,          # GPU checkpointing (faster)
+            "contiguous_memory_optimization": True,
+            "number_checkpoints": None,
+            "synchronize_checkpoint_boundary": False,
+        },
+
+        "steps_per_print": 100,
+        "wall_clock_breakdown": False,
+    }
+
+    config_path = output_dir / "ds_config.json"
+    config_path.write_text(json.dumps(config, indent=2))
+    return config
+```
+
+Block 2 — MFU monitoring and training health checks (production concern):
+
+```python
+from __future__ import annotations
+import time
+from dataclasses import dataclass, field
+from typing import Any
+import torch
+
+
+@dataclass
+class TrainingMonitor:
+    """
+    Tracks Model FLOP Utilization (MFU) and training health.
+    MFU = actual_tokens_per_sec / theoretical_max_tokens_per_sec.
+    Target: MFU > 45% for A100 BF16 training.
+    Alert if MFU drops below 35% for 10+ consecutive steps.
+    """
+
+    num_gpus: int
+    model_params: int                    # 7_000_000_000
+    gpu_peak_tflops: float = 312.0       # A100 BF16 peak
+    seq_len: int = 4096
+    micro_batch_per_gpu: int = 4
+
+    _step_times: list[float] = field(default_factory=list)
+    _mfu_history: list[float] = field(default_factory=list)
+    _loss_history: list[float] = field(default_factory=list)
+
+    def record_step(self, step_time_s: float, loss: float) -> dict[str, float]:
+        tokens_per_step = self.micro_batch_per_gpu * self.seq_len * self.num_gpus
+        actual_tok_per_sec = tokens_per_step / step_time_s
+
+        # FLOPs per token = 2 × params (forward) + backward doubles it
+        # For training: 6 × params per token (fwd + bwd + optimizer)
+        flops_per_token = 6 * self.model_params
+        actual_tflops = (actual_tok_per_sec * flops_per_token) / 1e12
+        theoretical_tflops = self.gpu_peak_tflops * self.num_gpus
+        mfu = actual_tflops / theoretical_tflops
+
+        self._step_times.append(step_time_s)
+        self._mfu_history.append(mfu)
+        self._loss_history.append(loss)
+
+        metrics = {
+            "step_time_s": step_time_s,
+            "tokens_per_sec": actual_tok_per_sec,
+            "mfu": mfu,
+            "loss": loss,
+        }
+
+        # Alert on MFU degradation
+        if len(self._mfu_history) >= 10:
+            recent_mfu = sum(self._mfu_history[-10:]) / 10
+            if recent_mfu < 0.35:
+                self._emit_alert(f"MFU degraded to {recent_mfu:.1%} — check for stragglers or communication bottleneck")
+
+        # Alert on loss spike (NaN or sudden increase)
+        if torch.isnan(torch.tensor(loss)):
+            self._emit_alert("NaN loss detected — checkpoint and investigate gradient overflow")
+        elif len(self._loss_history) > 20:
+            baseline = sum(self._loss_history[-20:-10]) / 10
+            recent = sum(self._loss_history[-10:]) / 10
+            if recent > baseline * 1.5:
+                self._emit_alert(f"Loss spike: {baseline:.3f} → {recent:.3f} — potential data quality issue")
+
+        return metrics
+
+    def _emit_alert(self, message: str) -> None:
+        import logging
+        logging.warning(f"[TrainingMonitor] ALERT: {message}")
+        # In production: send to PagerDuty / Slack
+
+
+def estimate_training_time(
+    total_tokens: int,
+    tokens_per_sec: float,
+    availability: float = 0.85,
+) -> dict[str, float]:
+    """Estimate wall-clock training time accounting for restarts/maintenance."""
+    ideal_hours = total_tokens / tokens_per_sec / 3600
+    actual_hours = ideal_hours / availability
+    return {
+        "ideal_days": ideal_hours / 24,
+        "actual_days": actual_hours / 24,
+        "checkpoint_overhead_hours": actual_hours - ideal_hours,
+    }
+```
+
+Block 3 — BROKEN -> FIX: gradient overflow and learning rate warmup:
+
+```python
+from __future__ import annotations
+import torch
+
+
+# BROKEN: Start training at full learning rate immediately.
+# At step 1, randomly initialized model parameters receive a large gradient.
+# With lr=3e-4 and no warmup, parameters jump to infinity in first 100 steps.
+# Loss immediately NaNs.
+def broken_lr_schedule(step: int, max_lr: float = 3e-4) -> float:
+    # Cosine decay from max_lr
+    import math
+    T = 375_000
+    return max_lr * 0.5 * (1 + math.cos(math.pi * step / T))
+
+
+# FIX: Linear warmup for 2000 steps, then cosine decay.
+# Warmup ramps from lr=0 to max_lr over 2000 steps.
+# Stable initialization — gradients are small at low lr.
+def fixed_lr_schedule(
+    step: int,
+    max_lr: float = 3e-4,
+    warmup_steps: int = 2_000,
+    total_steps: int = 375_000,
+    min_lr_ratio: float = 0.1,
+) -> float:
+    import math
+    if step < warmup_steps:
+        return max_lr * step / warmup_steps
+    progress = (step - warmup_steps) / (total_steps - warmup_steps)
+    cosine = 0.5 * (1 + math.cos(math.pi * progress))
+    min_lr = max_lr * min_lr_ratio
+    return min_lr + cosine * (max_lr - min_lr)
+
+
+# BROKEN: No gradient clipping — exploding gradients crash training.
+# At high learning rates or poor initialization, gradient norm can hit 1e6.
+# Parameters update by lr × 1e6 = 3e4 per step — immediate divergence.
+def broken_optimizer_step(model: torch.nn.Module, optimizer: torch.optim.Optimizer) -> None:
+    optimizer.step()   # no clipping
+
+
+# FIX: Clip gradient norm to 1.0 before optimizer step.
+# Caps the maximum parameter update magnitude.
+# Log the pre-clip norm — sustained high norms (>10) signal instability.
+def fixed_optimizer_step(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    max_grad_norm: float = 1.0,
+) -> float:
+    grad_norm = torch.nn.utils.clip_grad_norm_(
+        model.parameters(), max_grad_norm
+    )
+    optimizer.step()
+    return float(grad_norm)
+
+
+# BROKEN: Save checkpoint synchronously — blocks all 64 GPUs for 90 seconds
+# while writing 70 GB to NFS. Effective training downtime: 90s every 20 min.
+# MFU drops from 45% to 40% due to checkpoint blocking.
+def broken_checkpoint(state: dict, path: str) -> None:
+    torch.save(state, path)   # blocking on GPU 0
+
+
+# FIX: Async checkpoint — move state to CPU RAM, write in background thread.
+# GPU 0 pins CPU memory, background thread writes to NFS.
+# Training resumes immediately; checkpointing overlaps with next 500 steps.
+import threading
+def fixed_async_checkpoint(state: dict, path: str) -> threading.Thread:
+    # Move tensors to CPU to free GPU memory
+    cpu_state = {k: v.cpu() if hasattr(v, "cpu") else v for k, v in state.items()}
+
+    def _write() -> None:
+        torch.save(cpu_state, path)
+
+    t = threading.Thread(target=_write, daemon=True)
+    t.start()
+    return t   # caller can join before next checkpoint
+```
+
+**Pitfall 1 — Straggler GPUs collapsing global throughput:**
+
+```python
+# BROKEN: One GPU on a node with a faulty NVLink link runs at 60% speed.
+# AllReduce waits for all 64 GPUs — entire run throttled to 60% throughput.
+# MFU drops from 45% to 28%; 21-day target becomes 34 days.
+# Symptom: step times vary ±40% between steps.
+
+# FIX: Monitor per-GPU throughput via DCGM exporter (Prometheus).
+# Alert if any GPU's compute utilization drops below 85% for 5+ steps.
+# Preemptively hot-swap the node — 20-min interruption beats 13 days of degraded training.
+# Use spot-instance-friendly checkpointing to resume from last checkpoint after swap.
+```
+
+**Pitfall 2 — Data pipeline starvation on slow NFS:**
+
+```python
+# BROKEN: Training batch loaded from NFS (latency 10ms/batch) while GPU waits.
+# At 10K tokens/sec/GPU, a 4096-token batch loads in 0.4ms from RAM but 10ms from NFS.
+# NFS latency exceeds GPU compute time → data becomes the bottleneck, not compute.
+# MFU: 20% (GPU idle 80% of the time waiting for data).
+
+# FIX: Use prefetch with pinned memory — load N+2 batches while training on batch N.
+# All tokenized data shards pre-loaded to local SSD (800 GB NVMe per node).
+# Dataloader: 8 worker processes, prefetch_factor=4.
+import torch
+from torch.utils.data import DataLoader
+
+def build_dataloader(dataset: torch.utils.data.Dataset) -> DataLoader:
+    return DataLoader(
+        dataset,
+        batch_size=4,
+        num_workers=8,
+        pin_memory=True,         # pinned RAM → GPU DMA at PCIe bandwidth
+        prefetch_factor=4,       # 4 batches prefetched per worker
+        persistent_workers=True, # avoid worker spawn overhead per epoch
+    )
+```
+
+**Pitfall 3 — Loss NaN from bf16 underflow in small gradient values:**
+
+```python
+# BROKEN: Gradient values for embedding layer fall below bf16 minimum (~1e-38).
+# Stored as 0.0 in bf16 — embedding weights never update.
+# Symptom: embedding loss plateaus at step 100, rest of model trains normally.
+
+# FIX: Keep optimizer states in FP32 (mixed precision standard practice).
+# BF16 for forward/backward compute; FP32 for optimizer state (master weights).
+# DeepSpeed / Megatron do this automatically with bf16.enabled=True.
+# Verify: check that optimizer param groups use .float() for master params.
+def verify_optimizer_dtype(optimizer: torch.optim.Optimizer) -> None:
+    for group in optimizer.param_groups:
+        for p in group["params"]:
+            assert p.dtype == torch.float32, (
+                f"Optimizer master weight is {p.dtype} — should be float32"
+            )
+```
+
+**Metrics:**
+
+| Metric | Target | Achieved (after tuning) |
+|--------|--------|------------------------|
+| MFU | > 45% | 47.3% |
+| Tokens/sec (64 GPUs) | 640K | 672K |
+| Wall-clock training time | 21 days | 22.4 days |
+| GPU OOM events | < 0.1% | 0.03% |
+| NaN loss events | 0 | 1 (fixed by grad clipping) |
+| Checkpoint overhead | < 5% | 1.8% (async checkpoint) |
+| Data pipeline idle | < 2% | 0.6% (local SSD + prefetch) |
+| Straggler events | 0 | 2 (hot-swapped nodes) |
+| Total compute cost | $180K est | $194K (22.4 days × 64 × $2/hr) |
+
+**Interview Q&As:**
+
+**Q: Why choose ZeRO Stage 2 over Stage 3 for 7B model training on 64 A100s?**
+ZeRO Stage 2 shards optimizer states and gradients across GPUs but keeps full model parameters replicated on each GPU. Stage 3 additionally shards parameters, reducing per-GPU memory further but adding all-gather communication for every forward pass. For a 7B model in BF16 (14 GB weights), each A100 can hold the full replica with 66 GB remaining for optimizer states, activations, and gradients. Stage 2 delivers lower communication overhead than Stage 3 and achieves higher MFU; Stage 3 is reserved for models too large to fit a single copy per GPU (typically > 80B parameters on A100 80GB with FP16).
+
+**Q: What is Model FLOP Utilization (MFU) and why does it matter for training efficiency?**
+MFU is the ratio of actual training FLOP throughput to theoretical GPU peak FLOP throughput. An A100 has 312 BF16 TFLOPS peak; achieving 45% MFU means 140 TFLOPS of actual useful compute. The remainder is lost to memory bandwidth limits, communication overhead (AllReduce), checkpointing pauses, and data loading stalls. MFU directly determines how long training takes — improving from 35% to 47% MFU reduces a 30-day training run to 22.3 days, saving 8 days of GPU cost (~$24K at $2/GPU-hour for 64 GPUs).
+
+**Q: How does gradient checkpointing reduce memory at the cost of compute?**
+Normally, all activations from the forward pass are kept in GPU memory to compute gradients during backprop. For a 7B model with batch size 4 and sequence length 4096, activations require ~32 GB per GPU — exceeding available memory. Gradient checkpointing drops intermediate activations during the forward pass and recomputes them during backprop when needed. Memory reduction: ~8× for typical transformer layers. Compute overhead: ~33% more FLOPs (one extra forward pass per checkpoint boundary). The tradeoff — 33% more compute, 8× less activation memory — is almost always worthwhile for large models.
+
+**Q: Why is learning rate warmup essential for large model training?**
+At initialization, model weights are random and the loss landscape is highly irregular — large gradient magnitudes in some directions, small in others. Starting at the full learning rate (3e-4) causes parameter updates too large for the random initialization to handle, often causing NaN loss within 100-500 steps. Warmup ramps the learning rate from 0 to max_lr over 2,000 steps (a small fraction of total training), allowing the optimizer to settle into a stable region of the loss landscape before taking full-sized steps. Without warmup, approximately 30% of training runs fail to survive the first 1,000 steps.
+
+**Q: How do you diagnose and handle a straggler GPU in distributed training?**
+A straggler is a GPU running significantly slower than peers, causing AllReduce operations to wait at the slowest participant and throttling the entire run. Diagnosis: monitor per-GPU utilization via DCGM/Prometheus; a straggler shows consistently lower compute utilization (< 85%) compared to peers. Common causes: faulty NVLink link, thermal throttling (GPU overheating), slow NFS data path, CPU bottleneck on data preprocessing. Resolution: identify the node, pause training at the next checkpoint, hot-swap the node (replace with a healthy node), resume from checkpoint. The 20-minute interruption is preferable to sustained MFU degradation.
+
+**Q: What is the relationship between global batch size, gradient accumulation steps, and training stability?**
+Global batch size (in tokens) determines the gradient noise level — larger batches produce lower-variance gradient estimates, allowing higher learning rates and more stable training. For a 7B model, 4M token batches (the Llama/Mistral standard) provide good signal-to-noise. Gradient accumulation achieves large effective batch sizes without requiring each GPU to hold all the samples simultaneously: if 64 GPUs each process 16K tokens per step with 4 accumulation steps, the effective batch is 64 × 16K × 4 = 4M tokens. Training stability is maintained because the gradient update uses the same 4M token aggregate regardless of how many accumulation steps are used.

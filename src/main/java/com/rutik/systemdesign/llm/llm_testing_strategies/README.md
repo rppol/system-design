@@ -664,3 +664,101 @@ Action: Tone prompt tuning before deployment + monitor no-answer rate.
 - LangSmith evaluator on 5% of production traces daily (~500 traces/day)
 - Alert if rolling 7-day average drops >5% from baseline
 - One alert triggered in 6 months: knowledge base article was deleted; retrieval recall dropped 12% for one intent category; caught within 24 hours vs ~3 days without monitoring
+
+---
+
+**Additional war story — Golden dataset staleness causing false "passing" CI/CD gates in code generation product:**
+
+A code generation product maintained a golden dataset of 300 programming problems with expected outputs. CI passed if the model scored >80% on this set. After 6 months, engineers noticed that the golden dataset problems had been "contaminated" — the fine-tuning pipeline had been trained on solutions to 40 of the 300 problems (sourced from GitHub, which overlapped with the golden set). The model was memorizing, not generalizing, and the CI gate reported 89% accuracy while real-world acceptance rate had fallen from 34% to 27%. Detection came from a user survey, not from CI.
+
+```python
+# BROKEN: golden dataset with no contamination check against training data
+def evaluate_on_golden_set(model, golden_problems: list[dict]) -> float:
+    correct = 0
+    for problem in golden_problems:
+        output = model.generate(problem["prompt"])
+        if output.strip() == problem["expected_output"].strip():
+            correct += 1
+    return correct / len(golden_problems)  # BUG: no check if problems are in training data
+
+# FIX: contamination detection before using eval set as ground truth
+import hashlib
+from difflib import SequenceMatcher
+
+def check_contamination(
+    golden_problems: list[dict],
+    training_data: list[dict],
+    similarity_threshold: float = 0.85,
+) -> list[dict]:
+    """Returns list of golden problems with similarity > threshold to any training example."""
+    contaminated = []
+    for gp in golden_problems:
+        for td in training_data:
+            ratio = SequenceMatcher(
+                None, gp["prompt"].lower(), td["prompt"].lower()
+            ).ratio()
+            if ratio > similarity_threshold:
+                contaminated.append({
+                    "golden_id": gp["id"],
+                    "training_id": td["id"],
+                    "similarity": ratio,
+                })
+                break
+    return contaminated
+
+# Additional: use a held-out test set that is NEVER used in training pipeline
+def create_eval_split(problems: list[dict], held_out_fraction: float = 0.15) -> tuple:
+    import random
+    random.shuffle(problems)
+    split = int(len(problems) * held_out_fraction)
+    return problems[split:], problems[:split]  # train_set, test_set (locked away)
+```
+
+**Additional interview Q&As:**
+
+**What is the difference between online evaluation (LLM-as-judge) and offline evaluation (golden datasets), and when should you use each?** Offline evaluation on golden datasets is fast (<5 minutes for 1,000 examples), reproducible, and cheap — it is the right gate for CI/CD pipelines where you need a pass/fail decision before deployment. Online evaluation with LLM-as-judge samples 5-10% of production traffic, measures quality on real-world queries (not curated problems), and catches distribution shift — it is the right instrument for ongoing production monitoring. Use offline evaluation to prevent regressions; use online evaluation to detect drift. Never rely on one alone: offline can miss real-world quality gaps (golden set may not represent production distribution); online is too slow for pre-deployment gates.
+
+**How do you detect flaky LLM evaluations where the same input produces different scores on repeated runs?** Measure score variance over 5-10 repeated evaluations of the same prompt-response pair with the same judge LLM. For binary (pass/fail) judgments, flakiness rate = fraction of pairs where the judgment differs across runs. Target flakiness rate < 5% for reliable CI gates. Mitigation: use temperature=0 for judge LLM calls; include explicit scoring rubrics with examples in the judge prompt (reduces inter-run variance from 12% to 3% in practice); use ensemble judging (3 independent LLM calls, majority vote) for high-stakes evals. Track flakiness rate as a first-class metric alongside accuracy.
+
+**How do you integrate LLM evaluation into CI/CD without making every PR deployment take 30 minutes?** Use a tiered evaluation strategy: (1) fast tier (<2 minutes): run 50-100 representative golden examples on every PR; block merge if score drops >3%; (2) medium tier (<10 minutes): run full 1,000-example golden set on every merge to main; alert but don't block; (3) slow tier (<60 minutes): run full production eval including LLM-as-judge on 5% sample before every production deployment. Cache embedding computations for retrieval-dependent evals to cut tier-1 time by 40%. Use parallel evaluation workers (10 concurrent eval requests to judge LLM) to reduce wall clock time.
+
+**Quick-reference table:**
+
+| Strategy | Speed | Coverage | Best for |
+|---|---|---|---|
+| Golden dataset (exact match/BLEU) | Fast (<2 min for 100 examples) | Narrow — only tests known good outputs | Regression prevention in CI; structured output validation |
+| LLM-as-judge (production sampling) | Slow (hours for 1,000 examples) | Broad — tests real-world distribution | Production drift detection; open-ended generation quality |
+| Unit tests for tool calls and parsers | Fastest (<30 seconds) | Exact — tests deterministic components | JSON parsing, function call schema validation, retrieval integration |
+| A/B testing with user metrics | Very slow (days to weeks) | Ground truth — measures business impact | Final validation of model changes; acceptance criteria for major updates |
+
+**Pitfall — Golden dataset goes stale after model update, masking regressions.**
+
+```python
+# BROKEN: golden dataset created once, never refreshed — doesn't cover new features
+# After 6 months: model is tested against 200 prompts all from 6 months ago
+# New capabilities (code review, multi-language) have zero test coverage
+# A regression on multi-language is undetected until a user reports it
+
+golden_dataset = load_static("golden_v1.jsonl")   # frozen in time
+
+# FIX: dynamic golden dataset — auto-generate new test cases from production logs
+def refresh_golden_dataset(prod_logs: list[ConversationLog],
+                           current_dataset: list[TestCase],
+                           sample_rate: float = 0.01) -> list[TestCase]:
+    # Sample 1% of recent production conversations
+    new_cases = [
+        TestCase(
+            prompt=log.user_message,
+            expected_behavior="passes_judge",   # LLM-as-judge evaluates
+            tags=classify_intent(log.user_message),   # auto-tag by feature area
+        )
+        for log in random.sample(prod_logs, int(len(prod_logs) * sample_rate))
+    ]
+    # Deduplicate against existing dataset (semantic similarity < 0.9)
+    filtered = deduplicate_semantic(new_cases, current_dataset)
+    return current_dataset + filtered   # append, never replace
+```
+
+**How do you implement LLM-as-judge for automated evaluation at scale?** Use a stronger model (GPT-4o, Claude-3-Opus) to evaluate a weaker model's outputs against criteria: `judge_prompt = f"Criterion: {criterion}\nResponse: {response}\nScore 1-5 with reasoning"`. Key practices: (1) multi-criteria scoring (accuracy, helpfulness, safety, conciseness) with separate rubrics; (2) position bias mitigation — randomize the order of A/B responses when doing pairwise comparison; (3) calibrate judge against human labels — judge accuracy should be > 85% correlation with human scores on 200 calibration examples; (4) run judge on a separate judge model from the one being evaluated — never self-evaluate. Cost: ~$0.002 per evaluation with GPT-4o-mini at 95% human-correlation for simple criteria.
+
+**What is flakiness in LLM tests and how do you detect and fix it?** A flaky test passes sometimes and fails sometimes on the same model and prompt — caused by non-zero temperature sampling. Detection: run each test case 5× and flag tests where pass rate is 2/5 to 4/5 (not deterministically passing or failing). Fix: (1) set temperature=0 for deterministic evaluation of factual tasks; (2) for creative tasks that require non-zero temperature, switch from exact-match assertions to LLM-as-judge assertions that are robust to paraphrasing; (3) use `n=3` completions and require 2/3 to pass (majority vote) before marking the test as failed — reduces false failures from lucky/unlucky samples.

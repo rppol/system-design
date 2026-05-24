@@ -2,7 +2,7 @@
 
 ## Deep Dive Files
 
-This directory contains a README index (this file) plus 10 deep-dive files, each covering one framework or topic with the full 14-section module template and 15+ interview Q&As.
+This directory contains a README index (this file) plus 17 deep-dive files, each covering one framework or topic with the full 14-section module template and 15+ interview Q&As.
 
 | File | Topic | Focus |
 |------|-------|-------|
@@ -16,6 +16,13 @@ This directory contains a README index (this file) plus 10 deep-dive files, each
 | [dspy.md](dspy.md) | DSPy | Signatures, modules, optimizers (BootstrapFewShot, MIPRO), metrics, compilation |
 | [framework_observability.md](framework_observability.md) | Observability | LangSmith, Langfuse, OpenTelemetry, cost tracking, LLM-as-judge evaluation |
 | [structured_outputs_and_instructor.md](structured_outputs_and_instructor.md) | Structured Outputs | Instructor, Pydantic extraction, native structured outputs, retry on validation |
+| [openai_agents_sdk.md](openai_agents_sdk.md) | OpenAI Agents SDK | Agent primitives, Runner, handoffs, guardrails, tracing (2025) |
+| [claude_agent_sdk.md](claude_agent_sdk.md) | Anthropic API native | Tool use loop, parallel tools, subagents, computer use, prompt caching |
+| [pydantic_ai.md](pydantic_ai.md) | PydanticAI | Typed Agent[Deps,Result], dependency injection, structured output, evals |
+| [smolagents.md](smolagents.md) | HuggingFace smolagents | CodeAgent vs ToolCallingAgent, secure_executor, MCP tools |
+| [strands_aws.md](strands_aws.md) | AWS Strands | @tool decorator, Bedrock integration, agent_as_tool, OpenTelemetry |
+| [mastra_typescript.md](mastra_typescript.md) | Mastra (TS) | Workflows, agents, MCP client, evals, Vercel/CF deployment |
+| [litellm_routing.md](litellm_routing.md) | LiteLLM | Unified routing, fallback, cost tracking, semantic caching, virtual keys |
 
 ---
 
@@ -552,3 +559,110 @@ graph.add_conditional_edges("respond", route)
 - Average steps per resolution: 3.2 (down from 5.8)
 - P99 latency: 8 seconds (down from 22 seconds)
 - Code maintainability: team rated 8/10 (up from 3/10)
+
+---
+
+**Additional war story — LangGraph state explosion causing OOM in insurance claims processing:**
+
+An insurance claims agent used LangGraph with a state dict that accumulated the full conversation history, all retrieved documents, all intermediate tool call results, and all node outputs in a single state object. For a complex claim with 12 agent steps, the state object grew to 480KB. With 200 concurrent claims, the Python process consumed 96MB for state alone — manageable. But a bug caused the retry loop to append (not replace) tool results on each retry, growing state unboundedly. After 3 hours, the process OOMed at 8GB.
+
+```python
+# BROKEN: state accumulates tool results without replacement
+from typing import TypedDict, Annotated
+from langgraph.graph import StateGraph
+import operator
+
+class ClaimsState(TypedDict):
+    messages: list[dict]
+    tool_results: Annotated[list[dict], operator.add]  # BUG: always appends, never replaces
+    documents: Annotated[list[str], operator.add]       # BUG: same
+
+# FIX: replace tool results on retry; keep only the latest result per tool
+from typing import Any
+
+class ClaimsStateSafe(TypedDict):
+    messages: list[dict]
+    tool_results: dict[str, Any]   # keyed by tool name — latest result replaces prior
+    documents: list[str]           # explicit replacement in node logic
+    step_count: int                # hard limit guard
+
+def tool_node(state: ClaimsStateSafe, tool_name: str, result: Any) -> dict:
+    if state["step_count"] > 20:
+        raise RuntimeError(f"Agent exceeded step limit: {state['step_count']}")
+    return {
+        "tool_results": {**state["tool_results"], tool_name: result},  # replace, not append
+        "step_count": state["step_count"] + 1,
+    }
+```
+
+**Additional interview Q&As:**
+
+**What is the difference between LangGraph and LangChain LCEL for building agents, and when should you choose each?** LCEL (LangChain Expression Language) is a declarative pipeline builder for linear or branching chains with no persistent state between steps; it is appropriate for single-turn workflows like RAG pipelines, structured extraction, and multi-step prompts. LangGraph builds stateful graphs with cycles, checkpointing, and human-in-the-loop interruptions; it is appropriate for multi-step agents that need to revisit decisions, accumulate context across many steps, and recover from partial failures. Choose LCEL for <5-step deterministic pipelines; choose LangGraph for agents with loops, branching on tool results, and resumable execution.
+
+**How do you implement human-in-the-loop interruptions in a LangGraph agent without blocking the event loop?** Use `interrupt_before` or `interrupt_after` node configuration in LangGraph to pause execution and serialize the graph state to a persistent checkpoint (PostgreSQL or Redis). The HTTP endpoint returns a 202 Accepted with a `checkpoint_id`. A separate endpoint polls for pending interruptions; the human approves or modifies via a frontend; the approval resumes the graph by loading the checkpoint and continuing. This decouples human review latency (minutes to hours) from agent compute time (seconds) and supports concurrent agents with independent checkpoints.
+
+**What observability primitives should every production agentic framework expose?** At minimum: (1) per-step latency and token counts with step names (not just total); (2) tool call traces including inputs and outputs; (3) retry counts and failure reasons per node; (4) graph execution path (which edges were taken) for each run; (5) cost per run broken down by model and step. Without step-level tracing, debugging an agent that produced a wrong answer requires re-running with print statements, which is infeasible in production. Langfuse, LangSmith, and Phoenix all support LangGraph callback integration via `callbacks=[LangfuseCallbackHandler()]`.
+
+**Quick-reference table:**
+
+| Framework | Best for | Trade-off |
+|---|---|---|
+| LangGraph | Stateful multi-step agents, human-in-the-loop, resumable workflows | Steeper learning curve; state schema must be designed carefully to avoid OOM |
+| LangChain LCEL | Linear RAG pipelines, structured extraction, <5-step deterministic chains | No cycle support; state not persisted across invocations |
+| CrewAI | Multi-agent role-based workflows with minimal framework code | Less control over inter-agent communication; harder to debug agent reasoning |
+| OpenAI Agents SDK | Handoff-based agent networks with function tools; GPT-4o native | Vendor lock-in; limited support for non-OpenAI models; no built-in state persistence |
+
+**Pitfall — LangGraph node raises unhandled exception, silently drops state updates.**
+
+```python
+# BROKEN: exception in a node kills the graph without persisting completed work
+# A 10-step graph fails at step 7 — steps 1-6 results are lost, full restart required
+from langgraph.graph import StateGraph
+
+def process_claims(state: dict) -> dict:
+    result = external_api.process(state["claim"])   # can raise ConnectionError
+    return {"processed": result}                    # never reached if API fails
+
+graph = StateGraph(dict)
+graph.add_node("process", process_claims)           # no error handling
+
+# FIX: wrap nodes in try/except; persist partial state to a checkpointer
+from langgraph.checkpoint.sqlite import SqliteSaver
+
+def process_claims_safe(state: dict) -> dict:
+    try:
+        result = external_api.process(state["claim"])
+        return {"processed": result, "error": None}
+    except Exception as e:
+        return {"processed": None, "error": str(e), "retry_count": state.get("retry_count", 0) + 1}
+
+memory = SqliteSaver.from_conn_string("claims.db")
+graph = graph.compile(checkpointer=memory)   # saves state after each node
+# On failure: resume from last successful node, not from scratch
+```
+
+**How does LangGraph's state graph model differ from LangChain's sequential chains for complex agentic workflows?** LangChain chains are linear — output of step N is input to step N+1. This breaks for workflows with loops (retry on failure, human approval gates, iterative refinement). LangGraph models the workflow as a directed graph with explicit state — nodes read and write to a shared state dict, edges can be conditional (go to node A if approved, node B if rejected), and the graph can loop back. For insurance claim processing: LangGraph allows the graph to loop "extract → validate → request-more-info → extract" until validation passes, tracking all intermediate state in the checkpointer.
+
+**When should you choose LangGraph over a simple while-loop with direct LLM calls?** Use LangGraph when: (1) the workflow has branching logic based on LLM output (routing, conditional steps); (2) you need persistence across restarts (long-running workflows that span hours or days); (3) human-in-the-loop interrupts are required at specific nodes; (4) you want built-in streaming of intermediate node outputs to the UI. For simple linear pipelines or single LLM calls with tools, a direct `llm.invoke()` with a tool loop is simpler and has lower overhead. LangGraph's value is the state machine abstraction — if your workflow doesn't need a state machine, it's overkill.
+
+---
+
+**Quick-reference decision table:**
+
+| Scenario | Recommended approach | Key constraint |
+|---|---|---|
+| < 10k training examples | LoRA / few-shot prompting | Data scarcity |
+| Latency < 100ms required | Quantized model + ONNX Runtime | Throughput > accuracy |
+| Multi-tenant, shared model | System prompt isolation + guardrails | Security boundary |
+| Domain shift from pre-training | Fine-tune with domain data | Catastrophic forgetting risk |
+| Cost reduction (10× target) | Smaller model + prompt optimization | Quality floor |
+
+**Production checklist before shipping an LLM feature:**
+
+- [ ] Latency p99 measured under production load (not just median)
+- [ ] Fallback path tested: what happens when the LLM API is unavailable?
+- [ ] Cost per request calculated at current and 10× scale
+- [ ] Safety/guardrail evaluation on 200 adversarial prompts
+- [ ] Prompt versioned in code and tied to model version in experiment tracker
+- [ ] Human evaluation on 50 random production outputs before launch
+- [ ] Monitoring dashboard live: latency, error rate, cost, quality proxy metric

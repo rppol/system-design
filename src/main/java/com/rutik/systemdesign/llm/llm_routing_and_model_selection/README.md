@@ -724,3 +724,75 @@ Circuit breaker: trip when error rate > 5% over 30 seconds. Half-open after 60 s
 **Interview Discussion Points**
 
 The 48% cost reduction is below the theoretical 50–80% range because the code assistance workload is inherently high-complexity and resists cheap-model routing. Real-world savings depend heavily on workload composition. The team should track actual savings weekly and recalibrate routing thresholds as the DistilBERT classifier improves with more labeled data. The key risk is quality regression in the code assistance path — code errors have high user impact (bugs in production code), so the cascade confidence threshold should be tuned conservatively and monitored daily.
+
+---
+
+**Additional war story — Cascade routing confidence threshold set too low, sending 40% of complex queries to cheap model:**
+
+A code assistance platform implemented cascade routing: a DistilBERT classifier scored queries 0-1 for complexity; queries with score < 0.6 routed to GPT-4o-mini, queries with score >= 0.6 routed to GPT-4o. The threshold was set based on a 200-sample dataset collected in week 1 of the product. After 3 months, the product expanded into more complex enterprise use cases. The original training set underrepresented complex queries, so the classifier's calibration was off — it scored "explain this 500-line async codebase" as 0.54 (below threshold) and routed it to GPT-4o-mini. User satisfaction for enterprise customers dropped 18% before the miscalibration was detected.
+
+```python
+# BROKEN: static threshold with no monitoring of routing distribution
+class CascadeRouter:
+    def __init__(self, classifier, threshold: float = 0.6):
+        self.classifier = classifier
+        self.threshold = threshold  # BUG: never recalibrated as query distribution shifts
+
+    def route(self, query: str) -> str:
+        score = self.classifier.predict_complexity(query)
+        return "gpt-4o" if score >= self.threshold else "gpt-4o-mini"
+
+# FIX: adaptive threshold with routing distribution monitoring + recalibration trigger
+import statistics
+from collections import deque
+
+class AdaptiveCascadeRouter:
+    def __init__(
+        self,
+        classifier,
+        initial_threshold: float = 0.6,
+        target_premium_rate: float = 0.35,  # expect 35% of queries to use premium model
+        window_size: int = 10_000,
+    ):
+        self.classifier = classifier
+        self.threshold = initial_threshold
+        self.target_premium_rate = target_premium_rate
+        self.score_window: deque[float] = deque(maxlen=window_size)
+
+    def route(self, query: str) -> str:
+        score = self.classifier.predict_complexity(query)
+        self.score_window.append(score)
+        self._maybe_recalibrate()
+        return "gpt-4o" if score >= self.threshold else "gpt-4o-mini"
+
+    def _maybe_recalibrate(self) -> None:
+        if len(self.score_window) < 1000:
+            return
+        actual_premium_rate = sum(s >= self.threshold for s in self.score_window) / len(self.score_window)
+        deviation = actual_premium_rate - self.target_premium_rate
+        if abs(deviation) > 0.10:  # >10% drift triggers recalibration
+            # Shift threshold to move distribution back toward target
+            sorted_scores = sorted(self.score_window)
+            new_threshold_idx = int(len(sorted_scores) * (1 - self.target_premium_rate))
+            self.threshold = sorted_scores[new_threshold_idx]
+            # Alert: significant threshold shift may indicate distribution shift
+            if abs(self.threshold - 0.6) > 0.15:
+                alert_oncall(f"Router threshold shifted to {self.threshold:.2f} — investigate query distribution")
+```
+
+**Additional interview Q&As:**
+
+**What metrics should you monitor for a cascade routing system to detect when the classifier needs retraining?** Monitor: (1) routing distribution (% of queries routed to each tier) — a significant shift (>10% change over a week) indicates query distribution shift that may require classifier retraining; (2) quality score by tier — if quality scores for "cheap model" tier drop, the classifier is misrouting complex queries downward; (3) override rate — track cases where users requested to "use a better model" after a response, which is a direct signal of misrouting; (4) cost per quality point (total cost / aggregate quality score) — this should remain stable or decrease as routing improves. Set weekly automated retrain triggers based on routing distribution drift.
+
+**How does circuit breaking integrate with cascade routing for model provider outages?** Add a circuit breaker per model tier: if the primary tier (GPT-4o) error rate exceeds 5% over 30 seconds, open the circuit breaker and route all traffic to the fallback tier (GPT-4o-mini or Claude Haiku) regardless of complexity score. Log a high-severity alert. The half-open state (after 60 seconds) routes 10% of traffic to the primary tier to test recovery. During circuit open state, set a `X-Degraded-Mode: true` response header so the client can show a "using backup model" indicator to users. This prevents a provider outage from causing total service failure at the cost of degraded quality for complex queries during the outage window.
+
+**What is model canary routing and how does it differ from standard A/B testing for LLM model upgrades?** Standard A/B testing assigns users to model A or B based on a random split and runs for a fixed duration (typically 2 weeks for statistical significance). Model canary routing sends a small percentage of live traffic (1-5%) to the new model version while keeping 95-99% on the current version, with automatic rollback if quality metrics degrade. The key difference: canary routing uses the same users on both models (interleaved, not split), which eliminates user-segment confounds; and it has an automated rollback gate that A/B testing lacks. Use canary routing for production model upgrades where rollback speed matters; use A/B testing for measuring business impact of a model change where statistical rigor and segment isolation are required.
+
+**Quick-reference table:**
+
+| Strategy | Cost savings | Quality risk | Recalibration needs |
+|---|---|---|---|
+| Static threshold cascade (0.6) | 40-50% | High if query distribution shifts | Quarterly manual review |
+| Adaptive threshold cascade | 35-45% | Low — self-correcting | Automated via routing distribution monitor |
+| Semantic classifier (intent-based) | 50-60% | Medium — intent ≠ complexity | Monthly retraining on new labeled examples |
+| Token budget cascade (input length proxy) | 30% | Low — length correlates with complexity | No retraining; but misses complex short queries |

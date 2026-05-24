@@ -525,3 +525,274 @@ Annual savings: ~$50M → strong positive ROI
 **The failover latency penalty.** Detecting failure + switching provider takes 100-200ms. Combined with retry logic, some requests might take 2-5× normal latency during provider incidents. For real-time applications, pre-warm connections to all providers and use shadow traffic (send 1% of requests to backup provider) to keep connections warm.
 
 **Budget enforcement granularity.** Per-tenant monthly budget is the minimum. Production systems also need per-project, per-application, per-user granularity. Hierarchical budgets: tenant limit > project limit > user limit. Each level can set its own limit (must be ≤ parent limit).
+
+---
+
+## 9. Production Failure Scenarios
+
+### Incident 1: Redis Semantic Cache Memory Exhaustion Causes Total Outage
+
+**What happened:** The gateway's Redis cluster (32 GB) hit 100% memory utilization at 2:47 AM on a Monday. Redis began evicting LRU keys — including rate limit counters. Evicting a rate limit counter resets the counter to 0, effectively bypassing per-tenant rate limits. High-volume tenants burst past their limits, generating 40× normal traffic to OpenAI. OpenAI rate-limited the gateway globally. All tenants experienced 429 errors for 18 minutes.
+
+**Root cause:** Semantic cache entries had a default TTL of 7 days. Over 3 months, the cache grew to 28 GB of entries. A marketing campaign that week increased unique query diversity, adding 4 GB in 6 hours. The eviction policy (allkeys-lru) prioritized evicting rate limit counters (small, accessed frequently, LRU score was high) over cache entries (large, less frequently accessed, same query rarely repeated twice in 7 days).
+
+**Fix applied:**
+```python
+# BROKEN: single Redis instance for both semantic cache and rate limits
+redis_client = Redis(host="cache.internal", db=0, max_memory="32gb")
+
+# FIX: separate Redis instances with separate eviction policies
+# Rate limit Redis: maxmemory-policy noeviction (NEVER evict, OOM instead)
+rate_limit_redis = Redis(host="ratelimit.internal", db=0)
+# Semantic cache Redis: maxmemory-policy allkeys-lru (OK to evict)
+semantic_cache_redis = Redis(host="semcache.internal", db=0)
+
+# Semantic cache entries: shorter TTL, memory budget per tenant
+def store_semantic_cache(
+    tenant_id: str,
+    query_hash: str,
+    response: str,
+    ttl_seconds: int = 86400,   # 1 day, not 7 days
+    max_tenant_cache_mb: int = 512,
+) -> None:
+    # Enforce per-tenant cache budget with SCAN + TTL refresh
+    tenant_key_pattern = f"sem:{tenant_id}:*"
+    # ... check tenant cache size before storing
+    semantic_cache_redis.setex(
+        f"sem:{tenant_id}:{query_hash}",
+        ttl_seconds,
+        response,
+    )
+```
+
+**Prevention:** Set `maxmemory-policy noeviction` on the rate-limit Redis and alert when memory > 70%. Semantic cache Redis: cap per-tenant cache size, use 24h TTL not 7 days, and monitor key count × average key size separately.
+
+---
+
+### Incident 2: Provider Circuit Breaker Flapping During Partial Degradation
+
+**What happened:** OpenAI's API was experiencing 8% error rate on a single region (us-east-1) — not enough to trigger the circuit breaker (threshold: 10%), but enough to cause user-visible failures. The gateway continued routing 100% of traffic to OpenAI us-east-1. The 8% failure rate generated exactly the kind of intermittent errors that frustrated users the most (some retries succeed, some don't). Duration: 47 minutes until OpenAI mitigated.
+
+**Root cause:** Binary circuit breaker (open/closed) does not handle partial degradation. The 10% threshold was set to avoid false positives; 8% degradation was below the threshold but above user tolerance (SLA was 0.5% error rate).
+
+**Fix applied:**
+```python
+from dataclasses import dataclass, field
+from collections import deque
+import time
+
+@dataclass
+class AdaptiveCircuitBreaker:
+    """
+    Proportional load reduction: reduces traffic to a degrading provider
+    proportional to its error rate, rather than binary open/closed.
+    """
+    error_window_seconds: int = 30
+    min_traffic_fraction: float = 0.05   # always keep 5% for health probes
+    errors: deque = field(default_factory=lambda: deque())
+    requests: deque = field(default_factory=lambda: deque())
+
+    def record(self, is_error: bool) -> None:
+        now = time.time()
+        self.requests.append(now)
+        if is_error:
+            self.errors.append(now)
+        # Trim old entries
+        cutoff = now - self.error_window_seconds
+        while self.requests and self.requests[0] < cutoff:
+            self.requests.popleft()
+        while self.errors and self.errors[0] < cutoff:
+            self.errors.popleft()
+
+    @property
+    def traffic_fraction(self) -> float:
+        if len(self.requests) < 10:
+            return 1.0   # insufficient data
+        error_rate = len(self.errors) / len(self.requests)
+        # Linear reduction: 0% errors → 100% traffic, 20% errors → 5% traffic
+        fraction = max(self.min_traffic_fraction, 1.0 - (error_rate / 0.20))
+        return fraction
+
+    def should_route_to_provider(self) -> bool:
+        import random
+        return random.random() < self.traffic_fraction
+```
+
+**Prevention:** Replace binary circuit breakers with proportional load reducers. Alert when provider traffic fraction drops below 50% so on-call can investigate before users notice.
+
+---
+
+### Incident 3: Prompt Injection via Cached Response Propagation
+
+**What happened:** A malicious user submitted a prompt that caused GPT-4o to include `ignore previous instructions` preamble in its response. The response was stored in the semantic cache under a common query embedding. 47 subsequent users received the poisoned response from cache before the cache entry was invalidated.
+
+**Root cause:** Semantic cache stored raw LLM responses without output safety scanning. Cache lookup happened before output filtering.
+
+**Fix applied:**
+```python
+def get_cached_response(
+    query_embedding: np.ndarray,
+    similarity_threshold: float = 0.92,
+) -> Optional[str]:
+    cached = _vector_lookup(query_embedding, similarity_threshold)
+    if cached is None:
+        return None
+    # Re-run output safety scan on cached content before returning
+    if output_safety_classifier(cached) == "UNSAFE":
+        # Invalidate the poisoned cache entry
+        _invalidate_cache_entry(query_embedding)
+        return None   # Force fresh generation
+    return cached
+```
+
+---
+
+## 10. Capacity Planning Math
+
+**Target load:** 40M requests/month, mix: 65% simple (512-token output), 30% medium (1024-token), 5% complex (4096-token).
+
+```
+Requests/second (peak 3× average):
+  Average: 40M / (30 days × 86,400s) = 15.4 req/s
+  Peak:    15.4 × 3 = 46.2 req/s
+
+Token throughput at peak:
+  Simple:  46.2 × 0.65 × 512 =  15,379 tokens/s
+  Medium:  46.2 × 0.30 × 1024 = 14,196 tokens/s
+  Complex: 46.2 × 0.05 × 4096 =  9,462 tokens/s
+  Total peak: ~39,000 output tokens/second
+
+Gateway nodes (routing + caching layer, NOT inference):
+  Each gateway node: 4 vCPU, 8 GB RAM, handles 800 req/s
+  At peak 46.2 req/s: 1 node is sufficient (add 2nd for HA)
+  Redis semantic cache: 1 × r6g.xlarge (32 GB) — covers 6-month cache growth at 20% hit rate
+  Redis rate-limit: 1 × r6g.large (16 GB) — never needs eviction
+
+Cost breakdown at 40M req/month:
+  LLM API costs (before cache, before routing optimization):
+    Simple  (GPT-3.5-turbo):   26M req × 600 tok × $0.002/1k = $31,200/month
+    Medium  (GPT-4o-mini):     12M req × 1200 tok × $0.015/1k = $21,600/month
+    Complex (GPT-4o):           2M req × 4600 tok × $0.030/1k =  $27,600/month
+    Raw total: ~$80,400/month
+  
+  After 34% semantic cache hit rate (cached = $0 marginal):
+    Effective: $80,400 × 0.66 = $53,064/month
+  
+  Infrastructure (gateway nodes, Redis, monitoring): $4,200/month
+  Total: ~$57,264/month vs $180,000/month before optimization
+```
+
+---
+
+## 11. Additional Interview Questions
+
+**Q: How do you implement per-tenant semantic cache isolation to prevent tenant A seeing tenant B's responses?**
+Store cache keys as `sem:{tenant_id}:{query_hash}` where `query_hash` is BLAKE2b of the normalized query. Never allow cross-tenant cache lookup — even if two tenants send identical queries, they may have different system prompts, different data access, and different compliance requirements. The extra storage cost (no cross-tenant deduplication) is worth the security guarantee. An alternative where tenants opt-in to anonymous shared caching requires explicit consent and should never include PII or proprietary data.
+
+**Q: How do you handle LLM provider billing discrepancies where your token counts differ from the provider's invoice?**
+Token counting across providers is inconsistent: OpenAI uses tiktoken, Anthropic uses a different BPE, and both count system prompt tokens differently. Discrepancies of 3-8% are normal. Fix: (1) Track raw token counts from provider API responses (the `usage` field in the API response), not your own pre-tokenization estimates; (2) Reconcile provider invoices against your logged `usage` field monthly — alert if discrepancy > 5%; (3) Never bill tenants based on your token count estimates — always reconcile against actual provider invoices.
+
+**Q: What is the gateway's role in preventing data exfiltration via prompt injection?**
+The gateway is a defense layer, not the only defense. Its role: (1) Input scanner: detect prompt injection patterns (`ignore previous instructions`, role-play overrides, data exfiltration templates) in the first 2,048 tokens of every request; (2) Output scanner: detect PII (regex + NER model), credential patterns (key regex), and atypically long base64 strings in output; (3) Log everything with `tenant_id` and `user_id` for forensic reconstruction if a breach is suspected. The gateway cannot prevent all prompt injections — it buys time and detection. The LLM application itself must enforce data access controls and not pass sensitive data to the LLM in the first place.
+
+---
+
+### Multi-Provider Routing Architecture
+
+**Provider capability matrix:**
+
+| Provider | Strength | Context | Cost/1M tokens | p99 TTFT |
+|---|---|---|---|---|
+| Llama-3-8B (self-hosted) | Simple classification, extraction | 8k | $0.20 | 180ms |
+| Claude Haiku 3 | Medium reasoning, summarization | 200k | $1.25 (in) / $3.75 (out) | 350ms |
+| GPT-4o | Complex reasoning, multi-step | 128k | $5 (in) / $15 (out) | 800ms |
+| Claude Sonnet 3.5 | Coding, analysis, long-form | 200k | $3 (in) / $15 (out) | 600ms |
+
+**Routing decision logic:**
+
+```python
+from dataclasses import dataclass
+from enum import Enum
+
+class ComplexityTier(Enum):
+    SIMPLE = "simple"       # extraction, classification, short Q&A
+    MEDIUM = "medium"       # summarization, multi-paragraph reasoning
+    COMPLEX = "complex"     # multi-step analysis, code generation, long-form
+
+@dataclass
+class RoutingDecision:
+    provider: str
+    model: str
+    max_tokens: int
+    estimated_cost_usd: float
+    rationale: str
+
+def classify_and_route(
+    messages: list[dict],
+    tenant_config: dict,
+) -> RoutingDecision:
+    prompt_tokens = count_tokens(messages)
+    has_code = any("```" in m.get("content", "") for m in messages)
+    has_tool_calls = any("function" in m.get("role", "") for m in messages)
+    is_long_context = prompt_tokens > 16_000
+
+    # Tenant override: some tenants always want GPT-4o
+    if tenant_config.get("force_model"):
+        return _build_decision(tenant_config["force_model"], prompt_tokens)
+
+    # Routing heuristics (order matters — first match wins)
+    if is_long_context or has_tool_calls:
+        return RoutingDecision(
+            provider="anthropic",
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=min(4096, 200_000 - prompt_tokens),
+            estimated_cost_usd=prompt_tokens * 0.000003 + 1000 * 0.000015,
+            rationale="long_context_or_tools",
+        )
+    if has_code or prompt_tokens > 4_000:
+        return RoutingDecision(
+            provider="openai",
+            model="gpt-4o",
+            max_tokens=1024,
+            estimated_cost_usd=prompt_tokens * 0.000005 + 1024 * 0.000015,
+            rationale="code_or_complex",
+        )
+    if prompt_tokens > 1_000:
+        return RoutingDecision(
+            provider="anthropic",
+            model="claude-3-haiku-20240307",
+            max_tokens=512,
+            estimated_cost_usd=prompt_tokens * 0.00000125 + 512 * 0.00000375,
+            rationale="medium_complexity",
+        )
+    return RoutingDecision(
+        provider="self_hosted",
+        model="llama-3-8b-instruct",
+        max_tokens=256,
+        estimated_cost_usd=prompt_tokens * 0.0000002,
+        rationale="simple_short",
+    )
+```
+
+---
+
+### Additional Q&As
+
+**Q: How do you prevent vendor lock-in when one LLM provider handles 80% of your traffic?**
+Abstraction at three levels: (1) API abstraction layer: normalize all provider APIs to a single internal schema — the application code never calls OpenAI or Anthropic directly; (2) prompt portability: avoid provider-specific features (Anthropic's XML tool syntax, OpenAI's named function calling schemas) unless absolutely necessary; use a unified tool schema that maps to each provider's format at the gateway; (3) monthly traffic migration tests: route 5% of traffic from the primary provider to a secondary provider monthly, measure quality and latency parity, and keep the secondary integration tested. Lock-in happens when: (1) prompts use provider-specific syntax; (2) the secondary provider has been untested for 6+ months; (3) fine-tuned models are only available on one provider. Mitigation: standardize prompt syntax, run monthly validation traffic, and when fine-tuning, always train on at least two providers.
+
+**Q: How does the gateway handle provider API changes (e.g., OpenAI deprecating a model endpoint)?**
+Version pinning + deprecation monitoring: (1) always pin to a specific model version in gateway config (`gpt-4o-2024-11-20`, not `gpt-4o`); (2) subscribe to provider deprecation announcements via email/RSS; (3) model the transition: when OpenAI announces `gpt-4-0314` deprecates in 30 days, the gateway's routing table is updated to substitute `gpt-4-0613` before the deadline; (4) automated version health checks: every 15 minutes, the gateway sends a 10-token ping to each model version and alerts if a version stops responding (early warning before official deprecation). The substitution must be quality-validated: run the internal golden dataset against both old and new versions before updating the routing table.
+
+**Key architectural principles:**
+- Separate Redis instances for semantic cache (evictable) and rate-limit counters (noeviction) — prevents rate-limit bypass during memory pressure
+- Proportional load reducer replaces binary circuit breaker — handles partial degradation (8% error rate) that binary breakers miss
+- Output safety scan runs on cached responses too — prevents cache poisoning from spreading
+- Provider version pinning + 15-minute health checks provide early warning before official deprecation
+- Unified internal schema at the gateway layer ensures no application code is ever provider-coupled
+
+**LLM Gateway ROI summary:** For any company spending > $50k/month on LLM APIs, a gateway pays for itself within 2 months through: (1) semantic cache reducing calls 25-35%, (2) model routing directing 60% of traffic to cheaper models, (3) preventing cost overruns from runaway agent loops via budget enforcement. The engineering investment (4–6 weeks for a solid v1) has an IRR exceeding 300% at $100k/month pre-optimization spend.
+
+**Gateway v2 evolution:** After 12 months of production operation, the gateway typically evolves to add: (1) per-request cost prediction before routing (rather than post-hoc billing); (2) quality-based routing where the gateway benchmarks each provider monthly and routes based on quality×cost tradeoff; (3) streaming cost estimation (cost ticks up in real-time as tokens stream, enabling budget-based early termination).
+
+**Production lesson:** The most common failure mode for LLM gateways is treating the semantic cache as a nice-to-have and under-investing in cache invalidation. Stale cached responses are worse than no cache because they are confidently wrong. Cache the common case, monitor it weekly, and build invalidation triggers before the cache grows large enough to cause incidents.

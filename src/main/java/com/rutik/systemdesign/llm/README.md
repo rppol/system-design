@@ -18,7 +18,7 @@ A comprehensive, one-stop reference for understanding everything about Large Lan
 
 ## What This Section Covers
 
-This section is organized into **38 topic directories** plus **13 real-world case studies**, covering the full LLM lifecycle. Six topics have **deep-dive sub-files** (35 sub-files total, see the Sub-Files Index below):
+This section is organized into **42 topic directories** plus **13 real-world case studies**, covering the full LLM lifecycle. Nine topics have **deep-dive sub-files** (65 sub-files total, see the Sub-Files Index below):
 
 - How models are built (architecture, tokenization, pre-training, fine-tuning, alignment)
 - How to use models effectively (prompting, RAG, reasoning, code generation)
@@ -46,9 +46,9 @@ This section is organized into **38 topic directories** plus **13 real-world cas
 | 11 | [Advanced RAG](advanced_rag/README.md) | Agentic RAG, Graph RAG, multi-modal RAG, evaluation — with 6 deep-dive sub-files | Advanced |
 | 12 | [Reasoning Models](reasoning_models/README.md) | o1/o3, test-time compute, MCTS, DeepSeek-R1, PRM/ORM | Advanced |
 | 13 | [Code Generation](code_generation/README.md) | FIM, CodeLLaMA, Copilot architecture, SWE-bench, code agents | Intermediate |
-| 14 | [Agents & Tool Use](agents_and_tool_use/README.md) | Function calling, ReAct, plan-and-execute, memory systems — with 7 deep-dive sub-files | Intermediate |
-| 15 | [Agentic Frameworks](agentic_frameworks/README.md) | LangChain/LCEL, LangGraph, LlamaIndex, CrewAI, AutoGen, Semantic Kernel, Haystack, DSPy, observability, structured outputs — with 10 deep-dive sub-files | Intermediate |
-| 16 | [Multi-Agent Systems](multi_agent_systems/README.md) | Orchestrator pattern, debate, ChatDev, MetaGPT, Swarm | Advanced |
+| 14 | [Agents & Tool Use](agents_and_tool_use/README.md) | Function calling, ReAct, plan-and-execute, memory, sub-agents, sandboxes, cost — with 15 deep-dive sub-files | Intermediate |
+| 15 | [Agentic Frameworks](agentic_frameworks/README.md) | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, OpenAI Agents SDK, Anthropic API, PydanticAI, Smolagents, Strands, Mastra, LiteLLM — with 17 deep-dive sub-files | Intermediate |
+| 16 | [Multi-Agent Systems](multi_agent_systems/README.md) | Orchestrator, debate, ChatDev, MetaGPT, Swarm/Agents SDK, Magentic-One, A2A protocols — with 6 deep-dive sub-files | Advanced |
 | 17 | [Inference & Decoding](inference_and_decoding/README.md) | Sampling, KV cache, speculative decoding, continuous batching | Advanced |
 | 18 | [Context Windows & Long Context](context_windows_and_long_context/README.md) | RoPE, ALiBi, YaRN, long context vs RAG, positional encoding | Advanced |
 | 19 | [Inference Engines](inference_engines/README.md) | vLLM, TensorRT-LLM, llama.cpp, SGLang, Ollama, TGI | Intermediate |
@@ -63,7 +63,7 @@ This section is organized into **38 topic directories** plus **13 real-world cas
 | 28 | [Multimodal Models](multimodal_models/README.md) | VLMs, vision encoders, diffusion, speech, video | Advanced |
 | 29 | [Small Language Models & Edge AI](small_language_models_and_edge_ai/README.md) | Phi-3/4, LLaMA 3.2 1B/3B, on-device inference, quantization for mobile | Intermediate |
 | 30 | [Mixture of Experts](mixture_of_experts/README.md) | MoE architecture, top-k routing, load balancing, Mixtral, DeepSeek-V3 | Advanced |
-| 31 | [MCP (Model Context Protocol)](mcp_model_context_protocol/README.md) | MCP servers/clients, resources/tools/prompts, transports, JSON-RPC, A2A | Intermediate |
+| 31 | [MCP (Model Context Protocol)](mcp_model_context_protocol/README.md) | MCP servers/clients, resources/tools/prompts, transports, security, registries — with 5 deep-dive sub-files | Intermediate |
 | 32 | [AI Applications](ai_applications/README.md) | Healthcare, legal, finance, education, customer support | Beginner |
 | 33 | [LLM Ecosystem & Landscape](llm_ecosystem_and_landscape/README.md) | Model families, licensing, cost analysis, timeline | Beginner |
 | 34 | [Data Flywheels & Continuous Learning](data_flywheels_and_continuous_learning/README.md) | Production feedback loops, active learning, drift detection, A/B testing for LLMs | Advanced |
@@ -71,6 +71,10 @@ This section is organized into **38 topic directories** plus **13 real-world cas
 | 36 | [Knowledge Distillation & Model Merging](knowledge_distillation_and_model_merging/README.md) | Teacher-student distillation, SLERP/TIES/DARE merging, structured pruning, SparseGPT | Advanced |
 | 37 | [LLM Observability & Monitoring](llm_observability_and_monitoring/README.md) | Tracing, quality monitoring, cost attribution, alerting, Langfuse, Arize Phoenix | Intermediate |
 | 38 | [LLM Security](llm_security/README.md) | Prompt injection, data extraction, model theft, supply chain, adversarial robustness, red teaming | Advanced |
+| 39 | [Agentic Workflow Patterns](agentic_workflow_patterns/README.md) | Prompt chaining, routing, parallelization, orchestrator-workers, evaluator-optimizer (Anthropic taxonomy) | Intermediate |
+| 40 | [Coding Agents](coding_agents/README.md) | SWE-agent ACI, OpenHands, Aider, Devin, Cursor Composer, Claude Code, SWE-bench | Advanced |
+| 41 | [Voice Agents](voice_agents/README.md) | OpenAI Realtime, Gemini Live, STT→LLM→TTS pipelines, VAD, barge-in, telephony | Advanced |
+| 42 | [Browser Agents Deep Dive](browser_agents_deep_dive/README.md) | Browser Use, Stagehand, Playwright MCP, DOM vs vision extraction, WebArena | Advanced |
 
 ---
 
@@ -122,6 +126,14 @@ Topics marked with sub-files above contain individual deep-dive files in additio
 | [computer_use_and_browser_agents.md](agents_and_tool_use/computer_use_and_browser_agents.md) | Computer use — Anthropic CUA, browser automation, screen understanding |
 | [agent_evaluation_and_benchmarking.md](agents_and_tool_use/agent_evaluation_and_benchmarking.md) | Agent eval — SWE-bench, GAIA, WebArena, trajectory evaluation |
 | [agent_reliability.md](agents_and_tool_use/agent_reliability.md) | Agent reliability — timeout/circuit breaker, retry, checkpointing, dead-loop detection, human handoff |
+| [reflexion_and_self_correction.md](agents_and_tool_use/reflexion_and_self_correction.md) | Reflexion verbal RL, Self-Refine, CRITIC, sycophancy pitfalls |
+| [tree_of_thoughts_for_agents.md](agents_and_tool_use/tree_of_thoughts_for_agents.md) | ToT for planning — BFS/DFS/beam/MCTS, value functions, cost explosion |
+| [tool_selection_at_scale.md](agents_and_tool_use/tool_selection_at_scale.md) | Tool retrieval — RAG-over-tools, hierarchical menus, classifiers for N>50 tools |
+| [sandboxed_code_execution.md](agents_and_tool_use/sandboxed_code_execution.md) | E2B, Riza, Daytona, Modal — isolation, network ACL, resource limits |
+| [subagents_and_delegation.md](agents_and_tool_use/subagents_and_delegation.md) | Parallel dispatch, context isolation, structured return contracts |
+| [agent_ux_patterns.md](agents_and_tool_use/agent_ux_patterns.md) | Streaming, interrupt/resume, approval gates, artifacts, confidence signaling |
+| [durable_long_running_agents.md](agents_and_tool_use/durable_long_running_agents.md) | Temporal, Inngest, Restate, LangGraph checkpointing, idempotency |
+| [agent_cost_and_token_budget.md](agents_and_tool_use/agent_cost_and_token_budget.md) | Budgets, model cascade, compaction, caching, Batch API |
 
 ### Agentic Frameworks (`agentic_frameworks/`)
 | File | Topic |
@@ -136,6 +148,32 @@ Topics marked with sub-files above contain individual deep-dive files in additio
 | [dspy.md](agentic_frameworks/dspy.md) | DSPy — signatures, modules, optimizers (BootstrapFewShot, MIPRO), compilation |
 | [framework_observability.md](agentic_frameworks/framework_observability.md) | Observability — LangSmith, Langfuse, OpenTelemetry, cost tracking, LLM-as-judge |
 | [structured_outputs_and_instructor.md](agentic_frameworks/structured_outputs_and_instructor.md) | Structured outputs — Instructor, Pydantic extraction, native structured outputs |
+| [openai_agents_sdk.md](agentic_frameworks/openai_agents_sdk.md) | OpenAI Agents SDK — Agent primitives, Runner, handoffs, guardrails, tracing |
+| [claude_agent_sdk.md](agentic_frameworks/claude_agent_sdk.md) | Anthropic API native — tool use loop, parallel tools, subagents, prompt caching |
+| [pydantic_ai.md](agentic_frameworks/pydantic_ai.md) | PydanticAI — typed Agent[Deps,Result], DI, structured output, evals |
+| [smolagents.md](agentic_frameworks/smolagents.md) | HuggingFace smolagents — CodeAgent vs ToolCallingAgent, secure_executor, MCP |
+| [strands_aws.md](agentic_frameworks/strands_aws.md) | AWS Strands — @tool decorator, Bedrock integration, agent_as_tool |
+| [mastra_typescript.md](agentic_frameworks/mastra_typescript.md) | Mastra (TS) — workflows, agents, MCP client, evals, Vercel/CF deployment |
+| [litellm_routing.md](agentic_frameworks/litellm_routing.md) | LiteLLM — unified routing, fallback, cost tracking, semantic caching, virtual keys |
+
+### Multi-Agent Systems (`multi_agent_systems/`)
+| File | Topic |
+|------|-------|
+| [orchestrator_worker_pattern.md](multi_agent_systems/orchestrator_worker_pattern.md) | Supervisor decomposition, task ledgers, result aggregation |
+| [agent_debate_and_consensus.md](multi_agent_systems/agent_debate_and_consensus.md) | Multi-agent debate, majority vote, judge agent, temperature diversity |
+| [chatdev_and_software_simulation.md](multi_agent_systems/chatdev_and_software_simulation.md) | ChatDev roles, MetaGPT SOPs, product→design→code→QA pipeline |
+| [openai_swarm_and_handoffs.md](multi_agent_systems/openai_swarm_and_handoffs.md) | Swarm primitives, Agents SDK, handoffs, routines, statelessness |
+| [magentic_one_and_autogen_v04.md](multi_agent_systems/magentic_one_and_autogen_v04.md) | Magentic-One orchestrator, GAIA benchmark, AutoGen v0.4 event-driven core |
+| [agent_to_agent_protocols.md](multi_agent_systems/agent_to_agent_protocols.md) | A2A protocol, ACP, ANP, agent cards, inter-agent auth |
+
+### MCP (`mcp_model_context_protocol/`)
+| File | Topic |
+|------|-------|
+| [mcp_server_building.md](mcp_model_context_protocol/mcp_server_building.md) | Server skeleton, resources/tools/prompts/sampling, lifecycle, MCP Inspector |
+| [mcp_client_patterns.md](mcp_model_context_protocol/mcp_client_patterns.md) | ClientSession, capability negotiation, tool discovery, multi-server |
+| [mcp_transports_and_jsonrpc.md](mcp_model_context_protocol/mcp_transports_and_jsonrpc.md) | JSON-RPC 2.0, stdio vs Streamable HTTP vs SSE, connection lifecycle |
+| [mcp_security.md](mcp_model_context_protocol/mcp_security.md) | Tool injection, prompt shadowing, confused deputy, OAuth/PKCE |
+| [mcp_registries_and_ecosystem.md](mcp_model_context_protocol/mcp_registries_and_ecosystem.md) | Smithery, MCP Hub, official servers, versioning, signed servers |
 
 ---
 

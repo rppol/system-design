@@ -505,3 +505,113 @@ Still more? Use fewer GPUs with better utilization:
 Final: $5,760/month vs $36,000/month → 84% cost reduction
 Quality: Acceptable (7B Mistral vs GPT-3.5-turbo)
 ```
+
+---
+
+**Additional war story — vLLM PagedAttention eviction collision at 200 RPS causing garbled responses:**
+
+A team running a 13B Mistral model on vLLM at 200 RPS discovered that 0.3% of responses were garbled (output tokens from one request appearing in another). Root cause: they were using vLLM 0.2.x with a custom multi-process setup that bypassed the block manager's eviction locking. When two requests competed for the same KV block slot during peak load, the block was reassigned before the first request finished reading it. The fix required upgrading to vLLM 0.4+ (where block manager uses atomic CAS on block state) and removing the custom multi-process shim.
+
+```python
+# BROKEN: custom multi-process vLLM wrapper that bypasses block manager safety
+import multiprocessing
+from vllm import LLM, SamplingParams
+
+def worker_process(request_queue, result_queue, model_path):
+    llm = LLM(model=model_path, tensor_parallel_size=1)
+    while True:
+        request = request_queue.get()
+        # BUG: multiple workers share GPU memory via custom CUDA IPC — not supported by vLLM block manager
+        result = llm.generate([request["prompt"]], SamplingParams(max_tokens=256))
+        result_queue.put(result)
+
+# FIX: use vLLM's built-in async engine with proper async serving
+from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.arg_utils import AsyncEngineArgs
+import asyncio
+
+engine_args = AsyncEngineArgs(
+    model="mistralai/Mistral-7B-Instruct-v0.2",
+    tensor_parallel_size=2,        # use 2 GPUs via NVLink, not custom IPC
+    max_num_seqs=256,              # max concurrent sequences
+    max_num_batched_tokens=32768,  # continuous batching token budget
+    block_size=16,                 # KV cache block size in tokens
+    gpu_memory_utilization=0.90,   # leave 10% headroom for CUDA overhead
+)
+engine = AsyncLLMEngine.from_engine_args(engine_args)
+
+async def generate(prompt: str, request_id: str) -> str:
+    from vllm import SamplingParams
+    params = SamplingParams(temperature=0.7, max_tokens=256)
+    output_text = ""
+    async for output in engine.generate(prompt, params, request_id=request_id):
+        output_text = output.outputs[0].text
+    return output_text
+```
+
+**Additional interview Q&As:**
+
+**What is the key architectural difference between vLLM's PagedAttention and the standard KV cache, and why does it matter at 200 RPS?** Standard KV cache allocates a contiguous memory block per sequence at request arrival (maximum sequence length × layers × heads × head_dim × 2 bytes). At 200 RPS with 13B model and 2048 max tokens, 200 concurrent sequences × ~800MB each would require 160GB — far exceeding single-GPU capacity. PagedAttention divides KV memory into fixed-size blocks (16-32 tokens each) allocated on demand and shared across beam search hypotheses via copy-on-write. This reduces fragmentation from 30-40% (contiguous allocation) to under 4%, enabling 2-4x more concurrent sequences on the same hardware.
+
+**When should you choose TGI (Text Generation Inference) over vLLM for a 13B model production deployment?** TGI is preferred when: you need native HuggingFace model hub integration without conversion; you are deploying on AWS SageMaker (official TGI container support); you need built-in Prometheus metrics and health endpoints without additional instrumentation; you want a battle-tested production container maintained by HuggingFace. vLLM is preferred when: you need maximum throughput via PagedAttention (vLLM is typically 10-30% higher throughput than TGI for long outputs); you need speculative decoding; you need fine-grained control over scheduling. At 200 RPS with P95 < 500ms, vLLM consistently outperforms TGI in benchmarks.
+
+**How do you right-size the number of GPU replicas for a 13B model serving 200 RPS with P95 < 500ms SLA?** Measure throughput at saturation: a single A100 80GB running Mistral-13B at FP16 achieves approximately 85-120 tokens/second throughput with continuous batching (varies with batch size and sequence length). At 200 RPS × 128 average output tokens = 25,600 tokens/second demand. Minimum replicas: ceil(25,600 / 100) = 26 A100s, but this ignores head-of-line blocking and latency requirements. For P95 < 500ms with queue jitter, target 60% GPU utilization at peak → 43 A100s. Add auto-scaling based on queue depth metric (HPA on Kubernetes) to handle bursty traffic.
+
+**Quick-reference table:**
+
+| Engine | Throughput (13B, A100) | Best for | Trade-off |
+|---|---|---|---|
+| vLLM (PagedAttention) | Highest (~30% above TGI) | Maximum throughput, speculative decoding, complex batching | Steeper ops complexity; less HuggingFace native integration |
+| TGI (HuggingFace) | High | AWS SageMaker, HuggingFace Hub, production-ready container | Slightly lower throughput; less flexible scheduling |
+| llama.cpp | Low-medium (CPU/low VRAM) | Edge deployment, MacBook M-series, 4-bit quantized models | Not suitable for multi-user high-RPS serving; no continuous batching |
+| SGLang | High (RadixAttention prefix caching) | High prefix reuse (system prompts, RAG boilerplate) | Smaller community; fewer deployment examples |
+
+**Pitfall — vLLM PagedAttention fragmentation under long-context requests wastes GPU memory.**
+
+```python
+# BROKEN: mixing short (256-token) and long (32k-token) requests in the same vLLM instance
+# PagedAttention allocates KV cache pages on demand; long requests hold many pages
+# short requests can't get pages even though most GPU memory is "reserved but unused"
+# by long-running incomplete requests → OOM despite 40% average utilization
+
+# FIX: separate serving pools by expected context length
+# Short-context pool (4k max): high concurrency, small KV cache pages
+# Long-context pool (32k max): low concurrency, dedicated memory, separate replica
+
+# vllm serve configuration for short-context pool:
+# --max-model-len 4096 --gpu-memory-utilization 0.85 --max-num-seqs 256
+
+# vllm serve configuration for long-context pool:
+# --max-model-len 32768 --gpu-memory-utilization 0.90 --max-num-seqs 16
+
+# Router: classify request by estimated output length at ingestion time
+def route_request(prompt: str) -> str:
+    estimated_tokens = len(tokenizer.encode(prompt)) * 2   # rough output estimate
+    return "long-pool" if estimated_tokens > 4096 else "short-pool"
+```
+
+**How do you benchmark and choose between vLLM, TGI, and llama.cpp for a specific workload?** Run the same workload (1000 requests, matching your production QPS and input/output length distribution) against each engine. Measure: throughput (tokens/sec), p50/p99 latency, GPU utilization, and peak memory. vLLM wins on throughput for high-concurrency online serving with PagedAttention (20-40% more throughput than TGI at 50+ concurrent requests). TGI wins on ease of deployment and broad model support. llama.cpp wins on CPU/edge serving and quantized models (GGUF format). For A100 GPU serving at 50+ RPS: vLLM is the default choice; for < 10 RPS or CPU-only: llama.cpp with Q4_K_M quantization.
+
+**What is speculative decoding and which engine implements it most effectively?** Speculative decoding uses a small draft model (e.g., Llama-68M) to propose K tokens speculatively, then verifies all K with the large model in a single forward pass — accepting correct tokens and regenerating from the first mismatch. Throughput gain: 2-3× for short-output, repetitive tasks (code completion, structured extraction). vLLM supports speculative decoding natively (`--speculative-model`). The gain is highest when the draft model acceptance rate is > 75% — measure this by logging `speculative_tokens_accepted / speculative_tokens_proposed` in production and tune the draft model if acceptance falls below 60%.
+
+---
+
+**Quick-reference decision table:**
+
+| Scenario | Recommended approach | Key constraint |
+|---|---|---|
+| < 10k training examples | LoRA / few-shot prompting | Data scarcity |
+| Latency < 100ms required | Quantized model + ONNX Runtime | Throughput > accuracy |
+| Multi-tenant, shared model | System prompt isolation + guardrails | Security boundary |
+| Domain shift from pre-training | Fine-tune with domain data | Catastrophic forgetting risk |
+| Cost reduction (10× target) | Smaller model + prompt optimization | Quality floor |
+
+**Production checklist before shipping an LLM feature:**
+
+- [ ] Latency p99 measured under production load (not just median)
+- [ ] Fallback path tested: what happens when the LLM API is unavailable?
+- [ ] Cost per request calculated at current and 10× scale
+- [ ] Safety/guardrail evaluation on 200 adversarial prompts
+- [ ] Prompt versioned in code and tied to model version in experiment tracker
+- [ ] Human evaluation on 50 random production outputs before launch
+- [ ] Monitoring dashboard live: latency, error rate, cost, quality proxy metric

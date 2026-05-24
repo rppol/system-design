@@ -625,30 +625,364 @@ Post-LN (original Transformer) applies LayerNorm after the residual addition: `o
 
 ---
 
-## 14. Case Study: Designing a Scaled Transformer for 100B Parameters
 
-**Problem:** Team wants to train a 100B parameter model on 2T tokens of text. Design the training setup.
+## 14. Case Study
 
-**Architecture Decisions:**
-- Decoder-only (GPT-style): best for general-purpose generation
-- 96 transformer layers, hidden dim 12288, 96 attention heads with GQA (8 KV heads)
-- SwiGLU FFN with expansion ratio 4/3 × 2 (gated), RMSNorm, RoPE
-- Vocabulary: 100K BPE tokens (balanced for multilingual coverage)
-- Flash Attention 2 for memory efficiency
+**Scenario:** A consumer AI company serves GPT-4-scale transformer inference to 1M daily active users. The model is a 70B parameter dense decoder-only transformer (LLaMA-3-70B architecture: 80 layers, hidden dim 8192, 64 attention heads, 8 KV heads via GQA, context window 8192 tokens). Traffic: 500 RPS peak, average prompt 600 tokens, average output 400 tokens, p99 TTFT SLA 700ms, p99 decode latency 45ms/token, monthly GPU budget $180k.
 
-**Infrastructure:**
-- 1024 × H100 80GB GPUs across 128 nodes (8 GPUs/node)
-- 3D parallelism: tensor parallel degree 8 (within node), pipeline parallel degree 8 (across 8 nodes), data parallel degree 16
-- ZeRO Stage 2 for optimizer state sharding
-- Mixed precision: BF16 for forward/backward, FP32 for optimizer states
-- Gradient checkpointing to reduce activation memory
+**Architecture:**
 
-**Training Dynamics:**
-- Batch size: 4M tokens (ramp up over first 1B tokens)
-- Learning rate: 1e-4 peak, linear warmup 2000 steps, cosine decay to 1e-5
-- Gradient clipping: 1.0
-- Data: 2T tokens from curated web + books + code + math
+```
+  User Request
+       |
+       v
+  ┌─────────────────────────────────────────────────────────┐
+  │  API Gateway + Load Balancer                            │
+  │  - Request validation, auth, rate limiting              │
+  │  - Route to least-loaded inference pod                  │
+  └──────────────────────────┬──────────────────────────────┘
+                             │
+          ┌──────────────────┼──────────────────┐
+          │                  │                  │
+   ┌──────▼──────┐    ┌──────▼──────┐   ┌──────▼──────┐
+   │  Pod 0      │    │  Pod 1      │   │  Pod 2      │
+   │  TP=4       │    │  TP=4       │   │  TP=4       │
+   │  4×H100 80G │    │  4×H100 80G │   │  4×H100 80G │
+   │  vLLM v1    │    │  vLLM v1    │   │  vLLM v1    │
+   └─────────────┘    └─────────────┘   └─────────────┘
 
-**Estimated Cost:** ~2,000 GPU-days at ~$2/GPU-hour = ~$96K (rough estimate)
+  Memory Layout (per Pod, 4×H100 80GB NVLink):
+  ┌──────────────────────────────────────────┐
+  │  GPU 0 (80 GB)                           │
+  │  Model shard (FP8, TP=4): 70GB/4/2 = 8.75GB│
+  │  KV cache (paged, 16-tok blocks):        │
+  │    Remaining: ~70 GB                     │
+  │    Each block: 80 layers × 2 × 8 KV heads│
+  │    × 128 head dim × 16 tokens × 1 byte  │
+  │    = 80×2×8×128×16 = 3.28 MB/block      │
+  │    Blocks available: 70,000 MB / 3.28 MB │
+  │    = ~21,000 blocks = 336,000 KV tokens  │
+  └──────────────────────────────────────────┘
 
-**Outcome:** Compute-optimal per Chinchilla at this scale; surpasses GPT-3 performance with modern architectural improvements.
+  Attention Bottleneck Analysis:
+  Prefill (compute-bound):
+    FLOPs for 600-token prefill: 2 × seq² × hidden (self-attn)
+      = 2 × 600² × 8192 = 5.9B FLOPs for attention alone
+    + FFN: 2 × seq × 4 × hidden² = 2 × 600 × 32768 × 8192 = 322B FLOPs
+    Total per layer: ~328B FLOPs; 80 layers: 26 TFLOPs per request
+    H100 BF16: 989 TFLOPS → 80 requests fill GPU compute at 500 RPS
+
+  Decode (memory-bandwidth-bound):
+    Each decode step loads all 70B weights once: 70B bytes (FP8) = 70 GB
+    H100 HBM3 bandwidth: 3.35 TB/s → 70 GB loads in 20.9ms
+    → Decode speed ceiling: 1 / 20.9ms = 47.8 tokens/sec/GPU (single request)
+    With batching 16 requests: amortize weight loads → 16×47.8 = 765 tok/s
+```
+
+**Key implementation — 3 Python code blocks:**
+
+Block 1 — Attention mechanism with Flash Attention 2 and GQA:
+
+```python
+from __future__ import annotations
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class GroupedQueryAttention(nn.Module):
+    """
+    GQA (Grouped Query Attention) as used in LLaMA-3-70B.
+    num_heads=64 query heads, num_kv_heads=8 KV heads.
+    Each KV head is shared by 64/8=8 query heads.
+    Reduces KV cache size by 8× vs MHA with no quality loss at 70B scale.
+    Uses Flash Attention 2 for memory-efficient attention computation.
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int = 8192,
+        num_heads: int = 64,
+        num_kv_heads: int = 8,
+        head_dim: int = 128,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        assert num_heads % num_kv_heads == 0
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+        self.kv_groups = num_heads // num_kv_heads  # 8
+
+        self.q_proj = nn.Linear(hidden_dim, num_heads * head_dim, bias=False)
+        self.k_proj = nn.Linear(hidden_dim, num_kv_heads * head_dim, bias=False)
+        self.v_proj = nn.Linear(hidden_dim, num_kv_heads * head_dim, bias=False)
+        self.o_proj = nn.Linear(num_heads * head_dim, hidden_dim, bias=False)
+        self.dropout = dropout
+
+    def forward(
+        self,
+        x: torch.Tensor,                    # (batch, seq, hidden)
+        position_ids: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        B, S, _ = x.shape
+
+        q = self.q_proj(x).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(B, S, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(B, S, self.num_kv_heads, self.head_dim).transpose(1, 2)
+
+        # Apply RoPE (simplified)
+        q, k = _apply_rope(q, k, position_ids)
+
+        # Append to KV cache (for incremental decode)
+        if kv_cache is not None:
+            k = torch.cat([kv_cache[0], k], dim=2)
+            v = torch.cat([kv_cache[1], v], dim=2)
+        new_cache = (k, v)
+
+        # Expand KV heads to match Q heads (repeat each KV head kv_groups times)
+        # Memory stays compact in KV cache; expansion only for attention compute
+        k_expanded = k.repeat_interleave(self.kv_groups, dim=1)   # (B, num_heads, S, head_dim)
+        v_expanded = v.repeat_interleave(self.kv_groups, dim=1)
+
+        # Flash Attention 2 (memory-efficient O(S) memory, not O(S²))
+        # In production: use flash_attn.flash_attn_func directly
+        scale = 1.0 / math.sqrt(self.head_dim)
+        attn_out = F.scaled_dot_product_attention(
+            q, k_expanded, v_expanded,
+            scale=scale,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=True,
+        )   # Uses Flash Attention 2 kernel under torch.compile on CUDA
+
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, S, -1)
+        return self.o_proj(attn_out), new_cache
+
+
+def _apply_rope(
+    q: torch.Tensor, k: torch.Tensor, position_ids: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """RoPE positional encoding (simplified). Production uses fused kernel."""
+    head_dim = q.shape[-1]
+    theta = 10000.0
+    freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, dtype=torch.float) / head_dim))
+    # Full RoPE implementation omitted for brevity — use transformers RoPE class
+    return q, k   # passthrough for illustration
+```
+
+Block 2 — KV cache memory planning and eviction policy (production concern):
+
+```python
+from __future__ import annotations
+from dataclasses import dataclass, field
+import math
+
+
+@dataclass
+class KVCacheConfig:
+    """
+    KV cache memory planning for a 70B GQA model on 4×H100 80GB (TP=4).
+    Goal: maximize concurrent sequences without OOM.
+    """
+
+    num_layers: int = 80
+    num_kv_heads: int = 8
+    head_dim: int = 128
+    block_size_tokens: int = 16          # PagedAttention block granularity
+    dtype_bytes: int = 1                 # FP8 KV cache
+    gpu_count_per_pod: int = 4
+    gpu_vram_gb: float = 80.0
+    model_weights_gb: float = 35.0       # 70B FP8 / 4 GPUs = 8.75 GB/GPU; total 35 GB
+
+    @property
+    def kv_bytes_per_block(self) -> int:
+        """KV bytes per PagedAttention block."""
+        # 2 = key + value; block_size_tokens tokens per block
+        return (
+            self.num_layers
+            * 2
+            * self.num_kv_heads
+            * self.head_dim
+            * self.block_size_tokens
+            * self.dtype_bytes
+        )
+
+    @property
+    def available_kv_gb(self) -> float:
+        """VRAM available for KV cache after model weights."""
+        # 8% headroom for fragmentation and misc buffers
+        return (self.gpu_vram_gb * self.gpu_count_per_pod - self.model_weights_gb) * 0.92
+
+    @property
+    def total_blocks(self) -> int:
+        available_bytes = self.available_kv_gb * 1024**3
+        return int(available_bytes / self.kv_bytes_per_block)
+
+    @property
+    def max_concurrent_tokens(self) -> int:
+        return self.total_blocks * self.block_size_tokens
+
+    def max_concurrent_sequences(self, avg_seq_len: int = 1000) -> int:
+        return self.max_concurrent_tokens // avg_seq_len
+
+    def report(self) -> dict[str, object]:
+        return {
+            "kv_bytes_per_block_MB": self.kv_bytes_per_block / 1024**2,
+            "available_kv_GB": self.available_kv_gb,
+            "total_blocks": self.total_blocks,
+            "max_concurrent_tokens": self.max_concurrent_tokens,
+            "max_concurrent_seqs_at_1k_avg": self.max_concurrent_sequences(1000),
+        }
+
+
+# Example output for 70B on 4×H100 with FP8 KV:
+# kv_bytes_per_block_MB: 3.28 MB
+# available_kv_GB: 266 GB (4×80 - 35) × 0.92
+# total_blocks: 81,091 blocks
+# max_concurrent_tokens: 1,297,462 tokens
+# max_concurrent_seqs_at_1k_avg: 1,297 sequences per pod
+```
+
+Block 3 — BROKEN -> FIX: naive attention in decode and prefill batching collision:
+
+```python
+from __future__ import annotations
+import torch
+
+
+# BROKEN: Standard O(N²) attention — stores full N×N attention matrix in GPU memory.
+# For 8192-token context, attention matrix = 8192² × 2 bytes = 128 MB per head.
+# 64 heads × 80 layers = 655 GB per request — completely infeasible.
+def broken_standard_attention(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
+) -> torch.Tensor:
+    scale = q.shape[-1] ** -0.5
+    attn_weights = torch.softmax(q @ k.transpose(-2, -1) * scale, dim=-1)
+    # attn_weights shape: (batch, heads, seq, seq) — O(seq²) memory
+    return attn_weights @ v   # OOM for seq > 4096 with multiple heads
+
+
+# FIX: Flash Attention 2 — computes attention in tiles, never materializes
+# the full N×N matrix. Memory is O(N) not O(N²).
+# In production: use flash_attn library or torch.compile with SDPA.
+def fixed_flash_attention(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: bool = True
+) -> torch.Tensor:
+    return torch.nn.functional.scaled_dot_product_attention(
+        q, k, v,
+        is_causal=causal,
+        # torch automatically dispatches to Flash Attention 2 on CUDA
+        # when inputs are float16/bfloat16 and CUDA is available
+    )
+
+
+# BROKEN: Batch prefill and decode requests together naively.
+# A 8192-token prefill takes ~80ms compute; a 1-token decode takes 2ms.
+# Batching them: decode requests wait 80ms for the prefill to finish.
+# p99 decode latency: 80ms → violates 45ms/token SLA.
+def broken_batch_mixed(prefill_requests: list, decode_requests: list) -> list:
+    batch = prefill_requests + decode_requests  # mix them — decode starved
+    return _process_batch(batch)
+
+
+# FIX: Chunked prefill — break long prefills into chunks of 2048 tokens.
+# Scheduler interleaves prefill chunks with decode steps.
+# Decode requests get a step every 2048 prefill tokens instead of waiting for 8192.
+# P99 decode latency drops from 80ms to 12ms (one 2048-chunk ≈ 20ms, shared).
+def fixed_chunked_prefill(
+    prefill_request: dict, decode_requests: list, chunk_size: int = 2048
+) -> list:
+    prompt_tokens = prefill_request["tokens"]
+    results = []
+    for chunk_start in range(0, len(prompt_tokens), chunk_size):
+        chunk = prompt_tokens[chunk_start : chunk_start + chunk_size]
+        # Process this prefill chunk
+        results.extend(_process_batch([{"tokens": chunk, "type": "prefill"}]))
+        # Interleave with decode requests
+        results.extend(_process_batch([{**r, "type": "decode"} for r in decode_requests]))
+    return results
+
+
+def _process_batch(batch: list) -> list:
+    return []   # placeholder
+```
+
+**Pitfall 1 — KV cache thrashing from long prompt requests:**
+
+```python
+# BROKEN: Accept all request lengths without limit.
+# A 8192-token prompt for one request uses 8192/16=512 KV blocks.
+# At 21,000 blocks per GPU, one long request takes 2.4% of total KV cache.
+# 50 concurrent long requests = 25,600 blocks — KV cache exhausted, others preempted.
+
+# FIX: Tiered queue with per-tier max_model_len limits.
+# Long requests (> 4096 tokens) go to dedicated low-concurrency pods.
+# Standard requests (< 2048 tokens) share high-concurrency pods.
+def route_by_prompt_length(prompt_tokens: int) -> str:
+    if prompt_tokens > 4096:
+        return "long_context_pod"   # max_num_seqs=50, TP=8
+    return "standard_pod"           # max_num_seqs=512, TP=4
+```
+
+**Pitfall 2 — Tensor parallel AllReduce over PCIe instead of NVLink:**
+
+```python
+# BROKEN: TP=4 across GPUs on different PCIe switches.
+# Each transformer layer requires 2 AllReduce operations.
+# PCIe bandwidth: 32 GB/s; each AllReduce for 70B layer: ~200 MB.
+# Latency per AllReduce: 200MB / 32GB/s = 6.25ms; 80 layers × 2 = 1 second added per step.
+# Decode becomes compute-and-communication-bound — unusable.
+
+# FIX: Ensure all TP GPUs are within same NVLink domain.
+# NVLink: 600 GB/s; same AllReduce = 200MB / 600GB/s = 0.33ms; 80 layers × 2 = 53ms.
+# Verify with: nvidia-smi topo -m — NVLink connections shown as NV4/NV18.
+```
+
+**Pitfall 3 — Using BF16 KV cache instead of FP8:**
+
+```python
+# BROKEN: KV cache stored in BF16 (2 bytes per element).
+# 70B model, 4×H100: KV bytes/block = 80×2×8×128×16×2 = 6.55 MB/block.
+# Available blocks: 266 GB / 6.55 MB = 40,610 blocks → 649,760 max tokens.
+# Max concurrent 1k-token sequences: 649.
+
+# FIX: Use FP8 KV cache (1 byte per element).
+# KV bytes/block: 3.28 MB; blocks: 81,091; max tokens: 1.3M; sequences: 1,297.
+# 2× the concurrent capacity at same GPU count, same model quality.
+# vLLM: --kv_cache_dtype fp8; requires H100 (FP8 tensor core support).
+```
+
+**Metrics:**
+
+| Metric | Naive (BF16 KV, no Flash Attn) | Optimized (FP8 KV, Flash Attn, GQA) |
+|--------|-------------------------------|--------------------------------------|
+| p50 TTFT | 1,200 ms | 180 ms |
+| p99 TTFT | 3,800 ms | 650 ms |
+| p99 decode latency | 120 ms/token | 38 ms/token |
+| Max concurrent sequences | 320 | 1,280 |
+| GPU utilization | 41% | 74% |
+| KV cache hit rate (prefix) | 0% | 68% |
+| Monthly GPU cost | $180K | $72K (same load, fewer pods) |
+| Throughput | 180 RPS | 520 RPS |
+
+**Interview Q&As:**
+
+**Q: Why does the decode phase have fundamentally different performance characteristics than the prefill phase?**
+Prefill processes all prompt tokens in parallel — it is compute-bound (high arithmetic intensity). Decode generates one token at a time, requiring a full forward pass through all model weights to produce each token — it is memory-bandwidth-bound (low arithmetic intensity: load 70 GB of weights to produce 1 token). This is why batching dramatically improves decode throughput: processing 16 decode requests together loads the weights once, amortizing the 20ms memory load across 16 tokens. Compute bottlenecks benefit from faster GPUs; memory bandwidth bottlenecks benefit from larger batches.
+
+**Q: How does Grouped Query Attention (GQA) reduce KV cache memory without significantly hurting quality?**
+GQA uses fewer KV heads than query heads — LLaMA-3-70B has 64 query heads but only 8 KV heads. Each KV head is shared by 8 query heads. The KV cache stores only 8 sets of keys and values, reducing KV cache size by 8× compared to Multi-Head Attention. During attention computation, each KV head is replicated across the 8 query heads that use it — this expansion is cheap (a tensor repeat_interleave) and happens entirely in registers. Research (Ainslie et al. 2023) shows GQA achieves 95-99% of MHA quality at 70B+ scale while reducing KV cache 8×.
+
+**Q: What is chunked prefill and how does it improve decode latency fairness?**
+Without chunked prefill, a long 8192-token prompt monopolizes the GPU for ~80ms while all other decode requests wait. Chunked prefill breaks the prompt into chunks of 2048 tokens; the scheduler interleaves one prefill chunk with decode steps from waiting requests. Decode requests get a turn every ~20ms (one chunk) instead of waiting 80ms, reducing p99 decode latency by 4×. The tradeoff is slightly higher TTFT for the long prompt (it now takes 4 scheduling rounds instead of 1), but TTFT fairness is generally more important than minimizing a single long prompt's prefill time.
+
+**Q: How does Flash Attention 2 reduce memory complexity from O(N²) to O(N)?**
+Standard attention materializes the full N×N attention weight matrix — for N=8192 tokens and 64 heads, this is 8192² × 64 × 2 bytes ≈ 8.6 GB per layer, infeasible. Flash Attention 2 (Dao 2023) tiles the attention computation — processes Q, K, V in small blocks that fit in SRAM (on-chip cache), computing the softmax denominator incrementally without materializing the full matrix. The final output is computed by accumulating tiled attention-weighted values. Peak SRAM usage is O(block_size²) which is constant; total VRAM usage for activations is O(N). For a 8192-token sequence, Flash Attention 2 reduces attention memory from 8.6 GB to ~64 MB per layer.
+
+**Q: Why is prefix caching important for production LLM serving and what is its cache hit rate bound?**
+Prefix caching reuses KV cache blocks from previous requests that share a common prefix (typically a system prompt). If the system prompt is 512 tokens and all requests share it, those 512 tokens' KV blocks are computed once and reused by all subsequent requests — saving 512 tokens of prefill computation per request. At 500 RPS with a shared system prompt, this saves 256,000 tokens of prefill per second, reducing TTFT by ~100ms and cutting GPU compute by 30-40%. Cache hit rate is bounded by prefix sharing ratio — if 90% of requests share the same system prompt, hit rate approaches 90% for that prefix.
+
+**Q: What determines whether to use TP=2, TP=4, or TP=8 for serving a 70B model?**
+The primary drivers are: (1) Model fit — 70B in FP8 is 70 GB; one H100 (80 GB) can barely hold it with no KV cache. TP=2 allows 35 GB per GPU + 45 GB for KV, which is viable. (2) Communication overhead — AllReduce per layer adds latency proportional to TP degree over the available bandwidth. With NVLink (600 GB/s), TP=4 adds ~2ms per layer vs 0.5ms for TP=2. For low-latency SLAs (p99 < 50ms/token), TP=2 with FP8 often wins. (3) Throughput — higher TP allows more KV cache headroom, supporting more concurrent sequences. For throughput-optimized serving (high RPS), TP=4 or TP=8 on NVLink systems is preferred.

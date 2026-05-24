@@ -495,3 +495,304 @@ ROI comparison:
 **Knowledge base quality is the primary lever for improvement.** When resolution rate is low for an intent, the fix is usually more/better KB content, not a better model. Hiring dedicated KB managers who continuously update articles based on failed conversations is often higher ROI than model improvements.
 
 **Multilingual is harder than it looks.** Language detection fails on short messages. Cultural context affects communication style. The word "cancel" in German conversation might have different escalation signals than in English. Build language-specific test sets and measure CSAT separately by language.
+
+---
+
+## Escalation Logic Design
+
+Escalation from bot to human agent is the highest-stakes transition in a customer support bot. A bad escalation (too slow, missing context) causes significant customer dissatisfaction.
+
+**Escalation decision tree:**
+
+```
+User message received
+        │
+        ▼
+┌───────────────────────┐   intent confidence < 0.6
+│  Intent Classification│──────────────────────────► Escalate (uncertain intent)
+└───────────┬───────────┘
+            │ high confidence intent
+            ▼
+┌───────────────────────┐   intent in escalation_list
+│  Policy Check         │──────────────────────────► Escalate (policy requires human)
+│  (refunds >$500,      │   (e.g., "cancel account",
+│   legal threats,      │    "I'm a lawyer", "I'll sue")
+│   account compromise) │
+└───────────┬───────────┘
+            │ bot can handle
+            ▼
+┌───────────────────────┐   sentiment score < -0.7
+│  Sentiment Detection  │──────────────────────────► Escalate (customer very angry)
+└───────────┬───────────┘
+            │ neutral/positive
+            ▼
+┌───────────────────────┐   resolution_attempts >= 3
+│  Attempt Counter      │──────────────────────────► Escalate (bot failing to resolve)
+└───────────┬───────────┘
+            │
+            ▼
+      Bot continues
+```
+
+**Context handoff to human agent:**
+
+```python
+from dataclasses import dataclass
+from datetime import datetime
+
+@dataclass
+class EscalationContext:
+    conversation_id: str
+    user_id: str
+    account_tier: str
+    escalation_reason: str
+    sentiment_score: float
+    resolution_attempts: int
+    bot_summary: str          # LLM-generated summary of conversation
+    identified_intent: str
+    extracted_entities: dict  # order_id, product_sku, refund_amount, etc.
+    conversation_history: list[dict]
+    urgency_score: float      # 0-1: high urgency routes to senior agents
+
+def generate_handoff_summary(
+    conversation: list[dict],
+    client,
+    escalation_reason: str,
+) -> str:
+    """Generate a concise summary for the human agent to read in <30 seconds."""
+    history_text = "\n".join([
+        f"{msg['role'].upper()}: {msg['content']}"
+        for msg in conversation[-10:]  # last 10 turns
+    ])
+    response = client.messages.create(
+        model="claude-3-haiku-20240307",
+        max_tokens=256,
+        messages=[{
+            "role": "user",
+            "content": f"""Summarize this customer support conversation for a human agent.
+Include: customer's core issue, what was already tried, reason for escalation.
+Be concise (under 100 words).
+
+Escalation reason: {escalation_reason}
+
+Conversation:
+{history_text}"""
+        }]
+    )
+    return response.content[0].text
+```
+
+---
+
+## Sentiment Detection
+
+Real-time sentiment detection enables proactive escalation before the customer explicitly complains:
+
+```python
+from transformers import pipeline
+import numpy as np
+
+# Fine-tuned sentiment model: customer support domain (not general Twitter sentiment)
+# Trained on support transcripts with human-labeled sentiment -1.0 to +1.0
+sentiment_model = pipeline(
+    "sentiment-analysis",
+    model="./models/support-sentiment-v2",
+    device=0,  # GPU
+)
+
+def compute_conversation_sentiment(
+    messages: list[dict],
+    decay_factor: float = 0.8,  # recent messages weighted more
+) -> float:
+    """Compute exponentially weighted sentiment across conversation."""
+    user_messages = [m for m in messages if m["role"] == "user"]
+    if not user_messages:
+        return 0.0
+
+    sentiments = []
+    for msg in user_messages:
+        result = sentiment_model(msg["content"][:512])[0]
+        score = result["score"] if result["label"] == "POSITIVE" else -result["score"]
+        sentiments.append(score)
+
+    # Exponential decay: most recent message has highest weight
+    weights = [decay_factor ** (len(sentiments) - 1 - i) for i in range(len(sentiments))]
+    weighted_sum = sum(s * w for s, w in zip(sentiments, weights))
+    return weighted_sum / sum(weights)
+
+# Example: first message neutral (0.1), second frustrated (-0.4), third very angry (-0.9)
+# Weighted sentiment: dominant by last message → escalation threshold -0.7 triggered
+```
+
+---
+
+## CSAT Measurement Pipeline
+
+Customer Satisfaction (CSAT) measurement for bot interactions requires careful survey design to avoid selection bias:
+
+```python
+import random
+from enum import Enum
+
+class CSATTrigger(Enum):
+    RESOLUTION = "resolution"   # triggered when bot marks conversation resolved
+    ESCALATION = "escalation"   # triggered when escalating (was bot helpful before escalation?)
+    RANDOM = "random"           # 10% random sample for baseline measurement
+
+def should_trigger_csat_survey(
+    conversation_id: str,
+    trigger: CSATTrigger,
+    sampling_rate: float = 0.30,  # survey 30% of resolved conversations
+) -> bool:
+    """Deterministic sampling: same conversation always gets same decision."""
+    if trigger == CSATTrigger.RANDOM:
+        # Hash-based deterministic sampling: no database needed
+        hash_val = int(hashlib.md5(conversation_id.encode()).hexdigest(), 16)
+        return (hash_val % 100) < (sampling_rate * 100)
+    elif trigger == CSATTrigger.ESCALATION:
+        return True  # always survey escalations (high business value)
+    elif trigger == CSATTrigger.RESOLUTION:
+        hash_val = int(hashlib.md5(conversation_id.encode()).hexdigest(), 16)
+        return (hash_val % 100) < (sampling_rate * 100)
+    return False
+
+def compute_csat_score(responses: list[dict]) -> dict:
+    """CSAT = % of responses scoring 4 or 5 on a 5-point scale."""
+    if not responses:
+        return {"csat": None, "n": 0}
+    satisfied = sum(1 for r in responses if r["score"] >= 4)
+    return {
+        "csat": satisfied / len(responses),
+        "n": len(responses),
+        "score_distribution": {i: sum(1 for r in responses if r["score"] == i) for i in range(1, 6)},
+    }
+```
+
+---
+
+## Knowledge Base Freshness Pipeline
+
+The KB freshness pipeline ensures bot responses are based on current product information:
+
+```python
+from datetime import datetime, timedelta
+import hashlib
+
+class KBFreshnessMonitor:
+    def __init__(self, db, vector_db, stale_threshold_days: int = 7):
+        self.db = db
+        self.vector_db = vector_db
+        self.stale_threshold = timedelta(days=stale_threshold_days)
+
+    def check_freshness(self) -> dict:
+        """Return articles that are stale or have changed since last indexing."""
+        articles = self.db.query("SELECT id, content_hash, last_modified, last_indexed FROM kb_articles")
+        stale, changed = [], []
+        now = datetime.utcnow()
+        for article in articles:
+            if now - article["last_indexed"] > self.stale_threshold:
+                stale.append(article["id"])
+            current_hash = self._compute_hash(article["id"])
+            if current_hash != article["content_hash"]:
+                changed.append(article["id"])
+        return {"stale_count": len(stale), "changed_count": len(changed),
+                "stale_ids": stale, "changed_ids": changed}
+
+    def reindex_changed_articles(self, article_ids: list[str]) -> int:
+        reindexed = 0
+        for article_id in article_ids:
+            content = self.db.get_article_content(article_id)
+            embedding = embed(content)
+            self.vector_db.upsert(article_id, embedding, metadata={
+                "article_id": article_id,
+                "indexed_at": datetime.utcnow().isoformat(),
+            })
+            self.db.update("kb_articles", article_id, {
+                "content_hash": hashlib.md5(content.encode()).hexdigest(),
+                "last_indexed": datetime.utcnow(),
+            })
+            reindexed += 1
+        return reindexed
+```
+
+---
+
+## Multi-Language Support Architecture
+
+```
+User sends message in any of 40+ supported languages
+        │
+        ▼
+Language detection (fasttext langdetect, 3ms, 176 languages)
+        │
+        ├─ Confidence < 0.8 → ask user: "Could you clarify your language preference?"
+        │
+        ▼
+Route to language-specific KB index
+(separate vector index per language: EN, ES, FR, DE, JA, ZH, etc.)
+        │
+        ▼
+Retrieve KB articles in detected language
+(translated KB articles maintained by localization team)
+        │
+        ▼
+Generate response in detected language
+(system prompt: "Always respond in {language_code}")
+        │
+        ▼
+Quality check: does response language match detected language?
+(simple regex: detect CJK characters for ZH/JA, Latin for EN/ES/FR)
+```
+
+**Language-specific CSAT monitoring:**
+
+```python
+def monitor_csat_by_language(csat_responses: list[dict]) -> dict:
+    """Group CSAT scores by language to detect language-specific quality gaps."""
+    by_language: dict[str, list[float]] = {}
+    for response in csat_responses:
+        lang = response.get("detected_language", "unknown")
+        by_language.setdefault(lang, []).append(response["score"])
+    return {
+        lang: {
+            "csat": sum(1 for s in scores if s >= 4) / len(scores),
+            "n": len(scores),
+            "avg_score": sum(scores) / len(scores),
+        }
+        for lang, scores in by_language.items()
+        if len(scores) >= 20  # minimum sample size for reliable CSAT
+    }
+# Alert: if CSAT for any language drops >10% below English CSAT, flag for KB review
+```
+
+---
+
+## Failure Scenarios and Recovery
+
+**Failure 1 — Intent Model Confidence Collapse During Product Launch Surge**
+
+During a major product launch, 40% of incoming queries were about the new product (which didn't exist in the training data). The intent classifier returned confidence < 0.6 for 40% of all messages (vs normal 5%), triggering escalation for all of them. Human agent queue depth spiked from 8 conversations to 340 in 30 minutes, causing 45-minute wait times.
+
+**Detection:** Escalation rate alert (threshold: >20% of conversations) fired within 8 minutes.
+
+**Recovery:** (1) Immediate: raised the escalation confidence threshold from 0.6 to 0.4 for the next 4 hours (accept lower-confidence intent matches to reduce escalation rate). (2) Added a "new product" catch-all intent with a pre-written FAQ response. (3) Long-term: added a pre-launch KB update process — product FAQ articles indexed 48 hours before launch so the intent model has training signal.
+
+**Failure 2 — Context Handoff Dropping Critical Information During Agent Transfer**
+
+The handoff context was constructed from the last 5 conversation turns. A customer had mentioned their order number in turn 2 (13 turns ago) and their preferred resolution (store credit) in turn 8 (7 turns ago). The human agent received a summary that included neither, asking the customer to repeat their order number — triggering a 1-star review.
+
+**Recovery:** Updated the handoff summary prompt to explicitly extract structured entities from the full conversation, not just the last 5 turns. The LLM-generated summary now includes: `order_id`, `product_sku`, `requested_resolution`, `previous_resolutions_offered` as structured fields alongside the narrative summary.
+
+---
+
+## Additional Interview Questions
+
+**How do you design escalation routing to ensure high-priority customers reach senior agents faster?** Implement priority queue routing: assign each conversation a priority score at escalation time based on: customer lifetime value (CLV) tier, account age, churn risk score, escalation urgency (self-harm/legal/fraud routes immediately to senior agents), and conversation sentiment. The agent assignment system pops from the highest-priority queue first. Senior agents are pooled separately and receive only priority-flagged conversations. Track "time to first human response" segmented by priority tier as a key SLA metric.
+
+**What is the difference between resolution rate and containment rate in a customer support bot, and which matters more?** Resolution rate: the percentage of conversations where the customer's issue is resolved without escalation. Containment rate: the percentage of conversations that never reach a human agent (includes conversations where the bot said "I can't help" and the customer left without escalating). Containment rate is always higher than resolution rate. Resolution rate matters more for business impact — a bot that contains 80% of conversations but resolves only 40% (the other 40% leave unsatisfied) is worse than a bot that contains 60% but resolves 58% of total conversations. Track both and measure CSAT separately for contained vs escalated conversations.
+
+**How do you handle cases where the bot gives wrong information (hallucination) that causes customer harm, such as incorrect refund policy information?** Mitigation architecture: (1) all factual claims must come from the RAG KB, not the model's training data — use strict grounding with citation; (2) output validation against the KB: if the generated response contains a policy statement (refund, warranty, cancellation), a secondary check queries the KB for the policy and verifies the response matches; (3) response templating for critical policies (refund amounts, warranty terms) — use string interpolation from the KB into a template rather than free-form generation; (4) post-incident: implement "dead reckoning" — when a customer calls to dispute a policy the bot stated, log the discrepancy and audit the KB for outdated entries.
+
+**How do you measure and improve the bot's performance on rare intents (long-tail queries) that don't appear frequently enough for reliable CSAT measurement?** For rare intents (N < 20 responses per week), CSAT is statistically unreliable. Instead: (1) use human evaluation — route all rare intent conversations to a weekly expert review pool; reviewers label resolution quality (0-100) using a rubric; (2) track resolution attempt count — if rare intent conversations require >2 attempts before resolution or escalation, the bot is struggling; (3) use automated LLM-as-judge on 100% of rare intent conversations (feasible since volume is low) with a rubric specific to each intent type; (4) aggregate all rare intents into a "long-tail" bucket and set an overall long-tail resolution rate target (e.g., 65% vs 80% for common intents).
+
+**How would you architect a customer support bot to handle a sudden 10x traffic spike (e.g., a product recall or major outage)?** Design for elasticity at every layer: (1) intent classifier and embedding models on horizontally scalable container replicas (Kubernetes HPA, scale on queue depth metric, not CPU); (2) LLM API calls use a request queue with configurable throughput limits per tier — during spikes, free-tier customers see longer waits rather than errors; (3) pre-warm a static "outage mode" response template that bypasses RAG and LLM generation (serves a pre-written status page response in <50ms, no GPU needed); (4) circuit breaker on KB retrieval: if retrieval latency exceeds 2s, fall back to a cached "top 20 most common issues" response without live retrieval; (5) activate proactive communication (push email/SMS to affected users) to reduce inbound volume by 30-40% during known outages.

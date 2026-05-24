@@ -540,3 +540,260 @@ Optimization strategies:
 **Monitoring for RAG drift.** Unlike static software, RAG quality degrades silently as: (1) documents go stale, (2) query distribution shifts, (3) embedding model updates change the embedding space. Run RAGAS evaluation weekly and alert on degradation.
 
 **When to upgrade the pipeline.** Start simple: single retrieval pass + GPT-4. Add complexity only when measurements show where quality fails: low recall → add hybrid; low faithfulness → improve grounding prompts; slow latency → add caching; complex queries → add multi-query expansion.
+
+---
+
+## 11. Production Failure Scenarios
+
+### Incident 1: Embedding Model Update Breaks Retrieval Without Warning
+
+**What happened:** The team upgraded `text-embedding-ada-002` to `text-embedding-3-small`. The new model's embeddings are not compatible with ada-002 (different vector space, different dimensionality: 1536 vs 1536 but different distribution). The FAISS index was not rebuilt. Retrieval cosine similarity dropped from 0.82 average to 0.31 — the index returned semantically irrelevant documents. Faithfulness score dropped from 0.87 to 0.31 in RAGAS evaluation. Production queries started returning wrong answers. The degradation was silent — no code exception, no HTTP error — for 4 hours until a user reported incorrect answers.
+
+**Root cause:** No compatibility validation between the embedding model version used to build the index and the model used at query time.
+
+**Fix applied:**
+```python
+import hashlib
+import json
+
+def get_model_fingerprint(model_name: str, sample_text: str = "hello world") -> str:
+    """Generate a fingerprint of the embedding model by hashing a known output."""
+    import openai
+    response = openai.embeddings.create(model=model_name, input=sample_text)
+    vec = response.data[0].embedding[:10]  # first 10 dims are sufficient for identity
+    return hashlib.sha256(json.dumps(vec, ndigits=6).encode()).hexdigest()[:16]
+
+class SafeVectorIndex:
+    def __init__(self, index_path: str, model_fingerprint: str) -> None:
+        import faiss, pickle
+        meta = pickle.load(open(index_path + ".meta", "rb"))
+        if meta["model_fingerprint"] != model_fingerprint:
+            raise ValueError(
+                f"Embedding model mismatch: index built with {meta['model_fingerprint']!r}, "
+                f"current model {model_fingerprint!r}. Rebuild index before serving."
+            )
+        self.index = faiss.read_index(index_path)
+
+    @classmethod
+    def build(cls, texts: list[str], model_name: str, index_path: str) -> "SafeVectorIndex":
+        import faiss, pickle, numpy as np
+        fingerprint = get_model_fingerprint(model_name)
+        embeddings = _batch_embed(texts, model_name)
+        index = faiss.IndexFlatIP(len(embeddings[0]))
+        index.add(np.array(embeddings, dtype=np.float32))
+        faiss.write_index(index, index_path)
+        pickle.dump({"model_fingerprint": fingerprint, "doc_count": len(texts)},
+                    open(index_path + ".meta", "wb"))
+        return cls(index_path, fingerprint)
+```
+
+---
+
+### Incident 2: Context Window Overflow on Large Document Retrieval
+
+**What happened:** Users asking about financial reports submitted queries that retrieved 10 chunks × 512 tokens = 5,120 tokens of context, plus a 2,048-token system prompt, plus their 200-token query. Total: 7,368 tokens. The LLM (GPT-4 with 8k context) truncated the context silently — cutting the last 3 chunks. The model answered based on incomplete context and did not indicate the truncation. Users received partial answers they trusted as complete.
+
+**Fix applied:**
+```python
+def build_prompt_with_context_budget(
+    query: str,
+    chunks: list[str],
+    system_prompt: str,
+    model: str = "gpt-4",
+    max_context_tokens: int = 7000,    # leave 1000 for output
+    tokenizer=None,
+) -> tuple[str, int]:
+    """
+    Returns (prompt, num_chunks_used).
+    Trims chunks to fit within token budget rather than silently truncating.
+    """
+    import tiktoken
+    enc = tokenizer or tiktoken.encoding_for_model(model)
+    
+    system_tokens = len(enc.encode(system_prompt))
+    query_tokens = len(enc.encode(query))
+    overhead = system_tokens + query_tokens + 200   # formatting overhead
+    budget = max_context_tokens - overhead
+
+    selected_chunks: list[str] = []
+    used_tokens = 0
+    for chunk in chunks:
+        chunk_tokens = len(enc.encode(chunk))
+        if used_tokens + chunk_tokens > budget:
+            break   # stop before overflow — never silently truncate
+        selected_chunks.append(chunk)
+        used_tokens += chunk_tokens
+
+    if len(selected_chunks) < len(chunks):
+        # Inform the model it has partial context
+        partial_notice = f"[Note: {len(chunks) - len(selected_chunks)} additional sources "
+                         f"were omitted due to length limits. This answer is based on "
+                         f"{len(selected_chunks)} of {len(chunks)} retrieved sources.]\n\n"
+    else:
+        partial_notice = ""
+
+    context_block = "\n\n---\n\n".join(selected_chunks)
+    prompt = f"{system_prompt}\n\n{partial_notice}Context:\n{context_block}\n\nQuestion: {query}"
+    return prompt, len(selected_chunks)
+```
+
+---
+
+## 12. Capacity Planning Math
+
+**Target:** 500 concurrent enterprise users, 10M queries/month, corpus of 10M documents (100GB source text).
+
+```
+Infrastructure sizing:
+
+Vector Index (FAISS HNSW):
+  10M documents × 10 chunks/doc = 100M vectors
+  Embedding dimension: 1536 (text-embedding-3-small)
+  Storage: 100M × 1536 × 4 bytes (fp32) = 614 GB raw vectors
+  HNSW graph overhead: ~30 GB additional
+  Total RAM required: ~650 GB → 3 × r6g.8xlarge (each 256 GB RAM)
+  HNSW ef_search=64 → 97% recall at 12ms per query
+
+Ingestion pipeline (indexing new documents):
+  Embedding throughput: text-embedding-3-small = 10,000 tokens/s via batch API
+  100 GB corpus (avg 500 tokens/chunk): 200M tokens total
+  Indexing time: 200M / 10,000 = 20,000 seconds ≈ 5.6 hours for initial build
+  Incremental ingestion (100 new docs/day): < 5 minutes
+
+Query cost at 10M queries/month:
+  Retrieval (embedding query): 10M × 0.02 cents/1k tokens × 0.2k avg = $400/month
+  LLM generation (GPT-4o-mini, avg 600 output tokens): 
+    10M × 600 tok × $0.015/1k = $90,000/month
+  Reranker inference (MiniLM, 50 candidates × 10M): self-hosted, $800/month GPU
+  Redis semantic cache (30% hit rate saves 3M LLM calls):
+    Savings: 3M × 600 tok × $0.015/1k = $27,000/month
+  Net LLM cost: $90,000 - $27,000 = $63,000/month
+```
+
+---
+
+## 13. Additional Interview Questions
+
+**Q: How do you handle queries that span multiple documents and require synthesizing information from 5+ sources?**
+Multi-hop RAG: (1) retrieve initial K documents for the query; (2) for each retrieved document, extract sub-questions the document answers; (3) re-retrieve for each sub-question; (4) merge all retrieved content and generate a synthesis. This "iterative retrieval" pattern (used in FLARE and Agentic RAG) handles complex synthesis but costs 3-5× more in tokens and latency. Gate it on query complexity detection: simple factual queries use single-pass RAG; detected multi-entity or comparative queries trigger multi-hop. Complexity classifier: fine-tuned on ~5,000 labeled query examples achieves 88% accuracy.
+
+**Q: What is the right chunking strategy for a corpus that mixes code, tables, and prose?**
+Type-aware chunking: (1) prose: sentence-aware chunking at 512 tokens with 10% overlap; (2) tables: treat each table as one chunk regardless of length — splitting a table destroys its structure; (3) code: AST-aware chunking — split at function/class boundaries, never mid-function; (4) mixed documents (e.g., markdown with embedded tables and code): use a document structure parser to detect block type, then apply type-specific chunker. The overhead of implementing type-aware chunking is high (2-3 engineering weeks) but the recall improvement is 20-35% for technical documents. For simple prose-only corpora, standard sentence-aware chunking is sufficient.
+
+**Q: How do you ensure that RAG citations are accurate and the model is not fabricating source references?**
+Enforce post-hoc citation verification: after generating a response, use a secondary model to verify each claim in the response against the cited chunk. If a claim cannot be grounded in the cited chunk, mark it as unverified and either remove it or flag it to the user. This "entailment verification" step adds 200ms and 10% token cost. For high-stakes applications (legal, medical), the cost is mandatory. Never allow the model to generate citation numbers — instead, programmatically assign `[Source 1]`, `[Source 2]` tags to retrieved chunks and instruct the model to reference them by tag. This prevents hallucinated citations to non-retrieved documents entirely.
+
+---
+
+### Chunking Strategy Deep Dive
+
+**Type-aware chunking by document type:**
+```python
+from __future__ import annotations
+import re
+from dataclasses import dataclass
+from typing import Iterator
+
+@dataclass
+class Chunk:
+    text: str
+    source_file: str
+    chunk_index: int
+    doc_type: str      # "prose", "table", "code", "markdown"
+    token_estimate: int
+
+class TypeAwareChunker:
+    """
+    Applies different chunking strategies based on detected content type.
+    Prose: sentence-aware at 512 tokens with 10% overlap.
+    Tables: one chunk per table, regardless of size.
+    Code: AST function-boundary split (tree-sitter).
+    """
+
+    def chunk_markdown(self, text: str, source: str) -> list[Chunk]:
+        chunks: list[Chunk] = []
+        sections = re.split(r"\n(?=#{1,3} )", text)   # split at headers
+        chunk_idx = 0
+        for section in sections:
+            # Detect tables (markdown table syntax)
+            if re.search(r"\|.+\|.+\|", section):
+                # Extract table as single chunk
+                table_match = re.search(r"(\|.+\n)+", section)
+                if table_match:
+                    chunks.append(Chunk(
+                        text=table_match.group(),
+                        source_file=source,
+                        chunk_index=chunk_idx,
+                        doc_type="table",
+                        token_estimate=len(table_match.group().split()) // 3 * 4,
+                    ))
+                    chunk_idx += 1
+                    section = section[:table_match.start()] + section[table_match.end():]
+
+            # Remaining prose: sentence-aware chunking
+            for prose_chunk in self._sentence_chunks(section, max_tokens=512):
+                chunks.append(Chunk(
+                    text=prose_chunk,
+                    source_file=source,
+                    chunk_index=chunk_idx,
+                    doc_type="prose",
+                    token_estimate=len(prose_chunk.split()) // 3 * 4,
+                ))
+                chunk_idx += 1
+        return chunks
+
+    def _sentence_chunks(self, text: str, max_tokens: int = 512) -> Iterator[str]:
+        import nltk
+        sentences = nltk.sent_tokenize(text)
+        current: list[str] = []
+        current_tokens = 0
+        for sent in sentences:
+            sent_tokens = len(sent.split()) // 3 * 4   # rough token estimate
+            if current_tokens + sent_tokens > max_tokens and current:
+                yield " ".join(current)
+                # 10% overlap: keep last sentence for continuity
+                current = current[-1:]
+                current_tokens = len(current[0].split()) // 3 * 4
+            current.append(sent)
+            current_tokens += sent_tokens
+        if current:
+            yield " ".join(current)
+```
+
+---
+
+### Multi-Tenant RAG Architecture
+
+**Tenant isolation strategy:**
+
+```
+Enterprise Customer A (Legal Documents)
+    └── Tenant Namespace: "tenant-A"
+        ├── FAISS index partition: shard 0-31 (dedicated)
+        ├── Redis namespace: "cache:tenant-A:*"
+        └── Embedding model: text-embedding-3-large (premium)
+
+Enterprise Customer B (Technical Docs)
+    └── Tenant Namespace: "tenant-B"
+        ├── FAISS index partition: shard 32-63 (dedicated)
+        ├── Redis namespace: "cache:tenant-B:*"
+        └── Embedding model: text-embedding-3-small (standard)
+
+SMB Pool (< 100 documents each)
+    └── Shared namespace with row-level filtering
+        ├── Shared FAISS index: filtered by tenant_id metadata
+        ├── Redis namespace: "cache:shared:{tenant_id}:*"
+        └── Embedding model: text-embedding-3-small (shared)
+```
+
+**Isolation rule:** Large enterprise tenants (> 50k documents) get dedicated FAISS index partitions — no cross-tenant vector contamination is mathematically possible. SMB tenants share an index with metadata filtering: every FAISS result is checked against `chunk.tenant_id == requesting_tenant_id` before being returned. This filter happens post-retrieval, not pre-retrieval — retrieve 2K candidates, filter to tenant's subset, return top K. Extra retrieval overhead: 30ms for 500K shared tenant documents.
+
+---
+
+### Additional Q&As
+
+**Q: How do you handle document updates in a RAG system — specifically, updating one section of a 500-page PDF without re-indexing the entire document?**
+Chunk-level versioning: maintain a `chunks` table with `{chunk_id, doc_id, section_hash, embedding, indexed_at}`. When a document is updated, re-parse only the modified sections (detected by section hash comparison). Delete stale chunks from the FAISS index by their IDs (using `IndexIDMap.remove_ids`), re-embed the updated sections, and add the new chunks with new IDs. This allows surgical updates without full re-indexing. Limitation: if the document's structure changes significantly (sections merged, reordered), full re-indexing is necessary — structure change detection is done by comparing the table of contents before and after the update.
+
+**Q: When should you use a local embedding model (E5-large, BGE) vs. the OpenAI API for embeddings?**
+Local model criteria: (1) cost at scale: at > 1B tokens/month, self-hosting E5-large on A10G ($1.10/hr) costs ~$13/month vs. text-embedding-3-small at $0.02/1M tokens = $20,000/month — local wins decisively above ~100M tokens/month; (2) latency: local inference adds 2ms vs. API's 50-80ms round trip — critical for real-time applications; (3) data privacy: regulated industries (healthcare, finance) cannot send documents to third-party APIs. OpenAI API criteria: (1) text-embedding-3-large quality is 5-8% better than open-source alternatives on most benchmarks — justified for high-precision retrieval; (2) no infrastructure to manage; (3) at < 10M tokens/month, API cost ($0.20) is lower than GPU instance amortization.

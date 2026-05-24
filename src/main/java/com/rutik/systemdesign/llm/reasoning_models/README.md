@@ -532,27 +532,468 @@ A: Best-of-N with PRM reranking: generate N reasoning chains (N=10-50) with temp
 
 ---
 
-## 14. Case Study: Automated Math Competition Solver
 
-**Problem:** Educational platform wants to provide step-by-step solutions for AMC/AIME competition math. Previous LLM (GPT-4o) solved ~40% of AMC 12 problems.
+## 14. Case Study
 
-**Solution Architecture:**
+**Scenario:** A DevOps platform company serves 5,000 engineering teams. Their SRE assistant must automatically diagnose production incidents: given a stack trace, logs, and recent git diff, it must identify root cause, generate a fix, and write a regression test. Current GPT-4o (non-reasoning) solves 38% of incidents correctly on first attempt. SLA: correct root cause within 90 seconds for p90 of incidents, cost under $0.50/incident.
+
+**Architecture:**
+
 ```
-Query → difficulty classifier
-  Easy (AMC 10): → GPT-4o with CoT → 78% accuracy
-  Medium (AMC 12): → o1-mini → 89% accuracy
-  Hard (AIME): → o1 → 82% accuracy (AIME is extremely hard)
+  Incident triggered (PagerDuty alert)
+           |
+           v
+  ┌────────────────────────────────────────────────────────┐
+  │   Incident Triage Agent                                │
+  │   - Collects: stack trace, last 500 log lines,         │
+  │     git diff of last 3 commits, deployment metadata    │
+  │   - Classifies severity: P1 / P2 / P3                  │
+  └────────────────────────┬───────────────────────────────┘
+                           │  structured incident context
+                           v
+  ┌────────────────────────────────────────────────────────┐
+  │   Model Router                                         │
+  │   P3 (low severity): claude-sonnet-4-6, temp=0        │
+  │   P2 (medium):       o1-mini, budget_tokens=2000       │
+  │   P1 (critical):     o3, budget_tokens=10000           │
+  │   Timeout: P1 max 60s, P2 max 30s, P3 max 15s         │
+  └────────────────────────┬───────────────────────────────┘
+                           │
+                           v
+  ┌────────────────────────────────────────────────────────┐
+  │   Reasoning Model (o1/o3 or sonnet)                    │
+  │   Extended thinking: traces through:                   │
+  │     1. Parse stack trace — identify failing frame      │
+  │     2. Correlate with log lines — find causal event    │
+  │     3. Inspect git diff — find introduced regression   │
+  │     4. Generate root cause hypothesis                   │
+  │     5. Write targeted fix (code patch)                 │
+  │     6. Write regression test                           │
+  │   Output: structured JSON {root_cause, fix, test}      │
+  └────────────────────────┬───────────────────────────────┘
+                           │
+                           v
+  ┌────────────────────────────────────────────────────────┐
+  │   Validation Sandbox                                   │
+  │   - Apply generated patch to isolated container        │
+  │   - Run test suite (pytest subset — 120s timeout)      │
+  │   - If passes: propose PR via GitHub API               │
+  │   - If fails: retry with self-correction (max 2×)      │
+  └────────────────────────────────────────────────────────┘
 
-With PRM-guided self-consistency (N=5):
-  Easy: 82% (+4%), cost 5× → use only for wrong answers
-  Hard: 91% (+9%), cost 5× → worth it
-
-For wrong answers (as judged by answer checker):
-  Retry with o3 (highest quality): 97% accuracy on retry
+Test-Time Compute Scaling — budget_tokens effect:
+  budget_tokens=500:   o1-mini "fast think" — 12s, 65% solve rate
+  budget_tokens=2000:  o1-mini "deep think" — 28s, 78% solve rate
+  budget_tokens=10000: o3 "full think"      — 58s, 91% solve rate
+  PRM reranking N=4:   o1-mini × 4 + PRM   — 35s, 84% solve rate (cheaper than o3)
 ```
 
-**Results:**
-- Overall AMC 12 accuracy: 92% (vs 40% GPT-4o baseline)
-- AIME accuracy: 71% (vs 13% GPT-4o baseline)
-- Average latency: 12 seconds (users accept given it's replacing hours of work)
-- Cost per query: $0.08 avg (acceptable for tutoring app)
+**Key implementation — 3 Python code blocks:**
+
+Block 1 — Reasoning model invocation with structured output:
+
+```python
+from __future__ import annotations
+import json
+import time
+from dataclasses import dataclass
+from typing import Any, Literal
+
+import anthropic
+import openai
+
+
+@dataclass
+class IncidentContext:
+    incident_id: str
+    stack_trace: str
+    log_lines: str          # last 500 lines
+    git_diff: str           # last 3 commits
+    deployment_meta: str    # recent deploy info
+
+
+@dataclass
+class DiagnosisResult:
+    root_cause: str
+    confidence: float       # 0.0 - 1.0
+    fix_patch: str          # unified diff format
+    regression_test: str    # pytest test function
+    thinking_tokens_used: int
+    latency_seconds: float
+    model_used: str
+
+
+Severity = Literal["P1", "P2", "P3"]
+
+
+async def diagnose_incident(
+    ctx: IncidentContext,
+    severity: Severity,
+) -> DiagnosisResult:
+    """Route to appropriate reasoning model based on severity."""
+
+    prompt = _build_prompt(ctx)
+
+    if severity == "P3":
+        return await _diagnose_sonnet(prompt, ctx.incident_id)
+    elif severity == "P2":
+        return await _diagnose_o1_mini(prompt, ctx.incident_id, budget=2000)
+    else:  # P1
+        return await _diagnose_o3(prompt, ctx.incident_id, budget=10000)
+
+
+def _build_prompt(ctx: IncidentContext) -> str:
+    return f"""You are an expert SRE diagnosing a production incident.
+
+## Stack Trace
+{ctx.stack_trace}
+
+## Recent Logs (last 500 lines)
+{ctx.log_lines}
+
+## Git Diff (last 3 commits)
+{ctx.git_diff}
+
+## Deployment Metadata
+{ctx.deployment_meta}
+
+Analyze this incident and return a JSON object with exactly these fields:
+{{
+  "root_cause": "one-paragraph description of the root cause",
+  "confidence": 0.0-1.0,
+  "fix_patch": "unified diff format patch to fix the issue",
+  "regression_test": "complete pytest test function that would catch this bug"
+}}
+
+Think step by step: (1) parse the stack trace to find the failing frame,
+(2) correlate with log events to find the causal sequence,
+(3) inspect the git diff for the introduced regression,
+(4) formulate the root cause hypothesis,
+(5) design the minimal fix,
+(6) write a test that would have caught it."""
+
+
+async def _diagnose_sonnet(prompt: str, incident_id: str) -> DiagnosisResult:
+    """Claude Sonnet 4.6 with extended thinking for P3."""
+    client = anthropic.AsyncAnthropic()
+    t0 = time.monotonic()
+    response = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=8096,
+        thinking={"type": "enabled", "budget_tokens": 4000},
+        messages=[{"role": "user", "content": prompt}],
+    )
+    latency = time.monotonic() - t0
+    text = next(
+        (b.text for b in response.content if hasattr(b, "text")), ""
+    )
+    thinking_tokens = sum(
+        getattr(b, "thinking", "").count(" ")
+        for b in response.content
+        if hasattr(b, "thinking")
+    )
+    parsed = _parse_json_output(text)
+    return DiagnosisResult(
+        **parsed,
+        thinking_tokens_used=thinking_tokens,
+        latency_seconds=latency,
+        model_used="claude-sonnet-4-6",
+    )
+
+
+async def _diagnose_o1_mini(
+    prompt: str, incident_id: str, budget: int
+) -> DiagnosisResult:
+    """OpenAI o1-mini with reasoning effort budget."""
+    client = openai.AsyncOpenAI()
+    t0 = time.monotonic()
+    response = await client.chat.completions.create(
+        model="o1-mini",
+        max_completion_tokens=budget + 2048,
+        reasoning_effort="medium",
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+    )
+    latency = time.monotonic() - t0
+    text = response.choices[0].message.content or ""
+    reasoning_tokens = getattr(
+        response.usage, "completion_tokens_details", None
+    )
+    parsed = _parse_json_output(text)
+    return DiagnosisResult(
+        **parsed,
+        thinking_tokens_used=getattr(reasoning_tokens, "reasoning_tokens", 0),
+        latency_seconds=latency,
+        model_used="o1-mini",
+    )
+
+
+async def _diagnose_o3(
+    prompt: str, incident_id: str, budget: int
+) -> DiagnosisResult:
+    client = openai.AsyncOpenAI()
+    t0 = time.monotonic()
+    response = await client.chat.completions.create(
+        model="o3",
+        max_completion_tokens=budget + 4096,
+        reasoning_effort="high",
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+    )
+    latency = time.monotonic() - t0
+    text = response.choices[0].message.content or ""
+    parsed = _parse_json_output(text)
+    return DiagnosisResult(
+        **parsed,
+        thinking_tokens_used=0,
+        latency_seconds=latency,
+        model_used="o3",
+    )
+
+
+def _parse_json_output(text: str) -> dict[str, Any]:
+    try:
+        data = json.loads(text)
+        return {
+            "root_cause": data.get("root_cause", ""),
+            "confidence": float(data.get("confidence", 0.0)),
+            "fix_patch": data.get("fix_patch", ""),
+            "regression_test": data.get("regression_test", ""),
+        }
+    except json.JSONDecodeError:
+        return {
+            "root_cause": text[:500],
+            "confidence": 0.3,
+            "fix_patch": "",
+            "regression_test": "",
+        }
+```
+
+Block 2 — PRM reranking for cost-quality optimization (production concern):
+
+```python
+from __future__ import annotations
+import asyncio
+from dataclasses import dataclass
+
+
+@dataclass
+class RankedDiagnosis:
+    diagnosis: DiagnosisResult
+    prm_score: float          # 0.0 - 1.0 from Process Reward Model
+    rank: int
+
+
+async def prm_reranked_diagnosis(
+    ctx: IncidentContext,
+    n_candidates: int = 4,
+    model: str = "o1-mini",
+    budget_per_candidate: int = 1500,
+) -> RankedDiagnosis:
+    """
+    Generate N candidate diagnoses, score each with a PRM,
+    return the highest-scoring candidate.
+    Cost: N × o1-mini << 1 × o3, similar quality for P2 incidents.
+    PRM is a smaller Claude Haiku model prompted to evaluate step correctness.
+    """
+    tasks = [
+        _diagnose_o1_mini(
+            _build_prompt(ctx), ctx.incident_id, budget=budget_per_candidate
+        )
+        for _ in range(n_candidates)
+    ]
+    candidates = await asyncio.gather(*tasks)
+
+    scored = await asyncio.gather(
+        *[_score_with_prm(c, ctx) for c in candidates]
+    )
+
+    ranked = sorted(
+        zip(candidates, scored), key=lambda x: x[1], reverse=True
+    )
+    best, best_score = ranked[0]
+    return RankedDiagnosis(diagnosis=best, prm_score=best_score, rank=1)
+
+
+async def _score_with_prm(
+    diagnosis: DiagnosisResult, ctx: IncidentContext
+) -> float:
+    """
+    Use Claude Haiku as a Process Reward Model.
+    Scores the reasoning quality of the diagnosis (0.0-1.0).
+    """
+    import anthropic
+    client = anthropic.AsyncAnthropic()
+    prompt = f"""Rate the quality of this incident diagnosis (0.0-1.0).
+
+Stack trace context: {ctx.stack_trace[:500]}
+
+Diagnosis: {diagnosis.root_cause}
+Fix patch: {diagnosis.fix_patch[:300]}
+
+Score based on:
+- Does the root cause correctly identify the failing frame?
+- Is the fix targeted and minimal?
+- Would the regression test catch this bug?
+
+Return only a number between 0.0 and 1.0."""
+
+    response = await client.messages.create(
+        model="claude-haiku-4-5",
+        max_tokens=10,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    try:
+        return float(response.content[0].text.strip())
+    except (ValueError, IndexError):
+        return 0.5
+```
+
+Block 3 — BROKEN -> FIX: ignoring thinking token budget and timeout:
+
+```python
+from __future__ import annotations
+import asyncio
+
+
+# BROKEN: No timeout on reasoning model call.
+# o3 with high reasoning effort can run for 5+ minutes on complex incidents.
+# P1 incident needs answer in <60s — model overshoots budget.
+async def broken_o3_call(prompt: str) -> str:
+    import openai
+    client = openai.AsyncOpenAI()
+    response = await client.chat.completions.create(
+        model="o3",
+        max_completion_tokens=32768,   # no budget limit — model thinks indefinitely
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.choices[0].message.content or ""
+
+
+# FIX: Set reasoning budget and apply asyncio timeout.
+# If model exceeds timeout, fall back to cheaper faster model.
+async def fixed_o3_with_timeout(prompt: str, timeout_s: float = 60.0) -> str:
+    import openai
+    client = openai.AsyncOpenAI()
+    try:
+        response = await asyncio.wait_for(
+            client.chat.completions.create(
+                model="o3",
+                max_completion_tokens=12000,   # ~10000 reasoning + 2000 output
+                reasoning_effort="high",
+                messages=[{"role": "user", "content": prompt}],
+            ),
+            timeout=timeout_s,
+        )
+        return response.choices[0].message.content or ""
+    except asyncio.TimeoutError:
+        # Fallback to faster model — better partial answer than timeout
+        return await fixed_o1_mini_fallback(prompt)
+
+
+async def fixed_o1_mini_fallback(prompt: str) -> str:
+    import openai
+    client = openai.AsyncOpenAI()
+    response = await client.chat.completions.create(
+        model="o1-mini",
+        max_completion_tokens=4000,
+        reasoning_effort="low",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.choices[0].message.content or ""
+```
+
+**Pitfall 1 — Feeding entire log file to reasoning model wastes tokens:**
+
+```python
+# BROKEN: Pass 10,000 log lines to o3.
+# Most log lines are unrelated — reasoning model must wade through noise.
+# Token cost: ~30,000 tokens input; p99 latency 4 min.
+def broken_build_context(logs: list[str]) -> str:
+    return "\n".join(logs)  # all 10,000 lines
+
+# FIX: Pre-filter logs to error-level lines ±30 lines of context around
+# each error. Reduces input to 500-800 lines; 10x token reduction.
+def fixed_build_context(logs: list[str]) -> str:
+    error_indices = [i for i, l in enumerate(logs) if "ERROR" in l or "FATAL" in l]
+    included = set()
+    for idx in error_indices:
+        for j in range(max(0, idx - 30), min(len(logs), idx + 30)):
+            included.add(j)
+    return "\n".join(logs[i] for i in sorted(included))
+```
+
+**Pitfall 2 — Treating reasoning model output as infallible:**
+
+```python
+# BROKEN: Auto-apply generated fix patch without validation.
+# Reasoning models hallucinate plausible-looking but incorrect patches ~8% of the time.
+async def broken_apply_fix(patch: str) -> None:
+    import subprocess
+    subprocess.run(["git", "apply", "-"], input=patch.encode(), check=True)
+    # No test run — patch applied directly to production branch
+
+# FIX: Always validate in isolated sandbox before proposing PR.
+async def fixed_validate_and_propose(patch: str, test_code: str) -> dict[str, str]:
+    import subprocess, tempfile, os
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Clone repo into tmpdir, apply patch, run tests
+        subprocess.run(["git", "clone", "--depth=1", ".", tmpdir], check=True)
+        result = subprocess.run(
+            ["git", "apply", "-"], input=patch.encode(), cwd=tmpdir
+        )
+        if result.returncode != 0:
+            return {"status": "patch_failed", "error": result.stderr.decode()}
+        test_result = subprocess.run(
+            ["python", "-m", "pytest", "--timeout=120", "-x", "-q"],
+            cwd=tmpdir, capture_output=True, timeout=150,
+        )
+        if test_result.returncode == 0:
+            return {"status": "validated", "action": "open_pr"}
+        return {"status": "test_failed", "output": test_result.stdout.decode()[:2000]}
+```
+
+**Pitfall 3 — Using high reasoning effort for all incidents wastes budget:**
+
+```python
+# BROKEN: Always use o3 with max budget regardless of incident severity.
+# P3 "CSS layout broke" incident costs $8 with o3; costs $0.04 with Sonnet.
+async def broken_always_o3(prompt: str) -> str: ...
+
+# FIX: Tiered routing. Only P1 critical incidents use o3.
+# P2: o1-mini with budget=2000 or PRM reranking of 4 × o1-mini.
+# P3: claude-sonnet-4-6 with extended thinking.
+# Cost per incident: P3=$0.04, P2=$0.18, P1=$2.10 avg.
+```
+
+**Metrics:**
+
+| Metric | GPT-4o baseline | Sonnet 4.6 (P3) | o1-mini (P2) | o3 (P1) |
+|--------|-----------------|-----------------|--------------|---------|
+| First-attempt solve rate | 38% | 61% | 79% | 91% |
+| p50 latency | 8s | 14s | 28s | 52s |
+| p99 latency | 22s | 35s | 68s | 88s |
+| Cost per incident | $0.12 | $0.04 | $0.18 | $2.10 |
+| Patch validation pass rate | 81% | 88% | 93% | 96% |
+| False escalation rate | 31% | 19% | 8% | 4% |
+| PRM rerank (4×o1-mini) | — | — | 84%/35s/$0.72 | — |
+
+**Interview Q&As:**
+
+**Q: What is test-time compute scaling and how does it improve reasoning quality?**
+Test-time compute scaling dedicates more compute at inference time (not training time) to improve answer quality. Rather than making a single pass, the model generates extended "thinking" traces — step-by-step chains of reasoning — before producing the final answer. More budget_tokens allows more exploration of alternative approaches and self-correction. o1/o3 models demonstrate that a smaller model with 10x more reasoning compute outperforms a larger model with 1x compute on tasks requiring multi-step logic, math, or debugging.
+
+**Q: When should you use PRM reranking instead of a single o3 call?**
+PRM reranking (generate N candidates with a cheaper model, score each, take the best) is cost-effective when N × cheaper_model_cost < single expensive_model_cost and when the task benefits from diverse reasoning paths. For P2 incidents: 4 × o1-mini ($0.18 each) = $0.72 vs 1 × o3 ($2.10) — PRM achieves 84% solve rate vs 91% for o3, at one-third the cost. PRM is less useful when candidates are too similar (low diversity) or when the PRM scorer itself is unreliable for the domain.
+
+**Q: How do reasoning models differ from chain-of-thought prompting?**
+Chain-of-thought prompting adds "think step by step" to the user prompt; the reasoning is visible in the output and uses standard output tokens (billed at output rate). Reasoning models (o1, o3, Claude with extended thinking) perform internal reasoning in a separate "thinking" phase before generating the final response; this thinking may be partially or fully hidden, uses a separate token budget, and often uses a different (lower) per-token price than output tokens. Reasoning model chains tend to be more self-consistent and self-correcting than CoT-prompted standard models because the model is specifically trained to reason before answering.
+
+**Q: Why is a validation sandbox essential after a reasoning model generates a code fix?**
+Reasoning models hallucinate syntactically plausible but semantically incorrect patches approximately 5-10% of the time — the reasoning process increases confidence but does not eliminate hallucination. A patch that looks correct may fail to compile, break unrelated tests, or introduce a subtle new bug. Running the fix in an isolated container with the test suite catches these cases before a PR is opened. The sandbox also provides ground-truth feedback for a retry loop: if the first fix fails validation, the agent can pass the test failure output back to the model for self-correction.
+
+**Q: How do you choose budget_tokens for a reasoning model in production?**
+Budget_tokens controls how many tokens the model can spend "thinking" before generating the final answer. More tokens = better accuracy but higher cost and latency. Calibrate by running your eval set with exponentially increasing budgets (500, 1000, 2000, 4000, 8000) and plotting solve rate vs cost. The curve typically shows diminishing returns after a threshold — often 2000-4000 tokens for code debugging. Set the production budget at the knee of that curve. Apply higher budgets only for the highest-severity incidents where cost is less important than correctness.
+
+**Q: What makes code debugging particularly well-suited for reasoning models versus standard LLMs?**
+Code debugging requires multi-step logical deduction: (1) parse the stack trace to identify the fault, (2) trace backwards through the call chain, (3) correlate with external state (logs, recent changes), (4) form a causal hypothesis, (5) design a minimal fix, (6) verify the fix is consistent with all constraints. Standard LLMs tend to pattern-match to the most common bug for the given error type without thoroughly checking all evidence. Reasoning models systematically work through each step and self-correct when they detect contradictions — exactly the process an expert SRE uses, just codified as internal reasoning chains.

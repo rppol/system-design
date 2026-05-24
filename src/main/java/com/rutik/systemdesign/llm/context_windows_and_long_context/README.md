@@ -491,3 +491,118 @@ Result:
   Full codebase query: $0.50 (with caching)
   Architecture accuracy: 91% (vs. 73% with RAG-only)
 ```
+
+---
+
+**Additional war story — RoPE scaling misconfiguration causing hallucinated clause references in legal contract review:**
+
+A legal tech startup used a 128k-context Llama model (with RoPE scaled from 4k to 128k via linear interpolation) to review M&A contracts. On documents between 60k-100k tokens, the model began referencing non-existent clause numbers ("as specified in Section 14.3(b)"). Post-mortem: the team used `rope_scaling={"type": "linear", "factor": 32}` but did not fine-tune the model at the extended length. Linear interpolation without continued pretraining degrades position accuracy at the far end of the extended range.
+
+```python
+# BROKEN: linear RoPE scaling without extended pretraining
+from transformers import AutoModelForCausalLM
+
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-3-8B",
+    rope_scaling={"type": "linear", "factor": 32},  # extends 4k → 128k
+    # BUG: no fine-tuning at 128k means positions 60k-128k are poorly calibrated
+)
+
+# FIX: use YaRN scaling (better extrapolation) + verify with needle-in-haystack test
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-3-8B",
+    rope_scaling={
+        "type": "yarn",       # YaRN: better accuracy at extended lengths
+        "factor": 32,
+        "original_max_position_embeddings": 4096,
+    },
+)
+
+# Validate: needle-in-haystack test before production deployment
+def needle_in_haystack_test(model, tokenizer, target_depth: float = 0.8) -> float:
+    """Place a unique fact at target_depth (0.0=start, 1.0=end) of a long document."""
+    filler = "The company reported quarterly earnings." * 5000  # ~40k tokens
+    needle = "SECRET_CODE: RUTIK-42"
+    tokens = tokenizer.encode(filler)
+    insert_pos = int(len(tokens) * target_depth)
+    needle_tokens = tokenizer.encode(f" {needle} ")
+    full_tokens = tokens[:insert_pos] + needle_tokens + tokens[insert_pos:]
+    # Query the model and check if it retrieves the needle
+    ...
+    return retrieval_accuracy
+```
+
+**Additional interview Q&As:**
+
+**What is the difference between RoPE, ALiBi, and YaRN for positional encoding, and which should you use for 128k context?** RoPE (Rotary Position Embedding) encodes position by rotating query/key vectors in attention; it generalizes to longer sequences but degrades without fine-tuning at extended lengths. ALiBi adds a linear position bias to attention scores (no learned parameters) and extrapolates better than RoPE without retraining, but is less expressive for complex positional patterns. YaRN (Yet Another RoPE extensioN) applies non-uniform scaling across RoPE frequency dimensions and achieves better retrieval accuracy at extended lengths than linear interpolation without requiring full pretraining. For 128k context deployment, YaRN with fine-tuning on long documents is the current best practice.
+
+**What is the "lost in the middle" problem and how do you design around it?** Studies show that LLMs with long context reliably retrieve information near the beginning and end of the context window but miss information buried in the middle (accuracy drops 20-35% for facts at 40-60% depth in a 128k document). Design mitigations: RAG to surface relevant chunks to the beginning of context (structural position), document summarization + structured extraction for critical middle sections, and needle-in-haystack evaluation across depths before production deployment. Do not assume 128k context provides uniform recall across all positions.
+
+**When should you use long context vs RAG for a document analysis application?** Use long context when: the document is small enough to fit (<50% of context window), the task requires synthesizing information across the entire document (holistic analysis), and latency allows (a 100k-token request costs 10x a 10k-token request). Use RAG when: documents exceed context limits, queries target specific sections (retrieval precision outperforms exhaustive attention), or cost per query is a constraint. Hybrid: use RAG to select top-k chunks, then place them in a structured long-context prompt to allow cross-chunk reasoning.
+
+**Quick-reference table:**
+
+| Approach | Best for | Trade-off |
+|---|---|---|
+| Full document in context (long context) | Holistic analysis, synthesis across entire doc | 10-50x cost vs RAG; "lost in the middle" risk; slower TTFT |
+| RAG over document chunks | Specific fact retrieval, Q&A, large doc collections | Misses cross-chunk reasoning; chunk boundary artifacts |
+| Hybrid: RAG + long context reranking | High-value analysis requiring both precision and synthesis | Engineering complexity; two inference calls; requires careful prompt structure |
+| Summary + structured extraction | Regular reporting, monitoring multiple documents | Lossy — misses nuance; requires trusted summarizer model |
+
+**Pitfall — Attention sink causes degraded recall on content in the middle of long contexts.**
+
+```python
+# BROKEN: assume uniform recall across 128k context window
+# Legal contract review: key clause at position 60k-65k of a 128k-token document
+# Model recalls start (attention sink) and end (recency bias) but misses the middle
+
+def review_contract(contract_text: str, question: str) -> str:
+    # Stuffing entire contract as single context — middle sections get low attention
+    prompt = f"Contract:\n{contract_text}\n\nQuestion: {question}"
+    return llm.complete(prompt, max_context=128_000)
+    # Evaluation: recall@middle = 41% vs recall@start = 89%, recall@end = 85%
+
+# FIX: chunk contract into sections with metadata; use RAG to retrieve relevant sections
+def review_contract_rag(contract_path: str, question: str) -> str:
+    chunks = chunk_by_section(contract_path, overlap_tokens=200)
+    relevant = retriever.search(question, chunks, top_k=5)
+    context = "\n\n".join(c.text for c in relevant)
+    return llm.complete(f"Relevant contract sections:\n{context}\n\nQuestion: {question}")
+    # Recall on targeted sections: 91% — matches start-of-context recall
+```
+
+**What is the "lost in the middle" problem and which architectures suffer most?** Research shows that LLMs with standard attention consistently have lower accuracy on relevant information placed in the middle of long contexts versus the beginning or end. This is attributable to attention sink (high attention weight on the first few tokens) and recency bias (high weight on the last few tokens). Models with ALiBi positional encoding tend to have stronger recency bias; RoPE-based models (LLaMA, Mistral) show the same U-shaped recall curve. Mitigation: use RAG to place relevant chunks near the end of the prompt, chunk and retrieve rather than stuff full documents, or use models specifically trained for long-context recall (Gemini 1.5, Claude 3 with long-context training).
+
+**When should you choose a 128k-token context window over a RAG pipeline?** Use a long context window when: the entire document must be coherent (a 50-page report where questions span multiple sections), retrieval recall is unacceptably low (< 80%) for the document type, or latency for chunk retrieval adds unacceptable delay. Use RAG when: documents exceed any context window, you need the freshest information (real-time web search), you need source attribution per sentence, or the cost of processing 128k tokens per query is prohibitive ($0.40-1.28 per query at GPT-4-128k pricing vs. $0.01-0.04 with RAG on a retrieved 4k context).
+
+---
+
+**Quick-reference decision table:**
+
+| Scenario | Recommended approach | Key constraint |
+|---|---|---|
+| < 10k training examples | LoRA / few-shot prompting | Data scarcity |
+| Latency < 100ms required | Quantized model + ONNX Runtime | Throughput > accuracy |
+| Multi-tenant, shared model | System prompt isolation + guardrails | Security boundary |
+| Domain shift from pre-training | Fine-tune with domain data | Catastrophic forgetting risk |
+| Cost reduction (10× target) | Smaller model + prompt optimization | Quality floor |
+
+**Production checklist before shipping an LLM feature:**
+
+- [ ] Latency p99 measured under production load (not just median)
+- [ ] Fallback path tested: what happens when the LLM API is unavailable?
+- [ ] Cost per request calculated at current and 10× scale
+- [ ] Safety/guardrail evaluation on 200 adversarial prompts
+- [ ] Prompt versioned in code and tied to model version in experiment tracker
+- [ ] Human evaluation on 50 random production outputs before launch
+- [ ] Monitoring dashboard live: latency, error rate, cost, quality proxy metric
+
+**Key metric targets for production LLM systems:**
+
+| Metric | Typical target | How to measure |
+|---|---|---|
+| Latency p99 | < 2s for chat, < 500ms for autocomplete | Prometheus histogram |
+| Token cost per request | < $0.01 for most applications | Track input+output tokens × price |
+| Hallucination rate | < 5% on factual tasks | LLM-as-judge on sampled outputs |
+| Context utilization | > 60% of max context used | Avg tokens / max_context |
+| Cache hit rate | > 30% with prompt caching | Cache hit counter / total requests |

@@ -830,3 +830,85 @@ Eight product slices are defined: order status, returns and exchanges, payment a
 - The 6-month target was nearly achieved (89% vs 90%) through the flywheel alone in the LLM components; the final gap was closed by the RAG policy layer, illustrating that fine-tuning and retrieval are complementary rather than competing approaches.
 - The bi-weekly cycle was constrained by A/B test sample size, not by fine-tuning or evaluation time. For an application with 10x the traffic, weekly cycles would be statistically feasible.
 - The per-slice regression gate caught two would-be regressions (month 3 and month 5) that were invisible in aggregate metrics — exactly the pitfall described in Common Pitfalls section 5.
+
+---
+
+**Additional war story — RLHF feedback flywheel gaming: users discovered thumbs-up inflates model confidence:**
+
+A customer support platform collecting thumbs-up/thumbs-down signals to power an RLHF fine-tuning flywheel discovered that 12% of thumbs-up signals came from bots — the product had a public API that power users were scripting to send positive feedback on specific response types. The reward model trained on this corrupted signal learned to over-produce verbose, confident-sounding responses (which received more scripted thumbs-up) while underproducing appropriately uncertain responses. The gaming was detected when CSAT from human agents reviewing escalated conversations started declining even as the thumbs-up rate increased.
+
+```python
+# BROKEN: raw thumbs-up signals fed directly to reward model training
+def collect_feedback(user_id: str, response_id: str, thumbs_up: bool) -> None:
+    db.insert("feedback", {
+        "user_id": user_id,
+        "response_id": response_id,
+        "signal": 1 if thumbs_up else -1,
+        "timestamp": datetime.utcnow(),
+    })
+    # BUG: no validation, rate limiting, or bot detection
+
+# FIX: multi-signal reward with bot detection and signal quality gating
+from collections import defaultdict
+from datetime import datetime, timedelta
+
+class FeedbackCollector:
+    def __init__(self, db, redis_client):
+        self.db = db
+        self.redis = redis_client
+
+    def collect_feedback(
+        self,
+        user_id: str,
+        response_id: str,
+        thumbs_up: bool,
+        session_metadata: dict,
+    ) -> bool:
+        """Returns True if feedback was accepted, False if rejected."""
+        # Rate limit: max 10 feedbacks per user per hour
+        rate_key = f"feedback_rate:{user_id}"
+        count = self.redis.incr(rate_key)
+        if count == 1:
+            self.redis.expire(rate_key, 3600)
+        if count > 10:
+            return False  # silently drop — don't tell bots they're detected
+
+        # Bot detection: require minimum session duration before feedback
+        session_age_seconds = session_metadata.get("session_age_seconds", 0)
+        if session_age_seconds < 30:
+            return False  # bot submitted feedback within 30 seconds of session start
+
+        # Weight signal by user engagement quality
+        user_engagement_score = self._get_user_engagement_score(user_id)
+        weight = min(1.0, user_engagement_score / 100.0)
+
+        self.db.insert("feedback", {
+            "user_id": user_id,
+            "response_id": response_id,
+            "signal": (1 if thumbs_up else -1) * weight,
+            "timestamp": datetime.utcnow(),
+            "accepted": True,
+        })
+        return True
+
+    def _get_user_engagement_score(self, user_id: str) -> float:
+        """Score 0-100 based on session length, return visits, conversion actions."""
+        ...
+```
+
+**Additional interview Q&As:**
+
+**What is the cold start problem in a data flywheel and how do you overcome it for a new LLM product?** The cold start problem: the flywheel needs user feedback to improve the model, but without a high-quality initial model, users won't engage enough to generate useful feedback. Solutions: (1) use a strong frontier model (GPT-4o, Claude) for the first 3-6 months — this generates positive user engagement and collects high-quality implicit feedback even before an open-source model is ready; (2) seed the feedback dataset with human-labeled examples (100-500 expert annotations bootstrap the reward model); (3) collect implicit signals (time-on-response, follow-up questions asked) that don't require explicit user action. Never launch a weak model and hope the flywheel fixes it — the flywheel amplifies the baseline quality, it doesn't replace it.
+
+**How do you prevent distribution shift from causing feedback flywheel collapse over time?** Feedback flywheel collapse: the model becomes better at generating responses that receive positive feedback (which may diverge from actual quality) rather than better at serving users. Prevention: (1) evaluate the reward model on a held-out set of human preference labels that are refreshed quarterly — if reward model accuracy on fresh human labels declines, the reward model is overfit to gamed or shifted signals; (2) maintain a "canary" intent category where you manually review 100% of responses and score them against a rubric — if canary scores diverge from thumbs-up rate, the feedback signal is drifting; (3) add explicit "I'm not sure" or "I need to check" response options and track whether their frequency stays calibrated over time.
+
+**What is the typical ROI calculation for investing in a continuous learning flywheel vs staying on a static model?** Calculate: (1) baseline LLM API cost per month (e.g., $50K/month on GPT-4o); (2) cost of self-hosted fine-tuned model (training: $5K/run monthly; serving: $8K/month for GPU cluster); (3) quality improvement from fine-tuning (measure as resolution rate increase or CSAT improvement, then convert to revenue impact: 5% resolution rate improvement × $200 avg ticket cost × 10,000 tickets/month = $100K/month saved in human agent costs). Flywheel ROI is typically positive at >10,000 queries/day and measurable quality improvement >5%. Below 1,000 queries/day, the signal volume is too low for reliable reward model training, and the flywheel does not converge.
+
+**Quick-reference table:**
+
+| Signal type | Collection cost | Signal quality | Best for |
+|---|---|---|---|
+| Explicit thumbs-up/down | Low (UI widget) | Medium (gameable; selection bias) | High-volume consumer products; requires bot detection |
+| Implicit dwell time + follow-ups | Near-zero (server logs) | High (hard to game at scale) | Any product with session tracking; no UI changes required |
+| Agent/human correction (edited outputs) | Low (log edit events) | Very high (exact quality signal) | Products where users refine outputs (writing, code, emails) |
+| Expert annotation (human labelers) | High ($0.50-2.00/label) | Highest (ground truth) | Seed dataset; reward model training; quarterly calibration |

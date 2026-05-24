@@ -449,33 +449,434 @@ Model collapse occurs when a model trained on outputs from itself or similar mod
 
 ---
 
-## 14. Case Study: Building a Customer Support Fine-Tuning Dataset
 
-**Goal:** Create 50K instruction-following examples for a customer support domain (SaaS product).
+## 14. Case Study
 
-**Approach:**
+**Scenario:** A legal tech company fine-tunes Mistral-7B-Instruct for legal contract clause extraction and classification. The domain is highly specialized (M&A contracts, IP licensing, employment agreements). Human-annotated data: 800 examples (6 months of paralegal annotation, $120k cost). Goal: generate 100k instruction-tuning pairs to reach 50k+ effective training examples after quality filtering, at < $5,000 total synthetic data cost.
 
-**Phase 1: Seed Data (1K examples)**
-- Export 500 real resolved support tickets (anonymized)
-- Rewrite into (instruction, response) format manually: 200 human-annotator hours
+**Architecture:**
 
-**Phase 2: Evol-Instruct Expansion (50K → 200K raw)**
-- For each of 1K seeds, generate 5 evolved variants
-- Operators: more complex issue, multi-step problem, edge case, non-native English user, API-related
-- Model: GPT-4, temperature=0.8
+```
+  Step 1: Seed Data Collection
+  ┌──────────────────────────────────────────────────────────────┐
+  │  800 human-annotated examples                                │
+  │  + 2,000 unlabeled legal contracts (public domain, EDGAR)   │
+  │  + Legal clause taxonomy (50 clause types from CUAD dataset) │
+  └─────────────────────────────┬────────────────────────────────┘
+                                │
+                                v Step 2: Self-Instruct Pipeline
+  ┌──────────────────────────────────────────────────────────────┐
+  │  Generator: GPT-4o                                           │
+  │  Method: Evol-Instruct (complexity evolution)                │
+  │  Seed prompts → evolved prompts (3 rounds of evolution)      │
+  │  Evolution types: (1) add constraints, (2) deepen reasoning, │
+  │    (3) create adversarial variants, (4) cross-clause combos  │
+  │                                                              │
+  │  Output per seed: 5 evolved variants                         │
+  │  Total generated: 800 × 5 × 3 rounds = 12,000 base pairs    │
+  │  + Open-source legal clause extraction: 30,000 pairs         │
+  │  + Synthetic from unlabeled contracts: 60,000 pairs          │
+  │  Raw total: 102,000 pairs                                    │
+  └─────────────────────────────┬────────────────────────────────┘
+                                │
+                                v Step 3: Quality Filtering
+  ┌──────────────────────────────────────────────────────────────┐
+  │  Filters applied in sequence:                                │
+  │  1. Deduplication: SimHash, threshold=0.85 → remove 8,200   │
+  │  2. Length filter: prompt 20-500 tokens; response 20-1000   │
+  │     → remove 3,100                                          │
+  │  3. Legal accuracy: Mistral-7B-Legal-Instruct scores each   │
+  │     clause extraction → remove if score < 0.6 → -4,800     │
+  │  4. Instruction following: GPT-4o-mini judge checks if      │
+  │     response follows prompt → remove if "no" → -6,200      │
+  │  5. Diversity sampling: cluster by embedding, sample K=2    │
+  │     per cluster → retain 52,000 diverse examples            │
+  │  Final dataset: 52,000 high-quality instruction pairs        │
+  └─────────────────────────────┬────────────────────────────────┘
+                                │
+                                v Step 4: Fine-tuning
+  ┌──────────────────────────────────────────────────────────────┐
+  │  Model: Mistral-7B-Instruct v0.3                             │
+  │  Method: LoRA (r=16, alpha=32) on 52k pairs                 │
+  │  Training: 3 epochs, 1×A100, 8 hours                        │
+  │  Eval: CUAD held-out (100 contracts, 41 clause types)       │
+  └──────────────────────────────────────────────────────────────┘
+```
 
-**Phase 3: Quality Filtering (200K → 50K)**
-- Reward model scoring (trained on 500 human preference pairs): keep top 40%
-- Semantic deduplication (cosine > 0.95): remove 15K redundant
-- Format validation: remove examples with broken JSON or missing required fields
-- Human spot-check: 500 random samples, >90% quality threshold achieved
+**Key implementation — 3 Python code blocks:**
 
-**Phase 4: Verification for Structured Responses**
-- API documentation as ground truth for 30% of examples
-- Verify that generated responses don't contradict official docs
+Block 1 — Evol-Instruct complexity evolution pipeline:
 
-**Results:**
-- Final dataset: 52K high-quality examples
-- Fine-tuned LLaMA 3 8B with LoRA
-- Customer satisfaction score: +22% vs. base model
-- Resolution rate: 73% vs. 51% for base model (fewer escalations to human agents)
+```python
+from __future__ import annotations
+import asyncio
+import json
+from dataclasses import dataclass, field
+from typing import Any
+import anthropic
+
+
+@dataclass
+class SeedExample:
+    instruction: str
+    input_context: str   # contract excerpt
+    output: str          # clause label + explanation
+
+
+@dataclass
+class EvolvedPair:
+    instruction: str
+    input_context: str
+    output: str
+    evolution_type: str
+    generation: int       # evolution round (1, 2, or 3)
+    seed_id: int
+
+
+EVOLUTION_TYPES = [
+    "add_constraint",    # Add legal jurisdictional or temporal constraints
+    "deepen_reasoning",  # Require step-by-step legal reasoning chain
+    "adversarial",       # Create ambiguous clause that tests edge cases
+    "cross_clause",      # Combine multiple clause types in one question
+    "counterfactual",    # "If this clause were absent, what would happen?"
+]
+
+
+async def evolve_instruction(
+    client: anthropic.AsyncAnthropic,
+    seed: SeedExample,
+    evolution_type: str,
+    generation: int,
+    seed_id: int,
+) -> EvolvedPair | None:
+    """Apply one evolution to a seed instruction, producing a harder variant."""
+
+    evolution_prompts = {
+        "add_constraint": f"""Rewrite this legal instruction to add a jurisdictional or temporal constraint that makes it more specific and harder to answer.
+Original instruction: {seed.instruction}
+Original context: {seed.input_context[:500]}
+Make the evolved version require knowledge of a specific legal jurisdiction or time period.
+Return JSON: {{"instruction": "...", "input_context": "...", "output": "..."}}""",
+
+        "deepen_reasoning": f"""Rewrite this instruction to require step-by-step legal reasoning rather than just identification.
+Original instruction: {seed.instruction}
+Add: "Explain the legal implications of this clause step by step, citing the relevant legal standard."
+Return JSON: {{"instruction": "...", "input_context": "...", "output": "..."}}""",
+
+        "adversarial": f"""Create an adversarial variant where the clause is ambiguous or could be classified differently depending on interpretation.
+Original instruction: {seed.instruction}
+Modify the contract context to introduce ambiguity. Response should acknowledge the ambiguity.
+Return JSON: {{"instruction": "...", "input_context": "...", "output": "..."}}""",
+    }
+
+    prompt = evolution_prompts.get(evolution_type, evolution_prompts["add_constraint"])
+
+    try:
+        response = await client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.content[0].text
+        data = json.loads(text)
+        return EvolvedPair(
+            instruction=data["instruction"],
+            input_context=data["input_context"],
+            output=data["output"],
+            evolution_type=evolution_type,
+            generation=generation,
+            seed_id=seed_id,
+        )
+    except (json.JSONDecodeError, KeyError, IndexError):
+        return None
+
+
+async def run_evol_instruct_pipeline(
+    seeds: list[SeedExample],
+    num_rounds: int = 3,
+    evolutions_per_seed: int = 3,
+    concurrency: int = 20,
+) -> list[EvolvedPair]:
+    client = anthropic.AsyncAnthropic()
+    sem = asyncio.Semaphore(concurrency)
+    all_pairs: list[EvolvedPair] = []
+
+    async def evolve_with_sem(seed: SeedExample, etype: str, gen: int, sid: int) -> None:
+        async with sem:
+            pair = await evolve_instruction(client, seed, etype, gen, sid)
+            if pair:
+                all_pairs.append(pair)
+
+    current_gen = [(i, s) for i, s in enumerate(seeds)]
+    for round_num in range(1, num_rounds + 1):
+        tasks = []
+        for seed_id, seed_example in current_gen:
+            import random
+            etypes = random.sample(EVOLUTION_TYPES, min(evolutions_per_seed, len(EVOLUTION_TYPES)))
+            for etype in etypes:
+                tasks.append(evolve_with_sem(seed_example, etype, round_num, seed_id))
+        await asyncio.gather(*tasks)
+        # Use evolved pairs as seeds for next round
+        current_gen = [
+            (p.seed_id, SeedExample(p.instruction, p.input_context, p.output))
+            for p in all_pairs
+            if p.generation == round_num
+        ]
+
+    return all_pairs
+```
+
+Block 2 — Quality filtering pipeline with LLM-as-judge (production concern):
+
+```python
+from __future__ import annotations
+import hashlib
+import numpy as np
+from dataclasses import dataclass
+from typing import Any
+import anthropic
+
+
+@dataclass
+class QualityScore:
+    instruction_clarity: float      # 0.0 - 1.0
+    response_accuracy: float        # 0.0 - 1.0
+    instruction_following: float    # 0.0 - 1.0
+    overall: float                  # weighted average
+    keep: bool                      # final keep/discard decision
+
+
+async def score_pair_quality(
+    client: anthropic.AsyncAnthropic,
+    instruction: str,
+    context: str,
+    response: str,
+) -> QualityScore:
+    """
+    Use Claude claude-haiku-4-5 as judge (fast, cheap) for quality scoring.
+    GPT-4o-mini as judge: $0.15/1M tokens; 100k pairs × ~500 tokens = $7.50 total.
+    Haiku: $0.25/1M input; 100k × 500 = $12.50 total. Acceptable.
+    """
+    judge_prompt = f"""Rate this legal instruction-tuning pair on three dimensions (0.0-1.0 each):
+
+Instruction: {instruction}
+Context: {context[:300]}
+Response: {response[:300]}
+
+1. instruction_clarity: Is the instruction clear and specific? (1.0 = very clear)
+2. response_accuracy: Is the legal response accurate and well-grounded? (1.0 = accurate)
+3. instruction_following: Does the response follow the instruction? (1.0 = follows exactly)
+
+Return only JSON: {{"instruction_clarity": 0.0, "response_accuracy": 0.0, "instruction_following": 0.0}}"""
+
+    try:
+        resp = await client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=100,
+            messages=[{"role": "user", "content": judge_prompt}],
+        )
+        import json
+        scores = json.loads(resp.content[0].text)
+        clarity = float(scores.get("instruction_clarity", 0))
+        accuracy = float(scores.get("response_accuracy", 0))
+        following = float(scores.get("instruction_following", 0))
+        overall = 0.3 * clarity + 0.4 * accuracy + 0.3 * following
+        return QualityScore(
+            instruction_clarity=clarity,
+            response_accuracy=accuracy,
+            instruction_following=following,
+            overall=overall,
+            keep=overall >= 0.7,  # threshold: discard bottom 30%
+        )
+    except Exception:
+        return QualityScore(0.5, 0.5, 0.5, 0.5, keep=False)
+
+
+def simhash_dedup(texts: list[str], threshold: float = 0.85) -> list[bool]:
+    """
+    Near-duplicate detection using SimHash.
+    Returns boolean mask: True = keep, False = duplicate.
+    Threshold 0.85: pairs with >85% similar shingles are duplicates.
+    """
+    from datasketch import MinHash, MinHashLSH
+
+    lsh = MinHashLSH(threshold=threshold, num_perm=128)
+    keep_flags = [True] * len(texts)
+
+    for i, text in enumerate(texts):
+        mh = MinHash(num_perm=128)
+        for shingle in _get_shingles(text, k=5):
+            mh.update(shingle.encode("utf8"))
+        try:
+            neighbors = lsh.query(mh)
+            if neighbors:
+                keep_flags[i] = False   # duplicate
+            else:
+                lsh.insert(str(i), mh)
+        except Exception:
+            pass
+
+    return keep_flags
+
+
+def _get_shingles(text: str, k: int = 5) -> list[str]:
+    words = text.lower().split()
+    return [" ".join(words[i:i+k]) for i in range(len(words) - k + 1)]
+```
+
+Block 3 — BROKEN -> FIX: data contamination and distribution mismatch:
+
+```python
+from __future__ import annotations
+
+
+# BROKEN: Generate synthetic data using model responses at temperature=0.
+# All generated responses are deterministic → massive duplication.
+# 100k "generated" pairs → 60k exact duplicates after dedup.
+# Model memorizes a few patterns rather than learning diverse legal reasoning.
+async def broken_generate_deterministic(prompt: str) -> str:
+    import anthropic
+    client = anthropic.AsyncAnthropic()
+    resp = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=512,
+        messages=[{"role": "user", "content": prompt}],
+        # No temperature specified → defaults to model's default (~1.0 or 0 for some)
+    )
+    return resp.content[0].text
+
+
+# FIX: Generate with temperature=0.7-1.0 to encourage diversity.
+# Multiple generations per prompt, then keep highest-quality via judge.
+async def fixed_generate_diverse(prompt: str, n_candidates: int = 3) -> str:
+    import anthropic
+    import asyncio
+    client = anthropic.AsyncAnthropic()
+
+    async def generate_one() -> str:
+        resp = await client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=512,
+            temperature=0.8,    # diversity; range 0.7-1.0 for generation tasks
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.content[0].text
+
+    candidates = await asyncio.gather(*[generate_one() for _ in range(n_candidates)])
+    # Score each candidate, keep highest quality
+    # (simplified — production uses the judge function above)
+    return max(candidates, key=len)   # length heuristic; replace with judge score
+
+
+# BROKEN: Use public contract text verbatim as training context.
+# EDGAR public contracts contain company names, deal values, party identities.
+# Fine-tuned model memorizes real company data → privacy risk + hallucination
+# when generating responses about company-specific clauses.
+def broken_use_raw_edgar_context(contract_text: str) -> str:
+    return contract_text  # raw, contains PII and real company names
+
+
+# FIX: Anonymize contract text before including in training data.
+# Replace: company names → [COMPANY_A], [COMPANY_B]
+# Dollar amounts → [AMOUNT]
+# Dates → [DATE]
+# Person names → [INDIVIDUAL]
+import re
+def fixed_anonymize_contract(contract_text: str) -> str:
+    text = re.sub(r'\b[A-Z][a-z]+ [A-Z][a-z]+\b', '[INDIVIDUAL]', contract_text)
+    text = re.sub(r'\$[\d,]+(?:\.\d{2})?', '[AMOUNT]', text)
+    text = re.sub(r'\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b', '[DATE]', text)
+    # Company name patterns (simplified — production uses NER model)
+    text = re.sub(r'\b[A-Z][A-Za-z]+ (?:Inc\.|LLC|Corp\.|Ltd\.)\b', '[COMPANY]', text)
+    return text
+
+
+# BROKEN: Skip validation of synthetic data against human expert gold set.
+# 15% of GPT-4o-generated legal clause labels are incorrect for jurisdiction-specific nuances.
+# Fine-tuned model inherits these errors → 15% lower accuracy on held-out test.
+def broken_accept_all_synthetic(pairs: list[dict]) -> list[dict]:
+    return pairs   # no validation
+
+
+# FIX: Random sample 5% (2,500 pairs) for human expert validation.
+# If expert accuracy < 92% on sampled set, reject entire batch and investigate.
+import random
+def fixed_sample_for_human_validation(
+    pairs: list[dict], sample_rate: float = 0.05
+) -> list[dict]:
+    n = max(100, int(len(pairs) * sample_rate))
+    return random.sample(pairs, min(n, len(pairs)))
+```
+
+**Pitfall 1 — Diversity collapse from insufficient seed diversity:**
+
+```python
+# BROKEN: 800 seeds are all from M&A contracts.
+# Evol-Instruct generates 12,000 evolved pairs — all M&A variants.
+# Fine-tuned model: 94% accuracy on M&A clauses, 41% on employment clauses.
+# Task diversity was never introduced — evolution amplifies existing coverage gaps.
+
+# FIX: Ensure seed set covers all target clause types before evolution.
+# CUAD has 41 clause types; seeds must have ≥ 15 examples per clause type.
+# Check coverage before evolution: if any clause type < 15 examples, augment seeds first.
+def check_seed_coverage(seeds: list[dict], min_per_type: int = 15) -> dict[str, int]:
+    from collections import Counter
+    type_counts = Counter(s.get("clause_type") for s in seeds)
+    return {t: c for t, c in type_counts.items() if c < min_per_type}
+```
+
+**Pitfall 2 — Model collapse when fine-tuning on self-generated data without anchoring:**
+
+```python
+# BROKEN: Fine-tune exclusively on 100k synthetic pairs, discarding 800 human examples.
+# Model performance on human-annotated test set: F1 drops from 0.79 to 0.68.
+# Self-generated data amplifies the generator model's biases and errors.
+
+# FIX: Always mix human-annotated gold data with synthetic data.
+# Recommended ratio: 10-20% human gold + 80-90% synthetic.
+# Human data acts as an anchor, preventing distribution drift.
+def build_training_dataset(
+    human_pairs: list[dict],         # 800 gold pairs
+    synthetic_pairs: list[dict],     # 52,000 filtered synthetic
+    human_oversample_factor: int = 6,  # sample human data 6× to get ~18% of dataset
+) -> list[dict]:
+    human_repeated = human_pairs * human_oversample_factor   # 4,800 samples
+    combined = human_repeated + synthetic_pairs               # 56,800 total
+    import random
+    random.shuffle(combined)
+    return combined
+```
+
+**Metrics:**
+
+| Metric | Human-only (800 pairs) | + Synthetic (52k pairs) | Cost |
+|--------|----------------------|------------------------|------|
+| CUAD F1 (all clause types) | 0.71 | 0.84 | — |
+| Rare clause types F1 | 0.45 | 0.76 | — |
+| Jurisdiction-specific accuracy | 0.62 | 0.79 | — |
+| Annotation cost | $120k | $3,800 (generation + judge) | — |
+| Training time (1×A100) | 45 min | 8 hours | — |
+| Diversity (distinct instruction n-grams) | 12,400 | 187,000 | — |
+| Dedup removal rate | — | 8.4% | — |
+| Judge filter removal rate | — | 22.7% | — |
+| Final dataset size after filtering | 800 | 52,000 | — |
+
+**Interview Q&As:**
+
+**Q: What is Evol-Instruct and how does it improve instruction diversity?**
+Evol-Instruct (Xu et al. 2023, WizardLM) systematically evolves simple seed instructions into more complex, diverse variants using an LLM. Evolution types include: adding constraints, deepening reasoning requirements, creating adversarial variants, combining multiple concepts, and generating counterfactuals. Each seed generates 5 evolved variants; variants are used as seeds for the next round. The result is exponential growth in instruction complexity and diversity from a small seed set. WizardLM showed that 70k evolved pairs outperformed 175k random instructions on Alpaca benchmarks.
+
+**Q: Why is quality filtering more important than quantity for synthetic data?**
+LIMA (Zhou et al. 2023) demonstrated that 1,000 carefully curated examples outperform 50,000 randomly collected examples — the "less is more" finding for instruction tuning. Low-quality synthetic pairs (factual errors, instruction-following failures, near-duplicates) degrade fine-tuning by introducing noisy gradients that overwrite correct learned behaviors. The filtering pipeline (deduplication → length filter → LLM judge → diversity sampling) typically removes 40-60% of generated data, but the remaining dataset produces significantly better models. Target: precision over recall — it is better to have 50k high-quality pairs than 100k mixed-quality pairs.
+
+**Q: How do you prevent data contamination when using public legal documents as training context?**
+Four techniques: (1) Anonymization — replace company names, person names, dates, and financial figures with generic placeholders before including text in training data; (2) Jurisdictional generalization — rewrite clauses to remove jurisdiction-specific identifiers; (3) Train-test split by document — never include any excerpt from a test document in training data; (4) Decontamination check — embed all test prompts and filter training pairs with cosine similarity > 0.9 to any test prompt. For healthcare and legal AI, data contamination is both a quality problem (model memorizes rather than generalizes) and a compliance problem (PII in training data).
+
+**Q: What is the role of the LLM judge in synthetic data quality filtering?**
+The LLM judge (typically a capable model like GPT-4o-mini or Claude Haiku) evaluates generated pairs on instruction clarity, response accuracy, and instruction-following adherence. It provides a cheap (~$0.15/1M tokens) proxy for human evaluation at scale. Key considerations: (1) The judge should be different from (or larger than) the generator to avoid sycophancy bias; (2) Prompt the judge with rubrics, not just "is this good?"; (3) Validate judge scores against human ratings on a 500-pair sample — judge should achieve > 85% agreement. Judge filtering typically removes 20-30% of generated data, disproportionately removing the worst examples.
+
+**Q: How do you measure if synthetic data has improved the model versus just increased dataset size?**
+Three controlled experiments: (1) Data ablation — train with 800 human pairs, 800 + 10k synthetic, 800 + 52k synthetic; plot F1 vs dataset size. If curve flattens, more synthetic data is not helping. (2) Quality vs quantity — compare 20k filtered pairs vs 50k unfiltered pairs; higher-quality smaller dataset should win. (3) Distribution analysis — compute embedding cosine similarity between synthetic training pairs and test pairs; if similarity is low (< 0.6), synthetic data may not cover test distribution. Key metric: held-out F1 on human-annotated test set (not synthetic eval) — this is the ground truth measure of real-world quality.
+
+**Q: Why should you always mix human-annotated data with synthetic data rather than replacing it?**
+Synthetic data is generated by a model that has its own systematic biases, hallucination patterns, and coverage gaps. Fine-tuning exclusively on self-generated data amplifies these biases through a feedback loop — the fine-tuned model inherits the generator's failure modes. Human-annotated data acts as a calibration anchor: it represents real-world task distribution, captures edge cases humans specifically flagged, and contains correct labels for the hardest examples. The optimal mix is typically 10-20% human gold + 80-90% synthetic — enough human data to anchor the distribution without the cost of annotating at full scale.

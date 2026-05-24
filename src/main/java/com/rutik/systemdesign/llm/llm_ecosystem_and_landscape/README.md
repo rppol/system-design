@@ -697,3 +697,75 @@ Payback period: < 1 month
 - The 77% cost reduction is only realized if the classifier accurately routes queries — a 10% misroute rate on long-form queries to cheap models reduces output quality for those sessions
 - Domain evaluation was essential: initial assumption was gpt-4o would win on long-form; the 100-sample domain eval revealed claude-3.5-sonnet was consistently preferred by users on narrative continuity and brand voice adherence
 - The style analysis fine-tune required 500 labeled examples and 2 days of engineering; ROI was immediate since it replaced a manual human review step that was costing $1,500/month in contractor time
+
+---
+
+**Additional war story — Model selection framework failure: startup chose GPT-4 for a latency-sensitive use case without benchmarking:**
+
+A startup selected GPT-4 for an e-commerce product description generator that needed to produce 200-word descriptions in under 3 seconds per item for real-time PDP (Product Detail Page) generation. After launch, P95 latency was 7.2 seconds — unacceptable. The team had evaluated GPT-4 quality (excellent) but not latency at their prompt length (average 1,800 input tokens + 300 output tokens). The fix required switching to GPT-4o-mini (P95: 1.8 seconds) with quality maintained at 94% of GPT-4 via few-shot prompting. The 4-week migration cost $80,000 in engineering time that a 2-day benchmarking exercise would have prevented.
+
+```python
+# BROKEN: model selection based on quality only — no latency or cost benchmarking
+def select_model_naive(task: str) -> str:
+    # "GPT-4 is the best model, use it for everything"
+    return "gpt-4"
+
+# FIX: structured model selection with latency, cost, and quality benchmarking
+import time
+import statistics
+from openai import OpenAI
+
+client = OpenAI()
+
+def benchmark_model(
+    model: str,
+    test_prompts: list[dict],
+    quality_eval_fn,  # function(prompt, response) -> float [0, 1]
+    n_runs: int = 20,
+) -> dict:
+    latencies, costs, quality_scores = [], [], []
+    for prompt_data in test_prompts[:n_runs]:
+        start = time.monotonic()
+        response = client.chat.completions.create(
+            model=model,
+            messages=prompt_data["messages"],
+            max_tokens=prompt_data.get("max_tokens", 512),
+        )
+        elapsed = time.monotonic() - start
+        latencies.append(elapsed)
+        # Approximate cost (update pricing per provider)
+        input_tokens = response.usage.prompt_tokens
+        output_tokens = response.usage.completion_tokens
+        costs.append(input_tokens * 0.000002 + output_tokens * 0.000006)  # GPT-4o pricing
+        quality_scores.append(quality_eval_fn(prompt_data, response.choices[0].message.content))
+
+    return {
+        "model": model,
+        "p50_latency_s": statistics.median(latencies),
+        "p95_latency_s": statistics.quantiles(latencies, n=20)[18],
+        "avg_cost_per_call": statistics.mean(costs),
+        "avg_quality_score": statistics.mean(quality_scores),
+        "cost_per_quality_point": statistics.mean(costs) / statistics.mean(quality_scores),
+    }
+
+# Run for all candidate models before committing
+models = ["gpt-4o", "gpt-4o-mini", "claude-3-5-sonnet-20241022", "claude-3-haiku-20240307"]
+results = [benchmark_model(m, test_prompts, quality_eval_fn) for m in models]
+```
+
+**Additional interview Q&As:**
+
+**How do you build a vendor-neutral model evaluation framework that works across OpenAI, Anthropic, and Google models?** Use a common interface that abstracts provider-specific APIs behind a unified `generate(messages, model_config) -> str` function. LiteLLM is the standard library for this — it provides an OpenAI-compatible interface over 100+ models. Evaluation metrics should be computed on model outputs, not via provider-specific APIs (avoid using OpenAI's moderation endpoint to evaluate Anthropic models). Maintain a shared test harness that: (1) runs the same prompts across all candidates; (2) uses a fixed random seed for reproducibility; (3) stores raw responses for human review; (4) computes quality scores with an independent judge model or human annotators.
+
+**What factors determine whether a startup should use an API model vs self-host an open-source model?** Use API models when: monthly token volume is below 50M tokens/day (self-hosting A100 costs ~$30K/month and breaks even only above this volume), team lacks ML ops expertise, model needs regular updates (API providers push updates automatically), or regulatory requirements allow cloud processing. Self-host when: data residency or privacy requirements prohibit cloud APIs, monthly API cost exceeds $30K (break-even for one A100), you need a fine-tuned model that providers don't offer, or you need <100ms P99 latency that even the fastest APIs can't deliver due to network overhead.
+
+**How should you handle model deprecation risk when building a production system on a specific model version?** Always pin to a specific model version (e.g., `gpt-4o-2024-11-20` not `gpt-4o`), which providers typically maintain for 6-12 months after deprecation notice. Store all production prompts in a version-controlled prompt registry so that when a model version is deprecated, you can re-evaluate all prompts against the replacement model. Build an abstraction layer that maps logical model names to current physical version strings — updating a single config file migrates all features simultaneously. Budget one engineering sprint per year for model migration as a recurring cost.
+
+**Quick-reference table:**
+
+| Selection criterion | Favors | Against |
+|---|---|---|
+| P95 latency < 2 seconds | GPT-4o-mini, Claude Haiku, Gemini Flash | GPT-4o, Claude Sonnet/Opus at high input token count |
+| Best-in-class quality for complex reasoning | Claude Sonnet 3.5, GPT-4o, Gemini Ultra | Smaller models regardless of prompt engineering |
+| Cost < $0.001 per 1k tokens (combined I/O) | GPT-4o-mini, Claude Haiku, Gemini Flash | All frontier models (GPT-4o, Claude Opus, Gemini Ultra) |
+| HIPAA / data residency compliance | Azure OpenAI, self-hosted open-source | OpenAI API, Anthropic API (standard tier) |

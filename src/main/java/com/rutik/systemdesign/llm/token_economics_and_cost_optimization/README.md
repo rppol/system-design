@@ -1029,3 +1029,66 @@ which required one week of instrumentation work before any optimization was poss
 
 The general lesson: measure before optimizing. The instinct to move to self-hosting is almost
 always wrong at sub-200M tokens/day, and always wrong without first exhausting API-tier optimizations.
+
+---
+
+**Additional war story — Prompt caching cache miss spike after system prompt update causing 3x cost overrun:**
+
+A RAG product with a static 2,000-token system prompt relied on Anthropic's prompt caching to reduce costs by 90% (cache hit rate was 97%). An engineer updated the system prompt to add a disclaimer sentence. Because the new prompt differed in the first 2,000 tokens, all cached prefixes were invalidated simultaneously — every request was a cache miss for the next 5 minutes (until the cache warmed up again). During those 5 minutes, 10,000 requests × 2,000 tokens × $3/MTok = $60 in un-cached input costs (vs $6 with cache). Over a full week of prompt updates (3 updates per week), un-cached costs added $180/week — invisible in the monthly bill but attributable to the practice of updating system prompts without cache warmup strategy.
+
+```python
+# BROKEN: system prompt updated without cache warmup — spike in un-cached costs
+def update_system_prompt(new_prompt: str) -> None:
+    config["system_prompt"] = new_prompt  # BUG: invalidates all cached prefixes instantly
+
+# FIX: gradual rollout with cache pre-warming before switching all traffic
+import anthropic
+import time
+
+client = anthropic.Anthropic()
+
+def warm_prompt_cache(new_prompt: str, n_warmup_requests: int = 10) -> None:
+    """Pre-warm the cache for new_prompt before routing live traffic to it."""
+    for i in range(n_warmup_requests):
+        client.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=1,  # minimal output — just warming the cache
+            system=[{
+                "type": "text",
+                "text": new_prompt,
+                "cache_control": {"type": "ephemeral"},  # mark for caching
+            }],
+            messages=[{"role": "user", "content": "ping"}],
+        )
+        time.sleep(0.1)  # avoid rate limiting
+
+def safe_prompt_update(new_prompt: str) -> None:
+    """Update system prompt with cache warmup — eliminates cost spike."""
+    print(f"Warming cache for new prompt ({len(new_prompt)} chars)...")
+    warm_prompt_cache(new_prompt, n_warmup_requests=20)
+    print("Cache warmed. Switching traffic to new prompt.")
+    config["system_prompt"] = new_prompt
+
+# Monitor cache hit rate as a cost metric
+def get_cache_hit_rate_from_logs(traces: list[dict]) -> float:
+    total_input_tokens = sum(t["usage"]["input_tokens"] for t in traces)
+    cached_tokens = sum(t["usage"].get("cache_read_input_tokens", 0) for t in traces)
+    return cached_tokens / total_input_tokens if total_input_tokens > 0 else 0.0
+```
+
+**Additional interview Q&As:**
+
+**How do you calculate the break-even point for using the Anthropic Batch API vs real-time API for a RAG product with 1M requests/day?** Batch API pricing is 50% of real-time API pricing but requires 24-hour turnaround. For a RAG product with 1M requests/day at average 1,500 input + 200 output tokens: real-time cost = 1M × (1,500 × $3/MTok + 200 × $15/MTok) = $4,500 + $3,000 = $7,500/day. Batch cost = $3,750/day, saving $3,750/day ($1.37M/year). The break-even analysis is straightforward: if ANY requests can tolerate 24-hour latency (e.g., nightly report generation, batch document analysis, training data generation), use Batch API for those. For a RAG product, 30-40% of requests are typically batch-eligible (back-office workflows, scheduled reports), yielding $1,000-1,500/day in savings.
+
+**What is the optimal chunking strategy to maximize prompt cache hit rate in a RAG system?** Maximize the static portion of the prompt (system prompt + boilerplate context) and minimize the dynamic portion (user query + retrieved chunks). Structure: static system prompt (2,000+ tokens, always cached) → optional static RAG preamble (500 tokens, cached) → dynamic retrieved chunks (varies per query, not cached) → user message. Ensure retrieved chunks are appended after the cached prefix, not interleaved within it, because any modification to the cached prefix invalidates it. With this structure, 60-70% of total input tokens are in the cached prefix, reducing effective input cost by 60-70%.
+
+**How do you implement a token budget controller for a multi-turn conversation to prevent runaway costs for heavy users?** Implement a per-user daily token budget with three enforcement tiers: (1) soft limit (80% of budget): add a reminder to the system prompt encouraging concise responses; (2) warning limit (95% of budget): notify the user via UI that they are approaching their limit; (3) hard limit (100% of budget): reduce max_tokens to 100 and inject a system instruction to summarize and end the conversation. Track token usage per user per day using a Redis counter (key: `token_budget:{user_id}:{date}`, expire at midnight). For free-tier users, set max daily budget at 50,000 tokens (approximately 200 average conversations). For paid users, set at 500,000 tokens. Monitor the distribution of budget consumption — if >5% of free users hit the hard limit daily, the budget may be set too low for the use case.
+
+**Quick-reference table:**
+
+| Optimization | Cost reduction | Implementation effort | Latency impact |
+|---|---|---|---|
+| Prompt caching (static system prompt) | 50-90% on input tokens for cached prefix | Low — add `cache_control` flag | Near-zero (cache hit adds <5ms) |
+| Batch API for async workflows | 50% across all tokens | Low — change API endpoint | High — 24-hour SLA only |
+| Model cascade (cheap model first) | 30-60% | Medium — need quality gate logic | Adds 200-500ms for classifier |
+| Output token budgeting (max_tokens) | 10-30% | Low — set max_tokens conservatively | Reduces quality if set too low |

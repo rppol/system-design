@@ -453,3 +453,114 @@ Query pipeline:
 - Engineers spend 40% less time on feature implementation
 - Generated code passes code review 73% of the time on first try (vs. estimate of 30% expected)
 - Time to implement a new CRUD endpoint: 8 minutes (vs. 45 minutes before)
+
+---
+
+**Additional war story — FIM context window overflow crashing the extension at scale:**
+
+A 20k-user IDE extension was sending the entire open file as prefix to the FIM model. On files over 8,000 tokens (common in generated code), the combined prefix + suffix + completion window exceeded the model's 8,192-token limit, returning a 400 error that the extension silently swallowed — users saw no completion at all. Detection came from a 14% drop in weekly active users, not from alerts.
+
+```python
+# BROKEN: naive FIM prompt construction — no token budget enforcement
+def build_fim_prompt(prefix: str, suffix: str, max_tokens: int = 256) -> str:
+    return f"<PRE>{prefix}<SUF>{suffix}<MID>"  # can exceed 8192 tokens total
+
+# FIX: truncate prefix from the left (keep code closest to cursor)
+def build_fim_prompt_safe(
+    prefix: str,
+    suffix: str,
+    tokenizer,
+    model_context: int = 8192,
+    completion_budget: int = 256,
+    suffix_budget: int = 512,
+) -> str:
+    suffix_tokens = tokenizer.encode(suffix)[:suffix_budget]
+    overhead = 20  # special tokens
+    prefix_budget = model_context - completion_budget - len(suffix_tokens) - overhead
+    prefix_tokens = tokenizer.encode(prefix)[-prefix_budget:]  # keep tail (near cursor)
+    prefix_str = tokenizer.decode(prefix_tokens)
+    suffix_str = tokenizer.decode(suffix_tokens)
+    return f"<PRE>{prefix_str}<SUF>{suffix_str}<MID>"
+```
+
+**Why left-truncate prefix, not right-truncate?** Code immediately before the cursor is far more predictive of the next token than code at the top of the file (imports, class declarations seen earlier). Always keep the suffix tail and the prefix tail closest to the cursor.
+
+**Additional interview Q&As:**
+
+**What is Fill-in-Middle (FIM) and why does it outperform left-to-right generation for code completions?** FIM trains the model to predict a middle span given prefix and suffix context, which maps directly to IDE completions where the cursor is in the middle of a file. Left-to-right generation lacks suffix context, causing completions that contradict code written below the cursor (e.g., returning the wrong type). FIM models on HumanEval-Infilling benchmarks show 12-18% accuracy improvement over autoregressive-only baselines.
+
+**How do you measure the quality of code completions in production without running every suggestion through tests?** Use acceptance rate as a leading indicator (target >30%) and post-acceptance edit distance as a lagging quality metric. A completion accepted and immediately deleted within 5 seconds has near-zero value; a completion accepted and left unmodified for 60+ seconds is a high-quality signal. Segment by language, file type, and trigger context (line-end vs mid-line) to find quality gaps.
+
+**What is the latency budget for an IDE inline completion, and how do you hit it?** Users perceive latency above 200ms as sluggish for inline completions. The budget is: network RTT (20-50ms) + tokenization (2ms) + model inference (100-140ms at FP8 on A100 with speculative decoding) + decode + streaming first token (10ms). Speculative decoding with a small draft model (e.g., 200M parameter model drafting 4 tokens per step) reduces wall-clock inference from 180ms to 110ms at the cost of 40% more GPU FLOPS.
+
+**Quick-reference table:**
+
+| Approach | Best for | Trade-off |
+|---|---|---|
+| FIM with left-truncated prefix | Inline completions in large files | Loses class-level context at top of file |
+| Repository-level RAG context | Function signature inference, import suggestions | Adds 30-80ms latency per retrieval |
+| Speculative decoding (small draft model) | Hitting <150ms P50 at high RPS | Requires maintaining two model versions; draft model needs retraining when base model updates |
+| Semantic cache for repeated prompts | Boilerplate completions in monorepos | Low hit rate for unique business logic code; adds 10ms cache lookup overhead |
+
+**Pitfall — Accepting LLM code completions without syntax validation causes CI failures.**
+
+```python
+# BROKEN: stream raw LLM output directly to editor without parsing
+async def stream_completion(prompt: str) -> AsyncIterator[str]:
+    async for chunk in llm.stream(prompt):
+        yield chunk.text   # may produce syntactically invalid Python mid-stream
+
+# FIX: validate complete suggestion before inserting into editor
+async def complete_and_validate(prompt: str, language: str) -> str | None:
+    suggestion = await llm.complete(prompt)
+    if language == "python":
+        try:
+            ast.parse(suggestion)    # syntax check before offering completion
+            return suggestion
+        except SyntaxError:
+            return None              # decline to suggest broken code
+```
+
+**How does Fill-in-the-Middle (FIM) differ from left-to-right completion for code?** Standard left-to-right completion predicts tokens after the cursor — useful for appending code. FIM allows the model to see both the code before AND after the cursor, generating the missing middle section. This is essential for completing a function body when the return statement already exists, or filling a gap between two code blocks. Models trained with FIM use special tokens (`<PRE>`, `<SUF>`, `<MID>`) to signal the prefix, suffix, and generation target. GitHub Copilot's Tab completion is FIM; the quality improvement over left-to-right is 15-25% on HumanEval for in-function completions.
+
+**What is the role of a reranker in code generation candidate selection?** Code generation models typically sample N=5-20 candidates (temperature > 0) then rank them. A reranker scores each candidate on: (1) syntactic validity (AST parse passes); (2) type consistency with surrounding code (via language server); (3) test-case pass rate if a unit test oracle is available; (4) CodeBLEU similarity to existing patterns in the codebase. The highest-ranked candidate is shown. This reranking pipeline is why GitHub Copilot's `pass@1` accuracy is significantly higher than raw model `pass@1` — the reranker acts as a cheap verifier.
+
+---
+
+**Quick-reference decision table:**
+
+| Scenario | Recommended approach | Key constraint |
+|---|---|---|
+| < 10k training examples | LoRA / few-shot prompting | Data scarcity |
+| Latency < 100ms required | Quantized model + ONNX Runtime | Throughput > accuracy |
+| Multi-tenant, shared model | System prompt isolation + guardrails | Security boundary |
+| Domain shift from pre-training | Fine-tune with domain data | Catastrophic forgetting risk |
+| Cost reduction (10× target) | Smaller model + prompt optimization | Quality floor |
+
+**Production checklist before shipping an LLM feature:**
+
+- [ ] Latency p99 measured under production load (not just median)
+- [ ] Fallback path tested: what happens when the LLM API is unavailable?
+- [ ] Cost per request calculated at current and 10× scale
+- [ ] Safety/guardrail evaluation on 200 adversarial prompts
+- [ ] Prompt versioned in code and tied to model version in experiment tracker
+- [ ] Human evaluation on 50 random production outputs before launch
+- [ ] Monitoring dashboard live: latency, error rate, cost, quality proxy metric
+
+**Interview Q&A supplement:**
+
+**How do you measure the real-world impact of a code generation feature beyond pass@k?** Track production metrics: (1) acceptance rate — what fraction of shown completions are accepted by developers (industry baseline: 25-35%); (2) retention rate — of accepted completions, how many survive the next commit without modification (high quality = > 70%); (3) time-to-completion — does the developer ship features faster? Measure via A/B test: feature team vs. control team, track story-point velocity over 8 weeks. These business metrics matter more than HumanEval pass@1 for evaluating real impact.
+
+**What is test-driven development integration for code generation agents?** An agentic code generation loop: (1) generate code from the spec; (2) run tests against it; (3) feed failing test output back to the model as context; (4) iterate until tests pass or N retries exceeded. SWE-agent and OpenHands use this pattern and achieve 20-35% solve rate on SWE-bench — dramatically higher than single-shot generation (~2%). The key engineering challenge: sandboxing (tests must run in an isolated environment that can't damage the host), test timeout enforcement (infinite loops in generated code must be killed), and retry budget management (each iteration costs tokens + time).
+
+**Key metric targets for production LLM systems:**
+
+| Metric | Typical target | How to measure |
+|---|---|---|
+| Latency p99 | < 2s for chat, < 500ms for autocomplete | Prometheus histogram |
+| Token cost per request | < $0.01 for most applications | Track input+output tokens × price |
+| Hallucination rate | < 5% on factual tasks | LLM-as-judge on sampled outputs |
+| Context utilization | > 60% of max context used | Avg tokens / max_context |
+| Cache hit rate | > 30% with prompt caching | Cache hit counter / total requests |
+
+**What is repository-level context and why does it outperform file-level completion?** File-level completion sees only the current file. Repository-level systems (Copilot, Cursor) index the entire codebase, retrieve relevant files (similar functions, imported modules, type definitions), and include them in the LLM context. This enables completions that match the project's conventions (variable naming, error handling patterns, custom types). Empirically, repository-level context improves acceptance rate by 8-15% and reduces generated code that references undefined symbols by 60%. The engineering cost: a local embedding index of the codebase (updated on save), a retrieval step per completion request, and careful context budget management to stay within the model's context limit.

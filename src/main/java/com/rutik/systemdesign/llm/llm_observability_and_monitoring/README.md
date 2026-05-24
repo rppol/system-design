@@ -809,3 +809,75 @@ TTFT is measured at the client side -- the time from sending the request to rece
 - Discovered that 30% of conversations could use GPT-4o-mini instead of GPT-4o (quality scores were equivalent for simple billing inquiries), saving $2,400/month
 - Caught a prompt injection attempt within 8 minutes via safety trigger spike alert
 - Total observability cost: $630/month (Langfuse infra $250 + GPU for safety classifier $200 + quality eval LLM calls $180), which is 7.9% of the $8K/month LLM spend
+
+---
+
+**Additional war story — Cost attribution gap: 50-service LLM platform with $40K/month unattributed spend:**
+
+A platform team managing 50 LLM-powered services discovered that 35% of their $115K/month LLM API spend had no service attribution in their Langfuse traces. Engineers had correctly set up Langfuse in 32 services but 18 services were making direct `openai.chat.completions.create()` calls without the callback handler, bypassing tracing entirely. The unattributed spend was discovered only during a budget audit, 4 months after the platform launched. The fix required a wrapper enforcement mechanism — direct SDK calls were blocked at the network layer, forcing all services through the platform's traced gateway.
+
+```python
+# BROKEN: direct OpenAI SDK calls in 18 services bypass observability
+# In service_x/llm_client.py:
+from openai import OpenAI
+client = OpenAI()  # BUG: no tracing, no cost attribution, no rate limiting
+
+def generate_text(prompt: str) -> str:
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.choices[0].message.content
+
+# FIX: enforce all LLM calls through a platform gateway with mandatory tracing
+# platform/llm_gateway.py
+import httpx
+from langfuse import Langfuse
+from functools import wraps
+import os
+
+langfuse = Langfuse(
+    public_key=os.environ["LANGFUSE_PUBLIC_KEY"],
+    secret_key=os.environ["LANGFUSE_SECRET_KEY"],
+)
+
+def traced_completion(service_name: str, feature_name: str):
+    """Decorator that wraps any LLM call with cost attribution tracing."""
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            trace = langfuse.trace(
+                name=f"{service_name}/{feature_name}",
+                metadata={"service": service_name, "feature": feature_name},
+            )
+            generation = trace.generation(name="llm_call", model=kwargs.get("model"))
+            try:
+                result = fn(*args, **kwargs)
+                generation.end(output=result, usage=result.usage.__dict__)
+                return result
+            except Exception as e:
+                generation.end(level="ERROR", status_message=str(e))
+                raise
+        return wrapper
+    return decorator
+
+# Network-layer enforcement: route all *.openai.com traffic through gateway proxy
+# In Kubernetes NetworkPolicy: block direct egress to api.openai.com from non-gateway pods
+```
+
+**Additional interview Q&As:**
+
+**How do you implement per-feature cost attribution in a platform serving 50 services, and what granularity should you track?** Track cost at three levels: (1) service level (which microservice made the call); (2) feature level (which product feature within the service); (3) user segment level (free vs paid users, business unit). Use Langfuse trace metadata tags for all three: `{"service": "customer-support", "feature": "intent-classification", "tier": "free"}`. Aggregate cost by these dimensions in a daily dashboard. Without feature-level attribution, you cannot identify which features are over-budget or which are candidates for model downgrade — service-level only is insufficient for cost optimization.
+
+**What is groundedness score monitoring and how do you implement it at scale without evaluating every response?** Groundedness measures whether LLM output claims are supported by retrieved context (for RAG systems) or factual knowledge. Full evaluation (LLM-as-judge checking every response) is too expensive for 100% of traffic. Implementation: sample 5% of production responses stratified by intent category; run a fast groundedness classifier (fine-tuned on NLI datasets like MNLI, ~10ms inference on CPU) to produce a 0-1 score; alert if rolling 7-day average drops below 0.85 per intent category. For critical flows (medical, legal), bump the sampling rate to 20% and use a full LLM judge (Claude Haiku) instead of the NLI classifier.
+
+**How do you distinguish between a model quality regression and a retrieval quality regression in a RAG-based observability system?** Instrument both retrieval and generation separately: log the retrieval recall score (proportion of relevant documents retrieved, measured on a weekly golden query set) and the generation faithfulness score (does the output reflect the retrieved context) independently. If retrieval recall drops but faithfulness stays constant, the retrieval index has a problem (stale data, embedding model update). If retrieval recall is stable but faithfulness drops, the generation model changed (prompt update, model version update) or retrieved documents are being ignored. This two-signal approach was validated in a real incident: a Pinecone index staleness issue was identified in 6 hours instead of days because retrieval recall was monitored separately from output quality.
+
+**Quick-reference table:**
+
+| Metric | What it catches | Collection method | Alert threshold |
+|---|---|---|---|
+| Per-feature cost (daily) | Budget overruns, inefficient model usage | Langfuse span metadata aggregation | >20% week-over-week increase |
+| Groundedness score (sampled 5%) | Hallucination increase, retrieval degradation | NLI classifier on response + context pairs | Rolling 7-day avg < 0.85 |
+| P95 latency per service | Regression in generation speed, batching issues | Distributed tracing span durations | >20% increase over 7-day baseline |
+| Safety trigger rate | Prompt injection spikes, adversarial users | Count of guardrail blocks / total requests | >3x daily baseline |

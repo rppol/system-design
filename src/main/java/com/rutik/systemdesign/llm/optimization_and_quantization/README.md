@@ -709,36 +709,384 @@ A: Knowledge distillation trains a small student model using a large teacher mod
 
 ---
 
-## 14. Case Study: Deploying Mixtral 8x22B at Production Scale
 
-**Problem:** Company wants to serve Mixtral 8x22B (high quality) for enterprise customers. Total params: 141B. At BF16: 282GB — requires 4× H100 80GB, expensive.
+## 14. Case Study
 
-**Optimization strategy:**
+**Scenario:** An AI inference company deploys Llama-3-70B for a code generation product. Current state: FP16 model on 8×A100 80GB (TP=4, 2 replicas), throughput 80 RPS, GPU cost $12,400/month. Goal: apply AWQ 4-bit quantization to reduce GPU count by 50%, maintain MBPP (code benchmark) score within 2% of FP16 baseline, achieve 160+ RPS on reduced hardware, monthly savings > $5,000.
+
+**Architecture:**
+
 ```
-Step 1: AWQ INT4 quantization
-  141B params × 0.5 bytes/param = 70.5GB
-  Fits on 1× H100 80GB (with room for KV cache)
-  Quality check: MMLU 78.6% → 77.2% (acceptable)
+  Llama-3-70B FP16 Baseline:
+  ┌─────────────────────────────────────────────────────────────┐
+  │  8 × A100 80GB (2 replicas × TP=4)                         │
+  │  Model VRAM: 70B × 2 bytes = 140 GB (4 GPUs = 35 GB each)  │
+  │  KV cache: 80 GB per replica (limited by weight footprint)  │
+  │  MBPP score: 62.4%                                          │
+  │  Cost: $12,400/month (8 GPUs × $2/hr × 730 hrs)            │
+  └─────────────────────────────────────────────────────────────┘
+           |
+           v AWQ 4-bit Quantization
+  ┌─────────────────────────────────────────────────────────────┐
+  │  Step 1: Calibration (offline, 4 hours on 1×A100)           │
+  │  - 512 code samples from The Stack dataset                  │
+  │  - Compute per-channel activation scales                    │
+  │  - Find optimal per-group weight clipping (AWQ search)      │
+  │  - Group size: 128 (standard for quality vs speed trade-off)│
+  │                                                              │
+  │  Step 2: Quantization                                        │
+  │  - Weights: INT4 per-group (128 elements per scale factor)  │
+  │  - Activations: FP16 (NOT quantized — quality preservation) │
+  │  - KV cache: FP8 (separate optimization)                    │
+  │  - Output: Llama-3-70B-AWQ (Q4_K_M equivalent)             │
+  │                                                              │
+  │  Step 3: Deployment                                          │
+  │  Model VRAM: 70B × 0.5 bytes = 35 GB (FP4 equiv)           │
+  │  → Fits on 2×A100 per replica with 45 GB for KV cache       │
+  │  → 4×A100 total (2 replicas) vs 8×A100 before              │
+  │  MBPP score: 61.1% (-1.3% — within 2% SLA)                 │
+  │  Throughput: 185 RPS (2.3× vs FP16 on same hardware)        │
+  └─────────────────────────────────────────────────────────────┘
 
-Step 2: Flash Attention 2
-  Max context: 64K tokens
-  Without FA: 64K² × 2 bytes × 56 layers = catastrophic memory
-  With FA: linear memory scaling; manageable
-
-Step 3: Speculative decoding with Mixtral 8x7B as draft
-  Accept rate: 68% for enterprise text generation
-  Speedup: 2.1× throughput improvement
-
-Step 4: vLLM with PagedAttention
-  KV cache: efficiently managed; 60 concurrent users on 1× H100
-
-Final configuration:
-  1× H100 80GB per deployment unit
-  Serve 60 concurrent users with P99 TTFT < 800ms
-  Cost: ~$4/hr → $2,880/month per deployment unit
-
-vs. naive BF16 serving:
-  4× H100 needed (282GB weights)
-  ~$16/hr → $11,520/month per deployment unit
-  4× cost savings
+Quantization Quality Hierarchy (70B code models):
+  FP16 (2 bytes/param): MBPP 62.4% — baseline
+  BF16 (2 bytes/param): MBPP 62.4% — numerically equivalent
+  FP8  (1 byte/param):  MBPP 62.0% (-0.4%) — near-lossless
+  AWQ INT4 (0.5 byte):  MBPP 61.1% (-1.3%) — 4× compression
+  GPTQ INT4 (0.5 byte): MBPP 60.8% (-1.6%) — similar, AWQ wins
+  INT4 naive (0.5 byte): MBPP 58.2% (-4.2%) — unacceptable
+  INT3 (0.375 byte):     MBPP 55.9% (-6.5%) — too lossy for code
 ```
+
+**Key implementation — 3 Python code blocks:**
+
+Block 1 — AWQ quantization with calibration data:
+
+```python
+from __future__ import annotations
+import torch
+from datasets import load_dataset
+from transformers import AutoTokenizer
+from awq import AutoAWQForCausalLM
+
+
+def build_calibration_data(
+    model_id: str,
+    dataset_name: str = "bigcode/the-stack-smol",
+    subset: str = "data/python",
+    n_samples: int = 512,
+    max_seq_len: int = 2048,
+) -> list[str]:
+    """
+    Load domain-representative calibration samples.
+    Use code data (not general text) for a code LLM — calibration data
+    domain matters: wrong calibration data → worse quantization decisions.
+    """
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    dataset = load_dataset(dataset_name, subset, split="train", streaming=True)
+
+    samples: list[str] = []
+    for example in dataset:
+        code = example.get("content", "")
+        if len(code) < 200:  # skip trivial files
+            continue
+        tokens = tokenizer.encode(code, truncation=True, max_length=max_seq_len)
+        if len(tokens) >= 100:   # meaningful length
+            samples.append(tokenizer.decode(tokens))
+        if len(samples) >= n_samples:
+            break
+
+    return samples
+
+
+def quantize_awq(
+    model_id: str,
+    output_dir: str,
+    calibration_samples: list[str],
+    group_size: int = 128,
+    bits: int = 4,
+    zero_point: bool = True,
+) -> None:
+    """
+    Apply AWQ (Activation-aware Weight Quantization) to a model.
+    AWQ finds per-channel scaling factors that minimize quantization error
+    for the most salient weights (those multiplied by large activations).
+
+    group_size=128: balance between granularity and speed.
+      Smaller groups (64) → better quality, more scale factors stored (+4% model size).
+      Larger groups (256) → worse quality, fewer scale factors.
+    bits=4: standard INT4, 4× compression vs FP16.
+    zero_point=True: asymmetric quantization (slightly better quality than symmetric).
+    """
+    model = AutoAWQForCausalLM.from_pretrained(
+        model_id,
+        device_map="auto",
+        torch_dtype=torch.float16,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    quant_config = {
+        "zero_point": zero_point,
+        "q_group_size": group_size,
+        "w_bit": bits,
+        "version": "GEMM",   # GEMM kernel for A100/H100; use GEMV for single-token decode
+    }
+
+    model.quantize(
+        tokenizer,
+        quant_config=quant_config,
+        calib_data=calibration_samples,
+    )
+    model.save_quantized(output_dir)
+    tokenizer.save_pretrained(output_dir)
+    print(f"AWQ INT4 model saved to {output_dir}")
+    print(f"Model size: {_estimate_size_gb(model_id, bits)} GB")
+
+
+def _estimate_size_gb(model_id: str, bits: int) -> float:
+    """Estimate quantized model size."""
+    param_billions = float(model_id.split("-")[2].replace("B", "").replace("b", ""))
+    bytes_per_param = bits / 8
+    return param_billions * 1e9 * bytes_per_param / 1e9
+```
+
+Block 2 — Flash Attention 2 integration and latency benchmarking (production concern):
+
+```python
+from __future__ import annotations
+import time
+import statistics
+from dataclasses import dataclass
+import torch
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.sampling_params import SamplingParams
+from vllm.utils import random_uuid
+
+
+@dataclass
+class LatencyBenchmark:
+    p50_ttft_ms: float
+    p99_ttft_ms: float
+    p50_decode_ms_per_token: float
+    p99_decode_ms_per_token: float
+    throughput_rps: float
+    mbpp_score: float    # from separate eval run
+
+
+def build_awq_engine(model_dir: str, tensor_parallel: int = 2) -> AsyncLLMEngine:
+    """
+    Load AWQ-quantized model in vLLM.
+    vLLM natively supports AWQ: quantization="awq" loads INT4 weights,
+    uses GEMM kernel for prefill and decode.
+    TP=2 for 35 GB quantized model (fits on 2×A100 with KV headroom).
+    """
+    args = AsyncEngineArgs(
+        model=model_dir,
+        quantization="awq",               # AWQ INT4
+        tensor_parallel_size=tensor_parallel,
+        max_model_len=8192,
+        gpu_memory_utilization=0.92,
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
+        kv_cache_dtype="fp8",             # FP8 KV cache saves additional 50% KV memory
+        use_v2_block_manager=True,
+    )
+    return AsyncLLMEngine.from_engine_args(args)
+
+
+async def latency_benchmark(
+    engine: AsyncLLMEngine,
+    prompts: list[str],
+    max_new_tokens: int = 256,
+) -> LatencyBenchmark:
+    """Measure TTFT and decode latency distribution."""
+    import asyncio
+
+    params = SamplingParams(temperature=0.0, max_tokens=max_new_tokens)
+    ttfts: list[float] = []
+    decode_rates: list[float] = []
+
+    for prompt in prompts:
+        t_start = time.monotonic()
+        first_token = True
+        token_count = 0
+        async for output in engine.generate(prompt, params, random_uuid()):
+            if output.outputs:
+                if first_token:
+                    ttfts.append((time.monotonic() - t_start) * 1000)
+                    first_token = False
+                token_count = len(output.outputs[0].token_ids)
+        if token_count > 1:
+            total_time = (time.monotonic() - t_start)
+            decode_rates.append(total_time / token_count * 1000)  # ms/token
+
+    return LatencyBenchmark(
+        p50_ttft_ms=statistics.median(ttfts),
+        p99_ttft_ms=sorted(ttfts)[int(len(ttfts) * 0.99)],
+        p50_decode_ms_per_token=statistics.median(decode_rates),
+        p99_decode_ms_per_token=sorted(decode_rates)[int(len(decode_rates) * 0.99)],
+        throughput_rps=len(prompts) / sum(t / 1000 for t in ttfts),
+        mbpp_score=0.0,  # set from separate MBPP eval
+    )
+```
+
+Block 3 — BROKEN -> FIX: wrong calibration data and group size selection:
+
+```python
+from __future__ import annotations
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+
+# BROKEN: Calibrate AWQ on general text (C4 dataset) for a code LLM.
+# AWQ finds weight scales that minimize error on the CALIBRATION distribution.
+# General text uses different vocabulary, token frequencies, and activation patterns than code.
+# Result: AWQ optimizes for wrong inputs → code generation quality drops 4.8% vs 1.3%.
+def broken_calibration_data() -> list[str]:
+    from datasets import load_dataset
+    dataset = load_dataset("c4", "en", split="train", streaming=True)
+    return [ex["text"][:2000] for ex, _ in zip(dataset, range(512))]
+
+
+# FIX: Use domain-matched calibration data.
+# For code LLM: use Python code from The Stack or GitHub corpus.
+# For medical LLM: use PubMed abstracts.
+# For legal LLM: use law review articles or case opinions.
+# Calibration domain matters as much as calibration size (512 samples is enough).
+def fixed_calibration_data_code() -> list[str]:
+    from datasets import load_dataset
+    dataset = load_dataset("bigcode/the-stack-smol", "data/python", split="train", streaming=True)
+    return [ex["content"][:2000] for ex, _ in zip(dataset, range(512))]
+
+
+# BROKEN: Use group_size=512 for speed (fewer scale factors to store).
+# Large groups mean many weights share a single scale — quantization error
+# for weights far from the group mean becomes large.
+# MBPP score drops an additional 2.1% vs group_size=128.
+def broken_quant_config_large_group() -> dict:
+    return {"q_group_size": 512, "w_bit": 4, "zero_point": True}
+
+
+# FIX: group_size=128 is the standard production setting.
+# Quality vs size trade-off: 128 is Goldilocks — better quality than 256+,
+# minimal overhead vs 64.
+# For INT3 (not recommended): use group_size=64 to partially compensate for bit-loss.
+def fixed_quant_config() -> dict:
+    return {"q_group_size": 128, "w_bit": 4, "zero_point": True, "version": "GEMM"}
+
+
+# BROKEN: Quantize embedding and LM head layers.
+# These layers are NOT compute-bottlenecks but DO have high sensitivity to quantization.
+# The embedding layer maps token IDs → vectors; INT4 embedding causes
+# vocabulary confusion for tokens with similar embeddings → 3.2% quality drop alone.
+def broken_quantize_all_layers(model: torch.nn.Module) -> torch.nn.Module:
+    # Quantize every Linear layer including embed_tokens and lm_head
+    return _apply_int4_to_all(model)
+
+
+# FIX: Exclude embedding and lm_head layers from INT4 quantization.
+# Keep in FP16 (adds only ~0.5 GB to model size for 70B model).
+# AWQ's default behavior already excludes these — don't override it.
+def fixed_quantize_skip_embeddings(model: torch.nn.Module) -> torch.nn.Module:
+    # AWQ automatically skips: embed_tokens, lm_head, and the final layer norm
+    # Explicitly verify which layers were quantized:
+    quantized_layers = [
+        name for name, module in model.named_modules()
+        if hasattr(module, "scales") and hasattr(module, "zeros")
+    ]
+    print(f"Quantized {len(quantized_layers)} linear layers (embeddings excluded)")
+    return model
+
+
+def _apply_int4_to_all(model: torch.nn.Module) -> torch.nn.Module:
+    return model  # placeholder
+
+
+# BROKEN: Deploy AWQ model on GPU without checking CUDA Compute Capability.
+# AWQ GEMM kernel requires CUDA 8.0+ (Ampere A100 or better).
+# Deployed on T4 (CUDA 7.5) → GEMM kernel falls back to slow FP16 simulation.
+# "Quantized" model runs SLOWER than FP16 — 0.6× throughput.
+def broken_deploy_awq_anywhere() -> None:
+    # No capability check — deploys on any GPU
+    pass
+
+
+# FIX: Verify GPU CUDA Compute Capability before deploying AWQ.
+# Minimum: 8.0 (A100, A10G, RTX 3090/4090).
+# For older GPUs (T4, V100): use GPTQ with marlin kernel (supports CUDA 7.0+)
+# or FP8 quantization on H100 (native FP8 tensor cores).
+def fixed_check_gpu_capability() -> str:
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA not available")
+    cap = torch.cuda.get_device_capability()
+    major, minor = cap
+    if major < 8:
+        return f"GPU CUDA {major}.{minor} < 8.0: use GPTQ-marlin or FP8 instead of AWQ"
+    return f"GPU CUDA {major}.{minor} >= 8.0: AWQ supported"
+```
+
+**Pitfall 1 — Quantizing a model that's already LoRA fine-tuned:**
+
+```python
+# BROKEN: Apply AWQ to the merged LoRA model after weight merging.
+# LoRA merge changes the weight distribution — AWQ calibration
+# was designed for the base model distribution.
+# Quality loss: additional 1.5% on domain-specific benchmarks vs base model AWQ.
+
+# FIX: Quantize the base model with AWQ first, THEN apply LoRA adapters.
+# LoRA adapters remain in FP16 (they're small: rank 16 × dimensions = ~50M params).
+# Adapter weights stay in FP16 alongside INT4 base → no quality loss from double quantization.
+# QLoRA uses this approach: INT4 base + FP16 LoRA.
+```
+
+**Pitfall 2 — Over-quantizing to INT3 for cost savings:**
+
+```python
+# BROKEN: Apply INT3 quantization for additional 25% cost reduction.
+# 70B INT3 = 26 GB (fits on 1 A100 80GB) — seems attractive.
+# MBPP score: 55.9% (-6.5% vs FP16) — exceeds 2% SLA by 3.25%.
+# Code with subtle bugs generated at a rate customers notice → increased support.
+config_int3 = {"w_bit": 3}   # too aggressive for code LLMs
+
+# FIX: INT4 with FP8 KV cache is the correct production point.
+# INT4 weights (0.5 byte) + FP8 KV cache = approximately 45-50 GB for 70B.
+# MBPP: -1.3% — within SLA. KV cache savings: additional 30% memory freed.
+config_optimal = {"w_bit": 4, "kv_cache_dtype": "fp8"}
+```
+
+**Metrics:**
+
+| Metric | FP16 (8×A100) | AWQ INT4 (4×A100) | AWQ+FP8 KV (4×A100) |
+|--------|--------------|-------------------|---------------------|
+| MBPP score | 62.4% | 61.1% (-1.3%) | 60.9% (-1.5%) |
+| HumanEval | 73.2% | 71.8% (-1.4%) | 71.5% (-1.7%) |
+| Throughput | 80 RPS | 165 RPS | 185 RPS |
+| p99 TTFT | 1,800ms | 780ms | 720ms |
+| p99 decode | 95ms/tok | 41ms/tok | 38ms/tok |
+| Model VRAM | 140 GB | 35 GB | 35 GB |
+| KV cache headroom | 80 GB/replica | 90 GB/replica | 130 GB/replica |
+| Monthly GPU cost | $12,400 | $6,200 | $6,200 |
+| Savings | — | $6,200/month | $6,200/month |
+| Quantization time | — | 4h (1×A100) | 4h + 1h KV |
+
+**Interview Q&As:**
+
+**Q: How does AWQ differ from GPTQ in its approach to weight quantization?**
+GPTQ (Frantar et al. 2022) quantizes weights by minimizing the L2 reconstruction error of the layer output, processing columns sequentially using a Hessian-based correction (Optimal Brain Compression). AWQ (Lin et al. 2023) instead identifies "salient" weights — those multiplied by activations with the largest magnitudes — and scales them by a per-channel factor before quantization so they survive INT4 more accurately. AWQ does not update other weights; it only searches for the optimal scaling factors via a grid search on calibration data. In practice, AWQ and GPTQ achieve similar quality for 4-bit, but AWQ is faster to apply (no iterative column updates) and more predictable across architectures.
+
+**Q: Why does calibration data domain matter for quantization quality?**
+AWQ searches for per-channel scaling factors that minimize quantization error specifically on the calibration data distribution. Weight-activation interactions depend on which tokens are being processed — code uses different token patterns, different hot paths through the model, and different activation magnitude distributions than general text. If you calibrate on C4 (general web text) for a code LLM, AWQ optimizes scales for the wrong activation distribution, leaving code-specific activations suboptimally scaled. This adds approximately 3-4% MBPP quality loss versus domain-matched calibration — significant enough to exceed quality SLAs.
+
+**Q: What are the memory savings from INT4 quantization and how do they translate to deployment efficiency?**
+FP16 uses 2 bytes per parameter; INT4 uses 0.5 bytes — a 4× compression ratio. For Llama-3-70B: FP16 = 140 GB, INT4 = 35 GB. The immediate effect is model fit: FP16 requires 4×A100 (35 GB each, 140 GB total); INT4 fits on 2×A100 (17.5 GB each, plus group scale factors bringing it to ~38 GB). With 2×A100 per replica, the remaining ~80 GB per replica is available for KV cache — nearly double the concurrent sequences vs the FP16 deployment (which had only 40 GB KV headroom per GPU). So INT4 both reduces hardware cost and increases concurrent serving capacity.
+
+**Q: Which layers should NOT be quantized in an INT4 deployment?**
+Three categories: (1) Embedding layer (embed_tokens) — directly maps token IDs to dense vectors; INT4 causes vocabulary confusion between tokens with similar embeddings, losing 2-3% quality alone. (2) LM head (output projection) — the final layer that produces the vocabulary logits; quantization here spreads probability mass incorrectly, particularly affecting rare token predictions. (3) Layer norms — these have very small weight tensors that are not compute bottlenecks; quantizing them adds 0% speed benefit and some quality risk. AWQ excludes these by default. The quantization benefit comes from the large Linear layers in attention (Q/K/V/O projections) and FFN, which constitute > 99% of parameter count.
+
+**Q: How do Flash Attention 2 and INT4 quantization interact?**
+They are orthogonal optimizations: Flash Attention 2 optimizes the attention computation (memory-efficient attention with tiling), while INT4 quantization reduces weight memory and speeds up weight-bounded matrix multiplications. Both can be applied simultaneously. Flash Attention 2 operates on the attention kernel (QK^T V computation) and requires FP16/BF16 inputs — it does NOT quantize Q, K, V matrices themselves. The benefit of Flash Attention 2 is most significant for long contexts (reduces attention memory from O(N²) to O(N)); INT4 benefits are most significant for the FFN layers (which dominate compute). Combined, they achieve 3-4× throughput improvement over vanilla FP16 with standard attention.
+
+**Q: When should you choose FP8 quantization over INT4 (AWQ/GPTQ)?**
+FP8 is preferable when: (1) Hardware supports it natively (H100 has FP8 tensor cores at 1979 TFLOPS peak vs 312 TFLOPS BF16); (2) Quality tolerance is very strict (FP8 loses 0.2-0.5% vs INT4's 1-2%); (3) You need the full dynamic range of floating-point representation (important for fine-tuned models with non-Gaussian weight distributions). INT4 is preferable when: (1) You need maximum compression (4× vs 2× for FP8); (2) GPU does not have native FP8 support (A100 can run FP8 via emulation but gains are modest); (3) Cost reduction is the primary goal. For Llama-3-70B on A100: use INT4 (AWQ). On H100: FP8 often preferred for its native support and minimal quality loss.

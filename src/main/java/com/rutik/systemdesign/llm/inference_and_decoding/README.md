@@ -1117,33 +1117,346 @@ A: Naive batching waits for all requests in a batch to complete before accepting
 
 ---
 
-## 14. Case Study: Optimizing LLM Serving for a Chat Application
 
-**Problem:** Chat app serves 1000 concurrent users with GPT-4-size model (70B). Naive serving: P99 TTFT = 8 seconds, throughput = 50 tokens/sec/GPU.
+## 14. Case Study
 
-**Optimization steps:**
+**Scenario:** An AI infrastructure company serves Llama-3-70B as a shared inference API. Current state: single-model vLLM deployment, 180 RPS, p99 TTFT 1,800ms, p99 decode 95ms/token. Speculative decoding is proposed to hit 3× throughput improvement. Hardware: 8 × H100 80GB SXM (NVLink), single pod with TP=4. Target after speculative decoding: 520 RPS, p99 TTFT < 700ms, p99 decode < 40ms/token.
 
-**Step 1: Switch to vLLM + PagedAttention**
-- Before: HuggingFace generate() with naive batching
-- After: vLLM with continuous batching + PagedAttention
-- Result: 4× throughput improvement, P99 TTFT drops to 3 seconds
+**Architecture:**
 
-**Step 2: Quantization (INT4 with GPTQ)**
-- Before: BF16 weights = 140GB → requires 2× A100 80GB
-- After: INT4 weights = 35GB → fits on 1× A100 80GB
-- Result: 2× more concurrent users per GPU, 2× cost reduction
+```
+  Request                                    Speculative Decoding Flow
+     |                                       ==========================================
+     v                                       1. Draft model generates K tokens (K=5)
+  ┌──────────────────────────────────────┐      Draft: Llama-3.2-1B (1B params, FP8)
+  │  vLLM Scheduler                      │      Time: 5 × 1-token decode ≈ 5 × 2ms = 10ms
+  │  Continuous batching                 │
+  │  Chunked prefill (chunk=4096)         │   2. Target model verifies all K tokens in ONE pass
+  │  Speculative decoding:               │      Target: Llama-3-70B
+  │    draft_model: Llama-3.2-1B (TP=1)  │      Prefill of K=5 tokens: ~5ms (compute-bound)
+  │    num_speculative_tokens: 5          │      Acceptance sampling: compare draft vs target
+  │    rejection_sampling: multinomial   │
+  └──────────────────────────────────────┘   3. Accepted tokens advanced, rejected token
+                                               replaced by target's sample at that position.
+  Memory Layout (8×H100 80GB, TP=4 target + TP=1 draft):
+  ┌────────────────────────────────────┐      Expected accepted tokens E[accepted] = ?
+  │  Target: Llama-3-70B (TP=4)        │      Geometric series: if p=accept_prob per token
+  │    4×H100: 140 GB FP8 weights      │      E[k] = (1 - p^K) / (1-p)   for K=5
+  │    Remaining KV: 4 × ~35 GB = 140G │      p=0.7 (code): E[k] ≈ 2.85 tokens per step
+  │  Draft: Llama-3.2-1B (TP=1, 1 GPU) │      p=0.5 (general): E[k] ≈ 1.94 tokens per step
+  │    1×H100: 2 GB FP8 weights        │
+  │    Remaining KV: ~78 GB            │   Throughput gain:
+  └────────────────────────────────────┘      Without SD: 1 token per target step (20ms/token)
+                                               With SD (p=0.7): 2.85 tokens per step (22ms)
+                                               Speed: 2.85/22ms = 130 tok/s vs 50 tok/s = 2.6×
+```
 
-**Step 3: Speculative Decoding**
-- Deploy LLaMA 3 8B as draft model alongside 70B
-- Acceptance rate: 72% for conversational responses
-- Result: 2.3× throughput improvement for decode phase
+**Key implementation — 3 Python code blocks:**
 
-**Step 4: Request batching with dynamic batching**
-- Group requests by similar input length (±20%)
-- Minimize padding waste
-- Result: 15% additional throughput
+Block 1 — vLLM speculative decoding configuration:
 
-**Final result:**
-- P99 TTFT: 1.2 seconds (from 8 seconds, 6.7× improvement)
-- Throughput: 620 tokens/sec/GPU (from 50, 12.4× improvement)
-- Cost per 1K tokens: $0.002 (from $0.025, 12.5× reduction)
+```python
+from __future__ import annotations
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.async_llm_engine import AsyncLLMEngine
+import asyncio
+import time
+
+
+def build_speculative_engine() -> AsyncLLMEngine:
+    """
+    Configure vLLM with speculative decoding.
+    Target: Llama-3-70B (TP=4, 4×H100)
+    Draft: Llama-3.2-1B (TP=1, same 4 GPUs — draft runs on GPU 0 of each TP group)
+    num_speculative_tokens: how many tokens draft proposes per step.
+    Higher K = more speedup when acceptance rate is high,
+    but more wasted work when acceptance rate is low.
+    K=5 is optimal for code generation (p~0.7) and general chat (p~0.5).
+    """
+    args = AsyncEngineArgs(
+        model="meta-llama/Meta-Llama-3-70B-Instruct",
+        tensor_parallel_size=4,
+        quantization="fp8",
+        max_model_len=8192,
+        gpu_memory_utilization=0.90,
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
+        # Speculative decoding configuration
+        speculative_model="meta-llama/Llama-3.2-1B-Instruct",
+        num_speculative_tokens=5,          # K tokens per speculative step
+        speculative_draft_tensor_parallel_size=1,
+        # Rejection sampling method: "multinomial" preserves exact target distribution
+        # "greedy" is faster but changes output distribution slightly
+        speculative_disable_by_batch_size=32,   # disable SD for batch > 32 (overhead exceeds gain)
+        use_v2_block_manager=True,
+    )
+    return AsyncLLMEngine.from_engine_args(args)
+
+
+async def benchmark_speculative_vs_baseline(
+    engine: AsyncLLMEngine,
+    prompts: list[str],
+) -> dict[str, float]:
+    """Compare p50/p99 decode latency with and without speculative decoding."""
+    from vllm.sampling_params import SamplingParams
+    from vllm.utils import random_uuid
+
+    params = SamplingParams(temperature=0.7, max_tokens=256)
+
+    decode_latencies: list[float] = []
+    for prompt in prompts:
+        t0 = time.monotonic()
+        token_count = 0
+        async for output in engine.generate(prompt, params, random_uuid()):
+            if output.outputs:
+                new_tokens = len(output.outputs[0].token_ids)
+                if new_tokens > token_count:
+                    token_count = new_tokens
+        total_time = time.monotonic() - t0
+        if token_count > 0:
+            decode_latencies.append(total_time / token_count * 1000)  # ms/token
+
+    import numpy as np
+    latencies_arr = np.array(decode_latencies)
+    return {
+        "p50_ms_per_token": float(np.percentile(latencies_arr, 50)),
+        "p99_ms_per_token": float(np.percentile(latencies_arr, 99)),
+        "mean_ms_per_token": float(latencies_arr.mean()),
+        "throughput_tokens_per_sec": 1000 / float(latencies_arr.mean()),
+    }
+```
+
+Block 2 — Draft model acceptance rate monitoring (production concern):
+
+```python
+from __future__ import annotations
+import time
+from dataclasses import dataclass, field
+from collections import deque
+
+
+@dataclass
+class SpeculativeDecodingMonitor:
+    """
+    Track speculative decoding acceptance rates in production.
+    Acceptance rate varies by:
+    - Task type: code > structured text > open-ended chat
+    - Temperature: low temp → high acceptance; high temp → low acceptance
+    - User population: query diversity affects acceptance
+    
+    Alert if acceptance rate drops below threshold (speculative decoding hurting latency).
+    At p < 0.3, speculative decoding adds overhead without benefit — disable it.
+    """
+
+    window_size: int = 1000       # rolling window of requests
+    min_acceptance_rate: float = 0.4   # disable SD below this
+    max_k: int = 5
+    min_k: int = 2
+
+    _acceptance_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=1000)
+    )
+    _current_k: int = 5
+    _disabled: bool = False
+
+    def record_step(
+        self,
+        num_proposed: int,       # K tokens proposed by draft
+        num_accepted: int,       # tokens accepted by target
+    ) -> None:
+        if num_proposed > 0:
+            self._acceptance_history.append(num_accepted / num_proposed)
+
+    @property
+    def rolling_acceptance_rate(self) -> float:
+        if not self._acceptance_history:
+            return 1.0
+        return sum(self._acceptance_history) / len(self._acceptance_history)
+
+    def adapt_k(self) -> int:
+        """
+        Dynamically adjust K based on acceptance rate.
+        High acceptance (> 0.8): increase K for more speedup.
+        Low acceptance (< 0.4): decrease K to reduce wasted draft compute.
+        Very low (< 0.25): disable speculative decoding entirely.
+        """
+        rate = self.rolling_acceptance_rate
+        if rate > 0.8 and self._current_k < self.max_k:
+            self._current_k = min(self._current_k + 1, self.max_k)
+        elif rate < 0.4 and self._current_k > self.min_k:
+            self._current_k = max(self._current_k - 1, self.min_k)
+        elif rate < 0.25:
+            self._disabled = True
+        else:
+            self._disabled = False
+        return self._current_k
+
+    def metrics(self) -> dict[str, object]:
+        return {
+            "acceptance_rate": self.rolling_acceptance_rate,
+            "current_k": self._current_k,
+            "sd_disabled": self._disabled,
+            "expected_speedup": self._expected_speedup(),
+        }
+
+    def _expected_speedup(self) -> float:
+        p = self.rolling_acceptance_rate
+        k = self._current_k
+        if p <= 0 or self._disabled:
+            return 1.0
+        # E[tokens accepted] per step = sum_{i=0}^{K-1} p^i = (1-p^K)/(1-p)
+        expected_accepted = (1 - p ** k) / (1 - p) if p < 1 else k
+        # One target step generates expected_accepted tokens
+        # vs baseline: 1 token per target step
+        # Draft overhead: K draft tokens ≈ K/70 target steps (1B vs 70B params)
+        draft_overhead_fraction = k / 70.0
+        return expected_accepted / (1 + draft_overhead_fraction)
+```
+
+Block 3 — BROKEN -> FIX: temperature mismatch and sampling distribution corruption:
+
+```python
+from __future__ import annotations
+import torch
+
+
+# BROKEN: Speculative decoding with greedy draft, non-greedy target.
+# Draft generates tokens with temperature=0 (greedy), deterministically.
+# Target uses temperature=0.7 (sampling) to accept/reject.
+# Problem: draft's greedy tokens are biased toward the mode of the distribution.
+# Rejection sampling corrects this in principle, BUT if draft and target disagree
+# on >50% of tokens, the "correction" wastes more compute than it saves.
+# At temperature=1.0, code completions: acceptance rate drops to 0.35 (unprofitable).
+def broken_speculative_config_temp_mismatch() -> dict:
+    return {
+        "draft_temperature": 0.0,     # greedy draft
+        "target_temperature": 1.0,    # sampling target
+        # Result: p~0.35 acceptance for creative tasks — SD slower than baseline
+    }
+
+
+# FIX: Match draft sampling temperature to target temperature.
+# Draft samples from same temperature as target → higher acceptance rate.
+# For temperature=0.7: p~0.72 for code, p~0.55 for chat — profitable.
+# vLLM automatically passes target temperature to draft sampling.
+def fixed_speculative_config() -> dict:
+    return {
+        "draft_temperature": None,    # None = match target temperature automatically
+        "target_temperature": 0.7,    # applied to both draft and target
+        "num_speculative_tokens": 5,
+    }
+
+
+# BROKEN: Use speculative decoding with repetition penalty.
+# Repetition penalty modifies logits based on previously generated tokens.
+# Draft model applies penalty based on its own generated prefix.
+# Target model applies penalty based on its prefix — these differ after first rejection.
+# Result: target's accepted token distributions are incorrect → subtle output quality degradation.
+def broken_speculative_with_rep_penalty(prompt: str) -> dict:
+    return {
+        "prompt": prompt,
+        "repetition_penalty": 1.3,   # can cause distribution mismatch
+        "speculative_decoding": True,  # dangerous combination
+    }
+
+
+# FIX: Disable speculative decoding for requests with logit processors
+# (repetition penalty, presence penalty, frequency penalty, logit bias).
+# These processors create state-dependent logit modifications that
+# break the independence assumptions of rejection sampling.
+def fixed_route_request(prompt: str, sampling_params: dict) -> dict:
+    has_logit_processors = (
+        sampling_params.get("repetition_penalty", 1.0) != 1.0
+        or sampling_params.get("presence_penalty", 0.0) != 0.0
+        or sampling_params.get("logit_bias") is not None
+    )
+    return {
+        **sampling_params,
+        "use_speculative_decoding": not has_logit_processors,
+        "reason": "logit_processor_incompatible" if has_logit_processors else "sd_enabled",
+    }
+
+
+# BROKEN: Enable speculative decoding for prefill-heavy workloads.
+# A 4096-token context + 10-token output gains nothing from SD.
+# 10 tokens decoded = 2 speculative steps = 10ms overhead from draft.
+# Baseline without SD: 10 steps × 20ms/step = 200ms. With SD: 215ms. Slower.
+def broken_enable_sd_always(request: dict) -> None:
+    request["use_speculative_decoding"] = True  # always on
+
+
+# FIX: Only enable SD when expected output tokens > 50 (break-even point).
+def fixed_enable_sd_conditionally(
+    request: dict, expected_output_tokens: int = None
+) -> dict:
+    if expected_output_tokens is not None and expected_output_tokens < 50:
+        request["use_speculative_decoding"] = False
+        return request
+    # vLLM: speculative_disable_by_batch_size handles this automatically
+    request["use_speculative_decoding"] = True
+    return request
+```
+
+**Pitfall 1 — Draft model quality gap causing low acceptance on out-of-domain queries:**
+
+```python
+# BROKEN: Use the same draft model (Llama-3.2-1B-general) for all task types.
+# For Python code generation: acceptance rate 0.71 (profitable, 2.4× speedup).
+# For SQL generation (different vocabulary distribution): acceptance rate 0.28.
+# SQL queries disable SD automatically (< 0.3 threshold), but the threshold
+# detection adds 500 requests of warmup time before disabling.
+
+# FIX: Task-specific draft models OR ngram-based draft for highly structured tasks.
+# For SQL: ngram draft (copy from prefix matches) achieves 0.82 acceptance.
+# For code: Llama-3.2-1B-Code (domain-specific draft) achieves 0.79 acceptance.
+# vLLM: --speculative-model "[ngram]" --ngram-prompt-lookup-max 8 for ngram draft.
+```
+
+**Pitfall 2 — Speculative decoding disabled under high concurrency:**
+
+```python
+# BROKEN: No concurrency limit on SD.
+# At 512 concurrent sequences, draft model runs 512 batched forward passes × K=5 tokens
+# each step before target. Draft batch: 512 × 5 = 2560 tokens.
+# Draft step: 2560 × 2GB / 3.35TB/s bandwidth = 1.5ms per step × 5 = 7.5ms overhead.
+# Exceeds benefit at high concurrency — SD becomes a net negative.
+
+# FIX: Disable SD when batch size > threshold (vLLM: speculative_disable_by_batch_size).
+# Empirically: SD beneficial for batch < 32 (low latency SLA), unprofitable for batch > 64.
+args = {"speculative_disable_by_batch_size": 32}
+```
+
+**Metrics:**
+
+| Metric | Baseline (no SD) | + SD (K=5, 1B draft) | + Adaptive K |
+|--------|-----------------|---------------------|-------------|
+| p50 TTFT | 280 ms | 270 ms | 268 ms |
+| p99 TTFT | 1,800 ms | 680 ms | 650 ms |
+| p50 decode | 20 ms/token | 7.8 ms/token | 7.2 ms/token |
+| p99 decode | 95 ms/token | 38 ms/token | 35 ms/token |
+| Throughput | 180 RPS | 510 RPS | 540 RPS |
+| Code accept rate | — | 0.71 | 0.74 |
+| Chat accept rate | — | 0.52 | 0.55 |
+| Expected speedup | 1× | 2.8× | 3.0× |
+| GPU count (same load) | 8 × H100 | 8 × H100 | 8 × H100 |
+| Cost reduction | — | 65% | 68% |
+
+**Interview Q&As:**
+
+**Q: How does speculative decoding achieve throughput improvement without changing model quality?**
+Speculative decoding has the draft model propose K tokens, then the target model verifies all K in a single forward pass (prefill of K tokens). If the target accepts a draft token, it costs 1/K of a target decode step; if it rejects, only the first incorrect token is resampled. The key insight: verification of K tokens costs nearly the same compute as generating 1 token in the target (because compute is dominated by weight loading, not sequence length for small K). Expected accepted tokens E[k] = (1-p^K)/(1-p) approaches K for high acceptance probability p, giving near-K× speedup with zero distribution change.
+
+**Q: Why does speculative decoding work better for code than open-ended chat?**
+Code has high predictability and locality — the next token is often predictable from the preceding few tokens (variable names, syntax patterns, API calls follow conventions). A small 1B draft model trained on code achieves 70-80% acceptance rate for code generation. Open-ended chat has higher entropy — the target model's next-token distribution is more diffuse, and a small draft model often proposes tokens from a different mode. Acceptance rate drops to 45-60% for chat. The performance gain scales as E[accepted] / step_cost; when acceptance rate falls below ~0.35, speculative decoding adds more overhead than it saves.
+
+**Q: What is the rejection sampling algorithm in speculative decoding and why is it unbiased?**
+For each draft token at position i, compare the draft probability q(x_i) and target probability p(x_i). Accept with probability min(1, p/q). If rejected, sample from the modified distribution p'(x_i) ∝ max(0, p(x_i) - q(x_i)). This guarantees that the marginal distribution of each accepted token exactly equals the target distribution — speculative decoding is an exact sampler, not an approximation. The proof: the probability of token x reaching the output equals p(x), regardless of whether it was accepted from the draft or resampled from p'. This is why speculative decoding changes throughput but not quality.
+
+**Q: When should you disable speculative decoding for a request?**
+Three scenarios: (1) Logit processors — repetition penalty, presence/frequency penalty, and logit bias modify token probabilities based on history; the draft model applies a different history than the target after any rejection, breaking the independence assumption. (2) High concurrency — at batch size > 32-64, draft model overhead outweighs the acceptance benefit. (3) Short outputs — for requests with < 50 expected output tokens, the draft overhead dominates; 2 speculative steps × 10ms overhead > benefit from 2.85 × faster decode.
+
+**Q: How does the choice of draft model size affect the trade-off between acceptance rate and overhead?**
+Larger draft models (7B) achieve higher acceptance rates (0.85+ for code) but cost more compute per draft step — approximately 10% of the target's compute vs 1.4% for a 1B model. The speedup formula is approximately: E[accepted] / (1 + K × draft_cost_fraction / target_cost). For K=5, 7B draft (10%): 2.85 / (1 + 5×0.1) = 1.9×. For 1B draft (1.4%): 2.85 / (1 + 5×0.014) = 2.65×. The smaller draft wins in practice because its lower overhead compensates for lower acceptance. The exception: tasks where the 7B draft's higher acceptance (0.85+) is decisive — then 7B draft achieves 4.25 / 1.5 = 2.8× vs 3.4 / 1.07 = 3.2× for 1B. Still often similar; 1B draft is usually preferred.
+
+**Q: How does continuous batching interact with speculative decoding?**
+Continuous batching and speculative decoding are mostly compatible but have one tension: speculative decoding works best on small, homogeneous batches (similar task type, similar acceptance rate); continuous batching optimizes GPU utilization by mixing requests of different sizes. When a batch contains mixed tasks (code + chat), the acceptance rate is the minimum of all tasks — the low-acceptance chat requests drag down the effective speedup for high-acceptance code requests. vLLM's `speculative_disable_by_batch_size` addresses this by falling back to standard decoding when the batch grows large enough that per-request acceptance rate variance degrades the average benefit.

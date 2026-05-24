@@ -664,41 +664,380 @@ Graceful degradation requires a fallback chain and circuit breaker pattern. Impl
 
 ---
 
-## 14. Case Study: Production LLM Platform for 10M Users
 
-**Context:** Consumer app has 10M monthly active users, 100K daily active users using an LLM feature (writing assistant).
+## 14. Case Study
 
-**Traffic profile:**
-- Peak: 500 requests/min (10am-2pm weekdays)
-- Average: 150 requests/min
-- Query complexity: 60% simple, 30% medium, 10% complex
-- Average input: 500 tokens; average output: 300 tokens
-- Context: 80% of queries don't require chat history
+### Multi-Model LLM Serving Gateway with Cost and Latency Optimization
 
-**Architecture:**
+**Scenario**
+
+A B2B SaaS platform serving 5,000 enterprise customers routes 40 million LLM requests per month across GPT-4o, Claude-3.5-Sonnet, and a self-hosted Llama-3-70B cluster. Requirements:
+- Baseline cost: $180k/month running all requests on GPT-4o
+- Target: reduce to under $55k/month with no measurable quality regression (< 1% drop in user satisfaction)
+- p50 latency SLA: < 800ms; p99 < 3,000ms
+- Context window diversity: 40% of requests require > 32k tokens (internal data analysis)
+- Availability SLA: 99.95% (< 22 min/month downtime), requiring multi-provider fallback
+- Shadow evaluation budget: $2,000/month to run quality checks on routed traffic
+
+**Architecture**
+
 ```
-Traffic: 500 req/min × 800 avg tokens = 400K tokens/min
-
-Model routing:
-  60% (simple) → gpt-4o-mini: $0.60/1M output tokens
-  30% (medium) → gpt-4o: $15/1M output tokens
-  10% (complex) → o1-mini: $12/1M output tokens
-
-Semantic cache (FAQ questions):
-  Estimated 25% cache hit rate → 25% cost reduction
-
-Monthly cost estimate:
-  Simple (300K output tokens/min × 60% × 43,200 min/month × 0.25 missed cache):
-    = 195M tokens × $0.60/1M = $117
-  Medium:
-    = 97.2M tokens × $15/1M = $1,458
-  Complex:
-    = 32.4M tokens × $12/1M = $389
-  Total: ~$1,964/month
-
-Observability:
-  LangSmith: traces for debugging
-  Prometheus + Grafana: latency (p50=1.2s, p99=3.5s), cost, error rate
-  LLM-as-judge: 5% random sample evaluated daily
-  Automated alerts: quality score < 3.8/5 for 30 consecutive evals
+                        ┌─────────────────────────────────────────────────────────┐
+                        │                   LLM Gateway (FastAPI + asyncio)       │
+                        │                                                         │
+  Client Request        │  ┌──────────────┐    ┌───────────────────────────────┐ │
+  (prompt, tenant_id,   │  │ Auth &       │    │  Routing Engine               │ │
+   budget_tier)  ──────►│  │ Rate Limiter │───►│  1. Heuristic classifier      │ │
+                        │  └──────────────┘    │  2. Embedding-based router    │ │
+                        │                      │  3. Cost/latency optimizer    │ │
+                        │                      └───────────┬───────────────────┘ │
+                        │                                  │                     │
+                        │         ┌────────────────────────┼──────────────────┐  │
+                        │         v                        v                  v  │
+                        │  ┌─────────────┐      ┌──────────────────┐  ┌──────────┐│
+                        │  │ Semantic    │      │ Model Pool       │  │ Shadow   ││
+                        │  │ Cache       │      │                  │  │ Eval (1%)││
+                        │  │ (Redis +    │      │ Tier 1: Llama-3- │  │          ││
+                        │  │  FAISS)     │      │   70B self-host  │  │ Compare: ││
+                        │  │ cosine>0.95 │      │   $0.0009/1k tok │  │ routed   ││
+                        │  │ TTL-aware   │      │                  │  │ vs GPT4o ││
+                        │  └─────────────┘      │ Tier 2: Claude-  │  │ LLM judge││
+                        │         │             │   3.5-Haiku      │  └──────────┘│
+                        │    hit  │             │   $0.0025/1k out │              │
+                        │         │             │                  │              │
+                        │         │             │ Tier 3: GPT-4o   │              │
+                        │         │             │   $0.015/1k out  │              │
+                        │         │             │                  │              │
+                        │         │             │ Tier 4: Claude-  │              │
+                        │         │             │   3.5-Sonnet     │              │
+                        │         │             │   (128k ctx)     │              │
+                        │         │             └──────────────────┘              │
+                        │         │                      │                        │
+                        │         └──────────────────────┘                        │
+                        │                                │                        │
+                        │                    ┌───────────▼────────────┐           │
+                        │                    │ Circuit Breaker        │           │
+                        │                    │ per-provider (30s win) │           │
+                        │                    └───────────┬────────────┘           │
+                        └──────────────────────────────────────────────────────── ┘
+                                                         │
+                                                   Response to Client
 ```
+
+**Core Implementation: Routing Engine**
+
+```python
+from __future__ import annotations
+import re
+import asyncio
+import hashlib
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Callable, Awaitable
+
+import httpx
+import numpy as np
+import redis.asyncio as aioredis
+
+
+class Tier(str, Enum):
+    SELF_HOSTED = "llama-3-70b"
+    HAIKU = "claude-haiku-4"
+    GPT4O = "gpt-4o"
+    SONNET = "claude-3-5-sonnet-20241022"  # large-context tier
+
+
+@dataclass
+class RoutingDecision:
+    tier: Tier
+    reason: str
+    estimated_cost_usd: float
+    token_estimate: int
+
+
+COST_PER_1K_OUT: dict[Tier, float] = {
+    Tier.SELF_HOSTED: 0.0009,
+    Tier.HAIKU: 0.0025,
+    Tier.GPT4O: 0.015,
+    Tier.SONNET: 0.015,
+}
+
+CONTEXT_LIMIT: dict[Tier, int] = {
+    Tier.SELF_HOSTED: 8_192,
+    Tier.HAIKU: 200_000,
+    Tier.GPT4O: 128_000,
+    Tier.SONNET: 200_000,
+}
+
+
+def _estimate_tokens(text: str) -> int:
+    # ~0.75 words per token for English; rough pre-call estimate
+    return max(1, int(len(text.split()) / 0.75))
+
+
+def _classify_request(prompt: str, token_count: int) -> RoutingDecision:
+    """
+    Multi-signal heuristic classifier. Runs in < 1ms (no model call).
+    Falls back to embedding router when signals are ambiguous.
+    """
+    has_code = bool(re.search(r"```|def |class |import |SELECT |INSERT ", prompt))
+    has_math = bool(re.search(r"[∫∑∂∀∃]|integral|derivative|eigenvalue", prompt))
+    needs_long_ctx = token_count > 30_000
+    is_classification = bool(re.search(
+        r"^(classify|label|categorize|is this|yes or no)\b",
+        prompt[:120], re.IGNORECASE,
+    ))
+    requires_reasoning = bool(re.search(
+        r"prove|derive|explain why|step.by.step|analyze|debug", prompt, re.IGNORECASE
+    ))
+
+    # Long-context requests → Sonnet (200k window; GPT-4o capped at 128k)
+    if needs_long_ctx:
+        est = _estimate_tokens(prompt)
+        return RoutingDecision(Tier.SONNET, "long_context", est * COST_PER_1K_OUT[Tier.SONNET] / 1000, est)
+
+    # Simple classification / extraction with no code or math
+    if is_classification and not has_code and not has_math and token_count < 200:
+        est = _estimate_tokens(prompt)
+        return RoutingDecision(Tier.SELF_HOSTED, "simple_classification", est * COST_PER_1K_OUT[Tier.SELF_HOSTED] / 1000, est)
+
+    # Complex: code, math, or multi-step reasoning
+    if has_code or has_math or requires_reasoning:
+        est = _estimate_tokens(prompt)
+        return RoutingDecision(Tier.GPT4O, "complex_reasoning", est * COST_PER_1K_OUT[Tier.GPT4O] / 1000, est)
+
+    # Default: medium complexity → Haiku
+    est = _estimate_tokens(prompt)
+    return RoutingDecision(Tier.HAIKU, "medium_default", est * COST_PER_1K_OUT[Tier.HAIKU] / 1000, est)
+```
+
+**Production Concern: Semantic Cache with TTL-Aware Expiry**
+
+```python
+from sentence_transformers import SentenceTransformer
+import json
+
+_embed_model = SentenceTransformer("all-MiniLM-L6-v2")  # 384-d, 14ms/query on CPU
+_SIMILARITY_THRESHOLD = 0.95
+
+
+def _cache_ttl_seconds(prompt: str) -> int:
+    """Temporal queries expire fast; factual queries cached 7 days."""
+    is_temporal = bool(re.search(
+        r"\b(current|latest|now|today|this week|this year|recent)\b",
+        prompt, re.IGNORECASE,
+    ))
+    return 3_600 if is_temporal else 604_800  # 1h or 7 days
+
+
+async def semantic_cache_lookup(
+    redis: aioredis.Redis,
+    prompt: str,
+    max_scan: int = 5_000,
+) -> str | None:
+    emb = _embed_model.encode([prompt])[0].astype(np.float32)
+    keys = await redis.lrange("cache:idx", 0, max_scan - 1)
+    for key in keys:
+        raw = await redis.get(f"cache:emb:{key}")
+        if raw is None:
+            continue
+        stored = np.frombuffer(raw, dtype=np.float32)
+        cosine = float(np.dot(emb, stored) / (np.linalg.norm(emb) * np.linalg.norm(stored) + 1e-9))
+        if cosine >= _SIMILARITY_THRESHOLD:
+            resp = await redis.get(f"cache:resp:{key}")
+            return resp.decode() if resp else None
+    return None
+
+
+async def semantic_cache_store(
+    redis: aioredis.Redis,
+    prompt: str,
+    response: str,
+) -> None:
+    emb = _embed_model.encode([prompt])[0].astype(np.float32)
+    key = hashlib.sha256(prompt.encode()).hexdigest()[:16]
+    ttl = _cache_ttl_seconds(prompt)
+    pipe = redis.pipeline()
+    pipe.set(f"cache:emb:{key}", emb.tobytes(), ex=ttl)
+    pipe.set(f"cache:resp:{key}", response.encode(), ex=ttl)
+    pipe.lpush("cache:idx", key)
+    pipe.ltrim("cache:idx", 0, 49_999)  # cap index at 50k entries
+    await pipe.execute()
+```
+
+**BROKEN → FIX: Circuit Breaker Missing, Cascading Provider Failure**
+
+```python
+# BROKEN: no circuit breaker; a provider outage causes all requests to hang until timeout
+async def broken_route_request(prompt: str) -> str:
+    decision = _classify_request(prompt, _estimate_tokens(prompt))
+    # If GPT-4o is returning 503s, every "complex" request hangs for 10s then fails
+    return await call_provider(decision.tier, prompt, timeout=10.0)
+
+
+# FIX: per-provider circuit breaker with sliding 30s error rate window
+from collections import deque
+
+@dataclass
+class CircuitBreaker:
+    provider: Tier
+    window_seconds: float = 30.0
+    error_threshold: float = 0.10   # open if > 10% errors in window
+    half_open_probe_interval: float = 60.0
+    _events: deque[tuple[float, bool]] = field(default_factory=deque)  # (ts, is_error)
+    _opened_at: float | None = None
+
+    def record(self, is_error: bool) -> None:
+        now = time.monotonic()
+        self._events.append((now, is_error))
+        # Evict events outside window
+        while self._events and self._events[0][0] < now - self.window_seconds:
+            self._events.popleft()
+
+    @property
+    def is_open(self) -> bool:
+        if self._opened_at is None:
+            return False
+        if time.monotonic() - self._opened_at >= self.half_open_probe_interval:
+            self._opened_at = None   # enter half-open: allow one probe
+            return False
+        return True
+
+    def check_and_trip(self) -> bool:
+        """Returns True if circuit just tripped."""
+        if not self._events:
+            return False
+        errors = sum(1 for _, e in self._events if e)
+        rate = errors / len(self._events)
+        if rate > self.error_threshold and self._opened_at is None:
+            self._opened_at = time.monotonic()
+            return True
+        return False
+
+
+_breakers: dict[Tier, CircuitBreaker] = {t: CircuitBreaker(t) for t in Tier}
+
+FALLBACK_CHAIN: dict[Tier, Tier] = {
+    Tier.SELF_HOSTED: Tier.HAIKU,
+    Tier.HAIKU: Tier.GPT4O,
+    Tier.GPT4O: Tier.SONNET,
+    Tier.SONNET: Tier.GPT4O,  # cross-provider fallback
+}
+
+
+async def fixed_route_request(prompt: str) -> str:
+    token_count = _estimate_tokens(prompt)
+    decision = _classify_request(prompt, token_count)
+    tier = decision.tier
+
+    for _ in range(len(Tier)):   # at most len(Tier) fallback hops
+        if _breakers[tier].is_open:
+            tier = FALLBACK_CHAIN.get(tier, Tier.SONNET)
+            continue
+        try:
+            result = await call_provider(tier, prompt, timeout=10.0)
+            _breakers[tier].record(is_error=False)
+            return result
+        except Exception:
+            _breakers[tier].record(is_error=True)
+            _breakers[tier].check_and_trip()
+            tier = FALLBACK_CHAIN.get(tier, Tier.SONNET)
+
+    raise RuntimeError("All providers unavailable")
+```
+
+**Pitfall 1 — Heuristic classifier promotes short-but-complex requests to cheap tier.**
+
+```python
+# BROKEN: "Solve ∫₀^∞ e^(-x²) dx" is 9 tokens, no code → classified as "simple"
+# Llama-3-70B gives numerically wrong answer (0.9 instead of sqrt(pi)/2 ≈ 0.886...)
+# Users report math errors; quality regression detected after 200 affected requests
+
+# FIX: add unicode math and formal reasoning signals to classifier
+_MATH_UNICODE = re.compile(r"[∫∑∂∀∃√≈≠≤≥∈∉⊂⊃∪∩]")
+_FORMAL_REASONING = re.compile(
+    r"\b(prove|derive|disprove|theorem|lemma|corollary|QED|iff|iff|∴|∵)\b",
+    re.IGNORECASE,
+)
+
+def _has_complex_signals(prompt: str) -> bool:
+    return bool(_MATH_UNICODE.search(prompt) or _FORMAL_REASONING.search(prompt))
+
+# Integrate into classifier: _has_complex_signals check before "simple" branch
+```
+
+**Pitfall 2 — Semantic cache returns stale response for temporally-sensitive queries.**
+
+```python
+# BROKEN: "Who leads OpenAI?" answered from 2023 cache → wrong name served in 2025
+# Cache TTL is 7 days for all queries; temporal signals not detected
+
+# FIX: already shown in semantic_cache_store() above with _cache_ttl_seconds()
+# Additional fix: inject cache timestamp into system prompt for self-aware responses
+
+def build_system_prompt_with_cache_warning(cached_at_ts: float) -> str:
+    age_hours = (time.time() - cached_at_ts) / 3600
+    if age_hours > 2:
+        return (
+            f"Note: this response was cached {age_hours:.0f} hours ago. "
+            "If the user is asking about current events or recent changes, "
+            "state that your information may be outdated."
+        )
+    return ""
+```
+
+**Pitfall 3 — Shadow evaluation uses the same model family as the routed model, masking quality gaps.**
+
+```python
+# BROKEN: Claude-3.5-Haiku (routed) quality judged by Claude-3.5-Sonnet
+# Same training data and RLHF distribution → judge scores inflated by ~12%
+# A quality regression to Haiku is invisible because Sonnet rates its sibling favorably
+
+# FIX: always use a cross-family judge for shadow evaluation
+async def shadow_eval_quality(
+    prompt: str,
+    routed_response: str,
+    reference_response: str,
+    routed_tier: Tier,
+) -> float:
+    """Returns quality score 0-1 for routed_response relative to reference."""
+    # Use GPT-4o as judge when routed tier is Anthropic; use Claude as judge for OpenAI
+    judge_model = "gpt-4o" if "claude" in routed_tier.value else "claude-3-5-sonnet-20241022"
+    rubric = (
+        "Rate the quality of Response A vs Reference B on a scale 0-10 "
+        "for accuracy, completeness, and helpfulness. "
+        "Reply JSON: {\"score\": <0-10>, \"reason\": \"<one sentence>\"}"
+    )
+    payload = f"Prompt: {prompt}\n\nResponse A (to evaluate): {routed_response}\n\nReference B: {reference_response}"
+    raw = await call_provider_by_name(judge_model, rubric + "\n\n" + payload, timeout=15.0)
+    data = json.loads(raw)
+    return data["score"] / 10.0   # normalize to [0, 1]
+```
+
+**Metrics: Before vs After Gateway Deployment**
+
+| Metric | Before (GPT-4o only) | After (Multi-tier gateway) |
+|---|---|---|
+| Monthly LLM API cost | $180,000 | $47,200 (-73.8%) |
+| Avg p50 response latency | 2,100ms | 780ms (-62.9%) |
+| Avg p99 response latency | 6,800ms | 2,400ms (-64.7%) |
+| Semantic cache hit rate | 0% | 34% of requests |
+| Self-hosted Llama-3-70B share | 0% | 61% of volume |
+| Shadow eval quality delta | baseline | -0.6% (within 1% SLA) |
+| Provider failover events | n/a | 14 in 90 days (avg 38s outage) |
+| Routing accuracy (heuristic) | n/a | 91.4% correct tier |
+
+**Interview Q&As**
+
+**How do you validate that cheaper routed models meet quality SLAs before full rollout?** Shadow evaluation: route 1% of production traffic to both the candidate cheap model and the premium reference model simultaneously, then use a cross-family LLM judge to score both responses. Set a quality-delta threshold (for example, < 5%) and run for at least 10,000 shadow pairs before promoting the routing rule. Using a cross-family judge (GPT-4o judging Claude outputs, Claude judging GPT outputs) prevents model-family bias from inflating scores by 10-15%.
+
+**What signals does a heuristic routing classifier use and what are its failure modes?** Common signals: token count, regex for code/math markers, instruction-type prefix (classify vs. explain vs. prove), context-window requirement. Failure mode 1: short-but-complex prompts (9-token math expressions) misclassified as simple — fix by adding unicode math symbol detection. Failure mode 2: domain-specific jargon that resembles simple text — fix with an embedding-based secondary classifier when heuristics are ambiguous (confidence < 0.7).
+
+**How does a circuit breaker prevent cascading failures in a multi-provider gateway?** Track per-provider error rate in a 30-second sliding window. If errors exceed 10% of requests, open the circuit: stop routing new requests to that provider for 60 seconds. During open state, the fallback chain activates automatically (Llama → Haiku → GPT-4o → Sonnet). After 60 seconds, one probe request is allowed (half-open state); if it succeeds, the circuit closes. This converts a provider outage from a p99 latency spike (requests hanging until 10s timeout) into a near-zero-latency fallback (< 5ms to re-route).
+
+**How do you size the semantic cache to balance memory cost vs hit rate?** Profile cosine similarity distribution across 1 million production query pairs. If P60 similarity is 0.91, setting threshold at 0.95 captures ~40% of requests as cacheable. Each cache entry costs ~1,536 bytes (384-d float32 embedding) + ~2KB average response text ≈ 3.5KB. For 50,000 cached entries: ~175MB Redis memory. ROI: 34% cache hit rate eliminates 13.6M LLM calls/month at avg $0.003/call = $40,800/month saved, easily justifying a 4GB Redis instance at $200/month.
+
+**How do you handle multi-tenant cost attribution and per-customer budget enforcement?** Each request carries a tenant_id. Increment a per-tenant Redis counter (INCRBYFLOAT) with the estimated cost in USD on every LLM call. Check the counter against the tenant's monthly budget before processing. If the counter exceeds 90% of budget, downgrade routing tier by one level (GPT-4o → Haiku). At 100%, return a 429 with Retry-After header. Reset counters on the 1st of each month via a scheduled job. This prevents one large customer from monopolizing GPU capacity and causing latency spikes for others.
+
+**What is the operational cost of running self-hosted Llama-3-70B vs API providers and when does it break even?** Llama-3-70B on 4×A100 80GB SXM5 (tensor-parallel TP=4): 8×A100 spot at $2.50/GPU/hr = $20/hr, serving ~500 RPS at 800ms avg latency, handling roughly 1.5 billion tokens/day. Cost per 1k output tokens: ~$0.0009. GPT-4o API equivalent: $15/1k output tokens. Break-even volume: above ~3 million output tokens/day, self-hosting is cheaper. At 61% of 40M monthly requests routed to self-hosted Llama (~24M requests × avg 300 output tokens = 7.2B tokens/month), the monthly GPU cost is $14,400 vs API equivalent $108,000 — 7.5× savings at scale.

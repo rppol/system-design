@@ -451,35 +451,726 @@ Each RAG component has a comprehensive standalone reference with 10+ senior-AI-e
 
 ---
 
-## 14. Case Study: Building a RAG System for 10,000 Internal Documents
 
-**Context:** Enterprise with 10,000 internal documents (policies, SOPs, HR guides, product docs). Employees spend 2 hours/day searching for information.
+## 14. Case Study
+
+**Scenario: Hybrid BM25+HNSW retrieval for a 10M-document enterprise knowledge base.** A professional services firm has 10M internal documents (PDFs, Confluence pages, Slack threads) accumulated over 20 years. Employees spend 2 hours/day searching for precedent and policy. The RAG system must answer questions with cited sources, handle queries in English and Spanish, and respond in < 2 seconds. Retrieval recall@5 target: 85%.
+
+```
+RAG pipeline architecture:
+
+  User query (English/Spanish)
+        │
+  [Multilingual query rewriter] ← HyDE (hypothetical doc embedding)
+        │
+  ┌─────┴──────────────────────┐
+  │ BM25 (sparse)              │   ← keyword precision, handles rare terms
+  │ HNSW (dense, 1024-dim)     │   ← semantic similarity
+  └─────┬──────────────────────┘
+        │  RRF fusion (top-50 from each)
+  [Cross-encoder reranker]     ← reranks top-100 to top-5
+        │
+  [LLM generator + citation]   ← generates answer citing chunk IDs
+        │
+  User answer with [source links]
+```
+
+**Hybrid retrieval with Reciprocal Rank Fusion:**
+
+```python
+from rank_bm25 import BM25Okapi
+import faiss
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
+class HybridRetriever:
+    def __init__(self, corpus: list[str], embed_model: str = "multilingual-e5-large") -> None:
+        self.model = SentenceTransformer(embed_model)
+        # Sparse index
+        tokenized = [doc.split() for doc in corpus]
+        self.bm25 = BM25Okapi(tokenized)
+        # Dense index
+        embeddings = self.model.encode(corpus, batch_size=128, show_progress_bar=True)
+        self.index = faiss.IndexHNSWFlat(embeddings.shape[1], 32)
+        self.index.add(embeddings.astype(np.float32))
+        self.corpus = corpus
+
+    def search(self, query: str, k: int = 5, alpha: float = 0.6) -> list[tuple[int, float]]:
+        # Sparse scores
+        bm25_scores = self.bm25.get_scores(query.split())
+        bm25_ranks = {i: r for r, i in enumerate(np.argsort(-bm25_scores)[:50])}
+        # Dense scores
+        q_emb = self.model.encode([query]).astype(np.float32)
+        _, dense_ids = self.index.search(q_emb, 50)
+        dense_ranks = {int(i): r for r, i in enumerate(dense_ids[0])}
+        # RRF fusion: score = Σ 1 / (k + rank)
+        all_ids = set(bm25_ranks) | set(dense_ranks)
+        rrf_scores = {
+            doc_id: (1 - alpha) / (60 + bm25_ranks.get(doc_id, 1000))
+                  + alpha / (60 + dense_ranks.get(doc_id, 1000))
+            for doc_id in all_ids
+        }
+        return sorted(rrf_scores.items(), key=lambda x: -x[1])[:k]
+```
+
+**Chunking strategy for heterogeneous documents:**
+
+```python
+from dataclasses import dataclass
+
+@dataclass
+class Chunk:
+    text: str
+    doc_id: str
+    page: int
+    chunk_idx: int
+    metadata: dict[str, str]
+
+def chunk_document(text: str, doc_id: str, chunk_size: int = 512,
+                   overlap: int = 64) -> list[Chunk]:
+    sentences = text.split(". ")
+    chunks, current, current_tokens = [], [], 0
+    for sent in sentences:
+        tokens = len(sent.split())
+        if current_tokens + tokens > chunk_size and current:
+            chunks.append(" ".join(current))
+            # Keep last overlap tokens for context continuity
+            current = current[-overlap // 10:]
+            current_tokens = sum(len(s.split()) for s in current)
+        current.append(sent)
+        current_tokens += tokens
+    if current:
+        chunks.append(" ".join(current))
+    return [Chunk(text=c, doc_id=doc_id, page=0, chunk_idx=i, metadata={})
+            for i, c in enumerate(chunks)]
+```
+
+**Pitfall 1 — Chunking at fixed token boundaries splits mid-sentence, degrading retrieval.**
+
+```python
+# BROKEN: chunk every 512 tokens regardless of sentence boundaries
+def chunk_fixed(text: str, size: int = 512) -> list[str]:
+    tokens = text.split()
+    return [" ".join(tokens[i:i+size]) for i in range(0, len(tokens), size)]
+# "the patient should not take aspirin with" / "warfarin as it increases bleeding risk"
+# Two chunks: neither is retrievable for "aspirin warfarin interaction" query
+
+# FIX: sentence-aware chunking (as shown above) keeps complete sentences together
+# Recall@5 improvement: 71% (fixed) → 85% (sentence-aware)
+```
+
+**Pitfall 2 — Dense-only retrieval misses exact technical terms.**
+
+```python
+# BROKEN: pure HNSW fails on queries containing rare product codes or legal citations
+results = hnsw_index.search(embed("Case 2024-CV-00123 precedent"), k=5)
+# "2024-CV-00123" is OOV or split by tokenizer → embedding doesn't match
+
+# FIX: hybrid BM25+HNSW — BM25 handles exact string matching for rare terms
+# BM25 recall for exact legal citations: 94% vs. HNSW alone: 22%
+```
+
+**Pitfall 3 — Answer generation without source grounding causes hallucination.**
+
+```python
+# BROKEN: LLM generates answer from retrieved context but fabricates citations
+response = llm.complete(f"Context: {retrieved_text}\nQuestion: {query}")
+# Response: "As stated in Smith v. Jones (2019)..." — document not in retrieved set
+
+# FIX: constrained generation — only cite chunk IDs present in context
+prompt = f"""Answer using ONLY the provided chunks. Cite chunks as [CHUNK_ID].
+If the answer is not in the chunks, say "Not found in knowledge base."
+
+Chunks:
+{chr(10).join(f'[{c.chunk_idx}] {c.text}' for c in retrieved_chunks)}
+
+Question: {query}"""
+response = llm.complete(prompt)
+# Post-process: verify every [CHUNK_ID] in response is in retrieved_chunks set
+```
+
+**Metrics and results:**
+
+| Metric | BM25 only | HNSW only | Hybrid (RRF) |
+|---|---|---|---|
+| Recall@5 | 72% | 78% | 85% |
+| Precision@5 | 68% | 74% | 81% |
+| Latency p99 | 45ms | 80ms | 110ms |
+| Exact term recall | 94% | 22% | 92% |
+| Multilingual recall | 41% | 79% | 81% |
+
+**Interview discussion points:**
+
+**Why does hybrid retrieval outperform either BM25 or dense retrieval alone?** BM25 excels at exact keyword matching — product codes, legal citations, rare technical terms. Dense retrieval excels at semantic matching — synonyms, paraphrases, concept-level queries. Their failures are complementary: a query for "myocardial infarction" finds dense results via semantic similarity to "heart attack" but BM25 misses; a query for "RFC-7807" finds BM25 results exactly but dense retrieval loses the rare token. RRF fusion captures wins from both without requiring tuned weighting between them.
+
+**What is HyDE (Hypothetical Document Embedding) and when does it help?** HyDE generates a hypothetical answer to the query using an LLM, then embeds that hypothetical answer for retrieval instead of the raw query. A query like "what is our policy on remote work?" gets a generated hypothetical policy paragraph that is semantically close to actual policy documents in the index. HyDE improves recall by 5-12% for knowledge base queries where the query and document style differ significantly. It adds one LLM call per query (~100ms latency) — only use it when retrieval recall is below target and latency budget allows.
+
+**How do you evaluate retrieval quality separately from generation quality in a RAG pipeline?** Use a test set with labeled relevant document IDs per query. Measure retrieval metrics (Recall@K, MRR, NDCG@K) on the retriever alone, then measure end-to-end quality (faithfulness, answer accuracy) on the full RAG pipeline. This separation is critical for debugging: low answer accuracy from high retrieval recall → problem is in generation (hallucination, prompt); low retrieval recall → problem is in chunking or indexing. Tools: RAGAS (automated faithfulness + context recall), human evaluation for answer correctness.
+
+**What is the right chunk size and how do you tune it?** Smaller chunks (128-256 tokens) have higher precision — they contain less irrelevant text around the relevant passage. Larger chunks (512-1024 tokens) have higher recall — they're less likely to split a concept across chunks. The optimal size depends on document structure and query type. Tune by: (1) indexing at multiple sizes (256, 512, 1024); (2) measuring Recall@5 on a validation set for each; (3) choosing the size that maximizes recall subject to a latency constraint (larger chunks = slower HNSW search). Typical production: 512 tokens with 64-token overlap.
+
+**How do you keep the retrieval index fresh for a corpus that changes daily?** Implement incremental indexing: new or modified documents are chunked and embedded immediately (stream processing via Kafka → embedding worker → FAISS/Weaviate upsert). Deleted documents trigger a tombstone flag in the metadata store (the index itself is not rebuilt — HNSW doesn't support deletion efficiently). Weekly: rebuild the index from the full corpus to clean up tombstones and rebalance the HNSW graph. Metadata filter (exclude tombstoned doc IDs) is applied at query time until the weekly rebuild.
+
+## 14. Case Study
+
+**Scenario:** A Fortune 500 enterprise (35,000 employees, 280 business units) deploys an internal knowledge assistant over 10M documents: HR policies, legal contracts, technical documentation, financial reports, and internal wikis. Current state: SharePoint keyword search with 67% null result rate for natural language queries. Goal: answer 80%+ of employee questions from internal knowledge, p99 latency < 3 seconds, hallucination rate < 2%, $40k/month maximum infrastructure cost.
 
 **Architecture:**
 
-**Indexing (one-time + incremental):**
 ```
-Documents: PDFs, Word docs, Confluence pages, Notion pages
-Parser: Apache Tika for PDFs; native APIs for Confluence/Notion
-Chunking: 512-token chunks, 50-token overlap, sentence boundaries
-  + section headers as metadata
-Embedding: BGE-base-en-v1.5 (768d, fast, good quality)
-Storage: Qdrant (self-hosted, 10K × 512 chunks = ~5M vectors, ~2GB)
-BM25 index: Elasticsearch (same documents, keyword search)
+  10M Documents (HR, Legal, Technical, Financial, Wiki)
+         |
+         v Offline Ingestion Pipeline
+  ┌──────────────────────────────────────────────────────────────┐
+  │  Chunking Strategy (adaptive by document type):              │
+  │  - HR Policies: sentence-boundary, 512 tokens, 128 overlap  │
+  │  - Legal Contracts: section-boundary (## clause markers)    │
+  │  - Technical Docs: code-block-aware, 800 tokens             │
+  │  - Financial Reports: table-aware, preserve table structure  │
+  │                                                              │
+  │  Embedding: text-embedding-3-large (OpenAI)                  │
+  │  3072-dim → PCA → 1536-dim (half storage cost, 97% quality) │
+  │  Batch API: $0.02/1M tokens → 10M docs × 500 avg tokens     │
+  │  = 5B tokens = $100 one-time embedding cost                  │
+  │                                                              │
+  │  Vector DB: Qdrant (self-hosted, 5 nodes)                   │
+  │  HNSW index: M=32, ef_construction=200                       │
+  │  Payload filters: document_type, business_unit, last_updated │
+  └──────────────────────────────────────────────────────────────┘
+         |                    |
+         v                    v
+  ┌───────────────┐  ┌────────────────────────────────────────┐
+  │  Vector Index │  │  BM25 Index (Elasticsearch)             │
+  │  (Qdrant)     │  │  For hybrid search: handles exact       │
+  │  10M vectors  │  │  keyword matches (product names,        │
+  │  HNSW p99:24ms│  │  employee IDs, policy numbers)          │
+  └──────────┬────┘  └────────────────────┬───────────────────┘
+             │                            │
+             v                            │
+  ┌──────────────────────────────────────▼───────────────────┐
+  │  Hybrid Retrieval (RRF fusion)                           │
+  │  BM25 top-20 + HNSW top-20 → RRF → unified top-30       │
+  │  RRF score: 1/(rank + 60) summed across systems          │
+  └──────────────────────────────────────────────────────────┘
+             |
+             v
+  ┌──────────────────────────────────────────────────────────┐
+  │  Cross-encoder Reranker: ms-marco-MiniLM-L-12-v2         │
+  │  Rerank top-30 → top-5 for context                       │
+  │  Latency: 12ms for 30 query-document pairs               │
+  └──────────────────────────────────────────────────────────┘
+             |
+             v
+  ┌──────────────────────────────────────────────────────────┐
+  │  LLM: Claude claude-sonnet-4-6                           │
+  │  System: "Answer ONLY from the provided context.         │
+  │           If not in context, say 'I don't know.'"        │
+  │  Context: 5 chunks + metadata (source, date, BU)        │
+  │  Max tokens: 1024 output                                 │
+  └──────────────────────────────────────────────────────────┘
+
+Hybrid Search RRF Fusion:
+  Query: "What is the parental leave policy for VP-level employees?"
+  BM25 top-3: ["Parental Leave Policy v2.3", "VP Benefits Summary", "Leave Types Overview"]
+  Vector top-3: ["Parental Leave FAQ", "Benefits for Senior Employees", "Leave Policy"]
+  RRF scores:
+    "Parental Leave Policy v2.3": 1/(1+60) + 1/(3+60) = 0.0164 + 0.0154 = 0.0318
+    "VP Benefits Summary":         1/(2+60) + 1/(5+60) = 0.0161 + 0.0154 = 0.0179
+  Final order: "Parental Leave Policy v2.3" > "VP Benefits Summary" > ...
 ```
 
-**Query pipeline:**
-```
-Query → query rewriting (LLM expands acronyms, adds context)
-      → Dense retrieval top-100 + BM25 top-100
-      → RRF merge → top-100 combined
-      → BGE-reranker-base → top-5
-      → Inject into GPT-4o with source citations
-      → Return answer + links to source documents
+**Key implementation — 3 Python code blocks:**
+
+Block 1 — Adaptive chunking by document type with metadata preservation:
+
+```python
+from __future__ import annotations
+import re
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Generator
+
+
+class DocumentType(str, Enum):
+    HR_POLICY = "hr_policy"
+    LEGAL_CONTRACT = "legal_contract"
+    TECHNICAL_DOC = "technical_doc"
+    FINANCIAL_REPORT = "financial_report"
+    WIKI = "wiki"
+
+
+@dataclass
+class Chunk:
+    chunk_id: str
+    content: str
+    doc_id: str
+    doc_title: str
+    doc_type: DocumentType
+    business_unit: str
+    section_header: str       # nearest section header for context
+    page_number: int | None
+    last_updated: str         # ISO date
+    token_count: int
+
+
+def chunk_document(
+    text: str,
+    doc_id: str,
+    doc_title: str,
+    doc_type: DocumentType,
+    metadata: dict[str, str],
+) -> list[Chunk]:
+    """Dispatch to document-type-specific chunker."""
+    chunkers = {
+        DocumentType.HR_POLICY: _chunk_policy,
+        DocumentType.LEGAL_CONTRACT: _chunk_contract,
+        DocumentType.TECHNICAL_DOC: _chunk_technical,
+        DocumentType.FINANCIAL_REPORT: _chunk_financial,
+        DocumentType.WIKI: _chunk_policy,  # same as policy
+    }
+    chunker = chunkers[doc_type]
+    raw_chunks = list(chunker(text))
+    return [
+        Chunk(
+            chunk_id=f"{doc_id}_{i:04d}",
+            content=chunk_text,
+            doc_id=doc_id,
+            doc_title=doc_title,
+            doc_type=doc_type,
+            business_unit=metadata.get("business_unit", "global"),
+            section_header=_extract_section_header(chunk_text),
+            page_number=None,
+            last_updated=metadata.get("last_updated", ""),
+            token_count=len(chunk_text.split()) * 4 // 3,   # approx tokens
+        )
+        for i, chunk_text in enumerate(raw_chunks)
+        if len(chunk_text.strip()) > 50   # discard near-empty chunks
+    ]
+
+
+def _chunk_policy(text: str, size: int = 512, overlap: int = 128) -> Generator[str, None, None]:
+    """Sentence-boundary chunking with overlap for HR policies."""
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    buf: list[str] = []
+    buf_tokens = 0
+    approx_tok = lambda s: len(s.split()) * 4 // 3
+
+    for sent in sentences:
+        sent_tokens = approx_tok(sent)
+        if buf_tokens + sent_tokens > size and buf:
+            yield " ".join(buf)
+            # Keep last N tokens as overlap
+            overlap_buf: list[str] = []
+            overlap_count = 0
+            for s in reversed(buf):
+                if overlap_count + approx_tok(s) <= overlap:
+                    overlap_buf.insert(0, s)
+                    overlap_count += approx_tok(s)
+                else:
+                    break
+            buf = overlap_buf
+            buf_tokens = overlap_count
+        buf.append(sent)
+        buf_tokens += sent_tokens
+
+    if buf:
+        yield " ".join(buf)
+
+
+def _chunk_contract(text: str) -> Generator[str, None, None]:
+    """Section-boundary chunking for legal contracts."""
+    # Split on numbered sections: "1.", "2.1", "Article III", "Section 4"
+    section_pattern = r'\n(?=(?:\d+\.|\bArticle\b|\bSection\b)\s)'
+    sections = re.split(section_pattern, text)
+    for section in sections:
+        if len(section.strip()) < 50:
+            continue
+        # If section > 800 tokens, sub-chunk by paragraph
+        if len(section.split()) > 600:
+            for para in section.split("\n\n"):
+                if len(para.strip()) > 50:
+                    yield para.strip()
+        else:
+            yield section.strip()
+
+
+def _chunk_technical(text: str) -> Generator[str, None, None]:
+    """Code-block-aware chunking — never split inside a code block."""
+    code_block_pattern = r'(```.*?```|`[^`]+`)'
+    parts = re.split(code_block_pattern, text, flags=re.DOTALL)
+    buf = ""
+    for part in parts:
+        if part.startswith("```") or (part.startswith("`") and not part.startswith("```")):
+            # Always keep code blocks intact
+            if buf:
+                yield buf.strip()
+                buf = ""
+            yield part.strip()
+        else:
+            buf += part
+            if len(buf.split()) > 600:
+                yield buf.strip()
+                buf = ""
+    if buf.strip():
+        yield buf.strip()
+
+
+def _chunk_financial(text: str) -> Generator[str, None, None]:
+    """Table-aware chunking — preserve table structure within a chunk."""
+    # Split on headers but keep tables with their header row
+    lines = text.splitlines()
+    buf: list[str] = []
+    in_table = False
+
+    for line in lines:
+        is_table_row = "|" in line and line.strip().startswith("|")
+        if is_table_row:
+            in_table = True
+            buf.append(line)
+        else:
+            if in_table:
+                # Flush table with preceding context
+                yield "\n".join(buf)
+                buf = []
+                in_table = False
+            buf.append(line)
+            if len(buf) > 40:  # ~40 lines per chunk for narrative
+                yield "\n".join(buf)
+                buf = []
+
+    if buf:
+        yield "\n".join(buf)
+
+
+def _extract_section_header(text: str) -> str:
+    """Extract nearest section header for display context."""
+    match = re.search(r'^(?:##? .+|[A-Z][A-Z ]{5,}$)', text, re.MULTILINE)
+    return match.group().strip() if match else ""
 ```
 
-**Results:**
-- Information retrieval accuracy: 87% (vs. 42% with keyword search alone)
-- Avg time to find information: 12 seconds (vs. 2 hours manual)
-- Employee satisfaction score: 8.7/10
-- Hallucination rate: 4% (reduced to 1% by adding "say I don't know" instruction)
+Block 2 — Hybrid retrieval with RRF fusion and payload filtering (production concern):
+
+```python
+from __future__ import annotations
+import asyncio
+from dataclasses import dataclass
+from typing import Any
+
+from qdrant_client import AsyncQdrantClient, models as qmodels
+from elasticsearch import AsyncElasticsearch
+
+
+@dataclass
+class RetrievalResult:
+    chunk_id: str
+    content: str
+    score: float
+    doc_title: str
+    business_unit: str
+    last_updated: str
+    retrieval_source: str    # "vector", "bm25", or "rrf"
+
+
+async def hybrid_search(
+    query: str,
+    query_embedding: list[float],
+    qdrant: AsyncQdrantClient,
+    es: AsyncElasticsearch,
+    collection_name: str,
+    top_k_each: int = 20,
+    rrf_k: int = 60,
+    user_business_unit: str | None = None,
+) -> list[RetrievalResult]:
+    """
+    Hybrid BM25 + vector search with Reciprocal Rank Fusion.
+    Payload filter restricts to user's business unit (access control).
+    """
+
+    # Build payload filter for access control
+    payload_filter = None
+    if user_business_unit and user_business_unit != "global":
+        payload_filter = qmodels.Filter(
+            should=[
+                qmodels.FieldCondition(
+                    key="business_unit",
+                    match=qmodels.MatchValue(value=user_business_unit),
+                ),
+                qmodels.FieldCondition(
+                    key="business_unit",
+                    match=qmodels.MatchValue(value="global"),  # include global docs
+                ),
+            ]
+        )
+
+    # Parallel: vector search + BM25 search
+    vector_task = qdrant.search(
+        collection_name=collection_name,
+        query_vector=query_embedding,
+        limit=top_k_each,
+        query_filter=payload_filter,
+        with_payload=True,
+    )
+    bm25_task = es.search(
+        index=collection_name,
+        body={
+            "query": {
+                "bool": {
+                    "must": {"match": {"content": query}},
+                    "filter": (
+                        [{"term": {"business_unit": user_business_unit}}]
+                        if user_business_unit else []
+                    ),
+                }
+            },
+            "size": top_k_each,
+        },
+    )
+    vector_results, bm25_response = await asyncio.gather(vector_task, bm25_task)
+
+    # Build rank maps
+    vector_ranks: dict[str, int] = {
+        r.id: rank + 1 for rank, r in enumerate(vector_results)
+    }
+    bm25_hits = bm25_response["hits"]["hits"]
+    bm25_ranks: dict[str, int] = {
+        h["_id"]: rank + 1 for rank, h in enumerate(bm25_hits)
+    }
+
+    # RRF fusion: score = sum of 1/(rank + rrf_k) across systems
+    all_ids = set(vector_ranks) | set(bm25_ranks)
+    rrf_scores: dict[str, float] = {}
+    for cid in all_ids:
+        score = 0.0
+        if cid in vector_ranks:
+            score += 1.0 / (vector_ranks[cid] + rrf_k)
+        if cid in bm25_ranks:
+            score += 1.0 / (bm25_ranks[cid] + rrf_k)
+        rrf_scores[cid] = score
+
+    # Build results sorted by RRF score
+    sorted_ids = sorted(rrf_scores, key=lambda x: rrf_scores[x], reverse=True)[:top_k_each + 10]
+
+    # Fetch payloads for BM25-only results (not in vector results)
+    results = []
+    vector_payload = {r.id: r.payload for r in vector_results}
+    bm25_payload = {h["_id"]: h["_source"] for h in bm25_hits}
+
+    for cid in sorted_ids:
+        payload = vector_payload.get(cid) or bm25_payload.get(cid, {})
+        results.append(RetrievalResult(
+            chunk_id=cid,
+            content=payload.get("content", ""),
+            score=rrf_scores[cid],
+            doc_title=payload.get("doc_title", ""),
+            business_unit=payload.get("business_unit", ""),
+            last_updated=payload.get("last_updated", ""),
+            retrieval_source="rrf",
+        ))
+    return results
+```
+
+Block 3 — BROKEN -> FIX: context contamination and lack of grounding:
+
+```python
+from __future__ import annotations
+import anthropic
+
+
+# BROKEN: No system prompt grounding — LLM uses training knowledge to fill gaps.
+# Employee asks: "What is the maximum flex spending account contribution?"
+# Context: HR document says "$2,850 for 2023"
+# LLM (ungrounded): adds 2024 IRS limit from training data ($3,200) — hallucination.
+# Correct answer: only what the document states.
+async def broken_generate_answer(query: str, context_chunks: list[str]) -> str:
+    client = anthropic.AsyncAnthropic()
+    context = "\n\n".join(context_chunks)
+    resp = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"}],
+        # No system prompt — model uses training knowledge freely
+    )
+    return resp.content[0].text
+
+
+# FIX: Strict grounding system prompt + citation requirement.
+# If context does not contain the answer, model must say so explicitly.
+async def fixed_generate_answer(
+    query: str,
+    context_chunks: list[dict[str, str]],  # includes doc_title, content, last_updated
+) -> str:
+    client = anthropic.AsyncAnthropic()
+
+    context_block = "\n\n".join(
+        f"[Source: {c['doc_title']}, Updated: {c['last_updated']}]\n{c['content']}"
+        for c in context_chunks
+    )
+
+    system_prompt = (
+        "You are an enterprise knowledge assistant. "
+        "Answer ONLY using information from the provided documents. "
+        "If the answer is not in the documents, say exactly: "
+        "'I don't have that information in our internal knowledge base. "
+        "Please contact [appropriate team] directly.' "
+        "Always cite the source document by name. "
+        "Do NOT use any knowledge from your training data to fill gaps."
+    )
+
+    resp = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1024,
+        system=system_prompt,
+        messages=[{
+            "role": "user",
+            "content": f"Documents:\n{context_block}\n\nQuestion: {query}",
+        }],
+    )
+    return resp.content[0].text
+
+
+# BROKEN: Store all chunks with identical embedding — no differentiation.
+# "Policy updated January 2024" and "Policy (deprecated) 2019" both appear in results.
+# LLM receives both, gets confused by contradictory information.
+async def broken_index_all_versions(chunks: list[dict]) -> None:
+    for chunk in chunks:
+        pass  # index all chunks regardless of version or date
+
+
+# FIX: Recency filter — exclude documents updated more than 2 years ago
+# from primary retrieval; keep in archive index for explicit historical queries.
+# Also: filter by "deprecated" or "superseded" markers in metadata.
+async def fixed_index_with_version_control(
+    chunks: list[dict], archive_threshold_days: int = 730
+) -> tuple[list[dict], list[dict]]:
+    import datetime
+    cutoff = datetime.date.today() - datetime.timedelta(days=archive_threshold_days)
+    active = []
+    archive = []
+    for chunk in chunks:
+        is_deprecated = "deprecated" in chunk.get("content", "").lower()[:200]
+        try:
+            last_updated = datetime.date.fromisoformat(chunk.get("last_updated", "2000-01-01"))
+        except ValueError:
+            last_updated = datetime.date(2000, 1, 1)
+
+        if is_deprecated or last_updated < cutoff:
+            archive.append(chunk)
+        else:
+            active.append(chunk)
+    return active, archive
+```
+
+**Pitfall 1 — Chunk boundary splits key information across two chunks:**
+
+```python
+# BROKEN: Fixed-size 512-token chunks with no respect for semantic boundaries.
+# "The maximum vacation accrual is" ... [chunk boundary] ... "25 days per year."
+# First chunk indexed without the answer; second chunk has answer without context.
+# Neither chunk alone answers "maximum vacation accrual"; retrieval fails.
+
+# FIX: Sentence-boundary chunking + overlap.
+# 128-token overlap ensures "maximum vacation accrual is 25 days" appears
+# in at least one chunk intact. Both preceding and following context preserved.
+```
+
+**Pitfall 2 — Missing payload metadata causes wrong access control:**
+
+```python
+# BROKEN: Index chunks without business_unit metadata.
+# Finance team's confidential M&A documents indexed without access restriction.
+# HR employee searches "acquisition targets" → retrieves confidential docs.
+# Access control bypass via RAG.
+
+# FIX: Mandatory metadata schema validation before indexing.
+from dataclasses import dataclass
+@dataclass
+class RequiredMetadata:
+    business_unit: str       # required
+    document_classification: str  # "public", "internal", "confidential", "restricted"
+    last_updated: str
+    owner_team: str
+
+def validate_chunk_metadata(chunk: dict) -> list[str]:
+    errors = []
+    for field in ["business_unit", "document_classification", "last_updated"]:
+        if not chunk.get(field):
+            errors.append(f"Missing required metadata: {field}")
+    if chunk.get("document_classification") not in {"public", "internal", "confidential", "restricted"}:
+        errors.append("Invalid document_classification value")
+    return errors
+```
+
+**Pitfall 3 — Embedding staleness after document updates:**
+
+```python
+# BROKEN: Re-embed entire 10M document corpus when any document changes.
+# HR updates vacation policy → trigger full re-embedding job → 8 hours.
+# Embedding drift: policy updated but old embedding still in index for 8+ hours.
+# Employees get outdated answers during re-embedding window.
+
+# FIX: Incremental re-embedding on document change events.
+# Document update webhook → re-chunk changed document only → re-embed →
+# upsert to vector DB (overwrite by doc_id prefix). Total: 30-60 seconds.
+import asyncio
+from qdrant_client import AsyncQdrantClient
+
+async def incremental_update(
+    doc_id: str,
+    new_chunks: list[dict],
+    qdrant: AsyncQdrantClient,
+    collection: str,
+) -> None:
+    # Delete old chunks for this document
+    await qdrant.delete(
+        collection_name=collection,
+        points_selector=qmodels.FilterSelector(
+            filter=qmodels.Filter(
+                must=[qmodels.FieldCondition(
+                    key="doc_id", match=qmodels.MatchValue(value=doc_id)
+                )]
+            )
+        ),
+    )
+    # Insert new chunks
+    await qdrant.upsert(collection_name=collection, points=[
+        qmodels.PointStruct(id=c["chunk_id"], vector=c["embedding"], payload=c)
+        for c in new_chunks
+    ])
+
+from qdrant_client import models as qmodels
+```
+
+**Metrics:**
+
+| Metric | BM25 baseline | + Vector only | + Hybrid (RRF) | + Reranker |
+|--------|--------------|---------------|----------------|------------|
+| Answer found rate | 33% | 61% | 74% | 81% |
+| Null result rate | 67% | 39% | 26% | 19% |
+| NDCG@5 | 0.31 | 0.58 | 0.71 | 0.79 |
+| Hallucination rate | 18% (GPT-4 ungrounded) | 9% | 6% | 2.1% |
+| p50 latency | 180ms | 380ms | 420ms | 435ms |
+| p99 latency | 820ms | 1,400ms | 1,600ms | 1,620ms |
+| LLM answer latency | — | — | — | 1,200ms |
+| Total p99 end-to-end | — | — | — | 2.8s |
+| Monthly infra cost | $8k | $22k | $28k | $31k |
+| Employee satisfaction | 2.8/5 | 3.6/5 | 4.0/5 | 4.3/5 |
+
+**Interview Q&As:**
+
+**Q: Why use hybrid BM25 + vector search rather than vector search alone?**
+Vector search excels at semantic similarity but struggles with exact matches — product codes, policy numbers, employee IDs, proper nouns. BM25 excels at exact keyword matching and rare term retrieval but misses paraphrases and synonyms. Hybrid search with RRF fusion combines both strengths: a query for "FSA contribution limit 2024" benefits from BM25 finding documents containing "FSA" and "2024" exactly, while the vector component finds semantically related documents using synonyms like "flexible spending account" and "health benefit cap." In enterprise RAG benchmarks, hybrid search typically improves recall@10 by 10-20% over vector-only.
+
+**Q: What is Reciprocal Rank Fusion (RRF) and why is it preferred over score normalization?**
+RRF combines ranked lists from multiple retrieval systems by assigning each document a score of 1/(rank + k) where k is a smoothing constant (typically 60) and summing scores across systems. Documents appearing near the top of multiple systems receive the highest combined scores. RRF is preferred over score normalization because BM25 and vector similarity scores are on incompatible scales — a BM25 score of 8.3 and a cosine similarity of 0.72 are not directly comparable. RRF avoids this by operating only on ranks, which are always in [1, N] regardless of the underlying scoring function. Empirically, RRF consistently outperforms simple score averaging on BEIR and MTEB benchmarks.
+
+**Q: How do you implement access control in a RAG system without leaking confidential documents?**
+Three layers: (1) Payload filtering at retrieval time — each chunk in the vector index carries a business_unit and document_classification field; the query filter restricts retrieval to chunks the requesting user is authorized to access. (2) Pre-indexing validation — require all indexed chunks to have a valid classification label; reject ingestion of any chunk missing access metadata. (3) Post-retrieval verification — before including a chunk in the LLM context, verify the user's identity and access level match the chunk's classification. Never rely solely on the LLM to redact confidential information from its response.
+
+**Q: Why does adaptive chunking by document type improve retrieval quality?**
+Different document types have different semantic unit boundaries: HR policies are organized by numbered sections; legal contracts by clauses; technical documentation by function/class definitions; financial reports by table structures. Fixed-size chunking ignores these boundaries — splitting a legal clause mid-sentence or separating a table header from its data rows destroys the semantic coherence the embedding model needs to produce a good representation. Adaptive chunking produces semantically coherent units that embed into more precise vectors, improving retrieval recall by 8-15% on domain-specific benchmarks.
+
+**Q: How do you handle document version control and stale embeddings in a large enterprise RAG system?**
+Three strategies: (1) Incremental updates — on document change events (webhooks from SharePoint/Confluence), re-chunk and re-embed only the changed document, then upsert to the vector index by doc_id. Completion within 60 seconds; no staleness window during batch re-indexing. (2) Version metadata — each chunk stores a last_updated timestamp; retrieval can filter to "updated within last 2 years" as a recency gate. (3) Deprecation markers — documents explicitly marked "deprecated" or "superseded" are moved to an archive collection; only retrieved when a user explicitly asks for historical information. Combine all three: always prefer the most recently updated chunk when duplicates exist.
+
+**Q: What is the role of the cross-encoder reranker and when should you use it?**
+The cross-encoder reranker takes (query, document) pairs and computes a joint relevance score — unlike bi-encoders which compute embeddings independently, the cross-encoder can model the interaction between query terms and document terms explicitly. It is significantly more accurate (NDCG improvement of 8-15%) but also slower — about 50ms for 30 pairs versus 8ms for HNSW. The standard practice is "retrieve many, rerank fewer": HNSW retrieves the top-30 candidates cheaply, the cross-encoder reranks them to the top-5 that are actually sent to the LLM. Use a cross-encoder when the quality of top-5 context matters more than throughput — almost always true for enterprise RAG where hallucinations from irrelevant context are costly.
