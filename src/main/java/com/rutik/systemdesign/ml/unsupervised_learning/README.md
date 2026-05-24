@@ -538,29 +538,159 @@ The Davies-Bouldin index measures the average similarity between each cluster an
 
 ## 14. Case Study
 
-**Problem:** A telecom company wants to identify customer segments for targeted retention offers. Dataset: 500,000 customers, 12 features (call duration, data usage, plan type, tenure, number of complaints, payment history, etc.).
+**Scenario: Customer segmentation for a 10M-user e-commerce platform.** The marketing team wants behavioral segments to drive targeted email campaigns. The pipeline reduces 50 behavioral features to principal components, then clusters with k-means (k=8) on RFM features (Recency, Frequency, Monetary). Segments are recomputed weekly on a Spark cluster and pushed to the campaign system.
 
-**Steps:**
+```
+50 behavioral features (page views, session length, category mix, ...)
+        |
+   StandardScaler  (zero mean, unit variance)
+        |
+   PCA -> 15 components (85% cumulative explained variance)
+        |
+   append RFM features (also standardized)
+        |
+   k-means (k=8, k-means++ init, 10 restarts)
+        |
+   silhouette score = 0.42  -> 8 named segments
+        |
+   campaign system (per-segment email templates)
+```
 
-1. **Pre-processing:** `StandardScaler` on all numeric features; ordinal encode plan_type (3 values: prepaid=0, postpaid=1, enterprise=2). Drop customer_id.
+Outcome: targeted campaigns based on segments produced a 15% CTR lift over the previous one-size-fits-all blast. The "high-value at-risk" segment (high Monetary, low Recency) became a retention-campaign target with measurable win-back.
 
-2. **Dimensionality reduction:** PCA to 8 components (explains 91% variance). Reduces noise from correlated call/data features.
+**Choosing k with the elbow + silhouette:**
 
-3. **Determine k:** Run k-means for k=2..12 on PCA-reduced features. Elbow at k=5; silhouette peaks at k=5 (score=0.58). Proceed with k=5.
+```python
+import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 
-4. **Fit k-means:** `KMeans(n_clusters=5, init="k-means++", n_init=10, random_state=42)`. Inertia converges in 14 iterations.
+def select_k(X: np.ndarray, k_range: range) -> dict[int, tuple[float, float]]:
+    """Return inertia (for elbow) and silhouette for each k."""
+    results: dict[int, tuple[float, float]] = {}
+    for k in k_range:
+        km = KMeans(n_clusters=k, init="k-means++", n_init=10, random_state=0)
+        labels = km.fit_predict(X)
+        sil = silhouette_score(X, labels, sample_size=50_000)  # subsample at scale
+        results[k] = (km.inertia_, sil)
+    return results
+```
 
-5. **Interpret segments:**
-   - Cluster 0 (18%): high tenure, zero complaints, high spend — "loyal premium"
-   - Cluster 1 (22%): low tenure, low data usage — "new budget users"
-   - Cluster 2 (15%): high complaints, declining usage — "at-risk churners"
-   - Cluster 3 (30%): average everything — "mainstream stable"
-   - Cluster 4 (15%): enterprise, high data, zero calls — "data-only business"
+**The full segmentation pipeline:**
 
-6. **Anomaly check with DBSCAN:** Run DBSCAN (eps=1.2, min_samples=10) on PCA features. Identifies 2,100 noise points — accounts reviewed, 80% are fraud test accounts.
+```python
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+from sklearn.pipeline import Pipeline
 
-7. **Visualization:** UMAP 2-D projection shows well-separated cluster 2 ("at-risk") and significant overlap between clusters 3 and 1 — targeted campaigns focus on cluster 2 first.
+def build_segmenter(n_components: int = 15, k: int = 8) -> Pipeline:
+    return Pipeline([
+        ("scale", StandardScaler()),
+        ("pca", PCA(n_components=n_components, random_state=0)),
+        ("kmeans", KMeans(n_clusters=k, init="k-means++",
+                          n_init=10, random_state=0)),
+    ])
 
-8. **Business outcome:** Retention campaign targeted at cluster 2 reduces 90-day churn rate from 34% to 21% (A/B test result, n=5,000 per arm).
+def name_segments(pipe: Pipeline, X: np.ndarray,
+                  rfm: np.ndarray) -> dict[int, str]:
+    labels = pipe.named_steps["kmeans"].labels_
+    names: dict[int, str] = {}
+    for c in np.unique(labels):
+        r, f, m = rfm[labels == c].mean(axis=0)
+        if m > 0.8 and r < -0.5:   # high spend, long since last visit (z-scores)
+            names[c] = "high_value_at_risk"
+        elif f > 0.8:
+            names[c] = "loyal_frequent"
+        else:
+            names[c] = f"segment_{c}"
+    return names
+```
 
-**Key metrics:** Silhouette=0.58, Davies-Bouldin=0.71, cluster 2 recall precision validated against 3-month churn labels (AUC 0.73 — competitive with a supervised baseline of 0.79).
+**Pitfall 1 — k-means on non-normalized features.** Monetary value ranges 0-10000 while Recency is 0-365 days; without scaling, Euclidean distance is dominated by the largest-magnitude feature and clusters split purely on spend.
+
+```python
+# BROKEN: raw features -> monetary (scale ~10000) dominates the distance
+km = KMeans(n_clusters=8).fit(np.column_stack([recency, frequency, monetary]))
+
+# FIX: standardize so every feature contributes comparably to the distance
+X = StandardScaler().fit_transform(np.column_stack([recency, frequency, monetary]))
+km = KMeans(n_clusters=8, n_init=10).fit(X)
+```
+
+**Pitfall 2 — Choosing k arbitrarily.** Picking k=10 because "10 segments sounds good" yields unstable, low-silhouette clusters that change every week.
+
+```python
+# BROKEN: hard-coded k with no validation
+km = KMeans(n_clusters=10).fit(X)
+
+# FIX: plot inertia vs k (elbow) and silhouette vs k; pick the k where
+# inertia's marginal drop flattens AND silhouette is near its peak.
+scores = select_k(X, range(2, 15))   # inspect both curves before deciding
+```
+
+**Pitfall 3 — DBSCAN too slow on 10M points.** A naive DBSCAN over 10M rows is O(n^2) in the worst case and never finishes within the weekly batch window.
+
+```python
+# BROKEN: DBSCAN on 10M points -> hours, memory blowup
+from sklearn.cluster import DBSCAN
+DBSCAN(eps=0.5, min_samples=10).fit(X_10m)   # intractable
+
+# FIX: MiniBatchKMeans for scale, or HDBSCAN with approximate neighbors,
+# or cluster a representative sample then assign the rest by nearest centroid.
+from sklearn.cluster import MiniBatchKMeans
+MiniBatchKMeans(n_clusters=8, batch_size=10_000, n_init=5).fit(X_10m)
+```
+
+**Interview Q&A:**
+
+**Why apply PCA before k-means?** PCA removes correlated and noisy dimensions, mitigating the curse of dimensionality where distances become uninformative in high dimensions. Keeping 15 components that explain 85% of variance speeds up clustering and usually produces tighter, more stable clusters than running k-means on all 50 raw features.
+
+**What does the silhouette score measure and what is a good value?** Silhouette compares each point's average distance to its own cluster against the nearest other cluster, ranging -1 to 1. Values near 1 mean well-separated clusters; near 0 means overlapping; negative means likely misassigned. 0.42 indicates moderate, usable structure, common for real behavioral data which rarely forms crisp spheres.
+
+**Why k-means++ initialization and multiple restarts?** Random initialization can land k-means in a poor local optimum. k-means++ spreads initial centroids proportional to distance, giving better starts. n_init=10 runs the whole algorithm 10 times and keeps the lowest-inertia result, reducing sensitivity to initialization.
+
+**When would you choose DBSCAN or HDBSCAN over k-means?** When clusters are non-spherical or of varying density, when the number of clusters is unknown, or when you need to label outliers as noise rather than forcing every point into a cluster. The cost is sensitivity to the eps/min_samples parameters and worse scalability, which is why MiniBatchKMeans is preferred at 10M scale.
+
+**How do you validate clusters without ground-truth labels?** Use internal metrics (silhouette, Davies-Bouldin, inertia elbow), check cluster stability across resampling, and most importantly validate against business outcomes, here whether segment-targeted campaigns actually lift CTR. Stability plus a downstream lift is stronger evidence than any single internal metric.
+
+**Why standardize RFM features specifically?** Recency (days), Frequency (counts), and Monetary (currency) live on wildly different scales. Without standardization, Monetary's large numeric range dominates the Euclidean distance and the clustering effectively ignores Recency and Frequency, collapsing the segmentation into a spend-only split.
+
+**Pitfall — k-means sensitive to initialization causes non-reproducible clusters.**
+
+```python
+# BROKEN: random k-means initialization produces different clusters each run
+# Model serving pipeline uses cluster IDs as features → feature values shift between reruns
+from sklearn.cluster import KMeans
+kmeans = KMeans(n_clusters=50)  # default init="k-means++", random_state=None
+labels = kmeans.fit_predict(embeddings)  # cluster 7 this run ≠ cluster 7 next run
+
+# FIX: fix random seed AND use k-means++ with n_init=10 for stability
+kmeans = KMeans(n_clusters=50, init="k-means++", n_init=10, random_state=42)
+labels = kmeans.fit_predict(embeddings)
+# For downstream feature engineering: always re-use the FITTED kmeans object
+# (saved to disk) rather than re-fitting — cluster IDs then remain stable
+```
+
+**When does DBSCAN outperform k-means for production clustering?** DBSCAN excels when: (1) the number of clusters is unknown and varies over time (it determines it automatically); (2) clusters are non-spherical (elongated, irregular shapes); (3) there are outliers to exclude (DBSCAN marks them as noise, k-means assigns every point). Use case: anomaly detection — DBSCAN marks low-density regions as noise, naturally isolating anomalies. Limitation: DBSCAN is O(n log n) with a k-d tree (good to ~1M points) but scales poorly to 10M+; use HDBSCAN or MiniBatchKMeans for larger datasets.
+
+**How do you validate unsupervised cluster quality without ground truth labels?** Use internal metrics on the embedding space: (1) Silhouette score (−1 to +1): measures cohesion within clusters vs. separation between clusters; target > 0.5 for production use; (2) Davies-Bouldin index: lower is better; (3) Calinski-Harabasz index: higher is better. For business validation, sample 20-30 points per cluster and manually review with a domain expert — check if cluster members share meaningful business properties. Automated metrics can be gamed by trivial solutions (one cluster = score 0 Silhouette); always combine with business review.
+
+**When does dimensionality reduction with PCA before clustering hurt rather than help?** PCA maximizes variance explained — it preserves the directions of maximum global spread. If the cluster structure lives in low-variance directions (e.g., rare but coherent clusters), PCA discards those directions. UMAP preserves local neighborhood structure and finds cluster separation in low-dimensional space more reliably than PCA for complex, non-linear cluster geometries. Safe heuristic: use PCA for noise reduction (keep 95% variance) before k-means on high-dimensional numerical data; use UMAP for visualization and clustering of text/image embeddings where cluster structure is non-linear.
+
+**What is the elbow method for choosing k in k-means, and when does it fail?** Plot within-cluster sum of squares (WCSS/inertia) vs. k. WCSS always decreases as k grows (more clusters = smaller clusters = lower inertia). The "elbow" — where the rate of decrease slows sharply — suggests the optimal k. The method fails when the WCSS curve is smooth with no clear elbow, which is common for real-world high-dimensional data. Alternative: silhouette score (peaks at the optimal k), or domain knowledge (e.g., "we want 10 customer segments for business reasons"). In practice, test k = {5, 10, 20, 50} and evaluate each on a downstream business metric (segment homogeneity, CTR per segment) rather than relying solely on internal validity metrics.
+
+**How does autoencoders-based anomaly detection work, and what are its failure modes?** An autoencoder is trained on normal data to reconstruct its input. At inference, reconstruction error (MSE) is the anomaly score — anomalous inputs produce high reconstruction error because the autoencoder has no capacity for patterns it never saw. Failure modes: (1) Overfitting to training data including rare normal patterns → low reconstruction error for all inputs; (2) The autoencoder memorizes the training distribution too broadly → can reconstruct anomalies that resemble compressed versions of normal data; (3) High-dimensional inputs with small anomalies (e.g., a single corrupted pixel) → reconstruction error diluted across all dimensions. Mitigation: use a bottleneck dimension proportional to the expected information content; combine reconstruction error with a classifier on the latent space.
+
+---
+
+**Quick-reference comparison table:**
+
+| Approach | When to use | Trade-off |
+|---|---|---|
+| Rule-based baseline | Always — establish before ML | Interpretable, brittle on edge cases |
+| Simple ML (LR, RF) | < 100k rows, tabular, fast iteration | Lower ceiling than deep models |
+| Deep learning | Large data, unstructured input (images/text) | Expensive training, needs GPU |
+| Ensembling | Final 1-2% accuracy gain in competition | Complexity, inference latency |
+| Distillation/quantization | Inference cost reduction | Accuracy-efficiency trade-off |

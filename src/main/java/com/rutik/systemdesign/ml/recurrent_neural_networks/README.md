@@ -428,111 +428,173 @@ A stacked LSTM (multiple layers) learns hierarchical representations: lower laye
 
 ---
 
+
 ## 14. Case Study
 
-**Task**: Build an LSTM-based anomaly detection system for server metrics (CPU, memory, network I/O) at a cloud provider monitoring 50,000 servers in real time.
+**Scenario: LSTM-based log anomaly detection for cloud infrastructure at 10k events/sec.** A platform team monitors 500 microservices generating 10k structured log events/sec. Manual log review is infeasible. An LSTM sequence model learns normal log token patterns from 90 days of history and flags sequences deviating from the learned distribution as anomalies. Latency SLA: detection within 2 seconds of log ingestion, false positive rate < 1%.
 
-**Problem Statement**: Detect anomalous server behavior by predicting the next 5 minutes of metrics and flagging sequences where actual values deviate significantly from predictions (> 3 standard deviations). Input: 10-feature multivariate time series at 1-minute resolution, sequence length 60 (1 hour of history). Streaming inference — predictions must be generated within 100ms of each new data point.
-
-**Architecture**:
 ```
-Input: (batch=512, seq_len=60, features=10)
-    |
-[LSTM, hidden=128, num_layers=2, dropout=0.3, batch_first=True]
-    |
-(batch, seq_len, hidden=128)
-    |
-[Take last 5 time steps hidden states]  <- predict next 5 minutes
-    |
-[Linear(128, 10)]  <- predict all 10 features per step
-    |
-Output: (batch, 5, 10)  <- 5 future time steps, 10 features each
+Log anomaly detection pipeline:
+
+  Kafka (10k events/sec)
+        │
+  [Tokenizer + sliding window (50 events)]
+        │
+  [LSTM anomaly model — inference 4ms p99]
+        │
+  ┌─────┴──────┐
+  [Normal]   [Anomaly score > threshold]
+                │
+          [PagerDuty alert + Kibana link]
 ```
 
-**Streaming inference setup**:
-- Maintain one LSTM hidden state (h, c) per server (50K state vectors in GPU memory)
-- At each new data point: feed last 60 timesteps, get predictions for next 5 steps
-- Reset hidden state to zeros if server reboots or metric gap > 10 minutes
+**Model architecture and training:**
 
 ```python
 import torch
 import torch.nn as nn
-from torch import Tensor
+from torch.utils.data import DataLoader
 
-
-class AnomalyLSTM(nn.Module):
-    def __init__(
-        self,
-        input_size: int = 10,
-        hidden_size: int = 128,
-        num_layers: int = 2,
-        forecast_horizon: int = 5,
-        dropout: float = 0.3,
-    ) -> None:
+class LogLSTM(nn.Module):
+    def __init__(self, vocab_size: int, embed_dim: int = 64,
+                 hidden_size: int = 256, num_layers: int = 2,
+                 dropout: float = 0.3) -> None:
         super().__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
+        self.embed = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
         self.lstm = nn.LSTM(
-            input_size, hidden_size,
+            input_size=embed_dim,
+            hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
             dropout=dropout,
         )
-        self.head = nn.Linear(hidden_size, input_size * forecast_horizon)
-        self.forecast_horizon = forecast_horizon
-        self.input_size = input_size
+        self.head = nn.Linear(hidden_size, vocab_size)
 
-    def forward(
-        self,
-        x: Tensor,                             # (batch, seq_len, input_size)
-        state: tuple[Tensor, Tensor] | None = None,
-    ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
-        output, (h_n, c_n) = self.lstm(x, state)
-        # Use final hidden state for multi-step prediction
-        last_hidden = output[:, -1, :]         # (batch, hidden_size)
-        pred = self.head(last_hidden)           # (batch, input_size * forecast_horizon)
-        pred = pred.view(-1, self.forecast_horizon, self.input_size)
-        return pred, (h_n, c_n)
-
-
-@torch.no_grad()
-def streaming_predict(
-    model: AnomalyLSTM,
-    window: Tensor,               # (1, 60, 10) — single server window
-    server_state: tuple[Tensor, Tensor] | None,
-    threshold_std: float = 3.0,
-    historical_std: Tensor | None = None,  # (10,) per-feature std from training data
-    device: torch.device = torch.device("cuda"),
-) -> tuple[Tensor, bool, tuple[Tensor, Tensor]]:
-    model.eval()
-    window = window.to(device)
-    predictions, new_state = model(window, server_state)
-    # predictions: (1, 5, 10) — next 5 minute predictions for 10 features
-    if historical_std is not None:
-        # Anomaly score: max z-score across features and forecast steps
-        # (In production: compare predictions to actual incoming data)
-        residuals = predictions  # placeholder — compare to actuals in real system
-        z_scores = residuals.abs() / (historical_std.to(device) + 1e-8)
-        is_anomalous = z_scores.max().item() > threshold_std
-    else:
-        is_anomalous = False
-    return predictions, is_anomalous, new_state
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, seq_len) token IDs
+        emb = self.embed(x)                          # (batch, seq_len, embed_dim)
+        out, _ = self.lstm(emb)                      # (batch, seq_len, hidden_size)
+        logits = self.head(out)                      # (batch, seq_len, vocab_size)
+        return logits                                 # predict next token at each step
 ```
 
-**Training**:
-- Dataset: 6 months of metrics from 10,000 servers = ~2.6B time steps, sampled to 10M training windows
-- Batch size: 512; learning rate: 0.001 (Adam); gradient clipping: max_norm=1.0
-- Loss: Huber loss (less sensitive to outlier spikes than MSE): `nn.HuberLoss(delta=1.0)`
-- 20 epochs; early stopping patience=5 on validation MSE
+**Anomaly scoring via cross-entropy on unseen sequences:**
 
-**Results**:
-- Validation MSE: 0.023 (normalized features); 5-minute CPU forecast within 4% error
-- Anomaly detection precision: 0.81, recall: 0.89 on a labeled incident dataset
-- Inference: 0.8ms per server batch of 512 on A100 (50K servers processed in < 100ms total)
-- Memory for 50K server states: 50K * 2 (h, c) * 2 layers * 128 floats * 4 bytes = ~100MB GPU memory — acceptable
+```python
+import numpy as np
 
-**Key Lessons**:
-- Stateful streaming (carrying h, c across time windows) improved forecast quality by 12% vs resetting each window — the LSTM can use longer effective context through its hidden state.
-- Huber loss reduced sensitivity to known-bad metrics (servers in maintenance windows that have extreme CPU spikes), improving training stability vs MSE.
-- Per-server state management required careful bookkeeping: a LRU cache evicted states for servers not seen in 15 minutes, capping GPU memory at 200MB regardless of total server count.
-- Gradient clipping was non-negotiable: without it, ~5% of training batches had gradient norm > 100, causing NaN loss within 2 epochs on the longest sequences.
+def anomaly_score(model: LogLSTM, tokens: list[int],
+                  device: torch.device) -> float:
+    """Returns mean cross-entropy loss on the sequence.
+    High loss = sequence is unlikely under trained distribution = anomaly."""
+    model.eval()
+    x = torch.tensor([tokens[:-1]], dtype=torch.long, device=device)
+    y = torch.tensor([tokens[1:]],  dtype=torch.long, device=device)
+    with torch.no_grad():
+        logits = model(x)                             # (1, seq-1, vocab_size)
+        loss = nn.functional.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            y.view(-1),
+            reduction="mean",
+        )
+    return float(loss)
+
+# Threshold set at 99th percentile of normal log scores on validation set
+THRESHOLD = 2.85   # tuned to <1% false positive rate
+```
+
+**Streaming inference with sliding window:**
+
+```python
+from collections import deque
+
+class AnomalyDetector:
+    def __init__(self, model: LogLSTM, tokenizer, window: int = 50,
+                 threshold: float = THRESHOLD, device: torch.device = None) -> None:
+        self.model = model
+        self.tokenizer = tokenizer
+        self.window: deque[int] = deque(maxlen=window)
+        self.threshold = threshold
+        self.device = device or torch.device("cpu")
+
+    def ingest(self, log_line: str) -> bool:
+        """Returns True if anomaly detected."""
+        token = self.tokenizer.encode(log_line)
+        self.window.append(token)
+        if len(self.window) < 10:           # need minimum context
+            return False
+        score = anomaly_score(self.model, list(self.window), self.device)
+        return score > self.threshold
+```
+
+**Pitfall 1 — Training on mixed normal + anomaly logs poisons the model.**
+
+```python
+# BROKEN: training set includes anomalous sequences (outages, incidents)
+# Model learns anomalies as valid patterns → threshold inflated → real anomalies missed
+train_data = load_all_logs("2024-01-01", "2024-03-31")   # includes 3 incident windows
+
+# FIX: filter training set to confirmed-normal windows only
+normal_windows = [w for w in load_all_logs(...)
+                  if not incident_calendar.overlaps(w.timestamp)]
+# Label anomalies only during threshold calibration on a held-out validation set
+```
+
+**Pitfall 2 — Vanishing gradients with long sequences and no gradient clipping.**
+
+```python
+# BROKEN: no gradient clipping — LSTM over 200-step sequences diverges in 3 epochs
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+loss.backward()
+optimizer.step()   # gradients explode on long sequences → NaN weights
+
+# FIX: clip before optimizer step
+loss.backward()
+torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+optimizer.step()
+# Monitor: log grad_norm = sum(p.grad.norm() for p in model.parameters()) / n_params
+```
+
+**Pitfall 3 — Tokenizer mismatch between training and inference causes silent degradation.**
+
+```python
+# BROKEN: training tokenizer built on raw logs; inference tokenizer re-built monthly
+# New microservice names added monthly → OOV tokens silently map to <unk>
+# Model sees all new services as the same token → anomalies from new services undetected
+
+# FIX: freeze tokenizer at training time; save vocab alongside model checkpoint
+import json, pathlib
+
+def save_checkpoint(model, tokenizer, path: str) -> None:
+    p = pathlib.Path(path)
+    torch.save(model.state_dict(), p / "model.pt")
+    json.dump(tokenizer.vocab, open(p / "vocab.json", "w"))
+    # At inference: load vocab from checkpoint — never rebuild from inference data
+```
+
+**Metrics and results:**
+
+| Metric | Value |
+|---|---|
+| Training data | 90 days, 78B log tokens |
+| Vocab size | 12,847 unique tokens |
+| Model parameters | 4.2M |
+| Training time | 6h on 1×A100 |
+| Inference latency p99 | 4ms per 50-event window |
+| False positive rate | 0.7% (threshold at 99th percentile) |
+| Recall on known incidents | 91% (14/15 incidents caught within 30s) |
+| Throughput | 2,500 windows/sec per GPU replica |
+
+**Interview discussion points:**
+
+**Why model log anomaly detection as next-token prediction rather than binary classification?** Binary classification requires labeled anomalies — expensive to collect and biased toward known anomaly types. Next-token prediction is self-supervised: the model learns the "grammar" of normal log sequences from vast unlabeled normal data. Anything that deviates from this grammar scores high cross-entropy, including novel anomaly types never seen during training. This is the key advantage for infrastructure monitoring where anomaly types evolve continuously.
+
+**How do you calibrate the anomaly threshold without labeled anomalies?** Collect a validation set of confirmed-normal windows (e.g., stable production period with no incidents). Run the model on all windows and compute the distribution of cross-entropy scores. Set the threshold at the 99th percentile — this gives a 1% false positive rate on normal traffic. Validate recall against a small set of labeled incident windows from a historical outage postmortem.
+
+**What is the risk of using a fixed sliding window size?** A window of 50 events may capture a complete burst (e.g., a restart sequence) or split it across two windows. A split anomaly may score below threshold in both halves. Mitigate by using overlapping windows (stride = 25 instead of 50) so an anomalous burst is fully contained in at least one window. The cost is 2× inference volume, worth it for detection recall.
+
+**How do you handle log schema changes when a new microservice is deployed?** With a frozen vocab, new service names become `<unk>` tokens, and the model cannot distinguish between different new services. Two mitigations: (1) use subword tokenization (BPE) so "payment-service-v2" shares tokens with "payment-service"; (2) periodically fine-tune the model on recent normal data with the new vocab (warm-start from existing checkpoint — fast, 1-2h vs 6h from scratch).
+
+**What are the latency trade-offs between CPU and GPU inference for this use case?** At 10k events/sec with 50-event windows → 200 window evaluations/sec per service replica. A single LSTM forward pass on CPU takes ~15ms for a 4M-param model (batch size 1), GPU ~4ms. CPU is viable for < 70 windows/sec (suitable for smaller clusters); GPU is required for 200+. Use ONNX export + ONNX Runtime for CPU serving — typically 3-5× faster than plain PyTorch CPU inference.
+
+**Why is pack_padded_sequence important for production training?** Log sequences have variable lengths. Without packing, padding tokens consume GPU compute and LSTM states are updated on padding — introducing spurious gradient signal. `pack_padded_sequence` tells LSTM to skip padding, reducing compute by up to 40% on highly variable-length datasets. At 78B training tokens, this 40% reduction saves ~2.4h of A100 time per training run.

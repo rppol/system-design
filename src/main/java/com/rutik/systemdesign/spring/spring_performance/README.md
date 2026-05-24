@@ -1094,3 +1094,185 @@ public void warmUp() {
 - @Transactional scope determines how long connections are held. Every millisecond a connection is held under a blocking external call is a connection that cannot serve another request.
 - Caching product catalog data — stable, frequently read, large savings on DB load — provided a 6x throughput increase at zero infrastructure cost (used existing Redis cluster).
 - The combined effect of four changes (pool sizing, N+1 fix, transaction scope, caching) reduced P99 from 4.1 seconds to 95ms — a 43x improvement — without any infrastructure changes beyond configuration.
+
+---
+
+**Expanded Case Study: Migrating a 200 TPS REST API to Virtual Threads and GraalVM Native**
+
+**Scenario:** A fleet management API (Java 17, Spring Boot 3.1, 200 TPS peak) runs on 8-core Kubernetes pods with 4GB heap. Platform-thread pool (200 Tomcat threads) is saturated at 180 TPS because DB queries average 40ms blocking. P99 latency is 1,200ms. The team evaluates three performance levers: (1) virtual threads (Java 21 LTS), (2) HikariCP pool tuning, (3) GraalVM native compilation. Each lever is benchmarked independently.
+
+**Scale:** 200 TPS sustained, peak 400 TPS on Monday morning GPS batch sync. 8 cores, 4GB heap, 40ms DB p50, PostgreSQL with 20 existing HikariCP connections.
+
+```
+Bottleneck analysis (JFR profiling, 30-minute recording):
+
+  200 Tomcat threads:
+    40% blocked on JDBC (40ms avg)
+    25% blocked on HTTP client calls (external GPS API, 80ms avg)
+    15% blocked on Redis (5ms avg)
+    20% active CPU (parsing, business logic)
+
+  CPU utilization: 22% (8 cores × 22% = 1.76 cores in use)
+  Thread utilization: 98% (196/200 threads blocked at any given time)
+  → This is a classic I/O-bound profile: threads are the bottleneck, not CPU
+
+After virtual threads:
+  CPU utilization: 45% (same I/O time, but threads never block OS threads)
+  Threads: unlimited (JVM creates carriers on demand, 8 OS threads total)
+  TPS capacity: 400+ (I/O-bound ceiling removed)
+```
+
+**Virtual threads enablement (Spring Boot 3.2+):**
+
+```yaml
+# application.yml — single property, zero code changes
+spring:
+  threads:
+    virtual:
+      enabled: true   # Replaces Tomcat's platform-thread pool with virtual threads
+```
+
+**HikariCP pool sizing formula (with virtual threads):**
+
+```java
+// Platform threads: pool = (cores × 2) + spindle_count = (8×2) + 0 = 16
+// HikariCP default: 10  ← WRONG for this workload
+
+// With virtual threads: pool can be larger because VT suspension is cheap
+// Formula: pool_size = (TPS × avg_hold_time_ms) / 1000
+// = (400 × 40ms) / 1000 = 16 connections for sustaining 400 TPS
+// Add 25% headroom: 20 connections
+
+@Bean
+@ConfigurationProperties("spring.datasource.hikari")
+public HikariConfig hikariConfig() {
+    HikariConfig cfg = new HikariConfig();
+    cfg.setMaximumPoolSize(20);          // matches DB server capacity
+    cfg.setMinimumIdle(5);               // don't hold idle connections
+    cfg.setConnectionTimeout(2000);      // fail fast — 2s max wait
+    cfg.setIdleTimeout(600_000);         // 10 min idle before eviction
+    cfg.setKeepaliveTime(60_000);        // keep connections alive to PostgreSQL
+    return cfg;
+}
+```
+
+**BROKEN→FIX: ThreadLocal state leaks with virtual threads**
+
+```java
+// BROKEN: MDC (which uses ThreadLocal) on virtual threads is safe per-request,
+// but a shared ThreadLocal holding a non-request-scoped object leaks between requests
+// if the virtual thread carrier is reused (it isn't, but reused platform threads are)
+
+// Common mistake: using ThreadLocal for connection-per-thread pattern
+private static final ThreadLocal<Connection> CONN = new ThreadLocal<>();
+
+public void doWork() {
+    CONN.set(dataSource.getConnection());
+    // ... if work throws and CONN is never cleaned, connection leaks
+    // With virtual threads, the thread may be GC'd but connection not returned
+}
+
+// FIX: always use try-with-resources; never store Connection in ThreadLocal
+public void doWork() {
+    try (Connection conn = dataSource.getConnection()) {
+        // conn closed on exit, always — no ThreadLocal needed
+        execute(conn);
+    }
+}
+```
+
+**BROKEN→FIX: synchronized block pins virtual threads to OS thread**
+
+```java
+// BROKEN: synchronized method blocks the OS carrier thread while holding DB lock
+// Negates the benefit of virtual threads — all other VTs on this carrier queue up
+public synchronized void updateFleetCache(String key, FleetData data) {
+    // 40ms Redis write inside synchronized — pins OS thread!
+    redis.set(key, data);
+}
+
+// FIX: use ReentrantLock (JDK 21 makes VT-aware) or restructure to avoid locking
+private final ReentrantLock lock = new ReentrantLock();
+
+public void updateFleetCache(String key, FleetData data) {
+    lock.lock();    // VT suspends instead of pinning OS thread
+    try {
+        redis.set(key, data);
+    } finally {
+        lock.unlock();
+    }
+}
+
+// BETTER FIX: use ConcurrentHashMap for cache — no lock needed
+private final ConcurrentHashMap<String, FleetData> cache = new ConcurrentHashMap<>();
+public void updateFleetCache(String key, FleetData data) {
+    cache.put(key, data);  // CAS internally, no pinning
+}
+```
+
+**GraalVM Native Image — startup time reduction:**
+
+```xml
+<!-- pom.xml — Spring Boot Native support -->
+<plugin>
+    <groupId>org.graalvm.buildtools</groupId>
+    <artifactId>native-maven-plugin</artifactId>
+</plugin>
+```
+
+```bash
+# Build native image (takes 3-5 minutes, AOT compilation)
+./mvnw -Pnative native:compile
+
+# Before: JVM startup
+# Started FleetApplication in 4.2 seconds
+
+# After: Native image startup  
+# Started FleetApplication in 0.08 seconds (52x faster)
+```
+
+**GraalVM trade-offs:**
+
+```
+JVM (platform threads) → JVM (virtual threads) → GraalVM Native
+
+Startup time:   4.2s           4.2s               0.08s
+Throughput:     200 TPS        400 TPS            380 TPS (JIT not available)
+Memory:         512MB RSS      480MB RSS          180MB RSS
+Build time:     15s            15s                4min
+Reflection:     free           free               requires hints
+JFR profiling:  full           full               limited
+Lambda friendly: yes           yes                caution (reflection hints)
+```
+
+**Lazy initialization for faster startup (non-native):**
+
+```yaml
+# application.yml
+spring:
+  main:
+    lazy-initialization: true    # beans created on first use, not at startup
+    # Trade-off: first request to a cold bean is slower
+    # Use for serverless / scale-to-zero where startup dominates
+```
+
+**Benchmark results (JMH, 8-core EC2, 400 TPS sustained load):**
+
+| Configuration | p50 latency | p99 latency | TPS capacity | Memory |
+|---|---|---|---|---|
+| Platform threads (200) | 42ms | 1,200ms | 180 TPS | 512MB |
+| Virtual threads + tuned pool | 41ms | 95ms | 420 TPS | 490MB |
+| GraalVM Native + VT | 40ms | 88ms | 400 TPS | 180MB |
+| GraalVM Native, no VT | 42ms | 140ms | 310 TPS | 165MB |
+
+**Interview discussion points:**
+
+**Why do virtual threads not help CPU-bound workloads?** Virtual threads reduce blocking overhead: when a virtual thread blocks on I/O, the OS carrier thread is released to run other virtual threads. For CPU-bound work (parsing, cryptography, matrix multiplication), threads are never blocked — they use the CPU continuously. Adding more virtual threads beyond `Runtime.availableProcessors()` for CPU-bound code just adds scheduling overhead.
+
+**What is "pinning" in virtual thread context and how do you detect it?** A virtual thread is "pinned" to its OS carrier thread when it blocks inside a `synchronized` block or method. While pinned, the carrier cannot execute other virtual threads, defeating the purpose. Detect pinning via `-Djdk.tracePinnedThreads=full` JVM flag (logs stack traces when pinning occurs) or JFR with the `jdk.VirtualThreadPinned` event. Fix by replacing `synchronized` with `ReentrantLock` or restructuring to avoid locks on I/O paths.
+
+**How do you size the HikariCP pool when using virtual threads?** With platform threads, pool size = thread count (threads block, holding connections). With virtual threads, threads are cheap but DB connections are still expensive OS resources. Size based on actual connection hold time: `pool = TPS × avg_hold_ms / 1000` + headroom. Avoid a pool larger than the DB server's `max_connections / service_count` — PostgreSQL default is 100; with 5 services each getting 20 connections, you exactly hit the limit.
+
+**What are the trade-offs of GraalVM Native Image for a Spring Boot service?** Native images compile ahead-of-time: startup drops from seconds to milliseconds, memory footprint shrinks 60-70%. The cost: JIT compilation is unavailable (peak throughput ~10-15% lower than warmed JVM), reflection requires explicit hints (`@RegisterReflectionForBinding`, `reflect-config.json`), build time is 3-5 minutes vs. 15 seconds, and runtime profiling (JFR, async-profiler) has limited support. Best fit: serverless functions, batch jobs that start/stop frequently, or microservices where memory cost dominates.
+
+**How does lazy initialization interact with health checks on startup?** With `spring.main.lazy-initialization=true`, beans initialize on first use. A readiness probe that calls `/actuator/health` before the first real request will get a "healthy" response — but the first real request hits cold beans and can be slow. For production, warm up critical paths in an `ApplicationReadyEvent` listener or use a dedicated readiness probe that exercises the critical bean path.

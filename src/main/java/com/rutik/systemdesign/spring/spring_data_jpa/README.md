@@ -788,66 +788,209 @@ OSIV keeps the EntityManager (Session) open for the entire HTTP request lifecycl
 
 ## 14. Case Study
 
-### Scenario: Order History API with N+1, Projection, and Pagination
+### Scenario: Order Management System at Scale
 
-**Context**: An e-commerce platform's "My Orders" page loads slowly. Profiling reveals 200+ SQL queries for a page of 20 orders. The endpoint returns full entity graphs including customer, items, and product details.
+A B2C marketplace runs an order management system on PostgreSQL 15 with `JpaRepository<Order, Long>`. Scale:
 
-**Step 1 — Diagnose N+1**
-Enable Hibernate statistics:
-```properties
-spring.jpa.properties.hibernate.generate_statistics=true
-logging.level.org.hibernate.stat=DEBUG
+- 50M rows in the `orders` table, growing 5,000 writes/sec at peak
+- 18,000 read req/sec on the "My Orders" history endpoint
+- Inventory reservation requires correctness under concurrent checkout
+- A back-office search screen needs dynamic, ad-hoc filtering (status, date range, amount, customer)
+- HikariCP pool sized at 30; Hibernate 6.x; Spring Boot 3.2 / Java 17
+
+The original implementation loaded full entity graphs in a loop and called `findAll()` for reports. Two production incidents (an OOM and a 4.2s p99 on order history) triggered the redesign.
+
+### Architecture Overview
+
 ```
-Log output: `Session Metrics { 1 query executions, 20 collection loads ... }`. 1 findAll + 20 lazy loads of items + 20 lazy loads of product per item = 41 queries.
+                 +-------------------------------------------------+
+  Mobile/Web --> |              OrderController                    |
+                 |  GET /orders?customerId&page  (projection)      |
+                 |  GET /orders/search           (Specification)   |
+                 |  POST /checkout               (pessimistic lock)|
+                 +------------------------+------------------------+
+                                          |
+                          +---------------v----------------+
+                          |          OrderService          |
+                          |  @Transactional boundaries      |
+                          +------+----------------+---------+
+                                 |                |
+              read (readOnly)    |                |  write (PESSIMISTIC_WRITE)
+                                 v                v
+                       +-----------------+  +-------------------+
+                       | OrderRepository |  | InventoryRepo     |
+                       | EntityGraph     |  | SELECT ... FOR    |
+                       | JOIN FETCH      |  | UPDATE            |
+                       | Projections     |  +---------+---------+
+                       +--------+--------+            |
+                                |                     |
+                                v                     v
+                        +-----------------------------------+
+                        |  PostgreSQL 15 (orders 50M rows)  |
+                        |  partitioned by created_at month  |
+                        +-----------------------------------+
+```
 
-**Step 2 — Fix with @EntityGraph and DTO Projection**
+### Implementation
+
+Lightweight reads use interface-based projections plus `JOIN FETCH` only where associations are genuinely needed. The history endpoint paginates with `Pageable`.
+
 ```java
-public interface OrderSummary {
+public interface OrderSummary {           // interface projection — closed, no entity loaded
     Long getId();
     LocalDateTime getCreatedAt();
     OrderStatus getStatus();
     BigDecimal getTotalAmount();
-    // No items — not needed for list view
 }
 
-@EntityGraph(attributePaths = {})  // no associations needed for summary
-Page<OrderSummary> findByCustomerId(Long customerId, Pageable pageable);
-```
-Result: 2 queries total — 1 data query + 1 COUNT query. Zero lazy loads because DTO projection does not expose collections.
+public interface OrderRepository extends JpaRepository<Order, Long>,
+                                         JpaSpecificationExecutor<Order> {
 
-**Step 3 — Replace Page<T> with Slice<T> for mobile infinite scroll**
-```java
-Slice<OrderSummary> findByCustomerId(Long customerId, Pageable pageable);
-```
-Removes COUNT(*) query. On a table with 10M order rows, COUNT dropped from 800ms to 0.
+    // Lightweight list view: 1 data query + 1 count query, zero lazy loads
+    Page<OrderSummary> findByCustomerId(Long customerId, Pageable pageable);
 
-**Step 4 — Add @Version for concurrent cancellation**
-Two users (customer + admin) can concurrently cancel an order. Add optimistic locking:
+    // Detail view that genuinely needs the item graph — fetched in one query
+    @Query("""
+           select o from Order o
+           join fetch o.items i
+           join fetch i.product
+           where o.id = :id
+           """)
+    Optional<Order> findDetailById(@Param("id") Long id);
+
+    // EntityGraph as an alternative to JOIN FETCH for derived queries
+    @EntityGraph(attributePaths = {"items", "items.product"})
+    Optional<Order> findWithItemsById(Long id);
+}
+```
+
+Inventory reservation under concurrent checkout uses `PESSIMISTIC_WRITE` (DB row lock) so two buyers cannot oversell the last unit.
+
 ```java
-@Entity
-public class Order {
-    @Version
-    private Long version;
+public interface InventoryRepository extends JpaRepository<Inventory, Long> {
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @QueryHints(@QueryHint(name = "jakarta.persistence.lock.timeout", value = "3000"))
+    @Query("select i from Inventory i where i.productId = :pid")
+    Optional<Inventory> findForUpdate(@Param("pid") Long productId);
 }
 
-@Retryable(ObjectOptimisticLockingFailureException.class)
+@Service
+public class CheckoutService {
+    private final InventoryRepository inventoryRepo;
+    CheckoutService(InventoryRepository r) { this.inventoryRepo = r; }
+
+    @Transactional  // lock held only for the duration of this short tx
+    public void reserve(Long productId, int qty) {
+        Inventory inv = inventoryRepo.findForUpdate(productId).orElseThrow();
+        if (inv.getAvailable() < qty) throw new OutOfStockException(productId);
+        inv.setAvailable(inv.getAvailable() - qty);   // dirty checking flushes on commit
+    }
+}
+```
+
+Dynamic back-office filtering uses `Specification<Order>` composed from optional criteria — no string concatenation, no SQL injection surface.
+
+```java
+public final class OrderSpecs {
+    public static Specification<Order> status(OrderStatus s) {
+        return (root, q, cb) -> s == null ? null : cb.equal(root.get("status"), s);
+    }
+    public static Specification<Order> createdAfter(LocalDateTime t) {
+        return (root, q, cb) -> t == null ? null : cb.greaterThanOrEqualTo(root.get("createdAt"), t);
+    }
+    public static Specification<Order> minAmount(BigDecimal a) {
+        return (root, q, cb) -> a == null ? null : cb.greaterThanOrEqualTo(root.get("totalAmount"), a);
+    }
+}
+
+// Usage — null specs are ignored by Spring's conjunction
+Page<Order> results = orderRepository.findAll(
+        Specification.where(OrderSpecs.status(status))
+                     .and(OrderSpecs.createdAfter(from))
+                     .and(OrderSpecs.minAmount(min)),
+        PageRequest.of(page, 50, Sort.by("createdAt").descending()));
+```
+
+### Metrics
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Order history p99 | 4,200 ms | 180 ms |
+| Queries per history page | 41 (N+1) | 2 |
+| Report endpoint memory | OOM at ~6M rows | flat (paged) |
+| Oversell incidents / week | 3 | 0 |
+| HikariCP wait time p99 | 900 ms | 12 ms |
+
+### Common Pitfalls
+
+**Pitfall 1 — N+1 from lazy fetch in a loop.**
+
+```java
+// BROKEN: 1 query for orders, then 1 per order for items, 1 per item for product
+List<Order> orders = orderRepository.findByCustomerId(customerId);
+for (Order o : orders) {
+    for (OrderItem it : o.getItems()) {        // LAZY -> extra SELECT each iteration
+        total += it.getProduct().getPrice();   // LAZY -> another SELECT each item
+    }
+}
+```
+
+```java
+// FIX: one query with JOIN FETCH (or @EntityGraph)
+List<Order> orders = orderRepository.findByCustomerIdWithItems(customerId); // join fetch items, product
+```
+
+**Pitfall 2 — `findAll()` on 50M rows causes OOM.**
+
+```java
+// BROKEN: materializes 50M entities into the persistence context -> heap blows up
+List<Order> all = orderRepository.findAll();
+all.forEach(reportBuilder::add);
+```
+
+```java
+// FIX: page through, or stream with a fetch size and clear the context per page
+int page = 0;
+Page<Order> p;
+do {
+    p = orderRepository.findAll(PageRequest.of(page++, 5_000));
+    p.forEach(reportBuilder::add);
+    entityManager.clear();          // detach to release first-level cache
+} while (p.hasNext());
+```
+
+**Pitfall 3 — `@Transactional(readOnly = true)` on a write method.**
+
+```java
+// BROKEN: Hibernate sets FlushMode.MANUAL; the dirty update is silently never flushed
+@Transactional(readOnly = true)
+public void markShipped(Long id) {
+    Order o = orderRepository.findById(id).orElseThrow();
+    o.setStatus(OrderStatus.SHIPPED);   // change is lost on commit
+}
+```
+
+```java
+// FIX: writes must run in a read-write transaction
 @Transactional
-public void cancelOrder(Long orderId) {
-    Order order = orderRepository.findById(orderId).orElseThrow();
-    order.cancel(); // domain method validates state machine
+public void markShipped(Long id) {
+    Order o = orderRepository.findById(id).orElseThrow();
+    o.setStatus(OrderStatus.SHIPPED);   // flushed and committed
 }
 ```
 
-**Step 5 — Auditing for compliance**
-Regulatory requirement: record who cancelled what and when.
-```java
-@Entity
-@EntityListeners(AuditingEntityListener.class)
-public class Order extends Auditable {
-    private LocalDateTime cancelledAt;
-    private String cancelledBy;
-    // Auditable provides createdAt, createdBy, updatedAt, updatedBy
-}
-```
+A related trap is `LazyInitializationException`: accessing `order.getItems()` in the controller after the service transaction closed. Fix by fetching the association inside the transaction (`JOIN FETCH`/`@EntityGraph`) or mapping to a DTO before returning.
 
-**Outcome**: Page load time dropped from 4.2 seconds to 180ms. Query count dropped from 200+ to 2. Connection pool contention resolved. Compliance requirement met with no custom code.
+### Interview Discussion Points
+
+**Why prefer interface projections over fetching full entities for a list view?** Projections issue a narrower SELECT (only the named columns) and do not place a managed entity in the persistence context, so there is no lazy-loading surface and no dirty-checking overhead. For a 20-item page this turned 41 queries into 2 and removed all `LazyInitializationException` risk.
+
+**When do you use `JOIN FETCH` versus `@EntityGraph`?** Both produce a single query that eagerly loads associations. Use `JOIN FETCH` inside an explicit `@Query` when you want full control over the JPQL; use `@EntityGraph` to add eager fetching declaratively on top of a derived or paged query without writing JPQL. Note that `JOIN FETCH` with `Pageable` triggers in-memory pagination and a Hibernate warning, so for paged fetches prefer `@EntityGraph` or a two-step ID-then-fetch query.
+
+**How does `PESSIMISTIC_WRITE` differ from optimistic locking for inventory?** `PESSIMISTIC_WRITE` issues `SELECT ... FOR UPDATE`, taking a database row lock so concurrent transactions block until the first commits — correct for high-contention single rows like inventory counts. Optimistic locking (`@Version`) lets both reads proceed and fails the loser at commit, which is better for low-contention data where retries are cheap. Pessimistic locks should be held for the shortest possible transaction to avoid serializing throughput.
+
+**Why does `findAll()` on a huge table OOM, and what are the alternatives?** It loads every row as a managed entity into the first-level cache simultaneously. Alternatives: `Pageable` pagination with `entityManager.clear()` per page, `Stream<T>` query methods with a configured fetch size (closed promptly), or pushing aggregation into a native/SQL projection so rows never become entities.
+
+**How do `Specification` objects avoid SQL injection and stay composable?** They build a JPA Criteria tree (parameterized, type-checked) rather than concatenating strings, so user input always flows through bind parameters. Returning `null` from a spec means "no constraint," letting you compose only the filters the user actually supplied via `Specification.where(...).and(...)`.
+
+**What causes `LazyInitializationException` and how do you prevent it?** It happens when a lazy association is accessed after its Hibernate session/transaction has closed (commonly in the view layer). Prevent it by fetching the needed associations within the transaction (`JOIN FETCH`/`@EntityGraph`) or by mapping to a DTO before the transaction ends. Enabling `open-in-view` masks the symptom but holds connections open across rendering and is an anti-pattern at scale.

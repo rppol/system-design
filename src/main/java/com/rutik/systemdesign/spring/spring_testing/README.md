@@ -984,3 +984,221 @@ await().atMost(5, SECONDS)
 | @DirtiesContext invocations | 8 | 2 |
 
 The key insight was that test performance is a first-class concern. Every @MockBean and @DirtiesContext annotation has a measurable cost in context load time. Treating the test architecture with the same intentional design as production code — shared base classes, canonical context configurations, realistic databases — reduced CI time by 80% without reducing test coverage.
+
+---
+
+**Expanded Case Study: Test Strategy for a Multi-Tenant Order Management System**
+
+**Scenario:** An order management system (OMS) for a B2B marketplace has 14 Spring MVC controllers, 6 Spring Data JPA repositories, 2 Kafka listeners, 1 scheduled batch job, and 3 external REST integrations (inventory, shipping, payment). The team ships twice weekly. Full `@SpringBootTest` context starts in 45 seconds and takes 12 minutes for the full suite — CI is a bottleneck. The goal: restructure the test pyramid so CI finishes under 4 minutes without sacrificing coverage.
+
+**Scale:** 14 controllers, 6 repos, 3 external clients, 1 batch job, 2 Kafka listeners → 3 test layers × ~150 tests each = ~450 tests total.
+
+```
+Test pyramid for the OMS:
+
+  ┌─────────────────────────────────────────┐
+  │  E2E / Contract tests (5)               │  ~45s each, run nightly
+  │  Testcontainers (Postgres+Kafka full)   │
+  ├─────────────────────────────────────────┤
+  │  Integration tests (120)                │  ~3s each
+  │  @WebMvcTest, @DataJpaTest              │  lightweight slices
+  │  MockMvc + Testcontainers (single DB)   │
+  ├─────────────────────────────────────────┤
+  │  Unit tests (350)                       │  ~20ms each
+  │  Plain JUnit 5 + Mockito                │  no Spring context
+  └─────────────────────────────────────────┘
+
+Total CI target: (350 × 20ms) + (120 × 3s) + (5 × 45s) = 7s + 360s + 225s ≈ 10min
+After slicing:   (350 × 20ms) + (120 × 1.5s) + (5 × 45s) = 7s + 180s + 225s ≈ 6.9min
+With context caching: reduces to ~4min
+```
+
+**Controller layer — @WebMvcTest with @MockBean:**
+
+```java
+@WebMvcTest(OrderController.class)
+@AutoConfigureMockMvc
+class OrderControllerTest {
+
+    @Autowired
+    MockMvc mockMvc;
+
+    @MockBean
+    OrderService orderService;
+
+    @MockBean
+    SecurityConfig securityConfig;
+
+    @Test
+    @WithMockUser(roles = "BUYER")
+    void createOrder_validRequest_returns201() throws Exception {
+        var request = new CreateOrderRequest("tenant-1", List.of("sku-42"), 2);
+        var response = new OrderResponse(UUID.randomUUID(), "PENDING");
+
+        given(orderService.createOrder(any())).willReturn(response);
+
+        mockMvc.perform(post("/orders")
+                   .contentType(APPLICATION_JSON)
+                   .content(objectMapper.writeValueAsString(request)))
+               .andExpect(status().isCreated())
+               .andExpect(jsonPath("$.status").value("PENDING"));
+
+        verify(orderService).createOrder(argThat(r ->
+            r.tenantId().equals("tenant-1") && r.quantity() == 2));
+    }
+
+    @Test
+    void createOrder_unauthenticated_returns401() throws Exception {
+        mockMvc.perform(post("/orders").contentType(APPLICATION_JSON)
+                   .content("{}"))
+               .andExpect(status().isUnauthorized());
+    }
+}
+```
+
+**Repository layer — @DataJpaTest with Testcontainers:**
+
+```java
+@DataJpaTest
+@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
+@Testcontainers
+class OrderRepositoryTest {
+
+    @Container
+    static PostgreSQLContainer<?> postgres =
+        new PostgreSQLContainer<>("postgres:15")
+            .withDatabaseName("oms_test");
+
+    @DynamicPropertySource
+    static void configure(DynamicPropertyRegistry r) {
+        r.add("spring.datasource.url", postgres::getJdbcUrl);
+        r.add("spring.datasource.username", postgres::getUsername);
+        r.add("spring.datasource.password", postgres::getPassword);
+    }
+
+    @Autowired OrderRepository repo;
+    @Autowired TestEntityManager em;
+
+    @Test
+    void findByTenantId_returnsOnlyTenantOrders() {
+        em.persistAndFlush(new Order("tenant-A", "PENDING"));
+        em.persistAndFlush(new Order("tenant-B", "SHIPPED"));
+
+        List<Order> result = repo.findByTenantId("tenant-A");
+
+        assertThat(result).hasSize(1)
+            .extracting(Order::getTenantId).containsOnly("tenant-A");
+    }
+}
+```
+
+**Kafka listener — @SpringBootTest with EmbeddedKafka:**
+
+```java
+@SpringBootTest
+@EmbeddedKafka(partitions = 1, topics = {"order-events"})
+@TestPropertySource(properties = {
+    "spring.kafka.bootstrap-servers=${spring.embedded.kafka.brokers}",
+    "spring.kafka.consumer.auto-offset-reset=earliest"
+})
+class OrderEventListenerTest {
+
+    @Autowired KafkaTemplate<String, OrderEvent> template;
+    @Autowired OrderRepository repo;
+
+    @Test
+    void onOrderShipped_updatesOrderStatus() throws Exception {
+        var orderId = UUID.randomUUID();
+        repo.save(new Order(orderId, "PENDING"));
+
+        template.send("order-events",
+            new OrderEvent(orderId, "SHIPPED", Instant.now()));
+
+        // Poll up to 5s for async listener to process
+        await().atMost(5, SECONDS)
+               .until(() -> repo.findById(orderId)
+                                .map(o -> "SHIPPED".equals(o.getStatus()))
+                                .orElse(false));
+    }
+}
+```
+
+**BROKEN→FIX: @MockBean causes ApplicationContext cache miss**
+
+```java
+// BROKEN: three test classes each use @MockBean for different beans
+// Spring cannot reuse the same context; starts 3 full contexts = 3 × 45s = 135s
+
+@SpringBootTest
+class OrderServiceTest {
+    @MockBean InventoryClient inventoryClient;    // different mock set A
+}
+
+@SpringBootTest
+class ShippingServiceTest {
+    @MockBean ShippingClient shippingClient;      // different mock set B
+}
+
+// FIX: consolidate all @MockBean declarations in a shared @TestConfiguration
+// that is loaded by all integration tests → Spring reuses ONE context
+
+@TestConfiguration
+class GlobalTestMocks {
+    @MockBean InventoryClient inventoryClient;
+    @MockBean ShippingClient shippingClient;
+    @MockBean PaymentClient paymentClient;
+}
+
+// Each test class annotates with @Import(GlobalTestMocks.class)
+// Result: single context for all integration tests → 45s → 45s (not 45s × N)
+```
+
+**BROKEN→FIX: Testing @Transactional service with @Rollback vs real commit**
+
+```java
+// BROKEN: @Transactional on test class auto-rolls back;
+// Kafka outbox message (saved in a committed tx) is never sent — test passes
+// but production fails because Kafka listener never sees the event
+
+@SpringBootTest
+@Transactional  // rolls back — outbox never committed!
+class OrderServiceIntegrationTest {
+    @Test
+    void createOrder_sendsKafkaEvent() { /* always passes, outbox not checked */ }
+}
+
+// FIX: don't annotate test class with @Transactional; instead,
+// use @Sql to set up and tear down data explicitly
+@SpringBootTest
+@Sql("/sql/clean.sql")    // before each test
+class OrderServiceIntegrationTest {
+    @Test
+    void createOrder_sendsKafkaEvent() {
+        service.createOrder(request);
+        // tx commits → outbox row committed → poll Kafka for the event
+        await().atMost(3, SECONDS).until(() -> kafkaConsumer.hasReceived("order-events"));
+    }
+}
+```
+
+**Context caching results after restructure:**
+
+| Phase | Before | After |
+|---|---|---|
+| Unit tests (350) | 7s | 7s |
+| @WebMvcTest (60) | 180s (3 contexts × 45s) | 45s (1 shared context) |
+| @DataJpaTest (40) | 120s | 60s (Testcontainers reused) |
+| @SpringBootTest (20) | 300s | 90s (1 context, @MockBean consolidated) |
+| Total CI | ~607s | ~202s |
+
+**Interview discussion points:**
+
+**What is the ApplicationContext cache in Spring tests and how do you maximize reuse?** Spring caches `ApplicationContext` instances keyed by: the set of configuration classes, active profiles, context customizers, and the set of `@MockBean`/`@SpyBean` declarations. Any difference in this key starts a new context. Consolidating all `@MockBean` into a shared `@TestConfiguration` and using the same profile everywhere maximizes cache hits.
+
+**When should you use @WebMvcTest instead of @SpringBootTest for controller tests?** `@WebMvcTest` loads only the web layer: controllers, filters, `@ControllerAdvice`, message converters. It skips JPA, Kafka, scheduling, and security configuration (or lets you partial-mock it). Tests start in ~1s vs 45s for full context. Use `@WebMvcTest` whenever you're testing request mapping, serialization, validation, or authentication; use `@SpringBootTest` only when you need the full wiring.
+
+**How do you test a @KafkaListener without a real Kafka broker?** Use `@EmbeddedKafka` from `spring-kafka-test`. It starts an in-process Kafka broker, overrides `spring.kafka.bootstrap-servers` via `@TestPropertySource`, and runs at full speed. Alternatively use Testcontainers with a real Kafka image for higher fidelity (catches version-specific behavior). Always set `auto.offset.reset=earliest` in tests so the consumer sees messages published before it started.
+
+**What is @DynamicPropertySource and when is it essential?** It registers property overrides after the Testcontainers container has started and its random port is known. Without it, you'd need to hard-code ports in `@TestPropertySource` or use fixed-port containers. Use it whenever a test infrastructure component (Postgres, Redis, Kafka) binds to a random port.
+
+**How do you test security — authentication and authorization — without a real auth server?** Use `@WithMockUser` for simple role-based tests. For OAuth2, use `SecurityMockMvcRequestPostProcessors.jwt()` or `oidcLogin()` from Spring Security Test to inject a synthetic JWT claims set. Never start a real Keycloak or auth server in unit/integration tests — mock the token validation boundary instead.

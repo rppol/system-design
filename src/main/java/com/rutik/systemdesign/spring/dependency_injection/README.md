@@ -536,78 +536,188 @@ With field injection, if the bean is not available and `required=false`, the fie
 
 ## 14. Case Study
 
-### Problem: Replacing a Hard-Coded SMS Client with Multi-Channel Notifications
+### Scenario: Multi-Strategy Notification Service
 
-**Before (tightly coupled):**
+A SaaS platform (Spring Boot 3.2 / Java 17) sends transactional notifications across Email, SMS, and Push. Requirements:
 
-```java
-@Service
-public class OrderService {
-    // Hard-coded SMS dependency — cannot swap, cannot test, cannot add email
-    private final TwilioSmsClient smsClient = new TwilioSmsClient("apiKey123");
+- Fan-out to all enabled channels for some events, single channel for others
+- Email is the default channel when no preference is specified
+- A user can opt into a specific channel by name
+- An expensive, optional `TemplatePreviewService` is only present in some deployments and must not be a hard dependency
+- ~8,000 notifications/sec at peak; channel set must be extensible without editing the dispatcher
 
-    public void confirmOrder(Order order) {
-        smsClient.send(order.getPhone(), "Order confirmed: " + order.getId());
-    }
-}
+DI features — collection injection, `@Primary`, `@Qualifier`, and `ObjectProvider` — make this clean and testable.
+
+### Architecture Overview
+
+```
+                         +----------------------------------+
+   event ----dispatch--> |        NotificationService       |
+                         |                                  |
+                         |  List<NotificationChannel> all   |--> fan-out
+                         |  @Primary EmailChannel default   |--> single
+                         |  @Qualifier("sms") for opt-in    |
+                         |  ObjectProvider<TemplatePreview> |--> optional
+                         +------------+---------+-----------+
+                                      |         |
+              +-----------+-----------+         +-----------------+
+              |           |                     |                 |
+              v           v                     v                 v
+        EmailChannel   SmsChannel          PushChannel    TemplatePreviewService
+        (@Primary)     (@Qualifier sms)                    (maybe absent)
 ```
 
-**Problems:** `TwilioSmsClient` is instantiated inline (no DI), cannot be mocked, hardcoded API key in source, no way to add email notifications without changing `OrderService`.
+### Implementation
 
-**After (DI + interface-based design):**
+All implementations are collected via `List<NotificationChannel>`; `@Primary` marks the default; a custom qualifier annotation selects a specific channel.
 
 ```java
-// Interface
 public interface NotificationChannel {
     void send(String recipient, String message);
+    ChannelType type();
 }
 
-// Implementations
 @Component
-@Order(1)
+@Primary                                   // default when injecting a single NotificationChannel
 public class EmailChannel implements NotificationChannel {
-    private final JavaMailSender mailSender;
-    public EmailChannel(JavaMailSender mailSender) { this.mailSender = mailSender; }
-    @Override
-    public void send(String recipient, String message) { /* send email */ }
+    private final JavaMailSender mail;
+    public EmailChannel(JavaMailSender mail) { this.mail = mail; }   // required dep, constructor
+    public void send(String to, String msg) { /* ... */ }
+    public ChannelType type() { return ChannelType.EMAIL; }
 }
 
 @Component
-@Order(2)
+@Qualifier("sms")
 public class SmsChannel implements NotificationChannel {
-    @Value("${twilio.api-key}")
-    private String apiKey;
-    @Override
-    public void send(String recipient, String message) { /* send SMS */ }
-}
-
-// OrderService: receives ALL channels, no hard-coded dependency
-@Service
-public class OrderService {
-    private final List<NotificationChannel> channels;
-
-    public OrderService(List<NotificationChannel> channels) {
-        this.channels = channels;  // [EmailChannel, SmsChannel] — from Spring
-    }
-
-    public void confirmOrder(Order order) {
-        String message = "Order confirmed: " + order.getId();
-        channels.forEach(ch -> ch.send(order.getContactInfo(), message));
-    }
-}
-
-// Unit test — no Spring needed
-@Test
-void confirmOrder_notifiesAllChannels() {
-    NotificationChannel mockEmail = mock(NotificationChannel.class);
-    NotificationChannel mockSms = mock(NotificationChannel.class);
-
-    OrderService service = new OrderService(List.of(mockEmail, mockSms));
-    service.confirmOrder(testOrder);
-
-    verify(mockEmail).send(eq("user@example.com"), anyString());
-    verify(mockSms).send(eq("+1234567890"), anyString());
+    private final SmsGateway gateway;
+    public SmsChannel(SmsGateway gateway) { this.gateway = gateway; }
+    public void send(String to, String msg) { /* ... */ }
+    public ChannelType type() { return ChannelType.SMS; }
 }
 ```
 
-**Adding a new channel:** Create a new `@Component` implementing `NotificationChannel`. Spring automatically includes it in the injected list. Zero changes to `OrderService`. This is DI enabling the Open/Closed Principle.
+The dispatcher uses constructor injection for required collaborators and `ObjectProvider` for the optional preview service.
+
+```java
+@Service
+public class NotificationService {
+    private final List<NotificationChannel> channels;          // all implementations
+    private final NotificationChannel defaultChannel;          // @Primary -> EmailChannel
+    private final ObjectProvider<TemplatePreviewService> previewProvider;
+
+    public NotificationService(List<NotificationChannel> channels,
+                               NotificationChannel defaultChannel,
+                               ObjectProvider<TemplatePreviewService> previewProvider) {
+        this.channels = channels;
+        this.defaultChannel = defaultChannel;
+        this.previewProvider = previewProvider;
+    }
+
+    public void broadcast(String recipient, String message) {
+        // optional dependency: only used if a bean exists in this deployment
+        previewProvider.ifAvailable(p -> p.validate(message));
+        channels.forEach(c -> c.send(recipient, message));
+    }
+
+    public void sendDefault(String recipient, String message) {
+        defaultChannel.send(recipient, message);               // EmailChannel via @Primary
+    }
+}
+```
+
+Specific-channel selection uses `@Qualifier`, and tests need no Spring container at all.
+
+```java
+@Service
+public class OtpService {
+    private final NotificationChannel sms;
+    public OtpService(@Qualifier("sms") NotificationChannel sms) { this.sms = sms; }
+    public void sendOtp(String phone, String code) { sms.send(phone, "OTP: " + code); }
+}
+
+@Test
+void broadcast_hitsAllChannels() {
+    NotificationChannel email = mock(NotificationChannel.class);
+    NotificationChannel push  = mock(NotificationChannel.class);
+    var svc = new NotificationService(List.of(email, push), email,
+                                      mock(ObjectProvider.class));
+    svc.broadcast("u@x.com", "hi");
+    verify(email).send(eq("u@x.com"), eq("hi"));
+    verify(push).send(eq("u@x.com"), eq("hi"));
+}
+```
+
+### Metrics
+
+| Metric | Before (hard-coded) | After (DI) |
+|--------|---------------------|------------|
+| Files changed to add a channel | 5 | 1 (new `@Component`) |
+| Dispatcher unit test setup | full Spring context (~3s) | plain `new` (~5ms) |
+| Optional-dependency NPEs | 4/quarter | 0 (`ObjectProvider`) |
+| Channel-selection ambiguity errors at startup | recurring | 0 (`@Primary`/`@Qualifier`) |
+
+### Common Pitfalls
+
+**Pitfall 1 — field injection inside a `@Configuration` class breaks `@Bean` ordering.**
+
+```java
+// BROKEN: field injected dep may be null when a @Bean method runs during context bootstrap
+@Configuration
+public class AppConfig {
+    @Autowired private MeterRegistry registry;     // not guaranteed set when bean() is invoked
+    @Bean public Stats stats() { return new Stats(registry); }   // possible NPE
+}
+```
+
+```java
+// FIX: declare the dependency as a @Bean method parameter — Spring orders creation correctly
+@Configuration
+public class AppConfig {
+    @Bean public Stats stats(MeterRegistry registry) { return new Stats(registry); }
+}
+```
+
+**Pitfall 2 — `@Autowired(required=false)` silently leaves a null, NPE later.**
+
+```java
+// BROKEN: no bean present -> field stays null -> NPE at first use, far from the cause
+@Autowired(required = false)
+private AuditClient auditClient;
+public void record(Event e) { auditClient.send(e); }   // NPE in production
+```
+
+```java
+// FIX: model optionality explicitly with ObjectProvider
+private final ObjectProvider<AuditClient> auditProvider;
+public void record(Event e) {
+    auditProvider.ifAvailable(c -> c.send(e));          // no-op when absent
+}
+```
+
+**Pitfall 3 — circular dependency: setter injection "works", constructor injection fails fast.**
+
+```java
+// BROKEN: A and B require each other via constructor -> BeanCurrentlyInCreationException
+@Component class A { A(B b){} }
+@Component class B { B(A a){} }
+```
+
+```java
+// FIX: break the cycle (extract shared logic) or, if unavoidable, use @Lazy on one side
+@Component class A { A(@Lazy B b){} }   // injects a proxy, deferring B's full creation
+@Component class B { B(A a){} }
+```
+
+### Interview Discussion Points
+
+**How does injecting `List<NotificationChannel>` work, and how is order controlled?** Spring collects every bean implementing the interface into the list automatically, so adding a new `@Component` extends behavior with no dispatcher change (Open/Closed). Ordering follows `@Order`/`Ordered` or `@Priority`; without them order is undefined, so never rely on collection position for correctness.
+
+**When do `@Primary` and `@Qualifier` apply, and which wins?** `@Primary` designates the default bean chosen when a single instance of a type is injected without further qualification. `@Qualifier` names a specific bean at the injection point and takes precedence over `@Primary` when both are present, letting most callers get the default while specific callers opt into another implementation.
+
+**Why use `ObjectProvider` instead of `@Autowired(required=false)`?** `ObjectProvider` gives lazy, null-safe access via `getIfAvailable()`/`ifAvailable()`/`getIfUnique()`, so optionality and ambiguity are handled explicitly at the call site. `required=false` leaves a raw null field that defers the failure to first use, producing NPEs far from the missing-bean cause.
+
+**Why is constructor injection preferred over field injection?** It makes dependencies explicit and final (immutable, thread-safe), allows the object to be constructed and unit-tested without Spring, and surfaces unresolvable or circular dependencies at startup rather than at runtime. Field injection hides dependencies, prevents `final`, and complicates testing.
+
+**Why does field injection in a `@Configuration` class cause subtle bugs?** `@Bean` methods can be invoked during context bootstrap before field injection on the configuration instance has completed, so an injected field may still be null when the bean method reads it. Declaring the dependency as a method parameter lets the container resolve and order creation correctly.
+
+**How do you resolve a genuine circular dependency safely?** First try to remove it by extracting the shared behavior into a third collaborator, since a cycle usually signals a design smell. If it is truly required, switch one side to setter injection or annotate one constructor parameter with `@Lazy` so Spring injects a proxy and defers full creation, breaking the construction-time cycle.

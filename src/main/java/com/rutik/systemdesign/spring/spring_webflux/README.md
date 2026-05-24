@@ -960,3 +960,54 @@ at 5K req/sec:
 - The fraud service occasionally spikes to 800ms; the per-call 600ms timeout with a 2-attempt retry on the inventory service (which had transient failures) was tuned separately from the overall checkout timeout
 - Thread count reduction from 1,000 to 16 reduced JVM heap pressure substantially, which in turn reduced GC pause frequency and improved tail latency
 - The `ServerWebExchange.getPrincipal()` pattern for accessing the authenticated user in WebFlux replaced `SecurityContextHolder.getContext().getAuthentication()` — the reactive security context propagation was the most complex migration aspect
+
+---
+
+**Additional production patterns and interview Q&As:**
+
+**Backpressure war story: unbounded in-memory queue caused OOM.** A reactive pipeline consumed a Kafka topic and mapped each record through a slow external enrichment API (200ms). Without backpressure, the `Flux` buffered 100k pending records in heap, causing an OOM at peak.
+
+```java
+// BROKEN: flatMap with unlimited concurrency — 100k parallel HTTP calls buffered
+Flux.fromIterable(kafkaRecords)
+    .flatMap(record -> enrichmentClient.enrich(record))  // no concurrency limit!
+    .subscribe(enriched -> repo.save(enriched));
+
+// FIX: flatMap with concurrency cap and bounded prefetch
+Flux.fromIterable(kafkaRecords)
+    .flatMap(
+        record -> enrichmentClient.enrich(record),
+        8,     // max 8 concurrent inner subscriptions
+        1      // prefetch 1 at a time from upstream
+    )
+    .subscribe(enriched -> repo.save(enriched));
+// Result: heap usage: 4GB (OOM) → 180MB
+```
+
+**Pitfall: Blocking call inside reactive pipeline pins Netty thread.**
+
+```java
+// BROKEN: blocking JDBC call on Netty I/O thread → stalls all reactive requests
+@GetMapping("/vehicles/{id}")
+public Mono<Vehicle> getVehicle(@PathVariable String id) {
+    return Mono.fromCallable(() -> jdbcRepo.findById(id));  // blocks Netty thread!
+}
+
+// FIX: offload blocking to bounded elastic scheduler
+@GetMapping("/vehicles/{id}")
+public Mono<Vehicle> getVehicle(@PathVariable String id) {
+    return Mono.fromCallable(() -> jdbcRepo.findById(id))
+               .subscribeOn(Schedulers.boundedElastic());
+}
+// Or use R2DBC for fully non-blocking DB access
+```
+
+**When to use WebFlux vs Spring MVC:** Use WebFlux when upstream is reactive (R2DBC, reactive MongoDB, WebClient), you need streaming (Server-Sent Events, large file transfer), or you're running at >10k concurrent connections with I/O-bound workloads. Stick with Spring MVC when the data layer is blocking JDBC/Hibernate (virtual threads in Java 21 make MVC competitive), the team is unfamiliar with reactive programming, or the codebase uses `ThreadLocal`-based patterns (Spring Security `SecurityContext`, MDC) that need special reactive adaptation.
+
+**Additional interview Q&As:**
+
+**How does Project Reactor handle error signals differently from exceptions?** In a reactive pipeline, exceptions thrown inside operators are caught and converted to `onError` signals propagated downstream. Use `onErrorReturn(fallback)` for a static fallback, `onErrorResume(fn)` for a dynamic fallback `Mono`/`Flux`, and `onErrorMap(fn)` to rethrow as a different exception type. Uncaught errors that reach `subscribe()` are delivered to the subscriber's error handler; if none is provided, the exception is re-thrown on the subscription thread — often silently swallowed in Netty's event loop.
+
+**What is the difference between flatMap and concatMap in Reactor?** `flatMap` subscribes to inner publishers eagerly and merges results in arrival order — fast but unordered. `concatMap` subscribes to inner publishers sequentially — slower but preserves ordering. Use `flatMap` for independent I/O calls (enrichment API calls), `concatMap` when order matters (ordered event processing, sequential DB writes).
+
+**How do you propagate reactive context across service boundaries?** Use `Context` (Reactor's immutable key-value store) propagated automatically through the subscription chain. For HTTP headers (trace IDs), Spring's reactive WebClient supports `ExchangeFilterFunction` that reads from context and sets headers. Never use `ThreadLocal` in reactive code — the thread executing a step changes across operators; use `Mono.deferContextual` to read context at subscription time.

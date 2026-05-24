@@ -474,41 +474,154 @@ Shadow mode runs a candidate model on live traffic alongside the production mode
 
 ## 14. Case Study
 
-### Real-Time Product Recommendation Serving at an E-Commerce Platform
+**Scenario: Serving a 7B-parameter LLM with vLLM.** A chat product needs to serve a 7B model under 100 concurrent requests with streaming responses. vLLM provides PagedAttention (no KV-cache fragmentation) and continuous batching (new requests slot into gaps left by finished ones), with tensor parallelism across 2x A100. The deployment ships via shadow mode for a week before a canary rollout.
 
-**Problem**: An e-commerce company needed to serve personalized product recommendations to 50,000 concurrent users with P99 < 30ms. The model was a 2-layer MLP with 5M parameters trained in PyTorch. The team initially deployed a Flask endpoint that was hitting P99 of 120ms at 10,000 RPS.
-
-**Bottlenecks identified**:
-1. JSON deserialization of 200-feature input vectors: 35ms
-2. PyTorch model forward pass (CPU): 25ms
-3. JSON serialization of 20 output scores: 15ms
-4. Single-threaded Flask: requests queuing behind each other
-
-**Solution architecture**:
 ```
-Mobile/Web Client
-      |
-      | gRPC (protobuf)
-      v
-  FastAPI (async) + uvicorn workers (4 workers x 4 threads = 16 concurrent)
-      |
-      | ONNXRuntime (CPUExecutionProvider, 8 threads)
-      v
-  model.onnx (converted from PyTorch, dynamic axes enabled)
-      |
-      v
-  Redis cache (feature lookup, 5ms TTL for hot users)
+100 concurrent clients (streaming)
+        |
+   API gateway (auth, rate limit, server-side timeout)
+        |
+   vLLM engine
+     +-- continuous batching scheduler (per-step admission)
+     +-- PagedAttention KV cache (paged, no fragmentation)
+     +-- tensor parallelism across 2x A100 (split each layer)
+        |
+   token stream back to client (SSE)
+
+throughput 1200 tok/s | p99 = 800ms for a 200-token response
 ```
 
-**Results after migration**:
-- gRPC protobuf serialization: 35ms → 2ms
-- ONNXRuntime vs PyTorch CPU: 25ms → 9ms (2.8x speedup)
-- Dynamic batching (max_batch_size=16, max_wait_ms=3ms): throughput 3x at same CPU cost
-- P99 latency: 120ms → 22ms (under 30ms SLA)
-- CPU cost: 40 vCPUs → 14 vCPUs for the same traffic (65% reduction)
+Throughput ~1200 tokens/sec aggregate, p99 latency 800ms for a 200-token completion. PagedAttention lets many sequences share GPU memory efficiently; continuous batching keeps the GPU busy instead of waiting for the slowest sequence in a fixed batch.
 
-**Key decisions**:
-- Chose CPU over GPU: recommendation QPS is bursty; GPU cold-start during autoscale would cause latency spikes inconsistent with P99 SLA
-- Chose gRPC: client was a Go backend that could generate stubs easily; binary protocol eliminated JSON overhead
-- Added feature caching in Redis: 30% of requests had hot users whose features were already computed upstream; cache hit rate 42%, reducing model calls proportionally
-- Canary deployment: rolled out ONNX version to 5% traffic for 2 hours, confirmed P99 improvement, then promoted to 100%
+**Launching vLLM with tensor parallelism and bounded concurrency:**
+
+```python
+from vllm import LLM, SamplingParams
+
+def build_engine() -> LLM:
+    return LLM(
+        model="meta-llama/Llama-2-7b-chat-hf",
+        tensor_parallel_size=2,            # split across 2 A100s
+        gpu_memory_utilization=0.90,       # reserve headroom for KV cache
+        max_num_seqs=100,                  # cap concurrent sequences
+        max_model_len=4096,
+    )
+
+PARAMS = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=200)
+```
+
+**Streaming generation with the async engine:**
+
+```python
+from vllm import AsyncLLMEngine, SamplingParams
+from vllm.engine.arg_utils import AsyncEngineArgs
+import uuid
+
+class LLMService:
+    def __init__(self) -> None:
+        args = AsyncEngineArgs(model="meta-llama/Llama-2-7b-chat-hf",
+                               tensor_parallel_size=2, max_num_seqs=100)
+        self.engine = AsyncLLMEngine.from_engine_args(args)
+
+    async def stream(self, prompt: str):
+        params = SamplingParams(temperature=0.7, max_tokens=200)
+        async for out in self.engine.generate(prompt, params, str(uuid.uuid4())):
+            yield out.outputs[0].text   # incremental tokens to the client
+```
+
+**Server-side timeout to protect GPU memory:**
+
+```python
+import asyncio
+
+async def generate_with_timeout(service: "LLMService", prompt: str,
+                                deadline_s: float = 30.0) -> str:
+    async def collect() -> str:
+        chunks: list[str] = []
+        async for piece in service.stream(prompt):
+            chunks.append(piece)
+        return "".join(chunks)
+    try:
+        return await asyncio.wait_for(collect(), deadline_s)
+    except asyncio.TimeoutError:
+        return "[response timed out]"   # frees the sequence + its KV cache
+```
+
+**Pitfall 1 — Static batching waits for the slowest request.** Fixed batching collects N requests, runs them together, and cannot return any until the longest completes, wasting GPU on padding and inflating tail latency.
+
+```python
+# BROKEN: fixed batch with a wait timeout -> short requests blocked by long ones
+batch = collect_requests(n=32, timeout_ms=100)   # all finish together
+
+# FIX: continuous batching, the scheduler admits/evicts sequences every step,
+# so completed sequences free slots for new ones immediately (vLLM default).
+engine = build_engine()   # max_num_seqs governs concurrency, not a fixed batch
+```
+
+**Pitfall 2 — KV-cache eviction under overload.** Admitting more concurrent sequences than KV-cache memory allows forces eviction/recompute and degrades quality and latency.
+
+```python
+# BROKEN: unbounded concurrency -> KV cache thrashes, sequences preempted
+engine = LLM(model=..., max_num_seqs=10_000)
+
+# FIX: cap max_num_seqs to what KV-cache memory supports and queue the rest;
+# tune gpu_memory_utilization to size the KV cache deliberately.
+engine = LLM(model=..., max_num_seqs=100, gpu_memory_utilization=0.90)
+```
+
+**Pitfall 3 — No request timeout lets a slow client hold GPU memory.** A client that stops reading keeps its sequence and KV cache alive for minutes, starving others.
+
+```python
+# BROKEN: generate until EOS with no deadline -> stuck sequences pin memory
+text = await service.collect(prompt)   # could run for minutes
+
+# FIX: server-side timeout that aborts the sequence and reclaims its KV cache,
+# plus streaming so slow consumers apply natural backpressure.
+text = await generate_with_timeout(service, prompt, deadline_s=30.0)
+```
+
+**Interview Q&A:**
+
+**What problem does PagedAttention solve?** Naive KV-cache allocation reserves a contiguous block per sequence sized to the max length, wasting memory and fragmenting it so fewer sequences fit. PagedAttention stores the KV cache in fixed-size pages (like OS virtual memory), allocating on demand, which eliminates fragmentation and lets many more sequences share GPU memory, raising throughput.
+
+**How does continuous batching differ from static batching?** Static batching forms a fixed batch and runs all sequences to completion together, so short requests wait for the longest and the GPU pads. Continuous (in-flight) batching makes admission decisions every decode step: as soon as a sequence finishes, its slot is freed and a queued request joins, keeping the GPU saturated and cutting tail latency.
+
+**When do you use tensor parallelism versus other parallelism for inference?** Tensor parallelism splits each layer's matrices across GPUs and is used when a model is too large for one GPU or when you need lower per-token latency; it requires fast interconnect (NVLink) because of frequent all-reduces. Pipeline parallelism splits by layers and suits very large models, while data/replica parallelism scales throughput by running independent copies.
+
+**Why deploy with shadow mode before a canary?** Shadow mode sends real production traffic to the new model without serving its responses to users, so you can compare quality, latency, and cost with zero user risk. Only after shadow results look good does a canary route a small fraction of live traffic, limiting blast radius if something regresses.
+
+**How do you bound tail latency for LLM serving?** Cap concurrent sequences to fit KV-cache memory (avoid eviction), use continuous batching to avoid head-of-line blocking, stream tokens so clients see progress and apply backpressure, and enforce a server-side timeout that reclaims memory from stuck or slow sequences. Separately scaling prefill-heavy and decode-heavy workloads also helps.
+
+**What governs throughput vs latency trade-offs here?** Larger effective batches raise throughput (tokens/sec) but can raise per-request latency; smaller batches do the opposite. KV-cache memory caps how many sequences run at once. The levers are max_num_seqs, gpu_memory_utilization, and tensor-parallel degree; you tune them to hit the p99 SLA at the required concurrency.
+
+**Pitfall — Synchronous batch aggregation blocks fast requests behind slow ones.**
+
+```python
+# BROKEN: dynamic batching holds all requests until batch is full (or timeout)
+# A single large request (2000 tokens) delays 15 small requests (50 tokens each)
+class BatchingServer:
+    def __init__(self, max_batch=16, timeout_ms=50):
+        self.queue = []
+        self.max_batch = max_batch
+        self.timeout_ms = timeout_ms
+
+    async def predict(self, request):
+        self.queue.append(request)
+        if len(self.queue) == self.max_batch:
+            return await self._run_batch()   # fast requests blocked by one slow one
+
+# FIX: per-request padding + timeout-based batching; or use vLLM continuous batching
+# which interleaves prefill and decode, preventing head-of-line blocking
+# For non-LLM models: group requests by input length before batching
+from collections import defaultdict
+def group_by_length(requests, bucket_sizes=(64, 128, 256, 512)):
+    buckets = defaultdict(list)
+    for r in requests:
+        b = next((s for s in bucket_sizes if len(r.tokens) <= s), bucket_sizes[-1])
+        buckets[b].append(r)
+    return buckets
+```
+
+**How do you decide between TorchServe, ONNX Runtime, and TensorRT for serving?** TorchServe wraps PyTorch models with a REST/gRPC server, custom handlers, and model archive format — lowest engineering effort, good for experimentation and Python-heavy postprocessing. ONNX Runtime converts PyTorch to ONNX graph IR; runs on CPU/GPU/edge without a Python runtime; 2-5× faster than native PyTorch CPU inference. TensorRT performs hardware-specific layer fusion, precision calibration (INT8/FP16), and kernel auto-tuning for NVIDIA GPUs — achieves 3-10× speedup vs. PyTorch CUDA for production GPU inference. Choose based on: ONNX for CPU/edge portability, TensorRT for maximum GPU throughput (requires NVIDIA hardware), TorchServe for rapid iteration.
+
+**What is canary deployment for ML models and what metrics gate the rollout?** Canary deploys the new model to 5% of traffic. Gate metrics typically include: (1) primary business metric (CTR, AUC, revenue-per-user) vs. baseline — require no regression > 1%; (2) serving latency p99 — require no regression > 20%; (3) error rate — require < 0.01%. Monitor for 24-48 hours at each traffic step (5% → 25% → 50% → 100%). Automatic rollback triggers if any gate metric degrades. The key is that the canary runs on real production traffic, not synthetic load — shadow mode (offline scoring without serving) cannot catch distribution-specific latency issues.

@@ -737,3 +737,256 @@ This allows multiple application instances to poll concurrently without processi
 **Q: How would you handle schema evolution — adding a new field to an event payload without breaking consumers?**
 
 A: Use JSON for event payloads (as implemented) and follow consumer-driven contract testing. Consumers must ignore unknown fields (Jackson's `FAIL_ON_UNKNOWN_PROPERTIES = false` default). Producers may add new fields freely but must never remove or rename existing fields without a coordinated two-phase migration: (1) add the new field as optional, deploy all consumers that handle it, (2) once all consumers are deployed, make the field required in producers. Schema Registry with Avro and backward compatibility enforcement provides stronger guarantees at the cost of additional infrastructure.
+
+---
+
+## Failure Scenarios and Recovery
+
+Event-driven systems fail differently from request-response systems: the failure is rarely an immediate error returned to a user. Instead it shows up as consumer lag, duplicate processing, or silently lost events. The two highest-impact failures are broker unavailability and the publish-before-commit race.
+
+### Failure: Kafka Broker Goes Down
+
+When a broker hosting partition leaders becomes unavailable, producers cannot get acknowledgements and consumers cannot fetch. With the default producer config (`acks=all`, `max.block.ms=60000`), `kafkaTemplate.send().get()` blocks for up to 60 seconds, which cascades back into the HTTP request thread that triggered the send, exhausting the Tomcat thread pool. Meanwhile consumer lag builds because offsets stop advancing.
+
+```
+Healthy:
+  Producer --acks--> [ Broker leader ] --replicate--> [ followers ]
+  Consumer --fetch--> [ Broker leader ] --commit offset-->
+
+Broker leader down (before fix):
+  Producer --send().get()--X  (blocks 60s, HTTP threads pile up)
+  Consumer --fetch--X         (lag grows, offsets frozen)
+```
+
+Fix on the producer side: do not let a broker hiccup block request threads.
+
+```java
+// BROKEN: synchronous send on the request thread, default 60s block
+public void publish(OrderEvent e) {
+    kafkaTemplate.send("orders", e.getKey(), e).get(); // blocks request thread
+}
+```
+
+```java
+// FIX: acks=1 (leader-only ack) + bounded retries + async, non-blocking publish
+@Bean
+public ProducerFactory<String, Object> producerFactory() {
+    Map<String, Object> props = new HashMap<>();
+    props.put(ProducerConfig.ACKS_CONFIG, "1");            // leader ack only
+    props.put(ProducerConfig.RETRIES_CONFIG, 3);
+    props.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 5000); // fail fast
+    props.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, 2000);
+    props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true); // no dup on retry
+    return new DefaultKafkaProducerFactory<>(props);
+}
+
+public void publish(OrderEvent e) {
+    kafkaTemplate.send("orders", e.getKey(), e)
+        .whenComplete((res, ex) -> {
+            if (ex != null) outboxFallback.persist(e); // never lose the event
+        });
+}
+```
+
+Fix on the consumer side: shut down gracefully so in-flight offsets are committed.
+
+```java
+// FIX: commit offsets synchronously before the consumer exits
+@PreDestroy
+public void shutdown() {
+    listenerContainer.stop(() -> {
+        // stop callback runs after in-flight records finish
+        log.info("Consumer drained, committing final offsets");
+    });
+    // With MANUAL_IMMEDIATE ack mode, the last ack.acknowledge() already
+    // committed; commitSync() in the rebalance listener guarantees no replay.
+}
+```
+
+Recovery and time-to-recovery: with `acks=1` and `DELIVERY_TIMEOUT_MS=5s`, producer threads recover in ~5s instead of 60s. Kafka itself elects a new partition leader from in-sync replicas in seconds (controlled by `replica.lag.time.max.ms`, default 30s worst case). Consumer lag drains at the consumer's throughput once leaders return; size alerts to page when lag exceeds, e.g., 60s of expected volume.
+
+### Failure: Consumer Poison Message Blocks the Partition
+
+A malformed event that always throws during deserialization causes the consumer to retry the same offset forever, freezing that partition's progress. Fix: configure a `DefaultErrorHandler` with a `DeadLetterPublishingRecoverer` so the bad record is routed to `orders.DLT` after N retries and the partition advances. Recovery is inspecting the DLT, fixing the producer or consumer, and replaying from the DLT.
+
+---
+
+## Capacity Planning
+
+### Throughput and Thread Math
+
+```
+Target ingest:            10,000 events/sec
+Consumer groups (fanout): 5 services each consume the stream
+Handler invocations:      10,000 x 5 = 50,000 handler calls/sec
+
+Per-consumer threading:   8-thread listener pool per consumer instance
+Total consumer threads:   5 services x (instances) x 8
+                          assume 10 instances total across services
+                          10 x 8 = 80 base; scaled to peak = ~400 consumer threads
+```
+
+Partition count drives parallelism: a consumer group can have at most one active consumer thread per partition. To run 8 concurrent handlers per service, the topic needs at least 8 partitions. For headroom and future scaling, provision `partitions = max_expected_consumers x 2`. With a target of 8 active consumers, use 16 partitions.
+
+### Per-Handler Budget
+
+```
+50,000 handler calls/sec across the fleet
+If each handler does ~2ms of work (DB upsert + idempotency check):
+  required parallelism = 50,000 x 0.002s = 100 concurrent handlers
+  -> 100 / 8 per-instance = 13 consumer instances at steady state
+```
+
+### Outbox Poller Capacity
+
+```
+Poll interval:    100ms
+Batch per poll:   100 events
+Per instance:     1,000 events/sec
+For 10,000 events/sec ingest: 10 poller instances using
+  SELECT ... FOR UPDATE SKIP LOCKED to avoid double-publishing.
+```
+
+### Memory and Lag Budget
+
+```
+Consumer fetch buffer: max.partition.fetch.bytes default 1 MB x 16 partitions = 16 MB
+In-flight records:     max.poll.records default 500 x ~2 KB = 1 MB per poll
+Acceptable lag SLO:    < 60s of volume = < 600,000 events; alert at 50%.
+```
+
+---
+
+## Additional Production War Stories
+
+### War Story 1: Event Published Before DB Commit (Dual-Write Race)
+
+The order service charged the customer, published `order.created` to Kafka, and then committed the database transaction. Under load the transaction occasionally rolled back after the event was already on the wire. Downstream services shipped goods for an order that did not exist in the database — a classic dual-write inconsistency.
+
+```java
+// BROKEN: event published inside the method but Kafka send is not part of the DB TX
+@Transactional
+public void createOrder(OrderRequest req) {
+    Order order = orderRepository.save(toEntity(req));
+    kafkaTemplate.send("orders", new OrderCreatedEvent(order)); // escapes if TX rolls back
+    paymentService.charge(req); // if THIS throws, TX rolls back but event is gone
+}
+```
+
+```java
+// FIX: transactional outbox — write the event to an outbox table in the SAME TX.
+// A separate CDC/poller publishes it only AFTER the commit is durable.
+@Transactional
+public void createOrder(OrderRequest req) {
+    Order order = orderRepository.save(toEntity(req));
+    paymentService.charge(req);
+    outboxRepository.save(new OutboxEvent(
+        "orders", order.getId().toString(),
+        serialize(new OrderCreatedEvent(order)))); // committed atomically with order
+    // No Kafka call here. The outbox poller / Debezium CDC publishes post-commit.
+}
+```
+
+Because the outbox row and the order row commit (or roll back) together, there is no window where an event exists without its database record. The poller uses `FOR UPDATE SKIP LOCKED` and marks rows `published=true` after a successful send, giving at-least-once delivery.
+
+### War Story 2: Consumer Acknowledged Before Processing (Lost Events on Crash)
+
+A consumer used `AckMode.RECORD` but acknowledged at the start of the handler, then did the work. When an instance crashed mid-handler, the offset was already committed, so the event was never reprocessed — silently lost.
+
+```java
+// BROKEN: ack before the work is done
+@KafkaListener(topics = "orders")
+public void handle(OrderEvent e, Acknowledgment ack) {
+    ack.acknowledge();          // committed offset immediately
+    inventoryService.reserve(e); // crash here = event lost forever
+}
+```
+
+```java
+// FIX: ack only AFTER successful processing (at-least-once); make handler idempotent
+@KafkaListener(topics = "orders", containerFactory = "manualAckFactory")
+public void handle(OrderEvent e, Acknowledgment ack) {
+    if (processedRepository.existsById(e.getEventId())) { // idempotency guard
+        ack.acknowledge();
+        return;
+    }
+    inventoryService.reserve(e);
+    processedRepository.save(new ProcessedEvent(e.getEventId()));
+    ack.acknowledge(); // only now is the offset advanced
+}
+```
+
+---
+
+## At-Least-Once vs Exactly-Once for Payment Events
+
+Payment events are where delivery semantics matter most: a duplicate `payment.captured` could double-charge a customer.
+
+| Semantic        | Mechanism                                                                 | Cost / Tradeoff                                                                 |
+|-----------------|---------------------------------------------------------------------------|--------------------------------------------------------------------------------|
+| At-least-once   | Producer retries + consumer acks after processing + idempotent consumer   | Simplest; duplicates possible, so the consumer MUST dedupe on an idempotency key |
+| Exactly-once    | Kafka transactions: `enable.idempotence=true`, transactional producer, `read_committed` consumer | ~20-30% throughput cost; only end-to-end within Kafka, not across external systems like a payment gateway |
+
+For payments, the pragmatic answer is at-least-once delivery plus idempotent processing keyed on a payment intent ID. True exactly-once across an external payment gateway is impossible from Kafka alone — the gateway call itself can time out with unknown result. The capture handler stores the gateway's idempotency key, so a redelivered event re-invokes the gateway with the same key and the gateway returns the original result instead of charging again. Kafka transactions still help for the internal `payment.captured -> ledger.updated` hop, where exactly-once across Kafka topics is achievable and worth the throughput cost.
+
+```java
+// Idempotent payment capture: safe under at-least-once redelivery
+@KafkaListener(topics = "payments.capture")
+public void capture(CaptureEvent e, Acknowledgment ack) {
+    String idemKey = e.getPaymentIntentId();
+    // Gateway dedupes on idemKey; redelivery returns the original charge, never a second one
+    GatewayResult r = paymentGateway.charge(e.getAmount(), idemKey);
+    ledgerService.recordOnce(idemKey, r); // INSERT ... ON CONFLICT DO NOTHING
+    ack.acknowledge();
+}
+```
+
+---
+
+## Multi-Region Considerations
+
+A globally deployed event-driven system must decide where the source of truth lives and how events cross regions.
+
+```
+        Region US (us-east-1)                         Region EU (eu-west-1)
+   +----------------------------+                 +----------------------------+
+   | Producers (US traffic)     |                 | Producers (EU traffic)     |
+   |        |                   |                 |        |                   |
+   | [ Kafka cluster US ]       |  MirrorMaker 2  | [ Kafka cluster EU ]       |
+   |   topic: orders            | <-------------> |   topic: orders            |
+   |        |                   |  (async repl.)  |        |                   |
+   | Consumers (US)             |                 | Consumers (EU)             |
+   +----------------------------+                 +----------------------------+
+```
+
+Design changes for multi-region:
+- Use Kafka MirrorMaker 2 (or Confluent Cluster Linking) to replicate topics across regions asynchronously. Replication is eventually consistent — cross-region lag of seconds is normal.
+- Topic naming convention: MirrorMaker prefixes mirrored topics with the source cluster alias (`us.orders` in EU), so consumers can distinguish local from remote events and avoid infinite replication loops.
+- Each region owns the events produced by its local traffic. Aggregate/global consumers subscribe to both `orders` and `us.orders`/`eu.orders` patterns.
+- The outbox poller runs per region against the region-local database, so events never need a synchronous cross-region write.
+- For ordering guarantees, never assume a global total order across regions — order is only guaranteed per partition within a single cluster. Design consumers to be commutative and idempotent so out-of-region-order delivery is tolerated.
+- Failover: if the US region is lost, EU consumers continue from the last replicated offset. Some in-flight US events not yet mirrored are recovered from the US outbox once the region returns; this is why the outbox is the durable source of truth, not the Kafka log alone.
+
+---
+
+## Additional Interview Questions
+
+**Q: Why does the transactional outbox pattern solve the dual-write problem?**
+
+A: The dual-write problem is that writing to the database and publishing to Kafka are two separate systems with no shared transaction, so a crash between them leaves them inconsistent. The outbox pattern collapses this into a single local transaction: the business row and an outbox row are written atomically to the same database. A separate poller or CDC process (Debezium) reads committed outbox rows and publishes them to Kafka after the commit is durable. Because the event row can only exist if the transaction committed, there is never an event without its corresponding database record. The publish is at-least-once, so consumers must still dedupe.
+
+**Q: Why choose acks=1 over acks=all for the producer when a broker fails, and what is the risk?**
+
+A: `acks=all` waits for all in-sync replicas to acknowledge, which maximizes durability but blocks longer during a broker failure and amplifies tail latency. `acks=1` waits only for the partition leader, recovering request threads faster (paired with a short `delivery.timeout.ms`) and keeping the application responsive. The risk is a narrow window: if the leader acknowledges and then crashes before a follower replicates that record, the record is lost. We mitigate by combining `acks=1` with an outbox fallback that persists any event whose send ultimately fails, so durability is recovered at the cost of possible duplicates rather than lost data.
+
+**Q: For payment events, why is at-least-once plus idempotency preferred over Kafka exactly-once?**
+
+A: Kafka's exactly-once semantics only hold end-to-end within Kafka (topic to topic through transactional producers and read_committed consumers). A payment capture calls an external gateway, which Kafka transactions cannot enroll — the gateway call can time out with an unknown outcome regardless of Kafka guarantees. So the durable correctness must come from idempotency at the gateway: the consumer passes a stable idempotency key (the payment intent ID), and the gateway returns the original result on redelivery instead of charging twice. At-least-once delivery plus this idempotency key is simpler, cheaper (no ~20-30% EOS throughput tax), and actually correct across the external boundary.
+
+**Q: How do you size the number of partitions for a topic?**
+
+A: Partitions bound consumer parallelism — a consumer group can have at most one active consumer per partition, so to run N concurrent consumers you need at least N partitions. Provision `partitions = peak_expected_consumers x 2` for headroom, since increasing partitions later breaks key-based ordering for existing keys. Also account for per-partition throughput limits (a single partition typically sustains tens of MB/s) and broker count (spread partitions across brokers for balance). For a target of 8 concurrent consumers we use 16 partitions.
+
+**Q: What happens to consumer lag during and after a broker outage, and how do you alert on it?**
+
+A: During the outage, offsets stop advancing for affected partitions, so lag grows at the full ingest rate. Kafka elects a new leader from in-sync replicas within seconds to ~30s worst case (`replica.lag.time.max.ms`), after which consumers resume and lag drains at their throughput. Alert on consumer-group lag expressed in time (records-behind divided by consume rate) rather than raw record count, and page when lag exceeds the SLO — for example 60 seconds of expected volume. This catches both broker outages and slow/poison-message stalls.

@@ -460,57 +460,213 @@ Spring Boot auto-configures an embedded Tomcat with a thread pool (default max 2
 
 ## 14. Case Study
 
-### Problem: REST API Returns 406 for XML Clients
+### Scenario: REST API Gateway at 20k req/sec with Custom Argument Resolution and Content Negotiation
 
-**Symptom:** Mobile clients sending `Accept: application/json` get correct responses. A partner system sending `Accept: application/xml` gets `406 Not Acceptable`.
+**Context.** A public API gateway fronts dozens of internal services and serves **20,000 requests/sec**. `DispatcherServlet` routes each request through `RequestMappingHandlerMapping` to a `@RestController`. A custom `HandlerMethodArgumentResolver` injects the authenticated principal as `@CurrentUser` parsed from the JWT, avoiding repetitive boilerplate in every handler. The `HttpMessageConverter` chain serves JSON (Jackson) to mobile/web clients and Protobuf binary to high-throughput service-to-service callers, selected by the `Accept` header. Errors are returned as RFC 7807 `ProblemDetail` (Spring 6).
 
-**Investigation:**
+### Request Lifecycle
 
-```bash
-curl -H "Accept: application/xml" http://api.example.com/users/1
-# HTTP/1.1 406 Not Acceptable
+```
+Client request
+   |
+   v
++-------------------+
+| DispatcherServlet |
++--------+----------+
+         | 1. HandlerMapping (RequestMappingHandlerMapping) -> HandlerMethod
+         | 2. HandlerInterceptor.preHandle()  (timing start)
+         | 3. HandlerAdapter invokes method:
+         |       ArgumentResolvers: @CurrentUser, @PathVariable, @RequestBody
+         | 4. @RestController method runs
+         | 5. ReturnValueHandler -> HttpMessageConverter (Jackson | Protobuf via Accept)
+         | 6. HandlerInterceptor.afterCompletion()  (timing stop, record metric)
+         v
+   HTTP response (or @ExceptionHandler -> ProblemDetail on failure)
 ```
 
-**Root cause:** `spring-boot-starter-web` includes Jackson for JSON but NOT JAXB for XML. No `HttpMessageConverter` can produce `application/xml` from the DTO.
-
-**Fix:**
-
-```xml
-<!-- pom.xml: add Jackson XML support -->
-<dependency>
-    <groupId>com.fasterxml.jackson.dataformat</groupId>
-    <artifactId>jackson-dataformat-xml</artifactId>
-</dependency>
-```
+### Custom Argument Resolver and Negotiation
 
 ```java
-// DTO: annotate for XML namespace if needed
-@XmlRootElement(name = "user")  // optional for Jackson XML
-public class UserDto {
-    private Long id;
-    private String name;
-    // getters/setters
+public class CurrentUserArgumentResolver implements HandlerMethodArgumentResolver {
+    @Override public boolean supportsParameter(MethodParameter p) {
+        return p.hasParameterAnnotation(CurrentUser.class) && p.getParameterType() == AuthUser.class;
+    }
+    @Override public Object resolveArgument(MethodParameter p, ModelAndViewContainer mav,
+                                            NativeWebRequest req, WebDataBinderFactory bf) {
+        Jwt jwt = (Jwt) ((Authentication) req.getUserPrincipal()).getPrincipal();
+        return new AuthUser(jwt.getSubject(), jwt.getClaimAsString("tenant_id"));
+    }
 }
 
-// Verify in WebMvcConfig (Spring Boot auto-configures when JAR is present)
-// GET /users/1 with Accept: application/xml -> XML response
-// GET /users/1 with Accept: application/json -> JSON response
-// Both handled by same controller method — no code change
+@Configuration
+public class WebConfig implements WebMvcConfigurer {
+    @Override public void addArgumentResolvers(List<HandlerMethodArgumentResolver> resolvers) {
+        resolvers.add(new CurrentUserArgumentResolver());
+    }
+    @Override public void configureContentNegotiation(ContentNegotiationConfigurer c) {
+        c.favorParameter(false).ignoreAcceptHeader(false)   // negotiate strictly by Accept header
+         .defaultContentType(MediaType.APPLICATION_JSON)
+         .mediaType("protobuf", MediaType.valueOf("application/x-protobuf"));
+    }
+    @Override public void extendMessageConverters(List<HttpMessageConverter<?>> converters) {
+        converters.add(0, new ProtobufHttpMessageConverter());   // binary for service callers
+    }
+    @Override public void addInterceptors(InterceptorRegistry r) {
+        r.addInterceptor(new TimingInterceptor());
+    }
+}
 ```
-
-**Additional fix — explicit produces on sensitive endpoints:**
 
 ```java
-@GetMapping(value = "/users/{id}",
-            produces = {MediaType.APPLICATION_JSON_VALUE,
-                        MediaType.APPLICATION_XML_VALUE})
-public ResponseEntity<UserDto> getUser(@PathVariable Long id) { ... }
-
-// Lock down internal-only endpoints to JSON only:
-@GetMapping(value = "/admin/users",
-            produces = MediaType.APPLICATION_JSON_VALUE)
-public List<UserDto> listUsers() { ... }
-// Returns 406 for XML clients on admin endpoints (intentional)
+@RestControllerAdvice
+public class ApiErrorAdvice {
+    @ExceptionHandler(NoSuchOrderException.class)            // global, applies across all controllers
+    public ProblemDetail handle(NoSuchOrderException ex) {
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+        pd.setType(URI.create("https://api.example.com/errors/order-not-found"));
+        return pd;                                           // RFC 7807, serialized as application/problem+json
+    }
+}
 ```
 
-**Lesson:** `406 Not Acceptable` always means no converter supports (Java type + requested media type). Check: which converters are registered, which media types the method declares in `produces`, and what `Accept` header the client sends.
+### Metrics
+
+- Routing + resolution overhead: **~0.3ms** per request (handler lookup is cached in a `MappingRegistry`).
+- Protobuf payloads: **~60% smaller** than JSON for the same DTO, cutting service-to-service bandwidth.
+- TimingInterceptor records p99 per route to Micrometer; gateway p99 held at **35ms** under 20k req/sec.
+
+### Pitfalls
+
+**Pitfall 1 — `@ResponseBody` missing, so the gateway tries to resolve a view.**
+```java
+// BROKEN: on a @Controller (not @RestController), the String return is treated as a view name
+@Controller
+class OrderController {
+    @GetMapping("/orders/{id}")
+    public OrderDto get(@PathVariable String id) { return service.find(id); }
+    // DispatcherServlet asks the ViewResolver for a view named by the DTO -> 404/500
+}
+```
+```java
+// FIXED: @RestController (or @ResponseBody) tells the return-value handler to serialize the body
+@RestController
+class OrderController {
+    @GetMapping("/orders/{id}")
+    public OrderDto get(@PathVariable String id) { return service.find(id); }  // body serialized via converters
+}
+```
+
+**Pitfall 2 — Content negotiation not configured, so XML/Protobuf clients still get JSON.**
+```java
+// BROKEN: relying on defaults; favorParameter / path-extension strategies misfire and Accept is ignored
+// -> a client sending Accept: application/x-protobuf silently receives JSON
+```
+```java
+// FIXED: negotiate by Accept header and register the binary converter
+c.favorParameter(false).ignoreAcceptHeader(false).defaultContentType(MediaType.APPLICATION_JSON);
+converters.add(0, new ProtobufHttpMessageConverter());   // honored when Accept: application/x-protobuf
+```
+
+**Pitfall 3 — `@ExceptionHandler` on a single controller, not `@ControllerAdvice`.**
+```java
+// BROKEN: this handler only catches exceptions thrown by OrderController; other controllers fall through
+@RestController
+class OrderController {
+    @ExceptionHandler(NoSuchOrderException.class)
+    ProblemDetail handle(NoSuchOrderException e) { ... }   // local scope only
+}
+```
+```java
+// FIXED: move it to @RestControllerAdvice so one handler covers all 30 controllers
+@RestControllerAdvice
+class ApiErrorAdvice {
+    @ExceptionHandler(NoSuchOrderException.class)
+    ProblemDetail handle(NoSuchOrderException e) { ... }   // global scope
+}
+```
+
+### Interview Q&A
+
+**How does `RequestMappingHandlerMapping` find the handler for a request?** At startup it scans all `@RequestMapping` methods and builds a `MappingRegistry` keyed by `RequestMappingInfo` (path, method, params, headers, produces/consumes). Per request it matches the URL and HTTP attributes against that registry and returns a `HandlerMethod`, so lookup is a cached map operation, not reflection per call.
+
+**What problem does a custom `HandlerMethodArgumentResolver` solve?** It removes repeated boilerplate of extracting and validating cross-cutting request data. Instead of every handler parsing the JWT to get the user, a `@CurrentUser` resolver does it once and injects a typed `AuthUser`, keeping controllers focused on business logic.
+
+**How does Spring decide which `HttpMessageConverter` serializes the response?** It intersects the client's `Accept` header (via the configured `ContentNegotiationStrategy`) with the media types each registered converter can produce and the handler's `produces`. The first converter that supports both the Java type and a negotiated media type wins; if none match, it returns 406.
+
+**What is the difference between a `Filter` and a `HandlerInterceptor` for timing?** A servlet `Filter` runs outside the `DispatcherServlet` and sees raw requests/responses for all paths. A `HandlerInterceptor` runs inside the dispatcher with access to the resolved `HandlerMethod`, so it can record per-route metrics and `ModelAndView`, which a generic filter cannot.
+
+**Why use `ProblemDetail` over a custom error DTO?** `ProblemDetail` (Spring 6) implements RFC 7807, serializing as `application/problem+json` with standard `type`, `title`, `status`, `detail`, and extension fields. Clients across services get one predictable error contract instead of each team inventing its own error shape.
+
+**Why does returning a `String` from a `@Controller` behave differently than from a `@RestController`?** On a plain `@Controller`, a `String` return is interpreted as a view name passed to the `ViewResolver`. `@RestController` (which bundles `@ResponseBody`) routes returns through the message converters to be serialized as the response body, so the same String becomes literal output rather than a view lookup.
+
+---
+
+**Additional war stories and interview Q&As:**
+
+**Pitfall: HandlerMethodArgumentResolver order conflict.**
+
+```java
+// BROKEN: custom resolver registered last — Spring's built-in resolvers
+// handle @RequestBody first, your custom resolver never fires
+@Configuration
+public class WebConfig implements WebMvcConfigurer {
+    @Override
+    public void addArgumentResolvers(List<HandlerMethodArgumentResolver> resolvers) {
+        resolvers.add(new TenantContextResolver());  // added at end — too late!
+    }
+}
+
+// FIX: Spring iterates resolvers in order; custom resolvers added via
+// addArgumentResolvers are appended AFTER built-ins. Use
+// RequestMappingHandlerAdapter.setCustomArgumentResolvers() to prepend
+@Bean
+public RequestMappingHandlerAdapter requestMappingHandlerAdapter(
+        ApplicationContext ctx) {
+    RequestMappingHandlerAdapter adapter =
+        ctx.getBean(RequestMappingHandlerAdapter.class);
+    List<HandlerMethodArgumentResolver> resolvers = new ArrayList<>();
+    resolvers.add(new TenantContextResolver());     // prepend
+    resolvers.addAll(adapter.getArgumentResolvers());
+    adapter.setArgumentResolvers(resolvers);
+    return adapter;
+}
+```
+
+**Pitfall: @ControllerAdvice applies to all controllers including library controllers.**
+
+```java
+// BROKEN: @ControllerAdvice catches exceptions from Spring Actuator and
+// Springdoc OpenAPI controllers — transforms their JSON into your custom format
+@ControllerAdvice
+public class GlobalExceptionHandler {
+    @ExceptionHandler(Exception.class)
+    public ProblemDetail handleAll(Exception e) { ... }
+}
+// /actuator/health now returns ProblemDetail instead of health JSON
+
+// FIX: scope @ControllerAdvice to your own packages
+@ControllerAdvice(basePackages = "com.company.myapp.api")
+public class GlobalExceptionHandler { ... }
+```
+
+**DispatcherServlet request pipeline — full sequence:**
+
+```
+1. [Filter chain] — authentication, logging, CORS
+2. [DispatcherServlet.doDispatch()]
+3. [HandlerMapping.getHandler()] — finds controller method
+4. [HandlerAdapter.handle()]
+   a. [ArgumentResolvers] — @RequestBody, @PathVariable, custom
+   b. [Controller method executes]
+   c. [ReturnValueHandlers] — @ResponseBody → HttpMessageConverter → JSON
+5. [HandlerExceptionResolvers] — @ExceptionHandler, @ControllerAdvice
+6. [ViewResolver] — if not @ResponseBody (MVC views)
+```
+
+**Additional interview Q&As:**
+
+**How does Spring MVC choose between multiple HandlerMappings?** `DispatcherServlet` holds a list of `HandlerMapping` instances ordered by `@Order` or `Ordered`. It calls each in order until one returns a non-null `HandlerExecutionChain`. `RequestMappingHandlerMapping` (for `@RequestMapping`) has order 0; `RouterFunctionMapping` (WebFlux-style functional routes) has order -1 in Spring MVC (takes priority). Understand this ordering when mixing annotation-based and functional routing.
+
+**What happens during content negotiation when a client sends `Accept: application/xml` but only Jackson is on the classpath?** `AbstractMessageConverterMethodProcessor` iterates registered `HttpMessageConverter` instances to find one that can write the requested media type. With only Jackson (JSON), no converter can produce XML — Spring returns 406 Not Acceptable. Add `jackson-dataformat-xml` to enable XML output, or configure `ContentNegotiationStrategy` to always default to JSON for unknown accept types.
+
+**How do you stream a large response (1M rows) without loading it all into memory?** Return a `StreamingResponseBody` or `ResponseBodyEmitter` from the controller. Spring writes directly to the response `OutputStream` as data is produced without buffering the full response. For database streaming, use JPA `@QueryHints({@QueryHint(name = HINT_FETCH_SIZE, value = "1000")})` or Spring Data's `Stream<Entity>` return type (requires a transaction around the streaming read).

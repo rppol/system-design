@@ -547,86 +547,274 @@ Start with sanity checks in order: (1) Verify rewards are being received — log
 
 ## 14. Case Study
 
-### Problem: RLHF for Instruction-Following LLM
+**Scenario:** A streaming music platform (180M monthly active users) needs to improve playlist recommendation CTR. The current collaborative filtering model has CTR of 6.8% but suffers from the exploration-exploitation tradeoff: it over-exploits popular tracks and under-explores new releases (cold-start problem). The goal: implement a contextual bandit system serving 8,000 recommendation requests per second at p99 < 30ms, comparing LinUCB (linear upper confidence bound) against Thompson Sampling, targeting CTR >= 9.0% with cold-start track coverage >= 25%.
 
-**Context:** A 7B parameter base language model has been pre-trained on 1T tokens of text. The goal is to make it follow instructions accurately, refuse harmful requests, and provide helpful, detailed responses. The team has a budget for 50K human preference comparisons.
+**Architecture:**
+```
+User Context (real-time features, 128d)
+  - Session: current track, session duration, skip rate, time-of-day
+  - Profile: genre affinity vector (32d), playlist completion rate, device
+  - Engagement: 7-day play history, recent likes, listening streak
+         |
+         v
+Track Feature Store (30M tracks, 64d each)
+  - Audio: tempo, energy, valence, danceability (Spotify features)
+  - Popularity: global/local play count percentile, release age
+  - Contextual: trend score, region popularity, editorial tags
+         |
+         v
+Bandit Policy Engine (8K RPS, p99 < 30ms)
+  +-----------------------------+----------------------------------+
+  |  LinUCB (Disjoint)          |  Thompson Sampling               |
+  |  A_k^{-1} ridge inverse     |  Beta posteriors per arm         |
+  |  UCB bonus: alpha * sqrt(x' |  Sample from Beta(alpha, beta)   |
+  |  A_k^{-1} x)                |  for binary reward               |
+  +-----------------------------+----------------------------------+
+                   |
+                   v
+Top-K Ranking (K=10 per request)
+  Bandit score blended with CF score (0.4 bandit + 0.6 CF)
+                   |
+                   v
+Reward Signal (deferred, async)
+  Played >= 30s -> reward=1, skip < 10s -> reward=0
+  30-day reward window, weighted recency
+```
 
-**Phase 1 — Supervised Fine-Tuning (SFT)**
-
-Curate 10K high-quality (prompt, response) pairs from human demonstrators. Fine-tune the 7B model for 3 epochs with lr=2e-5, batch size=32, cosine LR schedule. This SFT model becomes both the policy initialization and the reference policy for the KL penalty.
-
-**Phase 2 — Reward Model Training**
-
-Collect 50K comparison pairs: for each prompt, show two model responses to a human labeler and record which is preferred. Train a 7B reward model (same architecture, add a linear head outputting a scalar) using Bradley-Terry preference model loss:
+**Step-by-step implementation:**
 
 ```python
-import torch
-import torch.nn.functional as F
+from __future__ import annotations
+import numpy as np
+from dataclasses import dataclass, field
+from typing import Optional
 
-def preference_loss(reward_chosen: torch.Tensor, reward_rejected: torch.Tensor) -> torch.Tensor:
-    """
-    Bradley-Terry: maximize log P(chosen > rejected).
-    reward_chosen, reward_rejected: scalar reward for each response.
-    """
-    return -F.logsigmoid(reward_chosen - reward_rejected).mean()
+@dataclass
+class LinUCBArm:
+    """Per-arm state for Disjoint LinUCB (Li et al. 2010)."""
+    A: np.ndarray      # d x d feature covariance matrix
+    b: np.ndarray      # d-dimensional reward accumulator
+    d: int             # context dimension
+
+    @classmethod
+    def initialise(cls, d: int) -> "LinUCBArm":
+        return cls(A=np.eye(d), b=np.zeros(d), d=d)
+
+    def update(self, context: np.ndarray, reward: float) -> None:
+        """Sherman-Morrison update: avoid full matrix inverse each time."""
+        self.A += np.outer(context, context)
+        self.b += reward * context
+
+    def score(self, context: np.ndarray, alpha: float = 0.5) -> float:
+        A_inv = np.linalg.inv(self.A)
+        theta = A_inv @ self.b
+        exploration_bonus = alpha * float(np.sqrt(context @ A_inv @ context))
+        return float(theta @ context) + exploration_bonus
+
+class LinUCBPolicy:
+    def __init__(
+        self,
+        context_dim: int = 128,
+        alpha: float = 0.5,
+    ) -> None:
+        self.context_dim = context_dim
+        self.alpha = alpha
+        self.arms: dict[str, LinUCBArm] = {}
+
+    def get_or_create_arm(self, track_id: str) -> LinUCBArm:
+        if track_id not in self.arms:
+            self.arms[track_id] = LinUCBArm.initialise(self.context_dim)
+        return self.arms[track_id]
+
+    def select_action(
+        self,
+        candidate_track_ids: list[str],
+        user_context: np.ndarray,
+        top_k: int = 10,
+    ) -> list[str]:
+        scores = [
+            (track_id, self.get_or_create_arm(track_id).score(user_context, self.alpha))
+            for track_id in candidate_track_ids
+        ]
+        scores.sort(key=lambda x: x[1], reverse=True)
+        return [t for t, _ in scores[:top_k]]
+
+    def update(self, track_id: str, context: np.ndarray, reward: float) -> None:
+        arm = self.get_or_create_arm(track_id)
+        arm.update(context, reward)
 ```
 
-Reward model accuracy on held-out pairs: 72% (human-level agreement on ambiguous pairs is ~75%).
+```python
+from scipy.stats import beta as beta_dist
 
-**Phase 3 — PPO Fine-Tuning**
+@dataclass
+class ThompsonSamplingArm:
+    """Beta distribution prior for binary reward Thompson Sampling."""
+    alpha: float = 1.0   # prior successes (plays >= 30s)
+    beta: float = 1.0    # prior failures (skips)
 
-```
-Policy:         SFT model (7B params) with LoRA adapters (r=64)
-Reference:      Frozen SFT model (no update)
-Reward model:   Trained in Phase 2 (frozen during PPO)
-KL coefficient: beta=0.1
+    def sample(self) -> float:
+        return float(beta_dist.rvs(self.alpha, self.beta))
 
-Reward computation:
-  r_total = reward_model(prompt, response) - beta * KL(policy || reference)
-  KL penalty prevents reward hacking (gibberish text that fools reward model)
+    def update(self, reward: float) -> None:
+        self.alpha += reward
+        self.beta += 1.0 - reward
 
-PPO hyperparameters:
-  rollout length:    512 tokens
-  minibatch size:    8 prompts
-  clip_eps:          0.2
-  value_coef:        0.1
-  entropy_coef:      0.0 (LM already has high entropy from pre-training)
-  lr:                1e-5 (much lower than SFT; policy is already near-optimal)
-  n_epochs_per_rollout: 4
-```
+    @property
+    def expected_reward(self) -> float:
+        return self.alpha / (self.alpha + self.beta)
 
-**Results after 100K PPO steps:**
+    @property
+    def uncertainty(self) -> float:
+        """Standard deviation of Beta posterior as uncertainty measure."""
+        n = self.alpha + self.beta
+        return float(np.sqrt(self.alpha * self.beta / (n ** 2 * (n + 1))))
 
-| Metric | SFT Model | After RLHF |
-|--------|-----------|-----------|
-| Human preference rate vs SFT | 50% | 71% |
-| Instruction following (MT-Bench) | 6.2 / 10 | 7.8 / 10 |
-| Refusal accuracy (harmful prompts) | 61% | 89% |
-| Reward model score (held-out) | 0.0 (baseline) | +2.1 |
+class ThompsonSamplingPolicy:
+    def __init__(self) -> None:
+        self.arms: dict[str, ThompsonSamplingArm] = {}
 
-**Key Failure Mode — Reward Hacking:**
+    def get_or_create_arm(self, track_id: str) -> ThompsonSamplingArm:
+        if track_id not in self.arms:
+            self.arms[track_id] = ThompsonSamplingArm()
+        return self.arms[track_id]
 
-After 200K PPO steps, the model began appending lengthy disclaimers to every response and repeating key phrases — behaviors that inflated the reward model score (trained on short responses) but degraded actual quality. Fix: added length penalty (subtract 0.001 * response_length from reward) and refreshed 20% of reward model training data with new human labels reflecting the new failure mode.
+    def select_action(
+        self,
+        candidate_track_ids: list[str],
+        top_k: int = 10,
+        n_samples: int = 1,  # multiple samples for batch selection diversity
+    ) -> list[str]:
+        scores = [
+            (track_id, self.get_or_create_arm(track_id).sample())
+            for track_id in candidate_track_ids
+        ]
+        scores.sort(key=lambda x: x[1], reverse=True)
+        return [t for t, _ in scores[:top_k]]
 
-**Production Deployment Architecture:**
-
-```
-User prompt
-    |
-    v
-[LoRA-merged policy model: vLLM serving, 4x A100 80GB]
-    |
-    v
-[Output filter: rule-based safety layer for clear-cut violations]
-    |
-    v
-[Online reward model scoring: sampled 5% of responses for quality monitoring]
-    |
-    v
-[Feedback collection: thumbs up/down -> new preference pairs -> quarterly RLHF refresh]
+    def update(self, track_id: str, reward: float) -> None:
+        self.get_or_create_arm(track_id).update(reward)
 ```
 
-**Key Decisions:**
-- LoRA (r=64) during PPO instead of full fine-tuning: reduces GPU memory from 320GB to 80GB, enabling training on 4xA100 instead of requiring 16xA100
-- KL beta=0.1: empirically tuned by sweeping [0.01, 0.05, 0.1, 0.2]; lower beta allows more policy change but risks reward hacking; higher beta keeps policy too close to SFT
-- Quarterly RLHF refresh: reward model decays as policy distribution shifts; stale reward model causes systematic reward hacking over time
+```python
+def evaluate_bandit_policy(
+    policy: LinUCBPolicy | ThompsonSamplingPolicy,
+    simulation_steps: int = 100_000,
+    n_tracks: int = 1_000,
+    context_dim: int = 128,
+    true_ctr_distribution: str = "beta",
+) -> dict[str, float]:
+    """Offline policy evaluation via counterfactual logging (IPS estimator)."""
+    rng = np.random.default_rng(42)
+
+    # Simulate true CTRs for each track (power-law distribution: most tracks rarely played)
+    true_ctrs = rng.beta(a=0.5, b=4.0, size=n_tracks)   # ~80% of tracks have CTR < 15%
+    track_ids = [f"track_{i}" for i in range(n_tracks)]
+
+    cumulative_reward = 0.0
+    cumulative_cold_start_plays = 0
+    cold_start_threshold = 10   # tracks with < 10 plays are "cold start"
+
+    for step in range(simulation_steps):
+        context = rng.standard_normal(context_dim)
+        candidates = rng.choice(track_ids, size=50, replace=False).tolist()
+        selected = policy.select_action(candidates, context) if hasattr(policy, "context_dim") \
+                   else policy.select_action(candidates)
+        chosen = selected[0]
+        chosen_idx = int(chosen.split("_")[1])
+        reward = float(rng.binomial(1, true_ctrs[chosen_idx]))
+        policy.update(chosen, context, reward) if hasattr(policy, "context_dim") \
+            else policy.update(chosen, reward)
+
+        cumulative_reward += reward
+        arm = policy.arms.get(chosen)
+        n_plays = int(arm.alpha + arm.beta - 2) if hasattr(arm, "alpha") else 0
+        if n_plays < cold_start_threshold:
+            cumulative_cold_start_plays += 1
+
+    ctr = cumulative_reward / simulation_steps
+    cold_start_coverage = cumulative_cold_start_plays / simulation_steps
+    return {"simulated_ctr": ctr, "cold_start_coverage": cold_start_coverage}
+```
+
+**Key pitfalls (3 with BROKEN->FIX):**
+
+**Pitfall 1 - Recomputing full matrix inverse per request instead of using Sherman-Morrison update:**
+```python
+# BROKEN: full matrix inverse on every score computation is O(d^3) = O(128^3) per arm
+def score_broken(self, context: np.ndarray, alpha: float) -> float:
+    A_inv = np.linalg.inv(self.A)   # O(d^3) = 2M FLOPs per arm
+    # With 1000 candidate tracks per request -> 2B FLOPs per request -> 800ms latency
+    return float(context @ A_inv @ context)
+
+# FIX: maintain A_inv incrementally using Sherman-Morrison formula
+# When A updates by outer product: A_new = A + u*u', then
+# A_new_inv = A_inv - (A_inv u u' A_inv) / (1 + u' A_inv u)
+def update_incremental(self, context: np.ndarray, reward: float) -> None:
+    u = context.reshape(-1, 1)
+    A_inv_u = self.A_inv @ u
+    denominator = 1.0 + float(u.T @ A_inv_u)
+    self.A_inv -= (A_inv_u @ A_inv_u.T) / denominator   # O(d^2), not O(d^3)
+    self.b += reward * context
+```
+
+**Pitfall 2 - Using Thompson Sampling with Beta prior for non-binary (continuous) rewards:**
+```python
+# BROKEN: play duration (0-300 seconds) as reward with Beta(alpha, beta) prior
+# Beta distribution is defined on [0,1]; reward = duration_seconds is unbounded
+arm.update(reward=duration_seconds)   # alpha grows to 300+ per update
+arm.alpha += duration_seconds         # Beta posterior with alpha=5000 is degenerate
+
+# FIX 1: binarise reward at a meaningful threshold (>= 30s play = success)
+binary_reward = 1.0 if play_duration_seconds >= 30 else 0.0
+arm.update(binary_reward)   # valid Bernoulli-Beta conjugate model
+
+# FIX 2: use Gaussian Thompson Sampling for continuous rewards
+# Model reward as N(mu, sigma^2); maintain conjugate Normal-Inverse-Gamma posterior
+```
+
+**Pitfall 3 - No exploration budget for cold-start tracks causes permanently low CTR estimates:**
+```python
+# BROKEN: pure exploitation of LinUCB scores; new tracks never selected
+# New tracks have no data: A = I, b = 0 -> theta = 0 -> score = alpha*||context||
+# But established tracks have theta >> 0 -> always outscored
+policy = LinUCBPolicy(alpha=0.01)   # very small exploration bonus
+# After 1M requests, 40% of tracks have 0 plays; CTR estimate stuck at prior
+
+# FIX: epsilon-greedy cold-start forcing + higher alpha during cold-start period
+def select_action_with_cold_start(self, candidates, context, epsilon_cold=0.15):
+    cold_tracks = [t for t in candidates if t not in self.arms or
+                   self.arms[t].A.trace() < self.context_dim + 5]
+    if cold_tracks and np.random.random() < epsilon_cold:
+        chosen_cold = np.random.choice(cold_tracks, size=min(2, len(cold_tracks)), replace=False)
+        return chosen_cold.tolist()  # force 2 cold-start tracks in top-10
+    return self.select_action(candidates, context)
+```
+
+**Metrics and results:**
+
+| Metric | CF baseline | LinUCB (alpha=0.5) | Thompson Sampling |
+|---|---|---|---|
+| CTR (online A/B test) | 6.8% | 9.1% | 9.4% |
+| Cold-start track coverage | 8% | 22% | 27% |
+| New track CTR (< 7 days) | 3.2% | 7.8% | 8.6% |
+| Top-10 diversity (intra-list) | 0.31 | 0.48 | 0.52 |
+| Inference p50 | 5ms | 18ms | 8ms |
+| Inference p99 | 11ms | 28ms | 14ms |
+| Memory per arm (128d LinUCB) | N/A | 131 KB | 16 bytes |
+| Total memory (30M tracks) | N/A | 3.9 TB (infeasible) | 480 MB |
+| Regret (simulation, 100K steps) | N/A | 8,240 | 6,110 |
+
+**Interview discussion points:**
+
+**Why does Thompson Sampling outperform LinUCB in CTR while also being faster and using less memory?** LinUCB maintains a d x d covariance matrix per arm (128 x 128 x 4 bytes = 65 KB), which becomes 3.9 TB for 30M tracks - infeasible for in-memory serving. In practice, LinUCB must be limited to active tracks or use approximate methods. Thompson Sampling maintains only two scalars per arm (alpha, beta = 16 bytes), scaling to 30M tracks in 480 MB. Furthermore, Thompson Sampling's probabilistic nature provides better exploration by sampling from the posterior uncertainty distribution, while LinUCB uses a deterministic UCB bound that can be overly conservative for contexts where the arm has high uncertainty in only certain directions.
+
+**What is the regret of a bandit algorithm and how is it measured in practice?** Regret is the cumulative difference between the reward of the optimal arm (in hindsight) and the reward received by the algorithm over T steps. For a track with true CTR 0.15, if the algorithm plays a track with CTR 0.08 due to insufficient exploration, it incurs regret of 0.07 for that step. In production, true CTRs are unknown, so offline evaluation uses the inverse propensity score (IPS) estimator: weight each logged reward by 1/P(action|context) where P is the logging policy's probability of choosing that action, creating an unbiased estimator of the counterfactual policy's expected reward.
+
+**How does LinUCB handle the contextual bandit problem differently from a standard multi-armed bandit?** Standard multi-armed bandits treat each arm independently with a fixed reward distribution. LinUCB assumes the expected reward of arm k given context x is theta_k' x (a linear function), allowing the algorithm to generalise across similar contexts. A user with context "late night, high energy tracks, gym playlist" can benefit from all previous arm updates for users with similar context vectors, not just their own history. This is critical for music recommendation where 180M users create 180M distinct contexts but share underlying preferences that linear models can capture.
+
+**What is the exploration-exploitation tradeoff and how does alpha (in LinUCB) and the prior (in TS) control it?** In LinUCB, alpha scales the UCB exploration bonus: sqrt(x' A^{-1} x) is large for arms with few observations (large A^{-1}). High alpha (e.g., 2.0) explores aggressively but may recommend too many unproven tracks; low alpha (e.g., 0.1) exploits but misses cold-start opportunities. In Thompson Sampling, the Beta(1,1) uniform prior assigns equal initial probability to all CTRs in [0,1], making it maximally uncertain about new tracks. After 10 plays with 3 successes, the posterior is Beta(4, 8), concentrating around CTR=0.33. The width of this posterior automatically shrinks as data accumulates, providing calibrated exploration without a tunable alpha hyperparameter.
+
+**How would you adapt this system for a non-stationary reward distribution where track popularity changes weekly?** Use sliding-window Thompson Sampling: weight recent rewards more heavily by using exponential forgetting. Replace the standard update (alpha += reward, beta += 1 - reward) with a discounted update (alpha = gamma * alpha + reward, beta = gamma * beta + (1 - reward)) where gamma = 0.998 (half-life of approximately 350 steps). This allows the posterior to track shifting preferences without resetting. Alternatively, use change-point detection (CUSUM on arm reward rate) to reset posteriors for arms showing significant distribution shift, while retaining posteriors for stable arms - a strategy called Discounted-UCB or Sliding-Window-UCB depending on the implementation.
+
+**What is the difference between online and offline bandit evaluation and why is offline evaluation challenging?** Online evaluation deploys the new policy and directly measures CTR in an A/B test, but exposes users to exploration costs during the experiment. Offline evaluation uses historical logs from a different (logging) policy to estimate the new policy's CTR without user exposure. The challenge is that offline evaluation is only valid at actions where the logging policy had non-zero probability of selecting that action (the support condition). For actions the new policy would choose but the logging policy never chose, the IPS estimator has infinite variance. Doubly robust estimators (combining IPS with a direct model) reduce variance at the cost of bias from model misspecification.

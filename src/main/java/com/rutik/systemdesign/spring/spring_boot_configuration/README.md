@@ -531,3 +531,199 @@ env:
 ```
 
 **Lesson:** Never hardcode profile names in Docker images. Secrets and environment-specific config belong in Kubernetes Secrets and ConfigMaps, not in the JAR or Docker image. The `/actuator/env` endpoint (secured, accessible to ops) is invaluable for diagnosing exactly which property source is winning for each property.
+
+---
+
+**Expanded Case Study: Multi-Environment Configuration Platform for a B2B SaaS**
+
+**Scenario:** A B2B SaaS platform serves 800 enterprise tenants across 5 environments (dev, staging, uat, perf, prod). Each environment needs a different datasource URL, Redis cluster, Kafka broker list, feature-flag set, and tenant-specific secret. The team has 23 Spring Boot microservices. Misconfiguration caused the production DB outage in Q1 (staging URL deployed to prod). The goal: make environment config impossible to get wrong and auditable.
+
+**Scale:** 23 services × 5 envs = 115 config surfaces. Secrets rotate every 90 days via HashiCorp Vault. 800 tenants × up to 50 custom properties each.
+
+```
+Config resolution priority (highest → lowest):
+  1. Kubernetes Secrets (mounted as env vars)   → SPRING_DATASOURCE_PASSWORD
+  2. Spring Cloud Config Server                 → per-env application.yml
+  3. Vault dynamic secrets                      → db.password, jwt.secret
+  4. application-{profile}.yml in classpath     → service-specific defaults
+  5. application.yml in classpath               → safe local-dev defaults
+
+Deployment topology:
+  ┌──────────────────────────────────────────────────────────┐
+  │  Config Server (Spring Cloud Config + Vault backend)     │
+  │  ┌──────────────────┐  ┌────────────────────────────┐   │
+  │  │  Git repo         │  │  HashiCorp Vault           │   │
+  │  │  (env branches)   │  │  (db creds, JWT keys)      │   │
+  │  └──────────────────┘  └────────────────────────────┘   │
+  └───────────────────────┬──────────────────────────────────┘
+                          │  HTTP (TLS mutual auth)
+       ┌──────────────────┼─────────────────────────┐
+       │                  │                          │
+  [Service A]        [Service B]               [Service N]
+  @ConfigurationProperties + @Validated
+  spring.config.import=configserver:
+```
+
+**Key design decisions:**
+
+**Decision 1 — @ConfigurationProperties over @Value.** Binding an entire namespace to a validated POJO catches missing/mistyped properties at startup, not at first request. `@Value` fails silently when a property is absent (returns null) unless `required=true` is explicit.
+
+```java
+// BROKEN: @Value fails silently if KAFKA_BROKERS env var is missing
+@Value("${kafka.brokers}")
+private String brokers;   // NullPointerException first time Kafka is used
+
+// FIX: @ConfigurationProperties with @Validated — fails at startup
+@ConfigurationProperties(prefix = "kafka")
+@Validated
+public record KafkaProperties(
+    @NotBlank String brokers,
+    @Min(1) @Max(10) int partitions,
+    @NotNull Duration ackTimeout
+) {}
+```
+
+**Decision 2 — Profile-specific YAML files, not conditional beans.** One file per profile keeps diffs small and reviewable. Conditional beans spread env logic throughout code.
+
+```yaml
+# application.yml — safe local defaults
+spring:
+  datasource:
+    url: jdbc:h2:mem:devdb
+  kafka:
+    brokers: localhost:9092
+
+---
+# application-prod.yml — prod overrides only
+spring:
+  config:
+    activate:
+      on-profile: prod
+  datasource:
+    url: ${DATASOURCE_URL}          # injected by Kubernetes Secret
+  kafka:
+    brokers: ${KAFKA_BROKERS}       # Kubernetes ConfigMap
+```
+
+**Decision 3 — ConfigurationPropertiesValidator for cross-field rules.** `@Validated` on `@ConfigurationProperties` supports JSR-303 per-field, but cross-field rules (e.g., "if ssl=true then keystore path must be set") need a custom `Validator`.
+
+```java
+@Component
+public class TlsPropertiesValidator implements Validator {
+    @Override
+    public boolean supports(Class<?> clazz) {
+        return TlsProperties.class.isAssignableFrom(clazz);
+    }
+
+    @Override
+    public void validate(Object target, Errors errors) {
+        TlsProperties p = (TlsProperties) target;
+        if (p.enabled() && (p.keystorePath() == null || p.keystorePath().isBlank())) {
+            errors.rejectValue("keystorePath",
+                "tls.keystore.required",
+                "keystorePath is required when TLS is enabled");
+        }
+    }
+}
+```
+
+**Decision 4 — Relaxed binding for Kubernetes env vars.** Spring Boot maps `SPRING_DATASOURCE_URL` (env var) to `spring.datasource.url` (property key) automatically via relaxed binding. Document the canonical property name in code, not the env var name.
+
+```java
+// Canonical property: spring.datasource.url
+// Set via any of:
+//   SPRING_DATASOURCE_URL (Kubernetes Secret env var)
+//   spring.datasource.url (YAML)
+//   spring_datasource_url (underscore)
+// All bound to the same field — never reference the env var name in Java code
+@ConfigurationProperties(prefix = "spring.datasource")
+public record DatasourceProperties(@NotBlank String url, ...) {}
+```
+
+**Decision 5 — @RefreshScope + Spring Cloud Bus for runtime config reload.** Vault secrets rotate every 90 days. `@RefreshScope` beans re-initialize on `/actuator/refresh` (or Cloud Bus broadcast) without restart.
+
+```java
+@RefreshScope
+@Component
+public class JwtVerifier {
+    // Re-read from Vault on each refresh event
+    @Value("${jwt.public-key}")
+    private String publicKey;
+
+    public boolean verify(String token) { /* ... */ }
+}
+```
+
+**Anti-patterns and pitfalls in production:**
+
+**Pitfall 1 — Secrets in git.** The team committed `application-prod.yml` with real DB password to the config repo. Spring Cloud Config + Vault prevents this: secrets are stored in Vault, config repo holds only Vault paths (`vault://secret/data/db`).
+
+```yaml
+# BROKEN: secret in git
+spring:
+  datasource:
+    password: SuperSecret123
+
+# FIX: Vault reference (resolved at runtime, never in git)
+spring:
+  datasource:
+    password: ${vault:secret/data/db:password}
+```
+
+**Pitfall 2 — Property type mismatch crashes at startup, not at compile time.** `@ConfigurationProperties` with `@Validated` catches this early:
+
+```yaml
+# application.yml
+server:
+  timeout: 5000   # developer intended Duration, wrote milliseconds as plain int
+```
+
+```java
+// BROKEN: binds as int, used as Duration, throws ConversionFailedException
+@ConfigurationProperties("server")
+public record ServerProps(Duration timeout) {}  // "5000" → fails
+
+// FIX: use ISO-8601 duration format
+# application.yml
+server:
+  timeout: PT5S  # explicit, unambiguous
+```
+
+**Pitfall 3 — @RefreshScope and Feign/RestTemplate clients.** Wrapping a `RestTemplate` bean in `@RefreshScope` re-creates the entire connection pool on every refresh event (which happens every time Vault rotates a secret — every 90 days). During re-creation, in-flight requests fail.
+
+```java
+// BROKEN: @RefreshScope on connection-pool-holding bean
+@RefreshScope
+@Bean
+public RestTemplate restTemplate() { return new RestTemplateBuilder().build(); }
+
+// FIX: @RefreshScope only on the property holder; pass updated property into
+// existing beans via a setter, or use WebClient with dynamic config
+@RefreshScope
+@ConfigurationProperties(prefix = "external.api")
+public class ExternalApiProperties { ... }  // only this bean re-creates
+
+@Bean
+public WebClient webClient(ExternalApiProperties props) {
+    // WebClient is stateless; re-create safely without losing connections
+    return WebClient.builder().baseUrl(props.url()).build();
+}
+```
+
+**Metrics and results:**
+- Config-related production incidents: 3 in Q1 (before hardening) → 0 in Q2 after `@Validated` startup checks
+- Time to rotate Vault secrets across 23 services: 8 minutes (Spring Cloud Bus broadcast) vs. 4-hour rolling restart previously
+- Misconfigured-profile incidents: eliminated by removing `SPRING_PROFILES_ACTIVE` from Docker images
+- Config audit coverage: 100% of properties are `@Validated` with JSR-303 constraints; violations logged with property source path
+
+**Interview discussion points:**
+
+**What is relaxed binding and why does it matter for Kubernetes deployments?** Spring Boot maps environment variable naming conventions (UPPER_SNAKE_CASE) to property key conventions (dot.case) automatically. `SPRING_DATASOURCE_URL` resolves to `spring.datasource.url`. This means you can inject any property from Kubernetes ConfigMaps/Secrets as env vars without special code, and the Java code only knows the canonical property name — not the deployment mechanism.
+
+**When should a property live in application.yml vs a Kubernetes ConfigMap vs Vault?** Non-secret, service-specific config (thread pool size, timeouts, feature flags) belongs in application.yml or Spring Cloud Config git repo — it's reviewable and version-controlled. Env-specific non-secrets (broker URLs, service endpoints) go in ConfigMaps. Credentials, API keys, TLS certs, and anything that must be audited and rotated go in Vault. Never cross these boundaries.
+
+**How does @ConfigurationProperties differ from @Value for list/map properties?** `@Value` cannot bind to a `List<String>` or `Map<String, Object>` directly without SpEL gymnastics. `@ConfigurationProperties` binds nested YAML structures to Java collections and records natively, including type conversion and validation. Prefer `@ConfigurationProperties` for any property group with more than one field.
+
+**What happens if a required property is missing when using @ConfigurationProperties with @Validated?** The `ApplicationContext` fails to start and throws `BindValidationException` listing every constraint violation. This is fail-fast behavior: misconfiguration is caught before any request is served, unlike `@Value` which can return null at runtime.
+
+**How do you test configuration binding without starting the full application context?** Use `@ConfigurationPropertiesTest` (from `spring-boot-test`) with a small `@TestConfiguration` that loads only the properties class under test. This starts faster than `@SpringBootTest` and validates binding and constraints without any beans except the properties record.

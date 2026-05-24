@@ -748,35 +748,235 @@ NimbusJwtDecoder fetches the JWKS from the configured URI and caches the keys. W
 
 ## 14. Case Study
 
-### Scenario: Migrating a Session-Based Monolith to Stateless JWT Auth in a Microservices Split
+### Scenario: Multi-Tenant SaaS API Secured with JWT + OAuth2 Resource Server
 
-**Context.** An e-commerce platform handles 50,000 concurrent users. The monolith uses Spring Session backed by Redis for session storage. During the microservices split, three new services are extracted: order-service, inventory-service, and notification-service. Each must authenticate users independently without a shared session store.
+**Context.** A B2B SaaS platform serves 4,000 tenant organizations through a shared API fleet handling **50,000 requests/sec** at peak. Every request carries a bearer JWT issued by a central Authorization Server. Tokens are signed with **RS256** (asymmetric): the AS holds the private key, every resource-server pod validates using the public key fetched from the JWKS endpoint and cached locally for **1 hour**. Refresh tokens use rotation with a Redis-backed revocation list. Access token TTL: 10 minutes. Refresh token TTL: 12 hours, single-use.
 
-**Decision.** Adopt RS256 JWTs issued by a dedicated Spring Authorization Server instance. Access token expiry: 10 minutes. Refresh token expiry: 8 hours (per business day). Refresh tokens stored in Redis with single-use rotation.
+### Architecture
 
-**Implementation steps.**
+```
+            +------------------+  rotate keys quarterly
+            | Authorization    |  signs JWT with RSA private key (RS256)
+            | Server (Keycloak)|  publishes /.well-known/jwks.json
+            +--------+---------+
+                     | JWKS (public keys, kid-tagged)
+        +------------+------------+----------------+
+        |            |            |                |
+   +----v----+  +----v----+  +----v----+      +----v-----+
+   | API pod |  | API pod |  | API pod | ...  | 60 pods  |
+   | JWKS    |  | JWKS    |  | JWKS    |      | (50k rps)|
+   | cache1h |  | cache1h |  | cache1h |      |          |
+   +----+----+  +----+----+  +----+----+      +----------+
+        |  validate sig + exp + iss + tenant claim (<1ms, no network)
+        v
+   +---------+        +----------------------------+
+   |  Redis  |<-------| refresh-token rotation +    |
+   | revoke  |        | jti revocation list (SETEX) |
+   +---------+        +----------------------------+
+```
 
-Step 1: Stand up Spring Authorization Server with RSA keypair. Publish JWKS at `https://auth.example.com/.well-known/jwks.json`.
+### Resource Server Configuration
 
-Step 2: Configure each microservice as an OAuth2 Resource Server:
+```java
+@Configuration
+@EnableWebSecurity
+public class ResourceServerConfig {
+
+    @Bean
+    SecurityFilterChain api(HttpSecurity http) throws Exception {
+        http
+            .csrf(csrf -> csrf.disable())               // stateless API, no cookies for API path
+            .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .authorizeHttpRequests(a -> a
+                .requestMatchers("/actuator/health").permitAll()
+                .anyRequest().authenticated())
+            .oauth2ResourceServer(oauth -> oauth
+                .jwt(jwt -> jwt.jwtAuthenticationConverter(converter())));
+        return http.build();
+    }
+
+    private JwtAuthenticationConverter converter() {
+        JwtGrantedAuthoritiesConverter roles = new JwtGrantedAuthoritiesConverter();
+        roles.setAuthoritiesClaimName("roles");          // custom claim, not "scope"
+        roles.setAuthorityPrefix("ROLE_");               // roles=["admin"] -> ROLE_admin
+        JwtAuthenticationConverter c = new JwtAuthenticationConverter();
+        c.setJwtGrantedAuthoritiesConverter(roles);
+        return c;
+    }
+}
+```
+
 ```yaml
 spring:
   security:
     oauth2:
       resourceserver:
         jwt:
-          issuer-uri: https://auth.example.com
+          issuer-uri: https://auth.example.com/realms/saas   # drives JWKS + iss validation
+          # JWKS fetched once, cached 1h; rotated keys discovered on kid miss
 ```
-Spring auto-discovers the JWKS URI from the OIDC discovery document at `/.well-known/openid-configuration`.
 
-Step 3: Implement a `JwtAuthenticationConverter` that maps the custom `roles` claim to Spring `ROLE_*` authorities.
+Tenant isolation is enforced with a validator that asserts the `tenant_id` claim matches the routed tenant:
 
-Step 4: Implement `RefreshTokenService` with Redis-backed token family tracking. Store: `HSET token:<family_id> <jti> <revoked|active>`. On reuse detection, `DEL token:<family_id>` to revoke the entire family instantly.
+```java
+@Bean
+JwtDecoder tenantAwareDecoder(OAuth2ResourceServerProperties props) {
+    NimbusJwtDecoder decoder = JwtDecoders.fromIssuerLocation(props.getJwt().getIssuerUri());
+    OAuth2TokenValidator<Jwt> withDefaults =
+        JwtValidators.createDefaultWithIssuer(props.getJwt().getIssuerUri()); // checks exp + iss
+    OAuth2TokenValidator<Jwt> tenant = jwt ->
+        jwt.getClaimAsString("tenant_id") != null
+            ? OAuth2TokenValidatorResult.success()
+            : OAuth2TokenValidatorResult.failure(
+                new OAuth2Error("missing_tenant", "tenant_id claim required", null));
+    decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(withDefaults, tenant));
+    return decoder;
+}
+```
 
-Step 5: Add a global rate limit on the `/token/refresh` endpoint (max 10 requests per minute per IP) to prevent brute-force refresh token theft.
+### Metrics
 
-Step 6: Audit log every token issuance and refresh: user ID, jti, issued-at, client IP. Index by jti in Elasticsearch for incident response.
+- Token validation latency: **0.4ms p50, 0.9ms p99** (pure crypto, JWKS cached, zero network on hot path).
+- JWKS endpoint load: **~1 request/pod/hour** = 60 req/hr total against the AS, instead of 50k/sec.
+- Refresh-token Redis revocation lookup: **0.3ms** (SISMEMBER on revoked-jti set).
+- Quarterly key rotation: zero downtime — old `kid` retained 24h, decoder refetches JWKS on unknown `kid`.
 
-**Results.** Redis session store load drops by 80% (only refresh tokens, not session data). Each microservice validates tokens in under 1ms (local JWKS cache). Horizontal scaling of any service requires no coordination — pods are fully stateless. Key rotation is performed quarterly: new RSA keypair added to JWKS endpoint; old key retained for 24 hours; access tokens issued during that window continue to validate gracefully.
+### Pitfalls
 
-**Gotcha encountered.** During the first key rotation, the JWKS cache TTL on two services was set to 60 minutes (not the recommended 5 minutes). These services rejected tokens signed with the new key for up to an hour after rotation. Fix: set `spring.security.oauth2.resourceserver.jwt.jwk-set-uri` cache to 5 minutes and implement forced cache invalidation on 401 responses (Nimbus does this automatically in newer versions when a kid is not found).
+**Pitfall 1 — Symmetric HS256 key leaked in the config repo.**
+```yaml
+# BROKEN: HS256 shared secret committed to Git; anyone with repo read access can forge tokens
+spring.security.oauth2.resourceserver.jwt.secret-key: c3VwZXItc2VjcmV0LWtleQ==
+```
+```yaml
+# FIXED: RS256 asymmetric — resource servers only ever hold the PUBLIC key; private key never leaves the AS
+spring.security.oauth2.resourceserver.jwt.issuer-uri: https://auth.example.com/realms/saas
+```
+
+**Pitfall 2 — `exp` claim not validated, tokens valid forever.**
+```java
+// BROKEN: replacing the default validator dropped the timestamp check
+decoder.setJwtValidator(new JwtIssuerValidator(issuer)); // no exp validation -> stolen tokens never expire
+```
+```java
+// FIXED: compose with the framework default which includes JwtTimestampValidator (exp + nbf)
+decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(
+    JwtValidators.createDefaultWithIssuer(issuer), tenantValidator));
+```
+
+**Pitfall 3 — Storing the JWT in `localStorage` (XSS exfiltration risk).**
+```javascript
+// BROKEN: any injected script can read localStorage and steal the bearer token
+localStorage.setItem("access_token", token);
+```
+```java
+// FIXED: server sets the token in an HttpOnly, Secure, SameSite cookie — unreadable by JS
+ResponseCookie cookie = ResponseCookie.from("access_token", jwt)
+    .httpOnly(true).secure(true).sameSite("Strict").path("/").maxAge(Duration.ofMinutes(10)).build();
+response.addHeader(HttpHeaders.SET_COOKIE, cookie.toString());
+```
+
+### Interview Q&A
+
+**Why RS256 over HS256 for a multi-service fleet?** RS256 is asymmetric: only the Authorization Server holds the private signing key, while every resource server validates with the public key. A leaked public key cannot forge tokens. HS256 uses one shared secret for both signing and validation, so every service that can validate can also forge, and the secret must be distributed to every pod.
+
+**How does a resource server validate a token without calling the AS on every request?** It fetches the JWKS (public keys) once and caches them locally, here for one hour. Validation is pure local crypto plus claim checks (signature, `exp`, `iss`, audience, custom claims), so the hot path makes zero network calls and runs in under 1ms.
+
+**What happens during key rotation if a pod has a stale JWKS cache?** When a token arrives with a `kid` not present in the cache, Nimbus triggers a forced JWKS refetch. Retaining the old key for an overlap window (24h here) means tokens signed before rotation keep validating until they naturally expire.
+
+**Why is refresh-token rotation with a revocation list necessary?** Refresh tokens are long-lived and high-value. Single-use rotation issues a new refresh token on each use and revokes the old one; if a stolen token is replayed, the reuse is detected and the whole token family is revoked via the Redis revocation set, limiting blast radius.
+
+**How do you enforce tenant isolation with shared JWT infrastructure?** Embed a `tenant_id` claim in the token and add a custom `OAuth2TokenValidator` that rejects tokens whose tenant claim does not match the routed tenant. This prevents a valid token for tenant A from being replayed against tenant B's data.
+
+**Why disable CSRF for this API but not for a cookie-based browser app?** CSRF protection guards against the browser auto-attaching credentials (cookies) to forged cross-site requests. A pure bearer-token API where the client explicitly sets the Authorization header is not vulnerable. Once you move the token into an HttpOnly cookie, CSRF protection must be re-enabled for the cookie-authenticated paths.
+
+---
+
+**Additional war stories and interview Q&As:**
+
+**Pitfall: JWT validated by signature but audience claim ignored.**
+
+```java
+// BROKEN: resource server validates signature + expiry only
+// Any service's token works on any other service (confused deputy)
+@Bean
+public JwtDecoder jwtDecoder() {
+    return NimbusJwtDecoder.withPublicKey(rsaPublicKey).build();
+    // No audience validation — token for "orders-service" works on "payment-service"!
+}
+
+// FIX: validate audience claim — each service accepts only its own audience
+@Bean
+public JwtDecoder jwtDecoder() {
+    NimbusJwtDecoder decoder = NimbusJwtDecoder.withPublicKey(rsaPublicKey).build();
+    OAuth2TokenValidator<Jwt> validator = new DelegatingOAuth2TokenValidator<>(
+        JwtValidators.createDefault(),           // iss, exp, nbf
+        new JwtClaimValidator<>("aud",
+            aud -> aud != null && aud.contains("payment-service"))
+    );
+    decoder.setJwtValidator(validator);
+    return decoder;
+}
+```
+
+**Pitfall: Refresh token rotation race condition with multiple tabs.**
+
+```java
+// BROKEN: user opens 3 tabs, all detect token expiry simultaneously
+// Tab 1 refreshes → server rotates refresh token → old token invalidated
+// Tabs 2 and 3 present the now-invalid old refresh token → forced logout
+// User loses all sessions unexpectedly
+
+// FIX: refresh token grace window (accept old token for 30s after rotation)
+// Server stores: {old_token_hash, new_token_hash, rotated_at}
+// During grace window, old token is accepted and returns the new token
+// After grace window, old token is rejected (compromised signal)
+
+public TokenPair refresh(String refreshToken) {
+    TokenRecord record = refreshTokenRepo.findByToken(refreshToken)
+        .orElseThrow(() -> new InvalidTokenException("Token not found or revoked"));
+
+    if (record.isRotated() &&
+        record.getRotatedAt().plusSeconds(30).isAfter(Instant.now())) {
+        // Grace window: return the already-rotated new token pair
+        return record.getNewTokenPair();
+    } else if (record.isRotated()) {
+        // Outside grace window with old token = potential replay attack
+        revokeAllUserTokens(record.getUserId());
+        throw new SecurityException("Potential token replay detected — all sessions revoked");
+    }
+
+    return rotateToken(record);
+}
+```
+
+**Token revocation via Redis:**
+
+```java
+// Stateless JWT problem: token is valid until expiry even after logout
+// FIX: maintain a Redis blocklist with TTL matching token expiry
+
+@Component
+public class JwtBlocklist {
+    private final RedisTemplate<String, String> redis;
+
+    public void block(String jti, Duration ttl) {
+        redis.opsForValue().set("jwt:blocked:" + jti, "1", ttl);
+    }
+
+    public boolean isBlocked(String jti) {
+        return Boolean.TRUE.equals(redis.hasKey("jwt:blocked:" + jti));
+    }
+}
+
+// In JwtDecoder customizer or SecurityFilterChain:
+// After decoding JWT, check: if (blocklist.isBlocked(jwt.getId())) throw 401
+```
+
+**Additional interview Q&As:**
+
+**How do you implement fine-grained authorization beyond role-based access?** Use Spring Security method security with `@PreAuthorize` and Spring Expression Language to check ownership or resource-level permissions: `@PreAuthorize("@permissionEvaluator.canAccess(authentication, #orderId, 'READ_ORDER')")`. Implement a custom `PermissionEvaluator` that resolves the permission check against a policy store (database, OPA, Casbin). This keeps authorization logic out of business code.
+
+**What is PKCE and why is it required for public clients?** PKCE (Proof Key for Code Exchange) prevents authorization code interception attacks. A public client (mobile app, SPA) generates a random `code_verifier` and sends its SHA-256 hash (`code_challenge`) in the authorization request. The token endpoint verifies the original `code_verifier` — an attacker who intercepts the authorization code cannot exchange it without the `code_verifier` that never left the legitimate client. Spring Authorization Server supports PKCE natively; Spring Boot 3.x resource servers can enforce it.
+
+**How do you propagate the JWT to downstream microservices?** Use a `WebClient` `ExchangeFilterFunction` (or Feign `RequestInterceptor`) that reads the current `SecurityContext`, extracts the Bearer token, and adds it to the outbound `Authorization` header. Never store the token in a thread-local that spans reactive pipelines — in WebFlux, use `ReactiveSecurityContextHolder` and read the token in a `.flatMap` operator.

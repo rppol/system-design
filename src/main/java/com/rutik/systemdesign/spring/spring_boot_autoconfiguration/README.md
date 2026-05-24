@@ -430,80 +430,175 @@ The processor runs at compile time and generates `META-INF/spring-autoconfigure-
 
 ## 14. Case Study
 
-### Problem: Internal Platform Starter Not Being Applied
+### Scenario: Company-Wide Distributed Tracing Starter
 
-**Scenario:** Platform team creates `platform-observability-starter`. Teams add it as a Maven dependency. No metrics appear in Prometheus.
+A platform team ships `company-tracing-spring-boot-starter` (Spring Boot 3.2 / Java 17) so all 80+ internal services get distributed tracing by adding one Maven dependency. Requirements:
 
-**Investigation:**
+- Auto-configure a `Tracer` bean only when the tracing library is on the classpath
+- Back off entirely if a service defines its own `Tracer` (advanced teams customize)
+- Bind configuration via `@EnableConfigurationProperties(TracingProperties.class)`
+- Register via the Boot 3 mechanism (`AutoConfiguration.imports`), not the removed `spring.factories`
+- Adoption goal: zero code in consuming services; opt-out via a property
 
-```bash
-java -jar service.jar --debug 2>&1 | grep -A 5 "ObservabilityAutoConfiguration"
+Two recurring failures drove the design hardening: double bean registration when the autoconfig class was accidentally component-scanned, and `@ConditionalOnMissingBean` not backing off because of bean-definition ordering.
 
-# Output: No mention of ObservabilityAutoConfiguration in condition report
-# Means: class was never even considered for loading
-```
-
-**Root cause analysis:**
-
-```bash
-# Check the JAR
-jar tf platform-observability-starter-1.0.jar | grep META-INF
-
-# Output:
-# META-INF/MANIFEST.MF
-# META-INF/maven/com.company/platform-observability-starter/pom.xml
-# META-INF/maven/com.company/platform-observability-starter/pom.properties
-
-# Missing:
-# META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
-```
-
-The registration file was never created. The auto-configuration class exists but is never loaded by `AutoConfigurationImportSelector`.
-
-**Fix:**
+### Architecture Overview
 
 ```
-# Create file:
-# src/main/resources/META-INF/spring/
-#   org.springframework.boot.autoconfigure.AutoConfiguration.imports
-
-# Content:
-com.company.platform.observability.ObservabilityAutoConfiguration
+   consuming-service (depends on starter jar)
+        |
+        v
+  Spring Boot startup
+        |
+        v
+  AutoConfigurationImportSelector reads:
+   META-INF/spring/
+     org.springframework.boot.autoconfigure.AutoConfiguration.imports
+        |
+        v
+  +------------------------------------------------------+
+  | TracingAutoConfiguration                              |
+  |   @ConditionalOnClass(Tracer.class)  --- backs off    |
+  |       if tracing lib absent                           |
+  |   @ConditionalOnMissingBean(Tracer.class) --- backs   |
+  |       off if user defines their own Tracer            |
+  |   @EnableConfigurationProperties(TracingProperties)   |
+  +-----------------------+------------------------------+
+                          | (only if both conditions pass)
+                          v
+                   Tracer bean (default)
 ```
 
-**Also found:** The auto-configuration class used `@Configuration` instead of `@AutoConfiguration` (Spring Boot 3.x app), and was missing `@ConditionalOnMissingBean`:
+### Implementation
+
+The autoconfiguration class lives in a package that is NOT component-scanned by consumers, and is registered via the imports file.
 
 ```java
-// Before (broken)
-@Configuration  // should be @AutoConfiguration in Boot 3.x
-@EnableConfigurationProperties(ObservabilityProperties.class)
-public class ObservabilityAutoConfiguration {
-    @Bean  // no @Conditional — conflicts if user defines their own reporter
-    public MetricsReporter reporter() { ... }
+@AutoConfiguration
+@ConditionalOnClass(Tracer.class)                      // backs off if lib missing
+@EnableConfigurationProperties(TracingProperties.class)
+public class TracingAutoConfiguration {
+
+    @Bean
+    @ConditionalOnMissingBean                          // user's own Tracer wins
+    @ConditionalOnProperty(prefix = "company.tracing",
+                           name = "enabled", havingValue = "true", matchIfMissing = true)
+    public Tracer tracer(TracingProperties props) {
+        return Tracer.builder()
+                     .serviceName(props.getServiceName())
+                     .samplingRate(props.getSamplingRate())
+                     .endpoint(props.getCollectorEndpoint())
+                     .build();
+    }
 }
 
-// After (correct)
-@AutoConfiguration
-@ConditionalOnClass(MeterRegistry.class)
-@ConditionalOnMissingBean(MetricsReporter.class)
-@EnableConfigurationProperties(ObservabilityProperties.class)
-public class ObservabilityAutoConfiguration {
-    @Bean
-    @ConditionalOnProperty(prefix="platform.observability", name="enabled",
-                           havingValue="true", matchIfMissing=true)
-    public MetricsReporter reporter(ObservabilityProperties props,
-                                     MeterRegistry registry) { ... }
+@ConfigurationProperties(prefix = "company.tracing")
+public class TracingProperties {
+    private String serviceName = "unknown";
+    private double samplingRate = 0.1;
+    private String collectorEndpoint = "http://otel-collector:4317";
+    // getters/setters
 }
 ```
 
-**Verification:**
+Boot 3 registration replaces the old `spring.factories` key with a plain text imports file.
+
+```
+# Boot 2.x (REMOVED in 3.x):
+#   src/main/resources/META-INF/spring.factories
+#   org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
+#     com.company.tracing.TracingAutoConfiguration
+
+# Boot 3.x (current):
+#   src/main/resources/META-INF/spring/
+#     org.springframework.boot.autoconfigure.AutoConfiguration.imports
+#   one fully-qualified class name per line:
+com.company.tracing.autoconfigure.TracingAutoConfiguration
+```
+
+Debugging which conditions matched uses the `--debug` flag's condition evaluation report.
 
 ```bash
-java -jar service.jar --debug 2>&1 | grep "ObservabilityAutoConfiguration"
-# Positive matches:
-#    ObservabilityAutoConfiguration matched:
-#      - @ConditionalOnClass found required class 'io.micrometer.core.instrument.MeterRegistry'
-#      - @ConditionalOnMissingBean (MetricsReporter) did not find any beans
+java -jar service.jar --debug 2>&1 | grep -A4 "TracingAutoConfiguration"
+# TracingAutoConfiguration matched:
+#   - @ConditionalOnClass found required class 'com.company.tracing.Tracer'
+#   - @ConditionalOnMissingBean (Tracer) did not find any beans
 ```
 
-**Lesson:** Auto-configuration registration file is the most commonly forgotten step when writing starters. The `--debug` flag tells you whether the class was discovered, evaluated, matched, or skipped.
+### Metrics
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Services with tracing | 12 (manual) | 80+ (automatic) |
+| Code per service to enable | ~40 lines | 0 (just the dependency) |
+| Double-registration startup failures | recurring | 0 |
+| Time to onboard a new service | ~half day | minutes |
+
+### Common Pitfalls
+
+**Pitfall 1 — autoconfig class in a component-scanned package causes double registration.**
+
+```java
+// BROKEN: placed under com.company.app... so consumers' @ComponentScan picks it up,
+// AND it's in AutoConfiguration.imports -> bean defined twice / ordering chaos
+package com.company.app.config;
+@AutoConfiguration
+public class TracingAutoConfiguration { ... }
+```
+
+```java
+// FIX: keep autoconfig in a dedicated package outside any consumer scan base package
+package com.company.tracing.autoconfigure;   // only reached via AutoConfiguration.imports
+@AutoConfiguration
+public class TracingAutoConfiguration { ... }
+```
+
+**Pitfall 2 — `@ConditionalOnMissingBean` does not back off due to definition ordering.**
+
+```java
+// BROKEN: user's @Bean is in a @Configuration processed AFTER autoconfig, so at the time
+// the condition is evaluated, the user bean isn't registered yet -> both get created
+@AutoConfiguration   // no ordering hint
+public class TracingAutoConfiguration {
+    @Bean @ConditionalOnMissingBean public Tracer tracer() { ... }
+}
+```
+
+```java
+// FIX: ensure user config is processed first via @AutoConfiguration(after=...) / ordering;
+// user @Bean definitions (regular @Configuration) are registered before autoconfiguration,
+// and stating intent with ordering annotations makes the back-off deterministic
+@AutoConfiguration(after = UserTracingConfig.class)
+public class TracingAutoConfiguration {
+    @Bean @ConditionalOnMissingBean public Tracer tracer() { ... }
+}
+```
+
+**Pitfall 3 — using `@Configuration` instead of `@AutoConfiguration` (Boot 3).**
+
+```java
+// BROKEN: @Configuration listed in imports is treated as a user config, losing
+// autoconfiguration ordering and @AutoConfigureBefore/After semantics
+@Configuration
+public class TracingAutoConfiguration { ... }
+```
+
+```java
+// FIX: Boot 3 autoconfiguration classes must use @AutoConfiguration
+@AutoConfiguration
+public class TracingAutoConfiguration { ... }
+```
+
+### Interview Discussion Points
+
+**How did autoconfiguration registration change from Boot 2 to Boot 3?** Boot 2 listed autoconfigurations under the `EnableAutoConfiguration` key in `META-INF/spring.factories`. Boot 3 removed that key and uses a dedicated file, `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`, with one fully-qualified class name per line. Classes must also be annotated `@AutoConfiguration` rather than `@Configuration`.
+
+**What is the role of `@ConditionalOnClass` and `@ConditionalOnMissingBean` in a starter?** `@ConditionalOnClass` makes the autoconfiguration apply only when a required type is on the classpath, so the starter degrades gracefully if the underlying library is absent. `@ConditionalOnMissingBean` makes the default bean back off when the consumer has defined their own, implementing the "sensible defaults, fully overridable" contract that defines good Boot starters.
+
+**Why must autoconfiguration classes live outside the consumer's component-scan path?** If the class sits under the application's base package, `@ComponentScan` registers it as a normal `@Configuration` in addition to the `AutoConfiguration.imports` mechanism, producing duplicate bean definitions and breaking the conditional ordering. Keeping it in a separate package ensures it is only loaded through the autoconfiguration import selector, after user configuration.
+
+**Why might `@ConditionalOnMissingBean` fail to back off, and how do you fix it?** The condition is evaluated when the autoconfiguration is processed; if the user's bean definition is registered later than expected, the condition sees no existing bean and creates the default too. Because autoconfiguration runs after user `@Configuration`, this is usually fine, but explicit ordering with `@AutoConfiguration(after=...)`/`@AutoConfigureBefore`/`@AutoConfigureAfter` makes the back-off deterministic across configurations.
+
+**How do you debug whether an autoconfiguration was applied?** Run with `--debug` (or set `debug=true`) to print the condition evaluation report, which lists positive matches (with the satisfied conditions) and negative matches (with the reason a class was skipped). It immediately tells you whether the class was even discovered (registration file present), and which `@ConditionalOn*` gate failed.
+
+**How do `@EnableConfigurationProperties` and `@ConfigurationProperties` cooperate in a starter?** `@ConfigurationProperties(prefix="company.tracing")` defines a typed binding target, and `@EnableConfigurationProperties(TracingProperties.class)` registers and binds it within the autoconfiguration without requiring the consumer to scan or annotate anything. Consumers then tune behavior purely through `application.yml` keys under that prefix, with relaxed binding and validation support.

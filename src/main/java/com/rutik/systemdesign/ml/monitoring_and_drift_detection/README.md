@@ -507,42 +507,162 @@ Without probability scores, standard prediction distribution monitoring is limit
 
 ## 14. Case Study
 
-### E-Commerce Price Prediction Model Drift Detection
-
-**Problem**: An e-commerce platform ran a price optimization model (gradient boosted trees, XGBoost) trained on 18 months of historical listing data. The model predicted optimal listing prices for sellers. After a major competitor entered the market, prices across the platform began shifting, but the model continued suggesting pre-competitive prices, causing sellers to lose sales to cheaper competitor listings.
-
-**Monitoring gaps identified**:
-1. No input feature drift monitoring — competitor price feature was not being tracked
-2. No prediction score monitoring — price predictions were point estimates with no distribution tracking
-3. Performance monitoring relied solely on quarterly business reviews, with 90-day label delay (actual sales conversion rate)
-
-**Monitoring system designed**:
+**Scenario: Monitoring a production credit-scoring model.** A bank scores loan applications with a model whose inputs and outputs are regulated. The monitoring stack computes weekly PSI on 20 input features, a KS test for target drift (the default rate shifting), tracks SHAP feature-importance stability (a regulatory requirement), and computes online AUC on labeled outcomes that arrive with a 30-day lag. Dashboards run on Grafana fed by Evidently AI.
 
 ```
-Daily batch job runs on previous 24h production data:
-
-Feature drift (PSI, n=10 bins):
-  - listing_price_mean      PSI = 0.31  ALERT (>0.2)
-  - competitor_price_delta  PSI = 0.44  ALERT (very significant)
-  - category_avg_price      PSI = 0.19  MONITOR (0.1-0.2)
-  - seller_rating           PSI = 0.02  OK
-
-Prediction score distribution:
-  - Predicted price PSI = 0.38           ALERT
-
-Proxy metric (conversion rate proxy):
-  - Add-to-cart rate on model-priced items: -22% week-over-week  ALERT
+production scoring  -> log (features, score, decision)
+        |
+   weekly job:
+     +-- PSI per feature (20)        -> alert if PSI > 0.2 on >=3 features
+     +-- KS test on default rate     -> target drift alert
+     +-- SHAP importance drift        -> regulatory audit alert
+     |
+   30 days later (labels arrive):
+     +-- online AUC vs offline AUC    -> performance-drift alert
+        |
+   Grafana + Evidently dashboards -> on-call + model-risk committee
 ```
 
-**Response procedure executed**:
-1. PSI alert fired on Day 3 after competitor launch (competitor_price_delta PSI = 0.44)
-2. Root cause identified: model had no competitor price feature; the drift was in correlated features (category_avg_price) that the model was using as proxies for competitive pricing
-3. Emergency retraining triggered: added explicit competitor price features; retrained on last 60 days; validation AUC stable
-4. New model deployed via canary (10% traffic) after 48 hours; conversion rate proxy recovered to within 5% of pre-drift baseline
-5. Total recovery time: 5 days from first alert to full deployment
+PSI > 0.2 on a feature flags a meaningful population shift; the system alerts only when several features drift together to avoid noise. Online AUC, computed once labels mature at 30 days, is the ground-truth performance signal; everything else is an early warning that fires before AUC can.
 
-**Lessons learned**:
-- Proxy metric (add-to-cart rate) was the fastest signal — fired 6 hours before PSI alert accumulated enough samples
-- Monitoring only business metrics (sales volume) would have detected the issue 2–3 weeks later
-- The competitor price feature was in the roadmap but not yet implemented; drift monitoring surfaced the priority gap
-- Set up automatic retraining triggers for feature PSI > 0.3 sustained for 48+ hours; manual review required before deployment
+**Population Stability Index per feature:**
+
+```python
+import numpy as np
+
+def psi(expected: np.ndarray, actual: np.ndarray, bins: int = 10) -> float:
+    """PSI < 0.1 stable; 0.1-0.2 moderate shift; > 0.2 significant shift."""
+    edges = np.quantile(expected, np.linspace(0, 1, bins + 1))
+    edges[0], edges[-1] = -np.inf, np.inf
+    e = np.histogram(expected, edges)[0] / len(expected)
+    a = np.histogram(actual, edges)[0] / len(actual)
+    e = np.clip(e, 1e-6, None)            # avoid divide-by-zero / log(0)
+    a = np.clip(a, 1e-6, None)
+    return float(np.sum((a - e) * np.log(a / e)))
+```
+
+**Multi-feature alerting (correlated drift, not single-feature noise):**
+
+```python
+import numpy as np
+
+def drift_alert(reference: dict[str, np.ndarray],
+                live: dict[str, np.ndarray],
+                psi_thr: float = 0.2, min_features: int = 3) -> dict:
+    drifted = {f: psi(reference[f], live[f]) for f in reference}
+    flagged = [f for f, v in drifted.items() if v > psi_thr]
+    return {
+        "alert": len(flagged) >= min_features,   # require several to drift
+        "flagged": flagged,
+        "psi": drifted,
+    }
+```
+
+**Online AUC on lagged labels:**
+
+```python
+import numpy as np
+from sklearn.metrics import roc_auc_score
+
+def lagged_auc(scores: np.ndarray, labels: np.ndarray,
+               label_ready: np.ndarray) -> float | None:
+    """Only score on applications whose 30-day outcome is known."""
+    mask = label_ready.astype(bool)
+    if mask.sum() < 100:           # not enough matured labels yet
+        return None
+    return float(roc_auc_score(labels[mask], scores[mask]))
+```
+
+**Pitfall 1 — Monitoring only accuracy.** Accuracy can stay flat while the input population shifts dramatically, masking silent degradation that surfaces only when labels arrive a month later.
+
+```python
+# BROKEN: watch accuracy only -> stays "fine" while PSI = 0.4 (silent drift)
+if accuracy < 0.9:
+    alert()
+
+# FIX: monitor input drift (PSI) and performance (AUC on lagged labels)
+# together; PSI catches the problem weeks before AUC can.
+if drift_alert(reference, live)["alert"]:
+    alert()
+```
+
+**Pitfall 2 — Alerting on every single-feature PSI breach.** One noisy feature crossing 0.2 every week trains the on-call to ignore alerts (alert fatigue).
+
+```python
+# BROKEN: alert whenever any one feature's PSI > 0.2 -> constant false alarms
+if any(psi(ref[f], live[f]) > 0.2 for f in features):
+    alert()
+
+# FIX: require multiple features to drift together (correlated shift) before
+# paging; route single-feature blips to a dashboard, not the pager.
+if drift_alert(reference, live, min_features=3)["alert"]:
+    alert()
+```
+
+**Pitfall 3 — Not monitoring the prediction distribution.** A model can start emitting extreme scores (e.g. clustering near 0 or 1) without any input-feature PSI moving, if a feature pipeline breaks and feeds a constant.
+
+```python
+# BROKEN: only input PSI watched -> a broken feature pipe yields constant
+# inputs, prediction distribution skews, but per-feature PSI looks normal.
+
+# FIX: also track the score distribution (mean, KS vs last week, % extreme).
+score_psi = psi(reference_scores, live_scores)
+if score_psi > 0.2 or (live_scores > 0.99).mean() > 0.1:
+    alert()
+```
+
+**Interview Q&A:**
+
+**What is the difference between data drift and concept drift?** Data (covariate) drift is a change in the input distribution P(X), the applicant population shifts, while the relationship P(y|X) stays the same. Concept drift is a change in P(y|X), the same inputs now imply a different outcome (e.g. an economic shock changes default behavior). PSI detects data drift; only labeled outcomes (online AUC, KS on default rate) reveal concept drift.
+
+**How do you interpret PSI values?** PSI below 0.1 means the population is stable, 0.1 to 0.2 is a moderate shift worth watching, and above 0.2 is a significant shift that typically warrants investigation or retraining. It is computed by binning a reference distribution and comparing live proportions per bin, summing (actual - expected) * log(actual/expected).
+
+**Why monitor with a 30-day label lag, and what do you do in the meantime?** Loan defaults are only observed after the outcome period, so true performance (AUC) cannot be measured immediately. In the meantime you rely on leading indicators, input PSI, prediction-distribution drift, and proxy signals, to catch problems early; the lagged AUC later confirms whether action was warranted.
+
+**Why require multiple features to drift before alerting?** Individual features fluctuate from seasonality and noise, so single-feature thresholds produce frequent false alarms and alert fatigue. Correlated drift across several features is far more likely to reflect a real population shift or pipeline break, so paging on a multi-feature condition keeps alerts trustworthy while single-feature blips go to a dashboard.
+
+**Why is monitoring SHAP feature-importance drift important here?** It is partly regulatory: the bank must show which features drive decisions and that they are stable and non-discriminatory. A sudden shift in feature importance (a feature suddenly dominating) can indicate a data-quality issue or an unintended change in model behavior that pure accuracy metrics would not surface, and it supports the model-risk audit trail.
+
+**What triggers a retraining decision in this system?** A combination: sustained input PSI drift across multiple features, a measured AUC drop on matured labels beyond a threshold, KS-detected target drift in the default rate, or SHAP importance shifts flagged in audit. Retraining is gated by champion/challenger evaluation on recent data so a refreshed model must beat the incumbent before replacing it.
+
+**Pitfall — PSI computed on wrong binning causes false drift alarms.**
+
+```python
+# BROKEN: bins computed on training data but applied to production data
+# If production feature range extends beyond training max, all new values
+# fall into the last bin → PSI always high for in-distribution shifts
+import numpy as np
+
+def psi_broken(train: np.ndarray, prod: np.ndarray, n_bins: int = 10) -> float:
+    bins = np.percentile(train, np.linspace(0, 100, n_bins + 1))  # training percentiles
+    train_hist, _ = np.histogram(train, bins=bins, density=True)
+    prod_hist, _  = np.histogram(prod, bins=bins, density=True)   # out-of-range values overflow!
+    return float(np.sum((prod_hist - train_hist) * np.log(prod_hist / (train_hist + 1e-8))))
+
+# FIX: extend bins with -inf/+inf to capture out-of-range values explicitly
+def psi_fixed(train: np.ndarray, prod: np.ndarray, n_bins: int = 10) -> float:
+    quantiles = np.linspace(0, 100, n_bins + 1)
+    bins = np.percentile(train, quantiles)
+    bins[0], bins[-1] = -np.inf, np.inf    # capture tail values in first/last bucket
+    train_frac = np.histogram(train, bins=bins)[0] / len(train) + 1e-8
+    prod_frac  = np.histogram(prod,  bins=bins)[0] / len(prod)  + 1e-8
+    return float(np.sum((prod_frac - train_frac) * np.log(prod_frac / train_frac)))
+```
+
+**How do you distinguish data drift from concept drift in production?** Data drift (input shift): input feature distribution changes but the true label relationship is unchanged — e.g., a new customer segment with different spending patterns. Detect via PSI on inputs. Concept drift (relationship shift): the same inputs now predict different outputs — e.g., economic shock changes fraud patterns. Detect via model performance degradation on labeled data. Key distinction: data drift may not hurt performance if the model generalizes; concept drift always hurts. Alert on data drift as a leading indicator; treat concept drift as requiring immediate retraining.
+
+**What is the KS test and why is it preferred over PSI for detecting distribution shift in small samples?** The Kolmogorov-Smirnov test compares the empirical CDFs of two samples and reports the maximum distance between them (KS statistic), along with a p-value. PSI requires enough samples to fill bins reliably — PSI is noisy below ~5,000 samples per bin. KS is distribution-free and works on samples as small as 100. Use PSI for monitoring (daily/hourly batch comparisons with 10k+ samples); use KS for alerting on small real-time windows (5-minute windows of 200 predictions).
+
+**How do you monitor a model when ground truth labels arrive with a 30-day delay (e.g., loan default)?** Use proxy metrics that correlate with the true metric but arrive faster: prediction distribution shift (immediate), feature PSI (immediate), prediction calibration on the subset where labels are available within 7 days (leading indicator). For the 30-day delayed labels, use a rolling evaluation window: at any point in time, compute AUC on the cohort that completed the 30-day window. Build a dashboard showing: (1) real-time feature drift; (2) 7-day proxy AUC; (3) 30-day true AUC on historical cohorts. Alert on any of the three.
+
+---
+
+**Quick-reference comparison table:**
+
+| Approach | When to use | Trade-off |
+|---|---|---|
+| Rule-based baseline | Always — establish before ML | Interpretable, brittle on edge cases |
+| Simple ML (LR, RF) | < 100k rows, tabular, fast iteration | Lower ceiling than deep models |
+| Deep learning | Large data, unstructured input (images/text) | Expensive training, needs GPU |
+| Ensembling | Final 1-2% accuracy gain in competition | Complexity, inference latency |
+| Distillation/quantization | Inference cost reduction | Accuracy-efficiency trade-off |

@@ -612,48 +612,151 @@ MAPE (Mean Absolute Percentage Error) = `mean(|actual - predicted| / |actual|) *
 
 ## 14. Case Study
 
-**Problem:** An e-commerce platform wants to predict whether a user will make a purchase within 24 hours of a session. Dataset: 10M sessions over 12 months, 2.3% purchase rate (highly imbalanced). Features: 35 numeric + 8 categorical. Business requirement: maximize revenue per email sent — precision matters (do not spam non-buyers), but recall matters (do not miss buyers). Agreed metric: F1-score at 10% email budget constraint (top 10% of scores by predicted probability).
+**Scenario: Loan-default model selection under a 2% base rate.** A lender compares Logistic Regression, XGBoost, and a Neural Net to predict 12-month default. Default rate is 2%, and a regulator requires the model operate at >=90% recall (catch at least 90% of true defaults). Because the class is rare, AUC-ROC is misleading; PR-AUC and calibration drive the decision. Final choice: XGBoost, calibrated with isotonic regression, evaluated under 5-fold stratified CV with a time-based hold-out.
 
-**Step 1 — Metric choice:**
-- Accuracy: rejected (90% "no purchase" baseline = 97.7% accuracy)
-- AUC-ROC: used for model selection (threshold-agnostic comparison)
-- AUC-PR: primary report metric (imbalanced, minority class matters)
-- F1 at top-10% cutoff: business metric for production threshold
+```
+                 AUC-ROC    PR-AUC    Brier
+LogReg            0.76       0.31     0.045
+XGBoost           0.84       0.52     0.031   <- selected
+Neural Net        0.83       0.49     0.038
 
-**Step 2 — Cross-validation design:**
-12 months of data — random split would allow December behavior in training and July in validation. Use `TimeSeriesSplit(n_splits=5)`: each fold trains on earlier months, validates on next month. This matches production deployment (model trained on past, scores future sessions).
-
-**Step 3 — Baseline:**
-LogisticRegression with StandardScaler: CV AUC-ROC=0.764, CV AUC-PR=0.213. F1@10%=0.31.
-
-**Step 4 — Model comparison (3 candidates):**
-
-```python
-models = {
-    "logreg": LogisticRegression(C=1.0, max_iter=1000),
-    "rf": RandomForestClassifier(n_estimators=300, random_state=42),
-    "gbm": GradientBoostingClassifier(n_estimators=500, random_state=42),
-}
-cv = TimeSeriesSplit(n_splits=5)
-for name, model in models.items():
-    scores = cross_val_score(model, X, y, cv=cv, scoring="average_precision", n_jobs=-1)
-    print(f"{name}: AUC-PR = {scores.mean():.4f} +/- {scores.std():.4f}")
-# logreg: 0.213 +/- 0.018
-# rf:     0.287 +/- 0.021
-# gbm:    0.341 +/- 0.019
+selection path:
+  AUC-ROC (optimistic on 2% base) -> PR-AUC (true ranking on positives)
+        -> calibration (Brier + reliability) -> threshold @ 90% recall
+        -> isotonic calibration -> final XGBoost
 ```
 
-Paired t-test (AUC-PR, gbm vs rf): t=4.2, p=0.008 — GBM significantly better.
+XGBoost wins on PR-AUC (0.52 vs 0.49/0.31), the metric that actually matters for a rare positive class. At the regulator's 90%-recall operating point its precision is the highest of the three, and isotonic calibration makes its scores usable as probabilities of default for pricing.
 
-**Step 5 — Hyperparameter tuning (Optuna, 150 trials, ~90 minutes):**
-Best params: `n_estimators=700, max_depth=6, learning_rate=0.05, subsample=0.8`. CV AUC-PR=0.358.
+**PR-AUC and threshold-at-recall selection:**
 
-**Step 6 — Calibration:**
-GBM Brier score before calibration: 0.037. After isotonic regression on 200k held-out rows: 0.021. Reliability diagram shows calibrated model within 3% of diagonal at all probability bins.
+```python
+import numpy as np
+from sklearn.metrics import average_precision_score, precision_recall_curve
 
-**Step 7 — Final test set evaluation (touched once):**
-12-month test period (last month, ~833k sessions): AUC-PR=0.349, F1@10%=0.44, recall=0.61, precision=0.34.
+def evaluate(y_true: np.ndarray, y_score: np.ndarray,
+             target_recall: float = 0.90) -> dict[str, float]:
+    pr_auc = average_precision_score(y_true, y_score)
+    precision, recall, thresholds = precision_recall_curve(y_true, y_score)
+    # pick the highest threshold that still achieves the required recall
+    ok = recall[:-1] >= target_recall
+    idx = np.where(ok)[0]
+    chosen = thresholds[idx[-1]] if len(idx) else 0.0
+    prec_at_recall = precision[idx[-1]] if len(idx) else 0.0
+    return {"pr_auc": float(pr_auc),
+            "threshold": float(chosen),
+            "precision_at_recall": float(prec_at_recall)}
+```
 
-**Business outcome:** At 10% email budget, model identifies 61% of buyers. Prior rule-based system (cart abandonment + recency) captured 38% of buyers at the same 10% budget. Incremental revenue per 100k sessions: $142k vs $88k (+61% lift).
+**Stratified CV plus isotonic calibration:**
 
-**Key learnings:** TimeSeriesSplit was critical — random CV gave AUC-PR 0.41 (inflated by ~0.06 vs time-based CV 0.358). Calibration improved probability-based threshold setting without changing AUC at all. Optuna found better params than GridSearchCV with 40% fewer model fits.
+```python
+import numpy as np
+from sklearn.model_selection import StratifiedKFold, cross_val_predict
+from sklearn.calibration import CalibratedClassifierCV
+import xgboost as xgb
+
+def cv_pr_auc(model, X: np.ndarray, y: np.ndarray) -> float:
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
+    oof = cross_val_predict(model, X, y, cv=skf, method="predict_proba")[:, 1]
+    from sklearn.metrics import average_precision_score
+    return float(average_precision_score(y, oof))
+
+def calibrate(base, X_tr, y_tr):
+    # isotonic fits a non-parametric monotonic map from raw score to P(default)
+    cal = CalibratedClassifierCV(base, method="isotonic", cv=5)
+    return cal.fit(X_tr, y_tr)
+```
+
+**Reliability check via Brier score:**
+
+```python
+import numpy as np
+from sklearn.metrics import brier_score_loss
+
+def reliability(y_true: np.ndarray, p_pred: np.ndarray,
+                bins: int = 10) -> list[tuple[float, float]]:
+    edges = np.linspace(0, 1, bins + 1)
+    out: list[tuple[float, float]] = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        m = (p_pred >= lo) & (p_pred < hi)
+        if m.any():
+            out.append((float(p_pred[m].mean()), float(y_true[m].mean())))
+    return out   # (predicted, observed) pairs; should lie on the diagonal
+```
+
+**Pitfall 1 — Accuracy on a 2% positive rate.** A model that predicts "no default" for everyone is 98% accurate and 100% useless.
+
+```python
+# BROKEN: optimize/report accuracy -> all-negative model looks "great"
+from sklearn.metrics import accuracy_score
+acc = accuracy_score(y, model.predict(X))   # 0.98, recall on defaults = 0
+
+# FIX: use PR-AUC (and recall at the regulatory operating point) which focus
+# on the rare positive class.
+pr_auc = average_precision_score(y, model.predict_proba(X)[:, 1])
+```
+
+**Pitfall 2 — Data leakage from future features.** A feature like "account closed" is only known after default, so including it inflates offline metrics but is unavailable at scoring time.
+
+```python
+# BROKEN: random split + a feature populated after the outcome -> leakage
+X_train, X_test = train_test_split(X, shuffle=True)   # mixes future into past
+
+# FIX: time-based split (train on past, test on later period) and audit each
+# feature's availability timestamp against the prediction time.
+cutoff = "2024-01-01"
+X_train, X_test = X[X.asof < cutoff], X[X.asof >= cutoff]
+```
+
+**Pitfall 3 — Overfitting to the validation set.** Repeatedly tuning against the same validation fold makes the chosen model look better than it generalizes.
+
+```python
+# BROKEN: tune hyperparameters against val, then report val score as final
+# -> the val set has effectively become training data.
+
+# FIX: lock an untouched hold-out test set; tune only on CV/validation and
+# evaluate the final model on the hold-out exactly once.
+final_score = average_precision_score(y_holdout, final_model.predict_proba(X_holdout)[:, 1])
+```
+
+**Interview Q&A:**
+
+**Why is AUC-ROC misleading for a 2% default rate, and what replaces it?** ROC uses the false-positive rate, whose denominator (the 98% negatives) is huge, so even many false positives barely move it; AUC-ROC looks high while precision is poor. PR-AUC uses precision and recall, both focused on the rare positives, so it reflects real performance on the class you care about. Here PR-AUC separates the models (0.52 vs 0.31) far more clearly than AUC-ROC.
+
+**What is model calibration and why does the lender need it?** Calibration means the predicted probability matches the observed frequency, when the model says 5% default, about 5% actually default. The lender prices loans off these probabilities, so a miscalibrated model misprices risk even if its ranking (AUC) is perfect. Brier score and reliability diagrams measure it; isotonic or Platt scaling correct it.
+
+**Why choose the operating threshold at 90% recall instead of maximizing F1?** The regulator mandates catching at least 90% of defaults, which is a hard recall constraint, not a balanced trade-off. So the threshold is fixed to meet that recall, and precision at that point becomes the metric to compare models. F1 would optimize a different, business-irrelevant balance.
+
+**Why a time-based split rather than a random split for this problem?** Default is a temporal phenomenon and many features evolve over time. A random split leaks future information into training and produces optimistic estimates. Training on an earlier period and testing on a later one mirrors production, where you always predict the future from the past.
+
+**What is the difference between Platt scaling and isotonic regression for calibration?** Platt scaling fits a logistic (sigmoid) map from score to probability, with few parameters, robust on small data but assumes a sigmoid shape. Isotonic regression fits a free monotonic step function, more flexible and accurate with enough data but prone to overfit on small sets. With ample data here, isotonic is chosen.
+
+**How do you avoid overfitting during model selection itself?** Use nested cross-validation or a strict three-way split: train, validation (for tuning), and a hold-out test touched exactly once at the end. Track how many times the validation set has been queried; repeated tuning against it silently turns it into training data and inflates the reported metric.
+
+**Pitfall — Optimizing for AUC-ROC when the business cost matrix is asymmetric.**
+
+```python
+# BROKEN: choosing threshold at 0.5 (default) maximizes accuracy but not business value
+# Fraud detection: FN (missed fraud) costs $200; FP (false alarm) costs $2 (review cost)
+# At threshold=0.5: precision=0.78, recall=0.71, revenue loss from FN = 29% × $200 = $58
+from sklearn.metrics import roc_auc_score
+auc = roc_auc_score(y_true, y_scores)   # 0.987 — looks great!
+# But business metric: daily cost = FP_count × $2 + FN_count × $200
+# At threshold=0.5, daily cost: 120 × $2 + 45 × $200 = $240 + $9,000 = $9,240
+
+# FIX: optimize threshold on cost function directly
+def business_cost(y_true, y_pred, fp_cost=2.0, fn_cost=200.0):
+    fp = ((y_pred == 1) & (y_true == 0)).sum()
+    fn = ((y_pred == 0) & (y_true == 1)).sum()
+    return fp * fp_cost + fn * fn_cost
+
+thresholds = np.linspace(0.01, 0.99, 99)
+costs = [business_cost(y_true, (y_scores >= t).astype(int)) for t in thresholds]
+best_threshold = thresholds[np.argmin(costs)]   # 0.17 — much lower threshold
+# At threshold=0.17, daily cost: 380 × $2 + 8 × $200 = $760 + $1,600 = $2,360 (74% reduction)
+```
+
+**Why is stratified k-fold cross-validation essential for imbalanced datasets?** Random k-fold splits can create folds with 0 positive examples (especially with 1:1000 class imbalance). A fold with no positives cannot compute AUC-ROC and produces division-by-zero errors in precision/recall. Stratified k-fold maintains the positive class ratio in each fold, guaranteeing that every fold contains positive examples proportional to the overall rate. Use `StratifiedKFold(n_splits=5)` as the default for any binary or multi-class classification task.
+
+**What is calibration and why does a highly accurate model still need it for probability outputs?** A model's raw output score (e.g., 0.85) should correspond to an 85% probability of the positive class — otherwise downstream systems (pricing, risk scoring) using the raw score as a probability make incorrect decisions. A model with AUC 0.98 can still output scores that are systematically biased: all outputs in the range [0.6, 0.8] while the true probability of positives is 0.2. Calibrate using Platt scaling (`sklearn.calibration.CalibratedClassifierCV(method='sigmoid')`) or isotonic regression (`method='isotonic'`). Visualize calibration with a reliability diagram (plot mean predicted probability vs. observed frequency per bin); a perfectly calibrated model lies on the diagonal.

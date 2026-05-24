@@ -974,43 +974,151 @@ Use Testcontainers with KafkaContainer to start a real Kafka broker in Docker. A
 
 ## 14. Case Study
 
-### Problem: Order Processing Platform with At-Least-Once Delivery and Deduplication
+### Scenario: Event-Driven Order Processing at 10k Events/sec with Exactly-Once Semantics
 
-An e-commerce company processes 50,000 orders per hour through an order service. The order service calls three downstream services: inventory (check and reserve), fulfillment (assign warehouse and create shipment), and notification (send order confirmation email). The original implementation used synchronous REST calls chained sequentially, resulting in high latency (>3 seconds per order) and full cascade failures when any downstream service was slow.
+**Context.** An e-commerce platform consumes order events from Kafka at **10,000 events/sec** across a 24-partition topic. Each event must update the order ledger exactly once — a duplicate charge or a lost order is unacceptable. The consumer uses `@Transactional` with **manual offset commit** so the DB write and the offset advance succeed or fail together. Failures retry 3 times, then route to a dead-letter topic. A fire-and-forget notification is dispatched with `@Async`.
 
-### Design
-
-The order service was refactored to use the Outbox pattern with Kafka:
-
-1. `POST /orders` endpoint saves the order to the database and writes an `OrderPlaced` event to the outbox table in the same transaction. Response returns immediately — 200ms latency.
-
-2. A Debezium CDC connector reads the outbox table from the PostgreSQL WAL (write-ahead log) and publishes events to the Kafka topic `orders.orders.placed`.
-
-3. Three independent consumer groups: `inventory-service`, `fulfillment-service`, `notification-service` each consume from `orders.orders.placed` with concurrency=6 (topic has 12 partitions).
-
-4. The topic is configured with `@RetryableTopic` — each consumer service retries up to 3 times with exponential backoff (1s, 2s, 4s) before sending to `orders.orders.placed.DLT`.
-
-5. A separate monitoring service consumes from the DLT and creates PagerDuty alerts, storing failed events in a dead-letter PostgreSQL table for manual replay via an admin UI.
-
-### Kafka Configuration
+### Architecture
 
 ```
-max.poll.records = 50          (each record takes ~30ms to process; 50 * 30 = 1500ms, well under 300s)
-max.poll.interval.ms = 300000
-enable.auto.commit = false
-ack mode = MANUAL_IMMEDIATE
-isolation.level = read_committed (inventory service is financial-critical)
+   orders topic (24 partitions, 10k events/sec)
+        |
+        v
+   +----------------------------------------+
+   | ConcurrentKafkaListenerContainerFactory|  concurrency=24 (1 thread/partition)
+   |  AckMode = MANUAL                      |
+   +-------------------+--------------------+
+                       | @KafkaListener
+                       v
+   +----------------------------------------+
+   | @Transactional process()               |
+   |  1. write order ledger (DB)            |
+   |  2. ack.acknowledge() AFTER commit     |
+   +-------------------+--------------------+
+          success      |        failure (3 retries, backoff)
+          v            v
+   @Async notify   DefaultErrorHandler ---> DeadLetterPublishingRecoverer
+   (email/SMS)                              ---> orders.DLT
 ```
 
-### Results
+### Listener and Container Configuration
 
-- Order submission latency dropped from 3.2 seconds to 210ms (synchronous path is now only DB write).
-- A fulfillment service deployment that took 8 minutes caused zero order processing interruptions — Kafka retained messages during the outage and the service caught up in 4 minutes after restart.
-- Consumer group lag monitoring via Micrometer/Prometheus revealed that the notification service was falling behind during peak hour due to SMTP provider rate limiting. The team reduced concurrency from 6 to 2 for the notification consumer group and added a RabbitMQ priority queue as an intermediate buffer (transactional emails at priority 8, marketing at priority 1) — resolving the rate-limit issue without dropping messages.
-- The DLT received 12 messages in the first month, all due to a schema mismatch when a developer pushed an incompatible payload change. The Avro schema registry caught subsequent incompatible changes at publish time before they reached consumers.
+```java
+@Configuration
+public class KafkaConsumerConfig {
 
-### Key Lessons
+    @Bean
+    ConcurrentKafkaListenerContainerFactory<String, OrderEvent> factory(
+            ConsumerFactory<String, OrderEvent> cf, KafkaTemplate<String, Object> template) {
+        var factory = new ConcurrentKafkaListenerContainerFactory<String, OrderEvent>();
+        factory.setConsumerFactory(cf);
+        factory.setConcurrency(24);                                  // one consumer per partition
+        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL);
 
-- The Outbox pattern eliminated dual-write inconsistency and reduced order submission latency by 15x simultaneously.
-- Setting max.poll.records conservatively (50 instead of the default 500) prevented rebalance storms during a slow inventory service incident where DB response times spiked to 800ms per call.
-- Combining Kafka for durable event streaming with RabbitMQ for flexible routing (priority, TTL) in the same architecture used each broker's strengths without trying to make one do both jobs.
+        // 3 retries with backoff 1s,2s,4s; then publish to <topic>.DLT
+        var recoverer = new DeadLetterPublishingRecoverer(template);
+        var errorHandler = new DefaultErrorHandler(recoverer, new ExponentialBackOff(1000L, 2.0));
+        errorHandler.setRetryListeners((rec, ex, attempt) ->
+            log.warn("retry {} for offset {}", attempt, rec.offset()));
+        factory.setCommonErrorHandler(errorHandler);
+        return factory;
+    }
+}
+```
+
+```java
+@Component
+public class OrderListener {
+
+    @KafkaListener(topics = "orders", containerFactory = "factory")
+    @Transactional                                          // DB write + offset commit atomic
+    public void onOrder(OrderEvent event, Acknowledgment ack) {
+        if (ledger.existsByEventId(event.id())) {           // idempotency guard
+            ack.acknowledge();
+            return;
+        }
+        ledger.apply(event);                                // 1. durable DB write
+        ack.acknowledge();                                  // 2. commit offset ONLY after success
+        notifier.sendConfirmation(event);                   // 3. fire-and-forget @Async
+    }
+}
+```
+
+```java
+@Service
+public class Notifier {
+    @Async("notifyExecutor")                                // does not block the consumer thread
+    public void sendConfirmation(OrderEvent event) {
+        emailClient.send(event.customerEmail(), template(event));
+    }
+}
+```
+
+### Metrics
+
+- Throughput: **10,200 events/sec** sustained, p99 process latency **45ms**.
+- Duplicate writes: **0** (idempotency key + ack-after-commit).
+- DLT volume: **<0.01%** of traffic, all alerted and replayable.
+- Notification thread pool: 8 core / 32 max, queue 500; rejection rate **0** after sizing.
+
+### Pitfalls
+
+**Pitfall 1 — Auto-commit before processing completes (at-most-once on crash).**
+```java
+// BROKEN: offset is committed on a timer BEFORE the DB write; a crash mid-process loses the event
+spring.kafka.consumer.enable-auto-commit: true   // commits every 5s regardless of success
+```
+```java
+// FIXED: manual ack, committed only after the transactional DB write succeeds
+factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL);
+// ... ledger.apply(event); ack.acknowledge();  // commit follows success -> at-least-once + idempotency
+```
+
+**Pitfall 2 — Unchecked exception escaping the listener kills the consumer.**
+```java
+// BROKEN: no error handler; an unhandled RuntimeException stops the container,
+// the partition is unassigned, and consumption silently halts
+@KafkaListener(topics = "orders")
+public void onOrder(OrderEvent e) { ledger.apply(e); }   // throws -> consumer dies
+```
+```java
+// FIXED: DefaultErrorHandler retries then routes to the DLT, keeping the partition assigned
+factory.setCommonErrorHandler(
+    new DefaultErrorHandler(new DeadLetterPublishingRecoverer(template),
+                            new ExponentialBackOff(1000L, 2.0)));
+```
+
+**Pitfall 3 — `@Async` thread pool exhaustion and lost MDC context.**
+```java
+// BROKEN: default SimpleAsyncTaskExecutor spawns unbounded threads and drops the request's MDC (traceId)
+@Async
+public void sendConfirmation(OrderEvent e) { /* logs have no traceId; threads explode under load */ }
+```
+```java
+// FIXED: bounded pool + TaskDecorator that copies MDC from the caller thread to the worker
+@Bean("notifyExecutor")
+ThreadPoolTaskExecutor notifyExecutor() {
+    var ex = new ThreadPoolTaskExecutor();
+    ex.setCorePoolSize(8); ex.setMaxPoolSize(32); ex.setQueueCapacity(500);
+    ex.setTaskDecorator(runnable -> {
+        Map<String, String> ctx = MDC.getCopyOfContextMap();
+        return () -> { if (ctx != null) MDC.setContextMap(ctx); try { runnable.run(); } finally { MDC.clear(); } };
+    });
+    ex.initialize();
+    return ex;
+}
+```
+
+### Interview Q&A
+
+**Why is ack-after-commit "at-least-once" rather than true "exactly-once"?** The DB write commits, then the offset is acknowledged; a crash between those two steps re-delivers the event on restart. True end-to-end exactly-once requires the consume and produce to share a Kafka transaction (read-process-write). The practical pattern here is at-least-once delivery plus an idempotency key, which yields exactly-once *effects*.
+
+**What does `concurrency=24` on the container factory do?** It creates 24 consumer threads in one consumer group. Kafka assigns at most one consumer per partition, so with a 24-partition topic each thread owns one partition, maximizing parallelism without violating per-partition ordering.
+
+**What happens to ordering when an event fails and goes to the DLT?** Within a partition, retries block subsequent messages until the failed one is retried or routed to the DLT. Once it lands on the DLT the partition proceeds, so cross-message ordering is preserved for successes but the failed message is processed out of band.
+
+**Why must `@Async` work be fire-and-forget here?** Sending email/SMS is slow and externally rate-limited. Doing it inline would hold the consumer thread, reduce throughput, and couple consumption to a flaky third party. Offloading to a bounded async pool keeps the consumer hot; the notification is best-effort and separately retryable.
+
+**Why does `@Async` lose the trace context, and how do you fix it?** `@Async` runs the method on a different thread, and `MDC` is thread-local, so the worker thread starts with an empty MDC and logs lose the `traceId`. A `TaskDecorator` copies the caller's MDC into the worker before running and clears it afterward.
+
+**How do you size the consumer's `max.poll.records` and `max.poll.interval.ms`?** Set `max.poll.records` so that batch processing time stays well under `max.poll.interval.ms`; otherwise the broker considers the consumer dead and triggers a rebalance storm. At ~45ms/event, a poll of 50 records (~2.3s) is safely under the default 5-minute interval.

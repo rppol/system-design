@@ -388,94 +388,317 @@ Label smoothing replaces hard targets (0 or 1) with soft targets (epsilon/(K-1) 
 
 ## 14. Case Study
 
-**Task**: Train an MLP for tabular fraud detection on a 500K row dataset with 50 features.
+**Scenario:** A payment processor (800M transactions/day, $2.4T annual volume) needs a real-time MLP fraud detector processing 50M transactions per day with decision latency under 10ms (p99). The current rule-based system has recall of 0.72 and false-positive rate (FPR) of 2.1%. The goal: MLP with batch normalisation and dropout achieving recall >= 0.92, FPR <= 0.3%, inference p99 < 8ms on CPU (no GPU on the edge scoring cluster), trained on 500M historical transactions with severe class imbalance (0.05% fraud rate).
 
-**Problem Statement**: Binary classification (fraud / not fraud) with severe class imbalance (0.5% fraud rate). Raw features include transaction amount, merchant category, time-of-day, and behavioral history features. The model must have < 5ms latency at inference for real-time scoring.
-
-**Architecture Decision**:
-- Input: 50 features after standardization (StandardScaler fitted on train set only)
-- Architecture: Linear(50, 256) -> BN -> GELU -> Dropout(0.3) -> Linear(256, 128) -> BN -> GELU -> Dropout(0.3) -> Linear(128, 1)
-- Loss: `BCEWithLogitsLoss(pos_weight=torch.tensor([200.0]))` to handle 0.5% fraud rate
-- Optimizer: Adam with lr=0.001, weight_decay=1e-4
-- Scheduler: CosineAnnealingLR
-
-**Key Design Decisions**:
-
-1. BatchNorm over LayerNorm: batch sizes are large (256) and consistent during training. Inference uses running stats so batching is not required.
-2. Dropout p=0.3 (not 0.5): tabular data has fewer redundant features than image pixels; too much dropout hurts.
-3. pos_weight in BCE loss: upweights the positive class by 200x to compensate for imbalance instead of oversampling (which would inflate dataset size 200x).
-4. No zero init: verified with gradient norm logging that gradients are healthy (norm ~0.1-1.0) from epoch 1.
-
-```python
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
-from typing import Optional
-
-
-class FraudMLP(nn.Module):
-    def __init__(self, input_dim: int = 50, dropout_p: float = 0.3) -> None:
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, 256),
-            nn.BatchNorm1d(256),
-            nn.GELU(),
-            nn.Dropout(p=dropout_p),
-            nn.Linear(256, 128),
-            nn.BatchNorm1d(128),
-            nn.GELU(),
-            nn.Dropout(p=dropout_p),
-            nn.Linear(128, 1),
-        )
-        self._init_weights()
-
-    def _init_weights(self) -> None:
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
-                nn.init.zeros_(m.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x).squeeze(-1)  # (B,)
-
-
-def train(
-    model: FraudMLP,
-    loader: DataLoader,
-    optimizer: optim.Optimizer,
-    device: torch.device,
-    pos_weight: float = 200.0,
-) -> float:
-    model.train()
-    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight]).to(device))
-    total_loss = 0.0
-    for x, y in loader:
-        x, y = x.to(device, dtype=torch.float32), y.to(device, dtype=torch.float32)
-        optimizer.zero_grad()
-        logits = model(x)
-        loss = criterion(logits, y)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-    return total_loss / len(loader)
-
-
-@torch.no_grad()
-def predict(model: FraudMLP, x: torch.Tensor, device: torch.device) -> torch.Tensor:
-    model.eval()  # critical: uses running BN stats, disables dropout
-    x = x.to(device, dtype=torch.float32)
-    logits = model(x)
-    return torch.sigmoid(logits)
+**Architecture:**
+```
+Transaction Event (Kafka, 50M events/day)
+  Features (real-time feature service, Redis):
+    - Velocity: txn count 1min/5min/1hr/24hr (4 features)
+    - Amount: log_amount, amount_vs_avg, amount_zscore (3 features)
+    - Merchant: risk_score, category_embedding (16d) (17 features)
+    - Card: days_since_issue, country_match, device_fingerprint (3 features)
+    - User: historical_fraud_rate, avg_daily_spend, tenure (3 features)
+  Total: 30 features -> 30-dimensional input vector
+         |
+         v
+MLP Scoring Model
+  Input: 30d
+  Hidden 1: 256d + BatchNorm + ReLU + Dropout(0.3)
+  Hidden 2: 128d + BatchNorm + ReLU + Dropout(0.3)
+  Hidden 3: 64d + BatchNorm + ReLU
+  Output: 1d (sigmoid -> fraud probability)
+         |
+         v
+Threshold Decision
+  p >= 0.65 -> block transaction (high confidence fraud)
+  0.35 <= p < 0.65 -> step-up authentication
+  p < 0.35 -> approve
+  (Thresholds tuned to achieve FPR <= 0.3%)
+         |
+         v
+Feedback Loop (async, 24hr delay)
+  Chargebacks and confirmed fraud labels
+  Nightly retraining on 90-day rolling window
 ```
 
-**Results**:
-- AUROC: 0.94 on held-out test set
-- Precision at 50% recall: 0.42 (vs 0.18 for logistic regression baseline)
-- Inference latency: 1.2ms per batch of 64 on CPU (well under 5ms SLA)
-- Training time: 8 minutes on a single V100 for 20 epochs over 500K samples
+**Step-by-step implementation:**
 
-**Lessons Learned**:
-- The single most impactful change was using `pos_weight` in BCE loss. Without it, the model predicted all negatives (99.5% accuracy, 0% fraud recall).
-- BatchNorm was crucial: without it, training was unstable with Adam at lr=0.001 and required lr=0.0001 to converge, tripling training time.
-- Monitoring gradient norms caught an early run where dead ReLU (originally used before switching to GELU) had zeroed 35% of layer-2 neurons after 5 epochs.
+```python
+from __future__ import annotations
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
+import numpy as np
+import pandas as pd
+
+class FraudMLP(nn.Module):
+    def __init__(
+        self,
+        input_dim: int = 30,
+        hidden_dims: list[int] = [256, 128, 64],
+        dropout_rates: list[float] = [0.3, 0.3, 0.0],
+        use_batch_norm: bool = True,
+    ) -> None:
+        super().__init__()
+        assert len(hidden_dims) == len(dropout_rates), "Mismatched hidden/dropout dims"
+
+        layers: list[nn.Module] = []
+        in_dim = input_dim
+
+        for i, (hidden_dim, dropout_rate) in enumerate(zip(hidden_dims, dropout_rates)):
+            layers.append(nn.Linear(in_dim, hidden_dim))
+            if use_batch_norm:
+                layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(nn.ReLU(inplace=True))
+            if dropout_rate > 0:
+                layers.append(nn.Dropout(dropout_rate))
+            in_dim = hidden_dim
+
+        layers.append(nn.Linear(in_dim, 1))
+        # Note: no sigmoid here; use BCEWithLogitsLoss for numerical stability
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.network(x).squeeze(-1)   # shape: (batch_size,)
+
+    @torch.no_grad()
+    def predict_proba(self, x: torch.Tensor) -> torch.Tensor:
+        logits = self(x)
+        return torch.sigmoid(logits)
+
+class FraudDataset(Dataset):
+    def __init__(
+        self,
+        features: np.ndarray,   # shape (N, 30), float32, already standardised
+        labels: np.ndarray,     # shape (N,), int64
+    ) -> None:
+        self.features = torch.from_numpy(features).float()
+        self.labels = torch.from_numpy(labels).float()
+
+    def __len__(self) -> int:
+        return len(self.labels)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.features[idx], self.labels[idx]
+
+def create_oversampled_loader(
+    dataset: FraudDataset,
+    batch_size: int = 4096,
+    fraud_oversample_ratio: float = 50.0,   # expose each fraud 50x more often
+) -> DataLoader:
+    labels = dataset.labels.numpy()
+    class_counts = np.bincount(labels.astype(int))
+    # Inverse frequency weights: fraud gets weight ~50x legitimate
+    sample_weights = np.where(
+        labels == 1,
+        fraud_oversample_ratio / class_counts[1],
+        1.0 / class_counts[0],
+    )
+    sampler = WeightedRandomSampler(
+        weights=torch.from_numpy(sample_weights).double(),
+        num_samples=len(dataset),
+        replacement=True,
+    )
+    return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=4)
+```
+
+```python
+from sklearn.metrics import roc_auc_score, precision_recall_curve, average_precision_score
+from typing import Iterator
+
+def train_epoch(
+    model: FraudMLP,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    class_weight_fraud: float = 100.0,
+) -> float:
+    model.train()
+    total_loss = 0.0
+    pos_weight = torch.tensor([class_weight_fraud], device=device)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+    for features, labels in loader:
+        features, labels = features.to(device), labels.to(device)
+        optimizer.zero_grad()
+        logits = model(features)
+        loss = criterion(logits, labels)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+        total_loss += float(loss) * len(labels)
+
+    return total_loss / len(loader.dataset)
+
+@torch.no_grad()
+def evaluate_model(
+    model: FraudMLP,
+    loader: DataLoader,
+    device: torch.device,
+    fraud_threshold: float = 0.65,
+) -> dict[str, float]:
+    model.eval()
+    all_probs: list[np.ndarray] = []
+    all_labels: list[np.ndarray] = []
+
+    for features, labels in loader:
+        probs = model.predict_proba(features.to(device)).cpu().numpy()
+        all_probs.append(probs)
+        all_labels.append(labels.numpy())
+
+    probs_arr = np.concatenate(all_probs)
+    labels_arr = np.concatenate(all_labels)
+    preds = (probs_arr >= fraud_threshold).astype(int)
+
+    tp = int(((preds == 1) & (labels_arr == 1)).sum())
+    fp = int(((preds == 1) & (labels_arr == 0)).sum())
+    fn = int(((preds == 0) & (labels_arr == 1)).sum())
+    tn = int(((preds == 0) & (labels_arr == 0)).sum())
+
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+
+    return {
+        "auc_roc": roc_auc_score(labels_arr, probs_arr),
+        "auc_pr": average_precision_score(labels_arr, probs_arr),
+        "recall": recall,
+        "precision": precision,
+        "fpr": fpr,
+        "f1": 2 * precision * recall / (precision + recall + 1e-8),
+    }
+```
+
+```python
+import time
+import onnx
+import onnxruntime as ort
+
+def export_to_onnx(
+    model: FraudMLP,
+    input_dim: int = 30,
+    output_path: str = "fraud_model.onnx",
+) -> None:
+    """Export model to ONNX for CPU inference via ONNX Runtime."""
+    model.eval()
+    dummy_input = torch.randn(1, input_dim)
+    torch.onnx.export(
+        model,
+        dummy_input,
+        output_path,
+        export_params=True,
+        opset_version=17,
+        do_constant_folding=True,
+        input_names=["features"],
+        output_names=["logits"],
+        dynamic_axes={"features": {0: "batch_size"}, "logits": {0: "batch_size"}},
+    )
+    print(f"Exported to {output_path}")
+
+def benchmark_inference(
+    onnx_path: str = "fraud_model.onnx",
+    batch_size: int = 256,
+    n_warmup: int = 20,
+    n_benchmark: int = 1000,
+) -> dict[str, float]:
+    sess_options = ort.SessionOptions()
+    sess_options.intra_op_num_threads = 4
+    sess_options.inter_op_num_threads = 1
+    sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    session = ort.InferenceSession(onnx_path, sess_options=sess_options,
+                                   providers=["CPUExecutionProvider"])
+
+    dummy = np.random.randn(batch_size, 30).astype(np.float32)
+    for _ in range(n_warmup):
+        session.run(None, {"features": dummy})
+
+    latencies: list[float] = []
+    for _ in range(n_benchmark):
+        t0 = time.perf_counter()
+        session.run(None, {"features": dummy})
+        latencies.append((time.perf_counter() - t0) * 1000)
+
+    return {
+        "p50_ms": float(np.percentile(latencies, 50)),
+        "p99_ms": float(np.percentile(latencies, 99)),
+        "throughput_per_sec": batch_size / (float(np.mean(latencies)) / 1000),
+    }
+```
+
+**Key pitfalls (3 with BROKEN->FIX):**
+
+**Pitfall 1 - Batch normalisation behaves differently in train vs eval mode causing score distribution shift:**
+```python
+# BROKEN: model evaluated in train mode; BatchNorm uses mini-batch statistics
+# rather than running statistics, causing variance in scores for small batches
+model.train()   # accidentally left in train mode
+preds = model(test_features)   # BatchNorm uses batch mean/std -> scores shift per batch
+# Score for a single transaction changes based on which batch it's grouped with -> unreliable
+
+# FIX: always set eval mode before inference; this switches BatchNorm to use
+# running mean/variance accumulated during training
+model.eval()
+with torch.no_grad():
+    preds = model(test_features)   # deterministic; same score regardless of batch composition
+```
+
+**Pitfall 2 - Training with raw class imbalance causes model to predict all-legitimate (99.95% of data):**
+```python
+# BROKEN: train on imbalanced data without weighting or sampling
+loader = DataLoader(dataset, batch_size=4096, shuffle=True)
+criterion = nn.BCEWithLogitsLoss()   # no pos_weight
+# Epoch 1: model learns to predict 0 for everything; loss = 0.0003 (minimises BCE on majority)
+# Recall = 0.0, FPR = 0.0, model is useless
+
+# FIX option A: BCEWithLogitsLoss pos_weight= (n_negative / n_positive)
+pos_weight = torch.tensor([19_998.0])   # 0.05% fraud rate -> 1999.8x ratio; cap at 100-200
+criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([150.0]))
+
+# FIX option B: WeightedRandomSampler to oversample fraud in each batch
+sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(dataset), replacement=True)
+loader = DataLoader(dataset, batch_size=4096, sampler=sampler)
+# Each mini-batch has ~50% fraud vs 0.05% in unsampled data; recall improves to 0.94
+```
+
+**Pitfall 3 - Using sigmoid in the model then BCELoss causes numerical instability for extreme logits:**
+```python
+# BROKEN: manual sigmoid before BCELoss; BCE computes log(p) which is -inf for p=0
+model_output = torch.sigmoid(logits)   # p near 0 or 1 for confident predictions
+loss = nn.BCELoss()(model_output, labels)   # log(0) = -inf -> NaN loss
+
+# FIX: use BCEWithLogitsLoss which applies numerically stable log-sum-exp trick
+# Internally: loss = max(logit, 0) - logit*label + log(1 + exp(-|logit|))
+# This avoids computing exp(logit) directly, preventing overflow for large positive logits
+loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)(logits, labels)   # never NaN
+```
+
+**Metrics and results:**
+
+| Metric | Rule-based baseline | MLP (no BN, no oversampling) | MLP + BN + oversampling |
+|---|---|---|---|
+| Recall | 0.72 | 0.81 | 0.93 |
+| Precision | 0.61 | 0.74 | 0.87 |
+| FPR | 2.1% | 1.2% | 0.28% |
+| AUC-ROC | 0.78 | 0.91 | 0.97 |
+| AUC-PR | 0.45 | 0.73 | 0.89 |
+| Inference p50 (CPU, batch=256) | N/A | 2.1ms | 3.8ms |
+| Inference p99 (CPU, batch=256) | N/A | 4.2ms | 7.4ms |
+| Model size (ONNX) | N/A | 180 KB | 185 KB |
+| Training time (90-day dataset) | N/A | 18 min | 24 min |
+| Fraud losses prevented/month | baseline | +$8.2M | +$18.7M |
+
+**Interview discussion points:**
+
+**Why does batch normalisation improve MLP training stability and convergence speed?** Without batch normalisation, the input distribution to each layer shifts as parameters in preceding layers change during training (internal covariate shift). The activations entering layer 3 depend on the weights of layers 1 and 2; as those weights update, the distribution seen by layer 3 changes unpredictably, requiring smaller learning rates to avoid instability. BatchNorm normalises each layer's input to zero mean and unit variance per mini-batch, then applies learnable scale (gamma) and shift (beta) parameters. This allows each layer to learn independently of the distribution shifts caused by preceding layers, enabling 3-5x larger learning rates and halving convergence time from 80 to 45 epochs.
+
+**What is the dead ReLU problem and how does batch normalisation before ReLU mitigate it?** A ReLU neuron becomes "dead" when its pre-activation input is always negative, causing the gradient to be permanently zero and the neuron to never update. This happens when weight initialisation or large learning rate updates push biases to large negative values. Batch normalisation before ReLU ensures the pre-activation has zero mean at initialisation, meaning approximately 50% of neurons fire in the first epoch. Without BN, aggressive learning rates cause ~15% of neurons to die in the first 5 epochs; with BN, dead neurons are essentially eliminated because the centering mechanism prevents systematic negative pre-activations.
+
+**Why is BCEWithLogitsLoss numerically superior to sigmoid followed by BCELoss?** For a logit x = 20 (very confident positive prediction), torch.sigmoid(20) = 1.0 due to float32 precision limits, then log(1.0) = 0 exactly. But the true gradient at x=20 is approximately exp(-20) = 2e-9, not zero. BCEWithLogitsLoss uses the numerically stable log-sum-exp reformulation: log(1 + exp(-x)) for positive x, which evaluates correctly to ~2e-9 at x=20 using extended precision arithmetic. The practical consequence is that BCEWithLogitsLoss provides correct gradients for confident correct predictions, while BCELoss produces exactly-zero gradients for any logit where sigmoid saturates to exactly 0 or 1.
+
+**How does WeightedRandomSampler change the effective training distribution and what is the implication for threshold calibration?** WeightedRandomSampler makes each mini-batch contain approximately 50% fraud examples (from the 50x oversample ratio), while the true fraud rate is 0.05%. The model's output probabilities are calibrated to the training distribution, meaning p(fraud=1|x) from the model reflects the 50% fraud rate of the training batches, not the true 0.05% rate. The decision threshold must be adjusted post-training: the model outputs 0.5 for a transaction with equal probability of being the 0.05% fraud or 99.95% legitimate; calibrate the threshold using Platt scaling or isotonic regression on a calibration holdout set with the true class distribution.
+
+**What is the effect of adding more hidden layers versus wider hidden layers in this fraud MLP?** Wider layers (e.g., 512-512-512 versus 256-128-64) increase the model's capacity in each layer, allowing it to learn more feature combinations at the same depth. Deeper layers (adding a 4th or 5th hidden layer) allow the model to learn hierarchical feature representations - useful for image or text data with clear hierarchical structure. For tabular fraud data with 30 engineered features, empirical results show that a 3-layer MLP with adequate width (256-128-64) captures all meaningful non-linear interactions; adding a 4th layer improves AUC-ROC by only 0.001 while adding 15% to inference latency. Wider layers also benefit from BatchNorm more than deeper layers, as BN reduces the dead neuron problem that is more prevalent in deeper networks.
+
+**How would you deploy this model with zero-downtime updates as fraud patterns shift?** Use blue-green deployment at the Kubernetes service level: maintain two deployments (blue=current, green=new). When a new model passes offline validation (AUC-ROC >= 0.97, FPR <= 0.3% on holdout), deploy it as the green deployment and route 5% of traffic to it via an Istio VirtualService weight. Monitor green deployment metrics (recall, FPR, p99 latency) for 30 minutes; if metrics are within 5% of blue deployment, shift 100% traffic to green. If green shows degraded metrics, shift traffic back to blue (rollback takes 60 seconds via kubectl patch). The ONNX model file is stored in a model registry (MLflow or SageMaker Model Registry) with version metadata; the serving container pulls the latest "Production" version at startup.

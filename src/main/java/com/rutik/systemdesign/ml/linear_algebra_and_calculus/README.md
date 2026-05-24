@@ -408,63 +408,232 @@ The condition number kappa(A) = sigma_max / sigma_min (ratio of largest to small
 
 ## 14. Case Study
 
-**Problem**: A recommendation team has a user-item rating matrix with 100,000 users, 50,000 items, and 2% density (most entries are missing). They need to predict ratings for unseen user-item pairs to power a recommendation engine. Training a deep neural network is too slow for their 4-hour daily retraining window.
+**Scenario:** A global e-commerce marketplace (280M products, 400M monthly active users) stores 512-dimensional image embeddings for every product, totalling 143 GB of float32 vectors. Visual similarity search serving 18,000 QPS at p99 < 45ms is bottlenecked by memory bandwidth and index build time. The goal: reduce embedding dimensionality from 512d to 64d using PCA while retaining >= 95% explained variance, cutting memory from 143 GB to 18 GB, reducing HNSW index build time from 14 hours to 2 hours, and maintaining Recall@10 >= 0.91 for visual search.
 
-**Solution — Truncated SVD collaborative filtering**:
-
-```python
-import numpy as np
-from scipy.sparse import csr_matrix
-from scipy.sparse.linalg import svds
-
-def build_svd_recommender(
-    user_ids: np.ndarray,        # shape (n_ratings,)
-    item_ids: np.ndarray,        # shape (n_ratings,)
-    ratings: np.ndarray,         # shape (n_ratings,)
-    n_users: int,
-    n_items: int,
-    n_factors: int = 50
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Sparse truncated SVD for collaborative filtering.
-    Uses scipy.sparse.linalg.svds — O(n_factors * nnz) instead of O(n_users * n_items).
-    """
-    # Build sparse rating matrix
-    R = csr_matrix((ratings, (user_ids, item_ids)), shape=(n_users, n_items))
-
-    # Mean-center by user (subtract each user's average rating)
-    user_means = np.array(R.sum(axis=1) / (R != 0).sum(axis=1)).flatten()
-    # Only subtract mean where ratings exist
-    R_centered = R.copy().astype(float)
-    rows, cols = R.nonzero()
-    R_centered[rows, cols] -= user_means[rows]
-
-    # Truncated SVD: only compute top n_factors singular values
-    # svds returns in ascending order — reverse for descending
-    U, sigma, Vt = svds(R_centered, k=n_factors)
-    U = U[:, ::-1]
-    sigma = sigma[::-1]
-    Vt = Vt[::-1, :]
-
-    return U, sigma, Vt, user_means
-
-
-def predict_rating(
-    user_idx: int,
-    item_idx: int,
-    U: np.ndarray,
-    sigma: np.ndarray,
-    Vt: np.ndarray,
-    user_means: np.ndarray
-) -> float:
-    """Predict a single user-item rating."""
-    # User latent vector: U[user] * sigma  (element-wise)
-    user_vec = U[user_idx, :] * sigma         # (n_factors,)
-    item_vec = Vt[:, item_idx]                 # (n_factors,)
-    predicted = float(np.dot(user_vec, item_vec)) + user_means[user_idx]
-    return float(np.clip(predicted, 1.0, 5.0))
+**Architecture:**
+```
+EfficientNet-B5 Backbone (pretrained)
+  Output: 512-dimensional L2-normalised embeddings
+  10M products/day throughput via 8xA100 batch inference
+         |
+         v
+PCA Whitening Pipeline (offline, weekly)
+  Incremental PCA on 280M x 512 matrix
+  Memory budget: 32 GB RAM (cannot load full matrix)
+  Output: PCA transform matrix W (512 x 64)
+  Whitening: divide each PC by sqrt(eigenvalue)
+         |
+         v
+Compressed Embeddings (64d float32)
+  Storage: 280M * 64 * 4 bytes = 71.7 GB -> quantise to int8 = 18 GB
+  Delta-compress with product quantization (PQ) for HNSW
+         |
+         v
+HNSW Index (FAISS, M=32, efConstruction=200)
+  Build time: 2.1 hr on 64 CPU cores
+  Index size: 22 GB (fits in single machine RAM)
+         |
+         v
+Visual Search Service (18K QPS, p99 < 45ms)
+  Query: raw 512d embedding -> apply W -> 64d -> HNSW lookup -> re-rank top-100
+  Re-ranking: full 512d dot product on top-100 candidates
 ```
 
-**Results**: Truncated SVD with 50 factors ran in 8 minutes on CPU (vs 4+ hours for matrix ALS). RMSE on held-out ratings: 0.89. Full SVD would have taken 3 hours and given the same top-50-factor reconstruction. The key insight was using `scipy.sparse.linalg.svds` which operates on the sparse matrix directly, avoiding materializing the dense 100k x 50k matrix (40 GB for float64).
+**Step-by-step implementation:**
 
-**Lesson**: Choosing the right decomposition (sparse truncated SVD vs full dense SVD) reduced wall-clock time by 22x with no accuracy loss, enabling daily retraining within the operational window.
+```python
+from __future__ import annotations
+import numpy as np
+from sklearn.decomposition import IncrementalPCA
+from pathlib import Path
+import struct
+
+def fit_incremental_pca(
+    embedding_shards: list[Path],
+    n_components: int = 64,
+    batch_size: int = 100_000,
+) -> IncrementalPCA:
+    """Fit PCA on 280M embeddings without loading all into RAM."""
+    ipca = IncrementalPCA(n_components=n_components, batch_size=batch_size)
+
+    for shard_path in embedding_shards:
+        # Each shard: ~10M embeddings stored as float32 binary
+        with open(shard_path, "rb") as f:
+            header = struct.unpack("II", f.read(8))  # n_rows, n_dims
+            n_rows, n_dims = header
+            chunk = np.frombuffer(f.read(), dtype=np.float32).reshape(n_rows, n_dims)
+
+        # Process shard in sub-batches to respect batch_size
+        for start in range(0, n_rows, batch_size):
+            batch = chunk[start : start + batch_size]
+            ipca.partial_fit(batch)
+            del batch
+
+        print(f"Processed shard {shard_path.name}: cumulative n_samples={ipca.n_samples_seen_}")
+
+    return ipca
+
+def compute_explained_variance(ipca: IncrementalPCA) -> dict[str, float]:
+    cumvar = float(np.cumsum(ipca.explained_variance_ratio_)[-1])
+    print(f"Explained variance (64 components): {cumvar:.4f}")
+    return {
+        "explained_variance_64d": cumvar,
+        "top_component_variance": float(ipca.explained_variance_ratio_[0]),
+        "bottom_component_variance": float(ipca.explained_variance_ratio_[-1]),
+    }
+```
+
+```python
+def apply_pca_whitening(
+    embeddings: np.ndarray,   # shape (N, 512), L2-normalised
+    ipca: IncrementalPCA,
+    whitening: bool = True,
+    eps: float = 1e-6,
+) -> np.ndarray:
+    """Project to PCA subspace with optional whitening."""
+    # Center using training mean
+    embeddings_centered = embeddings - ipca.mean_
+
+    # Project onto principal components: (N, 512) @ (512, 64) = (N, 64)
+    projected = embeddings_centered @ ipca.components_.T
+
+    if whitening:
+        # Divide by sqrt(eigenvalue) to make each dimension unit variance
+        std = np.sqrt(ipca.explained_variance_ + eps)
+        projected = projected / std
+
+    # L2-normalise projected vectors for cosine similarity via dot product
+    norms = np.linalg.norm(projected, axis=1, keepdims=True)
+    projected = projected / (norms + eps)
+
+    return projected.astype(np.float32)
+
+def quantise_to_int8(
+    embeddings_f32: np.ndarray,   # shape (N, 64), normalised to [-1, 1]
+) -> tuple[np.ndarray, float, float]:
+    """Quantise float32 embeddings to int8 for 4x memory reduction."""
+    min_val = float(embeddings_f32.min())
+    max_val = float(embeddings_f32.max())
+    scale = (max_val - min_val) / 255.0
+    quantised = ((embeddings_f32 - min_val) / scale).round().astype(np.int8)
+    return quantised, scale, min_val
+```
+
+```python
+import faiss
+
+def build_hnsw_index(
+    embeddings: np.ndarray,   # shape (N, 64), float32, L2-normalised
+    M: int = 32,
+    ef_construction: int = 200,
+    metric: int = faiss.METRIC_INNER_PRODUCT,  # cosine via L2-norm
+) -> faiss.IndexHNSWFlat:
+    d = embeddings.shape[1]
+    index = faiss.IndexHNSWFlat(d, M, metric)
+    index.hnsw.efConstruction = ef_construction
+    index.hnsw.efSearch = 128   # higher ef at search time for better recall
+
+    # Add in batches to show progress
+    batch_size = 1_000_000
+    for start in range(0, len(embeddings), batch_size):
+        batch = embeddings[start : start + batch_size]
+        index.add(batch)
+        if start % 10_000_000 == 0:
+            print(f"Indexed {start + len(batch):,} / {len(embeddings):,}")
+
+    return index
+
+def search_with_rerank(
+    query_512d: np.ndarray,        # shape (1, 512), raw embedding
+    ipca: IncrementalPCA,
+    index: faiss.IndexHNSWFlat,
+    full_embeddings_512d: np.ndarray,  # kept in S3, fetched for top-K
+    top_k: int = 10,
+    candidate_k: int = 100,
+) -> tuple[np.ndarray, np.ndarray]:
+    query_64d = apply_pca_whitening(query_512d, ipca, whitening=True)
+    distances, candidate_ids = index.search(query_64d, candidate_k)
+
+    # Re-rank top-100 using full 512d dot product
+    candidate_embeddings = full_embeddings_512d[candidate_ids[0]]
+    scores = (candidate_embeddings @ query_512d.T).squeeze()
+    reranked_order = np.argsort(-scores)[:top_k]
+    return candidate_ids[0][reranked_order], scores[reranked_order]
+```
+
+**Key pitfalls (3 with BROKEN->FIX):**
+
+**Pitfall 1 - Fitting PCA on unnormalised embeddings before L2-normalisation:**
+```python
+# BROKEN: fit PCA on raw embeddings then normalise after; PCA axes align with
+# variance in unnormalised space, not the meaningful directional structure
+ipca.partial_fit(raw_embeddings)   # embeddings with varying norms
+pca_embs = ipca.transform(raw_embeddings)
+pca_embs_normalised = pca_embs / np.linalg.norm(pca_embs, axis=1, keepdims=True)
+# Recall@10 degrades from 0.91 to 0.81 due to axis misalignment
+
+# FIX: L2-normalise embeddings BEFORE fitting PCA
+l2_norms = np.linalg.norm(raw_embeddings, axis=1, keepdims=True)
+normalised = raw_embeddings / (l2_norms + 1e-8)
+ipca.partial_fit(normalised)   # PCA in unit-sphere subspace
+```
+
+**Pitfall 2 - Applying PCA transform matrix fitted on old product set to new products:**
+```python
+# BROKEN: weekly PCA refit changes the component axes;
+# old index uses old W, new products use new W -> incompatible embeddings
+new_ipca = fit_incremental_pca(new_shards)   # different W than last week
+new_embeddings = apply_pca_whitening(new_products, new_ipca)
+# Search mixes new 64d vectors (new W) with existing 64d vectors (old W) -> nonsense
+
+# FIX: reproject ALL existing embeddings when PCA is refitted, or use
+# incremental update with rotation alignment between old and new PCA
+# Option 1 (simpler): full re-projection and HNSW rebuild on each refit
+# Option 2 (efficient): align new PCA to old via Procrustes rotation
+R, _ = np.linalg.qr(old_W.T @ new_W)   # orthogonal alignment
+aligned_new_W = new_W @ R               # rotate new axes to match old
+```
+
+**Pitfall 3 - Ignoring whitening causes PCA dimensions with unequal variance to bias HNSW:**
+```python
+# BROKEN: without whitening, first few PCs have much larger variance than later PCs
+# HNSW distance computation is dominated by the first 5-10 dimensions
+projected = embeddings @ ipca.components_.T   # no whitening
+# PC1 variance = 12.4, PC64 variance = 0.02 -> 620x imbalance
+# L2 distance in 64d space effectively uses only ~15 meaningful dimensions
+
+# FIX: whiten to equalise variance across all 64 dimensions
+std = np.sqrt(ipca.explained_variance_ + 1e-6)
+projected_whitened = projected / std   # all dims have variance ~1
+# Then L2-normalise so dot product = cosine similarity
+# Recall@10 improves from 0.79 to 0.91 after whitening
+```
+
+**Metrics and results:**
+
+| Metric | 512d baseline | 64d PCA + whitening |
+|---|---|---|
+| Explained variance retained | 100% | 96.3% |
+| Embedding memory (280M products) | 573 GB | 71.7 GB float32 / 18 GB int8 |
+| HNSW index build time | 14.2 hr | 2.1 hr |
+| HNSW index size | 89 GB | 22 GB |
+| Search throughput (single machine) | 4,200 QPS | 18,400 QPS |
+| p50 search latency | 8ms | 3ms |
+| p99 search latency | 62ms | 41ms |
+| Recall@10 (exact NN oracle) | 1.00 | 0.91 |
+| Recall@10 (with 512d re-rank) | 1.00 | 0.96 |
+| IncrementalPCA fit time | N/A | 3.8 hr (32 cores) |
+
+**Interview discussion points:**
+
+**Why does whitening improve downstream HNSW search quality?** Without whitening, PCA dimensions have variance proportional to their eigenvalues; the first principal component captures 12.4x more variance than the 64th. When computing L2 distances in this space, the first few dimensions contribute 12-600 times more to the distance than later dimensions, effectively discarding information in the lower-variance components. Whitening normalises each dimension to unit variance, so all 64 components contribute equally to distance computations, fully utilising the dimensionality reduction budget and improving Recall@10 from 0.79 to 0.91.
+
+**What is the computational complexity of projecting 280M embeddings and how does IncrementalPCA fit within 32 GB RAM?** Full-batch PCA on a 280M x 512 matrix requires storing the covariance matrix (512 x 512 = 2MB, trivial) and the input matrix (573 GB, infeasible). IncrementalPCA processes the data in batches of 100K rows (200 MB per batch), updating sufficient statistics (sum and sum-of-squares) incrementally without storing the full matrix. The projection step (280M x 512) @ (512 x 64) requires loading each shard of 10M rows (20 GB) and computing a matrix product, achievable with 32 GB RAM by streaming shards sequentially.
+
+**Why do you re-rank with full 512d embeddings rather than accepting 64d search results directly?** 64d PCA at 96.3% explained variance discards 3.7% of variance that sometimes contains discriminative fine-grained texture information. For very similar products (e.g., two near-identical shirts differing only in subtle print pattern), the distinguishing signal may sit in the discarded dimensions. Re-ranking the top-100 candidates using full 512d dot products recovers this precision: Recall@10 improves from 0.91 to 0.96, while adding only 8ms of latency (100 dot products in 512d = trivial on any SIMD CPU).
+
+**How does product quantisation (PQ) for HNSW differ from int8 scalar quantisation?** Scalar quantisation uniformly maps each float32 value to int8, reducing 512d embeddings from 2048 bytes to 512 bytes (4x). Product quantisation splits the 64d vector into M sub-vectors (e.g., 8 sub-vectors of 8d each), trains a codebook of 256 centroids per sub-vector, and encodes each sub-vector as a single byte index. PQ reduces 64d float32 embeddings from 256 bytes to 8 bytes (32x compression), at the cost of additional reconstruction error. FAISS's IVFPQ combines inverted file indexing with PQ encoding, fitting 280M 64d embeddings in 2.2 GB with Recall@10 of 0.87 - a further 10x memory reduction at 4% recall cost.
+
+**What is the Procrustes alignment used when refitting PCA weekly and why is it necessary?** When PCA is refit on a new snapshot of 280M products (with 1.5M product additions and deletions since last week), the principal component axes may rotate compared to the previous week's PCA. Products indexed under the old PCA axes would be incompatible with new products projected under the new axes if both are served from the same HNSW index. Procrustes alignment finds the optimal rotation matrix R minimising ||W_new - W_old @ R||_F, allowing new products to be projected to align with the existing index without a full rebuild, reducing weekly incremental update time from 2.1 hours to 18 minutes.
+
+**What is the numerical stability issue with computing covariance matrices from incremental batches?** Naive incremental computation of the sample covariance accumulates sum(x) and sum(x^2) separately, then computes variance as mean(x^2) - mean(x)^2. When values are large and close together (e.g., normalised embeddings near 0 with small differences), catastrophic cancellation occurs in floating-point arithmetic, producing negative variances. The correct approach is Welford's online algorithm, which computes mean and variance in a single numerically stable pass without computing sum of squares. Scikit-learn's IncrementalPCA implements Welford's algorithm internally, making it safe for this use case.

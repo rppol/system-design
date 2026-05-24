@@ -458,56 +458,159 @@ The container publishes: `ContextRefreshedEvent` (refresh complete), `ContextSta
 
 ## 14. Case Study
 
-### Problem: E-commerce Platform — Diagnosing Slow Startup
+### Scenario: Plugin-Based Analytics Platform with Runtime Bean Registration
 
-**Context:** A Spring Boot e-commerce application takes 45 seconds to start. Kubernetes readiness probe fails (10-second timeout), causing repeated pod restarts and deployment failures.
+**Context.** A multi-tenant analytics SaaS lets each tenant connect its own warehouse (Postgres, Snowflake, BigQuery). Tenant `DataSource` beans cannot be known at compile time — they are registered **programmatically at runtime** the first time a tenant makes a request, using `DefaultListableBeanFactory.registerBeanDefinition()`. The platform holds **~50 tenant-specific `DataSource` beans** live, each cached for the tenant's session lifetime. Peak: 3,000 tenant queries/sec across 50 active warehouses.
 
-**Investigation:**
+### Architecture
 
-```bash
-# Enable startup actuator
-management.endpoints.web.exposure.include=startup,beans
-
-# Start with debug logging
-java -jar app.jar --debug 2>&1 | grep "Started.*seconds"
+```
+   Request (X-Tenant-Id: acme)
+        |
+        v
+   +---------------------------+    bean "ds-acme" exists?
+   | TenantDataSourceRegistry  |---- no ---> registerBeanDefinition("ds-acme", ...)
+   +-------------+-------------+                       |
+                 | yes (cached)                        v
+                 v                            +------------------------+
+        ctx.getBean("ds-acme")                | DefaultListableBeanFactory|
+                 |                             |  (singleton scope)        |
+                 v                             +------------------------+
+        +-----------------+                            |
+        | TenantContextBPP|  injects TenantContext into every tenant bean
+        +-----------------+
+                 |
+                 v
+        JdbcTemplate -> tenant warehouse
 ```
 
-The startup log reveals 200 beans being initialized, including 50 heavy `@Component` beans that load configuration from a remote Config Server, each making a blocking HTTP call.
-
-**Root Cause Analysis:**
-- All 50 configuration beans are eager singletons, all initialized before the app is "ready"
-- Each makes a 500ms HTTP call to Config Server = 25 seconds in sequential initialization
-- 20 more seconds spent on Hibernate schema validation against a slow external DB
-
-**Solution:**
+### Runtime Bean Registration
 
 ```java
-// Step 1: Profile with startup endpoint
-// GET /actuator/startup — shows each bean's initialization time
-
-// Step 2: Make config-loading beans lazy
 @Component
-@Lazy
-public class RemoteConfigLoader {
-    @PostConstruct
-    public void loadConfig() {
-        // 500ms HTTP call — now only on first use
+public class TenantDataSourceRegistry {
+
+    private final DefaultListableBeanFactory beanFactory;   // from ConfigurableApplicationContext
+
+    public TenantDataSourceRegistry(ConfigurableApplicationContext ctx) {
+        this.beanFactory = (DefaultListableBeanFactory) ctx.getBeanFactory();
+    }
+
+    public DataSource forTenant(TenantConfig cfg) {
+        String beanName = "ds-" + cfg.id();
+        if (!beanFactory.containsBeanDefinition(beanName)) {
+            BeanDefinition def = BeanDefinitionBuilder
+                .genericBeanDefinition(HikariDataSource.class)
+                .addPropertyValue("jdbcUrl", cfg.jdbcUrl())
+                .addPropertyValue("username", cfg.username())
+                .addPropertyValue("password", cfg.password())
+                .addPropertyValue("maximumPoolSize", 5)
+                .setScope(BeanDefinition.SCOPE_SINGLETON)   // one pool per tenant, reused
+                .getBeanDefinition();
+            beanFactory.registerBeanDefinition(beanName, def);   // container now manages it
+        }
+        return beanFactory.getBean(beanName, DataSource.class);  // lazily instantiated on first get
     }
 }
-
-// Step 3: Disable Hibernate DDL validation at startup; validate async
-spring.jpa.properties.hibernate.hbm2ddl.auto=none
-# Run schema validation separately in a health check
-
-// Step 4: Add compile-time component index
-// pom.xml:
-// <dependency>
-//   <groupId>org.springframework</groupId>
-//   <artifactId>spring-context-indexer</artifactId>
-//   <optional>true</optional>
-// </dependency>
 ```
 
-**Result:** Startup time dropped from 45 seconds to 8 seconds. The compile-time index eliminated classpath scanning (saved 2s), lazy initialization of remote config beans (saved 25s), and async schema validation (saved 10s).
+```java
+// A BeanPostProcessor injects the resolved TenantContext into tenant-scoped components
+@Component
+public class TenantContextBeanPostProcessor implements BeanPostProcessor {
+    @Override
+    public Object postProcessBeforeInitialization(Object bean, String name) {
+        if (bean instanceof TenantAware aware) {
+            aware.setTenantContext(TenantContextHolder.current());
+        }
+        return bean;
+    }
+}
+```
 
-**Lesson:** The IoC container's eager initialization is a feature (fail-fast) but can be a liability when beans have slow side effects in `@PostConstruct`. Use the startup actuator, lazy initialization for non-critical beans, and compile-time indexing for large codebases.
+```
+BeanFactory vs ApplicationContext refresh:
+- BeanFactory: lazy, no auto BPP/BFPP registration, no event publishing, no i18n.
+- ApplicationContext.refresh(): runs BFPPs -> registers BPPs -> instantiates non-lazy singletons
+  -> publishes ContextRefreshedEvent. Runtime registration here happens AFTER refresh, so the new
+  bean is instantiated lazily on first getBean(), not during the refresh cycle.
+```
+
+### Metrics
+
+- Cold tenant registration + pool warm-up: **~120ms** (one-time per tenant).
+- Cached tenant lookup (`containsBeanDefinition` + `getBean`): **<0.1ms**.
+- 50 live tenant pools x 5 connections = **250 connections** budgeted; idle pools evicted after 10 min.
+
+### Pitfalls
+
+**Pitfall 1 — Calling `getBean()` during `BeanFactoryPostProcessor` execution.**
+```java
+// BROKEN: a BFPP that resolves a bean forces premature instantiation before BPPs are registered,
+// so that bean (and its dependencies) skip post-processing (no AOP, no @Transactional proxy)
+public class BadBFPP implements BeanFactoryPostProcessor {
+    public void postProcessBeanFactory(ConfigurableListableBeanFactory bf) {
+        MetricsService m = bf.getBean(MetricsService.class);  // premature -> proxying skipped
+    }
+}
+```
+```java
+// FIXED: a BFPP only inspects/edits BeanDefinitions; never instantiate beans here
+public class GoodBFPP implements BeanFactoryPostProcessor {
+    public void postProcessBeanFactory(ConfigurableListableBeanFactory bf) {
+        BeanDefinition bd = bf.getBeanDefinition("metricsService");
+        bd.setLazyInit(true);   // mutate metadata, do not create the instance
+    }
+}
+```
+
+**Pitfall 2 — `@Autowired` on a `BeanFactoryPostProcessor` causes a circular bootstrap.**
+```java
+// BROKEN: BFPPs run before normal beans exist; autowiring forces early creation of dependencies
+// and emits "is not eligible for getting processed by all BeanPostProcessors" warnings
+public class TenantBFPP implements BeanFactoryPostProcessor {
+    @Autowired DataSource dataSource;   // pulled in too early, proxying skipped
+}
+```
+```java
+// FIXED: pass collaborators lazily via ObjectProvider, resolved only when actually needed
+public class TenantBFPP implements BeanFactoryPostProcessor {
+    public void postProcessBeanFactory(ConfigurableListableBeanFactory bf) {
+        ObjectProvider<DataSource> ds = bf.getBeanProvider(DataSource.class);
+        // ds.getIfAvailable() only when a definition truly requires it, not at BFPP time
+    }
+}
+```
+
+**Pitfall 3 — Prototype bean injected into a singleton is created only once.**
+```java
+// BROKEN: @Autowired resolves once at singleton creation; the "prototype" is effectively a singleton
+@Component
+class ReportRunner {
+    @Autowired QueryJob job;   // prototype, but the SAME instance reused on every run
+    void run() { job.execute(); }
+}
+```
+```java
+// FIXED: use ObjectProvider (or ApplicationContext.getBean) to get a fresh prototype per call
+@Component
+class ReportRunner {
+    private final ObjectProvider<QueryJob> jobs;
+    ReportRunner(ObjectProvider<QueryJob> jobs) { this.jobs = jobs; }
+    void run() { jobs.getObject().execute(); }   // new QueryJob each invocation
+}
+```
+
+### Interview Q&A
+
+**Why register tenant `DataSource` beans at runtime instead of declaring them as `@Bean`?** Tenants and their warehouse credentials are unknown at compile time and change while the app runs. `registerBeanDefinition()` lets the container manage, cache, and lifecycle-scope each pool while still applying BPP injection and dependency resolution, which a plain map of `DataSource` objects would not get.
+
+**What is the difference between `BeanFactory` and `ApplicationContext` here?** `BeanFactory` is the raw container with lazy instantiation and no automatic post-processing. `ApplicationContext` extends it with automatic `BeanPostProcessor`/`BeanFactoryPostProcessor` registration, event publishing, and message resolution. Runtime registration uses the underlying `DefaultListableBeanFactory` exposed by the context.
+
+**At what point in `refresh()` are post-processors applied, and why does that matter for runtime beans?** `refresh()` registers BFPPs, then BPPs, then instantiates non-lazy singletons. A bean registered after refresh is instantiated lazily on first `getBean()` and still passes through the already-registered BPPs, so tenant-context injection works for late-registered beans.
+
+**Why does instantiating a bean inside a BFPP break proxying?** BPPs (which create AOP/transaction proxies) are not all registered yet when BFPPs run. A bean created during BFPP execution bypasses those BPPs, so it never gets wrapped — `@Transactional`, `@Async`, and caching advice silently do nothing on it.
+
+**Why is a prototype injected into a singleton not "really" a prototype?** Dependency injection happens once, when the singleton is created. The container resolves the prototype a single time and stores that reference. To get a new instance per use, the singleton must ask the container each time via `ObjectProvider`, method injection (`@Lookup`), or `ApplicationContext.getBean()`.
+
+**How do you bound resource usage with 50 live tenant pools?** Cap each pool small (5 connections), evict idle pools after a timeout, and monitor total connections against the warehouse limits. Because each pool is a managed singleton, eviction means removing the bean definition and closing the `DataSource`, so reconnecting a tenant simply re-registers it.

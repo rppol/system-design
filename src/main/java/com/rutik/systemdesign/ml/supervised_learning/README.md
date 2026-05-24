@@ -494,44 +494,219 @@ Cross-validation (CV) is a technique for estimating generalization performance u
 
 ## 14. Case Study
 
-**Problem**: a mid-size e-commerce company has 2 million customers and wants to predict 30-day churn (no purchase in 30 days after last activity). The current system is a simple rule: flag customers inactive for 14 days. Business impact: incorrectly flagging churned customers triggers unnecessary 20%-off discount emails, costing $4 per customer. Missing a churning customer costs $50 in lost revenue.
+**Scenario:** A fintech company processes 50,000 card transactions per second across 120M customers. The fraud team needs a real-time scoring pipeline that flags transactions in under 15ms (p99) with AUC-ROC >= 0.97 while keeping false-positive rate under 0.3% to avoid blocking legitimate purchases. The dataset has 2.4B historical transactions with 0.08% fraud rate (severe class imbalance).
 
-**Dataset**: 180 days of purchase history. Positive label: churned (no purchase in days 31-60 after observation window). Negative label: retained. Class ratio: 15% churned.
-
-**Architecture**:
+**Architecture:**
 ```
-Raw Events (clickstream, purchases, support tickets)
-    |
-    v
-Feature Store (Spark batch job, daily refresh)
-    |--- recency: days since last purchase
-    |--- frequency: purchases in last 30 days
-    |--- monetary: total spend last 90 days
-    |--- support_tickets: count last 30 days
-    |--- category_diversity: distinct categories purchased
-    |
-    v
-Training Pipeline (sklearn Pipeline)
-    |--- StandardScaler
-    |--- LogisticRegression (C=0.1, max_iter=1000, class_weight="balanced")
-    |
-    v
-Evaluation (held-out 20% test set, temporal split)
-    |--- AUC-ROC: 0.82
-    |--- Precision at threshold 0.35: 0.61
-    |--- Recall at threshold 0.35: 0.74
-    |
-    v
-Business Calibration
-    |--- cost matrix: FP=$4, FN=$50
-    |--- optimal threshold: 0.35 (maximizes expected profit)
-    |
-    v
-Batch Scoring (nightly, score all active customers)
-    |--- store scores in feature store
-    |--- trigger discount email for score > 0.35
+Raw Transactions (Kafka, 50K TPS)
+         |
+         v
+Feature Service (Redis, p99 < 2ms)
+  - velocity: txn count last 1min/5min/1hr
+  - merchant risk score (precomputed)
+  - user behaviour embeddings (128d)
+         |
+         v
+sklearn Pipeline  ──────────────────────────────────
+  ColumnTransformer                                  |
+    - numeric: StandardScaler                        |
+    - categorical: OrdinalEncoder                    |
+    - sparse: TruncatedSVD (128d -> 32d)            |
+  BalancedRandomForest (n=500, SMOTE-aware)         |
+         |                                           |
+         v                                           v
+Threshold Calibrator            Explanation (SHAP values)
+(Platt Scaling)                  top-3 features per decision
+         |
+         v
+Decision Engine (< 15ms p99)
+  score < 0.3  -> approve
+  0.3 - 0.7   -> step-up auth
+  > 0.7        -> block + alert
 ```
 
-**Outcome**: replacing the 14-day rule with the logistic regression model reduced unnecessary discounts by 38% (fewer false positives) while increasing detected churners by 22% (higher recall on true churners). Net revenue impact: +$1.2M annualized.
+**Step-by-step implementation:**
 
-**Lessons**: the recency feature alone explained 60% of predictive power (confirmed by SHAP). The class_weight="balanced" parameter was essential — without it, the model achieved 85% accuracy but 0% recall on churned customers. Temporal split for evaluation revealed that the model trained on summer behavior needed retraining every quarter to account for seasonal purchasing patterns.
+```python
+from __future__ import annotations
+import numpy as np
+import pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler, OrdinalEncoder
+from sklearn.decomposition import TruncatedSVD
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.metrics import roc_auc_score, average_precision_score
+from imblearn.ensemble import BalancedRandomForestClassifier
+from imblearn.pipeline import Pipeline as ImbPipeline
+
+NUMERIC_COLS: list[str] = [
+    "amount", "velocity_1min", "velocity_5min", "velocity_1hr",
+    "merchant_risk_score", "days_since_last_txn",
+]
+CATEGORICAL_COLS: list[str] = ["merchant_category", "entry_mode", "card_type"]
+EMBEDDING_COLS: list[str] = [f"emb_{i}" for i in range(128)]
+
+def build_pipeline() -> ImbPipeline:
+    numeric_transformer = StandardScaler()
+    categorical_transformer = OrdinalEncoder(
+        handle_unknown="use_encoded_value", unknown_value=-1
+    )
+    embedding_transformer = TruncatedSVD(n_components=32, random_state=42)
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", numeric_transformer, NUMERIC_COLS),
+            ("cat", categorical_transformer, CATEGORICAL_COLS),
+            ("emb", embedding_transformer, EMBEDDING_COLS),
+        ],
+        remainder="drop",
+    )
+
+    clf = BalancedRandomForestClassifier(
+        n_estimators=500,
+        max_depth=20,
+        min_samples_leaf=5,
+        n_jobs=-1,
+        random_state=42,
+        sampling_strategy="all",   # resample majority each tree
+    )
+    calibrated = CalibratedClassifierCV(clf, method="isotonic", cv=5)
+
+    return ImbPipeline([
+        ("preprocessor", preprocessor),
+        ("classifier", calibrated),
+    ])
+```
+
+```python
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import precision_recall_curve
+
+def evaluate_pipeline(
+    pipeline: ImbPipeline,
+    X: pd.DataFrame,
+    y: pd.Series,
+    n_splits: int = 5,
+) -> dict[str, float]:
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    auc_roc_scores: list[float] = []
+    auc_pr_scores: list[float] = []
+
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X, y)):
+        X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+        y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+        pipeline.fit(X_train, y_train)
+        probs = pipeline.predict_proba(X_val)[:, 1]
+        auc_roc_scores.append(roc_auc_score(y_val, probs))
+        auc_pr_scores.append(average_precision_score(y_val, probs))
+        print(f"Fold {fold}: AUC-ROC={auc_roc_scores[-1]:.4f}")
+
+    return {
+        "mean_auc_roc": float(np.mean(auc_roc_scores)),
+        "std_auc_roc": float(np.std(auc_roc_scores)),
+        "mean_auc_pr": float(np.mean(auc_pr_scores)),
+    }
+```
+
+```python
+import joblib
+import shap
+
+def explain_predictions(
+    pipeline: ImbPipeline,
+    X_sample: pd.DataFrame,
+    top_k: int = 3,
+) -> list[dict[str, float]]:
+    # Extract fitted preprocessor and classifier separately for SHAP
+    preprocessor = pipeline.named_steps["preprocessor"]
+    classifier = pipeline.named_steps["classifier"]
+    X_transformed = preprocessor.transform(X_sample)
+
+    explainer = shap.TreeExplainer(classifier.estimator)
+    shap_values = explainer.shap_values(X_transformed)
+    fraud_shap = shap_values[1]   # class=1 (fraud)
+
+    feature_names = (
+        NUMERIC_COLS
+        + CATEGORICAL_COLS
+        + [f"svd_{i}" for i in range(32)]
+    )
+    results: list[dict[str, float]] = []
+    for row_idx in range(len(X_sample)):
+        top_indices = np.argsort(np.abs(fraud_shap[row_idx]))[::-1][:top_k]
+        results.append({
+            feature_names[i]: float(fraud_shap[row_idx][i])
+            for i in top_indices
+        })
+    return results
+```
+
+**Key pitfalls (3 with BROKEN->FIX):**
+
+**Pitfall 1 - Data leakage through fit-transform on full dataset:**
+```python
+# BROKEN: fitting scaler on full dataset leaks validation stats
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)   # uses val/test distribution
+X_train_s, X_val_s = X_scaled[:n], X_scaled[n:]
+
+# FIX: fit only on training fold, transform val separately
+scaler = StandardScaler()
+X_train_s = scaler.fit_transform(X_train)
+X_val_s = scaler.transform(X_val)    # no leakage
+```
+
+**Pitfall 2 - Wrong metric for imbalanced fraud data:**
+```python
+# BROKEN: accuracy is 99.92% even when predicting all-legitimate
+from sklearn.metrics import accuracy_score
+score = accuracy_score(y_val, pipeline.predict(X_val))  # misleading
+
+# FIX: use AUC-PR (area under precision-recall curve)
+from sklearn.metrics import average_precision_score
+score = average_precision_score(y_val, pipeline.predict_proba(X_val)[:, 1])
+# AUC-PR 0.891 is meaningfully informative for 0.08% fraud rate
+```
+
+**Pitfall 3 - Threshold chosen on validation set then applied to test set:**
+```python
+# BROKEN: picking threshold on same set used for final AUC measurement
+probs = pipeline.predict_proba(X_val)[:, 1]
+best_thresh = thresholds[np.argmax(f1_scores)]   # overfit threshold
+final_auc = roc_auc_score(y_val, probs)           # optimistically biased
+
+# FIX: hold out a separate threshold-tuning set
+X_tune, X_test, y_tune, y_test = train_test_split(X_val, y_val, test_size=0.5)
+probs_tune = pipeline.predict_proba(X_tune)[:, 1]
+best_thresh = thresholds[np.argmax(f1_on_tune)]
+final_auc = roc_auc_score(y_test, pipeline.predict_proba(X_test)[:, 1])
+```
+
+**Metrics and results:**
+
+| Metric | Before (LR baseline) | After (BalancedRF + calibration) |
+|---|---|---|
+| AUC-ROC | 0.941 | 0.987 |
+| AUC-PR | 0.712 | 0.891 |
+| FPR @ recall=0.85 | 1.8% | 0.27% |
+| Inference p50 | 3ms | 8ms |
+| Inference p99 | 9ms | 14ms |
+| Training time (8 cores) | 4 min | 38 min |
+| Model size | 2 MB | 1.4 GB |
+| Fraud caught ($M/day) | 4.2 | 7.1 |
+
+**Interview discussion points:**
+
+**Why use BalancedRandomForestClassifier over SMOTE + standard RandomForest for fraud detection?** BalancedRandomForest resamples the majority class within each tree's bootstrap sample rather than synthesising minority examples globally. This avoids SMOTE's risk of generating synthetic frauds that lie in majority-class territory, and keeps memory bounded since no augmented dataset is stored in RAM. In production with 2.4B rows, global SMOTE would require 190M synthetic rows; per-tree bootstrap stays at 60K rows per tree regardless of dataset size.
+
+**How does probability calibration improve business outcomes beyond AUC?** An uncalibrated BalancedRF outputs probabilities clustered near 0 and 1, making the 0.3-0.7 "step-up auth" band nearly empty. Isotonic regression calibration spreads predicted probabilities to match empirical fraud rates, so the threshold ranges become operationally meaningful: 22% of transactions fall in step-up range, giving agents a workable review queue instead of binary block/pass decisions.
+
+**What is the risk of using SHAP with CalibratedClassifierCV and how do you fix it?** CalibratedClassifierCV wraps the base estimator in a meta-estimator, so TreeExplainer must be called on the inner estimator (`clf.estimator`), not the wrapper. Calling TreeExplainer on the wrapper raises a TypeError or silently uses a slow kernel explainer, adding 400ms per request. The fix is to extract `pipeline.named_steps["classifier"].estimator` before creating the explainer, then apply the same preprocessing transform manually.
+
+**Why is StratifiedKFold essential here rather than standard KFold?** With 0.08% fraud rate, a 5-fold split with random KFold can place 0 fraud examples in a validation fold by chance in smaller shards, making AUC-ROC undefined. StratifiedKFold guarantees each fold has the same class ratio (approximately 0.08% fraud), so every validation set has at minimum 192 fraud examples in a 240K-row validation fold, giving statistically stable AUC estimates with confidence intervals below +/-0.003.
+
+**How would you handle concept drift as merchant fraud patterns shift?** Deploy a shadow model retrained weekly on a 90-day rolling window, comparing its AUC-PR against the production model on a held-out recent window. If shadow AUC-PR exceeds production by more than 0.015, trigger a blue-green promotion. Additionally, monitor input feature distribution shift using Population Stability Index (PSI) on velocity features daily; PSI > 0.2 triggers retraining regardless of model performance delta.
+
+**What tradeoff exists between model size (1.4 GB) and inference latency for the p99 < 15ms SLA?** The 500-tree forest must be loaded into CPU cache for low-latency prediction; at 1.4 GB it spans multiple NUMA nodes on a 32-core machine, causing cache misses that push p99 to 18ms. The fix is to reduce to 200 trees (800 MB, fits in LLC on dual-socket Xeon) accepting AUC-ROC drop from 0.987 to 0.983, or to use model quantization (int8 leaf values) cutting model size to 380 MB with only 0.001 AUC-ROC loss, achieving p99 of 11ms.

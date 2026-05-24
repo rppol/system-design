@@ -796,3 +796,282 @@ A: Set `gridSize = number of available cores`. With 8 cores and 8 partitions, al
 **Q: How would you implement a progress API so operators can check how far along the job is?**
 
 A: Expose an actuator endpoint that queries the `JobRepository` for the current `JobExecution` and aggregates read/write counts across all `StepExecution`s. Spring Batch Actuator (`spring-boot-actuator` + `spring-batch`) provides `/actuator/batch/jobs` and `/actuator/batch/jobs/{jobName}/{jobInstanceId}` endpoints out of the box in Spring Boot 3.x. For a real-time dashboard, push the step execution metrics to a Micrometer gauge that Prometheus scrapes every 15 seconds, and display in Grafana.
+
+---
+
+## Failure Scenarios and Recovery
+
+Batch jobs run unattended overnight, so the defining question is what happens when a job dies at record 750,000 of a million. Spring Batch's `JobRepository` is the durable state machine that makes restart-from-failure possible.
+
+### Failure: Job Dies Mid-Chunk
+
+Spring Batch commits at chunk boundaries. With a chunk size of 1,000, after processing 750 chunks the `JobRepository` has recorded 750,000 read/write counts and the read cursor position for each step. If the process is killed at chunk 751, that in-flight chunk's transaction rolls back (its 1,000 items are not committed), and the `StepExecution` is left in a `STARTED`/`FAILED` state with the last committed read count at 750,000.
+
+```
+JobRepository state after a crash at chunk 751:
+
+  BATCH_JOB_EXECUTION:   status=FAILED, exit_code=FAILED
+  BATCH_STEP_EXECUTION:  read_count=750000, write_count=750000,
+                         commit_count=750, status=FAILED
+  -> last committed chunk = 750; chunk 751 rolled back cleanly
+```
+
+On restart, Spring Batch finds the existing `JobInstance` (same identifying job parameters), sees the `FAILED` execution, and resumes the step from read offset 750,000 — it does NOT reprocess the first 750,000 records. This requires the step to be restartable and the reader to be restartable (e.g., `FlatFileItemReader` persists `read.count` in the `ExecutionContext`).
+
+```java
+// FIX: ensure the job/step is restartable and parameters are identifying
+@Bean
+public Job importJob(JobRepository repo, Step importStep) {
+    return new JobBuilder("importJob", repo)
+        .preventRestart()  // BROKEN if uncommented: forbids restart-from-failure
+        .start(importStep)
+        .build();
+}
+
+// Correct version: do NOT call preventRestart(); leave the step restartable (default true)
+@Bean
+public Step importStep(JobRepository repo, PlatformTransactionManager tx,
+                       ItemReader<Record> reader, ItemWriter<Record> writer) {
+    return new StepBuilder("importStep", repo)
+        .<Record, Record>chunk(1000, tx)
+        .reader(reader)        // FlatFileItemReader is restartable: saves read.count
+        .processor(processor())
+        .writer(writer)
+        .faultTolerant()
+        .skipLimit(100_000)
+        .skip(FlatFileParseException.class)
+        .build();
+}
+```
+
+Recovery procedure:
+1. Investigate the failure cause (disk full, downstream DB outage, bad record beyond skip limit).
+2. Fix the root cause.
+3. Relaunch the job with the SAME identifying job parameters (e.g., `run.date=2026-05-24`). Spring Batch resumes from the last committed chunk automatically.
+4. Time-to-recovery: only the un-processed remainder is reprocessed. A crash at 75% means re-running ~25% of the work, not 100%.
+
+Note: identifying parameters matter. If you launch with a new `run.id` timestamp every time (a non-identifying-vs-identifying mistake), Spring Batch creates a brand-new `JobInstance` and reprocesses from zero. Use a `JobParametersIncrementer` only for scheduled fresh runs, never for restarts.
+
+### Failure: Writer Succeeds but Process Crashes Before Commit Metadata Persists
+
+The chunk transaction and the `JobRepository` metadata update participate in the same transaction (when sharing a `PlatformTransactionManager`), so they commit atomically. If they used separate transaction managers, a crash between the data write and the metadata write would double-process the chunk on restart. Fix: keep the business data and batch metadata on the same `DataSource`/transaction manager so chunk commit and bookkeeping are atomic.
+
+---
+
+## Capacity Planning
+
+### Chunk and Throughput Math
+
+```
+Total records:    1,000,000
+Chunk size:       1,000
+Chunks:           1,000,000 / 1,000 = 1,000 chunks
+Per-chunk time:   200ms (read + process + write 1,000 items)
+
+Single-threaded:  1,000 chunks x 200ms = 200,000ms = 200 seconds
+```
+
+### Parallelism with Partitioning
+
+```
+TaskExecutorPartitioner across 8 threads:
+  1,000 chunks / 8 threads = 125 chunks/thread
+  125 x 200ms = 25,000ms = 25 seconds (8x speedup, ideal case)
+
+Real-world: ~6-7x speedup due to DB write contention and uneven partitions.
+```
+
+```java
+// Partitioned step: master fans out to 8 worker partitions
+@Bean
+public Step masterStep(JobRepository repo, Step workerStep, Partitioner partitioner) {
+    return new StepBuilder("masterStep", repo)
+        .partitioner("workerStep", partitioner)
+        .step(workerStep)
+        .gridSize(8)                       // 8 partitions
+        .taskExecutor(partitionTaskExecutor())
+        .build();
+}
+
+@Bean
+public ThreadPoolTaskExecutor partitionTaskExecutor() {
+    ThreadPoolTaskExecutor exec = new ThreadPoolTaskExecutor();
+    exec.setCorePoolSize(8);               // one thread per partition
+    exec.setMaxPoolSize(8);
+    exec.setQueueCapacity(0);              // no queuing; partitions run immediately
+    exec.setThreadNamePrefix("batch-part-");
+    return exec;
+}
+```
+
+### Connection Pool and Memory Math
+
+```
+Writer connections:   8 partition threads each hold 1 DB connection while writing
+                      -> HikariCP pool must be >= 8 + 2 (Spring Batch metadata) = 10
+JDBC batch insert:    chunk 1,000 -> one batched INSERT of 1,000 rows per commit
+                      reduces round-trips from 1,000 to 1.
+
+Heap per partition:   chunk 1,000 x ~2 KB/item = ~2 MB live per partition
+                      8 partitions x 2 MB = 16 MB chunk working set (negligible)
+Reader buffering:     FlatFileItemReader streams line-by-line, O(1) memory.
+                      DO NOT load the whole file into a List.
+```
+
+Sizing rule: HikariCP pool size must be at least `gridSize + metadata_connections`. With 8 partitions, set pool to 10–12. A pool smaller than `gridSize` causes partition threads to block waiting for connections, silently serializing the "parallel" job.
+
+---
+
+## Additional Production War Stories
+
+### War Story 1: Stateful ItemProcessor Leaked Data Across Chunks
+
+An `ItemProcessor` accumulated a running total in an instance field to compute aggregates. Because the processor bean was a singleton shared across chunks (and across partition threads), state from chunk N bled into chunk N+1, and under partitioning two threads corrupted each other's totals. Records were enriched with stale data from a previous chunk.
+
+```java
+// BROKEN: instance field holds state across chunks and across partition threads
+@Component
+public class EnrichingProcessor implements ItemProcessor<Record, Record> {
+    private BigDecimal runningTotal = BigDecimal.ZERO; // shared mutable state!
+
+    @Override
+    public Record process(Record item) {
+        runningTotal = runningTotal.add(item.getAmount()); // leaks across chunks
+        item.setRunningTotal(runningTotal);                // stale/corrupted under parallelism
+        return item;
+    }
+}
+```
+
+```java
+// FIX 1: make the processor stateless — never hold cross-item state in a field
+@Component
+public class EnrichingProcessor implements ItemProcessor<Record, Record> {
+    @Override
+    public Record process(Record item) {
+        item.setCategory(classify(item)); // pure function of the input item only
+        return item;
+    }
+}
+```
+
+```java
+// FIX 2: if per-run state is genuinely needed, scope the bean to the step
+@Bean
+@StepScope   // a fresh processor instance per step execution (per partition)
+public ItemProcessor<Record, Record> scopedProcessor(
+        @Value("#{stepExecutionContext['partitionKey']}") String key) {
+    return new PartitionLocalProcessor(key);
+}
+```
+
+The rule: an `ItemProcessor` must be stateless, or `@StepScope`d when it must hold per-execution state. Running aggregates belong in a separate aggregation step or in the database, never in a shared processor field.
+
+### War Story 2: JobParametersIncrementer on Restart Reprocessed Everything
+
+The job used a `RunIdIncrementer` so every launch got a unique `run.id`. When an operator relaunched a failed job, the new `run.id` created a brand-new `JobInstance`, so Spring Batch did not see it as a restart and reprocessed all 1,000,000 records from zero, double-writing every already-committed row.
+
+```java
+// BROKEN: every launch is a new JobInstance -> restart reprocesses from zero
+jobLauncher.run(importJob,
+    new JobParametersBuilder()
+        .addLong("run.id", System.currentTimeMillis()) // always unique
+        .toJobParameters());
+```
+
+```java
+// FIX: use a stable identifying parameter so a restart matches the failed instance
+jobLauncher.run(importJob,
+    new JobParametersBuilder()
+        .addString("run.date", "2026-05-24")  // identifying + stable for the day
+        .toJobParameters());
+// Relaunching with the same run.date resumes the FAILED instance from chunk 751.
+```
+
+For scheduled fresh runs use an incrementer; for operator restarts of a failed run, relaunch with the original identifying parameters.
+
+---
+
+## @JobScope and @StepScope Bean Lifecycle
+
+Spring Batch defines two custom scopes that defer bean creation until the job or step is actually running, which is what enables late binding of runtime parameters.
+
+| Scope        | Bean created when            | Destroyed when         | Use for                                                      |
+|--------------|------------------------------|------------------------|-------------------------------------------------------------|
+| `@JobScope`  | the job execution starts     | the job execution ends | beans needing job parameters (`#{jobParameters['run.date']}`) |
+| `@StepScope` | the step execution starts    | the step execution ends| readers/writers/processors needing step context, partition keys |
+| singleton    | application context refresh  | context shutdown       | stateless shared components only                             |
+
+Why this matters: `@StepScope` beans are created fresh per step execution, and under partitioning, per partition step execution. This is exactly why a `@StepScope` processor solves the stateful-processor bug — each partition gets its own instance with no shared mutable state. It also enables late binding: a reader can inject `#{jobParameters['inputFile']}` or `#{stepExecutionContext['partitionKey']}`, which do not exist at context-refresh time.
+
+```java
+// Late binding only works because @StepScope defers creation until the step runs
+@Bean
+@StepScope
+public FlatFileItemReader<Record> reader(
+        @Value("#{jobParameters['inputFile']}") String path,          // job-level param
+        @Value("#{stepExecutionContext['fileName']}") String partFile) { // partition param
+    return new FlatFileItemReaderBuilder<Record>()
+        .name("recordReader")
+        .resource(new FileSystemResource(partFile != null ? partFile : path))
+        .delimited()
+        .names("id", "amount", "category")
+        .targetType(Record.class)
+        .build();
+}
+```
+
+A common pitfall: injecting a `@StepScope` bean into a singleton without a scoped proxy throws `BeanCreationException` because the step scope is not active at singleton instantiation time. Spring Batch wires a scoped proxy automatically for these beans, but custom configurations must mark `proxyMode = ScopedProxyMode.TARGET_CLASS` if defining the scope manually.
+
+---
+
+## Multi-Region Considerations
+
+Batch pipelines are usually region-pinned to where the data lives, because moving terabytes across regions for processing is slow and expensive. The design goal is to process data in its home region and only aggregate results globally.
+
+```
+   Region US (us-east-1)                      Region EU (eu-west-1)
+   +--------------------------+               +--------------------------+
+   | S3 us: input files       |               | S3 eu: input files       |
+   |        |                 |               |        |                 |
+   | [ Batch job US ]         |               | [ Batch job EU ]         |
+   |   JobRepository (US DB)  |               |   JobRepository (EU DB)  |
+   |        |                 |               |        |                 |
+   | results -> US warehouse  |               | results -> EU warehouse  |
+   +-----------+--------------+               +-----------+--------------+
+               |                                          |
+               +-------------- nightly ETL --------------+
+                                  |
+                       [ Global analytics warehouse ]
+```
+
+Design changes for multi-region:
+- Run an independent batch job per region against region-local input storage and a region-local `JobRepository`. Each region's `JobRepository` is its own state machine; restart semantics never cross regions.
+- Data residency: EU input data is processed by the EU job and written to EU storage; it never transits to a US compute node. This keeps regulated data in-region.
+- Global aggregates are produced by a downstream cross-region ETL into a central analytics warehouse, run on already-aggregated, residency-cleared outputs — not raw records.
+- Scheduling is region-local (each region's scheduler with its own ShedLock/`@SchedulerLock` distributed lock), so a region outage does not block other regions' nightly runs.
+- A region that fails its nightly run is restarted independently from its own `JobRepository` once the region recovers; other regions are unaffected.
+
+---
+
+## Additional Interview Questions
+
+**Q: How does Spring Batch resume a job that crashed at chunk 751 of 1,000?**
+
+A: Spring Batch commits at chunk boundaries and records progress in the `JobRepository`. After 750 committed chunks, the `StepExecution` shows `read_count=750000` and `commit_count=750`; the in-flight chunk 751 rolls back cleanly because its transaction never committed. On relaunch with the same identifying job parameters, Spring Batch finds the existing `JobInstance` in `FAILED` state and resumes the restartable step from read offset 750,000, reprocessing only the remaining ~25% rather than starting over. This depends on the reader being restartable (e.g., `FlatFileItemReader` persists `read.count` in the `ExecutionContext`) and on not calling `preventRestart()`.
+
+**Q: Why must an ItemProcessor be stateless, and what if it genuinely needs per-run state?**
+
+A: An `ItemProcessor` bean is a singleton shared across all chunks and, under partitioning, across all partition threads. Any mutable instance field leaks state from one chunk or thread into another, producing stale or corrupted output and race conditions. The processor must therefore be a pure function of its input item. If per-execution state is genuinely required, scope the bean with `@StepScope` so each step (and each partition) gets a fresh instance, or move running aggregates into a dedicated aggregation step or the database where they are computed correctly.
+
+**Q: How do you tune chunk size and partition count to process a million records fastest?**
+
+A: First compute the single-threaded baseline: 1,000,000 records at chunk size 1,000 is 1,000 chunks; at 200ms per chunk that is 200 seconds. Then partition: with a `TaskExecutorPartitioner` across 8 threads, each handles 125 chunks for an ideal ~25 seconds, realistically 6–7x due to DB write contention. Set `gridSize` to the core count and ensure the HikariCP pool is at least `gridSize + metadata connections` (10–12 for 8 partitions), otherwise partition threads block on connections and silently serialize. Larger chunk sizes reduce commit overhead but increase rollback cost and memory; tune by profiling whether the bottleneck is CPU (processor) or the database writer.
+
+**Q: What is the difference between @JobScope and @StepScope?**
+
+A: Both are Spring Batch custom scopes that defer bean creation until runtime to enable late binding of parameters. `@JobScope` beans are created when the job execution starts and destroyed when it ends, used for beans needing job parameters. `@StepScope` beans are created when the step execution starts and destroyed when it ends — and crucially, under partitioning a fresh instance is created per partition step execution, which is what makes a `@StepScope` reader or processor safe under parallelism. Late binding like `#{jobParameters['inputFile']}` or `#{stepExecutionContext['partitionKey']}` works only because these scopes defer instantiation past context-refresh time.
+
+**Q: Why can launching a job with a unique run.id each time break restart, and how do you fix it?**
+
+A: Spring Batch identifies a `JobInstance` by its identifying job parameters. If every launch injects a unique `run.id` (e.g., `System.currentTimeMillis()`), each launch is a brand-new `JobInstance`, so relaunching a failed job is not recognized as a restart — it reprocesses all records from zero and double-writes already-committed rows. The fix is to relaunch a failed run with the original stable identifying parameter (e.g., `run.date=2026-05-24`) so Spring Batch matches the failed instance and resumes from the last committed chunk. Use a `JobParametersIncrementer` only for scheduled fresh runs, never for operator restarts.

@@ -795,3 +795,243 @@ A: Enable `logging.level.org.springframework.cloud.gateway=TRACE`. This logs eve
 **Q: How does the gateway handle request body modification — for example, injecting a request ID into the body?**
 
 A: The reactive HTTP model streams the body as a `Flux<DataBuffer>`. Modifying the body requires buffering it fully in memory (losing streaming benefits) or using `ServerRequest` from WebFlux. Spring Cloud Gateway's `ModifyRequestBodyGatewayFilterFactory` handles this: it reads the body, applies a transformation function, and writes the modified body. The tradeoff is memory usage for large request bodies. For body injection of small fields (request ID, tenant ID), adding a header is preferred over body modification.
+
+---
+
+## Failure Scenarios and Recovery
+
+The gateway is the single ingress for every downstream service, so a gateway failure is a total outage. The highest-stakes decisions are how the gateway behaves when its own dependencies (Redis for rate limiting, the discovery registry) fail.
+
+### Failure: Rate-Limiter Redis Goes Down
+
+Spring Cloud Gateway's `RequestRateLimiter` filter uses Redis to store token-bucket counters. If Redis becomes unreachable, the default `RedisRateLimiter` throws, and every request that hits a rate-limited route fails — turning a non-critical dependency (rate limiting) into a critical one. This is a fail-closed default, and it converts a Redis blip into a full traffic outage.
+
+```
+Redis down, default behavior (fail-closed):
+  Client --> [ Gateway ] --RequestRateLimiter--X (Redis unreachable)
+                                |
+                          503 for ALL traffic
+```
+
+The decision: fail-open (allow traffic through when the limiter cannot make a decision) versus fail-closed (reject everything). For an API gateway, availability of the core proxy function usually outranks perfect rate-limit enforcement, so fail-open with a loud alert is the right default. Rate limiting is a protective measure, not a correctness requirement — losing it briefly is far less harmful than dropping all traffic.
+
+```java
+// BROKEN: limiter failure propagates and 503s all requests (fail-closed)
+@Bean
+public RedisRateLimiter redisRateLimiter() {
+    return new RedisRateLimiter(100, 200); // throws if Redis is down
+}
+```
+
+```java
+// FIX: wrap the rate limiter so Redis failure degrades to allow + alert (fail-open)
+@Bean
+public RateLimiter<RedisRateLimiter.Config> resilientRateLimiter(RedisRateLimiter delegate,
+                                                                 MeterRegistry meters) {
+    return new RateLimiter<>() {
+        @Override
+        public Mono<Response> isAllowed(String routeId, String id) {
+            return delegate.isAllowed(routeId, id)
+                .onErrorResume(ex -> {
+                    meters.counter("gateway.ratelimit.failopen").increment();
+                    log.warn("Rate limiter Redis unavailable, failing open", ex);
+                    // allow the request through; tokensRemaining headers omitted
+                    return Mono.just(new Response(true, Map.of()));
+                });
+        }
+        @Override public Map<String, Config> getConfig() { return delegate.getConfig(); }
+        @Override public Class<Config> getConfigClass() { return delegate.getConfigClass(); }
+        @Override public Map<String, Config> getMap() { return delegate.getMap(); }
+    };
+}
+```
+
+Recovery: when Redis Sentinel/cluster promotes a replica (typically ~30s), the limiter resumes enforcing. During the gap, traffic flows unthrottled, protected only by downstream service circuit breakers and connection limits — which is why those backstops must always be configured independently of the gateway limiter. Time-to-recovery for limiter enforcement equals Redis failover time (~30s); time-to-recovery for client traffic is zero because fail-open never dropped it.
+
+### Failure: Service Discovery Registry Unreachable
+
+If the gateway resolves routes via Eureka/Consul and the registry is unreachable, lb:// routes cannot resolve targets. Mitigation: enable registry client caching (`eureka.client.registry-fetch-interval-seconds`) so the last-known-good service list is retained, and the gateway keeps routing to cached instances. Recovery is automatic once the registry returns; the cache bridges the gap.
+
+---
+
+## Capacity Planning
+
+### Filter Latency Budget
+
+The gateway adds latency on every request, and filters run in sequence. The budget is unforgiving at high throughput.
+
+```
+Throughput:        100,000 req/sec
+Filters per route: 5 (auth, rate-limit, header-rewrite, tracing, logging)
+
+BROKEN (blocking filters, 0.1ms each but blocking the event loop):
+  5 filters x 0.1ms = 0.5ms CPU per request, BUT if any blocks the
+  Netty event-loop thread, effective added latency balloons.
+  A single 10ms blocking call on an event-loop thread at 100k req/sec
+  saturates the (cores x 2) event-loop threads almost instantly.
+```
+
+The constraint is not the arithmetic sum of filter times — it is that Spring Cloud Gateway runs on Netty's event loop, which has only `2 x cores` threads. Any blocking I/O on a filter (a synchronous Redis call, a blocking JWT key fetch) stalls the entire event loop.
+
+```java
+// BROKEN: blocking call inside a filter starves the Netty event loop
+public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+    String key = jwksClient.fetchKeyBlocking(kid); // blocks event-loop thread!
+    return chain.filter(exchange);
+}
+```
+
+```java
+// FIX: all filter work must be non-blocking; fetch keys reactively with caching
+public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+    return jwksCache.getKey(kid)                 // returns Mono, non-blocking
+        .flatMap(key -> { validate(exchange, key); return chain.filter(exchange); });
+}
+```
+
+Target: keep each filter under 1ms and strictly non-blocking, so 5 filters add well under 5ms p99 and the event loop never stalls. Move any unavoidable blocking work to a bounded elastic scheduler (`publishOn(Schedulers.boundedElastic())`).
+
+### Throughput and Thread Math
+
+```
+Netty event-loop threads:  2 x cores. On a 16-core node = 32 event-loop threads.
+Each non-blocking request: occupies a thread only for microseconds of CPU per hop.
+Sustained throughput:      ~50,000-100,000 req/sec per 16-core node when fully
+                           non-blocking, limited by CPU for TLS + serialization.
+Horizontal scale:          100,000 req/sec target -> 2-3 nodes behind an LB
+                           plus headroom for failover.
+```
+
+### Connection and Memory Budget
+
+```
+Upstream connection pool:  Reactor Netty default 500 connections per pool.
+                           For 100k req/sec with 20ms downstream latency:
+                           concurrency = 100,000 x 0.020 = 2,000 in-flight.
+                           -> raise max-connections to ~2,500 with headroom.
+Heap:                      Reactive, low per-request footprint. ~2-4 GB heap
+                           handles 100k req/sec; watch DataBuffer leaks instead.
+```
+
+---
+
+## Additional Production War Stories
+
+### War Story 1: Route Ordering Sent Health Checks Through Auth
+
+A catch-all `/api/**` route with a JWT auth filter was declared before the unauthenticated `/api/health` route. Spring Cloud Gateway evaluates routes in declared order and uses the first match, so health checks hit the auth route and returned 401. The load balancer marked every instance unhealthy and pulled the entire fleet out of rotation — a self-inflicted outage.
+
+```yaml
+# BROKEN: wildcard route matches /api/health first -> 401 on health checks
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: api
+          uri: lb://backend
+          predicates:
+            - Path=/api/**          # matches EVERYTHING under /api, including /api/health
+          filters:
+            - JwtAuthentication
+        - id: health
+          uri: lb://backend
+          predicates:
+            - Path=/api/health      # never reached
+```
+
+```yaml
+# FIX: order routes by specificity — most specific paths FIRST
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: health                # specific, no auth — declared first
+          uri: lb://backend
+          predicates:
+            - Path=/api/health
+        - id: api                   # wildcard last
+          uri: lb://backend
+          predicates:
+            - Path=/api/**
+          filters:
+            - JwtAuthentication
+```
+
+The rule: route predicate evaluation is first-match-wins in declaration order, so always order from most specific to least specific. Add an integration test that asserts `/api/health` returns 200 without a token to prevent regressions.
+
+### War Story 2: Unbounded Response Buffering Caused OOM
+
+A custom filter that logged response bodies cached the full `Flux<DataBuffer>` into memory for every response, including large file downloads. Under traffic the gateway heap filled with buffered multi-megabyte responses and the JVM OOM-killed, taking down all routes at once.
+
+```java
+// BROKEN: buffers the entire response body in memory for every request
+public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+    ServerHttpResponseDecorator decorated = new ServerHttpResponseDecorator(exchange.getResponse()) {
+        @Override
+        public Mono<Void> writeWith(Publisher<? extends DataBuffer> body) {
+            return DataBufferUtils.join(Flux.from(body)) // joins ENTIRE body in heap
+                .flatMap(buf -> { logBody(buf); return super.writeWith(Mono.just(buf)); });
+        }
+    };
+    return chain.filter(exchange.mutate().response(decorated).build());
+}
+```
+
+```java
+// FIX: only log small bodies under a size cap; stream large ones untouched
+public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+    long contentLength = exchange.getRequest().getHeaders().getContentLength();
+    if (contentLength > 8_192) {
+        return chain.filter(exchange); // do not buffer large/streamed responses
+    }
+    // ... bounded buffering only for small bodies, with DataBufferUtils.release()
+    return chain.filter(exchange);
+}
+```
+
+---
+
+## Multi-Region Considerations
+
+For a global API the gateway is deployed per region, fronted by a global anycast layer that routes users to the nearest healthy region.
+
+```
+                    [ AWS Global Accelerator / anycast IPs ]
+                                   |
+              +--------------------+--------------------+
+              |                    |                    |
+     [ Gateway us-east-1 ]  [ Gateway eu-west-1 ]  [ Gateway ap-south-1 ]
+              |                    |                    |
+     [ US services ]        [ EU services ]      [ APAC services ]
+```
+
+Design changes for multi-region:
+- A global load balancer such as AWS Global Accelerator (or Cloudflare/Akamai anycast) advertises a single anycast IP and routes each client to the lowest-latency healthy region at the network layer, with sub-minute failover when a region's gateway health checks fail.
+- Each region runs an independent gateway fleet with region-local rate-limiter Redis. Token buckets are per-region, not global; if you need a global quota, aggregate counts asynchronously rather than doing a synchronous cross-region Redis call on the hot path.
+- JWT validation uses a globally replicated JWKS so any region can verify tokens without cross-region calls.
+- Routes are configured identically per region (GitOps-managed), but lb:// targets resolve to region-local service instances only — the gateway never proxies across regions on the hot path.
+- Health checks are region-scoped: a failed region is drained at the Global Accelerator level, and clients reconverge on the next-nearest region. Time-to-failover is the anycast health-check interval, typically tens of seconds.
+
+---
+
+## Additional Interview Questions
+
+**Q: Should an API gateway rate limiter fail open or fail closed when Redis is down, and why?**
+
+A: For most API gateways, fail open with a loud alert. Rate limiting is a protective measure, not a correctness requirement, so a brief lapse in enforcement is far less harmful than rejecting all traffic and causing a full outage. Failing closed converts a non-critical dependency (the limiter's Redis) into a critical one, meaning a 30-second Redis failover becomes a 30-second total outage. The mitigation for the fail-open window is independent backstops: downstream circuit breakers and connection limits still protect services from overload while the limiter is unavailable. Endpoints with strict abuse or cost constraints (e.g., expensive AI inference) may selectively fail closed.
+
+**Q: Why does filter latency arithmetic understate the real risk in Spring Cloud Gateway?**
+
+A: Spring Cloud Gateway runs on Netty's event loop, which has only about `2 x cores` threads. Summing per-filter CPU time (five filters at 0.1ms = 0.5ms) ignores the real failure mode: a single blocking call inside any filter occupies an event-loop thread for the duration of the I/O, and at 100k req/sec the small pool of event-loop threads saturates almost instantly, stalling all routes. The correct design rule is that every filter must be strictly non-blocking; unavoidable blocking work is offloaded to a bounded elastic scheduler. Latency is gated by event-loop availability, not the arithmetic sum.
+
+**Q: Why does route ordering matter, and how do you prevent ordering bugs?**
+
+A: Spring Cloud Gateway evaluates route predicates in declaration order and uses the first match (first-match-wins). A broad wildcard like `/api/**` declared before a specific `/api/health` will swallow the specific path, so the specific route is never reached. The classic failure is an authenticated wildcard intercepting unauthenticated health checks, returning 401, and causing the load balancer to drain the whole fleet. Always declare routes from most specific to least specific, and add an integration test asserting that critical paths (health, metrics) resolve to the intended route without auth.
+
+**Q: How do you size the upstream connection pool for the gateway?**
+
+A: Use Little's Law: required in-flight connections equal `throughput x downstream latency`. For 100,000 req/sec with 20ms downstream latency, concurrency is `100,000 x 0.020 = 2,000` in-flight requests, so the Reactor Netty connection pool needs at least ~2,000 connections plus headroom (set ~2,500). Reactor Netty defaults to 500 per pool, which would bottleneck this workload. Monitor pool acquisition latency and pending-acquire counts; rising pending acquisitions signal the pool is too small or downstream services are slow.
+
+**Q: How does the architecture change for a global, multi-region deployment?**
+
+A: Front the regional gateway fleets with a global anycast layer such as AWS Global Accelerator that routes each client to the nearest healthy region at the network layer and fails over in tens of seconds. Each region runs an independent gateway with region-local rate-limiter Redis (per-region quotas, no synchronous cross-region calls on the hot path) and resolves lb:// targets only to region-local services. JWT verification uses a globally replicated JWKS so any region validates tokens without cross-region traffic. Route configuration is GitOps-managed and identical per region, and failed regions are drained at the global accelerator so clients reconverge on the next-nearest region.

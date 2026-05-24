@@ -516,66 +516,194 @@ HikariCP auto-registers metrics with Micrometer when `micrometer-core` is on the
 
 ## 14. Case Study
 
-### Problem: Kubernetes Rolling Deployment Causes 503 Errors
+### Scenario: Observable Payment Microservice on Kubernetes
 
-**Symptom:** During deployment, roughly 5% of requests return 503 Service Unavailable for 30 seconds after new pods start. Existing pods are healthy; new pods show UP in logs but receive traffic before they are ready.
+A payments microservice runs on Spring Boot 3.2 / Java 17 across a Kubernetes cluster. Scale and topology:
 
-**Root cause:** Kubernetes was using a TCP health check (just "can I connect to port 8080?") as the readiness probe. Spring Boot starts accepting TCP connections the moment Tomcat starts, but the `ApplicationContext` takes another 15 seconds to fully initialize (HikariCP connecting to the database, caches warming up). During those 15 seconds, new pods receive real traffic and fail.
+- 40 pods, ~12,000 req/sec aggregate, p99 budget 250 ms
+- Liveness and readiness probes wired to Actuator health groups
+- Prometheus scrapes `/actuator/prometheus` every 15s; Grafana dashboards and alerting on top
+- A downstream payment gateway whose outages must be visible without taking the whole pod down
+- A Resilience4j circuit breaker whose state must be inspectable in production
 
-**Fix:**
+The team had two recurring problems: 503 spikes during rolling deploys (probes passing before the context was ready) and a security finding that the `env` endpoint had leaked database credentials.
 
-```properties
-# application.properties
-management.endpoint.health.probes.enabled=true
-management.health.readiness-state.enabled=true
-management.health.liveness-state.enabled=true
+### Architecture Overview
 
-# Include database readiness in the readiness probe group
-management.endpoint.health.group.readiness.include=readiness,db
-management.endpoint.health.show-details=always
+```
+   Prometheus --scrape /actuator/prometheus (15s)--> +------------------+
+                                                      |   Payment Pod    |
+   K8s kubelet --GET /actuator/health/readiness-----> |                  |
+              --GET /actuator/health/liveness-------> |  Actuator        |
+                                                      |   health group:  |
+                                                      |    readiness =    |
+                                                      |     db, gateway   |
+                                                      |   /prometheus     |
+                                                      |   custom @Endpoint|
+                                                      +---------+--------+
+                                                                |
+                          +-------------------------------------+
+                          |                                     |
+                          v                                     v
+                 +------------------+                  +------------------+
+                 | PaymentGateway   |                  | Resilience4j CB  |
+                 | HealthIndicator  |                  | state endpoint   |
+                 +------------------+                  +------------------+
+
+   Grafana <--PromQL-- Prometheus    (rate(payments_total[1m]), histogram p99)
 ```
 
-```yaml
-# kubernetes deployment.yaml
-readinessProbe:
-  httpGet:
-    path: /actuator/health/readiness
-    port: 8080
-  initialDelaySeconds: 10
-  periodSeconds: 5
-  failureThreshold: 6           # 30 seconds to become ready before restart
+### Implementation
 
-livenessProbe:
-  httpGet:
-    path: /actuator/health/liveness
-    port: 8080
-  initialDelaySeconds: 30       # give time for startup before liveness kicks in
-  periodSeconds: 10
-  failureThreshold: 3
-```
-
-**Custom readiness indicator for cache warm-up:**
+A custom `HealthIndicator` reports downstream gateway health into the readiness group, so a pod with a dead gateway is pulled from the load balancer instead of failing live requests.
 
 ```java
-@Component
-public class CacheWarmupReadinessIndicator implements HealthIndicator {
-    private volatile boolean ready = false;
-
-    @EventListener(ContextRefreshedEvent.class)
-    public void onContextRefreshed() {
-        // Cache warm-up runs after context refresh
-        warmUpCaches();
-        ready = true;
-        // Spring Boot automatically updates ReadinessState to ACCEPTING_TRAFFIC
-        // after ContextRefreshedEvent, but this indicator adds a business-level check
-    }
+@Component("gateway")
+public class PaymentGatewayHealthIndicator implements HealthIndicator {
+    private final PaymentGatewayClient client;
+    PaymentGatewayHealthIndicator(PaymentGatewayClient c) { this.client = c; }
 
     @Override
     public Health health() {
-        return ready ? Health.up().withDetail("caches", "warmed").build()
-                     : Health.down().withDetail("caches", "warming").build();
+        try {
+            Duration rtt = client.ping();                 // cheap /status call, 1s timeout
+            return rtt.toMillis() < 500
+                ? Health.up().withDetail("rttMs", rtt.toMillis()).build()
+                : Health.status("DEGRADED").withDetail("rttMs", rtt.toMillis()).build();
+        } catch (Exception e) {
+            return Health.down(e).build();                // exception message only, no secrets
+        }
     }
 }
 ```
 
-**Result:** New pods remain out of the load balancer until the database connection succeeds AND caches are warmed. Zero 503 errors during rolling deployment. The readiness → liveness distinction also prevents Kubernetes from restarting pods that are temporarily struggling with a slow database connection (readiness fails, liveness stays up, pod is just removed from traffic).
+Business metrics use Micrometer `Counter` and `Timer`; Prometheus scrapes them and Grafana renders rate and p99.
+
+```java
+@Service
+public class PaymentService {
+    private final Counter approved;
+    private final Counter declined;
+    private final Timer latency;
+
+    public PaymentService(MeterRegistry registry) {
+        this.approved = Counter.builder("payments_total").tag("result", "approved").register(registry);
+        this.declined = Counter.builder("payments_total").tag("result", "declined").register(registry);
+        this.latency  = Timer.builder("payment_processing_seconds")
+                             .publishPercentileHistogram()   // enables Prometheus histogram p99
+                             .register(registry);
+    }
+
+    public PaymentResult charge(PaymentRequest req) {
+        return latency.record(() -> {
+            PaymentResult r = gateway.charge(req);
+            (r.isApproved() ? approved : declined).increment();
+            return r;
+        });
+    }
+}
+```
+
+A custom `@Endpoint` exposes circuit breaker state for on-call inspection, and `HealthContributor` composition groups multiple sub-checks.
+
+```java
+@Component
+@Endpoint(id = "circuitbreakers")
+public class CircuitBreakerEndpoint {
+    private final CircuitBreakerRegistry registry;
+    CircuitBreakerEndpoint(CircuitBreakerRegistry r) { this.registry = r; }
+
+    @ReadOperation
+    public Map<String, String> states() {
+        return registry.getAllCircuitBreakers().stream()
+            .collect(Collectors.toMap(CircuitBreaker::getName,
+                                      cb -> cb.getState().name()));
+    }
+}
+```
+
+```properties
+# Expose only what is needed; never wildcard in production
+management.endpoints.web.exposure.include=health,info,prometheus,circuitbreakers
+management.endpoint.health.probes.enabled=true
+management.endpoint.health.group.readiness.include=readinessState,db,gateway
+management.endpoint.health.show-details=when_authorized
+management.endpoint.health.show-components=when_authorized
+```
+
+```yaml
+# deployment.yaml
+readinessProbe:
+  httpGet: { path: /actuator/health/readiness, port: 8080 }
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  failureThreshold: 6
+livenessProbe:
+  httpGet: { path: /actuator/health/liveness, port: 8080 }
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  failureThreshold: 3
+```
+
+### Metrics
+
+| Metric | Before | After |
+|--------|--------|-------|
+| 503s per rolling deploy | ~5% of traffic, 30s | 0 |
+| Mean time to detect gateway outage | 8 min (user reports) | 20 s (readiness flip) |
+| Exposed actuator endpoints | all (`*`) | 4 explicit |
+| Secrets leaked via `env` | yes | none (endpoint not exposed) |
+| Grafana p99 metric gaps | frequent | none |
+
+### Common Pitfalls
+
+**Pitfall 1 — exposing all endpoints leaks secrets via `env`.**
+
+```properties
+# BROKEN: /actuator/env dumps every property, including spring.datasource.password
+management.endpoints.web.exposure.include=*
+```
+
+```properties
+# FIX: expose only the endpoints you operate on; protect the rest behind auth
+management.endpoints.web.exposure.include=health,info,prometheus
+```
+
+**Pitfall 2 — health details expose DB credentials to anonymous callers.**
+
+```properties
+# BROKEN: anyone hitting /actuator/health sees jdbc URL, validation query, etc.
+management.endpoint.health.show-details=always
+```
+
+```properties
+# FIX: only show component details to authenticated/authorized principals
+management.endpoint.health.show-details=when_authorized
+management.endpoint.health.roles=ACTUATOR_ADMIN
+```
+
+**Pitfall 3 — Prometheus scrape interval mismatch causes gaps and bad rates.**
+
+```yaml
+# BROKEN: scrape every 60s but alert on rate(...[30s]) -> empty windows, flapping alerts
+scrape_interval: 60s
+```
+
+```yaml
+# FIX: scrape faster than the smallest rate window; rate window >= 4x interval
+scrape_interval: 15s          # then use rate(payments_total[1m]) in Grafana/alerts
+```
+
+### Interview Discussion Points
+
+**What is the difference between liveness and readiness probes, and how does Actuator support them?** Liveness answers "is the JVM healthy enough to keep running" — failing it restarts the pod; readiness answers "can it serve traffic right now" — failing it removes the pod from the Service endpoints without a restart. Actuator exposes `/actuator/health/liveness` and `/actuator/health/readiness` as health groups, and you compose business checks (db, caches, downstream gateway) into the readiness group so a not-yet-warm pod stays out of rotation.
+
+**How do you keep a transient downstream outage from restarting pods?** Put the downstream check in the readiness group, not liveness. A failing gateway flips readiness to OUT_OF_SERVICE, so Kubernetes stops routing traffic but leaves the pod running; when the gateway recovers the pod rejoins automatically. Tying it to liveness instead would restart healthy pods on every blip, amplifying the outage.
+
+**Why is `show-details=when_authorized` the right default?** The health endpoint's component details can include JDBC URLs, validation queries, disk paths, and downstream addresses. `when_authorized` returns only `{"status":"UP"}` to anonymous probes (enough for Kubernetes) while exposing the diagnostic detail to authenticated operators, closing an information-disclosure hole without losing observability.
+
+**How do Micrometer `Counter` and `Timer` map to Prometheus, and how do you get p99?** A `Counter` becomes a monotonically increasing Prometheus counter you query with `rate(...)`; a `Timer` with `publishPercentileHistogram()` emits histogram buckets that Prometheus aggregates with `histogram_quantile(0.99, ...)` across pods. Computing percentiles server-side from buckets (rather than per-instance) is what makes cluster-wide p99 meaningful.
+
+**When would you write a custom `@Endpoint` instead of a `HealthIndicator`?** Use a `HealthIndicator` when the signal is a binary up/down/degraded that should influence health and probes. Use a custom `@Endpoint` (with `@ReadOperation`/`@WriteOperation`) when you need to surface rich operational state or actions that are not health decisions — like dumping circuit breaker states or triggering a cache refresh — exposed under its own actuator path and secured independently.
+
+**How do you secure actuator endpoints without disabling them?** Expose only the endpoints you operate (`exposure.include` allowlist), keep management on a separate port or behind the same Spring Security filter chain with a dedicated `ACTUATOR_ADMIN` role, and use `when_authorized` for detail-bearing endpoints. Probes that Kubernetes calls (`health/liveness`, `health/readiness`) can stay anonymous because they return no sensitive detail.

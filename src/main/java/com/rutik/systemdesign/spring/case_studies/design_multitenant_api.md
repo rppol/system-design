@@ -741,3 +741,226 @@ A: All tenants share the same connection pool. A tenant running a full-table sca
 **Q: How does the JWT signing key separation work per tenant?**
 
 A: During tenant provisioning, a 256-bit signing key is generated and stored in AWS KMS (or Vault) under a key alias scoped to that tenant. The JWT filter calls KMS to retrieve the key using the tenant ID embedded in the JWT header's `kid` (Key ID) claim. This means even if an attacker intercepts a valid JWT for tenant A, it cannot be accepted by tenant B's JWT verification because the signature check will fail — the `kid` points to tenant A's key, and that key does not validate a crafted tenant B claim.
+
+---
+
+## Failure Scenarios and Recovery
+
+A multi-tenant system has a unique failure mode: a problem caused by one tenant must not cascade to others. The most common cascade is connection pool exhaustion.
+
+### Failure: Shared Connection Pool Exhausted by One Tenant
+
+When all tenants share a single HikariCP pool of 20 connections, a single tenant running expensive full-table-scan queries can hold all 20 connections. Every other tenant then blocks on `connectionTimeout` (default 30s) waiting for a connection, then receives `SQLTransientConnectionException`. From the customer's perspective, tenant B's API goes down because tenant A misbehaved — a textbook noisy-neighbor incident.
+
+```
+Before (single shared pool — noisy neighbor):
+
+  Tenant A (runaway report) --\
+  Tenant B                    --+--> [ HikariCP pool: 20 conns ] --> PostgreSQL
+  Tenant C                    --/        (all 20 held by A)
+                                              |
+                                  B and C block, then 500/timeout
+```
+
+Fix: route each tenant tier to its own pool with `AbstractRoutingDataSource`. A runaway query in the free tier can only exhaust the free-tier pool; enterprise tenants are unaffected.
+
+```java
+public class TenantRoutingDataSource extends AbstractRoutingDataSource {
+    @Override
+    protected Object determineCurrentLookupKey() {
+        // Returns the tier for the current tenant; never the raw request input.
+        String tenantId = TenantContext.getTenantId();
+        return TenantRegistry.tierOf(tenantId); // ENTERPRISE | STANDARD | FREE
+    }
+}
+
+@Bean
+public DataSource tenantRoutingDataSource(
+        @Qualifier("enterprisePool") DataSource enterprise,
+        @Qualifier("standardPool") DataSource standard,
+        @Qualifier("freePool") DataSource free) {
+    TenantRoutingDataSource ds = new TenantRoutingDataSource();
+    Map<Object, Object> targets = Map.of(
+        Tier.ENTERPRISE, enterprise,
+        Tier.STANDARD, standard,
+        Tier.FREE, free);
+    ds.setTargetDataSources(targets);
+    ds.setDefaultTargetDataSource(standard);
+    return ds;
+}
+```
+
+Recovery procedure when exhaustion is detected:
+1. Identify the offending tenant via MDC-tagged slow query logs (`tenant_id` in every log line).
+2. Apply a per-tenant `statement_timeout` (`SET statement_timeout = '5s'`) so the runaway query self-aborts.
+3. If the tenant is on a shared pool, migrate it to a quarantine pool with a hard cap of 2 connections.
+4. Time-to-recovery: with per-tier pools and `statement_timeout`, the blast radius is contained automatically in ~5s (the statement timeout) with no operator action. Without per-tier pools, manual quarantine takes 5–15 minutes.
+
+### Failure: Schema Migration Half-Applied
+
+If a Flyway migration fails on tenant 347 of 500 (e.g., disk full), tenants 1–346 are on schema version N+1 while 347–500 remain on version N. Application code expecting the new column will throw `SQLException` for the un-migrated tenants. Recovery: migrations must be idempotent and tracked per-schema in `flyway_schema_history`. Re-run the migration; Flyway skips already-applied schemas and resumes at tenant 347. Never deploy code that requires the new column until all tenants report version N+1.
+
+---
+
+## Capacity Planning
+
+Connection pool sizing is the dominant capacity constraint in a schema-per-tenant or pool-per-tenant design.
+
+### Connection Pool Math
+
+With a naive per-tenant pool:
+
+```
+100 tenants x 10 connections/tenant = 1,000 DB connections
+```
+
+PostgreSQL's default `max_connections` is 100, and each connection costs ~10 MB of backend memory. 1,000 connections = ~10 GB of PostgreSQL memory just for connection backends, far past the practical limit. This is why per-tenant pools do not scale; use per-tier pools instead.
+
+### Tier-Based Pool Sizing
+
+| Tier       | Tenants | Pool size/tenant | Pooling strategy        | Effective DB conns |
+|------------|---------|------------------|-------------------------|--------------------|
+| Enterprise | 10      | 20               | dedicated pool/tenant   | 10 x 20 = 200      |
+| Standard   | 60      | 10               | shared pool per 10      | 6 pools x 10 = 60  |
+| Free       | 30      | 5                | one shared pool         | 1 pool x 5 = 5     |
+| **Total**  | 100     | —                | —                       | **265**            |
+
+265 connections fits comfortably behind PgBouncer in transaction-pooling mode, which multiplexes thousands of client connections onto ~50 server connections. Rule of thumb for pool size: `connections = ((core_count * 2) + effective_spindle_count)`. For an 8-core DB with SSD, ~20 active connections saturate throughput; everything above that just queues.
+
+### Memory Estimate Per App Instance
+
+```
+HikariCP pool object overhead:        ~1 KB/connection x 265 = 265 KB (negligible)
+JPA L1 cache per request:             ~2 MB peak per active request
+Tenant registry (in-memory):          100 tenants x ~2 KB metadata = 200 KB
+JWT AuthenticationManager cache:      100 x ~5 KB = 500 KB
+```
+
+The app heap is dominated by per-request JPA state, not tenant metadata. Size the heap for `concurrent_requests x 2 MB + 512 MB baseline`. For 200 Tomcat threads: `200 x 2 MB + 512 MB ~= 912 MB` -> set `-Xmx1500m` with headroom.
+
+---
+
+## Additional Production War Stories
+
+### War Story 1: Tenant ID Taken from Request Body Bypasses Row-Level Security
+
+A new endpoint accepted a JSON body containing `tenantId` and trusted it for the data lookup. An attacker authenticated as a free-tier tenant simply put another tenant's ID in the body and read their data. The row-level security was technically present but operated on attacker-controlled input.
+
+```java
+// BROKEN: tenant from request body — attacker controls it
+@PostMapping("/orders/search")
+public List<Order> search(@RequestBody OrderSearchRequest req) {
+    TenantContext.setTenantId(req.getTenantId()); // attacker-supplied!
+    return orderService.search(req.getCriteria());
+}
+```
+
+```java
+// FIX: tenant is ALWAYS derived from the authenticated SecurityContext,
+// never from any part of the request payload.
+@PostMapping("/orders/search")
+public List<Order> search(@RequestBody OrderSearchRequest req) {
+    Jwt jwt = (Jwt) SecurityContextHolder.getContext()
+                       .getAuthentication().getPrincipal();
+    String tenantId = jwt.getClaimAsString("tenant_id"); // signed, tamper-proof
+    TenantContext.setTenantId(tenantId);
+    // Defensive: reject if body tries to specify a different tenant
+    if (req.getTenantId() != null && !req.getTenantId().equals(tenantId)) {
+        throw new AccessDeniedException("Tenant mismatch");
+    }
+    return orderService.search(req.getCriteria());
+}
+```
+
+The rule: tenant identity is part of the authentication boundary, not the request data. The `tenant_id` claim is inside the JWT signature, so an attacker cannot forge it without the tenant's signing key.
+
+### War Story 2: TenantContext Leaked Across Threads via Thread Pool Reuse
+
+`TenantContext` used a plain `ThreadLocal`. An `@Async` method picked up a pooled thread that still held tenant A's context from a previous request, and wrote tenant A's data into tenant B's schema. The bug was intermittent and only appeared under load when threads were reused.
+
+```java
+// BROKEN: ThreadLocal never cleared; @Async inherits stale tenant
+public class TenantContext {
+    private static final ThreadLocal<String> CURRENT = new ThreadLocal<>();
+    public static void setTenantId(String id) { CURRENT.set(id); }
+    public static String getTenantId() { return CURRENT.get(); }
+}
+```
+
+```java
+// FIX 1: always clear in a finally block via a filter
+@Override
+protected void doFilterInternal(HttpServletRequest req, HttpServletResponse res,
+                                FilterChain chain) throws ServletException, IOException {
+    try {
+        TenantContext.setTenantId(extractFromJwt(req));
+        chain.doFilter(req, res);
+    } finally {
+        TenantContext.clear(); // guarantees no leak to next request on this thread
+    }
+}
+
+// FIX 2: propagate explicitly to async threads via TaskDecorator
+@Bean
+public TaskDecorator tenantTaskDecorator() {
+    return runnable -> {
+        String tenantId = TenantContext.getTenantId(); // captured at submit time
+        return () -> {
+            try {
+                TenantContext.setTenantId(tenantId);
+                runnable.run();
+            } finally {
+                TenantContext.clear();
+            }
+        };
+    };
+}
+```
+
+---
+
+## Multi-Region Considerations
+
+Global multi-tenancy intersects with data residency law (GDPR, country-level data-localization rules). An EU tenant's data must physically reside in an EU region; routing it to a US database is a compliance violation, not just a latency problem.
+
+```
+                         [ Global Anycast DNS / GeoDNS ]
+                                      |
+            +-------------------------+-------------------------+
+            |                                                   |
+     [ EU Gateway Region ]                              [ US Gateway Region ]
+            |                                                   |
+   tenant.region == EU  --> route here              tenant.region == US --> route here
+            |                                                   |
+   [ EU App Cluster ]                                  [ US App Cluster ]
+            |                                                   |
+   [ EU PostgreSQL (eu-west-1) ]                       [ US PostgreSQL (us-east-1) ]
+   schemas: tenant_acme_eu, ...                        schemas: tenant_globex_us, ...
+```
+
+Design changes for multi-region:
+- The tenant registry stores a `home_region` per tenant. The gateway reads the `tenant_id` claim from the JWT, looks up the home region, and routes (or 307-redirects) to that region's cluster. A tenant request that lands in the wrong region is redirected, never served, so data never crosses the boundary.
+- Each region runs an independent `AbstractRoutingDataSource` and pool set. There is no cross-region connection pooling.
+- The signing-key KMS is region-scoped; a tenant's `kid` resolves only within its home region's KMS.
+- Cross-region admin/billing aggregation runs as an offline ETL into a separate analytics warehouse with explicit data-processing agreements, not via live cross-region queries.
+- Onboarding assigns `home_region` at provisioning time based on the customer's stated jurisdiction; migration between regions is a deliberate, audited data-transfer operation, not an automatic failover.
+
+---
+
+## Additional Interview Questions
+
+**Q: Why is per-tier connection pooling preferred over per-tenant pooling at scale?**
+
+A: Per-tenant pooling multiplies connections by tenant count — 100 tenants times 10 connections is 1,000 DB connections, far past PostgreSQL's practical limit (~100–300 backends, ~10 MB each). Per-tier pooling caps the total: enterprise tenants get dedicated pools for isolation, while standard and free tenants share tier pools. This keeps the effective connection count in the low hundreds while still containing the noisy-neighbor blast radius to a tier. PgBouncer in transaction mode further multiplexes client connections onto a small server pool.
+
+**Q: How do you guarantee a tenant cannot read another tenant's data even if there is an application bug?**
+
+A: Defense in depth across three layers. First, tenant identity comes only from the signed JWT `tenant_id` claim resolved in the security filter, never from request input. Second, the connection provider sets `search_path` (schema-per-tenant) or a routing key per request, scoping all queries physically. Third, PostgreSQL row-level security policies on `tenant_id` columns reject any row that does not match the session's tenant GUC, so even a raw query that forgets the WHERE clause returns nothing. A single application bug must defeat all three layers to leak data.
+
+**Q: What is the time-to-recovery when a free-tier tenant runs a query that exhausts its pool?**
+
+A: With per-tier pools plus a per-tenant `statement_timeout` of 5s, recovery is automatic and bounded at ~5 seconds: the runaway statement self-aborts, releasing its connection back to the free-tier pool. Other tiers are never affected because they use separate pools. Without `statement_timeout` and per-tier isolation, an operator must manually identify and quarantine the tenant, which typically takes 5–15 minutes and impacts every tenant sharing the pool in the meantime.
+
+**Q: How do you handle a tenant that must move from the EU region to the US region?**
+
+A: This is a deliberate, audited data-transfer operation, not a failover. Procedure: (1) put the tenant in read-only mode, (2) snapshot and export the tenant's schema, (3) import into the target region's database, (4) update `home_region` in the global tenant registry and provision the signing key in the target KMS, (5) flip routing and verify, (6) drop the source schema after a retention window. Because residency rules govern where data may live, the move requires explicit authorization and an audit trail; it is never automatic.

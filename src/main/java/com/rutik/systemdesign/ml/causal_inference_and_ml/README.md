@@ -571,58 +571,257 @@ Correlation: statistical association, X and Y tend to move together. Prediction:
 
 ## 14. Case Study
 
-**Problem: Measuring the causal effect of email discounts on customer lifetime value (LTV)**
+**Scenario:** A B2C SaaS company (8M users, $240M ARR) wants to maximise revenue uplift from promotional email campaigns. Naive A/B testing showed 12% overall lift, but the marketing team suspects most lift comes from users who would have converted anyway (always-takers), and the emails are churning a segment of privacy-sensitive users (do-not-disturb). The goal: use uplift modeling to send emails only to persuadable users, targeting 2M of 8M users and achieving the same total conversions while reducing email volume by 75% and churn among anti-responders by 60%.
 
-Context: an e-commerce company sends promotional email discounts (10–30% off) to ~20% of its customer base. Data: 500K customers, 12-month behavioral history, 85 features. Question: does sending a discount email increase 6-month LTV, and for which customer segments?
-
-**Why naive ML fails:**
-Customers selected for discounts are high-value customers identified by a propensity-to-churn model. They have lower recent purchase frequency (selection bias). Naive comparison: treated LTV = $180, control LTV = $220. This suggests discounts decrease LTV — but confounding (churners selected for treatment) creates the illusion.
-
+**Architecture:**
 ```
-Confounding structure:
-  ChurnRisk (X) -> EmailDiscount (T)
-  ChurnRisk (X) -> LTV (Y)
-  EmailDiscount (T) -> LTV (Y)
-
-  Without controlling for ChurnRisk, naive E[LTV|T=1] < E[LTV|T=0]
-  Controlling for X recovers the positive causal effect.
-```
-
-**Solution pipeline:**
-
-```
-1. Feature set (pre-treatment, measured before email send):
-   Days since last purchase, purchase frequency (30/90/180d),
-   average order value, product categories, geographic region,
-   account age, email open rate (historical), churn risk score.
-
-2. Propensity score estimation:
-   GradientBoostingClassifier, 5-fold cross-fitting
-   E[T=1|X] distribution: treated ~ Beta(2,3), control ~ Beta(1,5)
-   Overlap: reasonable; trim e(x) < 0.02 or > 0.98 (drops 3.2% of sample)
-
-3. CATE estimation with CausalForestDML:
-   model_y: GradientBoostingRegressor (predict LTV from X)
-   model_t: GradientBoostingClassifier (predict T from X)
-   4000 trees, min_samples_leaf=50, honest splitting
-   Outcome: 6-month LTV post-email-send date
-
-4. Evaluation: Qini coefficient on 30% held-out set.
+User Feature Store (Feast, 180 features)
+  - engagement: DAU/WAU/MAU ratio, session depth, feature adoption score
+  - billing: LTV, payment history, plan tier, contract age
+  - behavioural: last login lag, support tickets, NPS survey response
+         |
+         v
+Uplift Model Training
+  Treatment assignment (email sent T=1, not sent T=0)
+  from historical RCT - 500K users (50/50 split)
+         |
+         +---------------------------+
+         |                           |
+   CausalForest (EconML)       Double ML (EconML)
+   honest splitting            residual-on-residual
+   500 trees, min_n=50         Ridge propensity model
+         |                           |
+         +---------------------------+
+                    |
+              CATE surface
+              tau_hat per user
+                    |
+                    v
+         Segmentation (tau quartiles)
+           tau > 0.08  -> "persuadable" (send email)
+           -0.02 < tau <= 0.08 -> "sure-thing" (no email needed)
+           tau <= -0.02 -> "sleeping-dog" (never email)
+                    |
+                    v
+         Email Campaign Engine
+         2M targeted emails / campaign cycle
 ```
 
-**Results:**
+**Step-by-step implementation:**
 
-| Segment | CATE (95% CI) | Interpretation |
+```python
+from __future__ import annotations
+import numpy as np
+import pandas as pd
+from econml.dml import CausalForestDML
+from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+
+def prepare_uplift_data(
+    df: pd.DataFrame,
+    treatment_col: str = "email_sent",
+    outcome_col: str = "converted_30d",
+    feature_cols: list[str] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if feature_cols is None:
+        feature_cols = [c for c in df.columns if c not in {treatment_col, outcome_col}]
+    X = df[feature_cols].values
+    T = df[treatment_col].values.astype(float)
+    Y = df[outcome_col].values.astype(float)
+    return X, T, Y
+
+def fit_causal_forest(
+    X_train: np.ndarray,
+    T_train: np.ndarray,
+    Y_train: np.ndarray,
+) -> CausalForestDML:
+    # Nuisance models: GBM for both outcome and propensity
+    model_y = GradientBoostingRegressor(n_estimators=200, max_depth=4, random_state=42)
+    model_t = GradientBoostingClassifier(n_estimators=200, max_depth=4, random_state=42)
+
+    cf = CausalForestDML(
+        model_y=model_y,
+        model_t=model_t,
+        n_estimators=500,
+        min_samples_leaf=50,      # honest splitting requires larger leaves
+        max_depth=None,
+        honest=True,              # split sample for structure vs CATE estimation
+        inference=True,           # enable confidence intervals
+        random_state=42,
+        n_jobs=-1,
+    )
+    cf.fit(Y_train, T_train, X=X_train)
+    return cf
+```
+
+```python
+from econml.dml import LinearDML
+from sklearn.linear_model import RidgeCV
+
+def fit_double_ml(
+    X_train: np.ndarray,
+    T_train: np.ndarray,
+    Y_train: np.ndarray,
+) -> LinearDML:
+    # Double ML: partial out treatment and outcome on covariates
+    model_y = GradientBoostingRegressor(n_estimators=300, max_depth=5, random_state=42)
+    model_t = GradientBoostingClassifier(n_estimators=300, max_depth=5, random_state=42)
+
+    dml = LinearDML(
+        model_y=model_y,
+        model_t=model_t,
+        model_final=RidgeCV(alphas=[0.01, 0.1, 1.0, 10.0]),
+        cv=5,
+        random_state=42,
+    )
+    dml.fit(Y_train, T_train, X=X_train)
+    return dml
+
+def evaluate_uplift_models(
+    cf_model: CausalForestDML,
+    dml_model: LinearDML,
+    X_test: np.ndarray,
+    T_test: np.ndarray,
+    Y_test: np.ndarray,
+) -> dict[str, float]:
+    tau_cf = cf_model.effect(X_test)
+    tau_dml = dml_model.effect(X_test)
+
+    # Qini coefficient: area under uplift curve relative to random targeting
+    def qini_coefficient(tau_hat: np.ndarray, T: np.ndarray, Y: np.ndarray) -> float:
+        order = np.argsort(-tau_hat)
+        T_ord, Y_ord = T[order], Y[order]
+        n = len(T_ord)
+        gains = np.cumsum(Y_ord * T_ord) / (np.cumsum(T_ord) + 1e-8) - \
+                np.cumsum(Y_ord * (1 - T_ord)) / (np.cumsum(1 - T_ord) + 1e-8)
+        return float(np.trapz(gains) / n)
+
+    return {
+        "qini_cf": qini_coefficient(tau_cf, T_test, Y_test),
+        "qini_dml": qini_coefficient(tau_dml, T_test, Y_test),
+        "mean_cate_cf": float(tau_cf.mean()),
+        "mean_cate_dml": float(tau_dml.mean()),
+    }
+```
+
+```python
+def segment_users(
+    tau_hat: np.ndarray,
+    user_ids: np.ndarray,
+    persuadable_threshold: float = 0.08,
+    sleeping_dog_threshold: float = -0.02,
+) -> pd.DataFrame:
+    segments = np.where(
+        tau_hat > persuadable_threshold, "persuadable",
+        np.where(tau_hat <= sleeping_dog_threshold, "sleeping_dog", "sure_thing")
+    )
+    df = pd.DataFrame({
+        "user_id": user_ids,
+        "tau_hat": tau_hat,
+        "segment": segments,
+    })
+    summary = df["segment"].value_counts(normalize=True)
+    print(f"Persuadable: {summary.get('persuadable', 0):.1%}")
+    print(f"Sure-thing:  {summary.get('sure_thing', 0):.1%}")
+    print(f"Sleeping-dog:{summary.get('sleeping_dog', 0):.1%}")
+    return df
+
+def estimate_campaign_roi(
+    df_segments: pd.DataFrame,
+    ctr_persuadable: float = 0.14,
+    ctr_sure_thing: float = 0.09,
+    ctr_sleeping_dog: float = 0.02,
+    conversion_value: float = 85.0,
+    email_cost: float = 0.008,
+) -> dict[str, float]:
+    counts = df_segments["segment"].value_counts()
+    persuadable_n = counts.get("persuadable", 0)
+    incremental_conversions = persuadable_n * ctr_persuadable
+    email_spend = persuadable_n * email_cost
+    revenue = incremental_conversions * conversion_value
+    return {
+        "emails_sent": int(persuadable_n),
+        "incremental_conversions": int(incremental_conversions),
+        "revenue": round(revenue, 2),
+        "roi": round((revenue - email_spend) / email_spend, 2),
+    }
+```
+
+**Key pitfalls (3 with BROKEN->FIX):**
+
+**Pitfall 1 - Using observational data without checking overlap assumption:**
+```python
+# BROKEN: using all historical email sends without checking propensity score overlap
+# Users who always receive emails have P(T=1|X) near 1.0; CATE is not identified for them
+tau = cf.effect(X_all)   # extrapolates into non-overlapping region
+
+# FIX: trim or reweight based on propensity score; only estimate CATE in overlap region
+from sklearn.linear_model import LogisticRegression
+prop_model = LogisticRegression().fit(X_all, T_all)
+propensity = prop_model.predict_proba(X_all)[:, 1]
+overlap_mask = (propensity > 0.1) & (propensity < 0.9)
+tau_overlap = cf.effect(X_all[overlap_mask])   # restricted to identified region
+print(f"Overlap region: {overlap_mask.mean():.1%} of users")
+```
+
+**Pitfall 2 - Evaluating uplift model with standard classification metrics:**
+```python
+# BROKEN: uplift has no ground-truth individual treatment effect; accuracy is meaningless
+from sklearn.metrics import accuracy_score
+# You cannot know true CATE for individual users - only average CATE via RCT
+preds = (tau_hat > 0.05).astype(int)
+score = accuracy_score(T_test, preds)   # measures propensity not uplift
+
+# FIX: use Qini coefficient or uplift curve area (AUUC)
+# Group test users by tau_hat decile; within each decile compute
+# conversion_rate(T=1) - conversion_rate(T=0) to validate monotonicity
+def uplift_by_decile(tau_hat, T_test, Y_test):
+    deciles = pd.qcut(tau_hat, 10, labels=False)
+    for d in range(10):
+        mask = deciles == d
+        lift = Y_test[mask & (T_test==1)].mean() - Y_test[mask & (T_test==0)].mean()
+        print(f"Decile {d}: tau_hat={tau_hat[mask].mean():.3f}, actual_lift={lift:.3f}")
+```
+
+**Pitfall 3 - Honest splitting disabled, causing overfitting in leaf CATE estimates:**
+```python
+# BROKEN: honest=False uses same samples for tree structure and leaf statistics
+# Results in overfit CATE estimates; confidence intervals are too narrow
+cf_bad = CausalForestDML(honest=False, n_estimators=500)
+cf_bad.fit(Y_train, T_train, X=X_train)
+# Leaf CATEs biased toward training residuals; Qini on test set 0.31 vs 0.19 train
+
+# FIX: honest=True (default) uses separate subsamples for splitting and leaf estimation
+cf_good = CausalForestDML(honest=True, min_samples_leaf=50, n_estimators=500)
+cf_good.fit(Y_train, T_train, X=X_train)
+# Train/test Qini gap shrinks from 0.12 to 0.03; confidence intervals coverage 93%
+```
+
+**Metrics and results:**
+
+| Metric | Naive broadcast | Uplift-targeted |
 |---|---|---|
-| High churn risk, high AOV | +$42 (+32, +52) | Persuadables — core target |
-| Low churn risk, high AOV | +$8 (+2, +14) | Sure things — marginal benefit |
-| High churn risk, low AOV | +$3 (-5, +11) | Lost causes — do not discount |
-| New customers (<90d) | +$28 (+18, +38) | High potential |
+| Emails sent per cycle | 8M | 2.1M |
+| Email volume reduction | 0% | 74% |
+| Total conversions | 48,200 | 46,800 |
+| Conversion rate (recipients) | 0.60% | 2.23% |
+| Sleeping-dog churn reduction | 0% | 61% |
+| Revenue per email | $3.40 | $12.80 |
+| Qini coefficient | N/A | 0.41 |
+| Campaign ROI | 1.8x | 6.3x |
+| Model training time | N/A | 2.1 hr (32 cores) |
 
-**Business impact:**
-Deploying discounts to top-CATE customers (estimated CATE > $20) instead of random selection:
-- Email volume reduced by 35% (cost savings)
-- Total LTV uplift increased 22% (vs. random targeting)
-- A/B holdout validation: CATE model quintile 1 vs. quintile 5 showed 3.1x difference in actual LTV lift (p < 0.001)
+**Interview discussion points:**
 
-**Qini coefficient:** 0.31 (vs. 0.0 for random targeting, theoretical max 0.5).
+**What is the fundamental identification assumption behind CausalForest and when is it violated?** CausalForest requires conditional unconfoundedness: given observed covariates X, treatment assignment T is independent of potential outcomes (Y0, Y1). This is violated when unmeasured confounders exist - for example, if sales reps manually email their best accounts and this "account health" variable is not in X, the estimated CATE conflates the email effect with account health effect. The fix is to use an RCT for training data, or to add instrumental variables (IV) estimation when an RCT is infeasible.
+
+**How does Double ML remove bias from regularised nuisance models?** Double ML first regresses Y on X (outcome model) and T on X (propensity model), then takes the residuals from both. The final CATE is estimated by regressing outcome residuals on treatment residuals. This orthogonalisation means errors in the nuisance models only affect CATE estimates at second order (squared error), allowing regularised models like GBM to be used without introducing first-order bias, a property called Neyman orthogonality.
+
+**Why is the Qini coefficient preferred over AUC-ROC for evaluating uplift models?** AUC-ROC measures how well a model ranks users by probability of a binary outcome, which is a propensity problem. Qini measures how much incremental lift a model delivers when users are targeted in order of predicted CATE, compared to random targeting. A model with high AUC-ROC but poor Qini correctly identifies "always-takers" (high baseline converters) but fails to distinguish them from "persuadables" - exactly the problem being solved by uplift modeling.
+
+**What is SUTVA and how does email marketing violate it?** SUTVA (Stable Unit Treatment Value Assumption) requires that a user's outcome depends only on their own treatment, not others'. Email marketing can violate SUTVA through network effects: a user who receives a promotional email and purchases may share the deal on social media, causing untreated friends to also purchase, inflating the measured ATE. The fix is to use cluster-randomisation (randomise at the household or social-graph cluster level) rather than individual-level randomisation.
+
+**How would you validate the uplift model without A/B testing the model itself?** Use a holdout validation RCT: after training on the initial 500K-user RCT, run a new 200K-user RCT where the treatment group is drawn entirely from the model's "persuadable" segment. The expected conversion lift in this targeted RCT should match the model's predicted mean CATE (0.11 in our case). If the measured lift is 0.08-0.14, the model is validated. Additionally, check monotonicity by confirming that Decile 10 (highest tau_hat) shows the largest measured lift.
+
+**What are the compute and memory requirements for serving CATEs at 8M user scale?** CausalForestDML with 500 trees and min_samples_leaf=50 produces a model of approximately 2.8 GB. Batch inference on 8M users takes 14 minutes on 32 CPU cores using joblib parallelism. For weekly campaigns, this is acceptable as a batch job. For real-time personalisation (e.g., triggered email within 5 minutes of a specific in-app event), the model must be reduced to 100 trees (600 MB) with inference p99 of 38ms per user on a single core, accepting a Qini drop from 0.41 to 0.37.

@@ -582,76 +582,192 @@ Spring builds a dependency graph from injection relationships (`@Autowired` fiel
 
 ## 14. Case Study
 
-### Problem: Application Starts Successfully but NullPointerException on First Request
+### Scenario: Managed Database Connection Pool Bean
 
-**Symptom:** A Spring Boot application starts without errors. The first API request to `/api/users` returns a `NullPointerException` from within `UserService.findAll()`.
+A trade-settlement service (Spring Boot 3.2 / Java 17) wraps its own `DatabaseConnectionPool` as a Spring-managed singleton. Operational requirements:
 
-**Code:**
+- Pool initializes 10 live connections at startup; the service must not accept traffic before the pool is ready
+- On shutdown (Kubernetes SIGTERM, ~30s grace), all in-flight work must finish and every connection must close cleanly — leaked sockets exhausted the database's connection limit in a prior incident
+- Every `DataSource` bean must be transparently wrapped with a metrics proxy to count borrows/returns
+- The service handles ~3,000 queries/sec across the 10 connections
 
-```java
-@Service
-public class UserService {
-    private final Map<String, User> cache = new HashMap<>();
+The lifecycle hooks (`@PostConstruct`, `@PreDestroy`) and a `BeanPostProcessor` make this clean and centralized.
 
-    @Autowired
-    private UserRepository repo;
+### Architecture Overview
 
-    public UserService() {
-        // BROKEN: repo is null here — field injection hasn't happened yet
-        repo.findAll().forEach(u -> cache.put(u.getId(), u));
-    }
-
-    public List<User> findAll() {
-        return new ArrayList<>(cache.values());  // cache is empty!
-    }
-}
+```
+  ApplicationContext refresh
+        |
+        v
+  +-------------------------------------------------------------+
+  | Bean creation: DatabaseConnectionPool                        |
+  |                                                              |
+  |  1 instantiate (constructor: config only, no I/O)           |
+  |  2 populate properties (@Value max-size, timeouts)          |
+  |  3 *Aware callbacks (BeanNameAware, ...)                    |
+  |  4 BeanPostProcessor.postProcessBeforeInitialization        |
+  |  5 @PostConstruct -> open 10 connections (BLOCKS until up)  |
+  |  6 InitializingBean.afterPropertiesSet                      |
+  |  7 BeanPostProcessor.postProcessAfterInitialization         |
+  |       -> MetricsProxy wraps the DataSource                  |
+  |  8 BEAN READY (singleton in context)                        |
+  |  ... serves traffic ...                                     |
+  |  9 context close / SIGTERM                                  |
+  | 10 @PreDestroy -> drain + close all 10 connections          |
+  | 11 DisposableBean.destroy                                   |
+  | 12 GC                                                        |
+  +-------------------------------------------------------------+
 ```
 
-**Root Cause:** Field injection via `@Autowired` happens after the constructor runs. At the time of `UserService()`, `repo` is `null`. The cache-loading loop throws `NullPointerException`, which is silently swallowed (or the constructor exits without loading anything depending on the exact code), leaving the cache empty.
+### Implementation
 
-Actually with the above code, `new UserService()` will throw NPE immediately. But if it was wrapped in a try-catch or the loop was conditional, it would silently fail. Either way, the fix is the same.
-
-**Fix:**
+The pool opens connections in `@PostConstruct` (after all properties are injected) and drains them in `@PreDestroy`.
 
 ```java
-@Service
-public class UserService {
-    private final Map<String, User> cache = new HashMap<>();
+@Component
+public class DatabaseConnectionPool {
 
-    @Autowired
-    private UserRepository repo;
+    @Value("${pool.size:10}")
+    private int size;
+    private final List<Connection> connections = new CopyOnWriteArrayList<>();
+    private final DataSource dataSource;
+
+    public DatabaseConnectionPool(DataSource dataSource) {
+        this.dataSource = dataSource;   // constructor: wiring only, no I/O yet
+    }
 
     @PostConstruct
-    public void loadCache() {
-        // Safe: @PostConstruct runs after all @Autowired fields are injected
-        repo.findAll().forEach(u -> cache.put(u.getId(), u));
-        System.out.println("Loaded " + cache.size() + " users into cache");
+    public void init() throws SQLException {
+        for (int i = 0; i < size; i++) {
+            connections.add(dataSource.getConnection());   // eager: fail fast at startup
+        }
+        log.info("Connection pool initialized with {} connections", connections.size());
     }
 
-    public List<User> findAll() {
-        return new ArrayList<>(cache.values());
+    @PreDestroy
+    public void shutdown() {
+        log.info("Draining {} connections", connections.size());
+        for (Connection c : connections) {
+            try { if (!c.isClosed()) c.close(); }           // graceful close — no leaks
+            catch (SQLException e) { log.warn("Close failed", e); }
+        }
+        connections.clear();
     }
 }
 ```
 
-**Better Fix (constructor injection — no lifecycle hook needed):**
+A `BeanPostProcessor` wraps every `DataSource` bean with a metrics proxy at step 7, with zero changes to the beans themselves.
 
 ```java
-@Service
-public class UserService {
-    private final Map<String, User> cache;
+@Component
+public class DataSourceMetricsProcessor implements BeanPostProcessor {
+    private final MeterRegistry registry;
+    DataSourceMetricsProcessor(MeterRegistry registry) { this.registry = registry; }
 
-    public UserService(UserRepository repo) {
-        // Constructor injection: repo is guaranteed non-null here
-        this.cache = repo.findAll().stream()
-            .collect(Collectors.toMap(User::getId, u -> u));
-        System.out.println("Loaded " + cache.size() + " users into cache");
-    }
-
-    public List<User> findAll() {
-        return new ArrayList<>(cache.values());
+    @Override
+    public Object postProcessAfterInitialization(Object bean, String name) {
+        if (bean instanceof DataSource ds) {
+            return Proxy.newProxyInstance(
+                ds.getClass().getClassLoader(),
+                new Class<?>[]{DataSource.class},
+                (proxy, method, args) -> {
+                    if ("getConnection".equals(method.getName())) {
+                        registry.counter("datasource.borrow", "bean", name).increment();
+                    }
+                    return method.invoke(ds, args);
+                });
+        }
+        return bean;
     }
 }
 ```
 
-**Lesson:** Constructor injection is the safest pattern because the constructor is the single initialization point where all dependencies are guaranteed to be available. Field injection requires understanding the `@PostConstruct` hook to safely access dependencies post-construction.
+A `SmartLifecycle` (optional) can coordinate ordered start/stop across multiple resource beans, but for a single pool the `@PostConstruct`/`@PreDestroy` pair plus `server.shutdown=graceful` is sufficient.
+
+```properties
+server.shutdown=graceful
+spring.lifecycle.timeout-per-shutdown-phase=25s   # finish in-flight work before @PreDestroy closes pool
+```
+
+### Metrics
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Connections leaked per restart | 10 | 0 |
+| DB "too many connections" incidents | 2/month | 0 |
+| Startup-to-ready delay | unbounded (lazy) | ~120 ms (eager init) |
+| First-request failures after deploy | intermittent | 0 |
+
+### Common Pitfalls
+
+**Pitfall 1 — calling an `@Async` method from `@PostConstruct`.**
+
+```java
+// BROKEN: at @PostConstruct the async proxy/executor isn't ready -> runs synchronously
+@PostConstruct
+public void warmUp() {
+    this.refreshAsync();   // self-invocation + async proxy not yet applied
+}
+@Async
+public void refreshAsync() { /* expected on a background thread, actually runs inline */ }
+```
+
+```java
+// FIX: defer async work until the context is fully started
+@EventListener(ApplicationReadyEvent.class)
+public void warmUpAfterStartup() {
+    asyncService.refreshAsync();   // proxy active, executor available
+}
+```
+
+**Pitfall 2 — expecting `@PreDestroy` on a prototype bean.**
+
+```java
+// BROKEN: Spring does NOT track prototype lifecycle; cleanup() never runs
+@Component
+@Scope("prototype")
+public class TempBuffer {
+    @PreDestroy public void cleanup() { release(); }   // never called by Spring
+}
+```
+
+```java
+// FIX: manage prototype teardown yourself, e.g. try-with-resources / explicit destroy
+@Component
+@Scope("prototype")
+public class TempBuffer implements AutoCloseable {
+    @Override public void close() { release(); }
+}
+// caller: try (TempBuffer b = provider.getObject()) { ... }
+```
+
+**Pitfall 3 — circular dependency where both beans use `@PostConstruct`.**
+
+```java
+// BROKEN: A.init() reads B's state, B.init() reads A's state -> order is non-deterministic
+@Component class A { @Autowired B b; @PostConstruct void init(){ b.value(); } }
+@Component class B { @Autowired A a; @PostConstruct void init(){ a.value(); } }
+```
+
+```java
+// FIX: break the init-time coupling; do cross-bean work after both are fully constructed
+@Component class A {
+    @Autowired B b;
+    @EventListener(ContextRefreshedEvent.class)   // both beans guaranteed initialized
+    void onReady() { b.value(); }
+}
+```
+
+### Interview Discussion Points
+
+**Walk through the Spring bean lifecycle for a bean that opens external resources.** The container instantiates it (constructor), populates dependencies, fires `*Aware` callbacks, runs `BeanPostProcessor.postProcessBeforeInitialization`, then `@PostConstruct`/`InitializingBean.afterPropertiesSet`, then `postProcessAfterInitialization` (where proxies/wrappers are applied), making the bean ready. On shutdown it runs `@PreDestroy`/`DisposableBean.destroy`. Resource acquisition belongs in `@PostConstruct` (all deps injected) and release in `@PreDestroy`, never in the constructor.
+
+**Why not open connections in the constructor?** At constructor time the bean is only partially configured — `@Value`-injected properties and setter/field dependencies are not yet applied, and post-processors have not run. Doing I/O there couples object creation to external availability and bypasses the proxying/metrics that happen in `postProcessAfterInitialization`. `@PostConstruct` runs after the bean is fully wired, which is the correct point.
+
+**How does a `BeanPostProcessor` differ from a `BeanFactoryPostProcessor`?** A `BeanFactoryPostProcessor` runs once, early, and mutates bean *definitions* (metadata) before any bean is instantiated — e.g. property placeholder resolution. A `BeanPostProcessor` runs for every bean *instance* around its initialization callbacks, which is where Spring applies AOP proxies and where you can wrap or replace instances (as with the DataSource metrics proxy).
+
+**Why is `@PreDestroy` never called on prototype beans?** Spring fully manages singleton lifecycles but only instantiates and configures prototypes — it hands them off and forgets them, so it has no reference to invoke destruction callbacks. The caller owns prototype cleanup, typically via `AutoCloseable`/try-with-resources or an explicit destroy method.
+
+**How do you guarantee graceful shutdown so connections are not leaked?** Set `server.shutdown=graceful` and a `spring.lifecycle.timeout-per-shutdown-phase` so the web server stops accepting new requests and lets in-flight ones drain before lifecycle teardown; `@PreDestroy` then closes each connection. Combined with a Kubernetes `terminationGracePeriodSeconds` longer than the phase timeout, this prevents abrupt socket termination.
+
+**What problems arise from a circular dependency with `@PostConstruct` cross-calls, and how do you resolve them?** Even when Spring resolves the cycle (via setter/field injection), the relative order of the two `@PostConstruct` methods is undefined, so one may observe the other in a half-initialized state. The clean fix is to remove init-time coupling and perform the cross-bean interaction after the context is fully refreshed, via an `ApplicationReadyEvent`/`ContextRefreshedEvent` listener.

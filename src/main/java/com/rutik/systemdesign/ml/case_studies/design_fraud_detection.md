@@ -529,3 +529,356 @@ AUC measures overall ranking quality but does not account for the asymmetric cos
 
 **How do you ensure the fraud score is produced in <50ms given streaming feature computation?**
 The critical insight is that streaming features must be precomputed, not computed on the critical path. Flink aggregates spend velocity continuously and writes results to Redis. At scoring time, the API does a Redis GET (sub-1ms), not a Flink computation. The 50ms budget is: rule engine 1ms + Redis feature fetch 5ms + model inference 15ms + network 10ms = 31ms, leaving 19ms buffer for tail latency. SHAP explanations (50-100ms) are computed asynchronously after the decision is returned.
+
+---
+
+## Failure Scenarios and Recovery
+
+### Failure 1: Redis Key Expiry During Peak Transaction Window
+
+**What failed:** On Black Friday, transaction volume spiked to 45K TPS (4.5x normal 10K TPS). The Flink streaming feature computation fell behind by 8 minutes — spend velocity features in Redis were stale. More critically, some Redis keys expired before Flink could refresh them: a card that had spent $2,000 in the last hour showed spend_velocity_1h=0 because the key had expired and Flink's write was delayed. The fraud model saw no velocity signal and approved 312 fraudulent transactions totaling $187K in 45 minutes.
+
+**Detection:** Chargebacks arrived 3 days later from card network. Real-time detection failed because the model's fraud score was low (velocity feature was zero). Post-hoc analysis correlated the window to Flink consumer lag. Time-to-detect: 3 days (via chargeback data), 45 minutes for Flink lag alert (but that alert was not actionable to fraud team).
+
+**Recovery steps:**
+1. Emergency manual blocklist: analyst added 890 card IDs that were flagged in the affected 45-minute window to the blocklist.
+2. Chargeback disputes filed with card networks for $187K.
+3. Flink parallelism increased from 8 to 32 workers specifically for spend velocity jobs; autoscaling enabled on Flink task managers.
+4. Redis TTL extended from window_size+10min to window_size+60min to provide buffer during consumer lag.
+
+**Prevention:** Added Kafka consumer lag as a feature-quality signal: if Flink lag > 5 minutes, automatically increase the fraud threshold from 0.85 to 0.70 (more conservative) to compensate for stale features. Alert on lag > 2 minutes.
+
+---
+
+### Failure 2: SMOTE Overfitting to Synthetic Minority Samples
+
+**What failed:** A model retrained with SMOTE sampling_strategy=0.5 (fraud → 50% of training data) achieved F-beta=0.92 on the validation set but precision=97.5% in production (target: >99.9%). Investigation showed SMOTE was generating synthetic fraud samples that interpolated between real fraud cases, creating a dense cluster of fraud-like feature combinations in embedding space. The model learned to predict fraud for any transaction in those regions, but real legitimate transactions sometimes occupied the same feature space (e.g., a legitimate $1,500 transaction from a new merchant at 2am — common for business travelers).
+
+**Detection:** Production precision monitoring: daily false-positive rate dashboard showed precision at 97.5%, below the 99.9% target. Analyst reviews showed 60% of flagged transactions in the manual review queue were legitimate. Time-to-detect: 2 weeks after new model deploy.
+
+**Recovery steps:**
+1. Rolled back to previous model (pre-SMOTE).
+2. Reduced SMOTE sampling_strategy from 0.5 to 0.1 (fraud → 10% of training data, not 50%).
+3. Validated on time-held-out test set (3-month delay to capture chargebacks) rather than random split, which better represented real distribution.
+4. Added graph features as hard guardrails: no SMOTE samples generated for transactions where shared_device_with_fraud=0 (legitimate device network reduces fraud probability strongly).
+
+**Prevention:** Precision monitoring with 24-hour lag (chargebacks from same-day approvals arrive within 24h for card-present fraud). Alert immediately if precision drops below 99.5% on a rolling 1,000-decision window.
+
+---
+
+### Failure 3: Concept Drift From New Account Takeover Vector
+
+**What failed:** Fraudsters discovered a new attack: instead of using stolen card numbers, they compromised email accounts, changed shipping addresses, and placed orders using the original card on file. The model's features (country_mismatch, new_device, velocity) did not capture this pattern. Fraud rate in the "new shipping address + email change within 24 hours" segment rose from 0.1% to 8% over 3 weeks. The model scored these transactions at 0.2-0.3 (legitimate), passing them to auto-approve. $2.3M in losses accumulated before detection.
+
+**Detection:** An analyst noticed an unusual pattern in chargebacks — all from the same demographic (email change 24h before order). Cross-referenced with model feature logs. Time-to-detect: 3 weeks.
+
+**Recovery steps:**
+1. Emergency rule added to the rule engine: if email_changed_within_24h AND new_shipping_address → force to human review queue regardless of model score.
+2. Feature engineering: added email_change_age_hours, shipping_address_age_hours, address_change_velocity_7d.
+3. Retrained XGBoost model on new features with labeled examples from the attack window.
+4. Deployed new model within 72 hours of root cause identification.
+
+**Prevention:** Weekly analyst review of chargeback patterns to identify emerging fraud vectors not captured by current features. Feature importance monitoring: if model's top-10 features do not include features covering a new fraud pattern within 2 weeks of its emergence, trigger emergency feature engineering sprint.
+
+---
+
+## Capacity Planning
+
+### Data Volume Projections
+
+```
+Year 0 (current):
+  Transaction rate: 10K TPS, 864M transactions/day
+  Transaction event size: ~2KB (features + metadata)
+  Daily raw log: 864M × 2KB = 1.73TB/day
+  Click label join: chargebacks arrive 30-90 days later → 90-day retention
+  Total hot storage (90 days): 1.73TB × 90 = 156TB (Parquet on S3)
+  Redis feature keys: 100M active cards × 3 windows × ~500B per key = 150GB Redis cluster
+
+Year 1 (2x transaction growth):
+  20K TPS, 1.73B transactions/day, ~3.46TB/day
+  Redis: 200M cards × 3 windows = 300GB (6-node r5.2xlarge cluster)
+  Model retraining data (30-day): ~104TB Parquet
+
+Year 3 (5x growth):
+  50K TPS, 4.32B transactions/day, ~8.6TB/day
+  Redis cluster: 12-node (750GB active feature data)
+  Flink processing: 50K events/sec → requires 80 task manager slots
+  90-day S3 retention: 780TB
+```
+
+### Training Compute Requirements
+
+```
+XGBoost Fraud Model (daily retrain):
+  Dataset: 30-day rolling window × 864M tx/day × 0.3 subsampled = 7.8B training examples
+  With class balancing (fraud:legit = 1:10 after sampling): ~15M examples
+  Hardware: c5.4xlarge (16 vCPU, 32GB RAM)
+  Duration: 25 minutes (tree_method=hist)
+  Cost: $0.68/hr × 0.42hr = $0.29/run × 365 = $106/year
+
+Graph Feature Precomputation (nightly):
+  Build device-card association graph: 864M nodes, 2B edges
+  GraphX on Spark (10-node EMR r5.2xlarge): 3 hours/night
+  Cost: 10 × $0.504/hr × 3hr = $15/night = $5,475/year
+
+SHAP Explanation Precomputation (async, post-decision):
+  500K decisions/day requiring SHAP (review queue + blocks)
+  TreeExplainer: 10ms per decision → 5M ms = 83 CPU-minutes
+  2 dedicated c5.xlarge for async SHAP: $0.17/hr each
+  Cost: 2 × $0.17 × 24 × 365 = ~$2,978/year
+
+Total annual training cost: ~$8,559
+```
+
+### Serving Infrastructure
+
+```
+Transaction Scoring Service:
+  10K TPS peak, 50ms P99 budget
+  Each scoring instance: XGBoost inference 15ms, Redis GET 5ms, network 10ms
+  Instances needed: 10K TPS × 30ms avg latency = 300 concurrent requests
+  10 instances (c5.2xlarge, 8 vCPU): 30 concurrent requests each
+  Cost: 10 × $0.34/hr = $3.40/hr = $2,450/month
+
+Redis Feature Store:
+  10K TPS × 5 Redis GETs per tx = 50K GET/sec
+  10-node Redis Cluster (r5.xlarge, 32GB RAM each): 5K ops/node
+  Estimated active data: 150GB across 10 nodes (15GB/node)
+  Cost: 10 × $0.252/hr = $2.52/hr = ~$1,814/month
+
+Kafka Cluster (transaction events + label feedback):
+  10K events/sec sustained, 30K peak
+  5-broker cluster (kafka.m5.2xlarge)
+  Cost: ~$750/month
+
+Flink Streaming (feature computation):
+  32 task managers (c5.xlarge, 4 vCPU)
+  Cost: 32 × $0.17/hr = $5.44/hr = ~$3,917/month
+
+Total monthly serving infrastructure: ~$8,931
+```
+
+---
+
+## Additional War Stories
+
+**War Story 1 — Threshold Calibration Using Wrong Validation Set:**
+
+```python
+# BROKEN: Using random train/val split for threshold optimization
+# Fraud patterns are temporal — training on all months and validating on random 10%
+# means the model has "seen" future fraud patterns via training data leakage
+
+from sklearn.model_selection import train_test_split
+import numpy as np
+import xgboost as xgb
+from sklearn.metrics import precision_recall_curve
+
+
+def optimize_threshold_broken(
+    X: np.ndarray,
+    y: np.ndarray,
+    model: xgb.XGBClassifier,
+) -> float:
+    # BUG: Random split — validation set contains fraud from same time window as training
+    # Model already overfit to these fraud patterns → inflated validation precision
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+    model.fit(X_train, y_train)
+    probs = model.predict_proba(X_val)[:, 1]
+    precision, recall, thresholds = precision_recall_curve(y_val, probs)
+    # Returns threshold=0.72 with precision=99.95% on validation
+    # In production: precision=97.8% — overoptimistic by 2.15 percentage points
+    best_idx = np.argmax(precision[recall >= 0.80])
+    return float(thresholds[best_idx])
+
+
+# FIX: Temporal validation split — validate on the most recent month only
+# Training: months 1-5, Validation: month 6, Test: month 7 (held out)
+
+def optimize_threshold_correct(
+    df_with_timestamp: "pd.DataFrame",  # includes 'timestamp' and 'label' columns
+    X: np.ndarray,
+    y: np.ndarray,
+    model: xgb.XGBClassifier,
+    validation_window_days: int = 30,
+) -> float:
+    """
+    Time-based split: train on all data except last validation_window_days.
+    Validate on most recent validation_window_days.
+    This simulates real deployment: model trained on past, evaluated on future.
+    """
+    import pandas as pd
+    cutoff = df_with_timestamp["timestamp"].max() - pd.Timedelta(days=validation_window_days)
+    train_mask = df_with_timestamp["timestamp"] < cutoff
+    val_mask = ~train_mask
+
+    model.fit(X[train_mask], y[train_mask])
+    probs = model.predict_proba(X[val_mask])[:, 1]
+    y_val = y[val_mask]
+
+    precision, recall, thresholds = precision_recall_curve(y_val, probs)
+    # Threshold is more conservative: typically 0.85-0.90 vs 0.72 from random split
+    recall_mask = recall[:-1] >= 0.80
+    if recall_mask.any():
+        best_idx = int(np.argmax(precision[:-1][recall_mask]))
+        return float(thresholds[recall_mask][best_idx])
+    return 0.90  # conservative default
+```
+
+**War Story 2 — SHAP Explanation Inconsistency Under Parallel Scoring:**
+
+```python
+# BROKEN: TreeExplainer initialized once and shared across threads
+# SHAP's internal state is not thread-safe — parallel requests cause race conditions
+# producing SHAP values that don't sum to model output (conservation violated)
+
+import shap
+import threading
+import xgboost as xgb
+import numpy as np
+
+
+class FraudExplainerBroken:
+    def __init__(self, model: xgb.XGBClassifier) -> None:
+        # BUG: single explainer shared across threads
+        self.explainer = shap.TreeExplainer(model)
+
+    def explain(self, X: np.ndarray) -> np.ndarray:
+        # Race condition: multiple threads calling explain() simultaneously
+        # corrupts internal background dataset state in TreeExplainer
+        return self.explainer.shap_values(X)  # NOT thread-safe
+
+
+# FIX: Use thread-local explainer instances, or serialize with a lock,
+# or use a process pool (separate memory space per worker)
+
+import concurrent.futures
+
+
+class FraudExplainerCorrect:
+    def __init__(self, model: xgb.XGBClassifier) -> None:
+        self.model = model
+        self._local = threading.local()
+
+    def _get_explainer(self) -> shap.TreeExplainer:
+        """Thread-local explainer — each thread gets its own instance."""
+        if not hasattr(self._local, "explainer"):
+            self._local.explainer = shap.TreeExplainer(self.model)
+        return self._local.explainer
+
+    def explain(self, X: np.ndarray) -> np.ndarray:
+        explainer = self._get_explainer()
+        shap_values = explainer.shap_values(X)
+        # Validate conservation property: shap_values.sum() + base_value ≈ model_output
+        base_value = explainer.expected_value
+        model_output = self.model.predict_proba(X)[:, 1]
+        shap_sum = shap_values.sum(axis=1) + base_value
+        if not np.allclose(shap_sum, model_output, atol=0.01):
+            raise RuntimeError(
+                f"SHAP conservation violated: shap_sum={shap_sum}, "
+                f"model_output={model_output}"
+            )
+        return shap_values
+```
+
+---
+
+## Monitoring and Drift Detection Deep-Dive
+
+### Features That Drift Fastest
+
+```
+Feature                           Drift rate    Why it drifts
+────────────────────────────────────────────────────────────────────────
+new_device (device_age < 1 day)   Very high     Fraudsters rotate devices daily
+spend_velocity_1h                 High          Attack patterns shift; seasonal spending
+failed_attempts_15min             High          Brute-force bot activity waxes/wanes
+country_mismatch                  High          Travel patterns; VPN usage trends
+is_high_risk_mcc                  Medium        Fraudsters shift to new merchant categories
+card_device_age_days              Medium        Legitimate users get new devices periodically
+tx_amount                         Low           Consumer spending patterns stable month-to-month
+hour_of_day distribution          Low           Shifts with daylight saving, seasonal habits
+```
+
+### PSI Monitoring for Fraud Features
+
+```python
+# PSI alert thresholds calibrated to fraud feature characteristics
+FRAUD_FEATURE_PSI_THRESHOLDS = {
+    "spend_velocity_1h": 0.15,          # seasonal variation expected
+    "new_device": 0.20,                  # bot campaigns cause legitimate spikes
+    "country_mismatch": 0.15,
+    "failed_attempts_15min": 0.25,       # DDoS/brute-force highly variable
+    "amount_vs_velocity_ratio": 0.10,   # stable; shift indicates new fraud pattern
+    "shared_device_with_fraud": 0.10,   # should be stable graph topology
+}
+
+# Model output monitoring
+SCORE_DISTRIBUTION_ALERTS = {
+    "fraction_auto_blocked": {"lower": 0.0005, "upper": 0.005},  # 0.05-0.5% of traffic
+    "fraction_in_review": {"lower": 0.005, "upper": 0.05},        # 0.5-5% of traffic
+    "median_fraud_score": {"lower": 0.02, "upper": 0.15},         # among all transactions
+}
+```
+
+### Retraining Triggers and Cadence
+
+```
+Cadence        Trigger condition                                Action
+─────────────────────────────────────────────────────────────────────────────
+Daily          Scheduled                                        Full XGBoost retrain
+Hourly         New confirmed fraud labels from analysts >1000   Incremental warm-start retrain
+Triggered      PSI > 0.20 on any top-5 feature                 Emergency retrain + feature audit
+Triggered      Precision drops below 99.5% on 1000-tx window   Threshold re-optimization
+Triggered      Fraud rate on auto-approved tx > 0.3% (vs 0.1%) Emergency rule addition + retrain
+Triggered      New attack vector identified by analyst          Emergency feature engineering
+Weekly         Scheduled                                        Graph feature rebuild (device associations)
+Monthly        Scheduled                                        Model audit: SHAP drift, feature importance shift
+```
+
+### A/B Testing for Model Promotion
+
+```
+Shadow mode (1 week):
+  New model runs in parallel on 100% of traffic
+  Predictions logged but not served
+  Validation checklist:
+    - Latency P99 < 50ms (reject if exceeds 45ms to leave 10% headroom)
+    - SHAP values computed and verified (conservation property)
+    - Score distribution similar to production model (PSI < 0.15)
+
+A/B test (2 weeks minimum):
+  Treatment: 20% of traffic scored by new model
+  Control: 80% scored by production model
+  Primary metrics:
+    - Precision on auto-blocked transactions (chargeback rate in blocked set)
+    - Recall: fraud rate on auto-approved transactions (delayed label, 30 days)
+  Guardrails:
+    - False positive rate in review queue must not increase > 5%
+    - P99 latency must not increase > 5ms
+  Statistical threshold: 95% confidence on primary metrics
+
+Ramp: 20% → 50% → 100% at 3-day intervals after significance confirmed
+```
+
+---
+
+## Additional Interview Questions
+
+**How do you handle feedback delays in fraud labels, where chargebacks arrive 30-90 days after a transaction?**
+The feedback delay creates a censoring problem: transactions from the last 30-90 days have incomplete labels — many fraudulent transactions have not yet been charged back. Training naively on recent data with incomplete labels underestimates fraud probability and biases the model toward legitimate predictions. Mitigations: (1) Use a training window that excludes the most recent 90 days (train on months 1-9, evaluate on month 10 with complete labels). (2) For hourly retraining on fresh data, use analyst-confirmed labels (faster: analyst reviews within 4 hours) rather than chargeback labels. (3) Implement a "pending label" state: transactions from the last 90 days are held in a label buffer; as chargebacks arrive, the buffer is updated and periodically used to fine-tune the model.
+
+**How do you maintain explainability while improving model accuracy with ensemble methods?**
+Single XGBoost provides SHAP values that are exact (not approximate) because TreeExplainer computes the exact Shapley decomposition for tree models. Stacking multiple XGBoost models or adding neural components breaks this: SHAP becomes approximate (KernelSHAP, LIME) and much slower (100-1000x). The approach that preserves explainability while improving accuracy: (1) Feature engineering — add interaction features (amount_vs_velocity_ratio, country_mismatch × new_device) to a single XGBoost model rather than ensembling two models. (2) Monotonicity constraints: constrain features like spend_velocity_1h to be monotonically increasing in fraud score, which also prevents SHAP from showing counterintuitive values. (3) If a second model is required (e.g., a graph neural network for device association), use it only as a feature input (graph_fraud_score) to the XGBoost model, not as an ensemble. The XGBoost then explains the combined signal.
+
+**What is the review queue economics, and how do you size it?**
+The review queue contains transactions with fraud score in [0.40, 0.85] where human judgment is required. Sizing: at 10K TPS, roughly 8% of traffic (after rule engine pass-through) reaches the ML model. Of that, approximately 5% falls in the review zone = 0.008 × 10K = 80 transactions/second = 6.9M per day. Each analyst reviews 200 transactions per hour → 6.9M / 200 = 34,500 analyst-hours/day. At $40/hour fully-loaded cost, this is $1.38M/day — clearly unsustainable. The review queue must be ruthlessly prioritized: only transactions with expected loss > $500 AND fraud_score > 0.60 enter the queue (reduces queue by 85%). Automated disposition handles the rest with slightly lower precision. The threshold zone [0.40, 0.60] is auto-approved with enhanced monitoring; [0.60, 0.85] is auto-reviewed with transaction hold.
+
+**How does the system handle coordinated bot attacks targeting the scoring service itself?**
+A coordinated attack might send millions of test transactions at low amounts to probe the model's decision boundary and infer the fraud threshold. Defenses: (1) Score obfuscation: never return the exact fraud probability to the client — return only the decision (approved/declined/pending). (2) Rate limiting at the API gateway: max 100 transactions per card per hour enforced in the rule engine, regardless of fraud score. (3) Behavioral fingerprinting: transaction inter-arrival times that are too regular (bots send at fixed intervals) trigger a rule-engine flag, routing to human review. (4) Model obfuscation: periodically introduce noise into auto-approve/block decisions for borderline scores (score 0.38-0.42 gets 20% stochastic override). This makes the boundary fuzzy from the attacker's perspective. (5) Canary features: hidden features that legitimate merchants would never trigger but test-probing bots might, similar to honeypots.
+
+**How do you reconcile the 99.9% precision requirement with the 80% recall requirement?**
+At 0.1% fraud rate with 99.9% precision and 80% recall: for every 1,000 transactions, 1 is fraud and 999 are legitimate. Catching 80% of fraud means catching 0.8 fraud cases. With 99.9% precision, we can have at most 0.001 × (0.8 / 0.999) ≈ 0.0008 false positives per transaction reviewed, or about 1 false positive per 1,000 auto-blocked decisions. In practice, this precision-recall operating point is achieved via the three-zone architecture: the auto-block zone (score > 0.85) must have 99.9% precision on its own, while the review zone (0.40-0.85) has lower precision (85-95%) but higher recall. The combined system recall is: auto-block recall + review recall. This separation allows optimizing each zone independently.

@@ -1110,3 +1110,211 @@ Before this architecture, the equivalent incident took down the product listing 
 **Observability outcome.** Zipkin trace tree showed the circuit-open pattern within 30 seconds of the incident starting. The on-call engineer identified the recommendation service as the root cause in 2 minutes by filtering Zipkin traces by service. Without distributed tracing, the investigation would have involved grep-searching logs across 20 services.
 
 **Lesson learned.** Gateway-level circuit breakers (for external-facing routes) and service-level Resilience4j (for inter-service Feign calls) are complementary and both necessary. A circuit breaker at the gateway protects frontend users; a circuit breaker on the Feign client inside product-service protects product-service from its own downstream dependencies. Defense in depth requires circuit breakers at every layer.
+
+---
+
+**Expanded Case Study: Resilient API Gateway for 100k req/min Across 12 Microservices**
+
+**Scenario:** A logistics SaaS platform routes 100k req/min through a Spring Cloud Gateway in front of 12 downstream microservices. Without resilience patterns, a slow `Inventory` service caused cascading timeouts that took down the entire API for 22 minutes. Goal: implement circuit breaker, rate limiting, retry, and service discovery so a single service degradation never propagates upstream.
+
+**Scale:** 100k req/min = ~1,667 RPS sustained. 12 downstream services, 3 of which are critical path (Orders, Inventory, Shipping). SLA: gateway p99 < 80ms, availability 99.9%.
+
+```
+Resilience topology:
+
+  Client  ──→  [Spring Cloud Gateway]
+                    │
+        ┌───────────┼───────────────────┐
+        │           │                   │
+  [RateLimiter]  [CircuitBreaker]   [Retry]
+  Redis token    Resilience4j       3 attempts
+  bucket         per-service        with backoff
+        │           │                   │
+        └───────────┼───────────────────┘
+                    │
+        ┌───────────┼──────────────────────────┐
+        │           │           │              │
+  [Orders]    [Inventory]  [Shipping]  [Notifications]
+  Eureka-     Eureka-      Eureka-     Eureka-
+  registered  registered   registered  registered
+  2 instances 3 instances  2 instances 1 instance
+```
+
+**Gateway configuration — circuit breaker + rate limiter per route:**
+
+```yaml
+# application.yml — Spring Cloud Gateway (Boot 3.2)
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: inventory-route
+          uri: lb://inventory-service        # Eureka service ID
+          predicates:
+            - Path=/api/inventory/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: inventoryCircuitBreaker
+                fallbackUri: forward:/fallback/inventory
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 500    # tokens/sec
+                redis-rate-limiter.burstCapacity: 1000
+                key-resolver: "#{@userKeyResolver}"
+            - name: Retry
+              args:
+                retries: 3
+                statuses: BAD_GATEWAY, SERVICE_UNAVAILABLE
+                backoff:
+                  firstBackoff: 50ms
+                  maxBackoff: 500ms
+                  factor: 2
+                  basedOnPreviousValue: false
+```
+
+**Resilience4j circuit breaker configuration:**
+
+```java
+@Configuration
+public class CircuitBreakerConfig {
+
+    @Bean
+    public Customizer<ReactiveResilience4JCircuitBreakerFactory> inventoryCbCustomizer() {
+        return factory -> factory.configure(builder -> builder
+            .circuitBreakerConfig(io.github.resilience4j.circuitbreaker.CircuitBreakerConfig.custom()
+                .failureRateThreshold(50)           // open at 50% failure rate
+                .waitDurationInOpenState(Duration.ofSeconds(10))
+                .slidingWindowSize(20)              // last 20 calls
+                .permittedNumberOfCallsInHalfOpenState(5)
+                .build())
+            .timeLimiterConfig(TimeLimiterConfig.custom()
+                .timeoutDuration(Duration.ofMillis(500))   // 500ms max per call
+                .build()),
+        "inventoryCircuitBreaker");
+    }
+}
+```
+
+**Fallback controller:**
+
+```java
+@RestController
+@RequestMapping("/fallback")
+public class FallbackController {
+
+    @GetMapping("/inventory")
+    public ResponseEntity<Map<String, Object>> inventoryFallback(
+            ServerWebExchange exchange) {
+        // Return stale cache or degrade gracefully
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+            .body(Map.of(
+                "status", "degraded",
+                "message", "Inventory service unavailable — showing cached availability",
+                "cached", true
+            ));
+    }
+}
+```
+
+**Feign client with Resilience4j fallback:**
+
+```java
+// Downstream service consuming inventory via Feign
+@FeignClient(name = "inventory-service", fallbackFactory = InventoryFallbackFactory.class)
+public interface InventoryClient {
+    @GetMapping("/inventory/{sku}")
+    InventoryResponse getStock(@PathVariable String sku);
+}
+
+@Component
+class InventoryFallbackFactory implements FallbackFactory<InventoryClient> {
+    @Override
+    public InventoryClient create(Throwable cause) {
+        return sku -> InventoryResponse.unavailable(sku, cause.getMessage());
+    }
+}
+```
+
+**BROKEN→FIX: No circuit breaker — slow service cascades**
+
+```java
+// BROKEN: direct Feign call with no resilience — 12s timeout accumulates
+@FeignClient(name = "inventory-service")
+public interface InventoryClient {
+    @GetMapping("/inventory/{sku}")
+    InventoryResponse getStock(@PathVariable String sku);
+    // No timeout → 12 default Ribbon timeout → 1667 RPS × 12s = 20k in-flight requests
+    // → thread pool exhaustion → entire gateway unresponsive
+}
+
+// FIX: Resilience4j CB + Feign timeout
+// 1. Set Feign read timeout to 500ms (fail fast)
+// 2. CB opens at 50% failure rate, serves fallback for 10s
+// 3. Result: slow inventory = degraded response, not outage
+feign:
+  client:
+    config:
+      inventory-service:
+        readTimeout: 500
+        connectTimeout: 200
+```
+
+**BROKEN→FIX: Retry amplifies load on unhealthy service**
+
+```java
+// BROKEN: 3 retries with no backoff on a service that's down
+// 1667 RPS × 3 retries = 5001 RPS hitting already-overwhelmed service
+filters:
+  - name: Retry
+    args:
+      retries: 3
+      # no backoff → all retries immediate → thundering herd
+
+// FIX: exponential backoff with jitter
+filters:
+  - name: Retry
+    args:
+      retries: 3
+      backoff:
+        firstBackoff: 50ms
+        maxBackoff: 500ms
+        factor: 2
+        basedOnPreviousValue: false   # jitter via randomized base
+// Result: retry traffic spread over 50-500ms window; recoverable services recover
+```
+
+**Service discovery with Eureka — health check integration:**
+
+```java
+@SpringBootApplication
+@EnableDiscoveryClient
+public class InventoryServiceApplication {
+    // Eureka registers this instance with metadata
+    // including health endpoint: /actuator/health
+    // Gateway's lb://inventory-service load-balances only HEALTHY instances
+    // (Spring Cloud LoadBalancer filters out DOWN instances every 30s)
+}
+```
+
+**Metrics and results:**
+
+| Metric | Before | After |
+|---|---|---|
+| Cascading failure duration | 22 min | 0 (circuit opens in ~10s) |
+| Gateway p99 latency | 4,200ms (timeout accumulation) | 67ms |
+| Error rate during inventory degradation | 100% (full outage) | 8% (fallback served) |
+| RPS capacity | 800 (thread exhaustion) | 1,800 |
+| CB false positive rate | N/A | 0.2% (10s cooldown) |
+
+**Interview discussion points:**
+
+**What is the difference between a circuit breaker and a timeout, and why do you need both?** A timeout limits how long a single request waits before failing. A circuit breaker tracks the pattern of failures over a window: once the failure rate crosses a threshold, it opens and immediately rejects new requests without trying the downstream service. You need both: timeout prevents indefinite blocking per request; circuit breaker prevents the retry/timeout cost from accumulating across thousands of concurrent requests.
+
+**How does Spring Cloud Gateway differ from Zuul for reactive workloads?** Spring Cloud Gateway is built on Project Reactor and Netty — it's fully non-blocking. Zuul 1 uses a servlet model with one thread per connection; under high concurrency, thread exhaustion limits throughput. At 1,667 RPS, Gateway runs on ~8 event-loop threads vs. Zuul needing 1,667 threads for equivalent throughput. Use Gateway for new reactive stacks; Zuul only if maintaining legacy Zuul 1 deployments.
+
+**What is the risk of retrying on non-idempotent operations?** Retrying a POST that creates an order can create duplicate orders. The Retry filter should only retry on safe HTTP methods (GET, HEAD) or explicitly idempotent operations guarded by an idempotency key. In the gateway, configure `methods: GET, HEAD` to restrict retries, or require upstream services to implement idempotent write APIs.
+
+**How do you choose a circuit breaker sliding window size?** The window size (20 in the example) must be large enough to distinguish transient from persistent failures: too small (5) and a single burst of failures opens the circuit; too large (200) and the circuit opens slowly, allowing more damage. A good heuristic: window = (expected RPS to this service) × (desired detection window in seconds). For 100 RPS to inventory and a 200ms detection window: 100 × 0.2 = 20 calls.
+
+**How does the rate limiter key resolver affect fairness?** The key resolver determines who shares a rate limit bucket. Using the user's JWT subject (`@userKeyResolver`) gives each user their own 500 req/sec bucket — fair per-user limiting. Using the IP address shares a bucket across users behind a NAT. Using a global key (same bucket for all) is a single choke point: one high-volume user starves others. Choose based on your billing model and fair-use policy.

@@ -887,3 +887,61 @@ public WebClient webClient() {
 - The filter must be ordered before Spring Security (`Order: -100`) so that MDC is populated before Spring Security logs authentication events for the same request
 - MDC cleanup in `finally` is mandatory — Tomcat thread pools reuse threads; without cleanup, thread 47 processing request 1001 will log with the trace ID from request 1000
 - The `afterCompletion` approach in the interceptor works for audit records; the filter's `finally` block works for cross-cutting concerns tied to the raw response
+
+---
+
+**Additional war stories and interview Q&As:**
+
+**Pitfall: Filter executing twice for error dispatch.** A logging filter records every request — but for an error, Spring dispatches the request twice (first to the original URL, then to `/error`). The filter fires both times, producing duplicate log entries.
+
+```java
+// BROKEN: filter fires for both REQUEST and ERROR dispatches
+@Component
+public class RequestLogFilter extends OncePerRequestFilter {
+    @Override
+    protected void doFilterInternal(...) {
+        log.info("Request: {}", request.getRequestURI());
+        filterChain.doFilter(request, response);
+    }
+    // Logs "GET /orders" then "GET /error" for every exception response
+}
+
+// FIX: override shouldNotFilterErrorDispatch to skip ERROR dispatch
+@Override
+protected boolean shouldNotFilterErrorDispatch() {
+    return true;  // only logs the original REQUEST dispatch
+}
+```
+
+**Pitfall: HandlerInterceptor's preHandle returning false without a response body.** Returning `false` from `preHandle` halts the handler chain, but if the interceptor wrote nothing to the response, the client receives an empty 200 response — confusing and hard to debug.
+
+```java
+// BROKEN: returns false, client gets empty 200
+@Override
+public boolean preHandle(HttpServletRequest req, HttpServletResponse res,
+                         Object handler) {
+    if (!isAuthenticated(req)) return false;  // empty response!
+    return true;
+}
+
+// FIX: write explicit error status before returning false
+@Override
+public boolean preHandle(HttpServletRequest req, HttpServletResponse res,
+                         Object handler) throws IOException {
+    if (!isAuthenticated(req)) {
+        res.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Unauthorized");
+        return false;
+    }
+    return true;
+}
+```
+
+**Pitfall: Ordering filters via @Order vs Spring Security's filter chain.** Filters registered with `@Component` + `@Order` are added to the embedded servlet container's filter chain. Spring Security's `SecurityFilterChain` is a separate chain managed by `DelegatingFilterProxy`. A logging filter at `@Order(1)` runs before Spring Security — meaning it logs requests that Security will eventually reject. Usually correct for logging, wrong for auth-gating.
+
+**Additional interview Q&As:**
+
+**What is the difference between OncePerRequestFilter and GenericFilterBean?** `OncePerRequestFilter` guarantees single execution per request, even during forwards, includes, or error dispatches (with `shouldNotFilterErrorDispatch`). `GenericFilterBean` fires on every dispatch. Use `OncePerRequestFilter` for any filter that must not double-execute (logging, authentication, rate limiting). Use `GenericFilterBean` only when you explicitly need to intercept all dispatch types.
+
+**How do you pass data from a Filter to a Controller?** Set a request attribute: `request.setAttribute("key", value)`. In the controller, inject `HttpServletRequest` and call `request.getAttribute("key")`. Alternatively, put the data in the `SecurityContext` (for auth principal) or in an MDC thread-local (for trace IDs). Never use static fields or application-scope singletons for request-scoped data.
+
+**When would you choose HandlerInterceptor over a Filter?** Use `HandlerInterceptor` when you need access to Spring MVC concepts: the matched `HandlerMethod`, model attributes, or `ModelAndView`. Use a Filter when you need to intercept at the servlet level before Spring MVC: for raw request/response manipulation (GZIP, logging raw bytes), for requests that may not reach a Spring handler (static resources, error pages), or for security filters that must run before DispatcherServlet.

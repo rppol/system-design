@@ -488,71 +488,293 @@ Larger batch sizes produce lower-variance gradient estimates, allowing larger le
 
 ## 14. Case Study
 
-**Problem**: A team trains a 350M-parameter transformer language model on 50B tokens. Early training runs diverged after 1000 steps — loss spiked to NaN. A second attempt converged but generalized poorly. The team needs a stable training recipe.
+**Scenario:** A research lab fine-tunes a 7B-parameter LLaMA-3 variant on a 120B-token instruction dataset using 8 A100-80GB GPUs. The baseline run with Adam at lr=1e-4 diverges at step 2,400 due to gradient norm explosion, while conservative lr=1e-5 converges but reaches perplexity 3.41 after 72 hours, still above the target of 2.85. The goal: implement AdamW with gradient clipping, warmup + cosine LR schedule, and loss scaling for bf16 mixed precision, achieving perplexity <= 2.90 within 48 hours on the same 8-GPU setup.
 
-**Diagnosis and solution**:
+**Architecture:**
+```
+Data Pipeline
+  120B tokens, shuffled once, streamed from S3 in 4096-token sequences
+  Micro-batch: 4 sequences per GPU, gradient accumulation over 8 steps
+  Effective batch size: 4 * 8 (GPUs) * 8 (accum) = 256 sequences = 1M tokens/step
+         |
+         v
+Model: LLaMA-3 7B
+  bf16 parameters (14 GB), fp32 master weights (28 GB)
+  Flash Attention 2 for O(n) memory attention
+         |
+         v
+Optimizer: AdamW
+  lr: cosine from peak 3e-4 -> 3e-5 (10% warmup, 90% cosine decay)
+  weight decay: 0.1 (applied to non-bias, non-norm params only)
+  beta1=0.9, beta2=0.95, eps=1e-8   (Chinchilla settings)
+  gradient clipping: max_norm=1.0 before optimizer step
+         |
+         v
+Training Loop
+  Loss: cross-entropy (language modeling)
+  Checkpointing: every 500 steps to S3
+  Perplexity tracking: rolling 100-step average
+  Automatic LR adjustment if val_loss stops decreasing for 1000 steps
+```
+
+**Step-by-step implementation:**
+
+```python
+from __future__ import annotations
+import math
+import torch
+import torch.nn as nn
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
+
+def get_cosine_schedule_with_warmup(
+    optimizer: AdamW,
+    num_warmup_steps: int,
+    num_training_steps: int,
+    min_lr_fraction: float = 0.1,   # minimum LR = peak_lr * min_lr_fraction
+) -> LambdaLR:
+    """Linear warmup followed by cosine decay to min_lr_fraction of peak lr."""
+
+    def lr_lambda(current_step: int) -> float:
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        progress = float(current_step - num_warmup_steps) / float(
+            max(1, num_training_steps - num_warmup_steps)
+        )
+        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_lr_fraction + (1.0 - min_lr_fraction) * cosine_decay
+
+    return LambdaLR(optimizer, lr_lambda)
+
+def build_optimizer(
+    model: nn.Module,
+    peak_lr: float = 3e-4,
+    weight_decay: float = 0.1,
+    beta1: float = 0.9,
+    beta2: float = 0.95,
+    eps: float = 1e-8,
+) -> AdamW:
+    """Apply weight decay only to non-embedding, non-layernorm, non-bias params."""
+    decay_params: list[torch.Tensor] = []
+    no_decay_params: list[torch.Tensor] = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if param.ndim == 1 or "bias" in name or "norm" in name.lower():
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    param_groups = [
+        {"params": decay_params, "weight_decay": weight_decay},
+        {"params": no_decay_params, "weight_decay": 0.0},
+    ]
+    return AdamW(param_groups, lr=peak_lr, betas=(beta1, beta2), eps=eps, fused=True)
+```
+
+```python
+from torch.cuda.amp import GradScaler
+from contextlib import contextmanager
+import torch.distributed as dist
+
+class TrainingLoop:
+    def __init__(
+        self,
+        model: nn.Module,
+        optimizer: AdamW,
+        scheduler: LambdaLR,
+        gradient_accumulation_steps: int = 8,
+        max_grad_norm: float = 1.0,
+        use_bf16: bool = True,
+    ) -> None:
+        self.model = model
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.max_grad_norm = max_grad_norm
+        self.use_bf16 = use_bf16
+        # GradScaler only needed for fp16; bf16 does not require loss scaling
+        self.scaler = GradScaler() if not use_bf16 else None
+
+    def train_step(
+        self,
+        input_ids: torch.Tensor,
+        labels: torch.Tensor,
+        step: int,
+    ) -> float:
+        is_accumulation_step = (step + 1) % self.gradient_accumulation_steps != 0
+
+        ctx = torch.cuda.amp.autocast(dtype=torch.bfloat16) if self.use_bf16 else \
+              torch.cuda.amp.autocast(dtype=torch.float16)
+
+        with ctx:
+            outputs = self.model(input_ids=input_ids, labels=labels)
+            loss = outputs.loss / self.gradient_accumulation_steps
+
+        if self.scaler is not None:
+            self.scaler.scale(loss).backward()
+        else:
+            loss.backward()
+
+        if not is_accumulation_step:
+            if self.scaler is not None:
+                self.scaler.unscale_(self.optimizer)
+
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), self.max_grad_norm
+            )
+
+            if self.scaler is not None:
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                self.optimizer.step()
+
+            self.scheduler.step()
+            self.optimizer.zero_grad(set_to_none=True)   # faster than zero_grad()
+            return float(grad_norm)
+        return 0.0
+
+    def log_metrics(self, step: int, loss: float, grad_norm: float) -> None:
+        lr = self.scheduler.get_last_lr()[0]
+        perplexity = math.exp(min(loss, 20))   # clamp to avoid overflow
+        print(f"Step {step:6d} | loss={loss:.4f} | ppl={perplexity:.2f} | "
+              f"lr={lr:.2e} | grad_norm={grad_norm:.3f}")
+```
 
 ```python
 import numpy as np
 
+def diagnose_gradient_explosion(
+    model: nn.Module,
+    threshold_norm: float = 10.0,
+) -> dict[str, float]:
+    """Diagnose which layers contribute to gradient norm explosion."""
+    layer_norms: dict[str, float] = {}
+    total_norm_sq = 0.0
 
-def training_recipe_config() -> dict:
-    """
-    Stable training configuration for a 350M parameter transformer.
-    Based on GPT-3 and LLaMA training recipes.
-    """
-    total_tokens = 50_000_000_000          # 50B tokens
-    tokens_per_batch = 2048 * 512          # seq_len=2048, batch_size=512 = 1M tokens/step
-    total_steps = total_tokens // tokens_per_batch  # ~48,800 steps
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            layer_norm = float(param.grad.detach().data.norm(2))
+            layer_norms[name] = layer_norm
+            total_norm_sq += layer_norm ** 2
 
-    warmup_fraction = 0.01                  # 1% = 488 warmup steps
-    warmup_steps = int(total_steps * warmup_fraction)
+    total_norm = total_norm_sq ** 0.5
+    top_layers = sorted(layer_norms.items(), key=lambda x: x[1], reverse=True)[:5]
 
-    return {
-        # Optimizer: AdamW with decoupled weight decay
-        "optimizer": "AdamW",
-        "lr": 3e-4,
-        "beta1": 0.9,
-        "beta2": 0.95,          # lower than default 0.999 for LM training
-        "eps": 1e-8,
-        "weight_decay": 0.1,    # stronger regularization for large model
+    if total_norm > threshold_norm:
+        print(f"WARNING: Gradient norm {total_norm:.2f} exceeds threshold {threshold_norm}")
+        print("Top contributing layers:")
+        for name, norm in top_layers:
+            print(f"  {name}: {norm:.4f}")
 
-        # Schedule: linear warmup + cosine decay to 10% of peak lr
-        "warmup_steps": warmup_steps,         # 488
-        "total_steps": total_steps,            # ~48,800
-        "lr_min": 3e-5,                        # 10% of peak lr at end
+    return {"total_norm": total_norm, "max_layer_norm": top_layers[0][1] if top_layers else 0.0}
 
-        # Gradient clipping: prevents NaN from early spikes
-        "gradient_clip_norm": 1.0,
+def select_peak_lr_via_lr_finder(
+    model: nn.Module,
+    dataloader: torch.utils.data.DataLoader,
+    min_lr: float = 1e-7,
+    max_lr: float = 1e-1,
+    num_steps: int = 100,
+) -> float:
+    """LR range test (Smith 2017): find steepest loss descent region."""
+    lrs = np.logspace(np.log10(min_lr), np.log10(max_lr), num_steps)
+    losses: list[float] = []
+    optimizer = AdamW(model.parameters(), lr=min_lr)
 
-        # Batch: gradient accumulation to simulate 512 batch size on 8 GPUs
-        "micro_batch_size": 64,
-        "gradient_accumulation_steps": 8,
-        "effective_batch_size": 512,
+    for step, (lr, batch) in enumerate(zip(lrs, dataloader)):
+        for g in optimizer.param_groups:
+            g["lr"] = float(lr)
+        loss = model(**batch).loss
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+        losses.append(float(loss))
 
-        # Initialization: critical for stable training
-        # Output projection weights scaled by 1/sqrt(n_layers)
-        # Prevents residual stream from growing with depth
-        "output_proj_init_scale": 1.0 / np.sqrt(24),  # for 24-layer model
-    }
-
-
-def compute_lr(step: int, config: dict) -> float:
-    """Compute learning rate at a given step."""
-    warmup_steps = config["warmup_steps"]
-    total_steps = config["total_steps"]
-    lr_max = config["lr"]
-    lr_min = config["lr_min"]
-
-    if step < warmup_steps:
-        return lr_max * step / warmup_steps
-    else:
-        progress = (step - warmup_steps) / (total_steps - warmup_steps)
-        return lr_min + 0.5 * (lr_max - lr_min) * (1 + np.cos(np.pi * progress))
+    # Find LR with steepest negative gradient
+    loss_arr = np.array(losses)
+    loss_gradient = np.gradient(loss_arr)
+    optimal_lr_idx = int(np.argmin(loss_gradient))
+    recommended_lr = float(lrs[optimal_lr_idx]) / 10   # use 10x below steepest point
+    print(f"LR finder recommends peak_lr: {recommended_lr:.2e}")
+    return recommended_lr
 ```
 
-**Root cause of divergence**: No warmup + Adam default beta2=0.999. At step 1, v_hat = g^2 / (1-0.999) = 1000 * g^2, making sqrt(v_hat) large and the effective lr tiny — until gradients accumulated and v_hat stabilized, at which point the effective lr jumped. This instability combined with the 350M parameter scale produced divergence at step ~1000 when a large gradient batch was encountered.
+**Key pitfalls (3 with BROKEN->FIX):**
 
-**Root cause of poor generalization**: Adam with L2 regularization (not AdamW) was used. Weight decay was unevenly applied — parameters with large gradient history received less effective regularization. Switching to AdamW and increasing weight_decay from 0.01 to 0.1 improved held-out perplexity by 2.1 points.
+**Pitfall 1 - Applying weight decay to LayerNorm and bias parameters:**
+```python
+# BROKEN: weight decay on all parameters causes LayerNorm scale parameters to shrink
+# toward 0, destabilising normalisation and causing loss spikes at step ~3000
+optimizer = AdamW(model.parameters(), lr=3e-4, weight_decay=0.1)
+# LayerNorm gamma and beta parameters are shrunk, activation scale collapses
 
-**Lesson**: For any new training run at scale, use: AdamW + warmup (1% of steps) + cosine decay + gradient clipping (1.0) + gradient norm logging. These four changes together prevent the most common training failure modes.
+# FIX: exclude 1D parameters, bias terms, and norm parameters from weight decay
+decay_params = [p for n, p in model.named_parameters()
+                if p.ndim > 1 and "norm" not in n and "bias" not in n]
+no_decay_params = [p for n, p in model.named_parameters()
+                   if p.ndim == 1 or "norm" in n or "bias" in n]
+optimizer = AdamW([
+    {"params": decay_params, "weight_decay": 0.1},
+    {"params": no_decay_params, "weight_decay": 0.0},
+], lr=3e-4)
+```
+
+**Pitfall 2 - Gradient clipping AFTER optimizer step does not prevent explosive updates:**
+```python
+# BROKEN: clipping after the optimizer step has no effect; parameters already updated
+optimizer.step()
+torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # too late
+# The gradient explosion already propagated to weights; training diverges at step 2400
+
+# FIX: clip gradients BEFORE optimizer step
+# For fp16 with GradScaler, unscale first so clipping operates on true gradient magnitude
+scaler.unscale_(optimizer)   # unscale before clipping
+grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+scaler.step(optimizer)       # step uses clipped gradients
+scaler.update()
+```
+
+**Pitfall 3 - Using Adam instead of AdamW causes L2 regularisation to interact with adaptive LR:**
+```python
+# BROKEN: Adam with weight_decay applies L2 penalty scaled by adaptive learning rate
+# For parameters with small gradient history (large Adam denominator), regularisation
+# is weaker, creating inconsistent regularisation across layers
+optimizer = torch.optim.Adam(model.parameters(), lr=3e-4, weight_decay=0.1)
+# Equivalent to: w -= lr / sqrt(v) * (g + weight_decay * w)
+# weight_decay effect varies by parameter; LayerNorm barely regularised, large matrices over-regularised
+
+# FIX: AdamW decouples weight decay from gradient scaling
+optimizer = AdamW(model.parameters(), lr=3e-4, weight_decay=0.1)
+# Equivalent to: w -= lr * weight_decay * w (decoupled)
+#                w -= lr / sqrt(v) * g (gradient step)
+# Consistent regularisation independent of gradient magnitude history
+```
+
+**Metrics and results:**
+
+| Metric | Adam lr=1e-4 | Adam lr=1e-5 | AdamW + cosine + clip |
+|---|---|---|---|
+| Diverged at step | 2,400 | N/A | N/A |
+| Final perplexity (val) | N/A | 3.41 | 2.87 |
+| Training time to converge | N/A | 72 hr | 44 hr |
+| Peak gradient norm | 142 | 3.2 | 0.94 (clipped) |
+| GPU memory (bf16) | 76 GB | 76 GB | 74 GB |
+| GPU utilisation | 72% | 72% | 89% |
+| Effective throughput (tokens/s) | 2.1M | 2.1M | 2.8M |
+| Checkpoint resume success rate | N/A | 100% | 100% |
+
+**Interview discussion points:**
+
+**Why does AdamW outperform Adam with L2 regularisation for LLM fine-tuning?** Adam with weight_decay effectively applies L2 regularisation scaled by the inverse of the adaptive learning rate: parameters with noisy gradients (large Adam denominator) receive weaker regularisation than parameters with consistent gradients. For transformer weights where different heads have very different gradient patterns, this creates inconsistent and unpredictable regularisation. AdamW applies the weight decay step independently of the gradient scaling, giving uniform regularisation per unit of parameter magnitude across all layers, which is the intended semantic of L2 regularisation.
+
+**What is the cosine learning rate schedule's advantage over step decay for LLM training?** Step decay maintains a constant LR between drops, causing the model to oscillate in a region of the loss landscape before abruptly jumping to a lower LR. This oscillation wastes compute. Cosine decay smoothly reduces the LR following a cosine curve from peak to minimum, maintaining the largest useful learning rate early when gradients are informative and gradually reducing as the model approaches convergence. For the 120B-token run, cosine decay achieves perplexity 2.87 versus step decay's 3.04 at the same compute budget, because the smooth transition allows better exploration of the loss landscape near convergence.
+
+**Why is bf16 preferred over fp16 for LLM training and does it require GradScaler?** fp16 has a maximum representable value of 65,504; gradient norms exceeding this overflow to infinity, causing NaN loss. GradScaler addresses this by scaling the loss up before backprop and unscaling gradients before the optimizer step, adding complexity and a runtime overhead of ~3%. bf16 has the same dynamic range as fp32 (8 exponent bits versus 5 for fp16), eliminating overflow risk entirely. No GradScaler is needed with bf16; the master weights are kept in fp32 for numerical precision in the optimizer state, while forward/backward passes use bf16, reducing memory from ~80 GB to ~74 GB for 7B parameters.
+
+**What is gradient accumulation and how does it affect the effective batch size and training stability?** Gradient accumulation runs multiple forward-backward passes without clearing gradients, then performs a single optimizer step with the accumulated gradient (average over accumulation steps). With 4 sequences per GPU, 8 GPUs, and 8 accumulation steps, the effective batch size is 256 sequences of 4096 tokens = 1.05M tokens per optimizer step. Larger effective batch sizes reduce gradient noise (lower variance per step), allowing a higher peak learning rate (linear scaling rule: peak_lr scales as sqrt(batch_size_ratio)) and fewer total optimizer steps for the same number of tokens, improving training stability and hardware utilisation.
+
+**How do you detect and respond to gradient norm explosion during training?** Monitor the gradient norm before clipping at every step. A sudden spike (e.g., norm jumps from 0.9 to 142) typically indicates a corrupt batch (NaN activations from division-by-zero in attention or feed-forward), an extreme outlier in training data (e.g., a document with 10K repeated tokens), or an LR that is too high for the current loss landscape region. The fix is: (1) implement nan-safe attention (add eps to softmax denominator); (2) filter training data for repetitive or degenerate sequences during preprocessing; (3) set gradient clipping at max_norm=1.0 as a safety net; (4) checkpoint every 500 steps so recovery from divergence loses at most 500 steps of compute.
+
+**What is the linear scaling rule for batch size and learning rate and when does it break down?** The linear scaling rule (Goyal et al. 2017) states that when batch size is multiplied by k, the learning rate should be multiplied by k to maintain training dynamics. This holds because SGD with batch size B and LR eta has the same expected gradient direction as SGD with batch size kB and LR k*eta (the noise in the gradient estimate scales as 1/sqrt(B)). The rule breaks down when the batch size becomes so large that the gradient estimate is near-deterministic (noise approaches zero) and the large LR causes the model to step past narrow minima. For LLMs, the rule holds well up to batch sizes of 4M tokens; beyond that, linear scaling leads to divergence, and square-root scaling or warmup adjustments are required.

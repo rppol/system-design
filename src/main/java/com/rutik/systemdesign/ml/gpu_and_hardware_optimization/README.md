@@ -629,44 +629,160 @@ PyTorch's caching allocator maintains a pool of freed tensors to avoid repeated 
 
 ## 14. Case Study
 
-**Problem**: A team is training a 13B parameter transformer for text generation. Single A100 80GB: 13B × 2 bytes (BF16) = 26 GB parameters, 26 GB gradients, 104 GB optimizer states (Adam) = 156 GB total — does not fit in 80 GB. Measured training throughput on 8× A100 (DDP baseline): 1,200 tokens/second, GPU utilization 52%, DataLoader consuming 45% of step time. Target: >4,000 tokens/second with current hardware.
-
-**Architecture**:
+**Scenario: Raising a transformer training job from 35% to 58% MFU on 8x A100 80GB.** A team's pretraining run was GPU-starved. PyTorch Profiler showed the GPUs idle 40% of the time waiting on the CPU data pipeline, plus wasted time in attention and the optimizer. A sequence of targeted fixes, prefetching, Flash Attention 2, torch.compile, and gradient checkpointing, delivered 1.66x end-to-end throughput and enabled a 30% larger batch.
 
 ```
-8x A100 80GB (NVLink interconnect)
+profiler breakdown (before):
+  data loading (CPU)   ####################  40%  <- GPU idle
+  attention             ############          25%
+  optimizer step        #######               15%
+  compute (useful)      ##########            20%
 
-Bottlenecks identified by torch.profiler:
-1. DataLoader: 45% of step time (num_workers=0, no pin_memory)
-2. Attention: standard scaled_dot_product (not Flash Attention)
-3. Model does not fit in 80 GB per GPU (DDP fails with 156 GB static requirement)
+fixes:
+  prefetch (num_workers=8, pin_memory) ---> overlap load with compute
+  Flash Attention 2                    ---> fused, memory-efficient attn
+  torch.compile                        ---> kernel fusion, less overhead
+  gradient checkpointing               ---> 30% mem -> bigger batch
+  bf16 mixed precision                 ---> halve optimizer-state memory
 
-Solution architecture:
-- FSDP FULL_SHARD: 156 GB / 8 = 19.5 GB static per GPU
-- Gradient checkpointing: reduces 24-layer activation from ~40 GB to ~16 GB per GPU
-- Flash Attention 2: replaces standard attention
-- torch.compile: fuses FFN elementwise ops
-- DataLoader: num_workers=4, pin_memory=True, prefetch_factor=2
-
-Peak memory estimate per GPU:
-  Parameters (sharded): 26/8 = 3.25 GB
-  Gradients (sharded): 26/8 = 3.25 GB
-  Optimizer states (sharded): 104/8 = 13 GB
-  Activations (checkpointed): ~16 GB
-  Flash Attn working memory: ~1 GB
-  Total: ~36.5 GB — comfortably within 80 GB
+result: 35% MFU -> 58% MFU, 1.66x throughput, +30% batch size
 ```
 
-**Key Design Decisions**:
+The single biggest win was eliminating the CPU data-loading stall; the rest came from fusing attention and reducing memory pressure so a larger, more efficient batch fit.
 
-1. FSDP with size_based_auto_wrap_policy (min_params=100M) — each of the 40 transformer blocks wrapped independently, sharded across 8 GPUs. AllGather before each block's forward, ReduceScatter after backward.
+**Overlapping data loading with compute:**
 
-2. Gradient checkpointing on every transformer block with use_reentrant=False (compatible with torch.compile). Reduces activation memory 40%, adds 33% compute — net positive because memory was the binding constraint.
+```python
+from torch.utils.data import DataLoader
 
-3. Flash Attention 2 via `torch.nn.functional.scaled_dot_product_attention()` (PyTorch 2.1+) — eliminates O(N^2) attention matrix in HBM. For sequence_length=2048: saves 8 × 2048 × 2048 × 2 bytes = 64 MB per forward pass.
+def fast_loader(dataset, batch_size: int) -> DataLoader:
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=8,          # parallel CPU workers prefetch batches
+        pin_memory=True,        # pinned host memory -> faster H2D copy
+        prefetch_factor=4,      # each worker stages 4 batches ahead
+        persistent_workers=True,
+    )
+```
 
-4. torch.compile with mode="reduce-overhead": fuses the 4 elementwise ops in each FFN block (GELU, dropout, two linear post-activations) into 2 kernels instead of 4 — 2 fewer HBM round trips per FFN block × 40 blocks = 80 fewer HBM accesses per step.
+**torch.compile + bf16 autocast training step:**
 
-5. DataLoader: num_workers=4, pin_memory=True, persistent_workers=True. Measured DataLoader throughput: 85,000 samples/second — faster than GPU consumption of 60,000 samples/second, eliminating the bottleneck.
+```python
+import torch
 
-**Results**: throughput increased from 1,200 to 4,800 tokens/second (4× improvement). GPU utilization: 91%. MFU: 43%. Training costs reduced from $18/hour (projected to add more GPUs) to $4.50/hour (same 8 GPUs, 4× faster). Total training run time for 100B tokens: 6 days vs 24 days with the unoptimized setup.
+def build(model: torch.nn.Module) -> torch.nn.Module:
+    return torch.compile(model, mode="max-autotune")   # fuse + autotune kernels
+
+def step(model, batch, optimizer, scaler) -> torch.Tensor:
+    optimizer.zero_grad(set_to_none=True)
+    with torch.autocast("cuda", dtype=torch.bfloat16):  # bf16 mixed precision
+        loss = model(batch["input_ids"], labels=batch["labels"]).loss
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    optimizer.step()
+    return loss
+```
+
+**Gradient checkpointing to trade compute for memory:**
+
+```python
+import torch
+
+def enable_checkpointing(model: torch.nn.Module) -> None:
+    # recompute activations in backward instead of storing them: ~30% less
+    # activation memory at ~25% extra compute -> enables a larger batch.
+    if hasattr(model, "gradient_checkpointing_enable"):
+        model.gradient_checkpointing_enable()
+```
+
+**Pitfall 1 — CPU data-loading bottleneck.** With a single-threaded loader the GPU sits idle 40% of the time waiting for the next batch.
+
+```python
+# BROKEN: synchronous loading on the main process -> GPU starves
+loader = DataLoader(dataset, batch_size=32)   # num_workers=0
+
+# FIX: parallel workers + pinned memory + prefetch so the next batch is ready
+# before the GPU finishes the current one (see fast_loader).
+loader = fast_loader(dataset, batch_size=32)
+```
+
+**Pitfall 2 — Storing all activations causes OOM.** Holding activations for the full forward pass at a large batch overflows GPU memory.
+
+```python
+# BROKEN: full activation cache -> OOM at the batch size you want
+loss = model(x).loss   # every activation kept for backward
+
+# FIX: gradient checkpointing recomputes activations in the backward pass,
+# cutting activation memory ~30% so a bigger batch fits.
+enable_checkpointing(model)
+```
+
+**Pitfall 3 — fp32 optimizer states triple memory.** Adam in fp32 stores master weights plus two moments at full precision, consuming about 3x the model size and crowding out batch capacity.
+
+```python
+# BROKEN: fp32 everywhere -> optimizer states dominate memory
+optimizer = torch.optim.AdamW(model.parameters())   # fp32 states
+
+# FIX: bf16 mixed precision (and 8-bit optimizers where appropriate) shrink
+# the optimizer-state footprint, freeing memory for a larger batch.
+with torch.autocast("cuda", dtype=torch.bfloat16):
+    loss = model(x).loss
+```
+
+**Interview Q&A:**
+
+**What is MFU and how do you raise it?** Model FLOPs Utilization is achieved useful FLOPs over hardware peak FLOPs. It drops when the GPU stalls on data loading, communication, or memory, or wastes work on unfused kernels. You raise it by removing those stalls: overlap data loading, fuse kernels (torch.compile, Flash Attention), use efficient precision, and increase the compute-to-overhead ratio with a larger batch.
+
+**Why is data loading such a common bottleneck and how do you confirm it?** GPUs are far faster than a single CPU thread doing decode/augment/collate, so without parallel prefetch the GPU waits. Confirm with the PyTorch Profiler: a large gap between kernels or high time in the dataloader indicates starvation. The fix is more workers, pinned memory, prefetch_factor, and moving heavy preprocessing off the hot path.
+
+**What does gradient checkpointing trade, and when is it worth it?** It trades compute for memory: instead of storing activations for the backward pass, it recomputes them, saving roughly 30% activation memory at about 25% extra compute. It is worth it when memory, not compute, caps your batch size; the larger batch often more than recovers the throughput lost to recomputation.
+
+**Why does Flash Attention improve both speed and memory?** Standard attention materializes the full N x N attention matrix in memory (O(N^2)) and is bandwidth-bound. Flash Attention tiles the computation and never materializes the full matrix, fusing softmax and the matmuls in SRAM. This reduces memory to O(N) and cuts HBM traffic, giving large speedups especially at long sequence lengths.
+
+**Why bf16 over fp16 for training, and what does it save?** bf16 keeps fp32's exponent range, avoiding the overflow/underflow that forces fp16 to use loss scaling, so it is more stable for large models. In mixed precision it halves activation and optimizer-state memory versus fp32, freeing room for larger batches, while modern GPUs run bf16 matmuls on tensor cores at high throughput.
+
+**What does torch.compile do and what are its caveats?** It traces the model into a graph and applies fusion, layout optimization, and autotuned kernels via a backend (Inductor), reducing Python overhead and kernel-launch counts. Caveats: a one-time compilation cost, recompilation on shape changes (use static shapes or padding), and occasional graph breaks on unsupported ops that you should profile and remove.
+
+**Pitfall — CUDA stream synchronization missing causes silent data races.**
+
+```python
+# BROKEN: two CUDA streams write to overlapping memory regions without sync
+import torch
+
+stream_a = torch.cuda.Stream()
+stream_b = torch.cuda.Stream()
+
+with torch.cuda.stream(stream_a):
+    result_a = model_a(input_a)   # writes to shared GPU buffer
+
+with torch.cuda.stream(stream_b):
+    result_b = model_b(input_b)   # reads from same buffer — DATA RACE!
+
+# FIX: synchronize before reading shared state
+stream_a.synchronize()   # wait for stream_a to finish
+with torch.cuda.stream(stream_b):
+    result_b = model_b(result_a)  # safe: result_a is committed
+```
+
+**How do you profile GPU utilization to find compute vs memory bottlenecks?** Use `torch.profiler` with `record_shapes=True, profile_memory=True, with_stack=True`. Export to Chrome trace format (`prof.export_chrome_trace("trace.json")`) and look for SM utilization (target > 80% for compute-bound), memory bandwidth utilization (target > 70% for memory-bound), and kernel launch overhead. Alternatively, `nvidia-smi dmon -s puc` samples power/utilization every second. An SM utilization of 30% on a compute-intensive workload indicates excessive kernel launch overhead or poor occupancy — check batch size and tensor shapes.
+
+**What is mixed precision training and when does BF16 outperform FP16?** Mixed precision (AMP) computes forward/backward in half precision (FP16 or BF16) and accumulates gradients in FP32. FP16 has 5 exponent bits and 10 mantissa bits — it overflows for values > 65,504 (requires loss scaling). BF16 has 8 exponent bits and 7 mantissa bits — same dynamic range as FP32, no overflow, no loss scaling needed. BF16 is preferred on Ampere/Ada A100/H100 GPUs and for LLM training where activation magnitudes can be large. Use FP16 only on Volta/Turing (V100, T4) where BF16 hardware support is absent.
+
+**What is GPU memory bandwidth vs. compute throughput, and which limits LLM inference?** Compute throughput (FLOPS) limits matrix-multiply-heavy operations (prefill/prompt processing). Memory bandwidth limits memory-bound operations (token generation: loading KV cache from HBM for each token). An A100 has 312 TFLOPS (BF16) and 2TB/s memory bandwidth. For a 7B model with 4-byte (FP16) weights = 14GB, loading all weights takes 14GB / 2TB/s = 7ms — the minimum per-token generation time regardless of batch size. This is why LLM generation is memory-bandwidth bound and why techniques like speculative decoding and continuous batching matter: they increase arithmetic intensity to better utilize compute.
+
+**What is tensor core utilization and how do matrix dimensions affect it?** Tensor cores on NVIDIA Ampere GPUs operate on 16×16 matrix tiles (FP16/BF16). If the matrix dimensions are not multiples of 16 (and ideally 128 for best efficiency), tensor cores pad to the next multiple, wasting cycles. Practical rule: keep all matrix dimensions (batch size, sequence length, hidden dim) as multiples of 64 or 128. A hidden size of 4097 wastes ~50% of a tensor core tile; hidden size 4096 achieves near-peak utilization. Use `torch.backends.cuda.matmul.allow_tf32 = True` on Ampere to enable TF32 for FP32 matmuls — 10× faster than FP32 with minimal accuracy loss.
+
+**What is gradient checkpointing and what is the compute-memory trade-off?** During backpropagation, PyTorch stores all intermediate activations from the forward pass to compute gradients. For a 7B LLM with sequence length 4k, this can require 80GB+. Gradient checkpointing (`torch.utils.checkpoint.checkpoint_sequential`) discards activations after the forward pass and recomputes them during backward when needed. Memory reduction: O(sqrt(N)) vs. O(N) for N layers (recompute the N/2 discarded activations from the N/2 checkpointed). Compute overhead: ~30% more FLOPS (one extra partial forward pass). The trade-off: pay 30% more compute to train models 5-10× larger than VRAM allows.
+
+---
+
+**Quick-reference comparison table:**
+
+| Approach | When to use | Trade-off |
+|---|---|---|
+| Rule-based baseline | Always — establish before ML | Interpretable, brittle on edge cases |
+| Simple ML (LR, RF) | < 100k rows, tabular, fast iteration | Lower ceiling than deep models |
+| Deep learning | Large data, unstructured input (images/text) | Expensive training, needs GPU |
+| Ensembling | Final 1-2% accuracy gain in competition | Complexity, inference latency |
+| Distillation/quantization | Inference cost reduction | Accuracy-efficiency trade-off |

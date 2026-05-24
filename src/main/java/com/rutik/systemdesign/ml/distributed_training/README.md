@@ -462,34 +462,156 @@ Gradient checkpointing (also called activation recomputation) trades compute for
 
 ## 14. Case Study
 
-**Problem**: A team needs to fine-tune a LLaMA-3 70B model on 10 billion proprietary tokens. Single A100 80GB VRAM: 70B parameters × 2 bytes (BF16) = 140 GB — does not fit. Even with 2 GPUs, naive DDP doubles model copies to 280 GB total. Target: 8 A100 80GB GPUs (640 GB combined) with a training throughput of at least 5,000 tokens/second.
-
-**Architecture**:
+**Scenario: Training a 7B-parameter LLaMA-style model with DeepSpeed ZeRO-3.** The cluster is 64 A100 80GB GPUs (8 nodes x 8 GPUs), NVLink within a node and InfiniBand between nodes. ZeRO-3 partitions optimizer states, gradients, AND parameters across all 64 ranks, so each GPU holds 7B/64 ~ 110M parameters resident. Global batch size 512 with gradient accumulation 4 and micro-batch 2 per GPU.
 
 ```
-8x A100 80GB (1 node, NVLink interconnect)
+8 nodes x 8 A100 = 64 ranks
+  intra-node: NVLink (fast all-reduce within node)
+  inter-node: InfiniBand (200Gb/s)
 
-FSDP FULL_SHARD: 70B params / 8 = 8.75B params per GPU shard
-  = 17.5 GB params + ~140 GB optimizer states / 8 = 17.5 GB per GPU
-  Peak (during AllGather): ~35 GB params materialized + 17.5 GB optimizer = ~52.5 GB
-  Activation memory (seq_len=2048, batch=4): ~18 GB
-  Total peak: ~70 GB — fits within 80 GB
+ZeRO-3 sharding (per rank holds 1/64 of):
+  parameters  (fp16)   : 7B/64  ~ 110M
+  gradients   (fp16)   : 7B/64
+  optimizer   (fp32 m,v): 7B/64    <- Adam states dominate memory
 
-Gradient accumulation steps = 8 (effective batch = 4 × 8 × 8 = 256 sequences)
-BF16 training, cosine LR schedule with 2000 warmup steps
-Gradient clipping: max_norm=1.0
+forward/backward: all-gather params for the layer in use, then free
+global batch = micro(2) x grad_accum(4) x ranks(64) = 512
 ```
 
-**Key Design Decisions**:
+Throughput 85 TFLOPS/GPU = ~57% Model FLOPs Utilization (MFU), strong for a 7B run at this scale. Checkpoints every 500 steps to object storage. Without ZeRO-3, a 7B model with Adam (params + grads + fp32 m/v + fp32 master ~ 16 bytes/param = 112GB) would not fit on a single 80GB GPU.
 
-1. FSDP with `size_based_auto_wrap_policy` (min_params=1M) wraps each of the 80 transformer blocks independently — each block's parameters are sharded across all 8 GPUs, AllGather before each layer's forward pass, freed after
+**DeepSpeed ZeRO-3 config and launch:**
 
-2. Gradient checkpointing enabled on every transformer block — trades 33% extra compute for 40% activation memory reduction, enabling batch_size=4 per GPU instead of batch_size=1
+```python
+ds_config = {
+    "train_micro_batch_size_per_gpu": 2,
+    "gradient_accumulation_steps": 4,
+    "gradient_clipping": 1.0,                # prevents grad-norm explosion
+    "bf16": {"enabled": True},               # bf16 mixed precision
+    "zero_optimization": {
+        "stage": 3,
+        "overlap_comm": True,                # overlap all-gather with compute
+        "contiguous_gradients": True,
+        "stage3_max_live_parameters": 1_000_000_000,
+        "offload_optimizer": {"device": "none"},  # keep on GPU at this scale
+    },
+}
+```
 
-3. `model.no_sync()` used for 7 of 8 accumulation steps — eliminates 7/8 of the inter-GPU ReduceScatter calls during backward pass
+```python
+import deepspeed
+import torch
 
-4. `torch.compile()` with `mode="reduce-overhead"` — fuses layer norm and activation kernels, reduces Python dispatch overhead; 15% throughput improvement on top of FSDP
+def setup(model: torch.nn.Module, params, ds_config: dict):
+    engine, optimizer, _, _ = deepspeed.initialize(
+        model=model, model_parameters=params, config=ds_config,
+    )
+    return engine, optimizer
+```
 
-5. Checkpoint saved every 500 steps using `StateDictType.FULL_STATE_DICT` with `offload_to_cpu=True, rank0_only=True` — gathers all shards to rank 0's CPU RAM, saves a standard HuggingFace-compatible checkpoint file; other ranks wait at `dist.barrier()`
+**Training loop with periodic checkpointing:**
 
-**Results**: 6,200 tokens/second throughput (25% above target), peak GPU utilization ~88%, training loss converged in 12 hours for a 1B token run used for validation. MFU ~41%.
+```python
+import deepspeed
+
+def train(engine, loader, total_steps: int, ckpt_dir: str,
+          ckpt_every: int = 500) -> None:
+    step = 0
+    for batch in loader:
+        loss = engine(batch["input_ids"], labels=batch["labels"]).loss
+        engine.backward(loss)        # grad accumulation handled internally
+        engine.step()                # all-reduce + clip + optimizer step
+        step += 1
+        if step % ckpt_every == 0:
+            # DeepSpeed saves sharded optimizer + params across all ranks
+            engine.save_checkpoint(ckpt_dir, tag=f"step_{step}")
+        if step >= total_steps:
+            break
+```
+
+**Pitfall 1 — Gradient-norm explosion.** Long-context language modeling can produce occasional huge gradients; without clipping the loss spikes to NaN and the run is dead.
+
+```python
+# BROKEN: no gradient clipping -> a single bad batch sends loss to NaN
+engine.backward(loss)
+engine.step()
+
+# FIX: clip global grad norm (set in ds_config so DeepSpeed applies it
+# correctly across the ZeRO shards).
+ds_config["gradient_clipping"] = 1.0
+```
+
+**Pitfall 2 — Checkpointing too infrequently.** A node fails 6 hours into training; if the last checkpoint was at the start, 6 hours of GPU time (and thousands of dollars) is lost.
+
+```python
+# BROKEN: checkpoint once per epoch -> a mid-epoch node failure loses hours
+if epoch_done:
+    engine.save_checkpoint(ckpt_dir)
+
+# FIX: checkpoint every N steps so worst-case loss is bounded to N steps,
+# and write asynchronously to object storage to hide I/O latency.
+if step % 500 == 0:
+    engine.save_checkpoint(ckpt_dir, tag=f"step_{step}")
+```
+
+**Pitfall 3 — Communication bottleneck on slow links.** Putting all 64 GPUs in one flat all-reduce over the slowest link wastes the fast NVLink and stalls on inter-node bandwidth.
+
+```python
+# BROKEN: topology-unaware collectives saturate the slow inter-node link
+# (all ranks treated identically, NVLink advantage wasted)
+
+# FIX: hierarchical communication, NVLink within node, InfiniBand between
+# nodes; enable overlap_comm so all-gather overlaps with compute.
+ds_config["zero_optimization"]["overlap_comm"] = True
+# launch with NCCL topology awareness:  NCCL_NET_GDR_LEVEL, NCCL_IB_HCA set
+```
+
+**Interview Q&A:**
+
+**What does each ZeRO stage partition, and why does stage 3 enable 7B on 80GB GPUs?** Stage 1 partitions optimizer states, stage 2 adds gradients, stage 3 adds the parameters themselves. With Adam, optimizer states (fp32 momentum + variance + master weights) are the largest memory consumer; sharding all three across 64 ranks means each holds only 1/64 of everything, so the per-GPU footprint drops from ~112GB to single-digit GB plus transient all-gathered layers.
+
+**What is MFU and why is 57% considered good?** Model FLOPs Utilization is achieved FLOPs divided by the hardware peak. Communication, memory stalls, data loading, and bubble time all reduce it. For large distributed training, 50-60% MFU is strong; below 35% usually signals a data-loading or communication bottleneck worth profiling.
+
+**Why bf16 instead of fp16 for the 7B run?** bf16 has the same exponent range as fp32, so it avoids the gradient-underflow and overflow problems that force fp16 to use loss scaling. On A100 the throughput is comparable, and bf16 training is more numerically stable for large models, which is why it is the default for modern LLM pretraining.
+
+**How does gradient accumulation interact with global batch size?** Global batch = micro-batch x accumulation steps x number of ranks. Accumulation lets you reach a large effective batch (512 here) without the memory of holding it all at once: gradients sum over several micro-batches before a single optimizer step. The all-reduce happens once per optimizer step, not per micro-batch.
+
+**Why checkpoint every 500 steps rather than per epoch?** At 64-GPU scale, epochs are long and hardware failures are frequent enough that per-epoch checkpointing risks losing hours of compute. Step-level checkpointing bounds the worst-case loss to N steps. Writing asynchronously to durable object storage keeps the checkpoint off the critical path so it does not stall training.
+
+**How do you diagnose a communication bottleneck?** Profile with the PyTorch profiler or DeepSpeed's wall-clock breakdown and look for high all-gather/all-reduce time relative to compute. Fixes include enabling overlap_comm so communication hides behind compute, ensuring NVLink is used intra-node and InfiniBand inter-node, tuning NCCL environment variables, and increasing micro-batch size to improve the compute-to-communication ratio.
+
+**Pitfall — DDP bucket size too small causes excessive AllReduce communication.**
+
+```python
+# BROKEN: default DDP bucket_cap_mb=25 creates 40 small AllReduce calls
+# for a 1B-param model → communication overhead dominates at scale
+from torch.nn.parallel import DistributedDataParallel as DDP
+model = DDP(model)   # default 25MB buckets → 40 AllReduce calls per backward pass
+
+# FIX: increase bucket size to reduce AllReduce frequency
+model = DDP(model, bucket_cap_mb=100)  # 10 AllReduce calls → 2× throughput
+# Tune: larger buckets reduce communication calls but delay gradient synchronization
+# Target: bucket_cap_mb = total_params_bytes / (desired_allreduce_calls × num_gpus)
+```
+
+**How does ZeRO Stage 3 achieve linear memory scaling with the number of GPUs?** ZeRO Stage 3 shards optimizer states (Stage 1), gradients (Stage 2), and model parameters (Stage 3) across all GPU workers. With N GPUs and a 70B-parameter model: each GPU holds only 1/N of the parameters in memory at any time (70B/N × 2 bytes/param for BF16). During the forward pass, parameters are gathered from all GPUs via `all_gather`, used locally, then freed. This reduces per-GPU memory from O(model_size) to O(model_size/N), enabling models larger than single-GPU VRAM. The cost: 3× more `all_gather` communication volume vs. DDP.
+
+**When should you prefer FSDP over DDP for model training?** Use DDP when the model fits in single-GPU memory with a reasonable batch size — DDP is simpler and faster (no sharding overhead). Switch to FSDP (or DeepSpeed ZeRO) when: (1) the model doesn't fit in single-GPU memory (e.g., > 40GB on an 80GB A100 with activations + optimizer states); (2) you want to scale to hundreds of GPUs without pipeline parallelism complexity; (3) you need gradient checkpointing combined with sharding. FSDP's `auto_wrap_policy` with `transformer_auto_wrap_policy` is the standard setup for LLM training.
+
+**What is gradient accumulation and when does it substitute for a larger batch size?** Gradient accumulation runs N forward-backward passes before calling `optimizer.step()`, simulating an effective batch size of `batch_size × N`. It allows training with effective batch sizes (e.g., 4096) on GPUs with limited VRAM (which can only fit 256 samples per step) without multi-GPU infrastructure. The trade-off: N sequential passes take N× longer than one large batch would — throughput is identical to a smaller batch but memory is lower. Use gradient accumulation when: you need a large batch size for training stability (LLM training typically uses effective batch 1M+ tokens), but GPU VRAM limits the physical batch size.
+
+**What is tensor parallelism and when is it preferable to data parallelism?** Tensor parallelism (TP) splits individual weight matrices across GPUs — for a linear layer `Y = XW`, TP splits `W` column-wise across GPUs, each computing part of the output. TP requires `all_reduce` after every linear layer (per-layer synchronization), so it is only efficient with high-bandwidth interconnects (NVLink: 600GB/s, vs. PCIe: 32GB/s). Use TP when a single layer's weights don't fit in one GPU's VRAM (e.g., a 40,000×40,000 attention projection at FP16 = 3.2GB per matrix). Data parallelism scales easily across nodes with slower interconnects (Ethernet); TP is for intra-node scaling on NVLink-connected GPU clusters.
+
+**How does pipeline parallelism differ from tensor parallelism, and when do you combine them?** Pipeline parallelism (PP) splits model layers across GPUs — GPU 0 runs layers 1-8, GPU 1 runs layers 9-16, etc. Each micro-batch flows through the pipeline sequentially; multiple micro-batches are interleaved to reduce pipeline bubbles (idle time). PP requires only forward activations to be transferred between pipeline stages (lower bandwidth than TP's all-reduce), making it suitable for slower inter-node connections. In Megatron-LM and DeepSpeed, both are combined (3D parallelism): TP within a node (NVLink), PP across nodes (InfiniBand), DP across replica groups — enabling training of models with 100B+ parameters across 1000+ GPUs.
+
+---
+
+**Quick-reference comparison table:**
+
+| Approach | When to use | Trade-off |
+|---|---|---|
+| Rule-based baseline | Always — establish before ML | Interpretable, brittle on edge cases |
+| Simple ML (LR, RF) | < 100k rows, tabular, fast iteration | Lower ceiling than deep models |
+| Deep learning | Large data, unstructured input (images/text) | Expensive training, needs GPU |
+| Ensembling | Final 1-2% accuracy gain in competition | Complexity, inference latency |
+| Distillation/quantization | Inference cost reduction | Accuracy-efficiency trade-off |

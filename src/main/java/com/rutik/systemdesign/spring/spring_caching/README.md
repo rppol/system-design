@@ -617,62 +617,215 @@ Annotate the test with `@SpringBootTest` to load the full context. Inject the se
 
 ## 14. Case Study
 
-### Problem: Product Catalog Service with Cache Stampede Under Flash Sale Load
+### Scenario: Product Catalog Service Caching 500k Records on Redis with Stampede Protection
 
-An e-commerce platform runs a nightly flash sale. At midnight, 50,000 concurrent users load the product catalog simultaneously. The Redis cache TTL is set to exactly midnight (using a fixed timestamp), causing all 50,000 entries to expire simultaneously. Within 500ms, the product database receives 50,000 concurrent queries, causing connection pool exhaustion (HikariCP maxPoolSize=20), query queue buildup, and a 30-second page load time instead of the normal 50ms.
+**Context.** A retail catalog service serves **500,000 product records** to a storefront at **25,000 read req/sec**. Reads are cached in Redis via `@Cacheable`, backed by a `RedisCacheManager` with per-cache TTLs: `catalog` (1 hour, slow-changing) and `pricing` (5 minutes, volatile). Writes use `@CacheEvict`/`@CachePut`. Cache stampede on hot keys is mitigated with probabilistic early expiration so popular products refresh before mass expiry.
 
-**Root Causes:**
-1. Synchronized TTL expiration (thundering herd / cache stampede).
-2. No stampede protection (`sync=true` not configured; not effective cross-JVM anyway).
-3. Cache warming not performed before the event.
-
-**Solution Architecture:**
+### Architecture
 
 ```
-Step 1: Randomized TTL to spread expiration
-  RedisCacheConfiguration.defaultCacheConfig()
-      .entryTtl(Duration.ofMinutes(10 + ThreadLocalRandom.current().nextInt(5)))
-  // Each entry expires at a slightly different time; no synchronized mass expiration
-
-Step 2: Probabilistic early refresh (jitter approach in Caffeine)
-  Caffeine.newBuilder()
-      .refreshAfterWrite(9, TimeUnit.MINUTES)   // async background refresh at 9 min
-      .expireAfterWrite(11, TimeUnit.MINUTES)   // hard expiry at 11 min
-      .build(key -> productRepository.findById(key))
-  // Serves stale data for ~2 min while refreshing in background; never a hard miss
-
-Step 3: Pre-warm cache before flash sale via scheduled job
-  @Scheduled(cron = "0 55 23 * * *")  // 23:55 — 5 min before midnight
-  public void prewarmProductCache() {
-      productRepository.findAllActive()
-          .forEach(p -> productService.findById(p.getId()));  // populates cache
-  }
-
-Step 4: Distributed stampede lock with Redisson for critical paths
-  RLock lock = redissonClient.getLock("populate:product:" + id);
-  if (lock.tryLock(0, 10, TimeUnit.SECONDS)) {
-      try {
-          Product p = productRepository.findById(id).orElseThrow();
-          cache.put(id, p);
-          return p;
-      } finally {
-          lock.unlock();
-      }
-  } else {
-      // Another instance is populating; wait briefly and retry from cache
-      Thread.sleep(50);
-      return cache.get(id);
-  }
+   storefront (25k req/sec)
+        |
+        v
+   +------------------------+    hit (98.5%)    +---------+
+   | @Cacheable("catalog")  |------------------>|  Redis  |
+   | @Cacheable("pricing")  |                   | catalog 1h
+   +-----------+------------+                   | pricing 5m
+        miss (1.5%) |  early-refresh on hot keys+---------+
+                    v
+   +------------------------+   @CachePut("catalog")  on create
+   | ProductRepository (DB) |   @CacheEvict           on update
+   +------------------------+
 ```
 
-**Results after changes:**
-- Cache miss rate during flash sale: from 100% to less than 2%
-- DB query rate at midnight peak: from 50,000/s to under 200/s
-- p99 page load at flash sale start: from 30s to under 100ms
-- HikariCP connection wait time: eliminated (pool never saturated)
+### Cache Configuration
 
-**Lessons:**
-- TTL jitter is the single most impactful change for thundering herd problems.
-- `sync=true` is only effective within a single JVM; distributed deployments need distributed locks.
-- Cache pre-warming before known traffic spikes is a first-line defense.
-- Monitor hit rate by cache name separately — a single cold cache can mask well-performing others.
+```java
+@Configuration
+@EnableCaching
+public class CacheConfig {
+
+    @Bean
+    RedisCacheManager cacheManager(RedisConnectionFactory cf) {
+        RedisCacheConfiguration base = RedisCacheConfiguration.defaultCacheConfig()
+            .serializeValuesWith(SerializationPair.fromSerializer(
+                new GenericJackson2JsonRedisSerializer()));
+        Map<String, RedisCacheConfiguration> perCache = Map.of(
+            "catalog", base.entryTtl(Duration.ofHours(1)),
+            "pricing", base.entryTtl(Duration.ofMinutes(5)));
+        return RedisCacheManager.builder(cf)
+            .withInitialCacheConfigurations(perCache).build();
+    }
+}
+```
+
+```java
+@Service
+public class ProductService {
+
+    @Cacheable(cacheNames = "catalog", key = "#id")     // SimpleKeyGenerator on (#id)
+    public ProductView findById(long id) {
+        return repo.findById(id).map(ProductView::from).orElseThrow();
+    }
+
+    @CachePut(cacheNames = "catalog", key = "#result.id())")
+    public ProductView createProduct(NewProduct p) {     // populates cache with the new entry
+        return ProductView.from(repo.save(p.toEntity()));
+    }
+
+    @CacheEvict(cacheNames = {"catalog", "pricing"}, key = "#p.id()")
+    public void updateProduct(ProductUpdate p) {         // invalidate on write
+        repo.update(p);
+    }
+}
+```
+
+```java
+// Probabilistic early expiration: refresh a hot key BEFORE TTL to avoid synchronized mass expiry
+boolean shouldEarlyRefresh(long ttlRemainingMs, long recomputeMs, double beta) {
+    double xfetch = recomputeMs * beta * -Math.log(ThreadLocalRandom.current().nextDouble());
+    return ttlRemainingMs <= xfetch;   // probability rises as TTL approaches zero
+}
+```
+
+### Metrics
+
+- Hit rate: **98.5%** steady state; DB read load reduced **~50x**.
+- `catalog` read: **0.6ms** from Redis vs **18ms** from DB.
+- Stampede on a viral product: DB QPS for that key capped at **~5/sec** instead of thousands.
+- Micrometer `cache.gets{cache=catalog,result=hit|miss}` exposes per-cache hit ratio.
+
+### Pitfalls
+
+**Pitfall 1 — `@Cacheable` on a private method: Spring AOP cannot proxy it.**
+```java
+// BROKEN: Spring AOP proxies public methods only; the annotation on a private method is ignored,
+// so the cache is never populated and every call hits the DB
+@Cacheable("catalog")
+private ProductView load(long id) { return repo.findById(id)...; }
+```
+```java
+// FIXED: make the cached method public so the proxy can intercept it
+@Cacheable(cacheNames = "catalog", key = "#id")
+public ProductView findById(long id) { return repo.findById(id)...; }
+```
+
+**Pitfall 2 — Self-invocation bypasses the caching proxy.**
+```java
+// BROKEN: getAll() calls this.findById() internally; the call goes straight to the target,
+// skipping the proxy, so @Cacheable never fires for those lookups
+@Service
+class ProductService {
+    public List<ProductView> getAll(List<Long> ids) {
+        return ids.stream().map(this::findById).toList();   // self-call, no cache
+    }
+    @Cacheable("catalog") public ProductView findById(long id) { ... }
+}
+```
+```java
+// FIXED: route through the proxy (self-injected reference or AopContext) so caching advice applies
+@Service
+class ProductService {
+    @Autowired @Lazy ProductService self;
+    public List<ProductView> getAll(List<Long> ids) {
+        return ids.stream().map(self::findById).toList();   // cached via proxy
+    }
+    @Cacheable("catalog") public ProductView findById(long id) { ... }
+}
+```
+
+**Pitfall 3 — Caching a non-serializable `Page<Product>` throws on store.**
+```java
+// BROKEN: PageImpl is not reliably (de)serializable by the Redis serializer -> SerializationException
+@Cacheable("catalog")
+public Page<ProductView> search(String q, Pageable p) { return repo.search(q, p); }
+```
+```java
+// FIXED: cache a serializable DTO wrapper (content + paging metadata), not the framework Page type
+@Cacheable("catalog")
+public PageResult<ProductView> search(String q, Pageable p) {
+    Page<ProductView> page = repo.search(q, p);
+    return new PageResult<>(page.getContent(), page.getNumber(), page.getTotalElements());
+}
+```
+
+### Interview Q&A
+
+**Why does `@Cacheable` on a private or self-invoked method silently fail?** Spring's caching is implemented via AOP proxies that wrap the bean. Proxies can only intercept external, public method calls; a private method or a `this.method()` self-call bypasses the proxy entirely, so the advice that reads/writes the cache never runs.
+
+**How do you configure different TTLs per cache?** Build a `RedisCacheManager` with `withInitialCacheConfigurations`, mapping each cache name to a `RedisCacheConfiguration` carrying its own `entryTtl`. Here `catalog` gets one hour and `pricing` five minutes, reflecting how often each changes.
+
+**What is a cache stampede and how does probabilistic early expiration help?** A stampede happens when many entries expire simultaneously and a flood of concurrent misses hits the DB. Probabilistic early expiration recomputes a hot key slightly before its TTL with a probability that rises as expiry nears, so one request refreshes the value while others still serve the cached copy, smoothing DB load.
+
+**When do you use `@CachePut` versus `@CacheEvict`?** `@CachePut` always executes the method and stores the result, ideal for create/update flows where you want the cache primed with the new value. `@CacheEvict` removes stale entries so the next read recomputes, used when recomputation is cheap or the new value is not directly returned.
+
+**Why can caching a `Page<T>` fail?** Spring Data's `PageImpl` is not designed for stable serialization across the configured Redis serializer, which can throw a `SerializationException` or deserialize incorrectly. Caching a purpose-built serializable DTO that carries the content list and paging metadata avoids the issue.
+
+**How do you observe cache effectiveness in production?** Enable Micrometer cache metrics (`cache.gets`, `cache.puts`, `cache.evictions`) tagged by cache name, and alert on hit-ratio drops per cache. A single cold cache can be hidden by a high aggregate ratio, so per-cache breakdown is essential.
+
+---
+
+**Additional production patterns and interview Q&As:**
+
+**Cache stampede prevention with probabilistic early expiration:**
+
+```java
+// BROKEN: many threads hit expired cache simultaneously → all query DB → thundering herd
+@Cacheable(value = "products", key = "#id")
+public Product getProduct(Long id) {
+    return productRepo.findById(id).orElseThrow();  // 50 threads query DB at once on expiry
+}
+
+// FIX 1: probabilistic early expiration (XFetch / Beta algorithm)
+// Recompute before expiry with probability proportional to how close to expiry
+public Product getProductWithEarlyExpiry(Long id) {
+    ValueWrapper cached = cacheManager.getCache("products").get(id);
+    if (cached != null && !shouldEarlyRecompute(id)) return (Product) cached.get();
+    Product fresh = productRepo.findById(id).orElseThrow();
+    cacheManager.getCache("products").put(id, fresh);
+    return fresh;
+}
+
+// FIX 2: Caffeine's refreshAfterWrite — asynchronous refresh on first stale access
+@Bean
+public CacheManager cacheManager() {
+    CaffeineCacheManager mgr = new CaffeineCacheManager("products");
+    mgr.setCaffeine(Caffeine.newBuilder()
+        .expireAfterWrite(10, MINUTES)
+        .refreshAfterWrite(8, MINUTES)    // refresh async before expiry
+        .recordStats());
+    return mgr;
+}
+```
+
+**@CacheEvict on wrong key causes stale cache:**
+
+```java
+// BROKEN: evicts with key "#id" but cache was populated with key "#product.id"
+@Cacheable(value = "products", key = "#product.id")
+public Product findById(Product product) { ... }
+
+@CacheEvict(value = "products", key = "#id")     // MISMATCH — wrong key!
+public void updateProduct(Long id, Product updated) { ... }
+// Result: old product remains cached indefinitely
+
+// FIX: use consistent key expression
+@CacheEvict(value = "products", key = "#updated.id")
+public void updateProduct(Long id, Product updated) { ... }
+```
+
+**Write-through vs write-behind vs cache-aside:**
+
+| Pattern | Write path | Read path | Data consistency | DB load |
+|---|---|---|---|---|
+| Cache-aside (`@Cacheable`) | Bypass cache, write DB directly | Check cache, miss → DB | Eventual (stale until evicted) | Burst on expiry |
+| Write-through | Write cache + DB synchronously | Always hit cache | Strong | Low |
+| Write-behind | Write cache, async DB flush | Always hit cache | Eventual | Smoothed |
+
+**Additional interview Q&As:**
+
+**How does @CachePut differ from @Cacheable?** `@Cacheable` skips the method if the cache holds a value for the key. `@CachePut` always executes the method and updates the cache with the result. Use `@CachePut` when you need to force a cache refresh on write — such as after an update operation that must both persist and cache the new value without a subsequent read.
+
+**What is the risk of caching with @Cacheable on a method that returns a mutable object?** The cached value is stored by reference in in-process caches (Caffeine, Ehcache). If the caller mutates the returned object, the cached version is also mutated — other callers see the mutated state. Fix: cache immutable types, return defensive copies, or use a serializing cache (Redis) which copies the object on put/get.
+
+**How do you implement cache warming on application startup?** Implement `ApplicationRunner` or `CommandLineRunner` and pre-populate the cache in `run()`. For critical hot paths (product catalog, config data), load top-N items on startup to avoid cold-start latency on first requests. Use `@CachePut` in the warm-up code so the cache is populated without requiring a prior read miss.

@@ -624,3 +624,231 @@ public class TraceIdFilter extends OncePerRequestFilter {
 - New service methods automatically traced
 
 **Lesson:** AOP is the right tool when a behavior must apply uniformly across many methods without polluting business logic. The key is defining a precise pointcut (`@Service` and `@RestController` classes), using `@Around` for full control, and ordering the aspect at `HIGHEST_PRECEDENCE` so it wraps all other advice.
+
+---
+
+**Expanded Case Study: Cross-Cutting Audit + Rate-Limiting Layer for a Financial API**
+
+**Scenario:** A payment processing API handles 8,000 req/min across 40 controller methods. Compliance requires every write operation to be audit-logged (WHO called WHAT with WHICH arguments, and WHAT was the result). Security requires per-user rate limiting. Operations needs method-level latency metrics. Adding this individually to 40 methods is untenable — 3 cross-cutting concerns would pollute every business method.
+
+**Scale:** 40 endpoints, 8k req/min peak, audit log must include user identity + request hash + response status, latency buckets reported to Prometheus every 10s.
+
+```
+AOP proxy chain (outermost first, highest @Order first):
+
+  HTTP Request
+      │
+  [DispatcherServlet]
+      │
+  [RateLimitAspect @Order(1)]      -- rejects before compute cost
+      │
+  [AuditAspect @Order(2)]          -- logs entry + exit
+      │
+  [LatencyAspect @Order(3)]        -- timer around real work
+      │
+  [Target: PaymentService]         -- business logic
+      │
+  [LatencyAspect]                  -- records elapsed
+      │
+  [AuditAspect]                    -- logs result / exception
+      │
+  [RateLimitAspect]                -- pass-through on success
+      │
+  HTTP Response
+```
+
+**Rate-limit aspect with Redis token bucket:**
+
+```java
+@Aspect
+@Component
+@Order(1)
+public class RateLimitAspect {
+
+    private final RedisTemplate<String, String> redis;
+    private final long MAX_TOKENS = 100;          // per user per minute
+    private final long REFILL_INTERVAL_MS = 60_000;
+
+    @Around("@annotation(rateLimit)")
+    public Object enforce(ProceedingJoinPoint pjp, RateLimit rateLimit) throws Throwable {
+        String userId = SecurityContextHolder.getContext()
+                           .getAuthentication().getName();
+        String key = "rate:" + userId;
+
+        // Lua script: atomic token-bucket check
+        String script = """
+            local tokens = tonumber(redis.call('GET', KEYS[1]) or '100')
+            if tokens <= 0 then return 0 end
+            redis.call('DECR', KEYS[1])
+            redis.call('EXPIRE', KEYS[1], 60)
+            return 1
+            """;
+        Long allowed = redis.execute(
+            RedisScript.of(script, Long.class),
+            List.of(key)
+        );
+        if (allowed == null || allowed == 0) {
+            throw new RateLimitExceededException("Rate limit exceeded for user: " + userId);
+        }
+        return pjp.proceed();
+    }
+}
+```
+
+**Audit aspect with structured logging:**
+
+```java
+@Aspect
+@Component
+@Order(2)
+public class AuditAspect {
+
+    private final AuditRepository auditRepository;
+
+    @Pointcut("@annotation(Audited) || @within(Audited)")
+    public void auditedOperation() {}
+
+    @Around("auditedOperation()")
+    public Object audit(ProceedingJoinPoint pjp) throws Throwable {
+        String user = SecurityContextHolder.getContext()
+                         .getAuthentication().getName();
+        String method = pjp.getSignature().toShortString();
+        String argsHash = DigestUtils.sha256Hex(
+            Arrays.toString(pjp.getArgs()));
+
+        AuditEntry entry = AuditEntry.builder()
+            .user(user).method(method).argsHash(argsHash)
+            .timestamp(Instant.now())
+            .build();
+
+        try {
+            Object result = pjp.proceed();
+            auditRepository.save(entry.withStatus("SUCCESS"));
+            return result;
+        } catch (Exception e) {
+            auditRepository.save(entry.withStatus("FAILURE:" + e.getClass().getSimpleName()));
+            throw e;
+        }
+    }
+}
+```
+
+**Latency aspect with Micrometer:**
+
+```java
+@Aspect
+@Component
+@Order(3)
+public class LatencyAspect {
+
+    private final MeterRegistry registry;
+
+    @Around("@annotation(Timed)")
+    public Object time(ProceedingJoinPoint pjp) throws Throwable {
+        String name = pjp.getSignature().toShortString();
+        Timer timer = registry.timer("api.method.latency", "method", name);
+        return timer.recordCallable(() -> {
+            try {
+                return pjp.proceed();
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        });
+    }
+}
+```
+
+**BROKEN→FIX: Self-invocation bypasses AOP proxy**
+
+```java
+// BROKEN: internalProcess() is a self-call — not proxied, @RateLimit ignored
+@Service
+public class PaymentService {
+    public void process(Payment p) {
+        internalProcess(p);   // THIS bypasses AOP — called directly on 'this'
+    }
+
+    @RateLimit
+    @Audited
+    private void internalProcess(Payment p) { /* ... */ }
+}
+
+// FIX: inject the proxy via ApplicationContext or restructure to call through proxy
+@Service
+public class PaymentService implements ApplicationContextAware {
+    private PaymentService self;   // proxy reference
+
+    @Override
+    public void setApplicationContext(ApplicationContext ctx) {
+        this.self = ctx.getBean(PaymentService.class);
+    }
+
+    public void process(Payment p) {
+        self.internalProcess(p);  // goes through CGLIB proxy → advice fires
+    }
+
+    @RateLimit
+    @Audited
+    public void internalProcess(Payment p) { /* ... */ }
+}
+
+// BETTER FIX: Extract into a separate Spring bean — no self-reference needed
+@Service
+public class PaymentProcessor {
+    @RateLimit
+    @Audited
+    public void process(Payment p) { /* ... */ }
+}
+```
+
+**BROKEN→FIX: @Transactional + @Audited ordering causes audit to see pre-commit state**
+
+```java
+// BROKEN: @Transactional wraps @Audited; audit save inside tx
+// If the outer transaction rolls back, the audit entry also rolls back — silent data loss
+@Service
+public class PaymentService {
+    @Transactional
+    @Audited   // audit save is inside the same tx — rolled back on failure!
+    public void transfer(Transfer t) {
+        // ... business logic that might throw
+    }
+}
+
+// FIX: Audit aspect uses REQUIRES_NEW — saves audit in a separate tx
+@Transactional(propagation = Propagation.REQUIRES_NEW)
+public void saveAudit(AuditEntry entry) {
+    auditRepository.save(entry);  // committed immediately, independent of outer tx
+}
+```
+
+**Components used from this module:**
+
+| Section | Concept | Where in case study |
+|---|---|---|
+| § 3 Join Point types | Method execution join point | `@Around("auditedOperation()")` |
+| § 4 Advice types | `@Around` for full control | All three aspects |
+| § 5 Pointcut expressions | `@annotation`, `@within` | `auditedOperation()` pointcut |
+| § 6 @Order | Aspect ordering | Rate → Audit → Latency |
+| § 10 Self-invocation | CGLIB bypass | BROKEN→FIX section |
+| § 10 @Transactional + AOP | Propagation.REQUIRES_NEW | Audit tx fix |
+| § 11 AspectJ weaving | Spring proxy-based AOP | Runtime proxy chain |
+
+**Metrics and results:**
+- Zero business-method changes across 40 endpoints to add 3 cross-cutting concerns
+- Audit log compliance: 100% write-operation coverage confirmed by log analysis
+- Rate limiting: false-positive rate < 0.01% (Redis Lua atomicity prevents races)
+- Latency overhead: AOP proxy adds ~0.3ms p99 per request (measured via JFR)
+- New endpoint auto-coverage: annotate class with `@Audited` once, all methods covered
+
+**Interview discussion points:**
+
+**Why is @Order important when you have multiple aspects on the same join point?** Without explicit ordering, Spring applies aspects in an undefined order. If the rate-limit aspect runs after the latency aspect, you measure latency for requests that will ultimately be rejected — inflating your metrics. `@Order(1)` on rate-limit ensures rejection happens first: fail fast, don't bill compute.
+
+**How do you unit-test an aspect in isolation?** Use `@SpringBootTest(classes = {AuditAspect.class, TargetService.class})` with a mock `AuditRepository`. The Spring context creates the CGLIB proxy wrapping `TargetService`, so calling `targetService.method()` exercises the full advice chain. Alternatively, use `AspectJProxyFactory` in a plain JUnit test for faster feedback without a Spring context.
+
+**What is the difference between compile-time AspectJ weaving and Spring's proxy-based AOP?** Spring AOP uses runtime CGLIB or JDK dynamic proxies — only works for Spring bean calls, cannot intercept `private` methods or self-invocations. AspectJ compile-time weaving modifies bytecode during compilation; it intercepts everything, including private methods, static calls, and field accesses, but requires a build plugin and more setup. Spring AOP is sufficient for 95% of cross-cutting concerns; AspectJ is needed when you must intercept non-proxied calls.
+
+**How do you prevent the audit aspect from inadvertently logging sensitive PII in argsHash?** Hash the arguments with SHA-256 (as shown) rather than logging them verbatim. For regulatory compliance (GDPR), the hash satisfies "who did what" without exposing "what the arguments were". If specific arguments must be logged, use a custom `@AuditField` annotation and only extract annotated method parameters.
+
+**What happens to aspect ordering when @Transactional is also on the target method?** `@Transactional` is itself an AOP aspect with a default order of `Integer.MAX_VALUE` (lowest precedence — innermost proxy). Your aspects with lower `@Order` values wrap the transactional proxy. This means your `@Audited` aspect runs outside the transaction; if you want audit saves inside the same transaction, use `Propagation.MANDATORY` in the audit save method.

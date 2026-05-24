@@ -483,92 +483,298 @@ Perplexity = exp(H) where H is the cross-entropy loss in nats, or equivalently 2
 
 ## 14. Case Study
 
-**Problem**: A team trains a multi-label document classifier (each document can have 1-5 topic labels from a set of 50) on 200,000 documents with severe class imbalance: the top 5 labels account for 60% of all label occurrences, while 20 rare labels appear fewer than 100 times each. Standard cross-entropy produces a model that achieves 91% overall accuracy but near-0% recall on rare labels.
+**Scenario:** A cloud ML platform (serving 400 production models across 200 enterprise clients) needs automated model distribution shift monitoring. The current approach of tracking accuracy on labelled ground-truth data has a 72-hour lag (labels collected via human review). The goal: implement KL divergence-based monitoring on unlabelled prediction distributions, detecting shift within 5 minutes with false positive rate <= 2% and false negative rate <= 8% for shifts exceeding 0.05 in KL divergence, serving 1,200 model scoring events per second with monitoring overhead < 3ms per event.
 
-```python
-import numpy as np
-
-
-def compute_per_class_cross_entropy(
-    probs: np.ndarray,    # (n_samples, n_classes) predicted probabilities
-    labels: np.ndarray    # (n_samples, n_classes) binary multi-hot labels
-) -> np.ndarray:
-    """
-    Per-class binary cross-entropy for multi-label classification.
-    BCE(y, p) = -(y * log(p) + (1-y) * log(1-p))
-    Returns: (n_classes,) mean BCE per class
-    """
-    probs = np.clip(probs, 1e-7, 1 - 1e-7)
-    per_sample_bce = -(
-        labels * np.log(probs) + (1 - labels) * np.log(1 - probs)
-    )
-    return per_sample_bce.mean(axis=0)   # mean over samples, per class
-
-
-def focal_bce_loss(
-    probs: np.ndarray,    # (n_samples, n_classes)
-    labels: np.ndarray,   # (n_samples, n_classes) binary
-    gamma: float = 2.0,
-    alpha: float = 0.25   # weight for positive class (rare labels benefit from alpha > 0.5)
-) -> float:
-    """
-    Focal binary cross-entropy for imbalanced multi-label classification.
-    For rare classes (few positives), focal loss reduces loss on easy negatives
-    and focuses gradients on the hard-to-classify rare-positive cases.
-
-    focal_loss = -(alpha * (1-p_t)^gamma * y * log(p_t)
-                   + (1-alpha) * p_t^gamma * (1-y) * log(1-p_t))
-    """
-    probs = np.clip(probs, 1e-7, 1 - 1e-7)
-
-    # p_t: predicted probability of the true class
-    p_t = np.where(labels == 1, probs, 1 - probs)
-    alpha_t = np.where(labels == 1, alpha, 1 - alpha)
-
-    focal_weight = (1 - p_t) ** gamma
-    bce = -np.log(p_t)
-
-    return float((alpha_t * focal_weight * bce).mean())
-
-
-def compute_label_frequencies(
-    labels: np.ndarray    # (n_samples, n_classes) binary
-) -> np.ndarray:
-    """Compute positive frequency per class for class-weight computation."""
-    return labels.mean(axis=0)   # (n_classes,)
-
-
-def inverse_frequency_weights(
-    label_frequencies: np.ndarray,
-    smoothing: float = 0.1
-) -> np.ndarray:
-    """
-    Class weights inversely proportional to frequency (with smoothing).
-    Rare classes get higher weight in the loss to compensate for imbalance.
-    weight_c = 1 / (freq_c + smoothing)
-    Normalize so mean weight = 1.
-    """
-    weights = 1.0 / (label_frequencies + smoothing)
-    return weights / weights.mean()
-
-
-# Diagnosis: which classes have high entropy in predictions?
-def diagnose_prediction_entropy(
-    probs: np.ndarray    # (n_samples, n_classes) predicted probabilities
-) -> np.ndarray:
-    """
-    For each class, compute average prediction entropy:
-    H = -p*log(p) - (1-p)*log(1-p)  (binary entropy)
-    Low entropy on wrong class = model is confidently wrong (overfit to majority)
-    High entropy on rare class = model is uncertain (under-trained on rare class)
-    """
-    p = np.clip(probs, 1e-7, 1 - 1e-7)
-    h = -(p * np.log(p) + (1 - p) * np.log(1 - p))
-    return h.mean(axis=0)   # (n_classes,)
+**Architecture:**
+```
+Production Model Serving (1200 scoring events/s)
+  Model output: probability distribution over classes
+  (e.g., fraud: [p_fraud, p_legitimate], credit: 10 score buckets)
+         |
+         v
+Distribution Aggregator (5-minute tumbling windows)
+  Collect prediction distributions over 5-min window
+  Compute: empirical probability mass per output bucket
+  Store: reference distribution (7-day rolling baseline)
+         |
+         v
+KL Divergence Monitor (every 5 minutes)
+  KL(P_current || P_reference) for each model
+  Two-sided Jensen-Shannon divergence for symmetric alerting
+  Chi-squared test for statistical significance of divergence
+         |
+         v
+Alerting Engine
+  KL > 0.05 AND chi2_p < 0.01 -> WARNING alert
+  KL > 0.15 AND chi2_p < 0.001 -> CRITICAL alert + auto-retraining trigger
+         |
+         v
+Dashboard (Grafana)
+  Per-model KL time series, top-K drifting models, input feature PSI
 ```
 
-**Findings from diagnosis**: The 20 rare classes had near-uniform prediction probabilities (~0.5 for all samples) — high entropy, indicating the model learned nothing about them. Per-class cross-entropy on rare classes was ~0.693 (log(2) = maximum binary entropy for a 50/50 predictor). The model was correct on rare classes 50% of the time purely by chance.
+**Step-by-step implementation:**
 
-**Solution**: Applied focal loss (gamma=2.0, alpha=0.75 for rare classes) combined with inverse-frequency class weights. After retraining: overall accuracy dropped slightly from 91% to 89% (loss of easy majority-class performance) but recall on rare labels improved from near-0% to 47%. The information-theoretic diagnosis (per-class entropy analysis) provided the decisive evidence that the problem was the model having maximum uncertainty on rare classes, not a learning rate or architecture issue.
+```python
+from __future__ import annotations
+import numpy as np
+from scipy.stats import chi2_contingency, entropy as scipy_entropy
+from scipy.special import rel_entr
+from dataclasses import dataclass
 
-**Lesson**: Per-class entropy of predictions is a powerful diagnostic tool. Maximum binary entropy (0.693) on a class means the model has learned nothing about it — equivalent to random guessing. This diagnosis is faster and more informative than just looking at per-class accuracy.
+@dataclass
+class DistributionSnapshot:
+    model_id: str
+    window_start: float   # Unix timestamp
+    window_end: float
+    empirical_counts: np.ndarray   # raw count per bucket (not normalised)
+    n_samples: int
+
+def compute_kl_divergence(
+    p_current: np.ndarray,
+    p_reference: np.ndarray,
+    epsilon: float = 1e-10,
+) -> float:
+    """KL(P_current || P_reference) = sum(P * log(P/Q)).
+    
+    KL is asymmetric: measures how P_current differs from P_reference.
+    Returns float; undefined if Q[i]=0 and P[i]>0 (handled by epsilon).
+    """
+    p = p_current / p_current.sum() + epsilon
+    q = p_reference / p_reference.sum() + epsilon
+    p = p / p.sum()   # renormalise after epsilon addition
+    q = q / q.sum()
+    return float(np.sum(rel_entr(p, q)))   # rel_entr handles 0*log(0)=0
+
+def compute_js_divergence(
+    p_current: np.ndarray,
+    p_reference: np.ndarray,
+    epsilon: float = 1e-10,
+) -> float:
+    """Jensen-Shannon divergence: symmetric, bounded [0, log(2)] in nats.
+    
+    JSD = 0.5*KL(P||M) + 0.5*KL(Q||M) where M = (P+Q)/2
+    JSD = 0 iff P = Q; JSD = log(2) iff P and Q have disjoint support.
+    """
+    p = p_current / p_current.sum() + epsilon
+    q = p_reference / p_reference.sum() + epsilon
+    p = p / p.sum()
+    q = q / q.sum()
+    m = 0.5 * (p + q)
+    return float(0.5 * np.sum(rel_entr(p, m)) + 0.5 * np.sum(rel_entr(q, m)))
+
+def compute_entropy(
+    distribution: np.ndarray,
+    epsilon: float = 1e-10,
+) -> float:
+    """Shannon entropy H(P) = -sum(P * log(P)) in nats."""
+    p = distribution / distribution.sum() + epsilon
+    p = p / p.sum()
+    return float(-np.sum(p * np.log(p)))
+```
+
+```python
+from scipy.stats import chi2 as chi2_dist
+import warnings
+
+def chi2_drift_test(
+    current_counts: np.ndarray,   # raw counts, not normalised
+    reference_counts: np.ndarray,
+) -> tuple[float, float]:
+    """Chi-squared goodness-of-fit test for distributional drift.
+    
+    H0: current distribution matches reference distribution.
+    Returns (chi2_statistic, p_value). Low p-value -> reject H0 -> drift detected.
+    """
+    # Scale reference to match current sample size
+    n_current = current_counts.sum()
+    n_reference = reference_counts.sum()
+    expected = reference_counts * (n_current / n_reference)
+
+    # Suppress warning for zero expected counts (handled by merging sparse bins)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        chi2_stat, p_value, dof, _ = chi2_contingency(
+            np.vstack([current_counts, expected.round()])
+        )
+    return float(chi2_stat), float(p_value)
+
+def detect_drift(
+    snapshot_current: DistributionSnapshot,
+    snapshot_reference: DistributionSnapshot,
+    kl_warning_threshold: float = 0.05,
+    kl_critical_threshold: float = 0.15,
+    chi2_p_warning: float = 0.01,
+    chi2_p_critical: float = 0.001,
+) -> dict[str, str | float | bool]:
+    kl = compute_kl_divergence(
+        snapshot_current.empirical_counts.astype(float),
+        snapshot_reference.empirical_counts.astype(float),
+    )
+    jsd = compute_js_divergence(
+        snapshot_current.empirical_counts.astype(float),
+        snapshot_reference.empirical_counts.astype(float),
+    )
+    chi2_stat, chi2_p = chi2_drift_test(
+        snapshot_current.empirical_counts,
+        snapshot_reference.empirical_counts,
+    )
+
+    if kl >= kl_critical_threshold and chi2_p <= chi2_p_critical:
+        severity = "CRITICAL"
+    elif kl >= kl_warning_threshold and chi2_p <= chi2_p_warning:
+        severity = "WARNING"
+    else:
+        severity = "OK"
+
+    return {
+        "model_id": snapshot_current.model_id,
+        "kl_divergence": kl,
+        "js_divergence": jsd,
+        "chi2_statistic": chi2_stat,
+        "chi2_p_value": chi2_p,
+        "severity": severity,
+        "alert": severity != "OK",
+        "n_current": snapshot_current.n_samples,
+        "n_reference": snapshot_reference.n_samples,
+    }
+```
+
+```python
+from collections import deque
+import time
+
+class RollingDistributionMonitor:
+    def __init__(
+        self,
+        model_id: str,
+        n_buckets: int,
+        reference_window_minutes: int = 10080,  # 7 days = 10080 minutes
+        monitoring_window_minutes: int = 5,
+        min_samples_per_window: int = 100,
+    ) -> None:
+        self.model_id = model_id
+        self.n_buckets = n_buckets
+        self.reference_window_minutes = reference_window_minutes
+        self.monitoring_window_minutes = monitoring_window_minutes
+        self.min_samples_per_window = min_samples_per_window
+
+        # Circular buffer of 5-minute snapshots
+        max_snapshots = reference_window_minutes // monitoring_window_minutes
+        self.snapshots: deque[DistributionSnapshot] = deque(maxlen=max_snapshots)
+        self.current_window_counts = np.zeros(n_buckets, dtype=np.int64)
+        self.current_window_start = time.time()
+
+    def record_prediction(self, bucket_index: int) -> None:
+        self.current_window_counts[bucket_index] += 1
+
+    def flush_window(self) -> DistributionSnapshot | None:
+        now = time.time()
+        n_samples = int(self.current_window_counts.sum())
+
+        if n_samples < self.min_samples_per_window:
+            return None  # insufficient data for reliable distribution estimate
+
+        snapshot = DistributionSnapshot(
+            model_id=self.model_id,
+            window_start=self.current_window_start,
+            window_end=now,
+            empirical_counts=self.current_window_counts.copy(),
+            n_samples=n_samples,
+        )
+        self.snapshots.append(snapshot)
+        self.current_window_counts[:] = 0
+        self.current_window_start = now
+        return snapshot
+
+    def get_reference_distribution(self) -> DistributionSnapshot | None:
+        if len(self.snapshots) < 2:
+            return None
+        combined_counts = sum(s.empirical_counts for s in self.snapshots)
+        return DistributionSnapshot(
+            model_id=self.model_id,
+            window_start=self.snapshots[0].window_start,
+            window_end=self.snapshots[-1].window_end,
+            empirical_counts=combined_counts,
+            n_samples=int(combined_counts.sum()),
+        )
+```
+
+**Key pitfalls (3 with BROKEN->FIX):**
+
+**Pitfall 1 - Computing KL divergence without epsilon leads to infinite divergence when reference has zero bins:**
+```python
+# BROKEN: if reference distribution has 0 counts in any bucket that current has > 0,
+# KL diverges to infinity; one new prediction class -> infinite alert
+def kl_broken(p, q):
+    return float(np.sum(p * np.log(p / q)))   # q[i]=0 -> division by zero -> inf or NaN
+# All fraud models alert immediately on new merchant category code
+
+# FIX: add symmetric Laplace smoothing before computing KL
+def kl_fixed(p_counts, q_counts, epsilon=1e-6):
+    p = (p_counts + epsilon) / (p_counts.sum() + epsilon * len(p_counts))
+    q = (q_counts + epsilon) / (q_counts.sum() + epsilon * len(q_counts))
+    return float(np.sum(rel_entr(p, q)))   # never infinite
+```
+
+**Pitfall 2 - Using KL alone without statistical significance test causes spurious alerts from low sample size:**
+```python
+# BROKEN: threshold on raw KL value without accounting for window sample size
+# With n=20 samples, KL of 0.08 from sampling noise triggers false alert
+kl = compute_kl_divergence(snapshot_current.counts, snapshot_ref.counts)
+if kl > 0.05:
+    send_alert(model_id, kl)   # FPR = 18% at n=20 samples per window
+
+# FIX: require both KL threshold AND statistical significance (chi2 p-value)
+kl = compute_kl_divergence(...)
+chi2_stat, chi2_p = chi2_drift_test(...)
+if kl > 0.05 and chi2_p < 0.01:   # dual condition
+    send_alert(model_id, kl)   # FPR drops to 0.8% at same n=20 window
+```
+
+**Pitfall 3 - Monitoring output distributions only misses input covariate shift before it propagates to outputs:**
+```python
+# BROKEN: monitor only prediction distribution; input shift detected only after
+# model outputs degrade (lag of 1-3 hours for slow drift)
+kl_output = compute_kl_divergence(output_probs_current, output_probs_ref)
+# Input feature "income" distribution shifts due to data pipeline bug;
+# model output barely changes (income weight = 0.03 in this model) -> missed
+
+# FIX: monitor both input feature distributions and output distributions
+# For top-20 features by importance, compute KL on discretised feature distributions
+for feature in top_20_features:
+    feature_kl = compute_kl_divergence(
+        np.histogram(current_features[feature], bins=feature_bins[feature])[0],
+        np.histogram(reference_features[feature], bins=feature_bins[feature])[0],
+    )
+    if feature_kl > 0.1:
+        log_input_drift(feature, feature_kl)
+```
+
+**Metrics and results:**
+
+| Metric | Accuracy-based monitoring | KL divergence monitoring |
+|---|---|---|
+| Alert latency (median) | 72 hr (label lag) | 5 min |
+| False positive rate | 0.5% | 1.8% |
+| False negative rate (KL > 0.05) | 31% (missed slow drift) | 7.2% |
+| Monitoring overhead per event | 0.1ms | 2.7ms |
+| Models covered (no labels needed) | 28% | 100% |
+| Incidents caught before user impact | 3/month | 11/month |
+| Mean time to detect drift | 72 hr | 12 min |
+| Retraining triggers (true positives) | 3/month | 9/month |
+| False retraining triggers | 0.2/month | 1.4/month |
+
+**Interview discussion points:**
+
+**Why is Jensen-Shannon divergence preferred over KL divergence for symmetric alerting?** KL divergence is asymmetric: KL(P||Q) != KL(Q||P). When the current distribution P has support in a bucket where the reference Q has zero probability, KL(P||Q) = infinity regardless of the epsilon correction's adequacy. JSD is symmetric (JSD(P,Q) = JSD(Q,P)), bounded in [0, log(2)] for nats, and handles support differences more gracefully because it uses the average distribution M = (P+Q)/2 as the reference point for both directions. For production alerting where the reference distribution also evolves over time, symmetry ensures that replacing P with Q in the comparison does not change the alert severity.
+
+**What is the relationship between KL divergence, cross-entropy, and entropy?** KL(P||Q) = H(P, Q) - H(P), where H(P, Q) = -sum(P * log(Q)) is the cross-entropy and H(P) = -sum(P * log(P)) is the entropy of P. KL measures the extra bits needed to encode samples from P using a code optimised for Q. Cross-entropy is the total bits needed; entropy is the theoretical minimum for encoding P with its own optimal code. In the monitoring context, if the current distribution P has cross-entropy H(P, Q_ref) = 2.8 nats with the reference Q_ref and entropy H(P) = 2.3 nats, then KL = 0.5 nats, indicating the model has drifted by an amount requiring 0.5 extra nats per prediction to communicate under the reference code.
+
+**How do you choose the number of buckets for discretising continuous model output scores?** Too few buckets (e.g., 5) miss subtle distribution shifts within bins; too many buckets (e.g., 1000) result in sparse counts per bucket, making KL estimates unreliable due to small-sample noise. The optimal choice balances resolution against reliability. A practical rule: ensure each bucket has at least 30 expected counts in both current and reference windows for the chi-squared test to be valid. With 1,200 events/second and 5-minute windows, n=360,000 events per window; with 100 buckets, expected count per bucket is 3,600 - well above the threshold of 30. Use quantile-based bins from the reference distribution to ensure uniform expected counts.
+
+**What is the information gain interpretation of KL divergence in the context of model drift?** KL(P_current || P_reference) measures the expected additional bits of information contained in a prediction from P_current compared to what you would expect under P_reference. A KL of 0.05 nats means that, on average, each current prediction is 0.05 nats more surprising under the reference model than under the current model. In practice, KL = 0.05 corresponds roughly to the sensitivity threshold where human reviewers can begin to notice performance degradation in held-out metrics; KL = 0.15 corresponds to degradation noticeable to end users. These thresholds were calibrated empirically against 6 months of confirmed drift incidents.
+
+**How would you extend this system to handle multivariate input drift using mutual information?** Mutual information I(X; Y) = H(X) + H(Y) - H(X, Y) measures statistical dependence between two variables. For detecting multivariate input drift, monitor the joint distribution of the top 5 most correlated input feature pairs: if I(feature_A_current, feature_B_current) drops significantly from the reference mutual information, it indicates that the correlation structure (not just marginal distributions) has changed - a deeper form of drift. Copula-based approaches estimate joint distributions non-parametrically. An alternative is to use the model's loss on a small labelled anchor dataset (100-500 labelled samples updated weekly) as a sensitive single-number drift signal combining all distributional changes.
+
+**What is the computational cost of computing KL divergence for 400 models every 5 minutes?** With 400 models, each with output distributions over B=100 buckets, one KL computation requires 100 multiplications and 100 log evaluations: approximately 10 microseconds per model on a single CPU core. The chi-squared test requires an additional 200 multiplications: 15 microseconds per model. Total for 400 models: 400 * 25 microseconds = 10 milliseconds per monitoring cycle - negligible compared to the 5-minute (300,000ms) window. The primary cost is I/O: reading 5-minute count aggregates from Redis for all 400 models (400 * 100 * 8 bytes = 320 KB) at < 2ms round-trip. The total monitoring pipeline runs in under 50ms per 5-minute cycle, well within the 3ms per-event overhead budget when amortised.

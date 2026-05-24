@@ -444,33 +444,159 @@ Avro is a row-oriented binary format with a JSON schema embedded in the file hea
 
 ## 14. Case Study
 
-**Problem**: An e-commerce company's recommendation model is trained weekly on a 90-day clickstream dataset. The pipeline takes 14 hours on a 20-node Spark cluster, the training dataset has unknown quality (no validation), and the model AUC degrades 0.04 points every 2 months due to undetected data drift. The team cannot reproduce a model from 3 months ago.
-
-**Architecture**:
+**Scenario: A medallion (Bronze/Silver/Gold) PySpark pipeline for clickstream.** A product analytics team ingests 500GB/day of raw clickstream JSON. The pipeline lands raw events (Bronze), cleans and deduplicates (Silver), then aggregates into ML-ready features (Gold). Great Expectations validates each layer; DVC versions the curated datasets. On a 20-node Spark cluster the pipeline sustains ~2GB/min, finishing the daily batch in roughly 4 hours.
 
 ```
-Raw Clickstream            Validated Raw           Feature Dataset        Training
-(S3, 8 TB, Parquet)  -->  (Great Expectations) --> (PySpark + EMR)   --> (XGBoost)
-                           |                        |                      |
-                           v FAIL                   v                      v
-                        Page on-call          s3://features/           MLflow
-                        Stop pipeline         v{N}/date={D}/          (params +
-                                             Parquet (Delta)          metrics +
-                                                                      artifacts)
+S3 raw JSON (500GB/day)
+        |
+   BRONZE  (raw, append-only, partitioned by ingest_date)
+        |  schema-on-read, no transformation
+        v
+   SILVER  (cleaned, deduplicated, typed Parquet)
+        |  drop malformed, dedupe by event_id, cast types
+        |  Great Expectations gate: not-null keys, value ranges
+        v
+   GOLD    (aggregated session/user features)
+        |  group-by user/session, window aggregations
+        v
+   Feature store / warehouse  (consumed by training)
+
+DVC tracks Gold dataset hash per run; lineage = git SHA + data hash
 ```
 
-**Key Design Decisions**:
+Throughput 2GB/min on 20 nodes; Silver dedupe removes ~3% duplicate events; Great Expectations catches schema regressions before they reach Gold. Schema evolution (adding a column to 2TB of historical Parquet) is handled without a full rewrite via `mergeSchema`.
 
-1. Schema pinned in Avro schema registry — any upstream schema change triggers an automated compatibility check CI job that fails before the pipeline runs
+**Bronze to Silver with deduplication and validation:**
 
-2. Great Expectations suite runs in 12 minutes on a 10% sample before the full pipeline — catches null spikes and cardinality explosions early
+```python
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
 
-3. Shuffle partitions tuned to 800 (8 TB / 128 MB target) instead of default 200 — reduces per-task size from 40 GB to 10 GB, eliminates OOM on groupBy aggregations
+def bronze_to_silver(spark: SparkSession, bronze_path: str,
+                     silver_path: str) -> None:
+    raw = spark.read.json(bronze_path)
+    cleaned = (
+        raw
+        .filter(F.col("event_id").isNotNull() & F.col("user_id").isNotNull())
+        .withColumn("event_ts", F.to_timestamp("event_ts"))
+        .dropDuplicates(["event_id"])          # idempotent re-runs
+    )
+    (cleaned.write
+        .mode("overwrite")
+        .partitionBy("ingest_date")
+        .parquet(silver_path))
+```
 
-4. PSI computed against the previous week's feature distribution — if any feature has PSI > 0.2, pipeline writes a drift report and sends a Slack alert but does NOT block training (allows manual override)
+**Great Expectations gate between layers:**
 
-5. DVC tracks dataset versions: `dvc.lock` committed with every pipeline run captures the exact input data hashes and output dataset hash — any experiment is reproducible with `git checkout <sha> && dvc pull`
+```python
+import great_expectations as gx
 
-6. Feature computation logic extracted into a shared Python package (`company-features` on internal PyPI) — same functions imported by the training pipeline and the FastAPI serving stack
+def validate_silver(df) -> bool:
+    ctx = gx.get_context()
+    validator = ctx.sources.add_spark("spark").add_dataframe_asset(
+        "silver", dataframe=df
+    ).build_batch_request()
+    v = ctx.get_validator(batch_request=validator)
+    v.expect_column_values_to_not_be_null("user_id")
+    v.expect_column_values_to_be_between("session_duration_s", 0, 86_400)
+    v.expect_column_values_to_be_unique("event_id")
+    result = v.validate()
+    return bool(result.success)   # fail the job if False; do not write Gold
+```
 
-**Results**: pipeline runtime reduced from 14 hours to 3.5 hours (AQE + partition tuning + broadcast joins for product metadata). Data validation catches 2-3 issues per month that previously reached the model silently. Full reproducibility achieved for all runs going back 6 months.
+**Skew-aware Gold aggregation with salting:**
+
+```python
+from pyspark.sql import DataFrame
+from pyspark.sql import functions as F
+
+def gold_user_features(silver: DataFrame, salt_buckets: int = 50) -> DataFrame:
+    # salt the hot keys so a few power users do not overload one partition
+    salted = silver.withColumn(
+        "salt", (F.rand() * salt_buckets).cast("int")
+    )
+    partial = salted.groupBy("user_id", "salt").agg(
+        F.count("*").alias("events"),
+        F.sum("revenue").alias("revenue"),
+    )
+    return partial.groupBy("user_id").agg(
+        F.sum("events").alias("events_total"),
+        F.sum("revenue").alias("revenue_total"),
+    )
+```
+
+**Pitfall 1 — Data skew on a wide transformation.** Grouping by user_id where 0.1% of users generate 80% of events sends those keys to a single overloaded executor; the stage hangs on one straggler task.
+
+```python
+# BROKEN: a few hot keys -> one task processes 80% of the data, OOM/straggler
+df.groupBy("user_id").agg(F.sum("revenue"))
+
+# FIX: salt the key into N buckets, aggregate twice (partial then final),
+# spreading hot keys across executors (see gold_user_features above).
+```
+
+**Pitfall 2 — Collecting a large DataFrame to the driver.** Calling `.collect()` on a multi-GB result pulls everything into driver memory and OOMs the driver.
+
+```python
+# BROKEN: pulls the entire result into the driver JVM heap -> OOM
+rows = gold_df.collect()
+write_somewhere(rows)
+
+# FIX: write distributed from the executors; never materialize on the driver.
+gold_df.write.mode("overwrite").parquet("s3://.../gold/")
+```
+
+**Pitfall 3 — Schema evolution breaking downstream readers.** A new column is added to today's partition; readers that infer schema from an old partition fail or silently drop the column.
+
+```python
+# BROKEN: default read infers schema from one file; new column is lost/errors
+spark.read.parquet("s3://.../gold/")
+
+# FIX: mergeSchema reconciles old and new partitions; enforce backward-compatible
+# changes (add nullable columns only, never rename/retype in place).
+spark.read.option("mergeSchema", "true").parquet("s3://.../gold/")
+```
+
+**Interview Q&A:**
+
+**Why use the medallion (Bronze/Silver/Gold) architecture?** It separates concerns and enables replay. Bronze is an immutable raw landing zone so you can reprocess if a downstream bug is found; Silver is the single cleaned source of truth; Gold is purpose-built aggregates. If a transformation bug ships, you fix the code and rebuild Silver/Gold from Bronze without re-ingesting from source.
+
+**What causes data skew in Spark and how do you fix it?** Skew arises when a shuffle key has a few extremely frequent values, so one partition gets most rows. Symptoms are one task running far longer than the rest. Fixes include salting the key, broadcast joins for small dimension tables, `repartition` on a balanced key, and adaptive query execution (AQE) skew-join handling.
+
+**Why is dedupe by event_id important and where is it placed?** Upstream at-least-once delivery means duplicate events. Deduping in Silver makes the pipeline idempotent: re-running a failed batch produces the same Silver output, so downstream aggregates are not double-counted. Placing it early prevents duplicates from inflating every Gold metric.
+
+**How do you version data alongside code for reproducibility?** DVC stores a content hash of the Gold dataset and the pointer is committed to git, so each experiment pins both the code (git SHA) and the exact data (DVC hash). Reproducing a model means checking out the SHA and `dvc pull`, which retrieves the identical dataset version from remote storage.
+
+**Why prefer narrow over wide transformations when possible?** Narrow transformations (map, filter) require no shuffle and stay within a partition, so they are cheap and parallelize cleanly. Wide transformations (groupBy, join, distinct) trigger a shuffle that moves data across the network and is the main source of skew, spill, and slowdowns. Minimizing and tuning shuffles is the core of Spark performance work.
+
+**How do you safely evolve a schema over 2TB of historical Parquet?** Only make backward-compatible changes, add nullable columns, never rename or retype in place. Use `mergeSchema` on read so old and new partitions reconcile, and version the schema. For breaking changes, write a new dataset version and migrate readers deliberately rather than mutating history.
+
+**Pitfall — Schema evolution in Parquet breaks downstream readers silently.**
+
+```python
+# BROKEN: Spark job adds a new column "user_tier" to the feature table
+# Downstream training job reads with schema from 3 months ago → missing column
+# pandas read_parquet returns None for "user_tier" without raising an error
+import pandas as pd
+
+# Writer adds column:
+df["user_tier"] = compute_user_tier(df)
+df.to_parquet("features/2024-10-01.parquet")
+
+# Reader (old code):
+df = pd.read_parquet("features/")   # merges all files
+# "user_tier" is None/NaN for all rows before 2024-10-01 → model trains on NaN
+
+# FIX: use Delta Lake or Iceberg with schema evolution tracking
+# Delta Lake enforces schema compatibility on write:
+from delta.tables import DeltaTable
+DeltaTable.forPath(spark, "features/").toDF()  # schema is versioned
+# New column: use ALTER TABLE ADD COLUMN with a default value
+spark.sql("ALTER TABLE features ADD COLUMNS (user_tier STRING DEFAULT 'standard')")
+# All historical rows get the default → no NaN pollution
+```
+
+**How does Apache Spark handle data skew in joins, and what is the remedy?** Data skew occurs when a small number of partition keys hold a disproportionate fraction of data — e.g., 80% of records have `country='US'`. The `US` partition task takes 100× longer than others, stalling the job. Remedy: (1) salting — append a random suffix to the skewed key before join, broadcast the small table with the suffix expanded, then aggregate results: `df.withColumn("salt", F.concat("country", F.lit("_"), (F.rand() * 100).cast("int")))`; (2) broadcast join — if the small table fits in memory (< 8MB default), use `F.broadcast(small_df)` to avoid the shuffle entirely; (3) skew join hint in Spark 3.x: `spark.sql.adaptive.skewJoin.enabled=true` detects and splits skewed partitions automatically.
+
+**What is the role of Great Expectations in a production data pipeline?** Great Expectations defines data quality rules ("expectations") as code and validates them at pipeline boundaries. An expectation like `expect_column_values_to_be_between("price", 0.01, 10_000)` runs on every batch — if any row violates it, the pipeline fails and an alert fires before bad data reaches the feature store or model. This shifts data quality left: instead of discovering that the model degraded because price was encoded as negative numbers 3 days after it happened, you catch the anomaly at ingestion time. Store expectations in version control alongside pipeline code so they evolve with schema changes.

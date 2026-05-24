@@ -807,3 +807,269 @@ A: Override the `RedisCacheManager` to catch `RedisConnectionFailureException` a
 **Q: How do you measure whether the cache is actually reducing database load by 80%?**
 
 A: Compare two Micrometer metrics: (1) `cache.l1.hit.rate` + Redis cache hit rate (from Redis INFO keyspace stats or Spring Boot Actuator `/actuator/caches`) gives the combined hit rate; (2) database query count per second (from HikariCP `hikaricp.connections.usage` and database slow query logs). A Grafana dashboard showing the ratio of `(cache hits)/(cache hits + DB queries)` gives the real-time reduction rate. Set an alert if the cache hit rate drops below 70% — this indicates either a cache eviction storm, a TTL misconfiguration, or an access pattern shift requiring cache sizing adjustment.
+
+---
+
+## Failure Scenarios and Recovery
+
+A distributed cache is a performance optimization, but at scale the database often cannot survive without it — losing the cache becomes an availability problem because the database is sized for cache-hit traffic, not cache-miss traffic. The defining failure is Redis primary loss.
+
+### Failure: Redis Primary Fails
+
+In a Redis Sentinel setup, when the primary dies, Sentinel detects the failure (after `down-after-milliseconds`, typically ~5s) and promotes a replica to primary — the full failover including client reconnection typically completes in ~30 seconds. During those 30 seconds, every cache lookup misses and falls through to the database. If the cache normally absorbs 80% of read traffic, the database suddenly sees 5x its provisioned load — a thundering herd that can take the database down, turning a cache failover into a full outage.
+
+```
+Redis primary dies (before fix):
+
+  Clients --miss--> [ Redis: unavailable for ~30s ] 
+                          |  fall-through
+                          v
+                    [ Database ]  <-- 5x normal load, may collapse
+```
+
+Fix: a two-level cache (local L1 in-process + Redis L2) plus a circuit breaker around Redis so the database is shielded during failover.
+
+```java
+// FIX: L1 Caffeine (in-process) absorbs reads when L2 Redis is unavailable
+@Bean
+public CacheManager cacheManager(RedisConnectionFactory redis) {
+    // L1: Caffeine, per-instance, survives Redis outage
+    CaffeineCacheManager l1 = new CaffeineCacheManager();
+    l1.setCaffeine(Caffeine.newBuilder()
+        .maximumSize(50_000)
+        .expireAfterWrite(Duration.ofSeconds(60)));
+
+    // L2: Redis, shared across instances
+    RedisCacheManager l2 = RedisCacheManager.builder(redis)
+        .cacheDefaults(RedisCacheConfiguration.defaultCacheConfig()
+            .entryTtl(Duration.ofMinutes(10)))
+        .build();
+
+    return new TwoLevelCacheManager(l1, l2); // checks L1, then L2, then loader
+}
+```
+
+```java
+// FIX: circuit breaker around Redis so a Redis blip degrades gracefully to L1 + DB
+@CircuitBreaker(name = "redisCache", fallbackMethod = "fromL1OrDb")
+public Product getFromRedis(String key) {
+    return redisTemplate.opsForValue().get(key); // throws if Redis down
+}
+
+public Product fromL1OrDb(String key, Throwable ex) {
+    Product cached = l1Cache.getIfPresent(key);   // serve stale-ish L1 if present
+    return cached != null ? cached : productRepository.findByKey(key);
+}
+```
+
+Recovery and time-to-recovery:
+- L1 Caffeine continues serving hot keys throughout the ~30s Redis failover, so the database sees only the long-tail misses, not the full 5x spike.
+- The circuit breaker opens after consecutive Redis failures, stops hammering the dead primary, and probes for recovery (`waitDurationInOpenState` ~30s), automatically closing once the promoted primary accepts traffic.
+- After failover the L2 cache is cold (the new primary's dataset depends on replication; with `replica-read-only` replicas it is usually warm). Refill happens lazily on demand or via a warmup job.
+- A `cache.redis.fallback.count` Micrometer counter and a Redis-down alert page operators if the degraded state persists beyond the expected failover window.
+
+### Failure: Cache Stampede on a Hot Key Expiry
+
+When a single very hot key expires, thousands of concurrent requests all miss and stampede the database simultaneously. Fix: request coalescing (Caffeine `get(key, loader)` lets only one thread load, others wait) for L1, and a distributed lock (Redisson `RLock` or `SET NX`) for L2 so only one node recomputes the hot value. Add jitter to TTLs so many keys do not expire in the same instant.
+
+---
+
+## Capacity Planning
+
+### Memory and Shard Math
+
+```
+Cached objects:    500,000
+Object size:       2 KB average (serialized JSON)
+Working set:       500,000 x 2 KB = 1 GB
+
+Redis cluster:     3 shards x 2 GB = 6 GB total capacity
+Headroom:          1 GB data / 6 GB capacity = ~17% utilization
+                   (leaves room for key overhead, replication buffers,
+                    fragmentation ~1.5x, and growth)
+Eviction policy:   allkeys-lru  -> evicts least-recently-used across all keys
+                   when memory pressure hits maxmemory
+```
+
+Redis memory is more than the raw value size: each key has ~50–100 bytes of overhead (key string, expiry, internal structures), and the allocator (jemalloc) introduces fragmentation, so plan for ~1.5x the raw data size. Set `maxmemory` to ~75% of the instance RAM and `maxmemory-policy allkeys-lru` so the cache evicts cold entries gracefully under pressure rather than OOM-ing or rejecting writes.
+
+### Throughput and Connection Budget
+
+```
+Read QPS:          100,000 reads/sec
+Cache hit rate:    80%  -> 80,000 served from cache, 20,000 hit DB
+With L1 (Caffeine) absorbing the hottest 50%:
+                   L1 serves 50,000, L2 Redis serves 30,000, DB sees 20,000
+
+Lettuce connections: Lettuce multiplexes on a single connection by default;
+                   for 100k QPS use a small pool (e.g., 8-16) or shared
+                   connection with pipelining. Avoid one-connection-per-request.
+
+DB protection:     database sized for ~20-25k QPS; if cache hit rate drops
+                   to 0 (total cache loss) DB would face 100k QPS -> 5x.
+                   This is why L1 + circuit breaker are mandatory, not optional.
+```
+
+### TTL and Eviction Sizing
+
+```
+Hot tier (TTL 10 min):   product catalog, ~100k keys
+Warm tier (TTL 1 hour):  user profiles, ~300k keys
+Cold tier (TTL 24 hours):reference data, ~100k keys
+TTL jitter:              +/- 10% random offset per key to avoid synchronized
+                         mass expiry (stampede prevention).
+```
+
+---
+
+## Additional Production War Stories
+
+### War Story 1: Cache Key Collision Across Services
+
+Two services, the user service and the order service, both ran against the same shared Redis cluster and both used the key `user:{id}` — one storing a `UserProfile`, the other storing a `UserOrderSummary`. They overwrote each other's entries, so reads returned the wrong type and deserialization either threw or, worse, silently returned corrupted data.
+
+```java
+// BROKEN: two different services use the same key namespace
+// In user-service:
+redisTemplate.opsForValue().set("user:" + id, userProfile);   // UserProfile
+
+// In order-service:
+redisTemplate.opsForValue().set("user:" + id, orderSummary);  // OrderSummary — collision!
+// A read of "user:42" returns whichever service wrote last -> corrupted reads
+```
+
+```java
+// FIX: namespace every key with service + entity to guarantee uniqueness
+// In user-service:
+redisTemplate.opsForValue().set("user-service:profile:" + id, userProfile);
+
+// In order-service:
+redisTemplate.opsForValue().set("order-service:user-summary:" + id, orderSummary);
+```
+
+```java
+// FIX via Spring cache name -> the cache name becomes the key prefix
+@Cacheable(cacheNames = "user-service:profile", key = "#id")
+public UserProfile getProfile(String id) { ... }
+// RedisCacheManager prefixes keys with the cache name by default:
+// "user-service:profile::42"
+```
+
+The rule: every key in a shared cache must be namespaced `service:entity:{id}`. Rely on `RedisCacheManager`'s default cache-name key prefix, and never let two services share an unqualified key space.
+
+### War Story 2: Caching Mutable Objects Caused Cross-Request Corruption
+
+A service cached a mutable `Cart` object in an in-process Caffeine cache and returned the same instance to every caller. One request mutated the cart (added an item) and the change appeared in every other request reading the same cached cart, because they all shared one object reference.
+
+```java
+// BROKEN: returns the shared cached instance; callers mutate shared state
+@Cacheable(cacheNames = "carts", key = "#id")
+public Cart getCart(String id) { return cartRepository.findById(id); }
+
+// caller mutates the cached instance, corrupting it for everyone
+Cart c = cartService.getCart("42");
+c.addItem(item); // mutates the cached object in place!
+```
+
+```java
+// FIX 1: cache immutable snapshots (records) so callers cannot mutate shared state
+public record CartView(String id, List<ItemView> items, BigDecimal total) {}
+
+@Cacheable(cacheNames = "carts", key = "#id")
+public CartView getCart(String id) {
+    return CartView.from(cartRepository.findById(id)); // immutable copy
+}
+```
+
+```java
+// FIX 2: if mutable, return a defensive copy from the cache layer
+@Cacheable(cacheNames = "carts", key = "#id")
+public Cart getCart(String id) { return cartRepository.findById(id); }
+// callers must copy: Cart working = new Cart(cartService.getCart(id));
+```
+
+Cache immutable value objects (Java records are ideal). For Redis-backed caches this is less of a risk because each read deserializes a fresh object, but for in-process L1 caches that return references, mutability is a correctness landmine.
+
+---
+
+## Write-Through vs Write-Behind Patterns
+
+How writes propagate to the cache and database defines the consistency and durability tradeoffs.
+
+| Pattern        | Write path                                                       | Consistency                          | Durability risk                                  | Use when                                  |
+|----------------|------------------------------------------------------------------|--------------------------------------|--------------------------------------------------|-------------------------------------------|
+| Cache-aside    | App writes DB, then evicts/updates cache                         | eventual; brief stale window         | none (DB is source of truth)                     | default; most read-heavy workloads        |
+| Write-through  | App writes cache, cache synchronously writes DB                  | strong (cache and DB always agree)   | none, but write latency = cache + DB             | reads must never see stale data           |
+| Write-behind   | App writes cache, cache asynchronously flushes DB later          | eventual; cache ahead of DB          | HIGH — buffered writes lost if cache crashes     | write-heavy, can tolerate some loss       |
+
+```java
+// Cache-aside write (default, safest): DB is source of truth, then invalidate
+@CacheEvict(cacheNames = "user-service:profile", key = "#profile.id")
+public UserProfile update(UserProfile profile) {
+    return userRepository.save(profile); // DB committed; cache invalidated -> next read refills
+}
+```
+
+```java
+// Write-through: keep cache and DB in lockstep on every write
+@CachePut(cacheNames = "user-service:profile", key = "#profile.id")
+public UserProfile update(UserProfile profile) {
+    return userRepository.save(profile); // cache updated with the saved value
+}
+```
+
+Write-behind is the highest-performance option (it batches and coalesces writes) but trades durability: if the cache node crashes before flushing, buffered writes are lost. It is appropriate only for data where some loss is acceptable (e.g., view counters, last-seen timestamps), never for financial or order data. For most systems, cache-aside with `@CacheEvict` on write is the right default because the database remains the unambiguous source of truth and stale windows are bounded by TTL.
+
+---
+
+## Multi-Region Considerations
+
+A globally cached service must decide whether the cache is replicated across regions or kept region-local. Cross-region cache replication adds latency and consistency complexity, so the common pattern is region-local caches backed by region-local or globally replicated databases.
+
+```
+        Region US (us-east-1)                    Region EU (eu-west-1)
+   +----------------------------+           +----------------------------+
+   | App US                     |           | App EU                     |
+   |   L1 Caffeine (in-proc)    |           |   L1 Caffeine (in-proc)    |
+   |   L2 Redis cluster US      |           |   L2 Redis cluster EU      |
+   +-------------+--------------+           +-------------+--------------+
+                 |                                        |
+                 v                                        v
+         [ DB primary (US) ] --async replication--> [ DB replica (EU) ]
+                  ^------- invalidation events (pub/sub) -------^
+```
+
+Design changes for multi-region:
+- Each region runs its own L1 + L2 cache. Caches are NOT replicated synchronously across regions — cross-region Redis replication would add 80–150ms to writes and create split-brain risk.
+- Cache invalidation must cross regions: when the US region writes and invalidates a key, publish an invalidation event (Redis pub/sub, or a Kafka topic) that the EU region consumes to evict the stale entry from its local cache. This bounds cross-region staleness to the replication/propagation lag (typically seconds).
+- The source-of-truth database is region-aware: a single global primary with regional read replicas (writes routed to the primary, reads served locally) or an active-active database with conflict resolution. The cache mirrors whichever model the database uses.
+- Accept that a freshly written value may briefly be stale in remote regions until invalidation propagates; design read flows to tolerate bounded staleness, and use write-through with cross-region invalidation only for data that must be near-consistent globally.
+- During a regional Redis outage, that region's L1 + circuit breaker + local DB replica keep it serving; other regions are unaffected because caches are independent.
+
+---
+
+## Additional Interview Questions
+
+**Q: Why can losing the Redis cache cause a full outage, not just slower responses?**
+
+A: Because the database is provisioned for cache-hit traffic, not cache-miss traffic. If the cache normally absorbs 80% of reads, the database is sized for ~20% of total QPS. When Redis fails, every read falls through and the database suddenly faces 5x its provisioned load — a thundering herd that can collapse it, turning a cache-layer failure into a full outage. The mitigations are a two-level cache where an in-process L1 (Caffeine) keeps absorbing hot keys during the ~30s Redis failover, plus a circuit breaker that stops hammering the dead primary and degrades gracefully to L1 and the database for the long tail.
+
+**Q: How does a two-level (L1 + L2) cache help during Redis failover?**
+
+A: L1 is an in-process Caffeine cache local to each application instance; L2 is the shared Redis cluster. During a Redis primary failure and the ~30-second Sentinel failover, L2 is unavailable, but L1 continues serving the hottest keys directly from JVM memory, so the database sees only long-tail misses instead of the full read volume. A circuit breaker around the Redis calls opens after consecutive failures, routing requests to L1-or-database and probing for Redis recovery, then closing automatically once the promoted primary is reachable. This caps the database blast radius and gives zero-downtime read availability for hot data.
+
+**Q: How do you size a Redis cluster for 500,000 objects of 2 KB each?**
+
+A: The raw working set is 500,000 x 2 KB = 1 GB, but Redis needs ~1.5x for key overhead (~50–100 bytes per key), expiry metadata, and allocator fragmentation, so plan for ~1.5 GB effective. A 3-shard cluster at 2 GB per shard gives 6 GB total — comfortable ~17% utilization with room for replication buffers and growth. Set `maxmemory` to ~75% of instance RAM and `maxmemory-policy allkeys-lru` so the cache evicts cold entries under pressure rather than OOM-ing or rejecting writes, and add per-key TTL jitter to avoid synchronized mass expiry.
+
+**Q: What is the difference between write-through and write-behind, and when is each safe?**
+
+A: Write-through writes to the cache and synchronously to the database on every write, keeping them in lockstep — strong consistency at the cost of write latency being the sum of both. Write-behind writes to the cache and asynchronously flushes to the database later, which is the fastest option because it batches and coalesces writes, but it risks data loss: if the cache node crashes before flushing, buffered writes are gone. Write-through suits read paths that must never see stale data; write-behind is acceptable only for loss-tolerant data like counters or last-seen timestamps, never for orders or payments, where cache-aside (DB as source of truth, invalidate on write) is the safe default.
+
+**Q: How do you prevent cache key collisions in a cache shared across multiple services?**
+
+A: Namespace every key with `service:entity:{id}` so two services can never write the same unqualified key. The classic incident is two services both using `user:{id}` for different payloads, overwriting each other and returning corrupted reads. With Spring's `@Cacheable`, the cache name becomes the Redis key prefix by default (`RedisCacheManager` prefixes `cacheName::key`), so naming caches `user-service:profile` and `order-service:user-summary` enforces isolation automatically. Never let independent services share an unqualified key space on a common cluster.
+
+**Q: How do cache invalidations work across regions, and what staleness do you accept?**
+
+A: Caches are kept region-local (synchronous cross-region Redis replication would add 80–150ms per write and risk split-brain), so invalidation must be propagated explicitly: when one region writes and evicts a key, it publishes an invalidation event over Redis pub/sub or a Kafka topic that other regions consume to evict the stale entry from their local caches. This bounds cross-region staleness to the propagation lag, typically seconds. Read flows must tolerate that bounded staleness; only data requiring near-global consistency uses write-through plus cross-region invalidation, while most data accepts eventual consistency with TTL as a backstop.

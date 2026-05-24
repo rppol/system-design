@@ -571,59 +571,281 @@ Polynomial features create all combinations of input features up to a specified 
 
 ## 14. Case Study
 
-**Problem:** A consumer lending company needs to predict 90-day loan default on 2M applications. Raw data: 45 columns — mix of numeric (income, loan_amount, credit_score), categorical (loan_purpose, employment_type, state — 51 values), and binary (has_mortgage, is_self_employed). Missing rate: 8% on income, 12% on credit_score, 2% on employment_type.
+**Scenario:** A consumer lending platform (3.2M active borrowers, $4.8B loan book) needs to rebuild its credit scoring pipeline. The current system uses 28 manually crafted features and a logistic regression, yielding a Gini coefficient of 0.61 and 18% default rate on approved loans. The target: Gini >= 0.74, default rate <= 12% on same approval volume, using a feature store that serves 250 features in under 5ms for real-time decisions at 800 applications per minute, with automated feature freshness enforcement (no stale features older than 24h).
 
-**Step 1 — Exploratory analysis:**
-- `income`: right-skewed (median $62k, mean $89k, max $4.2M) — apply `log1p`
-- `credit_score`: roughly normal (600–850) — `StandardScaler`
-- `state`: 51 unique values — target encoding, not one-hot
-- `loan_purpose`: 9 values — one-hot
-- `employment_type`: 4 values — one-hot
-- Missing `credit_score` correlates with default rate 2.1x vs present — add indicator
-
-**Step 2 — Pipeline design:**
-
-```python
-from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import (
-    FunctionTransformer, StandardScaler, OneHotEncoder
-)
-import numpy as np
-
-numeric_log_cols = ["income", "loan_amount", "monthly_debt"]
-numeric_std_cols = ["credit_score", "tenure_months", "num_accounts"]
-low_cat_cols = ["loan_purpose", "employment_type"]
-high_cat_col = ["state"]  # handled separately with TargetEncoder
-
-log_pipe = Pipeline([
-    ("impute", SimpleImputer(strategy="median")),
-    ("log1p", FunctionTransformer(np.log1p)),
-    ("scale", StandardScaler()),
-])
-
-std_pipe = Pipeline([
-    ("impute", SimpleImputer(strategy="median")),
-    ("scale", StandardScaler()),
-])
-
-cat_pipe = Pipeline([
-    ("impute", SimpleImputer(strategy="most_frequent")),
-    ("encode", OneHotEncoder(handle_unknown="ignore", sparse_output=True)),
-])
-
-preprocessor = ColumnTransformer([
-    ("log_num", log_pipe, numeric_log_cols),
-    ("std_num", std_pipe, numeric_std_cols),
-    ("low_cat", cat_pipe, low_cat_cols),
-], remainder="drop")
+**Architecture:**
+```
+Raw Data Sources
+  - Bureau: Equifax tradeline pull (monthly batch)
+  - Internal: payment history, product usage (real-time CDC)
+  - Behavioural: app session logs (Kafka streaming)
+  - Alternative: bank statement parsing (async, 4h SLA)
+         |
+         v
+Feature Engineering Pipeline (Apache Spark + Feast)
+  +-----------------+------------------+-------------------+
+  |  Batch Features |  Streaming Feats |  On-Demand Feats  |
+  |  (daily cron)   |  (Flink, 30s lag)|  (at inference)   |
+  |  bureau ratios  |  velocity counts |  application form |
+  |  historical LTV |  session depth   |  income vs request|
+  +-----------------+------------------+-------------------+
+         |
+         v
+Feature Store (Feast + Redis online, S3 offline)
+  250 features per entity (borrower_id)
+  TTL enforcement: 24h for behavioural, 30d for bureau
+         |
+         v
+GBM Scoring Model (LightGBM, 500 trees)
+  trained on 3-year historical cohort
+  target encoding for high-cardinality categoricals
+  monotonic constraints on income, DTI features
+         |
+         v
+Decision Engine (800 applications/min, p99 < 15ms)
+  score -> approve/decline/refer-to-underwriter
 ```
 
-**Step 3 — Missing indicators:** Add `credit_score_was_missing` and `income_was_missing` binary columns before preprocessing.
+**Step-by-step implementation:**
 
-**Step 4 — Feature selection:** After pipeline transforms, 62 features remain (42 one-hot + 20 numeric). Run `SelectFromModel(LogisticRegression(C=0.1, penalty="l1"))` — retains 38 features. RFECV on 38 features (5-fold, LogisticRegression estimator) selects 31 final features.
+```python
+from __future__ import annotations
+import numpy as np
+import pandas as pd
+from category_encoders import TargetEncoder
+from sklearn.model_selection import StratifiedKFold
+from sklearn.pipeline import Pipeline
+import lightgbm as lgb
 
-**Step 5 — Target encoding for state:** TargetEncoder fit on 4/5 folds, applied to 1/5 fold repeatedly. Global default rate = 4.1%; high-default states (MS, WV) encode near 7%; low-default (SD, ND) near 2%.
+# High-cardinality: employer_name (40K categories), zip_code (30K), occupation (1.2K)
+HIGH_CARDINALITY_COLS: list[str] = ["employer_name", "zip_code", "occupation_code"]
+NUMERIC_COLS: list[str] = [
+    "annual_income", "dti_ratio", "months_employed", "utilisation_rate",
+    "num_open_trades", "delinquency_score", "revolving_balance",
+]
 
-**Step 6 — Results:** Pipeline + GBM final model: AUC 0.831 on temporal hold-out (most recent 6 months). Baseline (raw features, no engineering): AUC 0.784. Gain attributable to log transforms (+0.018), missing indicators (+0.012), target encoding of state (+0.009), L1 feature selection (+0.008). Total gain: +0.047 AUC points from feature engineering alone.
+def build_target_encoder_cv(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    cat_cols: list[str],
+    n_splits: int = 5,
+    smoothing: float = 10.0,
+) -> TargetEncoder:
+    """Fit TargetEncoder using cross-validated mean to avoid leakage."""
+    encoder = TargetEncoder(
+        cols=cat_cols,
+        smoothing=smoothing,     # shrink toward global mean for rare categories
+        return_df=True,
+    )
+    # Must fit only on training folds; outer CV handles this
+    encoder.fit(X_train, y_train)
+    return encoder
+
+def compute_bureau_ratios(df: pd.DataFrame) -> pd.DataFrame:
+    """Derive credit bureau ratio features with null safety."""
+    df = df.copy()
+    df["credit_utilisation"] = np.where(
+        df["credit_limit"] > 0,
+        df["revolving_balance"] / df["credit_limit"],
+        np.nan,   # missing limit = unknown, not 0
+    ).clip(0, 2.0)   # cap at 200% (over-limit accounts)
+
+    df["payment_ratio"] = np.where(
+        df["scheduled_payment"] > 0,
+        df["actual_payment"] / df["scheduled_payment"],
+        1.0,   # no payment due -> full compliance
+    ).clip(0, 5.0)
+
+    df["months_since_delinquency"] = (
+        df["last_delinquency_date"]
+        .apply(lambda d: (pd.Timestamp.now() - d).days // 30 if pd.notnull(d) else 999)
+    )
+    return df
+```
+
+```python
+import lightgbm as lgb
+from sklearn.metrics import roc_auc_score
+
+MONOTONE_CONSTRAINTS: dict[str, int] = {
+    # +1: higher value -> higher score (less risky)
+    "annual_income": 1,
+    "payment_ratio": 1,
+    "months_employed": 1,
+    # -1: higher value -> lower score (more risky)
+    "dti_ratio": -1,
+    "credit_utilisation": -1,
+    "num_delinquencies_24m": -1,
+}
+
+def train_lgbm_with_constraints(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    feature_names: list[str],
+) -> lgb.Booster:
+    constraint_list = [MONOTONE_CONSTRAINTS.get(f, 0) for f in feature_names]
+
+    params: dict = {
+        "objective": "binary",
+        "metric": "auc",
+        "learning_rate": 0.02,
+        "num_leaves": 63,
+        "min_child_samples": 200,   # avoid overfit on rare borrower segments
+        "feature_fraction": 0.8,
+        "bagging_fraction": 0.8,
+        "bagging_freq": 5,
+        "monotone_constraints": constraint_list,
+        "monotone_constraints_method": "advanced",   # more powerful than basic
+        "lambda_l1": 0.1,
+        "lambda_l2": 0.5,
+        "seed": 42,
+        "n_jobs": -1,
+        "verbose": -1,
+    }
+    dtrain = lgb.Dataset(X_train, label=y_train, feature_name=feature_names)
+    model = lgb.train(
+        params,
+        dtrain,
+        num_boost_round=2000,
+        callbacks=[lgb.early_stopping(50), lgb.log_evaluation(100)],
+    )
+    return model
+
+def cross_validate_pipeline(
+    X: pd.DataFrame, y: pd.Series, n_splits: int = 5
+) -> dict[str, float]:
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    auc_scores: list[float] = []
+    gini_scores: list[float] = []
+
+    for train_idx, val_idx in skf.split(X, y):
+        X_tr, X_val = X.iloc[train_idx], X.iloc[val_idx]
+        y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
+
+        X_tr = compute_bureau_ratios(X_tr)
+        X_val = compute_bureau_ratios(X_val)
+
+        encoder = build_target_encoder_cv(X_tr, y_tr, HIGH_CARDINALITY_COLS)
+        X_tr_enc = encoder.transform(X_tr)
+        X_val_enc = encoder.transform(X_val)
+
+        model = train_lgbm_with_constraints(X_tr_enc, y_tr, list(X_tr_enc.columns))
+        preds = model.predict(X_val_enc)
+        auc = roc_auc_score(y_val, preds)
+        auc_scores.append(auc)
+        gini_scores.append(2 * auc - 1)
+
+    return {"mean_gini": float(np.mean(gini_scores)), "mean_auc": float(np.mean(auc_scores))}
+```
+
+```python
+import feast
+from feast import FeatureStore
+from datetime import datetime, timedelta
+
+def serve_features_realtime(
+    borrower_id: str,
+    feature_store: FeatureStore,
+    max_age_hours: int = 24,
+) -> dict[str, float]:
+    """Retrieve features with staleness enforcement."""
+    feature_refs = [
+        "borrower_features:credit_utilisation",
+        "borrower_features:dti_ratio",
+        "borrower_features:months_employed",
+        "behavioural_features:session_depth_7d",
+        "velocity_features:app_logins_24h",
+    ]
+    online_features = feature_store.get_online_features(
+        features=feature_refs,
+        entity_rows=[{"borrower_id": borrower_id}],
+    ).to_dict()
+
+    # Enforce TTL: reject stale bureau features
+    bureau_age_hours = online_features.get("bureau_pull_age_hours", [999])[0]
+    if bureau_age_hours > 720:  # 30 days
+        raise ValueError(f"Bureau data stale: {bureau_age_hours:.0f}h old; re-pull required")
+
+    behavioural_age_hours = online_features.get("behavioural_age_hours", [999])[0]
+    if behavioural_age_hours > max_age_hours:
+        # Fallback: use defaults for behavioural features rather than failing
+        online_features["session_depth_7d"] = [0.0]
+        online_features["app_logins_24h"] = [0.0]
+
+    return {k: v[0] for k, v in online_features.items()}
+```
+
+**Key pitfalls (3 with BROKEN->FIX):**
+
+**Pitfall 1 - Target encoding leakage when fitted on full training set:**
+```python
+# BROKEN: encoder sees y for all samples during fit, leaks target into training features
+encoder = TargetEncoder(cols=["employer_name"])
+X_train["employer_name_enc"] = encoder.fit_transform(X_train, y_train)
+# AUC on CV fold inflated by ~0.03 vs held-out test
+
+# FIX: fit encoder only on training split within each CV fold
+skf = StratifiedKFold(n_splits=5)
+for train_idx, val_idx in skf.split(X, y):
+    enc = TargetEncoder(cols=["employer_name"], smoothing=10)
+    enc.fit(X.iloc[train_idx], y.iloc[train_idx])        # fit on fold train
+    X_train_enc = enc.transform(X.iloc[train_idx])       # transform fold train
+    X_val_enc = enc.transform(X.iloc[val_idx])           # transform fold val (no leakage)
+```
+
+**Pitfall 2 - Dividing by zero in ratio features causes inf/-inf in tree models:**
+```python
+# BROKEN: LightGBM silently treats inf as missing; behaviour unpredictable
+df["utilisation"] = df["revolving_balance"] / df["credit_limit"]
+# When credit_limit = 0 -> inf; LightGBM sends inf to left child arbitrarily
+
+# FIX: explicit null assignment for invalid denominator
+df["utilisation"] = np.where(
+    df["credit_limit"] > 0,
+    (df["revolving_balance"] / df["credit_limit"]).clip(0, 2.0),
+    np.nan,   # nan is correctly handled by LightGBM as missing
+)
+```
+
+**Pitfall 3 - Missing monotonic constraints allows counter-intuitive scorecard behaviour:**
+```python
+# BROKEN: unconstrained model learns that very high income sometimes predicts default
+# (true for a small segment of high-income fraudsters in training data)
+# This creates regulatory and explainability issues
+model = lgb.train(params_without_constraints, dtrain)
+# Feature importance shows income with negative SHAP for high earners - rejected by compliance
+
+# FIX: enforce monotone constraints matching domain knowledge
+params["monotone_constraints"] = [1, -1, 1, -1, 1, 0, 0]  # income+, dti-, employed+, util-, payment+
+params["monotone_constraints_method"] = "advanced"
+model = lgb.train(params, dtrain)
+# Income is now monotonically associated with lower risk at all values
+```
+
+**Metrics and results:**
+
+| Metric | Logistic Regression baseline | LightGBM + Feature Store |
+|---|---|---|
+| Gini coefficient | 0.61 | 0.76 |
+| AUC-ROC | 0.805 | 0.880 |
+| Default rate (same approval vol) | 18.0% | 11.4% |
+| Feature count | 28 manual | 250 automated |
+| Feature serving p50 | 2ms | 3ms |
+| Feature serving p99 | 8ms | 12ms |
+| Stale feature incidents/month | 7 | 0 |
+| Model training time | 4 min | 28 min |
+| Retraining cadence | quarterly | monthly |
+
+**Interview discussion points:**
+
+**Why is smoothing in TargetEncoder critical for high-cardinality credit features?** Without smoothing, rare employer names (e.g., a company with 2 borrowers in training, 1 defaulted) get encoded as 50% default rate - wildly overestimated. Smoothing shrinks rare category estimates toward the global mean proportionally to sample size: encoded_value = (n * category_mean + k * global_mean) / (n + k) where k is the smoothing factor. With k=10, the 2-sample employer gets 2/(2+10) * 50% + 10/(2+10) * 8% = 14.3% rather than 50%, preventing the model from over-indexing on rare employers.
+
+**How do you prevent feature staleness from silently corrupting model scores?** Each feature in the Feast feature store is registered with a TTL (time-to-live) metadata field. The serving layer checks feature_timestamp - now() against the TTL before returning features. For bureau features (TTL=30d), stale data triggers a re-pull request queued for next-day batch; the application is placed in a "pending bureau refresh" queue rather than scored with stale data. For behavioural features (TTL=24h), the fallback is global-mean imputation, logged as a data quality event for monitoring.
+
+**What are monotonic constraints in LightGBM and why are they required for credit scoring?** Monotonic constraints force the model's prediction to be non-decreasing (constraint=+1) or non-increasing (constraint=-1) with respect to a feature, holding all others constant. In credit, regulators and compliance teams require that higher income never increases predicted default probability - a reversal would constitute disparate impact. The `advanced` method enforces constraints at leaf level using a repair step after each split, reducing Gini by only 0.008 versus unconstrained while eliminating all constraint violations.
+
+**How does the Feast feature store handle the read-after-write consistency problem for real-time features?** When a borrower submits an application, in-session behavioural features (clicks, form field changes) are written to Kafka, consumed by Flink within 30 seconds, and materialised to Redis. However, the scoring request can arrive within milliseconds of the session start, before Flink processes the event. The fix is a two-layer lookup: first check Redis for the materialised feature; if missing (TTL expired or not yet written), fall back to computing the feature on-demand from the Kafka consumer group offset, accepting 200ms additional latency for the first request from a cold-start session.
+
+**Why is cross-validated target encoding preferable to leave-one-out encoding for credit scoring?** Leave-one-out (LOO) encoding computes each sample's encoding using all other samples' target values, which is leak-free but computationally expensive for 3M borrowers and unstable for rare categories. Cross-validated target encoding divides training data into K folds, encoding each fold using the remaining K-1 folds. This is equivalent to LOO in expectation but runs in O(K * n) rather than O(n^2), and produces stable estimates for rare categories because each encoding uses n*(K-1)/K samples rather than n-1 samples (effectively the same for large datasets).
+
+**What is the population stability index (PSI) and when do you trigger model retraining?** PSI measures how much the distribution of a feature or model score has shifted between a baseline (training) period and current production: PSI = sum((actual_% - expected_%) * ln(actual_% / expected_%)) across bins. PSI < 0.1 means no significant shift (no action), 0.1-0.2 means moderate shift (investigate), >0.2 means major shift (retrain required). We monitor PSI daily on the model output score distribution and on the top 20 input features; PSI > 0.2 on the score distribution or > 0.25 on income/DTI triggers an emergency retraining pipeline.

@@ -598,49 +598,155 @@ The projector (MLP head mapping encoder output to lower-dimensional z) serves tw
 
 ## 14. Case Study
 
-**Problem: Semi-supervised fraud detection on e-commerce transactions**
-
-Context: 10M daily transactions, 0.05% labeled as fraud (5K labels/day), remainder unlabeled. Goal: improve fraud recall by 15% over supervised-only baseline (XGBoost on 60-day labeled history).
-
-**Approach: SCARF pretraining + fine-tuning**
+**Scenario: Self-supervised pretraining for product image embeddings.** An e-commerce platform has a 50M-product catalog but only 100k labeled images. SimCLR with an NT-Xent contrastive loss pretrains a ResNet-50 backbone on 200M unlabeled product images, producing 256-dim embeddings. The pretrained encoder powers visual search and a category classifier that reaches strong accuracy with very few labels.
 
 ```
-Data pipeline
-==============
-  10M transactions/day
-  Features: [amount, merchant_id_embedding (16d), category (one-hot 200d),
-             hour_of_day, day_of_week, device_type, country, velocity_1h,
-             velocity_24h, card_age_days, account_age_days]
-  Total: 238 features after encoding
-
-SSL Pretraining
-===============
-  SCARF encoder: MLP [238 -> 512 -> 512 -> 512 -> 256]
-  Corruption rate: 0.6 (60% of features replaced from marginals)
-  Projector: [256 -> 256 -> 128]
-  NT-Xent temperature: 0.07
-  Batch size: 2048
-  Optimizer: AdamW, lr=1e-3, weight_decay=1e-5
-  Schedule: cosine decay, 100 epochs over 5M samples
-  Hardware: 2x A100, ~8 hours
-
-Fine-tuning
-===========
-  Freeze encoder, train linear head: 2 epochs (fast, high precision)
-  Fine-tune full model: 20 epochs with lr=1e-4 (higher recall)
-  Loss: weighted BCE (fraud weight = 20x to address imbalance)
-  Data: 60 days * 5K labels/day = 300K labeled samples
+200M unlabeled product images
+        |
+   two augmented views per image (crop, color jitter, blur)
+        |
+   ResNet-50 encoder f(.) -> 2048d -> projection head g(.) -> 256d
+        |
+   NT-Xent loss: pull the two views together, push all others apart
+        |
+   freeze/fine-tune encoder
+        |
+   +--> visual search: cosine kNN  (recall@100 = 0.87)
+   +--> category head: 1k labels   (acc 0.94 vs 0.71 from scratch)
 ```
 
-**Results:**
+Downstream: visual search top-10 recall@100 = 0.87; category classification reaches 0.94 accuracy with only 1k labeled samples, versus 0.71 training from scratch on the same 1k labels. The label efficiency, 23 points from pretraining, is the whole point of SSL here.
 
-| Metric | XGBoost (supervised) | SCARF + fine-tune | Improvement |
-|---|---|---|---|
-| Recall @ Precision=85% | 61% | 74% | +13pp |
-| AUC-ROC | 0.934 | 0.963 | +0.029 |
-| AUC-PR | 0.71 | 0.83 | +0.12 |
-| P99 inference latency | 3ms | 8ms | 2.7x slower |
+**NT-Xent loss (the core of SimCLR):**
 
-Key finding: SCARF pretraining helped most for rare fraud patterns (account takeover: +22% recall) where labeled examples are sparse. Common fraud patterns (CNP fraud) saw minimal improvement — sufficient labels existed for XGBoost to learn those patterns directly.
+```python
+import torch
+import torch.nn.functional as F
 
-The 8ms inference latency was acceptable for the batch-scoring use case (transactions scored every 5 minutes). For real-time (<50ms) blocking, a distilled version of the fine-tuned model (2-layer MLP) retained 90% of the recall gain at 2ms latency.
+def nt_xent(z1: torch.Tensor, z2: torch.Tensor,
+            temperature: float = 0.1) -> torch.Tensor:
+    """z1, z2: (B, D) projections of the two augmented views."""
+    z = F.normalize(torch.cat([z1, z2], dim=0), dim=1)   # (2B, D)
+    sim = z @ z.T / temperature                          # (2B, 2B)
+    n = z1.size(0)
+    # positive pairs: i <-> i+n
+    targets = torch.arange(2 * n, device=z.device)
+    targets = (targets + n) % (2 * n)
+    sim.fill_diagonal_(float("-inf"))                    # exclude self-similarity
+    return F.cross_entropy(sim, targets)
+```
+
+**The augmentation pipeline (semantic-preserving):**
+
+```python
+import torchvision.transforms as T
+
+def simclr_augment(size: int = 224) -> T.Compose:
+    return T.Compose([
+        T.RandomResizedCrop(size, scale=(0.4, 1.0)),   # not too aggressive
+        T.RandomHorizontalFlip(),
+        T.RandomApply([T.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+        T.RandomGrayscale(p=0.2),
+        T.RandomApply([T.GaussianBlur(kernel_size=23)], p=0.5),
+        T.ToTensor(),
+    ])
+```
+
+**Linear-probe evaluation (frozen encoder, few labels):**
+
+```python
+import torch
+from torch import nn
+
+def linear_probe(encoder: nn.Module, n_classes: int) -> nn.Module:
+    for p in encoder.parameters():
+        p.requires_grad = False          # freeze the SSL backbone
+    return nn.Sequential(encoder, nn.Linear(2048, n_classes))
+```
+
+**Pitfall 1 — Small batch shrinks the NT-Xent denominator.** Contrastive learning needs many negatives; a small batch gives too few, and the embeddings barely separate.
+
+```python
+# BROKEN: batch_size=64 -> only 126 negatives, weak contrastive signal
+loss = nt_xent(z1, z2)   # with B=64
+
+# FIX: large batch (4096) with mixed precision / gradient accumulation, or a
+# memory bank / MoCo queue to supply many negatives without huge batches.
+# with B=4096 the denominator has ~8190 negatives -> sharp embeddings
+```
+
+**Pitfall 2 — Augmentation too strong destroys the semantic signal.** An extreme crop scale can remove the product entirely, so the two "views" share no content and the model learns nothing useful.
+
+```python
+# BROKEN: scale=(0.05, 1.0) crops can contain only background
+T.RandomResizedCrop(224, scale=(0.05, 1.0))
+
+# FIX: tune crop scale so both views still contain the product; for product
+# images a higher lower-bound (0.4) preserves the object.
+T.RandomResizedCrop(224, scale=(0.4, 1.0))
+```
+
+**Pitfall 3 — Representation collapse.** Without negatives or an asymmetry, the encoder maps everything to a constant vector that trivially minimizes a naive loss.
+
+```python
+# BROKEN: a similarity-only objective with no negatives -> all-equal embeddings
+loss = -F.cosine_similarity(z1, z2).mean()   # collapses to a constant
+
+# FIX: keep negatives (SimCLR/NT-Xent), or use an asymmetric design, MoCo's
+# momentum encoder or SimSiam's stop-gradient, to prevent collapse.
+loss = nt_xent(z1, z2)   # negatives in the denominator prevent collapse
+```
+
+**Interview Q&A:**
+
+**Why use self-supervised pretraining when you only have 100k labels?** Labels are expensive, but unlabeled product images are abundant (200M). SSL learns general visual structure from the unlabeled data, so the downstream classifier needs far fewer labels to reach high accuracy (0.94 with 1k labels vs 0.71 from scratch). It converts cheap unlabeled data into label efficiency.
+
+**What does the NT-Xent loss actually optimize?** It is a softmax over cosine similarities scaled by temperature: for each anchor it maximizes similarity to its positive (the other augmented view) relative to all other samples in the batch (negatives). The temperature controls how sharply it penalizes hard negatives; lower temperature emphasizes the hardest negatives.
+
+**Why does batch size matter so much in SimCLR?** The negatives come from the same batch, so a larger batch provides more and harder negatives, which sharpens the learned representation. This is why SimCLR famously used batches of thousands. Methods like MoCo decouple the negative count from batch size using a momentum-updated queue, achieving similar quality with smaller batches.
+
+**What is representation collapse and how do contrastive vs non-contrastive methods avoid it?** Collapse is when the encoder outputs a constant regardless of input, trivially satisfying a similarity objective. Contrastive methods (SimCLR, MoCo) prevent it with negatives that push embeddings apart. Non-contrastive methods avoid it structurally: BYOL/SimSiam use a momentum encoder and/or stop-gradient asymmetry; VICReg/Barlow Twins add variance and decorrelation terms.
+
+**How do you evaluate a self-supervised encoder?** Standard protocol is linear probing, freeze the encoder and train only a linear classifier on a labeled set; the accuracy measures representation quality. Also report fine-tuning accuracy and downstream task metrics (here, kNN visual-search recall). Linear probe isolates representation quality from the capacity of the downstream head.
+
+**Why is the projection head discarded after pretraining?** The projection head g(.) maps features into the space where the contrastive loss is applied, and it absorbs information specific to the pretext task. The backbone features before the head transfer better to downstream tasks, so you keep the encoder output (2048d here) and drop g(.) for inference and fine-tuning.
+
+**Pitfall — Representation collapse when negative mining is too easy.**
+
+```python
+# BROKEN: random negatives from the same batch — most pairs are obviously dissimilar
+# Contrastive loss saturates near 0; gradients vanish; encoder learns nothing
+loss = nt_xent_loss(anchors, positives, random_negatives)  # trivial task, no learning
+
+# FIX: hard negative mining — use in-batch semi-hard negatives (far in label space
+# but closer in embedding space than the positive pair)
+from pytorch_metric_learning.miners import MultiSimilarityMiner
+miner = MultiSimilarityMiner(epsilon=0.1)
+hard_pairs = miner(embeddings, labels)
+loss = criterion(embeddings, labels, hard_pairs)
+# Embedding clustering (silhouette score): 0.12 (random) → 0.61 (hard negatives)
+```
+
+**Why does momentum encoder (MoCo) outperform standard contrastive learning at small batch sizes?** Standard contrastive learning (SimCLR) needs large batches (4096+) to have enough negatives per anchor for a meaningful loss signal. MoCo decouples batch size from number of negatives by maintaining a queue of recent encoded negatives (65,536) updated with an exponential moving average (EMA) encoder (momentum=0.999). At batch size 256, MoCo achieves 67.5% ImageNet linear accuracy vs. SimCLR's 61.9%, while using 16× less GPU memory.
+
+**How do you evaluate self-supervised representations without labeled data?** Use probing tasks: train a linear classifier on frozen representations with 1% labeled data (linear evaluation protocol). Report top-1 accuracy. For NLP, run BERTScore on generation tasks or zero-shot classification accuracy on MNLI/SST-2. For vision, use low-shot (1%, 10%) fine-tuning accuracy. The key insight: a good SSL representation should be linearly separable for the downstream task — if you need more than a linear head to get good performance, the representation hasn't disentangled the task-relevant factors.
+
+**What is the role of the projection head in SimCLR, and why is it discarded after training?** SimCLR appends a 2-3 layer MLP projection head after the backbone encoder. The contrastive loss is applied to the projection head's output (z), not the backbone's output (h). Empirically, the representation at h (backbone output) is more general and transfers better to downstream tasks than z (projection output). The projection head specializes in making augmentation-invariant representations — useful for the contrastive loss but too specifically tuned to the SSL task. Discarding it and using h for downstream linear probing or fine-tuning achieves better transfer accuracy by 5-15% on ImageNet linear evaluation.
+
+**How does BYOL (Bootstrap Your Own Latent) avoid representation collapse without negative pairs?** BYOL uses an online encoder and an exponential moving average (EMA) target encoder. The online encoder is trained to predict the target encoder's representation of a differently augmented view of the same image. The EMA prevents both encoders from collapsing to a constant (if both were trained with gradients, they'd converge to outputting the same vector). The asymmetry — one network trained with gradients, one updated only via EMA — creates a stable learning signal without negatives. This is counterintuitive: the model learns by predicting itself, but the moving average target is always slightly "ahead", creating a useful learning signal.
+
+**How do you apply contrastive SSL to tabular data, and what augmentations make sense?** For tabular data, image augmentations (crop, flip) don't apply. Effective tabular augmentations: (1) feature masking — randomly mask 30-50% of features and train the model to recover them (BERT-style MLM for tabular); (2) feature corruption — replace feature values with random samples from the marginal distribution; (3) mixup — blend two rows with a random weight. SCARF (Self-supervised Contrastive Learning using Random Feature Corruption) applies these and achieves competitive downstream classification with 1% labels vs. 100% baseline, particularly valuable in regulated domains (healthcare, finance) where labels are expensive.
+
+**Why does the temperature parameter in NT-Xent loss matter, and how do you tune it?** Temperature τ scales the similarity scores before softmax: `loss = -log(exp(sim(z_i, z_j)/τ) / Σ exp(sim(z_i, z_k)/τ))`. A low τ (e.g., 0.07) sharpens the distribution — the model is penalized heavily for any non-zero similarity to negatives, encouraging tight clusters but risking false-negative penalties (similar images that happen to be different classes are treated as negatives). A high τ (e.g., 0.5) smooths the distribution — more tolerant of false negatives but weaker learning signal. SimCLR uses τ=0.07 as the default for ImageNet; domain-specific datasets with higher class overlap often benefit from τ=0.1-0.2. Tune τ via grid search on linear probe accuracy.
+
+---
+
+**Quick-reference comparison table:**
+
+| Approach | When to use | Trade-off |
+|---|---|---|
+| Rule-based baseline | Always — establish before ML | Interpretable, brittle on edge cases |
+| Simple ML (LR, RF) | < 100k rows, tabular, fast iteration | Lower ceiling than deep models |
+| Deep learning | Large data, unstructured input (images/text) | Expensive training, needs GPU |
+| Ensembling | Final 1-2% accuracy gain in competition | Complexity, inference latency |
+| Distillation/quantization | Inference cost reduction | Accuracy-efficiency trade-off |

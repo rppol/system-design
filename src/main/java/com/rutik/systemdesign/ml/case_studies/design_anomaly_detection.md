@@ -682,3 +682,378 @@ on-call annotation. Worse, infrastructure changes monthly — labeled anomalies 
 leak in old service) may not represent Q3 anomalies. Isolation Forest adapts to whatever "normal"
 is in the last 30 days. Supervised methods are used as a second pass when labels accumulate
 for specific known failure modes (e.g., "database connection pool exhaustion" pattern).
+
+---
+
+## Failure Scenarios and Recovery
+
+### Failure 1: Autoencoder Reconstruction Threshold Set Too Low During Traffic Migration
+
+**What failed:** A major infrastructure migration moved 40% of the fleet from bare-metal to containerized workloads. Containerization changed CPU utilization patterns significantly: containers showed higher micro-burst frequency (10-100ms bursts every few seconds) and lower sustained utilization. The Autoencoder had been trained on bare-metal telemetry only and had not seen this pattern. Its reconstruction error for container metrics was consistently above the p99 training threshold, triggering 47,000 alerts over 8 hours. On-call engineers were overwhelmed; true incidents were buried in false positives and went undetected for 3 hours.
+
+**Detection:** Alert volume spike to 5,800/hour (baseline: 120/hour) triggered an alert-volume anomaly detector (meta-monitoring). Time-to-detect the threshold problem: 25 minutes after alert storm began.
+
+**Recovery steps:**
+1. Immediately disabled Autoencoder detection for containerized hosts, reverting to 3-sigma + CUSUM only.
+2. Collected 7 days of container telemetry, trained a separate Autoencoder on container patterns.
+3. Deployed infrastructure-type conditional: Autoencoder model routing based on host_type label (bare-metal vs container).
+4. Added pre-deployment validation: when training data composition changes by > 20% in any infrastructure category, flag for human review before deploying the new model.
+
+**Prevention:** Infrastructure migration events trigger automatic "observation mode" for anomaly detection: increase thresholds by 2x, disable all except 5-sigma detection, collect new-environment data for 7 days, then retrain and validate before returning to normal sensitivity.
+
+---
+
+### Failure 2: CUSUM Accumulated State Not Reset After Scheduled Maintenance Windows
+
+**What failed:** A 4-hour maintenance window caused legitimate CPU spikes (deployments, restarts, health checks) across 2,000 hosts. CUSUM's cumulative sum accumulated a large positive value during the maintenance window. When maintenance ended and systems returned to normal, CUSUM's internal state was already far above the alarm threshold — it interpreted the end-of-maintenance return to normal as a continuation of an anomaly. CUSUM was stuck in "alarming" state for 6 hours after maintenance ended, suppressing legitimate alerts for new anomalies that occurred post-maintenance.
+
+**Detection:** On-call engineers noticed CUSUM was still generating alerts for metrics that had clearly returned to normal (visual inspection on Grafana). Time-to-detect: 2 hours after maintenance window ended.
+
+**Recovery steps:**
+1. CUSUM state is now reset to zero at the start and end of scheduled maintenance windows (maintenance window metadata from the CMDB is streamed to the anomaly detection service via Kafka).
+2. Added a "maintenance mode" where 3-sigma fast path still runs (for catching real failures during maintenance) but CUSUM and Autoencoder are paused.
+3. Added automatic CUSUM state audit: if CUSUM state remains above 0.8× threshold for > 1 hour after an alert fires, and the raw metric has returned to baseline, force a CUSUM reset.
+
+**Prevention:** Integrate with the deployment and maintenance scheduling system. Any event tagged as "planned maintenance" automatically triggers anomaly detector state reset at event start and end.
+
+---
+
+### Failure 3: Kafka Consumer Lag Causing 60-Second Detection Delay to Inflate to 8 Minutes
+
+**What failed:** The Flink streaming job processing metric data from Kafka fell behind during a traffic spike. Kafka consumer lag reached 500,000 messages (approximately 5 seconds of data at 100K metrics/sec). Processing rate was 95K messages/sec (5% below ingestion rate) due to STL decomposition being CPU-bound. The lag compounded: after 30 minutes, the processing was 8 minutes behind real time. Anomalies were detected 8 minutes late — the 60-second SLA was violated for 2 hours. Two real infrastructure incidents were detected after their cascade had already caused user-visible impact.
+
+**Detection:** Flink lag monitoring alerted at 100K message lag (30-second delay threshold). Time-to-detect the lag: 8 minutes. Time-to-detect that detection was delayed: after the fact, from post-mortem.
+
+**Recovery steps:**
+1. Profiled Flink job: STL decomposition consumed 70% of CPU. Moved STL to a daily precompute (deseasonalized baseline computed offline), replacing the streaming STL with a simple baseline subtraction using the precomputed seasonal component. STL streaming CPU dropped from 70% to 15%.
+2. Added Kafka consumer lag alert at 50K messages (15-second delay) — earlier than the previous 100K threshold.
+3. Enabled Flink autoscaling: task managers scale from 32 to 64 when lag > 50K messages.
+
+**Prevention:** Processing throughput must be >= 1.3× peak ingestion rate (30% headroom) measured on the 99th percentile of historical ingestion spikes. This is validated quarterly with a load test.
+
+---
+
+## Capacity Planning
+
+### Data Volume Projections
+
+```
+Year 0 (current):
+  Ingestion: 100K metrics/sec × 30 days × 86400 sec = 259B metric data points/month
+  InfluxDB (30-day hot): 259B × 16 bytes/point = 4.14TB hot storage
+  Parquet cold (2yr): 259B × 12 months = 3.1T points/yr × 2yr × 16B = 99TB/yr
+  Kafka: 100K × 100 bytes/msg = 10MB/sec sustained, 7-day retention = 6TB total
+
+Year 1 (50% fleet growth):
+  150K metrics/sec, 6.2TB InfluxDB hot, 9TB Kafka
+  Flink task managers: scale from 32 to 48
+
+Year 3 (3x growth — new data centers, more services):
+  300K metrics/sec, 12.4TB InfluxDB hot
+  Parquet cold: ~300TB/yr
+  May require InfluxDB cluster expansion: from 6-node to 12-node cluster
+```
+
+### Training Compute Requirements
+
+```
+Isolation Forest Weekly Retrain:
+  Dataset: 30-day rolling window × 100K metrics × 15-min windows
+  = 100K metrics × 2,880 windows/day × 30 days = 8.64B samples (subsample 1% = 86.4M)
+  Hardware: c5.4xlarge (16 vCPU, 32GB RAM)
+  Duration: 3 hours (parallel sklearn with n_jobs=-1)
+  Cost: $0.68/hr × 3hr = $2.04/week = $106/month
+
+Autoencoder Weekly Retrain:
+  Dataset: same 86.4M subsampled windows, each as (1024-dim feature vector)
+  Hardware: 1× A10G GPU (g5.xlarge)
+  Duration: 4 hours (early stopping typical at epoch 50)
+  Cost: $1.006/hr × 4hr = $4.02/week = $209/month
+
+CUSUM Parameters Re-optimization (monthly):
+  Grid search over k ∈ [0.25, 0.5, 1.0] × h ∈ [3, 5, 7] on labeled anomaly set
+  CPU-only: 1 hour on c5.2xlarge
+  Cost: $0.34/hr × 1hr = $0.34/month ≈ negligible
+
+Total monthly training cost: ~$315
+```
+
+### Serving Infrastructure
+
+```
+Flink Streaming (feature extraction):
+  100K metrics/sec, 15-minute tumbling windows
+  32 task managers (c5.xlarge, 4 vCPU each): 3,125 metrics/task manager
+  Cost: 32 × $0.17/hr = $5.44/hr = ~$3,917/month
+
+Anomaly Scoring Service:
+  100K scores/sec across 5 detectors
+  3-sigma and CUSUM: in-process, no additional infrastructure
+  Isolation Forest: serialized model loaded in-memory (100MB), 10ms inference per batch of 1K
+  Autoencoder: GPU inference, 1× g5.xlarge handles 50K samples/sec
+  Cost: 1 × $1.006/hr = ~$724/month
+
+InfluxDB Cluster:
+  6-node cluster (r5.2xlarge, 64GB RAM): 100K writes/sec, 4.14TB hot storage
+  Cost: 6 × $0.504/hr = $3.03/hr = ~$2,182/month
+
+Redis (anomaly score cache, 5-min TTL):
+  100K active metrics × 500B per score = 50MB working set
+  1× r5.large: trivially small
+  Cost: $0.126/hr = ~$91/month
+
+PostgreSQL (alert history + suppression):
+  Alert volume: 1,200/hr baseline, 50GB/year
+  1× r5.large: adequate
+  Cost: $0.126/hr = ~$91/month
+
+Kafka Cluster:
+  10MB/sec ingestion, 7-day retention = 6TB
+  5-broker cluster (kafka.m5.2xlarge)
+  Cost: ~$600/month
+
+Total monthly serving infrastructure: ~$7,605
+```
+
+---
+
+## Additional War Stories
+
+**War Story 1 — Isolation Forest Contamination Parameter Causing Alert Volume Collapse:**
+
+```python
+# BROKEN: contamination=0.001 (0.1%) underestimates real anomaly rate
+# If true anomaly rate is 0.5%, Isolation Forest misclassifies 80% of anomalies as normal
+# Alert volume drops 80% — appears to be "improvement" but is actually missed detections
+
+from sklearn.ensemble import IsolationForest
+import numpy as np
+
+
+def train_isolation_forest_broken(
+    X_train: np.ndarray,
+) -> IsolationForest:
+    """BROKEN: contamination too low — misses most true anomalies."""
+    model = IsolationForest(
+        n_estimators=200,
+        contamination=0.001,  # BUG: too low; assumes only 0.1% anomalies
+        random_state=42,
+        n_jobs=-1,
+    )
+    model.fit(X_train)
+    # model.score_samples() returns lower values for anomalies
+    # decision_function < 0 = anomaly; threshold calibrated for contamination=0.001
+    # At true anomaly rate 0.5%, 80% of true anomalies have score above threshold
+    return model
+
+
+# FIX: Calibrate contamination using actual labeled anomaly rate from historical data
+# Or use decision function raw scores and tune threshold independently on a labeled set
+
+def train_isolation_forest_correct(
+    X_train: np.ndarray,
+    X_labeled: np.ndarray,
+    y_labeled: np.ndarray,  # 1=anomaly, 0=normal
+    target_fpr: float = 0.001,  # 0.1% FPR target
+) -> tuple["IsolationForest", float]:
+    """
+    Train Isolation Forest with threshold tuned on labeled set.
+    Do NOT rely on contamination parameter for threshold — tune explicitly.
+    """
+    model = IsolationForest(
+        n_estimators=200,
+        contamination="auto",  # auto: does not use contamination for threshold
+        random_state=42,
+        n_jobs=-1,
+    )
+    model.fit(X_train)
+
+    # Score labeled set and find threshold that achieves target FPR
+    scores = model.score_samples(X_labeled)  # lower = more anomalous
+
+    normal_scores = scores[y_labeled == 0]
+    # At target_fpr, the threshold is the (fpr * 100)th percentile of normal scores
+    # i.e., only top-fpr fraction of normal instances score below threshold
+    threshold = float(np.percentile(normal_scores, target_fpr * 100))
+
+    tp = ((scores[y_labeled == 1] < threshold)).sum()
+    fp = ((scores[y_labeled == 0] < threshold)).sum()
+    recall = tp / max((y_labeled == 1).sum(), 1)
+    actual_fpr = fp / max((y_labeled == 0).sum(), 1)
+
+    print(f"Threshold: {threshold:.4f}")
+    print(f"Recall: {recall:.4f}, Actual FPR: {actual_fpr:.4f} (target: {target_fpr:.4f})")
+    return model, threshold
+```
+
+**War Story 2 — Autoencoder Training on Biased Normal Data Including Slow Leaks:**
+
+```python
+# BROKEN: Training autoencoder on "normal" data that includes slow memory leaks
+# A memory leak growing 0.1% per hour looks "normal" over any single hour
+# Autoencoder learns to reconstruct the slowly-growing pattern as normal
+# When leak accelerates (0.5% per hour), score stays low — missed
+
+import torch
+import torch.nn as nn
+import numpy as np
+from typing import Optional
+
+
+def train_autoencoder_broken(
+    normal_data: np.ndarray,  # BUG: contains slow drift that is actually anomalous
+    epochs: int = 100,
+) -> nn.Module:
+    """Broken: training data includes gradual drift patterns labeled as 'normal'."""
+    model = Autoencoder(input_dim=normal_data.shape[1])
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    X = torch.FloatTensor(normal_data)
+
+    for epoch in range(epochs):
+        model.train()
+        recon = model(X)
+        loss = nn.MSELoss()(recon, X)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    return model  # will not detect slow memory leaks it was trained on
+
+
+# FIX: Detrend training data before autoencoder training
+# CUSUM is better suited for drift; Autoencoder for sudden structural changes
+# Autoencoder trains on STL residuals (seasonal + trend removed), not raw metrics
+
+def train_autoencoder_on_residuals_correct(
+    raw_data: np.ndarray,  # (T, num_metrics) raw metric time series
+    seasonal_period: int = 1440,  # 1440 * 1-min intervals = 1 day
+    epochs: int = 100,
+) -> tuple[nn.Module, float]:
+    """
+    Train autoencoder on STL residuals to isolate structural anomalies
+    from trend and seasonal components. Autoencoder learns 'normal' residual
+    patterns, not 'normal' levels.
+    """
+    from statsmodels.tsa.seasonal import STL
+
+    residuals = np.zeros_like(raw_data)
+    for i in range(raw_data.shape[1]):
+        try:
+            stl = STL(raw_data[:, i], period=seasonal_period, robust=True)
+            result = stl.fit()
+            residuals[:, i] = result.resid
+        except Exception:
+            residuals[:, i] = raw_data[:, i] - raw_data[:, i].mean()
+
+    # Normalize residuals per feature (z-score)
+    residual_mean = residuals.mean(axis=0)
+    residual_std = residuals.std(axis=0) + 1e-8
+    normalized = (residuals - residual_mean) / residual_std
+
+    model = Autoencoder(input_dim=normalized.shape[1])
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    X = torch.FloatTensor(normalized)
+
+    for epoch in range(epochs):
+        model.train()
+        recon = model(X)
+        loss = nn.MSELoss()(recon, X)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    # Compute reconstruction threshold from training data (p99 of reconstruction error)
+    model.eval()
+    with torch.no_grad():
+        train_recon = model(X)
+        train_errors = ((train_recon - X) ** 2).mean(dim=1).numpy()
+    threshold = float(np.percentile(train_errors, 99))
+
+    return model, threshold
+```
+
+---
+
+## Monitoring and Drift Detection Deep-Dive
+
+### Metrics That Drift Fastest
+
+```
+Feature / Signal                  Drift rate   Reason
+──────────────────────────────────────────────────────────────────────────
+CPU utilization baseline          High         New deployments change service behavior
+Request rate patterns             High         Product launches, viral events, seasonality
+Memory leak rate (slow drift)     Moderate     Appears as gradual increase; often weeks
+STL seasonal component            Moderate     Business hours shift with timezone, seasons
+Disk I/O patterns                 Moderate     Database growth, new indexes, vacuum jobs
+Error rate baseline               High         Code deployments change error behavior
+Network traffic distribution      Moderate     CDN routing changes, new services launch
+GC pause frequency (JVM)          Low          Changes with heap growth or GC tuning
+```
+
+### PSI Monitoring for Anomaly Detection Features
+
+```python
+# PSI monitoring for anomaly detection input feature distributions
+FEATURE_PSI_THRESHOLDS = {
+    "cpu_utilization_mean": 0.20,      # high drift expected from deployments
+    "request_latency_p99": 0.15,       # medium: changes with traffic mix
+    "memory_utilization_trend": 0.10,  # low: gradual change is the signal
+    "error_rate": 0.20,                # high: deployment-driven changes
+    "isolation_forest_score": 0.15,    # model output drift = model needs retraining
+    "autoencoder_recon_error": 0.15,
+}
+
+# Meta-monitoring: monitor the anomaly detector outputs themselves
+DETECTOR_HEALTH_METRICS = {
+    "alert_volume_hourly": {
+        "baseline": 120,        # alerts/hour baseline
+        "upper_alert_multiplier": 5.0,   # 5x baseline = alert storm
+        "lower_alert_multiplier": 0.2,   # 80% below baseline = missed detections?
+    },
+    "mean_score_per_metric": {
+        "drift_threshold": 0.20,   # PSI on isolation forest scores
+    },
+    "false_positive_rate": {
+        "target": 0.001,           # 0.1% FPR
+        "alert_upper": 0.005,      # 5x target triggers retraining
+    },
+}
+```
+
+### Retraining Triggers and Cadence
+
+```
+Cadence        Trigger                                    Action
+──────────────────────────────────────────────────────────────────────────────
+Weekly         Scheduled                                   Isolation Forest + Autoencoder retrain
+Monthly        Scheduled                                   CUSUM parameter grid search
+Triggered      Alert volume > 5× baseline (1 hour)        Alert storm: raise thresholds + investigate
+Triggered      Alert volume < 0.2× baseline (1 hour)      Missed detections: lower thresholds + audit
+Triggered      PSI > 0.20 on any top-5 feature            Feature drift: trigger Isolation Forest retrain
+Triggered      Major infrastructure change (deployment,   Put detection in observation mode (2x threshold)
+               migration, new service)                     for 7 days; collect data; retrain
+Triggered      Labeled FPR > 0.5% (weekly precision audit)Emergency threshold recalibration
+Triggered      Synthetic anomaly injection recall < 95%   Recall regression: investigate + retrain
+Quarterly      Scheduled                                   Full system evaluation with synthetic
+                                                           anomalies across all scenario types
+```
+
+---
+
+## Additional Interview Questions
+
+**How do you detect anomalies in multivariate metric correlations, not just individual metrics?**
+Single-metric detectors miss anomalies where each individual metric appears normal but their joint behavior is unusual. Example: CPU utilization at 70% and network I/O at 50% are both normal individually, but their simultaneous occurrence at 2 AM on a Sunday is unusual. Three approaches: (1) Multivariate Autoencoder: train on joint feature vectors of correlated metrics per host (e.g., [cpu, memory, network, disk] as a 4-dim vector). The autoencoder learns the joint normal distribution; unusual combinations produce high reconstruction error even if each dimension is individually normal. (2) Correlation drift detection: compute pairwise Pearson correlation between related metrics (e.g., request_count vs CPU) on a rolling basis. A sudden change in correlation (from 0.9 to 0.2) indicates a structural change worth investigating. (3) Graph-based anomaly: model services as nodes, metric correlations as edges. Anomaly if a node's correlation profile with its neighbors changes significantly.
+
+**How does the CUSUM algorithm detect gradual drift versus the 3-sigma rule?**
+The 3-sigma rule computes the z-score of the current value against the rolling window mean and std: z = (x - mu) / sigma. It detects point anomalies (sudden large deviations) but is insensitive to gradual drift — a sequence of small positive deviations each within 2 sigma is not flagged, but represents a cumulative drift of 10+ sigma. CUSUM (Cumulative Sum): S_t = max(0, S_{t-1} + (x_t - mu - k)), where k is the allowed slack (typically 0.5 sigma). When S_t exceeds threshold h (typically 5 sigma), an alarm fires. CUSUM accumulates the evidence of sustained drift: 20 consecutive deviations of +0.3 sigma = S_20 = 20 × (0.3 - 0.5) = -4 (reset to 0 each time negative)... actually: if the drift is consistent, S_t grows. For drift of +0.6 sigma above mu with k=0.5: each step adds (0.6 - 0.5) = 0.1 to S_t. After h/0.1 = 50 steps (50 minutes), CUSUM alarms. 3-sigma would never alarm because each individual point is only 0.6 sigma above mean.
+
+**How do you build an anomaly detection system that supports multi-tenancy (different teams with different baselines)?**
+Infrastructure monitoring at scale serves hundreds of teams with different baseline behaviors. Single global models fail: what is anomalous for the checkout service is normal for the batch processing service. Multi-tenancy design: (1) Per-service-type models: cluster services by behavior profile (web APIs, batch jobs, databases, streaming) using k-means on feature vector statistics. Train separate Isolation Forest and Autoencoder models per cluster (4-8 clusters). (2) Per-service thresholds: the Isolation Forest score distribution varies by service. Calibrate the decision threshold independently per service using its own 30-day historical data. (3) Shared seasonal decomposition: STL decomposition of the seasonal component is reusable across services if they share the same time zone and business hour patterns. (4) Team-configurable sensitivity: expose a sensitivity parameter (low/medium/high) that shifts the Isolation Forest decision threshold by ±1 sigma, letting teams tune their own alert sensitivity without affecting others.
+
+**How would you design anomaly detection for a metric that has no normal state (e.g., error count that should always be near zero)?**
+Metrics with near-zero baseline (error counts, exception rates, 5xx error rates) require a different approach than typical mean-reversion metrics. Problems with standard z-score: if the mean is 0 and std is 0, the z-score is undefined; if std is 0.001, any count above 0 is thousands of sigma. Solutions: (1) Threshold-based detection: any non-zero value triggers an alert, with a minimum threshold (e.g., > 5 errors in 5 minutes) to suppress noise. (2) Poisson distribution test: model error counts as Poisson(lambda) where lambda is estimated from the last 7 days. Use a Poisson exact test: P(count >= observed | lambda). Flag if p-value < 0.001. This accounts for natural variability in rare events without being confused by zero baseline. (3) Rate change detection: instead of absolute count, compute errors_per_1000_requests. This metric has a meaningful mean even when counts are low and is insensitive to traffic volume changes. Apply CUSUM on the rate.
+
+**How do you measure the recall of an anomaly detection system in production where ground truth is rare and expensive?**
+Ground truth labeling for anomaly detection is expensive: on-call engineers manually reviewing 500 alerts/week is the maximum sustainable budget. Three complementary recall measurement methods: (1) Injected synthetic anomalies (chaos engineering): schedule controlled experiments — inject a CPU spike to 95%, simulate a memory leak growing 2% per hour, kill and restart a service. Measure what fraction of these known anomalies are detected within 60 seconds. Run 10 synthetic anomalies per week; target recall > 95%. (2) Post-hoc incident coverage: for every production incident that caused user impact (tracked in PagerDuty), check whether the anomaly detection system fired an alert within 5 minutes of the incident start. Track "incident coverage rate" — what fraction of production incidents had a preceding anomaly alert. (3) Honeypot metrics: inject fake metrics that simulate known failure patterns (a metric that always increases 1% per hour, simulating a memory leak) permanently in the metric stream. These honeypot anomalies must always be detected; failure to detect = recall regression.

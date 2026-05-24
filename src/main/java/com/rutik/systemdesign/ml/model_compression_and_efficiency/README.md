@@ -469,41 +469,152 @@ ResNet-50 FP32: ~98 MB model file, ~7ms inference on Intel Xeon CPU. After INT8 
 
 ## 14. Case Study
 
-### Compressing a BERT-based Sentiment Classifier for Mobile Deployment
+**Scenario: Compressing a 13B model for edge deployment.** A 13B model in fp16 needs 26GB and cannot run on a laptop. The team applies 4-bit GPTQ quantization (26GB -> 6.5GB, 4x smaller, +15% throughput) and AWQ for better accuracy retention, then distills the 13B teacher into a 3B student. The 3B student at 4-bit fits in ~1.6GB and runs on a MacBook M2.
 
-**Problem**: A product team trained a BERT-base sentiment classifier (110M parameters, 440MB FP32) for in-app review analysis. Target: deploy on-device (iOS, Android) with < 50MB model size, < 20ms inference on mid-range phone (Snapdragon 778G), and < 1% accuracy drop vs cloud BERT-base (accuracy: 91.3% on test set).
-
-**Compression strategy**:
-
-Step 1 — Knowledge distillation to DistilBERT-style student:
-- Teacher: BERT-base (12 layers, 110M params)
-- Student: 6-layer BERT (66M params, 264MB FP32)
-- Training: 5 epochs distillation on training set, T=4, alpha=0.2
-- Result: student accuracy 90.1% (1.2% drop), 40% smaller, 1.9x faster
-
-Step 2 — Dynamic PTQ INT8:
-- Applied `torch.quantization.quantize_dynamic` to all `nn.Linear` layers
-- No calibration set needed for dynamic quantization
-- Result: 66MB (4x reduction vs student FP32), accuracy 89.8% (0.3% additional drop from student)
-- Total accuracy drop vs BERT-base: 1.5% (within budget)
-
-Step 3 — ONNX export and CoreML conversion for iOS:
-- Exported 6-layer INT8 student to ONNX (opset 17, dynamic axes)
-- Converted ONNX → CoreML using coremltools; applied FP16 weight precision in CoreML
-- Final model size on iOS: 41MB (under 50MB target)
-- Inference on Snapdragon 778G via ONNX Runtime Mobile: 14ms (under 20ms target)
-
-**Results summary**:
 ```
-Model              Size     Accuracy    Latency (mobile)
-BERT-base FP32     440 MB   91.3%       N/A (too large)
-Student FP32       264 MB   90.1%       52ms
-Student INT8       66 MB    89.8%       18ms
-Student INT8+ONNX  41 MB    89.7%       14ms
+13B fp16 (26 GB)
+   |
+   +-- GPTQ 4-bit  -> 6.5 GB, +15% throughput, ppl 7.2 -> 7.5
+   +-- AWQ 4-bit   -> 6.5 GB, ppl 7.2 -> 7.3 (activation-aware, better)
+   |
+   distillation (13B teacher -> 3B student)
+   |     student keeps 94% of teacher MMLU
+   v
+ 3B fp16 (6 GB)  --4-bit-->  1.6 GB  -> runs on MacBook M2
 ```
 
-**Key lessons**:
-- Distillation was necessary first; PTQ alone on BERT-base dropped accuracy 2.3% (exceeded 1% budget)
-- Dynamic quantization was preferred over static because the activation distributions for text inputs are variable; static calibration with 500 samples did not cover all token patterns adequately
-- CoreML FP16 conversion from ONNX added only 0.1% accuracy drop but cut model size by another 37%
-- The combined pipeline (distillation + dynamic PTQ + ONNX + CoreML FP16) achieved 70% size reduction with 1.6% total accuracy drop
+GPTQ degrades perplexity from 7.2 to 7.5 (acceptable); AWQ to 7.3 by protecting salient weights. Distillation produces a 3B student retaining 94% of the teacher's MMLU score; quantizing that student to 4-bit yields a 1.6GB model that runs locally with Flash-Attention-2 for memory-efficient attention.
+
+**4-bit GPTQ quantization:**
+
+```python
+from transformers import AutoModelForCausalLM, GPTQConfig, AutoTokenizer
+
+def quantize_gptq(model_id: str, out_dir: str) -> None:
+    tok = AutoTokenizer.from_pretrained(model_id)
+    cfg = GPTQConfig(
+        bits=4, dataset="c4", tokenizer=tok,
+        group_size=128,          # finer groups -> better accuracy
+        desc_act=True,           # quantize in order of activation importance
+    )
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id, quantization_config=cfg, device_map="auto"
+    )
+    model.save_pretrained(out_dir)
+```
+
+**Knowledge distillation with a combined loss:**
+
+```python
+import torch
+import torch.nn.functional as F
+
+def distill_loss(student_logits: torch.Tensor, teacher_logits: torch.Tensor,
+                 labels: torch.Tensor, T: float = 2.0,
+                 alpha: float = 0.5) -> torch.Tensor:
+    # soft targets: match the teacher's full distribution (dark knowledge)
+    soft = F.kl_div(
+        F.log_softmax(student_logits / T, dim=-1),
+        F.softmax(teacher_logits / T, dim=-1),
+        reduction="batchmean",
+    ) * (T * T)
+    # hard targets: keep task-specific supervision so the student stays grounded
+    hard = F.cross_entropy(student_logits, labels)
+    return alpha * soft + (1 - alpha) * hard
+```
+
+**Keeping sensitive layers in higher precision (mixed-precision quant):**
+
+```python
+def build_quant_config(skip_layers: list[str]) -> dict:
+    # embeddings and the LM head are accuracy-critical; leave them in fp16
+    return {
+        "bits": 4,
+        "group_size": 128,
+        "modules_to_not_convert": skip_layers,   # e.g. ["lm_head", "embed_tokens"]
+    }
+```
+
+**Pitfall 1 — Quantizing embedding and output layers too aggressively.** 4-bit on the embedding and LM-head layers causes a large quality drop because those layers are sensitive to precision.
+
+```python
+# BROKEN: quantize every layer to 4-bit, including embeddings and lm_head
+cfg = GPTQConfig(bits=4)   # converts everything
+
+# FIX: keep the first (embeddings) and last (lm_head) layers in fp16; quantize
+# the bulk transformer blocks to 4-bit.
+cfg = build_quant_config(skip_layers=["embed_tokens", "lm_head"])
+```
+
+**Pitfall 2 — Distillation without task supervision.** Training the student to match only the teacher's outputs loses domain-specific accuracy because the teacher's soft labels are imperfect on the target task.
+
+```python
+# BROKEN: pure soft-label distillation -> student drifts on the real task
+loss = F.kl_div(student_soft, teacher_soft, reduction="batchmean")
+
+# FIX: combine distillation (soft) with task cross-entropy (hard) so the
+# student is grounded by ground-truth labels (see distill_loss).
+loss = distill_loss(student_logits, teacher_logits, labels, T=2.0, alpha=0.5)
+```
+
+**Pitfall 3 — Ignoring the activation distribution.** Round-to-nearest quantization treats all weights equally, but a few salient weights (tied to large activations) carry disproportionate impact.
+
+```python
+# BROKEN: naive round-to-nearest 4-bit ignores which weights matter
+w_q = round_to_nearest(w, bits=4)
+
+# FIX: activation-aware quantization (AWQ) scales salient weight channels
+# before quantizing, preserving the ones that drive large activations.
+# ppl 7.2 -> 7.3 with AWQ vs 7.5 with naive GPTQ-style rounding
+```
+
+**Interview Q&A:**
+
+**What is the difference between GPTQ and AWQ?** Both are post-training 4-bit weight quantization. GPTQ minimizes per-layer reconstruction error using second-order (Hessian) information, quantizing weights to best preserve each layer's output. AWQ observes that a small fraction of weight channels (those multiplying large activations) matter most and scales them before quantizing, protecting salient weights. AWQ often retains slightly more accuracy and is calibration-light.
+
+**Why does 4-bit quantization give roughly 4x memory reduction and a throughput gain?** Storing weights in 4 bits instead of 16 cuts weight memory ~4x, so a memory-bandwidth-bound LLM moves far fewer bytes per token, raising throughput. The gain is bandwidth-driven; arithmetic is still done in higher precision after dequantization, so the speedup is less than 4x but real (here +15%).
+
+**How does knowledge distillation transfer capability to a smaller model?** The student trains to match the teacher's full softened output distribution (the "dark knowledge" in the relative probabilities of wrong answers), not just the hard label. This richer signal lets a 3B student capture much of a 13B teacher's behavior, here 94% of MMLU, far better than training the 3B from scratch on the same data.
+
+**Why keep embeddings and the LM head in higher precision?** These layers map between the vocabulary and the hidden space and are disproportionately sensitive to quantization error; small errors there propagate across every token. Leaving them in fp16 while 4-bit quantizing the transformer blocks recovers most of the lost accuracy at negligible extra memory.
+
+**What is the temperature in distillation for?** Temperature softens the teacher's softmax, amplifying the relative probabilities of non-top classes so the student learns the teacher's similarity structure rather than just the argmax. The KL term is scaled by T^2 to keep gradient magnitudes comparable. Higher T reveals more dark knowledge but can blur the signal, so it is tuned (often 2-4).
+
+**How do you decide how far to compress for a given deployment?** Set the target by the device memory and latency budget (e.g. fit in 2GB on an M2), then choose the least aggressive compression that meets it, since quality degrades with compression. Validate with task metrics (MMLU, perplexity) and reject configurations that drop below the acceptable threshold; combine techniques (distill then quantize) when a single method cannot reach the target without unacceptable loss.
+
+**Pitfall — Calibration dataset size too small causes GPTQ weight distortion.**
+
+```python
+# BROKEN: calibrating GPTQ with only 32 samples — layer Hessian estimate is noisy
+from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
+
+config = BaseQuantizeConfig(bits=4, group_size=128, desc_act=True)
+model.quantize(calibration_data[:32])  # 32 samples → Hessian has high variance
+
+# FIX: use 128-512 diverse calibration samples (mixed domains, varied lengths)
+model.quantize(calibration_data[:256])  # perplexity drops from 8.4 → 6.9
+```
+
+**Why does INT4 quantization hurt attention heads more than FFN layers?** Attention projection weights are applied to token representations that vary widely in magnitude across heads. Symmetric INT4 quantization uses a single scale per group, losing the tail of the distribution where outlier activations live — directly degrading attention score quality. FFN weights are applied to more uniform activations, so quantization error matters less. Mitigation: use per-channel (not per-tensor) scales for QKV projections, or apply outlier-aware quantization (AWQ channels the quantization budget to sensitive weights).
+
+**How do you verify that a quantized model is numerically equivalent enough for production?** Run the same 1,000 held-out prompts through both FP16 and INT4 models. Compute: (1) cosine similarity of output logit distributions (target > 0.99); (2) top-1 token agreement rate (target > 95%); (3) task-specific metric delta (MMLU accuracy drop < 1pp). Never deploy based on perplexity alone — perplexity can improve on the calibration domain while degrading on production queries.
+
+**How does knowledge distillation differ from quantization for reducing model size?** Quantization reduces the bit-width of weights and activations (FP32 → INT8 → INT4), preserving the original model architecture. Knowledge distillation trains a smaller student model to mimic the larger teacher's output distribution (soft labels), resulting in a fundamentally different model with fewer parameters. They are complementary: distill a 70B model to a 7B student, then quantize the 7B student to INT4 — achieving a 4× size reduction from distillation × 8× from INT4 = 32× total compression. Distillation preserves more accuracy for large compression ratios; quantization is faster to apply (hours vs. days of distillation training).
+
+**What is structured vs. unstructured pruning and why does hardware matter for the choice?** Unstructured pruning sets individual weights to zero based on magnitude (l1/l2 norm < threshold). The resulting sparse weight tensors require specialized sparse matrix operations to see inference speedups — standard dense GPU kernels run at the same speed on sparse matrices. Structured pruning removes entire neurons, attention heads, or layers, producing a smaller dense model that runs faster on standard hardware without sparse kernel support. For production GPU serving without custom CUDA kernels, prefer structured pruning (remove heads/layers) or quantization over unstructured sparsity.
+
+**When should you use dynamic quantization vs. static quantization vs. QAT?** Dynamic quantization quantizes weights statically but activations dynamically at runtime — easiest to apply (one `torch.quantization.quantize_dynamic()` call), no calibration needed, 2-4× CPU speedup for LSTM/Transformer inference. Static quantization quantizes both weights and activations using a calibration dataset to determine activation ranges — requires representative calibration data, higher speedup than dynamic. Quantization-aware training (QAT) inserts fake quantization nodes during training, fine-tuning the model to be robust to quantization error — best accuracy recovery for aggressive quantization (INT4, INT2), but requires full training infrastructure. Use dynamic for NLP models on CPU; static for vision models; QAT when dynamic/static accuracy loss is unacceptable.
+
+**What is Flash Attention and why does it improve both speed and memory for transformers?** Flash Attention rewrites the attention computation to avoid materializing the full N×N attention matrix in GPU HBM (high-bandwidth memory). Instead, it tiles the computation in SRAM (fast on-chip cache) and fuses the softmax + matmul into a single kernel pass. For a 4k-token sequence, the attention matrix is 4k×4k × 2 bytes = 32MB — moving it to/from HBM is the bottleneck, not compute. Flash Attention reduces memory complexity from O(N²) to O(N) and achieves 2-4× wall-clock speedup for long sequences. It is now the standard in all major LLM inference frameworks (vLLM, TGI, llama.cpp).
+
+---
+
+**Quick-reference comparison table:**
+
+| Approach | When to use | Trade-off |
+|---|---|---|
+| Rule-based baseline | Always — establish before ML | Interpretable, brittle on edge cases |
+| Simple ML (LR, RF) | < 100k rows, tabular, fast iteration | Lower ceiling than deep models |
+| Deep learning | Large data, unstructured input (images/text) | Expensive training, needs GPU |
+| Ensembling | Final 1-2% accuracy gain in competition | Complexity, inference latency |
+| Distillation/quantization | Inference cost reduction | Accuracy-efficiency trade-off |

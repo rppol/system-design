@@ -678,37 +678,152 @@ Deploy multiple Config Server instances behind a load balancer. Each instance in
 
 ## 14. Case Study
 
-### Scenario: Zero-Downtime Configuration Refresh for a High-Traffic E-Commerce Platform
+### Scenario: Centralized Config for a 200-Service Platform with Vault Secrets and Bus Refresh
 
-**Context.** An e-commerce platform serves 10,000 requests per second across 50 microservice instances. Configuration changes (feature flags, rate limits, third-party API endpoints) previously required a rolling restart, causing 30–60 seconds of degraded throughput per service during deployments. The team needs a solution that pushes config changes in under 10 seconds with zero restarts.
+**Context.** A fintech platform runs **200 microservices** across multiple Kubernetes clusters. All non-secret configuration (feature flags, rate limits, downstream URLs, timeouts) lives in a Git repository served by **Spring Cloud Config Server**. Secrets (DB credentials, API keys) live in **HashiCorp Vault**, which the Config Server proxies so applications never talk to Vault directly. Config changes propagate without restart via **`@RefreshScope` + Spring Cloud Bus over Kafka**. Target: a flag flip reaches all 200 services in under 5 seconds.
 
-**Solution architecture.**
-
-- Config Server: 3 instances behind an Nginx load balancer, Git backend (GitLab), `clone-on-start: true`, `force-pull: true`, `cache-ttl: 30s`.
-- Spring Cloud Bus: Kafka cluster with 3 brokers. Topic `springCloudBus` with 10 partitions for parallel processing.
-- GitLab webhook: on push to `main` branch, calls `POST https://config-server-lb/actuator/busrefresh`.
-- All microservices: `spring.config.import=configserver:`, `fail-fast: true`, retry with 6 attempts.
-- `@RefreshScope` applied only to: `FeatureFlagService`, `RateLimitConfig`, `ExternalApiUrlConfig`.
-- `DataSource`, `EntityManagerFactory`: singleton, not refresh-scoped.
-
-**Deployment flow for a config change:**
+### Architecture
 
 ```
-1. Developer creates PR modifying feature-flags.yml
-2. Tech lead approves and merges to main
-3. GitLab webhook fires POST /actuator/busrefresh to Config Server LB (< 1s)
-4. Config Server publishes RefreshRemoteApplicationEvent to Kafka topic (< 100ms)
-5. All 50 service instances consume event from Kafka (< 500ms)
-6. Each instance re-creates @RefreshScope beans (< 200ms per instance)
-Total elapsed time: < 2 seconds from merge to all instances updated
+   Git repo (config)            Vault (secrets)
+        |                            |
+        +------------+   +-----------+
+                     v   v
+            +--------------------------+   3 replicas, HA
+            |   Config Server cluster  |   local Git clone fallback
+            +-----------+--------------+
+                        | served via /{app}/{profile}
+        +---------------+----------------+----------------+
+        |               |                |                |
+   +----v----+    +-----v---+      +-----v---+      +-----v----+
+   | svc-001 |    | svc-002 | ...  | svc-199 |      | svc-200  |
+   | @Refresh|    | @Refresh|      | @Refresh|      | @Refresh |
+   +----+----+    +----+----+      +----+----+      +----+-----+
+        |              |                |                |
+        +--------------+----- Kafka (springCloudBus) ----+
+                         RefreshRemoteApplicationEvent fan-out
 ```
 
-**Operational challenges encountered.**
+### Bootstrap and Refresh Setup
 
-Challenge 1: During a GitLab outage, the webhook did not fire after a merge. Config changes sat in Git but were not pushed to services. Resolution: added a scheduled polling job (`spring.cloud.config.watch.enabled=true`, interval 60 seconds) as a fallback, accepting the trade-off of up to 60 seconds of lag during Git webhook failures.
+```yaml
+# application.yml on each service (Spring Boot 3.x uses spring.config.import, not bootstrap.yml)
+spring:
+  application:
+    name: payment-service
+  config:
+    import: "optional:configserver:http://config-server:8888"
+  cloud:
+    config:
+      fail-fast: true
+      retry:
+        max-attempts: 6
+        initial-interval: 1000
+        multiplier: 1.5
+    bus:
+      enabled: true
+  kafka:
+    bootstrap-servers: kafka-1:9092,kafka-2:9092,kafka-3:9092
+```
 
-Challenge 2: A `@RefreshScope` was accidentally applied to a `RestTemplate` bean that had been injected into a non-refresh-scoped service. After a bus refresh, the `RestTemplate` proxy was destroyed mid-flight for in-progress requests, causing `NullPointerException`. Resolution: removed `@RefreshScope` from `RestTemplate` (URL is now a configuration property read from a refresh-scoped `ApiUrlConfig` bean, not hardcoded in the RestTemplate construction).
+```java
+// A refresh-scoped DataSource: the bean is destroyed and rebuilt on /actuator/refresh,
+// so a rotated DB password from Vault takes effect without a restart.
+@Configuration
+public class DataSourceConfig {
 
-Challenge 3: Config Server Git clone directory grew unboundedly under `/tmp` due to temporary branch checkouts. Resolution: configured `spring.cloud.config.server.git.basedir=/data/config-server-checkout` with a persistent volume and monitored disk usage.
+    @Bean
+    @RefreshScope
+    @ConfigurationProperties("app.datasource")
+    public HikariDataSource dataSource() {
+        return DataSourceBuilder.create().type(HikariDataSource.class).build();
+    }
+}
+```
 
-**Results.** Configuration changes propagate in under 2 seconds with zero service restarts. Rolling restart frequency dropped from 15 times per week (config-driven restarts) to 2 times per week (code-driven deployments only). Mean time to config rollback: 90 seconds (revert Git commit + automatic bus refresh).
+```
+Refresh call flow:
+1. Ops merges flag change to Git main
+2. Git webhook -> POST /actuator/busrefresh on any Config Server replica   (<1s)
+3. Config Server publishes RefreshRemoteApplicationEvent to Kafka          (<100ms)
+4. All 200 services consume the event                                      (<1s)
+5. Each rebuilds only its @RefreshScope beans (lazy, on next access)       (<200ms)
+   Total: ~3s merge-to-effect across the fleet
+```
+
+### Metrics
+
+- Flag-flip propagation: **~3s** to all 200 services (was a 20-minute rolling restart).
+- Config Server startup with local Git clone fallback: serves config in **<2s** even during a Git provider outage.
+- Vault lease renewal handled by Config Server; services see refreshed secrets on the next bus refresh, **zero direct Vault calls** from 200 services.
+
+### Pitfalls
+
+**Pitfall 1 — 200 services hammering the Config Server on cold start.**
+```yaml
+# BROKEN: every pod retries instantly with no jitter; a cluster-wide rollout DDoSes the Config Server
+spring.cloud.config.retry.initial-interval: 0
+```
+```yaml
+# FIXED: exponential backoff with jitter + Config Server response caching staggers the herd
+spring:
+  cloud:
+    config:
+      retry: { initial-interval: 1000, multiplier: 1.5, max-attempts: 6 }
+# plus deploy with maxSurge/maxUnavailable so pods come up in waves, not all at once
+```
+
+**Pitfall 2 — Single Config Server with no HA becomes a startup SPOF.**
+```yaml
+# BROKEN: one Config Server, no local cache; if it (or Git) is down, no service can start
+spring.config.import: "configserver:http://config-server:8888"
+```
+```yaml
+# FIXED: 3 replicas behind a Service VIP + server clones Git locally so it serves from disk during Git outages
+spring:
+  config:
+    import: "optional:configserver:http://config-server:8888"   # optional avoids hard fail
+# Config Server side:
+  cloud:
+    config:
+      server:
+        git:
+          clone-on-start: true
+          force-pull: true
+          basedir: /data/config-cache   # persistent volume, local fallback
+```
+
+**Pitfall 3 — `@RefreshScope` on a `@Configuration` class does not refresh the property consumer.**
+```java
+// BROKEN: putting @RefreshScope on the config class does NOT make beans that already
+// captured the value re-read it; the proxy wraps the factory, not the consumer.
+@Configuration
+@RefreshScope
+public class RateLimitConfig {
+    @Value("${rate.limit}") int limit;   // captured once; never updates
+}
+```
+```java
+// FIXED: put @RefreshScope on the BEAN that actually uses the property at runtime
+@Service
+@RefreshScope
+public class RateLimiter {
+    private final int limit;
+    public RateLimiter(@Value("${rate.limit}") int limit) { this.limit = limit; }
+    // on /actuator/refresh, the bean is recreated and the constructor re-reads ${rate.limit}
+}
+```
+
+### Interview Q&A
+
+**Why proxy Vault through the Config Server instead of having each service call Vault?** Centralizing Vault access means 200 services do not each need Vault tokens, network policy, or client libraries. The Config Server holds one Vault role, applies leasing/renewal once, and exposes secrets merged with Git config through a single `/{app}/{profile}` contract.
+
+**What does Spring Cloud Bus add on top of `/actuator/refresh`?** `/actuator/refresh` refreshes one instance. Bus broadcasts a `RefreshRemoteApplicationEvent` over a shared broker (Kafka here) so a single `/actuator/busrefresh` triggers every subscribed instance, turning a per-pod operation into a fleet-wide fan-out.
+
+**Why is `@RefreshScope` lazy, and what is the cost?** Refresh-scoped beans are wrapped in a proxy; on refresh the target is discarded and rebuilt on the next method call. The cost is a one-time rebuild latency and the requirement that the bean be safely re-creatable (no in-flight state lost), which is why a `DataSource` works but a stateful in-flight connection holder does not.
+
+**What breaks if you refresh-scope a `DataSource` carelessly?** In-flight queries holding the old pool can fail when the bean is rebuilt mid-request. The safe pattern is a refresh-scoped Hikari pool with graceful shutdown semantics, refreshed during low traffic, or routing the changed value through a config bean rather than tearing down live connections.
+
+**How do you prevent a config rollout from taking down the Config Server?** Stagger pod startup (Kubernetes `maxSurge`/`maxUnavailable`), use client retry with backoff and jitter, cache Config Server responses, and run multiple Config Server replicas with a local Git clone so reads survive a Git provider outage.
+
+**How do you roll back a bad config change?** Revert the Git commit and fire `/actuator/busrefresh`. Because config is versioned in Git, rollback is a normal `git revert` plus a bus event, typically under two minutes, with full audit history of who changed what.

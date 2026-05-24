@@ -512,30 +512,151 @@ The variance reduction from averaging B models is σ^2*(ρ + (1-ρ)/B). Adding m
 
 ## 14. Case Study
 
-### Problem: E-Commerce Churn Prediction at Scale
+**Scenario: Card-fraud detection with a stacked ensemble.** A payments processor scores 10M transactions/day, fraud rate ~0.1% (10k positives/day). A single model misses subtle fraud patterns, so three base learners trained on different feature views are stacked and combined by a logistic-regression meta-learner. The system must score each transaction in under 5ms inline with authorization.
 
-**Context**: 10 million customers, monthly churn prediction, model updated weekly, engineering team has 2 ML engineers, SLA: predictions in under 100ms per batch (100K rows).
+```
+                 transaction features (300+)
+        +-----------------+-----------------+
+        |                 |                 |
+   feature view A    feature view B    feature view C
+  (velocity/amount)  (device/geo)     (merchant/MCC)
+        |                 |                 |
+   XGBoost           LightGBM         Random Forest
+        |                 |                 |
+        +-------- out-of-fold scores --------+
+                          |
+                  meta-learner (LogReg)
+                          |
+                   calibrated p(fraud)
+                          |
+         threshold @ 99% recall -> decline / step-up / approve
+```
 
-**Baseline**: Single LightGBM with default hyperparameters, AUC 0.831.
+AUC-ROC = 0.987, precision@99%recall = 0.43 (i.e. to catch 99% of fraud, 57% of flagged transactions are false positives, routed to step-up auth rather than hard decline). End-to-end inference < 5ms because trees are shallow (max_depth 6-8) and the meta-learner is a 3-feature dot product.
 
-**Ensemble strategy**:
+**Out-of-fold stacking (the correct way to generate meta-features):**
 
-1. Base models trained on 80% of data (stratified):
-   - LightGBM (num_leaves=127, learning_rate=0.03, 800 rounds with early stopping): AUC 0.849
-   - XGBoost (max_depth=7, learning_rate=0.03, 600 rounds with early stopping): AUC 0.844
-   - Random Forest (n_estimators=500, max_features=0.4): AUC 0.832
-   - CatBoost (depth=8, learning_rate=0.05, 600 iter): AUC 0.841
+```python
+import numpy as np
+from sklearn.model_selection import StratifiedKFold
+from sklearn.base import clone
 
-2. 5-fold OOF predictions generated for meta-features.
+def oof_predictions(model, X: np.ndarray, y: np.ndarray,
+                    n_splits: int = 5) -> np.ndarray:
+    """Generate leak-free meta-features: each row scored by a model that
+    never saw it during training."""
+    oof = np.zeros(len(X))
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
+    for train_idx, val_idx in skf.split(X, y):
+        m = clone(model)
+        m.fit(X[train_idx], y[train_idx])
+        oof[val_idx] = m.predict_proba(X[val_idx])[:, 1]
+    return oof
+```
 
-3. Meta-learner: LogisticRegression (C=0.1, l2 penalty) on OOF features + 5 domain features (tenure bucket, product tier, support_tickets_90d).
+**Building the stack with class imbalance handled:**
 
-4. Final ensemble AUC on holdout: **0.861** — 1.2% gain over best single model.
+```python
+import xgboost as xgb
+import lightgbm as lgb
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+import numpy as np
 
-**Serving architecture**:
-- All four base models serialised with pickle/joblib, loaded once at startup
-- Batch scoring: 100K rows in ~4s on 8-core CPU (LightGBM: 1s, XGBoost: 1.5s, RF: 1.2s, CatBoost: 0.8s, meta: 0.1s)
-- Per-batch p99 latency well within 100ms SLA when batching 1K rows
-- Monitoring: per-model PSI (Population Stability Index) tracked weekly; alert if any base model PSI > 0.2
+def build_stack(X: np.ndarray, y: np.ndarray) -> dict:
+    pos_weight = (y == 0).sum() / (y == 1).sum()   # ~1000 for 0.1% fraud
+    bases = {
+        "xgb": xgb.XGBClassifier(max_depth=6, n_estimators=400,
+                                 scale_pos_weight=pos_weight, eval_metric="aucpr"),
+        "lgb": lgb.LGBMClassifier(num_leaves=63, n_estimators=400,
+                                  class_weight="balanced"),
+        "rf":  RandomForestClassifier(n_estimators=300, max_depth=12,
+                                      class_weight="balanced_subsample", n_jobs=-1),
+    }
+    # leak-free meta-features
+    meta_X = np.column_stack([oof_predictions(m, X, y) for m in bases.values()])
+    meta = LogisticRegression(class_weight="balanced").fit(meta_X, y)
+    # refit base models on ALL data for inference
+    for m in bases.values():
+        m.fit(X, y)
+    return {"bases": bases, "meta": meta}
+```
 
-**Business outcome**: 1.2% AUC improvement translated to ~8% better targeting in the top decile, resulting in €2.1M additional annual retention campaign ROI at an implementation cost of 3 engineer-weeks.
+**Pitfall 1 — Data leakage in stacking.** The classic bug: train base models on the full set, then train the meta-learner on predictions from those same models. The meta-features are then over-optimistic because each base model has memorized its own training rows.
+
+```python
+# BROKEN: base model scores its own training data -> leak, inflated CV
+xgb_model.fit(X_train, y_train)
+meta_X = xgb_model.predict_proba(X_train)[:, 1]   # same rows it trained on
+meta.fit(meta_X, y_train)                          # learns from leaked signal
+
+# FIX: out-of-fold predictions (each row scored by a fold that excluded it)
+meta_X = oof_predictions(xgb_model, X_train, y_train)
+meta.fit(meta_X, y_train)
+```
+
+**Pitfall 2 — Ignoring class imbalance.** Training base models without reweighting on a 0.1% positive rate produces a model that predicts "not fraud" for everything and still gets 99.9% accuracy.
+
+```python
+# BROKEN: default objective optimizes accuracy -> predicts all-negative
+model = xgb.XGBClassifier()
+model.fit(X, y)   # recall on fraud ~ 0
+
+# FIX: scale_pos_weight (XGBoost), class_weight (sklearn), or SMOTE on train fold
+model = xgb.XGBClassifier(scale_pos_weight=(y == 0).sum() / (y == 1).sum(),
+                          eval_metric="aucpr")
+```
+
+**Pitfall 3 — Overfitting the ensemble to the validation set.** Repeatedly tuning base/meta hyperparameters against the same validation split makes the ensemble look better than it is in production.
+
+```python
+# BROKEN: select base-model weights by maximizing AUC on the SAME val set
+#         used for early stopping -> optimistic, fails in production
+
+# FIX: nested CV. Inner loop tunes hyperparameters, outer untouched fold
+#      estimates honest generalization; final test set is touched once.
+from sklearn.model_selection import cross_val_score
+honest = cross_val_score(estimator, X, y, cv=outer_cv, scoring="average_precision")
+```
+
+**Interview Q&A:**
+
+**Why stack diverse base models instead of one tuned XGBoost?** Diversity is the source of ensemble gains: errors that are uncorrelated across models cancel when combined. XGBoost, LightGBM, and Random Forest split features differently and trained on different views, so their mistakes differ. If all three made identical predictions, the meta-learner would add nothing.
+
+**Why use out-of-fold predictions for the meta-learner?** To prevent leakage. If the meta-learner trains on base-model scores of rows those base models already saw, it learns from over-confident, memorized predictions that will not be available at inference time, so its weights are miscalibrated. OOF predictions simulate the inference condition where the base model has never seen the row.
+
+**Why is precision@99%recall the chosen metric, not accuracy or plain AUC?** Fraud is a 0.1% positive problem where accuracy is meaningless (predict all-negative for 99.9%). The business cost is asymmetric: missing fraud is far worse than a false alarm, so the operating point is pinned at 99% recall and precision there measures the false-alarm burden the ops team must absorb.
+
+**What is the difference between bagging, boosting, and stacking?** Bagging (Random Forest) trains independent models on bootstrap samples and averages to reduce variance. Boosting (XGBoost, LightGBM) trains models sequentially, each correcting the prior's residuals, reducing bias. Stacking trains a meta-model to learn the best combination of heterogeneous base learners. They are complementary and here all three appear.
+
+**Why a simple logistic regression as the meta-learner rather than another boosted tree?** A linear meta-learner over a handful of base scores has low variance, is hard to overfit, is fully interpretable (the weights show each base model's contribution), and infers in microseconds. A complex meta-learner over only 3 inputs invites overfitting and adds latency for no accuracy gain.
+
+**How would you keep the ensemble effective as fraud patterns evolve?** Monitor PR-AUC on labeled chargebacks (which arrive with weeks of lag), watch feature PSI for input drift, and retrain base models on a rolling window. Because fraudsters adapt, schedule frequent retraining and keep a champion/challenger setup so a new ensemble must beat the incumbent on held-out recent data before promotion.
+
+**Pitfall — Feature importance from XGBoost used to prune features causes silent model degradation.**
+
+```python
+# BROKEN: pruning features with importance < 0.01 removes redundant-but-protective features
+# Feature "account_age_days" has low split importance (rarely used in trees)
+# but is a strong interaction term with "transaction_velocity"
+import xgboost as xgb
+
+booster = xgb.train(params, dtrain)
+scores = booster.get_fscore()  # split count importance
+keep = [f for f, s in scores.items() if s >= 0.01]
+# Removes account_age_days → model loses fraud-ring detection ability
+# AUC drops from 0.987 → 0.961 silently (no error thrown)
+
+# FIX: use SHAP values for feature importance — captures interaction effects
+import shap
+explainer = shap.TreeExplainer(booster)
+shap_values = explainer.shap_values(X_val)
+shap_importance = np.abs(shap_values).mean(0)  # mean |SHAP| per feature
+# account_age_days: SHAP importance 0.082 → NOT pruned
+```
+
+**How does gradient boosting differ from bagging (Random Forest) in bias-variance trade-off?** Bagging (Random Forest) builds many independent high-variance, low-bias trees and averages them — reducing variance while keeping bias low. Each tree is trained on a bootstrap sample independently. Gradient boosting builds trees sequentially, each tree fitted to the residual error of the previous ensemble — reducing bias iteratively. Boosting can overfit if too many rounds are used; bagging is intrinsically regularized by averaging. In practice: gradient boosting (XGBoost/LightGBM) achieves lower test error on most tabular tasks; Random Forest is more robust to hyperparameter choices and rarely overfits.
+
+**When does stacking outperform any individual base learner, and when does it fail?** Stacking (meta-learning) wins when base learners have diverse error patterns — one model excels on dense regions, another on sparse/tail regions. The meta-learner combines them optimally. Stacking fails when: (1) base learners are correlated (same architecture, similar hyperparameters — their errors coincide); (2) the meta-learner overfits (too few out-of-fold samples, too many base learners); (3) training set is too small (< 10k rows) to reliably learn the meta-learner. Best practice: out-of-fold predictions for training the meta-learner (never train and predict on the same fold) and use a simple meta-learner (linear regression, ridge) to prevent overfitting.
+
+**How do you decide how many trees to use in a gradient-boosted ensemble?** Use early stopping: hold out 10-20% of training data as a validation set and monitor validation loss after each tree. Stop when validation loss stops improving for N consecutive rounds (n_rounds patience = 50 is common). The optimal number of trees is training-data-dependent — more data generally needs more trees to capture patterns. In LightGBM: `early_stopping_rounds=50` with `valid_sets=[val_data]` automates this. Never set `n_estimators` as a fixed value without early stopping — you risk underfitting (too few trees) or overfitting (too many, validation loss rises).

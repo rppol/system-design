@@ -422,31 +422,161 @@ Standard pipeline: export model to TorchScript or ONNX for portability; optimize
 
 ## 14. Case Study
 
-**Problem**: A retail company needs to classify ~20 product categories from shelf photos taken on mobile phones (varying lighting, angles, partial occlusion). They have 8,000 labeled images.
+**Scenario: Real-time defect detection on a manufacturing line.** Twelve cameras stream 30 FPS video of products on a conveyor; a YOLOv8 detector flags surface defects (scratches, dents, missing components). The model runs on NVIDIA Jetson AGX at the edge (no cloud round-trip), TensorRT-optimized to FP16. Each frame must be processed within the 33ms inter-frame budget for 30 FPS, and the line targets 99.97% uptime.
 
-**Baseline approach**:
-- EfficientNet-B3 pretrained on ImageNet (12M params, balanced accuracy/speed).
-- Training transform: `RandomResizedCrop(300)`, `RandomHorizontalFlip`, `ColorJitter`, `Normalize(IMAGENET_MEAN, IMAGENET_STD)`.
-- Validation transform: `Resize(320)`, `CenterCrop(300)`, `Normalize(...)`.
-- AdamW, base LR 1e-4 (backbone), 1e-3 (head), weight decay 1e-4, 50 epochs, cosine schedule.
-- Initial result: top-1 accuracy 74%.
+```
+12 cameras @ 30 FPS
+        |
+   frame grabber (per-camera ring buffer)
+        |
+   preprocess: letterbox resize 1920x1080 -> 640x640, normalize
+        |
+   YOLOv8 (TensorRT FP16 engine on Jetson AGX)   ~18ms/frame
+        |
+   NMS (per-class IoU threshold)
+        |
+   defect? --yes--> reject arm + log image + alert
+           --no---> pass
+```
 
-**Iteration 1 — better augmentation**:
-- Added RandAugment (magnitude=9, num_ops=2) and CutMix (alpha=1.0).
-- Result: 78%.
+Latency 18ms/frame (within the 33ms budget). Precision 0.94, Recall 0.91 at IoU=0.5. The edge deployment removes network dependency, so a cloud outage cannot stop the line; only local images of rejected parts are uploaded for audit and future retraining.
 
-**Iteration 2 — class imbalance fix**:
-- Discovered 4 categories had < 200 images; others had 600+.
-- Added WeightedRandomSampler and focal loss (gamma=2).
-- Result: minority class recall went from 31% to 67%; macro-averaged F1 improved from 0.71 to 0.81.
+**TensorRT FP16 export for edge inference:**
 
-**Iteration 3 — knowledge distillation**:
-- Trained EfficientNet-B7 teacher (84.3% ImageNet top-1) for 100 epochs → 83% accuracy.
-- Distilled into EfficientNet-B3 student using soft labels (temperature=4, alpha=0.7).
-- Student reached 81% accuracy vs. 78% with hard labels, with no inference overhead.
+```python
+from ultralytics import YOLO
 
-**Production deployment**:
-- Model exported to ONNX, optimized with TensorRT FP16.
-- Deployed on AWS EC2 G4dn (T4 GPU), achieving 8ms end-to-end latency (preprocessing + inference + postprocessing).
-- TorchServe handles batching; batch size 32 at 100 req/s with P99 latency 25ms.
-- Accuracy monitored weekly via a stratified sample of 500 production images reviewed by QA.
+def export_trt(weights: str) -> str:
+    model = YOLO(weights)
+    # half=True -> FP16 engine; ~2x throughput vs FP32 on Jetson tensor cores
+    engine_path = model.export(format="engine", half=True, imgsz=640,
+                               device=0, workspace=4)
+    return engine_path
+```
+
+**Letterbox preprocessing to match training resolution:**
+
+```python
+import cv2
+import numpy as np
+
+def letterbox(img: np.ndarray, new: int = 640,
+              color: tuple[int, int, int] = (114, 114, 114)) -> np.ndarray:
+    """Resize preserving aspect ratio, pad to a square. Keeps geometry
+    consistent with training so boxes are not distorted."""
+    h, w = img.shape[:2]
+    scale = min(new / h, new / w)
+    nh, nw = int(round(h * scale)), int(round(w * scale))
+    resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    canvas = np.full((new, new, 3), color, dtype=np.uint8)
+    top, left = (new - nh) // 2, (new - nw) // 2
+    canvas[top:top + nh, left:left + nw] = resized
+    return canvas
+```
+
+**Per-class NMS so different defect types get appropriate thresholds:**
+
+```python
+import numpy as np
+
+def per_class_nms(boxes: np.ndarray, scores: np.ndarray, classes: np.ndarray,
+                  thresholds: dict[int, float]) -> list[int]:
+    keep: list[int] = []
+    for c in np.unique(classes):
+        idx = np.where(classes == c)[0]
+        iou_thr = thresholds.get(int(c), 0.45)
+        order = idx[scores[idx].argsort()[::-1]]
+        while len(order) > 0:
+            i = order[0]
+            keep.append(int(i))
+            if len(order) == 1:
+                break
+            ious = _iou(boxes[i], boxes[order[1:]])
+            order = order[1:][ious < iou_thr]
+    return keep
+```
+
+**Pitfall 1 — Domain shift from studio to factory floor.** The model was trained on clean studio images; on the factory floor with different lighting, dust, and angles, recall collapses.
+
+```python
+# BROKEN: train only on pristine studio shots -> fails on real line conditions
+train_data = "studio_images/"
+
+# FIX: fine-tune on real factory-floor images (varied lighting, motion blur,
+# dust) and add domain-matched augmentation; collect hard negatives from prod.
+train_data = "studio_images/ + factory_floor_labeled/"   # + augmentation
+```
+
+**Pitfall 2 — NMS threshold too high.** A single IoU threshold for all defect types merges adjacent small defects or keeps duplicate boxes, hurting recall on clustered scratches.
+
+```python
+# BROKEN: one global NMS IoU for all classes -> small clustered defects merged
+keep = nms(boxes, scores, iou_threshold=0.7)
+
+# FIX: tune IoU per defect type; tight clusters need a lower threshold so
+# nearby true positives are not suppressed (see per_class_nms above).
+keep = per_class_nms(boxes, scores, classes, {0: 0.3, 1: 0.5})
+```
+
+**Pitfall 3 — Resolution mismatch between training and deployment.** Training at 640x640 but feeding raw 1920x1080 frames stretches geometry and shifts box coordinates.
+
+```python
+# BROKEN: naive resize 1920x1080 -> 640x640 distorts aspect ratio
+inp = cv2.resize(frame, (640, 640))   # squashes the image, boxes misaligned
+
+# FIX: letterbox (aspect-preserving resize + padding) to match training, then
+# unletterbox the predicted boxes back to original coordinates.
+inp = letterbox(frame, 640)
+```
+
+**Interview Q&A:**
+
+**Why deploy at the edge (Jetson) instead of streaming frames to the cloud?** Latency and reliability. A cloud round-trip per frame would blow the 33ms budget and make the line dependent on network uptime; a momentary outage would halt production. Edge inference keeps decisions local and deterministic; only rejected-part images are uploaded asynchronously for audit and retraining.
+
+**Why TensorRT FP16, and what does it cost in accuracy?** TensorRT fuses layers and uses tensor cores; FP16 roughly doubles throughput and halves memory versus FP32 on Jetson, getting the model under the latency budget. The accuracy cost is usually negligible (sub-1% mAP) for detection; INT8 would be faster still but needs calibration and risks larger accuracy loss, so FP16 is the safe production default.
+
+**How do you choose the detection confidence and NMS thresholds for a quality-control task?** The business cost is asymmetric, missing a defect (shipping a bad part) is worse than a false reject. So set the confidence threshold to favor recall, accept more false positives at the reject arm, and tune NMS per class so clustered small defects are not suppressed. Validate on a labeled line-captured set, not the studio set.
+
+**What is letterboxing and why does it matter?** Letterboxing resizes an image to the model's input size while preserving aspect ratio, padding the remainder with a neutral color. It keeps object geometry consistent with training so predicted boxes map back correctly. A naive stretch resize distorts shapes and degrades both localization and classification.
+
+**How do you handle domain shift after deployment?** Continuously sample production frames (especially false negatives and rejects), label them, and fine-tune on this real-world distribution. Add augmentations that mimic factory conditions (lighting, blur, occlusion). Monitor live precision/recall on audited rejects; a drop signals the input distribution has drifted and triggers a retraining cycle.
+
+**How do you sustain 30 FPS across 12 cameras on one device?** Run the TensorRT engine with batched or interleaved inference, use per-camera ring buffers so a slow frame does not stall others, overlap preprocessing on CPU with GPU inference, and pin the engine to FP16. If one device cannot keep up, partition cameras across multiple Jetsons; the 18ms-per-frame headroom under the 33ms budget gives room for batching a few cameras together.
+
+**Pitfall — Data leakage via patient/entity ID across train/val/test splits.**
+
+```python
+# BROKEN: random split — same patient appears in both train and test
+# Model memorizes patient-specific patterns; test AUC 0.94 (inflated)
+from sklearn.model_selection import train_test_split
+X_train, X_test = train_test_split(images, test_size=0.2)  # random split!
+# Same patient's images in train AND test → data leakage
+
+# FIX: group split on patient ID — all images from one patient go to one split
+from sklearn.model_selection import GroupShuffleSplit
+splitter = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+train_idx, test_idx = next(splitter.split(images, groups=patient_ids))
+# Test AUC drops from 0.94 → 0.81 — the real generalization performance
+```
+
+**How do you handle class imbalance in medical image classification (1:1000 ratio)?** Three complementary approaches: (1) class-weighted loss — `nn.CrossEntropyLoss(weight=torch.tensor([1.0, 1000.0]))` trains the model to treat minority-class errors as 1000× more costly; (2) oversampling the minority class with augmentation (`torchvision.transforms` random crops, rotations, color jitter) during training; (3) focal loss — `FL = -alpha_t * (1 - p_t)^gamma * log(p_t)` down-weights easy negatives and focuses training on hard positives. In practice, combine class weights + augmentation; evaluate on precision-recall (not accuracy) since a classifier predicting "no defect" for all inputs achieves 99.9% accuracy on 1:1000 data.
+
+**What is the role of transfer learning, and when does fine-tuning all layers hurt vs. help?** Transfer learning initializes a model with weights pre-trained on a large dataset (ImageNet, JFT-300M). For small target datasets (< 10k images), fine-tuning only the classification head preserves ImageNet features and prevents overfitting. For large target datasets (> 100k images) or domain-shifted targets (medical, satellite, infrared imagery), fine-tuning all layers with a low learning rate (1e-5 to 1e-4) for the backbone allows the network to adapt its feature representations. The heuristic: if target domain is visually similar to source, freeze more layers; if domain is visually dissimilar, fine-tune more layers.
+
+**What is the role of data augmentation in preventing overfitting for small vision datasets?** With < 10k labeled images, a model like ResNet-50 (25M parameters) can memorize the training set in < 10 epochs. Augmentation artificially expands the training distribution: horizontal flips, random crops (224×224 from 256×256), color jitter (±10% brightness/contrast), mixup (blend two images and their labels). Effective augmentation matches the invariances that hold in the real deployment distribution — don't apply vertical flips for natural images (rare in real world) but do for satellite imagery. CutMix and Mixup consistently improve top-1 accuracy 1-2pp at small dataset sizes.
+
+**How do you choose between object detection architectures (YOLO vs. Faster R-CNN) for production?** YOLO (You Only Look Once) runs inference in a single forward pass, achieving 30-100+ FPS on GPU — suited for real-time detection (video surveillance, autonomous driving inference). Faster R-CNN uses a two-stage pipeline (region proposal + classification), achieving higher mAP but lower throughput (~5-15 FPS). In production: use YOLO when throughput > 15 FPS is required, object count per image is moderate (< 50), and you can accept 2-5% mAP trade-off. Use Faster R-CNN (or DETR) when maximum accuracy on densely packed small objects is required (aerial imagery, microscopy) and latency allows.
+
+**How does Vision Transformer (ViT) differ from CNN architectures, and when does ViT win?** CNN encodes spatial locality and translation equivariance as inductive bias — nearby pixels share information through convolutional kernels. ViT treats an image as a sequence of patches (e.g., 16×16 px patches for a 224×224 image = 196 patches), applies self-attention globally across all patches, and has no spatial locality bias. ViT requires more data to learn spatial structure from scratch: ViT underperforms ResNet on ImageNet with < 100M training images but surpasses it when pre-trained on JFT-300M or LAION-5B. In production: use EfficientNet/ConvNeXt for small-data, compute-constrained settings; use ViT (CLIP ViT-L, DINOv2) when large-scale pre-training is available and zero-shot or few-shot transfer is needed.
+
+---
+
+**Quick-reference comparison table:**
+
+| Approach | When to use | Trade-off |
+|---|---|---|
+| Rule-based baseline | Always — establish before ML | Interpretable, brittle on edge cases |
+| Simple ML (LR, RF) | < 100k rows, tabular, fast iteration | Lower ceiling than deep models |
+| Deep learning | Large data, unstructured input (images/text) | Expensive training, needs GPU |
+| Ensembling | Final 1-2% accuracy gain in competition | Complexity, inference latency |
+| Distillation/quantization | Inference cost reduction | Accuracy-efficiency trade-off |

@@ -536,62 +536,264 @@ PinSage uses importance-based neighbor sampling: instead of uniform random sampl
 
 ## 14. Case Study
 
-**Problem: Real-time fraud detection in a payment network**
-
-Scale: 50M users, 200M transactions/day, graph has ~250M edges. Goal: classify transactions as fraudulent with >85% precision at >60% recall, inference latency <50ms.
+**Scenario:** A professional network (950M users, 70M companies) faces a surge in fraud rings - coordinated groups of fake accounts that endorse each other, apply for jobs in bulk, and scrape recruiter contact data. Traditional ML detects isolated fake accounts (precision 0.71, recall 0.58) but misses ring structures where individual node features appear legitimate. The goal: detect fraud rings of 5-500 accounts using GraphSAGE, achieving precision >= 0.88, recall >= 0.82, with batch scoring of 5M flagged candidate accounts within 6 hours, and real-time single-node scoring in under 80ms (p99).
 
 **Architecture:**
-
 ```
-Offline: Nightly Graph Embedding Refresh
-=========================================
-
-  Transaction Graph (Neo4j)
+Raw Account Data (950M nodes)
+  - Node features: profile completeness, account age, connection velocity,
+    post frequency, endorsement given/received ratio (128 features)
+  - Edge types: connection, endorsement, message_sent, shared_ip, co-applied_job
          |
-  NeighborSampler (hop-1: 15, hop-2: 10)
+         v
+Graph Construction (PyG + NetworkX)
+  Heterogeneous graph:
+    nodes: accounts (950M), companies (70M)
+    edges: connection (5.8B), endorsement (1.2B), shared_ip (200M)
          |
-  3-layer GraphSAGE (128 -> 64 -> 32)
-  Node features: [amount, merchant_category, hour, device_fingerprint,
-                  velocity_7d, country_code] (64 dims total)
+         v
+Mini-batch GraphSAGE Training
+  2-hop neighbourhood sampling (fanout [25, 10])
+  Hidden dim: 256, 3 layers, mean aggregator
+  Node classification: fraud (1) / legitimate (0)
+  Trained on 500K labelled nodes (abuse team labels)
          |
-  Node embeddings stored in Redis (TTL: 24h)
+         v
+Ring Detection Post-processing
+  Extract fraud-score > 0.7 subgraph
+  Connected components -> candidate rings
+  Ring features: size, density, avg_score, formation_age
+  Ring classifier (GBM) -> confirmed ring / false positive
          |
-  ANN index (FAISS IVF) for similar-node retrieval
-
-
-Online: Real-time Inference (<50ms)
-=====================================
-
-  Incoming transaction t
-         |
-  Fetch 15 hop-1 neighbors from Neo4j (indexed, <5ms)
-         |
-  Fetch their embeddings from Redis (<3ms)
-         |
-  Single GraphSAGE forward pass (CPU, mini-graph of 16 nodes)
-         |
-  MLP classifier (embedding + rule features) -> fraud score
-         |
-  Score > 0.7: block; 0.4-0.7: step-up auth; <0.4: allow
+         v
+Action Engine
+  score > 0.9  -> auto-restrict
+  0.7-0.9      -> human review queue
+  ring detected -> coordinated action (restrict all members)
 ```
 
-**Key Design Decisions:**
+**Step-by-step implementation:**
 
-1. Offline embedding precomputation: re-running full GraphSAGE online is too slow. Nightly refresh covers 99% of returning users. New users fall back to MLP on raw features only.
+```python
+from __future__ import annotations
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.nn import SAGEConv
+from torch_geometric.data import HeteroData
+from torch_geometric.loader import NeighborLoader
+import numpy as np
 
-2. GraphSAGE (inductive) over GCN (transductive): new accounts created mid-day must get embeddings. GCN requires retraining to incorporate new nodes.
+class FraudGraphSAGE(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int = 256,
+        out_channels: int = 2,
+        num_layers: int = 3,
+        dropout: float = 0.3,
+    ) -> None:
+        super().__init__()
+        self.convs = nn.ModuleList()
+        self.bns = nn.ModuleList()
+        self.dropout = dropout
 
-3. Sum aggregation for hop-2, mean for hop-1: hop-2 neighborhood count (how many 2nd-degree fraud contacts) is informative. Hop-1 mean embedding captures average neighbor profile.
+        self.convs.append(SAGEConv(in_channels, hidden_channels, aggr="mean"))
+        self.bns.append(nn.BatchNorm1d(hidden_channels))
+        for _ in range(num_layers - 2):
+            self.convs.append(SAGEConv(hidden_channels, hidden_channels, aggr="mean"))
+            self.bns.append(nn.BatchNorm1d(hidden_channels))
+        self.convs.append(SAGEConv(hidden_channels, out_channels, aggr="mean"))
 
-4. Temporal edge sampling: only sample edges from the past 30 days — older connections are less predictive of current behavior.
+    def forward(
+        self, x: torch.Tensor, edge_index: torch.Tensor
+    ) -> torch.Tensor:
+        for i, (conv, bn) in enumerate(zip(self.convs[:-1], self.bns)):
+            x = conv(x, edge_index)
+            x = bn(x)
+            x = F.relu(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
+        return self.convs[-1](x, edge_index)
 
-**Results:**
+def build_neighbor_loader(
+    data: HeteroData,
+    node_indices: torch.Tensor,
+    num_neighbors: list[int] = [25, 10, 5],
+    batch_size: int = 1024,
+    shuffle: bool = True,
+) -> NeighborLoader:
+    return NeighborLoader(
+        data,
+        num_neighbors=num_neighbors,
+        batch_size=batch_size,
+        input_nodes=("account", node_indices),
+        shuffle=shuffle,
+        num_workers=4,
+        persistent_workers=True,
+    )
+```
 
-| Metric | Before (XGBoost) | After (GraphSAGE) |
+```python
+from torch_geometric.utils import to_networkx
+import networkx as nx
+from sklearn.ensemble import GradientBoostingClassifier
+
+def train_graphsage(
+    model: FraudGraphSAGE,
+    loader: NeighborLoader,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    class_weight_fraud: float = 10.0,   # fraud is rare: ~0.2% of accounts
+) -> float:
+    model.train()
+    total_loss = 0.0
+    weights = torch.tensor([1.0, class_weight_fraud], device=device)
+    criterion = nn.CrossEntropyLoss(weight=weights)
+
+    for batch in loader:
+        batch = batch.to(device)
+        optimizer.zero_grad()
+        out = model(batch["account"].x, batch["account", "connection", "account"].edge_index)
+        # Only compute loss on seed nodes (first batch_size nodes in mini-batch)
+        out = out[:batch["account"].batch_size]
+        y = batch["account"].y[:batch["account"].batch_size]
+        loss = criterion(out, y)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+        total_loss += float(loss) * batch["account"].batch_size
+
+    return total_loss / len(loader.dataset)
+
+@torch.no_grad()
+def score_nodes(
+    model: FraudGraphSAGE,
+    loader: NeighborLoader,
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray]:
+    model.eval()
+    all_probs: list[torch.Tensor] = []
+    all_labels: list[torch.Tensor] = []
+
+    for batch in loader:
+        batch = batch.to(device)
+        out = model(batch["account"].x, batch["account", "connection", "account"].edge_index)
+        out = out[:batch["account"].batch_size]
+        probs = F.softmax(out, dim=1)[:, 1]
+        all_probs.append(probs.cpu())
+        all_labels.append(batch["account"].y[:batch["account"].batch_size].cpu())
+
+    return torch.cat(all_probs).numpy(), torch.cat(all_labels).numpy()
+```
+
+```python
+def detect_fraud_rings(
+    node_ids: np.ndarray,
+    fraud_scores: np.ndarray,
+    edge_list: list[tuple[int, int]],
+    score_threshold: float = 0.7,
+    min_ring_size: int = 5,
+    max_ring_size: int = 500,
+) -> list[dict]:
+    # Build subgraph of high-score nodes
+    high_score_mask = fraud_scores >= score_threshold
+    high_score_ids = set(node_ids[high_score_mask].tolist())
+
+    G = nx.Graph()
+    G.add_nodes_from(high_score_ids)
+    for u, v in edge_list:
+        if u in high_score_ids and v in high_score_ids:
+            G.add_edge(u, v)
+
+    rings: list[dict] = []
+    for component in nx.connected_components(G):
+        if not (min_ring_size <= len(component) <= max_ring_size):
+            continue
+        subgraph = G.subgraph(component)
+        member_scores = fraud_scores[np.isin(node_ids, list(component))]
+        rings.append({
+            "member_ids": list(component),
+            "size": len(component),
+            "density": nx.density(subgraph),
+            "avg_fraud_score": float(member_scores.mean()),
+            "max_fraud_score": float(member_scores.max()),
+            "internal_edges": subgraph.number_of_edges(),
+        })
+
+    return sorted(rings, key=lambda r: r["avg_fraud_score"], reverse=True)
+```
+
+**Key pitfalls (3 with BROKEN->FIX):**
+
+**Pitfall 1 - Neighbour explosion when sampling 3-hop neighbourhoods for hub nodes:**
+```python
+# BROKEN: fixed large fanout causes memory OOM for hub nodes with 50K+ connections
+loader = NeighborLoader(data, num_neighbors=[50, 50, 50])  # 50^3 = 125K nodes in worst case
+# Hub account (influencer) with 50K connections samples 50K * 50 * 50 = 125M neighbours -> OOM
+
+# FIX: cap fanout and add node degree normalization in features
+loader = NeighborLoader(data, num_neighbors=[25, 10, 5])   # max 1250 sampled neighbours
+# Additionally, cap edge weights by log(1 + degree) so hubs don't dominate aggregation
+x[:, degree_feature_idx] = torch.log1p(x[:, degree_feature_idx])
+```
+
+**Pitfall 2 - Training on temporally mixed data leaks future graph structure:**
+```python
+# BROKEN: edge_index includes connections formed after the fraud label was assigned
+# The model sees "A connected to known-fraud B after B was flagged" -> trivial pattern
+data = build_graph(all_edges, labels)   # uses all historical edges
+train_loader = NeighborLoader(data, input_nodes=train_mask)  # future edges included
+
+# FIX: construct graph using only edges that existed before the label timestamp
+def build_temporal_graph(edges_df, labels_df, snapshot_date):
+    edges_before = edges_df[edges_df["created_at"] < snapshot_date]
+    return build_graph(edges_before, labels_df)
+snapshot = labels_df["flagged_at"].min()   # use earliest label date as cutoff
+data = build_temporal_graph(edges_df, labels_df, snapshot)
+```
+
+**Pitfall 3 - Using accuracy or cross-entropy without class weighting on 0.2% fraud rate:**
+```python
+# BROKEN: model predicts all-legitimate; accuracy 99.8%, loss minimal, recall 0%
+model = FraudGraphSAGE(in_channels=128)
+criterion = nn.CrossEntropyLoss()   # no class weights
+# Training converges to all-negative predictions in 2 epochs
+
+# FIX: compute class weights from training set; use focal loss as alternative
+n_fraud = int(train_labels.sum())
+n_legit = len(train_labels) - n_fraud
+weight_fraud = n_legit / n_fraud   # ~500x weight for fraud class
+weights = torch.tensor([1.0, weight_fraud])
+criterion = nn.CrossEntropyLoss(weight=weights)
+# Alternative: focal loss with gamma=2.0 downweights easy negatives automatically
+```
+
+**Metrics and results:**
+
+| Metric | Traditional ML (node-only) | GraphSAGE + ring detection |
 |---|---|---|
-| Precision@60% recall | 78% | 87% |
-| AUC-ROC | 0.91 | 0.96 |
-| P99 inference latency | 12ms | 41ms |
-| False positive rate | 2.1% | 1.2% |
+| Precision (node-level) | 0.71 | 0.89 |
+| Recall (node-level) | 0.58 | 0.83 |
+| F1 (node-level) | 0.64 | 0.86 |
+| Ring detection precision | N/A | 0.91 |
+| Ring detection recall | N/A | 0.79 |
+| Fraud accounts actioned/day | 12,000 | 34,000 |
+| False positive rate | 1.2% | 0.38% |
+| Batch scoring time (5M nodes) | 45 min | 5.2 hr |
+| Real-time inference p99 | 12ms | 74ms |
+| Model size | 180 MB | 2.4 GB |
+| GPU training time | N/A | 11 hr (4xA100) |
 
-The 9% precision gain translated to $4.2M/year reduction in fraud losses. The 29ms latency increase was acceptable given the improvement in precision.
+**Interview discussion points:**
+
+**Why does GraphSAGE outperform a node-only model for fraud ring detection despite individual nodes appearing legitimate?** Fraud ring members are deliberately crafted to have individually normal features: real profile photos, connections to legitimate users, and normal posting frequency. The ring's signature is structural: members endorse each other in circular patterns, share IP address clusters, and have synchronised account creation timestamps. GraphSAGE aggregates 2-hop neighbourhood information, allowing the model to learn that a node surrounded by mutually-endorsing peers with no external connections is suspicious even if its own features are clean, capturing relational fraud signals invisible to node-only models.
+
+**What is the difference between inductive and transductive graph learning and why does LinkedIn need inductive?** Transductive methods (spectral GCN) learn embeddings for a fixed set of nodes in a single graph; they cannot embed new nodes without retraining the entire model. Inductive methods (GraphSAGE) learn a function that aggregates neighbourhood features, allowing new nodes to be embedded at inference time by aggregating their neighbours' features. At LinkedIn scale, 500K new accounts are created daily; retraining a transductive model daily would take 40 hours per cycle. GraphSAGE embeds new nodes in 74ms using the fixed trained aggregation function.
+
+**How does mini-batch training with NeighborLoader scale to 950M nodes when the full graph does not fit in GPU memory?** NeighborLoader samples a fixed-size neighbourhood subgraph for each seed node in the batch, loading only those nodes and edges into GPU memory. For a batch of 1024 seed nodes with fanout [25, 10, 5], the maximum subgraph contains 1024 * 25 * 10 * 5 = 1.28M nodes, requiring approximately 650 MB of GPU memory versus 480 GB for the full graph. The tradeoff is that sampled neighbourhoods introduce variance in gradient estimates, mitigated by using 25 neighbours at the first hop and decreasing fanout at deeper hops where exponential growth is most severe.
+
+**Why is temporal graph construction critical for avoiding label leakage in fraud detection?** Fraud labels are assigned retroactively by the abuse team, often weeks after account creation. If edges formed after the flagging date are included in training, the model learns to predict based on "was this node connected to known fraud after it was already flagged?" - a trivially easy pattern that does not generalise to real-time scoring of unflagged accounts. Using only edges existing before the earliest label assignment date in the training set ensures the model learns structural signals that precede detection, achieving 0.83 recall on future unseen fraud rings versus 0.94 with leakage (12% inflated).
+
+**How would you serve real-time GraphSAGE scores at 80ms p99 for a single account?** The critical path is: (1) retrieve the account's 2-hop neighbourhood from a graph database (Neptune or TigerGraph), targeting < 30ms for a 25-node sample via an online index; (2) load pre-computed node embeddings for neighbours from Redis (2ms); (3) run one GraphSAGE aggregation layer using the cached neighbour embeddings plus the target node's raw features (20ms on CPU); (4) return the fraud score. Pre-computing and caching 1-hop neighbour embeddings nightly for all active nodes reduces the real-time computation to a single aggregation layer rather than 3 layers, achieving p99 of 68ms versus 210ms for full 3-hop inference.
+
+**What graph topology features distinguish a fraud ring from a legitimate community cluster?** Fraud rings exhibit: (1) high internal density (>0.8 edges / possible edges within the ring) versus legitimate communities (0.1-0.3 density); (2) low external connectivity (few edges leaving the ring per member) versus legitimate clusters with 15-40 external edges per member; (3) synchronised formation age (90% of ring edges formed within a 72-hour window) versus organic communities forming over months; (4) reciprocal endorsement loops (A endorses B, B endorses A, C endorses A and B) absent in legitimate skill validation. These features feed the ring-level GBM classifier achieving 0.91 precision at the ring level, above the 0.89 node-level precision.

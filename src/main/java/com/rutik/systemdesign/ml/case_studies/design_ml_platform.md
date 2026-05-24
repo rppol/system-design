@@ -677,3 +677,174 @@ Platform target: < 5 minutes (one-click rollback in the web UI). Fourth, GPU uti
 platform-wide GPU utilization (80% target). Low utilization = expensive idle capacity; high
 utilization = engineers waiting for resources. Fifth, feature freshness SLA violations: percentage
 of feature reads that exceed the feature's declared freshness guarantee. Target < 0.1%.
+
+---
+
+## Failure Scenarios and Recovery
+
+**Failure 1 — Training job OOM kills mid-run, experiment state lost.**
+The experiment tracking database recorded the run as "running" but the process was killed by the OOM killer after 6 hours of training. MLflow showed the run open; no model artifact was saved.
+
+- Detection: MLflow heartbeat monitor — if a run has no new metric logs for 10 minutes, mark it "zombie" and alert.
+- Recovery: implement checkpoint-every-N-steps with `torch.save(state_dict, f"ckpt_{step}.pt")` at the training loop level. On restart, load the latest checkpoint and resume. Log the checkpoint step as a run parameter.
+- Prevention: enforce memory budgets with `ulimit` inside the training container; set `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512` to reduce fragmentation-induced OOM.
+
+**Failure 2 — Feature store serving layer returns stale features after Redis failover.**
+Redis Sentinel promoted a replica to primary during a failover. The replica had a 4-second replication lag. Feature values for 12,000 users were stale, causing the model to serve degraded recommendations for ~90 seconds.
+
+- Detection: feature freshness metric (difference between feature `event_timestamp` and current time) crossed 30s threshold; Grafana alerted.
+- Recovery: automatic — once new primary caught up, fresh features resumed. No manual intervention.
+- Prevention: use synchronous replication (`min-replicas-to-write 1`) for real-time features; accept async replication only for historical/batch features where staleness is acceptable.
+
+**Failure 3 — Model registry API rate limit caused deployment pipeline deadlock.**
+10 teams ran `mlflow.register_model()` simultaneously during a post-deploy validation window. The Model Registry REST API hit its 100 req/min limit. All 10 pipelines blocked with exponential backoff, but their lock on the CI job queue starved other teams' pipelines for 40 minutes.
+
+- Detection: CI pipeline duration alert (> 20 minutes), combined with MLflow API 429 errors in logs.
+- Recovery: manually cancelled 8 of the 10 blocked pipelines; let the remaining 2 proceed sequentially.
+- Prevention: stagger deployment windows per team (time-slotted CI jobs); implement a registration queue service that serializes calls and limits concurrent MLflow API calls to 5.
+
+---
+
+## Capacity Planning
+
+**Data volume:**
+
+```
+Current: 50 services × 10k events/hr = 500k feature rows/hr = 12M/day
+Year 1:  100 services → 24M feature rows/day
+Year 3:  300 services → 72M/day
+
+Feature store storage (Parquet, 1KB/row):
+  Year 1: 24M × 1KB = 24GB/day × 365 = 8.76TB/year
+  Retention 2 years → 17.5TB offline store (S3, ~$400/month at $0.023/GB)
+  Online store (Redis, top-5 features × 1M active entities × 100B/feature):
+    5 × 1M × 100 = 500MB active RAM — fits in a 4GB Redis instance
+```
+
+**Training compute:**
+
+```
+XGBoost fraud model:  12M rows × 200 features × 500 trees × 8 leaves
+  = ~6 minutes on 8-core CPU (sklearn, histogram method)
+  Monthly retraining: 6 min × 12 = 72 min/year — negligible
+
+Deep recommender (two-tower, 100M params):
+  50M training pairs × 5 epochs on 4×A100 → ~8 hours per run
+  Weekly retraining: 8h × 52 = 416 A100-hours/year → $1,600/year at $3.85/A100-hr
+```
+
+**Serving infrastructure:**
+
+```
+Prediction API: 100k req/hr = 28 RPS average, 140 RPS peak (5× burst)
+  FastAPI + ONNX Runtime, p99 < 20ms
+  1 replica handles 200 RPS → 1 replica sustains peak with 30% headroom
+  Run 2 replicas for HA: 2 × (1 vCPU, 2GB RAM) = $120/month
+```
+
+---
+
+## Additional War Stories
+
+**War Story 1 — Training/serving feature skew caused silent AUC degradation.**
+
+```python
+# BROKEN: training uses SQL window function for 7-day click rate;
+# serving uses a Redis counter reset daily — different denominators
+
+# Training SQL:
+train_rate = sql("""
+    SELECT clicks_7d / NULLIF(impressions_7d, 0) as ctr_7d
+    FROM daily_aggregates
+    WHERE date BETWEEN now() - 7 days AND now()
+""")
+
+# Serving (wrong):
+serve_rate = redis.get(f"clicks:{user_id}") / redis.get(f"impressions:{user_id}")
+# Counter resets at midnight → 7-day window ≠ daily-reset counter
+
+# FIX: define all features in Feast; materialize to both offline (Parquet)
+# and online (Redis) from the same transformation
+from feast import Feature, FeatureView, Field
+ctr_7d_fv = FeatureView(
+    name="user_ctr_7d",
+    source=daily_push_source,
+    schema=[Field(name="ctr_7d", dtype=Float32)],
+    ttl=timedelta(days=1),
+)
+# Both training and serving call feature_store.get_historical_features()
+# or feature_store.get_online_features() — same transformation, guaranteed parity
+```
+
+**War Story 2 — Model registered as "Production" without challenger comparison caused revenue regression.**
+
+```python
+# BROKEN: any model with AUC > 0.80 auto-promoted to Production
+# New model: AUC 0.82 (better on overall test set)
+# but NDCG@10 on top-1% revenue users dropped 8% → $40k/day revenue loss
+
+def auto_promote(run_id: str, client: MlflowClient) -> None:
+    metrics = client.get_run(run_id).data.metrics
+    if metrics["auc"] > 0.80:
+        client.transition_model_version_stage(MODEL_NAME, version, "Production")
+    # No comparison against current Production model on business-critical segment
+
+# FIX: champion/challenger comparison before promotion
+def promote_if_better(challenger_run_id: str, client: MlflowClient) -> bool:
+    challenger = client.get_run(challenger_run_id).data.metrics
+    champion_ver = client.get_latest_versions(MODEL_NAME, stages=["Production"])[0]
+    champion = client.get_run(champion_ver.run_id).data.metrics
+
+    if (challenger["auc"] > champion["auc"] and
+            challenger["ndcg_at_10_top_users"] >= champion["ndcg_at_10_top_users"] * 0.99):
+        client.transition_model_version_stage(MODEL_NAME, challenger_ver, "Production")
+        return True
+    return False
+```
+
+---
+
+## Monitoring and Drift Detection Deep-Dive
+
+Key signals for an ML platform:
+
+```
+Feature drift (PSI per feature, computed hourly):
+  PSI < 0.10 → no action
+  PSI 0.10-0.20 → log warning, investigate
+  PSI > 0.20 → trigger retraining pipeline, page on-call
+
+Prediction distribution drift (KS test on score histograms):
+  Compare last 1h predictions vs rolling 7-day baseline
+  p-value < 0.01 → alert (distribution shifted significantly)
+
+Model performance (online evaluation where labels arrive with delay):
+  XGBoost fraud: labels arrive in ~2h (chargeback window)
+    → compute AUC and precision@0.1% FPR every 4h
+  Recommender: CTR label arrives in 30min
+    → compute online NDCG@10 on logged impressions hourly
+
+Retraining triggers:
+  1. Scheduled: fraud model weekly, recommender daily
+  2. Event-based: PSI > 0.20 on any top-5 feature → immediate retrain
+  3. Performance-based: AUC drops > 2% from 7-day rolling mean → retrain + alert
+
+A/B testing for model promotion:
+  Shadow mode: new model runs in parallel, predictions logged but not served (2 days)
+  Canary: 5% traffic for 24h → measure NDCG, revenue-per-user, latency
+  Full rollout: if canary passes, promote to 100% traffic
+```
+
+---
+
+## Additional Interview Questions
+
+**How do you ensure reproducibility across training runs in a shared ML platform?** Log all inputs to a training run: dataset hash (DVC content hash), feature store snapshot timestamp, model config (as JSON artifact), library versions (pip freeze artifact), and random seeds. MLflow's `mlflow.log_artifact()` stores these alongside metrics. For full bit-for-bit reproducibility, add `CUBLAS_WORKSPACE_CONFIG=:4096:8` to force deterministic CUDA ops. Treat training runs like database transactions: record everything needed to replay the run from scratch.
+
+**What is the difference between online and batch feature computation, and how does the platform serve both?** Batch features are computed on historical data in scheduled Spark/SQL jobs and stored in the offline feature store (Parquet/Delta Lake). Online features are computed in real-time (stream processing or point-in-time lookup) and stored in the online feature store (Redis/DynamoDB) for low-latency serving. The platform exposes a unified feature retrieval API: `get_historical_features()` for training (returns Parquet), `get_online_features()` for inference (returns Redis values). Feature definitions are written once; the platform materializes to both stores.
+
+**How do you handle model rollback when a production model causes a regression?** The model registry stores all versions with stage transitions audited. Rollback is a stage transition: `client.transition_model_version_stage(MODEL_NAME, previous_version, "Production")`. The serving layer polls the registry every 60 seconds and hot-swaps the ONNX model without restart. Total rollback time: < 2 minutes. For catastrophic failures (OOM, crash loop), the serving infrastructure falls back to the last-known-good ONNX file cached on disk, independent of the registry.
+
+**What is a feature store and why is it worth the operational overhead?** A feature store solves three problems: (1) training/serving skew — features are computed once and read identically by both; (2) feature reuse — teams share computed features instead of re-implementing the same 7-day CTR in 5 different codebases; (3) point-in-time correctness — historical training data is fetched with the feature values that were available at each training example's timestamp, preventing future data leakage. The overhead (maintaining Feast/Tecton, running materialization jobs) pays off once 3+ teams share the same feature.
+
+**How do you manage secrets (API keys, DB passwords) in training jobs without baking them into Docker images?** Use Kubernetes Secrets mounted as environment variables into the training pod, or Vault's Kubernetes auth method (pod gets a short-lived Vault token via its service account, exchanges it for the secret at runtime). Never pass secrets as command-line arguments (visible in `ps aux`) or log them (redact in MLflow). The training container's Dockerfile contains no secrets — it reads from env vars at runtime.

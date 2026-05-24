@@ -548,59 +548,152 @@ Annotate the method with `@PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_
 
 ## 14. Case Study
 
-### Problem: Inconsistent Error Responses Across 30 Controllers
+### Scenario: B2B Platform REST API with Validation, Multipart Upload, and Global Error Mapping
 
-**Symptom:** The API returns different error formats depending on which controller threw the exception: some return `{"error": "..."}`, others return `{"message": "..."}`, and validation errors return Spring's default verbose format.
+**Context.** A B2B integration platform exposes a REST API consumed by ~600 partner systems, handling **6,000 req/sec**. Endpoints use `@RestController` with `@PathVariable`, `@RequestParam`, and `@RequestBody`. Bean validation (`@Valid`) on request bodies produces structured RFC 7807 `ProblemDetail` responses (Spring 6 / Boot 3). Partners also upload bulk CSV files (bounded to 25 MB) and submit CSV bodies parsed by a custom `HttpMessageConverter`. A single `@ControllerAdvice` maps every exception type to a consistent error contract.
 
-**Solution — Unified Error Handling:**
+### Request and Error Flow
+
+```
+   Partner request
+        |
+        v
+   +------------------------+
+   | @RestController        |
+   |  @Valid @RequestBody   |---- validation fails ----> MethodArgumentNotValidException
+   |  @PathVariable         |                                   |
+   |  @RequestParam         |                                   v
+   |  MultipartFile (<=25MB)|                          @RestControllerAdvice
+   +-----------+------------+                          -> ProblemDetail (application/problem+json)
+               | success
+               v
+        domain service
+```
+
+### Controller and Validation
 
 ```java
-// Single source of truth for all error responses
+@RestController
+@RequestMapping("/api/v1/orders")
+public class OrderController {
+
+    @PostMapping
+    public ResponseEntity<OrderDto> create(@Valid @RequestBody CreateOrderRequest req,
+                                           @RequestParam(defaultValue = "false") boolean dryRun) {
+        OrderDto dto = service.create(req, dryRun);
+        return ResponseEntity.status(HttpStatus.CREATED).body(dto);
+    }
+
+    @PostMapping(value = "/bulk", consumes = "text/csv")     // custom converter parses CSV body
+    public ResponseEntity<BulkResult> bulk(@RequestBody List<CreateOrderRequest> rows) {
+        return ResponseEntity.accepted().body(service.bulk(rows));
+    }
+
+    @PostMapping(value = "/import", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<ImportSummary> upload(@RequestParam MultipartFile file) {
+        return ResponseEntity.ok(service.importFile(file));
+    }
+}
+
+public record CreateOrderRequest(
+    @NotBlank String customerId,
+    @Positive int quantity,
+    @NotNull @PastOrPresent LocalDate orderDate) {}
+```
+
+```java
 @RestControllerAdvice
 public class ApiExceptionHandler {
-
-    // Validation failures
     @ExceptionHandler(MethodArgumentNotValidException.class)
-    public ResponseEntity<ProblemDetail> handleValidation(
-            MethodArgumentNotValidException ex) {
-        ProblemDetail problem = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);
-        problem.setTitle("Validation Failed");
-        Map<String, List<String>> errors = ex.getBindingResult()
-            .getFieldErrors().stream()
-            .collect(Collectors.groupingBy(
-                FieldError::getField,
-                Collectors.mapping(DefaultMessageSourceResolvable::getDefaultMessage,
-                                   Collectors.toList())));
-        problem.setProperty("fieldErrors", errors);
-        return ResponseEntity.badRequest().body(problem);
+    public ProblemDetail handleValidation(MethodArgumentNotValidException ex) {
+        ProblemDetail pd = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);
+        pd.setTitle("Validation Failed");
+        Map<String, String> fields = ex.getBindingResult().getFieldErrors().stream()
+            .collect(Collectors.toMap(FieldError::getField,
+                                      DefaultMessageSourceResolvable::getDefaultMessage, (a, b) -> a));
+        pd.setProperty("fieldErrors", fields);
+        return pd;   // 400 with structured per-field errors
     }
 
-    // Not found
-    @ExceptionHandler(EntityNotFoundException.class)
-    public ResponseEntity<ProblemDetail> handleNotFound(EntityNotFoundException ex) {
-        ProblemDetail problem = ProblemDetail.forStatus(HttpStatus.NOT_FOUND);
-        problem.setTitle("Resource Not Found");
-        problem.setDetail(ex.getMessage());
-        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(problem);
-    }
-
-    // Access denied
-    @ExceptionHandler(AccessDeniedException.class)
-    public ResponseEntity<ProblemDetail> handleAccessDenied(AccessDeniedException ex) {
-        ProblemDetail problem = ProblemDetail.forStatus(HttpStatus.FORBIDDEN);
-        problem.setTitle("Access Denied");
-        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(problem);
-    }
-
-    // Catch-all
-    @ExceptionHandler(Exception.class)
-    public ResponseEntity<ProblemDetail> handleAll(Exception ex) {
-        log.error("Unhandled exception", ex);
-        ProblemDetail problem = ProblemDetail.forStatus(HttpStatus.INTERNAL_SERVER_ERROR);
-        problem.setTitle("Internal Server Error");
-        return ResponseEntity.internalServerError().body(problem);
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public ProblemDetail handleTooBig(MaxUploadSizeExceededException ex) {
+        ProblemDetail pd = ProblemDetail.forStatus(HttpStatus.PAYLOAD_TOO_LARGE);
+        pd.setDetail("File exceeds 25MB limit");
+        return pd;
     }
 }
 ```
 
-**Result:** All 30 controllers throw domain exceptions. One `@RestControllerAdvice` converts them all to RFC 7807-compliant `ProblemDetail` JSON. API clients can write a single error handler. Adding a new exception type requires one method in one class.
+```yaml
+spring:
+  servlet:
+    multipart:
+      max-file-size: 25MB        # streamed to disk past threshold; rejects oversized uploads early
+      max-request-size: 30MB
+      file-size-threshold: 2MB
+```
+
+### Metrics
+
+- Validation rejection: **<1ms**, returned as `application/problem+json` with a `fieldErrors` map.
+- Bulk CSV body parse via custom converter: **~12k rows/sec** without loading the whole file as a String.
+- Oversized uploads rejected before buffering, keeping heap flat at p99 under partner abuse.
+
+### Pitfalls
+
+**Pitfall 1 — `@RequestParam` without `required=false` returns 400 on a missing optional param.**
+```java
+// BROKEN: param is implicitly required; partners not sending ?dryRun get 400 Bad Request
+@PostMapping
+public ResponseEntity<OrderDto> create(@Valid @RequestBody CreateOrderRequest r,
+                                       @RequestParam boolean dryRun) { ... }
+```
+```java
+// FIXED: mark optional with a default (or required = false)
+@RequestParam(defaultValue = "false") boolean dryRun
+```
+
+**Pitfall 2 — `@Valid` silently does nothing because the validation starter is absent.**
+```xml
+<!-- BROKEN: no Bean Validation provider on the classpath, so @Valid is a no-op; invalid bodies pass through -->
+<!-- (only spring-boot-starter-web present) -->
+```
+```xml
+<!-- FIXED: add the validation starter so Hibernate Validator triggers @Valid -->
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-validation</artifactId>
+</dependency>
+```
+
+**Pitfall 3 — Large uploads without size limits exhaust the heap.**
+```yaml
+# BROKEN: no multipart limits; a partner uploads a 2GB file, the server buffers it and OOMs
+spring:
+  servlet:
+    multipart:
+      enabled: true   # defaults effectively unbounded for the request
+```
+```yaml
+# FIXED: cap file and request size and stream past a small in-memory threshold
+spring:
+  servlet:
+    multipart:
+      max-file-size: 25MB
+      max-request-size: 30MB
+      file-size-threshold: 2MB
+```
+
+### Interview Q&A
+
+**How does Spring turn a `@Valid` failure into an HTTP response?** When binding a `@RequestBody`, Spring runs the Bean Validation provider; constraint violations throw `MethodArgumentNotValidException` before the controller body executes. An `@ExceptionHandler` for that exception converts the `BindingResult` field errors into a `ProblemDetail`, so the client never reaches business logic with invalid data.
+
+**Why is `@RequestParam` required by default and how do you make it optional?** Spring treats a declared param as mandatory to fail fast on contract violations. Set `required = false` or provide a `defaultValue` (or use `Optional<T>`) to make it optional; otherwise a missing param produces a 400 `MissingServletRequestParameterException`.
+
+**What does the custom CSV `HttpMessageConverter` give you over reading a String body?** It plugs CSV into the normal content-negotiation pipeline, so a handler can declare `consumes = "text/csv"` and receive a typed `List<CreateOrderRequest>` parsed incrementally, rather than accepting a raw String and parsing manually in every controller.
+
+**How does Spring bound multipart memory usage?** With `file-size-threshold`, small files stay in memory and larger ones are streamed to a temp directory; `max-file-size`/`max-request-size` reject oversized uploads before fully buffering them, preventing heap exhaustion from hostile or accidental large files.
+
+**Why centralize error handling in `@ControllerAdvice` rather than per controller?** A single advice class maps every exception type to one RFC 7807 contract, so all 600 partners get a consistent error shape and new exception types are handled in one place. A per-controller `@ExceptionHandler` only covers that controller, leading to inconsistent formats.
+
+**What is the advantage of `ProblemDetail` for a partner-facing API?** It is a standardized (RFC 7807) media type `application/problem+json` with predictable fields plus typed extensions like `fieldErrors`. Partners can write one parser for all error responses instead of branching on ad hoc shapes per endpoint.

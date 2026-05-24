@@ -491,79 +491,167 @@ When a bean injects itself via `@Autowired private MyService self`, Spring injec
 
 ## 14. Case Study
 
-### Problem: @Transactional Not Working — Data Not Committed
+### Scenario: OrderService with @Transactional and @Cacheable Both via CGLIB
 
-**Symptom:** An order processing service's `@Transactional` method runs without errors, but the database is not updated. No exception is thrown.
+An order service (Spring Boot 3.2 / Java 17) annotates a read method with `@Cacheable` and a write method with `@Transactional`. Spring Boot creates a CGLIB proxy (subclass) for the bean. Scale and symptoms:
+
+- 22,000 read req/sec on `getOrder`, backed by a Redis cache (expected ~95% hit rate)
+- The team observed a near-0% cache hit rate and missing transactions, despite correct annotations
+- Root cause: an internal method calling `this.getOrder(id)` — a self-invocation that bypasses the proxy, so neither `@Cacheable` nor `@Transactional` advice runs
+
+Understanding the proxy mechanics (CGLIB vs JDK, `proxyTargetClass`, `final`, self-invocation) is what resolves this.
+
+### Architecture Overview
+
+```
+   caller ----> [ CGLIB Proxy : OrderService$$SpringCGLIB ]   <-- intercepts here
+                       |  applies @Transactional, @Cacheable
+                       v
+                 [ OrderService (real target) ]
+                       |
+   self-invocation:  this.getOrder(id)  --X-- never re-enters the proxy
+                       |                       (no caching, no transaction)
+                       v
+                 plain method body
+
+   Proxy class hierarchy:
+     CGLIB:  OrderService  <-  OrderService$$SpringCGLIB  (subclass, default in Boot)
+     JDK:    OrderService implements OrderApi
+             Proxy  implements OrderApi   (only interface methods visible)
+```
+
+### Implementation
+
+The bug: an internal aggregate method calls a cached method on `this`, bypassing the proxy.
 
 ```java
 @Service
-public class OrderProcessingService {
+public class OrderService {
+
+    @Cacheable("orders")
+    public Order getOrder(Long id) {                 // proxied -> should cache
+        return orderRepository.findById(id).orElseThrow();
+    }
+
+    public List<Order> getOrders(List<Long> ids) {
+        return ids.stream()
+                  .map(this::getOrder)               // BROKEN: self-invocation, no cache, no tx
+                  .toList();
+    }
+}
+```
+
+Fix using `AopContext.currentProxy()` (requires `@EnableAspectJAutoProxy(exposeProxy = true)`), so the call re-enters the proxy and caching applies.
+
+```java
+@Configuration
+@EnableCaching
+@EnableAspectJAutoProxy(exposeProxy = true)          // expose proxy on a ThreadLocal
+public class AopConfig {}
+
+@Service
+public class OrderService {
+
+    @Cacheable("orders")
+    public Order getOrder(Long id) {
+        return orderRepository.findById(id).orElseThrow();
+    }
+
+    public List<Order> getOrders(List<Long> ids) {
+        OrderService self = (OrderService) AopContext.currentProxy();
+        return ids.stream()
+                  .map(self::getOrder)               // goes through proxy -> cached
+                  .toList();
+    }
+}
+```
+
+The cleaner alternative (preferred in most teams) is to extract the cached read into a separate bean so the call naturally crosses a proxy boundary.
+
+```java
+@Service
+public class OrderQueryService {
+    @Cacheable("orders")
+    public Order getOrder(Long id) { return repo.findById(id).orElseThrow(); }
+}
+
+@Service
+public class OrderService {
+    private final OrderQueryService queries;        // injected -> calls cross the proxy
+    OrderService(OrderQueryService q) { this.queries = q; }
+    public List<Order> getOrders(List<Long> ids) {
+        return ids.stream().map(queries::getOrder).toList();
+    }
+}
+```
+
+### Metrics
+
+| Metric | Before (self-invocation) | After (fix) |
+|--------|--------------------------|-------------|
+| Cache hit rate | ~0% | 95% |
+| DB reads/sec for getOrder | ~22,000 | ~1,100 |
+| getOrders p99 | 480 ms | 18 ms |
+| Transactions correctly opened | no | yes |
+
+### Common Pitfalls
+
+**Pitfall 1 — `@Transactional` on a `private` method is silently ignored.**
+
+```java
+// BROKEN: CGLIB subclass cannot override private; advice never applied
+@Service
+public class PaymentService {
     @Transactional
-    public void processOrderBatch(List<Order> orders) {
-        orders.forEach(this::processOrder);  // processes each order
-    }
-
-    @Transactional(propagation = Propagation.REQUIRES_NEW)  // each order in own tx
-    private void processOrder(Order order) {  // PRIVATE METHOD!
-        order.setStatus(OrderStatus.PROCESSED);
-        orderRepo.save(order);
-    }
+    private void debit(Long id) { ... }   // no proxy interception, no transaction
 }
 ```
 
-**Root causes:**
-1. `processOrder` is `private` — CGLIB cannot override private methods; `@Transactional` is silently ignored
-2. Even if it were public, `this::processOrder` is a self-invocation — bypasses the proxy
-
-**Investigation:**
-
 ```java
-// Add to integration test
-@Autowired
-private OrderProcessingService service;
-
-@Test
-void verifyProxy() {
-    System.out.println(service.getClass().getName());
-    // Prints: OrderProcessingService (NO proxy!)
-    // Because: no public @Transactional method was found? Or private bypassed?
-    // Use: System.out.println(AopUtils.isAopProxy(service));
-}
-```
-
-**Fix:**
-
-```java
+// FIX: make it public (or package-private with AspectJ) and call it through the proxy
 @Service
-public class OrderProcessingService {
-    private final OrderTransactionService txService;  // separate service
-
-    public OrderProcessingService(OrderTransactionService txService) {
-        this.txService = txService;
-    }
-
+public class PaymentService {
     @Transactional
-    public void processOrderBatch(List<Order> orders) {
-        // Call through injected service (goes through proxy)
-        orders.forEach(txService::processOrder);
-    }
-}
-
-@Service
-public class OrderTransactionService {
-    private final OrderRepository orderRepo;
-
-    public OrderTransactionService(OrderRepository orderRepo) {
-        this.orderRepo = orderRepo;
-    }
-
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public void processOrder(Order order) {  // public, in separate bean
-        order.setStatus(OrderStatus.PROCESSED);
-        orderRepo.save(order);
-        // Each order committed independently; one failure doesn't roll back others
-    }
+    public void debit(Long id) { ... }
 }
 ```
 
-**Lesson:** Two proxy pitfalls combined to create a completely non-transactional path. Private methods can never be proxied (silently skipped). Self-invocation bypasses the proxy. The fix — extracting to a separate service — is the cleanest solution and also improves cohesion.
+**Pitfall 2 — casting a JDK-proxied bean to its concrete class throws `ClassCastException`.**
+
+```java
+// BROKEN: when the bean implements an interface and proxyTargetClass=false, the proxy
+// is NOT an instance of the concrete class
+OrderServiceImpl impl = (OrderServiceImpl) context.getBean(OrderApi.class); // CCE
+```
+
+```java
+// FIX: depend on the interface, or force CGLIB so the proxy is a subclass
+// application.properties: spring.aop.proxy-target-class=true   (Boot default = true)
+OrderApi api = context.getBean(OrderApi.class);   // program to the interface
+```
+
+**Pitfall 3 — a proxy stored in HTTP session fails cluster replication.**
+
+```java
+// BROKEN: CGLIB proxy isn't Serializable -> NotSerializableException on session replication
+session.setAttribute("orderService", orderService);   // storing a Spring bean/proxy
+```
+
+```java
+// FIX: never store beans/proxies in session; keep only serializable state
+session.setAttribute("orderId", order.getId());        // plain data, replicates cleanly
+```
+
+### Interview Discussion Points
+
+**Why does self-invocation bypass Spring AOP advice?** Spring AOP is proxy-based: advice (`@Transactional`, `@Cacheable`, custom aspects) lives in the proxy that wraps the target bean. An internal `this.method()` call dispatches directly on the target instance and never passes through the proxy, so no advice runs. Crossing a bean boundary, using `AopContext.currentProxy()`, or switching to AspectJ weaving are the ways around it.
+
+**When does Spring use a CGLIB proxy versus a JDK dynamic proxy?** A JDK dynamic proxy is used when the bean implements at least one interface and `proxyTargetClass=false`; it implements the same interfaces and only intercepts interface methods. CGLIB generates a runtime subclass and is used when there is no interface or when `proxyTargetClass=true` — which is the Spring Boot default, so most beans are CGLIB-proxied.
+
+**Why can't CGLIB proxy `final` classes or `final` methods?** CGLIB works by subclassing the target and overriding methods to insert advice. A `final` class cannot be subclassed and a `final` (or `private`/`static`) method cannot be overridden, so those members are not intercepted — `final` classes fail proxy creation outright, and `final` methods are silently un-advised.
+
+**What is `proxyTargetClass` and why is `true` the Boot default?** It forces CGLIB (subclass) proxies even when interfaces exist. Spring Boot defaults it to `true` to avoid the common `ClassCastException` from casting an interface-only JDK proxy to a concrete type and to ensure non-interface methods can be advised, at the cost of requiring non-final classes.
+
+**How does `AopContext.currentProxy()` fix self-invocation, and what is its downside?** With `exposeProxy=true`, Spring places the current proxy in a `ThreadLocal`; calling a method on that reference re-enters the proxy so advice applies. The downside is that it couples business code to Spring's AOP infrastructure and is easy to misuse, so extracting the advised method into a separate bean is usually the cleaner fix.
+
+**Why must you avoid storing Spring proxies in serializable state like the HTTP session?** CGLIB proxies (and most beans) are not `Serializable`, so a clustered/replicated session serialization attempt throws `NotSerializableException`. Sessions should hold only plain, serializable data (IDs, value objects); behavior should be obtained from the container per request, not persisted.

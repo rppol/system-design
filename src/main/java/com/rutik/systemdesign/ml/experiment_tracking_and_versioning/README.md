@@ -548,44 +548,161 @@ Use the MLflow tracking client: `MlflowClient().search_runs(experiment_ids=["1"]
 
 ## 14. Case Study
 
-**Problem**: A team of 8 ML engineers is training transformer models for text classification. Each engineer runs 5-10 experiments per week on shared GPU servers. After 3 months, they cannot reproduce the model currently in production (the engineer who trained it left the team), two engineers unknowingly duplicate work (running identical configurations), and hyperparameter search is done manually (engineers pick values based on intuition). Model quality is stagnant.
-
-**Architecture**:
+**Scenario: Experiment tracking for a 12-person ML team running 500 experiments/week.** Without discipline, results are irreproducible and the team re-runs the same failed configs. MLflow centralizes params, metrics, and artifacts; DVC versions large datasets; the Model Registry gates Staging -> Production promotion. Every run is pinned to a git commit SHA and a DVC data hash, so any model can be reproduced exactly.
 
 ```
-Engineer Workstations              MLflow Tracking Server
-+ GPU servers                      (PostgreSQL backend, S3 artifacts)
-                                   +---------------------------+
-train.py                           |  Experiments:             |
-  mlflow.set_experiment(...)  -->  |  - text_clf/bert/f1       |
-  mlflow.start_run(...)            |  - text_clf/distilbert/f1 |
-  log_params(all_config)           |  Runs: 847 total          |
-  log_metrics(per_epoch)     -->   |  Params, Metrics, Artifacts|
-  log_artifact(checkpoint)         |  Linked to git SHAs       |
-                                   +---------------------------+
-                                              |
-DVC (git + S3)                     Model Registry
-  dvc add data/                    (Staging / Production states)
-  dvc.lock pinned in git      -->  Only registered models deployed
-  dvc push/pull                    Linked to run_id
-
-Optuna Sweep (weekly, 50 trials):
-  TPE sampler + MedianPruner
-  4 parallel workers (4 GPUs)
-  Results logged as nested MLflow runs
-  Best config auto-registered to Staging
+experiment run
+  +-- mlflow.log_params()    (lr, batch, arch, seed)
+  +-- mlflow.log_metrics()   (loss/AUC every 100 steps)
+  +-- mlflow.log_artifact()  (weights, confusion matrix, preprocessing code)
+  +-- tags: git_sha, dvc_data_hash
+        |
+   MLflow Tracking Server (Postgres backend + S3 artifact store)
+        |
+   Model Registry:  None -> Staging -> Production -> Archived
+        |
+   reproduce = checkout(git_sha) + dvc pull(data_hash) + load run params
 ```
 
-**Key Design Decisions**:
+500 experiments/week become searchable and comparable; promotion to Production requires passing the Staging gate (offline metric threshold + shadow eval). Reproducibility holds because both code (SHA) and data (DVC hash) are pinned per run.
 
-1. Every training run logs: git SHA, DVC dataset ref (content hash), all hyperparameters, per-epoch train/val metrics, final test metrics, Python/CUDA versions, GPU type — 12 parameters and 6 metrics per run minimum
+**Logging an experiment correctly (throttled metrics, full artifacts):**
 
-2. Runs are named `{architecture}_{lr}_{batch_size}_{dataset_version}` — searchable and self-describing in the MLflow UI
+```python
+import mlflow
 
-3. Weekly automated Optuna sweep: 50 trials, 10 epochs each, MedianPruner prunes ~35 trials by epoch 5 — 15 full trials per week on 4 GPUs, identifies top configuration in ~6 GPU-hours vs 50 GPU-hours for random search
+def run_experiment(model, train_fn, params: dict, data_hash: str) -> str:
+    mlflow.set_experiment("ticket-classifier")
+    with mlflow.start_run() as run:
+        mlflow.log_params(params)
+        mlflow.set_tag("dvc_data_hash", data_hash)
+        mlflow.set_tag("git_sha", current_git_sha())
+        for step, (loss, auc) in enumerate(train_fn(model, params)):
+            if step % 100 == 0:                       # throttle UI load
+                mlflow.log_metric("loss", loss, step=step)
+                mlflow.log_metric("auc", auc, step=step)
+        mlflow.log_artifact("preprocessing.py")        # reproducibility
+        mlflow.sklearn.log_model(model, "model")
+        return run.info.run_id
+```
 
-4. Model registration policy: only runs with val_F1 > 0.87 AND reproducibility tag set (git SHA + DVC ref both logged) can be registered to the Model Registry. CI job enforces this gate.
+**Hyperparameter sweep with nested runs:**
 
-5. DVC tracks data pipelines: `dvc repro` is the canonical way to rebuild any dataset version from raw data — eliminates "what preprocessing did we use?" questions
+```python
+import mlflow, itertools
 
-**Results**: production model is fully reproducible (reproduced from a 4-month-old git SHA + DVC pull in 2 hours). Duplicate experiment rate dropped from ~25% to <5% (engineers check the MLflow UI before starting a run). Hyperparameter search identified a configuration 3.1% better F1 than the best manual configuration in the first automated sweep week.
+def sweep(train_fn, grid: dict[str, list]) -> None:
+    with mlflow.start_run(run_name="lr_sweep") as parent:   # one parent
+        for combo in (dict(zip(grid, v)) for v in itertools.product(*grid.values())):
+            with mlflow.start_run(nested=True):            # child per config
+                mlflow.log_params(combo)
+                final_auc = train_fn(combo)
+                mlflow.log_metric("final_auc", final_auc)
+        mlflow.set_tag("status", f"swept_{len(grid)}_dims")
+```
+
+**Registry promotion workflow:**
+
+```python
+from mlflow.tracking import MlflowClient
+
+def promote(run_id: str, name: str, min_auc: float) -> str:
+    client = MlflowClient()
+    auc = client.get_run(run_id).data.metrics["auc"]
+    if auc < min_auc:
+        return "rejected"
+    mv = client.create_model_version(name, f"runs:/{run_id}/model", run_id)
+    client.transition_model_version_stage(name, mv.version, "Staging")
+    return f"{name} v{mv.version} -> Staging"
+```
+
+**Pitfall 1 — Logging metrics every step.** Logging on every training step generates millions of points; the MLflow UI becomes unusable and the backend store bloats.
+
+```python
+# BROKEN: log on every step -> 1M+ points per run, UI crashes
+for step, (loss, auc) in enumerate(train_fn(...)):
+    mlflow.log_metric("loss", loss, step=step)   # every single step
+
+# FIX: throttle to every N steps (and/or log epoch-level summaries).
+if step % 100 == 0:
+    mlflow.log_metric("loss", loss, step=step)
+```
+
+**Pitfall 2 — Not logging artifacts, so a run is not reproducible.** Logging only metrics but not the model weights or preprocessing code means a good run cannot be reconstructed later.
+
+```python
+# BROKEN: only metrics logged -> "best" run cannot be rebuilt
+mlflow.log_metric("auc", auc)
+
+# FIX: always log the model, the preprocessing code, and the data hash so the
+# run is fully reproducible.
+mlflow.sklearn.log_model(model, "model")
+mlflow.log_artifact("preprocessing.py")
+mlflow.set_tag("dvc_data_hash", data_hash)
+```
+
+**Pitfall 3 — Flat sweep runs clutter the UI.** Logging 200 sweep configs as top-level runs makes the experiment list unnavigable and hides the relationship between them.
+
+```python
+# BROKEN: each config is a separate top-level run -> 200 sibling runs
+for combo in configs:
+    with mlflow.start_run():    # all flat, no grouping
+        ...
+
+# FIX: a parent run for the sweep with nested child runs (see sweep()).
+with mlflow.start_run(run_name="sweep"):
+    for combo in configs:
+        with mlflow.start_run(nested=True):
+            ...
+```
+
+**Interview Q&A:**
+
+**What makes an ML experiment reproducible?** Pinning everything that affects the result: code (git SHA), data (DVC content hash), hyperparameters and random seeds (logged params), environment (dependency lockfile or container image), and the trained artifacts. With those, checking out the SHA, pulling the exact data, and rerunning with the logged params reproduces the run.
+
+**Why version data separately with DVC instead of committing it to git?** Git is built for text and chokes on large binary datasets. DVC stores a small pointer (content hash) in git and the actual data in remote object storage, so git stays lightweight while the dataset version is still pinned and retrievable with `dvc pull`. This couples code and data versions without bloating the repository.
+
+**What is the role of the Model Registry?** It is the source of truth for which model version is in which stage (Staging, Production, Archived), decoupling experimentation from deployment. Serving infrastructure loads "the Production version of model X" by reference, so promotion and rollback are metadata operations rather than redeploys, with an audit trail of who promoted what.
+
+**Why throttle metric logging?** Logging every step produces enormous numbers of points that slow the tracking backend and make charts unreadable, and the marginal information per extra point is tiny. Logging every N steps (plus epoch summaries) keeps the curves informative while keeping the store and UI responsive.
+
+**How do you organize a large hyperparameter sweep in MLflow?** Use a single parent run for the sweep and nested child runs per configuration. The parent groups the sweep and can hold aggregate tags; children hold individual params and metrics. This keeps the experiment list clean and makes it easy to compare configs within one sweep.
+
+**How do you decide when to promote a model from Staging to Production?** Gate on objective criteria: the offline metric must beat the current Production model by a meaningful margin on a fixed hold-out, it must pass a shadow-mode evaluation on live traffic, and it must meet latency and fairness checks. Promotion is then a registry transition, and the previous Production version is kept Archived for instant rollback.
+
+**Pitfall — Logging metrics inside the training loop at every step causes I/O bottleneck.**
+
+```python
+# BROKEN: logging every batch — 10k steps × 5 metrics = 50k MLflow API calls/epoch
+# I/O latency of 5ms × 50k = 250s of blocked training per epoch
+for step, (X_batch, y_batch) in enumerate(dataloader):
+    loss = train_step(X_batch, y_batch)
+    mlflow.log_metric("loss", loss, step=step)   # every single step!
+
+# FIX: log every N steps (every 100 steps reduces API calls 100×)
+LOG_INTERVAL = 100
+for step, (X_batch, y_batch) in enumerate(dataloader):
+    loss = train_step(X_batch, y_batch)
+    if step % LOG_INTERVAL == 0:
+        mlflow.log_metric("loss", float(loss), step=step)
+# Alternatively: use mlflow.log_metrics() with a dict to batch multiple metrics
+# in a single API call, reducing call count further
+```
+
+**How do you version datasets alongside models to ensure reproducibility?** Use DVC (Data Version Control) to track datasets in Git-compatible fashion without storing large files in Git. `dvc add data/features.parquet` creates `data/features.parquet.dvc` (a small JSON pointer) that is committed to Git. The actual data is stored in a remote (S3, GCS). When reproducing a historical experiment, check out the Git commit and `dvc pull` — you get the exact dataset used. Link the DVC dataset hash to the MLflow run via `mlflow.log_param("dataset_hash", dvc_hash)`. This creates an auditable chain: Git commit → MLflow run ID → DVC dataset hash → S3 data.
+
+**What is an experiment tracking system's role in the ML lifecycle vs. a model registry?** An experiment tracking system (MLflow Tracking, W&B, Neptune) logs the process: metrics over time, parameters, artifacts (model weights, confusion matrices, plots) for every training run. It answers "what happened during training." A model registry (MLflow Model Registry, Vertex AI Model Registry) manages the outcome: which trained models are in Staging vs. Production, who approved them, what aliases they have, and their lineage. The registry answers "what is currently deployed and what was deployed before." Use tracking for all experiments (including failed runs); promote only production-ready models to the registry with a review + approval process.
+
+**What is the difference between a run, an experiment, and a registered model in MLflow?** A run is a single training execution: it captures parameters, metrics, and artifacts (model weights, plots) for one specific configuration. An experiment is a named collection of runs — e.g., "fraud-model-v2-hyperparameter-search" contains 50 runs with different learning rates and regularization values. A registered model is a named entity in the model registry (separate from tracking) that links to the best run's artifact, has lifecycle stages (Staging, Production, Archived), and enables promotion workflows. Runs are cheap to create (log everything); experiments organize related runs; the registry manages the subset of runs that become deployable artifacts.
+
+---
+
+**Quick-reference comparison table:**
+
+| Approach | When to use | Trade-off |
+|---|---|---|
+| Rule-based baseline | Always — establish before ML | Interpretable, brittle on edge cases |
+| Simple ML (LR, RF) | < 100k rows, tabular, fast iteration | Lower ceiling than deep models |
+| Deep learning | Large data, unstructured input (images/text) | Expensive training, needs GPU |
+| Ensembling | Final 1-2% accuracy gain in competition | Complexity, inference latency |
+| Distillation/quantization | Inference cost reduction | Accuracy-efficiency trade-off |

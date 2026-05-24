@@ -615,54 +615,234 @@ Fourier features represent periodic patterns as sums of sine and cosine function
 
 ## 14. Case Study
 
-### Problem: Retail Sales Forecasting at SKU-Store Level
+**Scenario:** A European e-commerce platform (18M SKUs, 40M monthly active users) needs 26-week demand forecasts to drive warehouse replenishment. Current ARIMA-based system has MAPE of 34% on seasonal products, causing 620M euros of overstock and 190M euros of lost sales annually. The target is MAPE < 18% on held-out 26-week test window, with forecasts generated for all 18M SKUs within 4 hours on a weekly batch schedule.
 
-**Context:** A grocery retailer operates 500 stores, 20K SKUs per store — 10M time series. Goal: forecast daily unit sales 28 days ahead for replenishment ordering. Constraint: forecasts must be generated for all series in under 2 hours nightly.
-
-**Approach Selection:**
-
-Per-series ARIMA is infeasible (10M models * 10 seconds each = 115 days). Pure deep learning (LSTM per SKU) is too slow to retrain nightly. Solution: LightGBM with lag features as a global model — one model covers all SKUs.
-
-**Feature Engineering:**
-
+**Architecture:**
 ```
-Lag features:   lag_1, lag_7, lag_14, lag_28, lag_365
-Rolling stats:  rolling_mean_7, rolling_mean_28, rolling_std_7
-Calendar:       day_of_week, month, week_of_year, is_holiday, days_until_holiday
-Store features: store_id (categorical), store_size, region
-SKU features:   category (categorical), subcategory, price, is_on_promotion
-```
-
-**Walk-Forward Validation Results:**
-
-| Model | SMAPE | Training Time | Notes |
-|-------|-------|--------------|-------|
-| Naive (last week) | 28.4% | 0s | Baseline |
-| ARIMA per SKU (sample) | 19.2% | 10s/series | Not scalable |
-| LightGBM global | 14.7% | 8 min | Scales to 10M series |
-| LightGBM + Prophet residuals | 13.1% | 20 min | Blend: LGB for trend, Prophet for holidays |
-
-**Production Pipeline:**
-
-```
-Nightly 2AM:
-  [Data pull from DWH: 90 days history per series]
-       |
-  [Feature engineering: pandas, 15 min]
-       |
-  [LightGBM inference: 28-day forecast per series, 40 min on 32-core VM]
-       |
-  [Reconciliation: store-level sums match regional forecasts]
-       |
-  [Write to replenishment system: 5 min]
-       |
-  [Drift monitor: compute SMAPE on last 7 days actual vs previous forecast]
-       |
-  [Alert if SMAPE > 25% on >5% of SKUs -> page on-call]
+Historical Sales DB (Snowflake, 5 years)
+         |
+         v
+Feature Engineering
+  - Calendar features: day-of-week, week-of-year, holiday flags
+  - Lag features: lag_1w, lag_4w, lag_52w (year-over-year)
+  - Rolling stats: mean/std 4w, 13w, 26w windows
+  - External: weather index, Google Trends, promo flags
+         |
+         v
+Model Ensemble
+  +--------------------------+---------------------------+
+  |  Prophet (per-SKU)       |  Global LSTM (all SKUs)   |
+  |  trend + seasonality     |  shared weights, item emb |
+  |  changepoints            |  seq-to-seq 52->26 steps  |
+  +--------------------------+---------------------------+
+                   |
+                   v
+         Stacking Blender (Ridge regression)
+         weights: prophet=0.42, lstm=0.58
+                   |
+                   v
+         Forecast Store (Redis + S3 Parquet)
+         26-week horizon per SKU, P10/P50/P90 quantiles
 ```
 
-**Key Decisions:**
-- LightGBM over LSTM: 10x faster inference, no GPU required, better on sparse intermittent series
-- Global model over per-series: shared patterns (day-of-week, holidays) transfer across 10M series
-- Rolling SMAPE monitoring: catches concept drift before ordering errors reach stores
-- 28-day direct horizon: separate LightGBM output node per forecast day to avoid error accumulation
+**Step-by-step implementation:**
+
+```python
+from __future__ import annotations
+import numpy as np
+import pandas as pd
+from prophet import Prophet
+from prophet.diagnostics import cross_validation, performance_metrics
+from typing import NamedTuple
+
+class ForecastResult(NamedTuple):
+    sku_id: str
+    ds: pd.DatetimeIndex
+    yhat: np.ndarray       # point forecast
+    yhat_lower: np.ndarray # P10
+    yhat_upper: np.ndarray # P90
+
+def fit_prophet_sku(
+    df: pd.DataFrame,    # columns: ds (date), y (sales)
+    sku_id: str,
+    horizon_weeks: int = 26,
+) -> ForecastResult:
+    m = Prophet(
+        yearly_seasonality=True,
+        weekly_seasonality=True,
+        daily_seasonality=False,
+        seasonality_mode="multiplicative",   # essential for proportional holiday spikes
+        changepoint_prior_scale=0.15,        # tuned via CV; default 0.05 underfit
+        interval_width=0.8,                  # P10-P90 interval
+    )
+    m.add_country_holidays(country_name="DE")
+    m.add_regressor("promo_flag")
+    m.add_regressor("weather_index")
+    m.fit(df)
+
+    future = m.make_future_dataframe(periods=horizon_weeks, freq="W")
+    future["promo_flag"] = 0.0
+    future["weather_index"] = df["weather_index"].mean()
+    forecast = m.predict(future)
+
+    tail = forecast.tail(horizon_weeks)
+    return ForecastResult(
+        sku_id=sku_id,
+        ds=tail["ds"].values,
+        yhat=tail["yhat"].clip(lower=0).values,
+        yhat_lower=tail["yhat_lower"].clip(lower=0).values,
+        yhat_upper=tail["yhat_upper"].clip(lower=0).values,
+    )
+```
+
+```python
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+
+class DemandDataset(Dataset):
+    def __init__(
+        self,
+        sales: np.ndarray,        # shape (n_skus, T)
+        item_ids: np.ndarray,     # shape (n_skus,)
+        input_len: int = 52,
+        output_len: int = 26,
+    ) -> None:
+        self.sales = torch.from_numpy(sales).float()
+        self.item_ids = torch.from_numpy(item_ids).long()
+        self.input_len = input_len
+        self.output_len = output_len
+        T = sales.shape[1]
+        self.indices: list[tuple[int, int]] = [
+            (sku, t)
+            for sku in range(len(sales))
+            for t in range(input_len, T - output_len + 1)
+        ]
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, ...]:
+        sku, t = self.indices[idx]
+        x = self.sales[sku, t - self.input_len : t].unsqueeze(-1)
+        y = self.sales[sku, t : t + self.output_len]
+        item_emb_idx = self.item_ids[sku]
+        return x, item_emb_idx, y
+
+class DemandLSTM(nn.Module):
+    def __init__(
+        self,
+        n_items: int,
+        emb_dim: int = 32,
+        hidden: int = 256,
+        layers: int = 2,
+        output_len: int = 26,
+        dropout: float = 0.2,
+    ) -> None:
+        super().__init__()
+        self.item_emb = nn.Embedding(n_items, emb_dim)
+        self.lstm = nn.LSTM(
+            input_size=1 + emb_dim,
+            hidden_size=hidden,
+            num_layers=layers,
+            batch_first=True,
+            dropout=dropout,
+        )
+        self.head = nn.Linear(hidden, output_len)
+        self.output_len = output_len
+
+    def forward(
+        self, x: torch.Tensor, item_idx: torch.Tensor
+    ) -> torch.Tensor:
+        B, T, _ = x.shape
+        emb = self.item_emb(item_idx).unsqueeze(1).expand(B, T, -1)
+        inp = torch.cat([x, emb], dim=-1)
+        out, _ = self.lstm(inp)
+        return torch.relu(self.head(out[:, -1, :]))   # non-negative demand
+```
+
+```python
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import TimeSeriesSplit
+
+def blend_forecasts(
+    prophet_preds: np.ndarray,   # shape (n_skus, 26)
+    lstm_preds: np.ndarray,      # shape (n_skus, 26)
+    actuals: np.ndarray,         # shape (n_skus, 26) from validation window
+) -> tuple[np.ndarray, Ridge]:
+    # Stack horizontally for blender input
+    X_blend = np.hstack([prophet_preds, lstm_preds])   # (n_skus, 52)
+    blender = Ridge(alpha=1.0, positive=True)           # positive=True avoids negative weights
+    blender.fit(X_blend, actuals.mean(axis=1))          # fit on mean weekly error
+    blended = blender.predict(X_blend)
+    mape = float(np.mean(np.abs(blended - actuals.mean(axis=1)) / (actuals.mean(axis=1) + 1)))
+    print(f"Blended MAPE: {mape:.4f}")
+    return blended, blender
+```
+
+**Key pitfalls (3 with BROKEN->FIX):**
+
+**Pitfall 1 - Using additive seasonality for products with proportional holiday spikes:**
+```python
+# BROKEN: additive mode adds a fixed 500 units for Christmas regardless of base sales
+m = Prophet(seasonality_mode="additive")
+# SKU with avg sales 50 units gets +500 (10x spike) - absurd
+# SKU with avg sales 5000 units also gets +500 (10% spike) - too flat
+
+# FIX: multiplicative mode scales holiday lift proportionally
+m = Prophet(seasonality_mode="multiplicative")
+# Christmas effect becomes a multiplier (e.g. 2.3x) applied to trend level
+# MAPE on seasonal SKUs drops from 38% to 21%
+```
+
+**Pitfall 2 - Training LSTM on raw sales without log transform causing large-scale items to dominate loss:**
+```python
+# BROKEN: MSE loss on raw units; SKU with 50K/week overwhelms SKU with 50/week
+criterion = nn.MSELoss()
+loss = criterion(preds, targets)   # gradient dominated by high-volume SKUs
+
+# FIX: log1p transform normalizes scale across all SKUs
+targets_log = torch.log1p(targets)
+preds_log = torch.log1p(preds.clamp(min=0))
+loss = nn.MSELoss()(preds_log, targets_log)
+# Convert back for inference: torch.expm1(model(x))
+```
+
+**Pitfall 3 - Using random train/test split instead of temporal split leaks future data:**
+```python
+# BROKEN: random split mixes past and future - model sees future during training
+from sklearn.model_selection import train_test_split
+X_train, X_test = train_test_split(df, test_size=0.2)  # future leaks into training
+
+# FIX: always split by time for time series
+cutoff = df["ds"].max() - pd.Timedelta(weeks=26)
+train_df = df[df["ds"] <= cutoff]
+test_df = df[df["ds"] > cutoff]
+# Validate with walk-forward cross validation (TimeSeriesSplit), not KFold
+```
+
+**Metrics and results:**
+
+| Metric | ARIMA baseline | Prophet only | LSTM only | Ensemble |
+|---|---|---|---|---|
+| MAPE (all SKUs) | 34% | 24% | 21% | 16.8% |
+| MAPE (seasonal SKUs) | 38% | 26% | 23% | 18.1% |
+| MAPE (new SKUs < 6mo) | 52% | 41% | 35% | 31% |
+| Forecast gen time (18M SKUs) | 6.5 hr | 11 hr | 1.2 hr | 3.8 hr |
+| Overstock reduction | baseline | -18% | -24% | -31% |
+| Lost sales reduction | baseline | -12% | -19% | -28% |
+| Model training time | N/A | per-SKU | 4 hr (8xA100) | 5.2 hr total |
+
+**Interview discussion points:**
+
+**Why does the ensemble outperform either individual model significantly?** Prophet captures interpretable trend-changepoints and known holiday effects accurately but struggles with non-linear demand shocks. The LSTM captures complex cross-SKU patterns and exogenous signal interactions but can miss known structural breaks. Ridge blending learns that Prophet is more reliable for slow-moving seasonal SKUs (weight 0.67) while LSTM dominates fast-fashion categories (weight 0.71), automatically routing forecast responsibility by SKU type without explicit rule encoding.
+
+**How do you handle the 18M SKU scale within 4 hours on a weekly batch?** Prophet is parallelised across SKU shards on a Spark cluster (200 executors, 90K SKUs per executor, 3 min per shard). The LSTM is a single global model inferring all 18M SKUs in one batched pass using a DataLoader with batch size 4096 on 8 A100s, completing in 72 minutes. The blender runs in 8 minutes on CPU. Total wall time is 3.8 hours with Spark I/O overhead.
+
+**What is changepoint_prior_scale in Prophet and how did you tune it?** changepoint_prior_scale controls the flexibility of trend changepoints; the default 0.05 caused underfitting on fashion SKUs with rapid trend reversals, while 0.5 caused overfitting on stable grocery SKUs. Tuning used Prophet's built-in cross_validation with horizons of 4, 13, and 26 weeks across a 1-year training window, evaluating MAPE at each horizon. The optimal value of 0.15 balanced flexibility for fashion categories while maintaining stability for FMCG.
+
+**How do you forecast demand for new SKUs with less than 6 months of history?** Cold-start SKUs get three treatments in priority order: (1) if a parent category and attribute vector exist, embed the new SKU using item2vec trained on co-purchase graphs and retrieve the 5 nearest-neighbor SKUs, averaging their forecasts weighted by embedding cosine similarity; (2) if the SKU is a variant (size/colour) of an existing product, use the parent product's forecast scaled by the variant's share of historical sales during overlap; (3) pure cold-start defaults to category-median seasonality profile.
+
+**Why is MAPE a problematic metric for intermittent demand SKUs and what is the alternative?** MAPE divides by actual sales; when actuals are 0 (stockouts or truly zero demand weeks), MAPE is undefined and sklearn's mean_absolute_percentage_error returns infinity or NaN. The alternative is sMAPE (symmetric MAPE) which divides by (|actual| + |forecast|)/2, or RMSSE (Root Mean Scaled Squared Error) used in the M5 competition, which scales error by the training MAE of a naive seasonal model, making it well-behaved for intermittent series.
+
+**How would you add uncertainty quantification to the LSTM forecasts to match Prophet's P10/P90?** Train the LSTM with Monte Carlo Dropout (keep dropout active at inference time) and run 100 forward passes per batch, computing mean and 10th/90th percentiles across the 100 samples. Alternatively, use a distributional output head predicting parameters of a negative binomial distribution (appropriate for count data with overdispersion), directly training with negative log-likelihood loss. The negative binomial approach trains 40% slower but produces better-calibrated intervals on sparse demand data.

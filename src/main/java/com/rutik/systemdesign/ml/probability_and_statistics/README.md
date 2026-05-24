@@ -448,70 +448,279 @@ First determine the baseline conversion rate (say p=0.10) and the minimum detect
 
 ## 14. Case Study
 
-**Problem**: An e-commerce platform ran an A/B test of a new product page layout across 200,000 users (100k per group). Metric: purchase conversion rate. The data science team needs to determine if the new layout is significantly better and estimate the true effect size for a business impact projection.
+**Scenario:** A subscription SaaS company (2.4M paying users) runs a product experiment testing whether a new onboarding flow increases 30-day retention. The company runs 60 concurrent A/B tests at any time. The data science team has a history of stopping tests early when results "look good" (peeking), leading to false discovery rates of 35% (3 in 8 recent experiments were post-hoc revealed as false positives). The goal: implement a statistically rigorous experiment framework using proper sample-size calculation, p-value correction for multiple comparisons, and sequential testing with ALWAYS VALID inference to eliminate early-stopping bias.
 
-```python
-import numpy as np
-from scipy import stats
-
-
-def analyze_ab_test(
-    n_a: int,
-    n_b: int,
-    conversions_a: int,
-    conversions_b: int,
-    alpha: float = 0.05
-) -> dict:
-    """
-    Two-proportion z-test for A/B conversion experiment.
-    H0: p_A == p_B (no difference)
-    H1: p_B > p_A (new layout improves conversion) -- one-tailed
-    """
-    p_a = conversions_a / n_a
-    p_b = conversions_b / n_b
-    relative_lift = (p_b - p_a) / p_a
-
-    # Pooled proportion under H0
-    p_pool = (conversions_a + conversions_b) / (n_a + n_b)
-    se_pool = np.sqrt(p_pool * (1 - p_pool) * (1 / n_a + 1 / n_b))
-
-    z_stat = (p_b - p_a) / se_pool
-    # One-tailed p-value (testing p_b > p_a)
-    p_value = stats.norm.sf(z_stat)
-
-    # 95% CI for the difference (two-tailed for estimation)
-    se_diff = np.sqrt(p_a * (1 - p_a) / n_a + p_b * (1 - p_b) / n_b)
-    z_crit = stats.norm.ppf(1 - alpha / 2)
-    ci_low = (p_b - p_a) - z_crit * se_diff
-    ci_high = (p_b - p_a) + z_crit * se_diff
-
-    # Business impact: daily conversions * estimated lift * avg order value
-    daily_users = 50_000
-    avg_order_value = 85.0
-    daily_lift_conversions = daily_users * (p_b - p_a)
-    daily_revenue_impact = daily_lift_conversions * avg_order_value
-
-    return {
-        "conversion_rate_a": p_a,
-        "conversion_rate_b": p_b,
-        "absolute_lift": p_b - p_a,
-        "relative_lift_pct": relative_lift * 100,
-        "z_statistic": float(z_stat),
-        "p_value": float(p_value),
-        "reject_null": p_value < alpha,
-        "ci_95_absolute_difference": (float(ci_low), float(ci_high)),
-        "daily_revenue_impact_usd": daily_revenue_impact
-    }
-
-
-# Observed data
-result = analyze_ab_test(
-    n_a=100_000, n_b=100_000,
-    conversions_a=3_100, conversions_b=3_420
-)
-# p_a=0.031, p_b=0.0342, lift=+10.3%, p=0.0001, daily revenue impact=$13,600
+**Architecture:**
+```
+Experiment Framework
+  +-----------------------+-------------------------+
+  |  Pre-experiment        |  During experiment       |
+  |  Power analysis        |  Sequential testing      |
+  |  Sample size calc      |  mSPRT statistic         |
+  |  MDE specification     |  Always-valid p-value    |
+  |  Randomisation unit    |  No fixed stopping rule  |
+  +-----------------------+-------------------------+
+                   |
+                   v
+Experiment Database (PostgreSQL)
+  - Assignment: user_id, variant, assignment_ts
+  - Events: user_id, event_type, ts
+  - Results: experiment_id, daily metrics snapshot
+                   |
+                   v
+Analysis Pipeline (daily batch)
+  - Primary metric: 30-day retention (binary)
+  - Secondary: DAU/MAU ratio, feature adoption
+  - Multiple comparison correction: BH (Benjamini-Hochberg)
+  - Sequential test: mSPRT with mixture prior
+                   |
+                   v
+Decision Dashboard
+  Show: current effect size, confidence interval,
+        always-valid p-value, recommended n remaining,
+        FDR-adjusted significance at 0.05 level
 ```
 
-**Findings**: Conversion rate increased from 3.10% to 3.42% (relative lift +10.3%, p=0.0001, 95% CI: [0.0019, 0.0045]). The null hypothesis is rejected. The 95% CI excludes zero, confirming the effect is statistically and practically significant. At 50,000 daily visitors and $85 average order value, the projected daily revenue impact is $13,600 — approximately $5M annualized. The team shipped the new layout.
+**Step-by-step implementation:**
 
-**Lesson**: Reporting only the p-value would have led to "it's significant, ship it." Reporting the 95% CI translated statistical significance into a business-legible range ($1.6M to $7.6M annual impact range), enabling a better resource allocation decision.
+```python
+from __future__ import annotations
+import numpy as np
+from scipy import stats
+import math
+
+def calculate_sample_size(
+    baseline_rate: float,
+    minimum_detectable_effect: float,   # absolute lift, e.g. 0.03 for 3pp
+    alpha: float = 0.05,
+    power: float = 0.80,
+    two_sided: bool = True,
+) -> int:
+    """Calculate required sample size per variant using Fleiss formula."""
+    p1 = baseline_rate
+    p2 = baseline_rate + minimum_detectable_effect
+    p_bar = (p1 + p2) / 2
+
+    z_alpha = stats.norm.ppf(1 - alpha / (2 if two_sided else 1))
+    z_beta = stats.norm.ppf(power)
+
+    # Two-proportion z-test formula
+    numerator = (
+        z_alpha * math.sqrt(2 * p_bar * (1 - p_bar))
+        + z_beta * math.sqrt(p1 * (1 - p1) + p2 * (1 - p2))
+    ) ** 2
+    denominator = (p2 - p1) ** 2
+    n_per_variant = math.ceil(numerator / denominator)
+    return n_per_variant
+
+def compute_experiment_duration_days(
+    n_per_variant: int,
+    daily_eligible_users: int,
+    traffic_fraction: float = 0.5,   # 50% of eligible users in experiment
+) -> float:
+    users_per_day = daily_eligible_users * traffic_fraction / 2  # 2 variants
+    return n_per_variant / users_per_day
+
+# Example: baseline retention 42%, MDE = 2.5 percentage points
+n = calculate_sample_size(baseline_rate=0.42, minimum_detectable_effect=0.025)
+duration = compute_experiment_duration_days(n, daily_eligible_users=80_000)
+print(f"Required n per variant: {n:,}")
+print(f"Estimated duration: {duration:.1f} days")
+```
+
+```python
+from statsmodels.stats.proportion import proportions_ztest, proportion_confint
+import pandas as pd
+
+def run_frequentist_test(
+    control_conversions: int,
+    control_n: int,
+    treatment_conversions: int,
+    treatment_n: int,
+    alpha: float = 0.05,
+) -> dict[str, float]:
+    """Two-proportion z-test with continuity correction."""
+    stat, p_value = proportions_ztest(
+        count=[treatment_conversions, control_conversions],
+        nobs=[treatment_n, control_n],
+        alternative="two-sided",
+    )
+    ci_low, ci_high = proportion_confint(
+        count=treatment_conversions,
+        nobs=treatment_n,
+        alpha=alpha,
+        method="wilson",
+    )
+    control_rate = control_conversions / control_n
+    treatment_rate = treatment_conversions / treatment_n
+    absolute_lift = treatment_rate - control_rate
+    relative_lift = absolute_lift / control_rate
+
+    return {
+        "control_rate": control_rate,
+        "treatment_rate": treatment_rate,
+        "absolute_lift": absolute_lift,
+        "relative_lift": relative_lift,
+        "p_value": p_value,
+        "z_statistic": stat,
+        "treatment_ci_lower": ci_low,
+        "treatment_ci_upper": ci_high,
+        "significant": p_value < alpha,
+    }
+
+def apply_benjamini_hochberg(
+    p_values: list[float],
+    fdr_threshold: float = 0.05,
+) -> list[bool]:
+    """BH procedure for FDR control across multiple simultaneous experiments."""
+    m = len(p_values)
+    sorted_indices = np.argsort(p_values)
+    sorted_p = np.array(p_values)[sorted_indices]
+
+    thresholds = fdr_threshold * (np.arange(1, m + 1) / m)
+    significant = sorted_p <= thresholds
+
+    # Find the largest rank where H0 is rejected, reject all below
+    if significant.any():
+        max_reject_rank = int(np.where(significant)[0].max())
+        significant[:max_reject_rank + 1] = True
+
+    result = np.zeros(m, dtype=bool)
+    result[sorted_indices] = significant
+    return result.tolist()
+```
+
+```python
+def compute_msprt_statistic(
+    control_obs: np.ndarray,    # array of 0/1 outcomes
+    treatment_obs: np.ndarray,
+    theta_null: float | None = None,   # None = use control rate as null
+    prior_variance: float = 0.1,
+) -> tuple[float, float]:
+    """
+    Mixture Sequential Probability Ratio Test (mSPRT) for always-valid inference.
+    Returns (lambda_statistic, always_valid_p_value).
+    Uses normal mixture prior on effect size (Johari et al. 2015).
+    """
+    n_c = len(control_obs)
+    n_t = len(treatment_obs)
+
+    p_c = float(control_obs.mean()) if len(control_obs) > 0 else 0.5
+    p_t = float(treatment_obs.mean()) if len(treatment_obs) > 0 else 0.5
+
+    if theta_null is None:
+        theta_null = p_c
+
+    # Observed effect size
+    delta_hat = p_t - p_c
+    # Pooled variance under null
+    sigma2 = theta_null * (1 - theta_null) * (1 / n_c + 1 / n_t)
+
+    # mSPRT log-likelihood ratio with Gaussian mixture prior
+    # lambda = (1 + prior_variance / sigma2)^{-0.5} * exp(delta_hat^2 / (2 * (sigma2 + prior_variance)))
+    var_ratio = prior_variance / (sigma2 + prior_variance)
+    log_lambda = (
+        -0.5 * math.log(1 + prior_variance / sigma2)
+        + 0.5 * (delta_hat ** 2) * var_ratio / sigma2
+    )
+    lambda_stat = math.exp(log_lambda)
+
+    # Always-valid p-value: 1/lambda (by Ville's inequality; never below 0)
+    always_valid_p = min(1.0, 1.0 / lambda_stat)
+
+    return lambda_stat, always_valid_p
+
+def sequential_test_decision(
+    lambda_stat: float,
+    alpha: float = 0.05,
+    stopping_threshold_high: float | None = None,
+) -> str:
+    """Recommend action based on mSPRT statistic."""
+    threshold = 1.0 / alpha   # reject H0 when lambda >= 1/alpha
+    if stopping_threshold_high is None:
+        stopping_threshold_high = threshold
+
+    if lambda_stat >= stopping_threshold_high:
+        return "REJECT_NULL"
+    elif lambda_stat <= alpha:
+        return "ACCEPT_NULL"
+    else:
+        return "CONTINUE"
+```
+
+**Key pitfalls (3 with BROKEN->FIX):**
+
+**Pitfall 1 - Peeking: stopping the test when p < 0.05 before planned sample size:**
+```python
+# BROKEN: checking p-value daily and stopping when significant
+for day in range(1, 30):
+    results = run_frequentist_test(ctrl_conv[day], ctrl_n[day], trt_conv[day], trt_n[day])
+    if results["p_value"] < 0.05:
+        print(f"Day {day}: Significant! p={results['p_value']:.4f}")
+        stop_experiment()   # false positive rate inflates to ~26% for 14 peeks
+        break
+
+# FIX: use mSPRT which provides always-valid inference at any stopping time
+for day in range(1, 30):
+    lambda_stat, av_p = compute_msprt_statistic(ctrl_obs[:day], trt_obs[:day])
+    decision = sequential_test_decision(lambda_stat, alpha=0.05)
+    if decision in ("REJECT_NULL", "ACCEPT_NULL"):
+        print(f"Day {day}: {decision}, always-valid p={av_p:.4f}")
+        break   # safe to stop; Type I error controlled at 5%
+```
+
+**Pitfall 2 - Running 60 concurrent A/B tests without multiple comparison correction:**
+```python
+# BROKEN: each test uses alpha=0.05 independently
+# Expected false positives = 60 * 0.05 = 3 false discoveries per round
+results = [run_frequentist_test(*args) for args in experiment_args]
+significant = [r["p_value"] < 0.05 for r in results]   # 35% FDR observed
+
+# FIX: apply Benjamini-Hochberg FDR correction across all concurrent tests
+p_values = [r["p_value"] for r in results]
+bh_significant = apply_benjamini_hochberg(p_values, fdr_threshold=0.05)
+# BH controls expected FDR at 5%; 60 tests with 5% true null rate -> 0.15 expected FDPs
+```
+
+**Pitfall 3 - Using user-level assignment but session-level analysis (SUTVA violation):**
+```python
+# BROKEN: randomise at user level but compute conversion rate from sessions
+# Users have multiple sessions; sessions within a user are not independent
+sessions_control = df[df["variant"] == "control"].groupby("session_id")["converted"].mean()
+sessions_treatment = df[df["variant"] == "treatment"].groupby("session_id")["converted"].mean()
+stat, p_value = stats.ttest_ind(sessions_control, sessions_treatment)
+# Inflated test statistic because sessions within a user are correlated
+
+# FIX: aggregate to user level before test (match randomisation and analysis unit)
+user_control = df[df["variant"] == "control"].groupby("user_id")["converted"].max()
+user_treatment = df[df["variant"] == "treatment"].groupby("user_id")["converted"].max()
+stat, p_value = stats.ttest_ind(user_control, user_treatment)
+# Independent observations; Type I error properly controlled
+```
+
+**Metrics and results:**
+
+| Metric | Before (peeking) | After (mSPRT + BH) |
+|---|---|---|
+| False positive rate (empirical) | 35% | 4.8% |
+| Avg experiment duration | 8 days (stopped early) | 21 days (planned) |
+| True positives confirmed (6mo) | 3 of 8 "wins" | 9 of 10 "wins" |
+| Experiments reaching planned n | 22% | 91% |
+| Simultaneous tests corrected | No | Yes (BH, FDR=5%) |
+| Onboarding flow lift (final result) | N/A | +3.1pp retention (validated) |
+| Annual revenue impact of correct wins | $4.2M | $18.7M |
+| Engineering time on false-positive fallout | 40 hr/quarter | 4 hr/quarter |
+
+**Interview discussion points:**
+
+**What is the precise statistical error introduced by peeking and why does it inflate Type I error?** Peeking exploits the fact that if you check a standard z-test p-value at multiple points during data collection, the probability of seeing p < 0.05 at least once is much higher than 5%. Formally, if you peek 14 times at equally spaced intervals during a fixed-horizon test, the actual Type I error rate rises to approximately 26% (Armitage 1969). This occurs because the p-value is not uniformly distributed under repeated observation; the test statistic is a random walk, and the probability that it ever crosses a fixed threshold is higher than the probability it exceeds the threshold at a single predetermined time.
+
+**How does the Benjamini-Hochberg procedure differ from Bonferroni correction and why is it preferred for A/B testing platforms?** Bonferroni controls the familywise error rate (FWER): the probability of making even one Type I error among all tests. For 60 simultaneous tests at FWER 5%, each test uses alpha = 0.05/60 = 0.00083, requiring 4x larger samples for the same power. BH controls the false discovery rate (FDR): the expected proportion of false positives among all rejected hypotheses. BH uses each test's original p-value ranked against adaptive thresholds, maintaining much higher power. For an A/B platform where some false positives are acceptable (they'll be caught by downstream business review), FDR control at 5% is more practical than FWER control.
+
+**What is the SUTVA violation when assignment unit differs from analysis unit?** SUTVA (Stable Unit Treatment Value Assumption) requires each unit's outcome to depend only on its own treatment. When users are assigned to variants but analysis uses sessions, sessions from the same user share the same treatment, making them correlated rather than independent. The standard error of the treatment effect estimator is underestimated (inflates t-statistic), because the effective sample size is n_users not n_sessions. The fix is always to aggregate outcomes to the randomisation unit (user) before computing the test statistic.
+
+**When should you use a one-sided versus two-sided hypothesis test for product experiments?** Two-sided tests are appropriate when the new feature could plausibly harm or help (e.g., UI redesign might increase or decrease conversion). One-sided tests are appropriate only when a harm direction is genuinely impossible or would lead to immediate rollback regardless of significance (e.g., testing a performance optimisation where slower performance is obviously rolled back without a test). Using one-sided tests to gain statistical power while claiming two-sided inference is a common form of p-hacking that inflates Type I error: the effective alpha is 0.025 for one direction, but experimenters cherry-pick the direction post-hoc.
+
+**What minimum detectable effect (MDE) should be chosen and how does it affect duration?** MDE should reflect the smallest effect that would change a business decision, not the smallest effect the team hopes to detect. For the onboarding experiment with 30-day retention at 42%, a 1pp absolute lift (MDE=0.01) requires n=57,400 per variant (72 days at current traffic), while 2.5pp MDE requires n=9,100 (11 days). Choosing MDE=1% when the business would only act on a 2.5% lift wastes 6x the experiment duration, blocking experiment slots needed for other tests. The correct MDE is determined by the product roadmap cost of implementing the feature: if implementation costs $200K, a 2pp lift generating $500K/year ROI sets the practical minimum.
+
+**What is the mSPRT's relationship to Bayes factors and why does it enable valid early stopping?** The mSPRT statistic is the ratio of the marginal likelihood under a mixture alternative hypothesis to the likelihood under the null hypothesis. By Ville's inequality, for any stopping time T, P(lambda_T >= 1/alpha | H0) <= alpha - meaning that regardless of when you look at the data, the probability of falsely rejecting H0 is bounded by alpha. This is fundamentally different from the classical p-value, which is only valid at a pre-specified fixed sample size. The mixture prior over effect sizes (normal with variance tau^2) determines the test's power profile: larger tau^2 gives more power for large effects but less for small ones.

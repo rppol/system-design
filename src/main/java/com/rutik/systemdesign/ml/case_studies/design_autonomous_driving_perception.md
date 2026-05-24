@@ -601,3 +601,326 @@ If the GPU is overloaded, stage 5 is dropped first (camera BEV), then stage 3 (s
 while LiDAR and radar perception always complete. The planning module is notified of which modalities
 are active and applies more conservative margins when camera BEV is unavailable. In practice, the
 NVIDIA Orin SoC with INT8 quantization sustains the full pipeline at 90ms, leaving 10ms margin.
+
+---
+
+## Failure Scenarios and Recovery
+
+### Failure 1: LiDAR Saturation in Construction Zone Causing False Object Detection
+
+**What failed:** A construction zone with highly reflective orange traffic cones and retroreflective safety vests caused LiDAR intensity saturation. The Velodyne HDL-128 returned max intensity (255) for points from these surfaces, creating "ghost points" at incorrect depths due to multi-path reflection. The VoxelNet detector interpreted a cluster of ghost points as a stationary vehicle in the adjacent lane. The planning module planned a 3-second emergency brake. In 47 reported incidents over 2 months, 3 resulted in rear-end collisions from following vehicles.
+
+**Detection:** Safety driver reports and customer feedback identified the pattern. Post-hoc analysis of the raw LiDAR pointcloud for these incidents showed the saturation signature (point clusters with intensity = 255). Time-to-detect: 2 months (safety review meeting surfaced pattern from individual incident reports).
+
+**Recovery steps:**
+1. Added intensity-based ghost point filter: remove any LiDAR point with intensity > 230 that has inconsistency with surrounding point depth (neighbor depth variance > 2m).
+2. Added construction zone detection using camera: orange cone and safety vest detection triggers a "construction zone" mode that raises the detection confidence threshold for stationary objects.
+3. Cross-checked ghost detections against radar: if a radar return does not exist within 2m of a LiDAR-detected stationary object, reduce detection confidence by 0.3.
+4. Retrained VoxelNet with synthetic construction zone scenarios (injected into training simulator).
+
+**Prevention:** Systematic evaluation across 12 predefined challenging scenarios (construction zones, rain, tunnel entry, bridge) required before any perception model update passes shadow validation. Each scenario must achieve recall > 99% and false positive rate < 0.1%.
+
+---
+
+### Failure 2: Kalman Filter Divergence From Extreme Maneuver
+
+**What failed:** A vehicle ahead performed an emergency swerve from 80 km/h in a straight lane to an immediate lateral acceleration of 8 m/s². The Kalman filter was initialized with a constant velocity model (no acceleration state), so it could not predict this extreme maneuver. The innovation (difference between predicted position and measured position) exceeded the Mahalanobis distance threshold, causing the tracker to classify the existing track as "lost" and create a new track for the same vehicle. During the 0.8 seconds of track loss, the planning module lost the preceding vehicle's state. The ego vehicle failed to brake appropriately and collided with the swerving vehicle at 35 km/h.
+
+**Detection:** Post-collision incident analysis. The tracker log showed track ID change 0.8s before collision. Time-to-detect: post-incident (0.8s gap with no automated detection).
+
+**Recovery steps:**
+1. Extended Kalman Filter state from [x, y, z, vx, vy, vz] to [x, y, z, vx, vy, vz, ax, ay] to model acceleration explicitly.
+2. Added Interacting Multiple Models (IMM) filter: run 3 parallel Kalman filters per track (constant velocity, constant acceleration, coordinated turn) and weight their outputs by likelihood, blending predictions.
+3. Increased Mahalanobis distance threshold for track-to-detection association: from 5.0 to 9.0 (99.99% confidence interval). Prevents premature track loss for extreme maneuvers.
+4. Added coasting logic: if a confirmed track loses association for up to 15 frames (1.5 seconds), coast using the physics model rather than deleting the track.
+
+**Prevention:** Simulation scenarios library includes "emergency swerve" maneuvers with ground truth. New tracker implementations must achieve track continuity > 99.5% through a library of 50 synthetic emergency maneuver replays.
+
+---
+
+### Failure 3: INT8 Quantization Accuracy Drop at Long Range
+
+**What failed:** After INT8 quantization of the BEV detection model for deployment on NVIDIA Orin, pedestrian recall at 80-120m range dropped from 97.2% to 88.4% (target: 99.5%). The INT8 calibration dataset had been collected in a suburban environment with pedestrians predominantly at 0-40m range. The quantization clipping thresholds were set based on this distribution, causing long-range feature activations (which have smaller magnitudes, since LiDAR point density decreases with range) to be clipped to zero.
+
+**Detection:** Offline simulation recall metrics, measured per distance band. The 80-120m recall regression was caught in the standard pre-deployment evaluation suite. Time-to-detect: 30 minutes (caught before production deployment).
+
+**Recovery steps:**
+1. Rebuilt calibration dataset: stratified sampling ensures 25% of calibration examples have pedestrians at 80-120m range.
+2. Used per-layer quantization: initial convolutional layers (where long-range features are first processed) used FP16 instead of INT8 to preserve precision for small-magnitude activations.
+3. Added per-channel quantization (NVIDIA TensorRT supports this): different quantization scale per output channel, more appropriate for feature maps with high inter-channel variance.
+
+**Prevention:** Per-distance-band recall evaluation is now a required gate for all model deployments. Distance bands: 0-20m, 20-50m, 50-80m, 80-120m. Each band must meet recall target independently.
+
+---
+
+## Capacity Planning
+
+### Data Volume Projections
+
+```
+Vehicle sensor data (per vehicle, per second):
+  10 cameras × 8MP × 30 FPS × ~400KB/frame (JPEG compressed) = 1.2GB/sec raw
+  5 LiDARs × 128-beam × 10 Hz × 100K points/scan × 16 bytes/point = ~100MB/sec
+  2 radars × 10 Hz × minimal data: negligible
+  Total: ~1.3GB/sec per vehicle (compressed + encoded for logging)
+
+Fleet size projections:
+  Year 0: 500 test vehicles, 8h/day operation
+  Year 1: 2,000 vehicles × 8h = 5.76TB/vehicle/day × 2,000 = 11.52PB/day
+  Year 3: 10,000 commercial vehicles × 10h = 47TB/vehicle/day × 10,000 = 47PB/day
+
+Cloud offload (selected scenarios only — not full log):
+  "Interesting" scenario detection: ~0.1% of drive time triggers cloud upload
+  Year 1: 11.52PB × 0.001 = 11.52TB/day interesting scenario data
+  Year 3: 47TB/day
+
+Training data labeling:
+  3D LiDAR labeling: 1 hour of sensor data = 36,000 frames = ~500 human-hours at $0.10/frame
+  Cost: 36K frames × $0.10 = $3,600 per vehicle-hour labeled
+  Year 1 budget: $500K/month → 139 vehicle-hours labeled/month
+```
+
+### Training Compute Requirements
+
+```
+BEV Fusion Detection Model (monthly full retrain):
+  Dataset: 500K labeled frames (3D LiDAR + camera) × 120 voxels/frame avg
+  Hardware: 64× A100 80GB (multi-node DDP)
+  Duration: 72 hours (3 days)
+  Cost: p4d.24xlarge equivalent × 3 days = 64 × $32.77/hr × 72hr = ~$151K/run
+  Monthly: $151K
+
+Camera YOLOv8 Models (biweekly retrain, 10 models):
+  Per model: 4× A100, 24 hours
+  Cost per model: $32.77/hr × 24hr = $786
+  10 models biweekly = 20 models/month = ~$15,700/month
+
+Tracker Parameter Tuning (weekly):
+  Simulation-based optimization: 500 simulation rollouts
+  CPU cluster: 100× c5.2xlarge × 4 hours
+  Cost: 100 × $0.34/hr × 4hr = $136/week = ~$545/month
+
+Deep Ensemble Uncertainty (5-model ensemble training):
+  5× BEV models with different random seeds
+  Cost: 5× monthly BEV cost = $755K/month (feasible only for safety-critical updates)
+  In practice: Distill uncertainty estimates from ensemble into single model annually
+
+Total monthly training cost estimate: ~$168K
+(Dominated by BEV fusion model; most expensive single-component in the platform)
+```
+
+### Serving Infrastructure (On-Vehicle)
+
+```
+NVIDIA Orin SoC (per vehicle, embedded):
+  275 TOPS (INT8), 12-core ARM, 64GB LPDDR5
+  All inference on-vehicle: no cloud latency dependency
+  Power: 65W total SoC budget for perception
+
+Perception compute allocation (per perception cycle, 100ms):
+  LiDAR voxelization (CPU): 10ms
+  VoxelNet 3D detection (DLA INT8): 25ms
+  Camera BEV encoding (GPU INT8): 30ms
+  BEV fusion + detection head (GPU): 15ms
+  Tracker update (CPU): 8ms
+  Total: 88ms (12ms margin)
+
+Cloud infrastructure (training + simulation):
+  Training cluster: 128× A100 nodes (shared with other ML teams)
+  Simulation cluster: 500× CPU nodes for closed-loop simulation
+  Storage: 5PB S3 for training data + scenario archive
+  Estimated cloud bill: $500K/month total platform
+```
+
+---
+
+## Additional War Stories
+
+**War Story 1 — Non-Maximum Suppression (NMS) IoU Threshold Too Aggressive:**
+
+```python
+# BROKEN: IoU threshold = 0.3 for NMS removes legitimate separate objects
+# A pedestrian standing close to a bicycle gets merged into one detection
+# because their 3D bounding boxes overlap with IoU = 0.25
+
+import numpy as np
+from typing import Sequence
+
+
+def nms_3d_broken(
+    boxes: np.ndarray,    # (N, 7): x, y, z, l, w, h, yaw
+    scores: np.ndarray,   # (N,)
+    iou_threshold: float = 0.3,  # BUG: too aggressive for nearby pedestrians
+) -> list[int]:
+    """3D NMS that incorrectly merges nearby distinct objects."""
+    order = np.argsort(-scores)
+    keep: list[int] = []
+
+    while order.size > 0:
+        i = order[0]
+        keep.append(int(i))
+        if order.size == 1:
+            break
+        # Compute 3D IoU between box i and remaining boxes
+        ious = compute_3d_iou(boxes[i:i+1], boxes[order[1:]])[0]
+        suppressed = np.where(ious > iou_threshold)[0]
+        order = np.delete(order, np.concatenate([[0], suppressed + 1]))
+
+    return keep
+
+
+def compute_3d_iou(boxes_a: np.ndarray, boxes_b: np.ndarray) -> np.ndarray:
+    """Simplified 3D IoU computation (Bird's Eye View)."""
+    # ... actual implementation uses rotated rectangle intersection
+    # Returns IoU matrix of shape (len(boxes_a), len(boxes_b))
+    pass
+
+
+# FIX: Use class-specific NMS thresholds
+# Pedestrians and cyclists in close proximity are valid separate detections
+# Use higher IoU threshold (0.5) for pedestrians to allow nearby objects
+
+CLASS_NMS_THRESHOLDS = {
+    "vehicle": 0.3,       # Vehicles don't physically overlap
+    "pedestrian": 0.5,    # Pedestrians can be very close together (crowds)
+    "cyclist": 0.4,       # Cyclists may be in tight groups
+    "traffic_cone": 0.3,  # Cones are placed with separation
+}
+
+
+def nms_3d_class_specific(
+    boxes: np.ndarray,
+    scores: np.ndarray,
+    class_ids: np.ndarray,
+    class_thresholds: dict[str, float] | None = None,
+) -> list[int]:
+    """
+    Class-specific 3D NMS.
+    Use different IoU thresholds per class to handle physically plausible proximity.
+    Pedestrians can legitimately be at IoU=0.4 (standing in a crowd).
+    """
+    if class_thresholds is None:
+        class_thresholds = CLASS_NMS_THRESHOLDS
+
+    all_kept: list[int] = []
+    class_names = list(class_thresholds.keys())
+
+    for cls_idx, cls_name in enumerate(class_names):
+        cls_mask = class_ids == cls_idx
+        if not cls_mask.any():
+            continue
+        cls_boxes = boxes[cls_mask]
+        cls_scores = scores[cls_mask]
+        threshold = class_thresholds[cls_name]
+
+        order = np.argsort(-cls_scores)
+        while order.size > 0:
+            i = order[0]
+            original_idx = int(np.where(cls_mask)[0][i])
+            all_kept.append(original_idx)
+            if order.size == 1:
+                break
+            ious = compute_3d_iou(cls_boxes[i:i+1], cls_boxes[order[1:]])[0]
+            order = np.delete(order, np.concatenate([[0], np.where(ious > threshold)[0] + 1]))
+
+    return all_kept
+```
+
+**War Story 2 — Temporal Fusion Causing Incorrect Velocity Estimate for Newly-Appeared Object:**
+
+```python
+# BROKEN: Temporal fusion averages features over 5 consecutive frames
+# For an object that appears at frame 0, frames -4 to -1 are zeros (padding)
+# The velocity estimate is diluted by zero-padding: estimated_v = true_v / 5
+
+import numpy as np
+from dataclasses import dataclass, field
+
+
+@dataclass
+class TemporalFrameBuffer:
+    """BROKEN: Naive zero-padding for new objects."""
+    max_frames: int = 5
+    buffer: list[np.ndarray] = field(default_factory=list)
+
+    def add_frame(self, features: np.ndarray) -> None:
+        self.buffer.append(features)
+        if len(self.buffer) > self.max_frames:
+            self.buffer.pop(0)
+
+    def get_fused_broken(self) -> np.ndarray:
+        """BUG: Zero-pads early frames, diluting velocity for new objects."""
+        padded = [np.zeros_like(self.buffer[0])] * (self.max_frames - len(self.buffer))
+        all_frames = padded + self.buffer
+        return np.mean(all_frames, axis=0)  # zeros dilute actual feature values
+
+    def get_fused_correct(self) -> np.ndarray:
+        """
+        FIX: Average only available frames (no zero-padding).
+        For a new object at frame 1, uses only frame 1's features (no dilution).
+        As more frames accumulate, the average stabilizes.
+        """
+        if not self.buffer:
+            return np.zeros(256, dtype=np.float32)  # fallback
+        return np.mean(self.buffer, axis=0)  # mean of only actual frames
+```
+
+---
+
+## Monitoring and Drift Detection Deep-Dive
+
+### Metrics That Degrade Fastest in Production
+
+```
+Signal                              Degradation cause              Monitoring mechanism
+────────────────────────────────────────────────────────────────────────────────────────
+LiDAR return density (points/scan)  Dirt/rain on sensor housing    Per-scan point count
+                                                                    < 50K points → alert
+Camera blur score                   Lens contamination, vibration  FFT sharpness metric
+                                                                    < 0.4 → flag sensor
+Object confidence distribution      New environment types,         Hourly histogram vs
+                                    model drift                     baseline; KS p < 0.05
+False positive rate on              Sensor degradation,            Human review of
+stationary objects                  adversarial objects            flagged incidents (2%)
+Per-class recall (simulation)       Model drift after              Simulation suite run
+                                    new training data              after every model update
+Track duration distribution         Tracker parameter drift        Mean track lifetime
+                                    or sensor degradation          < 3s → investigate
+```
+
+### Retraining Triggers and Cadence
+
+```
+Cadence        Trigger                                         Action
+───────────────────────────────────────────────────────────────────────────────────────
+Monthly        Scheduled                                       Full BEV model retrain
+Bi-weekly      Scheduled                                       YOLOv8 camera model updates
+Weekly         Scheduled                                       Tracker parameter optimization
+Triggered      Pedestrian recall < 99.5% in simulation         Emergency model investigation
+Triggered      New scenario type detected (not in training)   Simulate + label data; retrain
+Triggered      LiDAR point density < 50K/scan (30+ vehicles)  Hardware inspection + OTA fix
+Triggered      False positive rate > 0.02%                    Model audit + rule-based filter
+Triggered      New road geometry (new city onboarding)        Collect 500h local driving data;
+                                                               fine-tune BEV model on local data
+Annual         Scheduled                                       Full ensemble retraining for
+                                                               uncertainty calibration audit
+```
+
+---
+
+## Additional Interview Questions
+
+**How does Bird's Eye View (BEV) feature fusion differ from early and late fusion, and why is it preferred?**
+Early fusion combines raw sensor data before any feature extraction: projecting LiDAR points into camera image pixels or projecting camera features into 3D space. This preserves maximum information but requires precise sensor calibration and fails when modalities have very different characteristics (camera: 8MP images, 1/30s shutter; LiDAR: sparse 3D points, 10Hz). Late fusion runs separate detection pipelines per sensor and combines output bounding boxes via weighted ensemble or voting. Simple and robust but loses information available only through cross-modal feature interaction. BEV feature-level fusion projects all sensor outputs into a shared Bird's Eye View coordinate frame using known sensor extrinsics. Camera features are projected via depth estimation (LSS or BEVFormer); LiDAR features are voxelized into BEV pillars. Fusion happens at the feature level — the network can learn cross-modal attention across spatial locations. BEV fusion captures geometric relationships missed by early fusion and cross-modal features missed by late fusion. It is now the dominant architecture (BEVFormer, BEVDet, UniAD) for production autonomous driving.
+
+**How do you ensure the tracker maintains identity (track ID) through temporary occlusions?**
+Occlusion causes detection gaps: a pedestrian behind a parked car may be undetected for 2-5 frames (0.2-0.5 seconds). Without occlusion handling, each re-emergence creates a new track with a different ID, breaking downstream trajectory prediction. Mechanisms: (1) Track state machine: "confirmed" → "tentatively lost" (no association for up to 10 frames) → "deleted" (no association for > 15 frames). During tentatively lost, the Kalman filter continues to predict position from velocity; the predicted position is maintained in the scene representation even without a detection. (2) Re-identification: when a detection appears near where a tentatively lost track is predicted, try to re-associate using IoU, appearance similarity (camera ReID embedding), and velocity consistency. (3) Mahalanobis distance gating: associations are only considered if the predicted-vs-measured distance is within the 99.9th percentile of the Kalman innovation distribution, preventing wrong re-associations.
+
+**What is the role of Monte Carlo Dropout vs deep ensembles for uncertainty estimation in perception?**
+Both methods estimate model uncertainty but differ in cost and quality. Monte Carlo Dropout: run the same model forward pass N times with dropout active at inference time; the variance of predictions estimates epistemic uncertainty. Cost: N× inference time (typically N=10). Deep ensembles: train M independent models with different random seeds; the variance of their predictions estimates uncertainty. Cost: M× model parameters in memory, M× inference time. Quality: deep ensembles are better calibrated (more reliable coverage of true uncertainty intervals) and more robust to distribution shift. MC Dropout underestimates uncertainty for predictions far from the training distribution. For safety-critical applications (autonomous driving), deep ensembles are preferred despite the 5× memory cost. In practice, a 3-model ensemble provides 85% of the uncertainty estimation quality of a 10-model ensemble. Distillation approach: train a single student model to predict both the detection output and the ensemble's uncertainty estimate — this is the production approach (single inference time, ensemble quality).
+
+**How do you handle the long tail of rare edge cases (black swans) that are dangerous but underrepresented in training data?**
+The long tail of rare scenarios (a mattress on a highway, a child on a skateboard, an unusual intersection geometry) is where perception models fail most dangerously. Three strategies: (1) Simulation: use photorealistic 3D simulators (CARLA, Waymo Simulation) to generate synthetic training data for rare scenarios. Insert synthetic pedestrians in unusual poses, unusual vehicles (horse-drawn carriages, agricultural machinery), and unusual road geometries. Synthetic-to-real gap is reduced by domain randomization (varying lighting, weather, camera parameters) and by sim-to-real fine-tuning. (2) Active learning: flag real-world driving scenarios where model confidence is low (detection uncertainty > threshold) for priority labeling. This focuses expensive human labeling budget on the highest-value edge cases. (3) Ontology expansion: when a new object class is encountered (e.g., e-scooters were not in the original object ontology), add a new detector class trained on 500+ examples before deployment, rather than relying on the existing model to handle it correctly as an out-of-distribution input.
+
+**How does the system ensure real-time performance within the 100ms perception cycle budget?**
+The 100ms budget requires parallel execution across heterogeneous compute resources on the NVIDIA Orin SoC: (1) Camera preprocessing (ISP hardware block): runs in dedicated hardware, zero GPU cycles consumed. (2) LiDAR voxelization (CPU, multi-threaded): 16 ARM cores process 128-beam × 128K-point scan into a 0.1m resolution voxel grid in 10ms. (3) VoxelNet inference (DLA, INT8): the Deep Learning Accelerator on Orin runs the 3D detection backbone in 25ms — isolated from main GPU workload. (4) Camera BEV encoding (GPU, INT8): runs concurrently with DLA in 30ms — overlapped pipeline, not sequential. (5) BEV fusion + detection head (GPU): 15ms. (6) Tracker update (CPU, post-GPU sync): 8ms. Total wall-clock: 88ms (DLA + GPU overlap means the LiDAR and camera pipelines run concurrently). The critical path is the GPU-bound BEV fusion, not the DLA-bound 3D detection. CUDA streams are used to overlap camera encoding (GPU) and 3D detection (DLA) with LiDAR voxelization (CPU), maximizing hardware utilization.

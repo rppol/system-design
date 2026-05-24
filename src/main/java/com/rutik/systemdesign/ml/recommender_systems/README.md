@@ -445,26 +445,177 @@ SASRec (Self-Attentive Sequential Recommendation, 2018) applies the Transformer 
 
 ## 14. Case Study
 
-**Problem**: A mid-size e-commerce platform (5M users, 500K products, 50M clicks/month) wants to add personalized product recommendations to the homepage and product detail pages.
-
-**Constraints**: <100ms end-to-end latency; 40% of users are new (cold start); team of 3 ML engineers.
-
-**Solution Architecture**:
+**Scenario: Netflix-scale two-tower retrieval + ranking.** 200M users, 15k movies in catalog, 2B home-page impressions/day. The home page must be personalized per profile, refreshed on every visit, under a strict latency budget so the carousel renders before the user scrolls. The system splits into an offline training pipeline and a low-latency online serving path.
 
 ```
-OFFLINE (nightly batch)
-  Spark job reads 90-day click/purchase log
-  Trains ALS model (implicit feedback, k=128, alpha=40, 15 iterations)
-  Exports item embeddings (500K x 128) to FAISS IVF index
-  Exports user embeddings (5M x 128) to Redis (TTL 24h)
+OFFLINE (daily batch on Spark + TPU/GPU)
+  90-day interaction log (plays, completes, thumbs, search)
+        |
+        v
+  Two-tower model (TensorFlow)
+    user tower : MLP([profile_emb, watch_history, context]) -> 128d
+    item tower : MLP([title_emb, genre, cast, recency])     -> 128d
+    score = dot(user_vec, item_vec)   (in-batch sampled softmax)
+        |
+        +--> export 15k item vectors -> FAISS IVF-PQ index
+        +--> export 200M user vectors -> feature store (Redis, TTL 24h)
 
-ONLINE (request time)
-  1. Fetch user embedding from Redis (<1ms)
-     If missing (new user): use content-based embedding from product category average
-  2. ANN search in FAISS: top-200 candidates (recall@100 ~95%)  (~5ms)
-  3. XGBoost ranker: score 200 candidates using user x item features (~10ms)
-  4. Re-rank: apply diversity constraint (max 3 items per category) + business rules
-  5. Return top-20 recommendations
+ONLINE (per request, p99 < 30ms)
+  1. user_vec from feature store              (~2ms)
+  2. FAISS ANN: top-1000 candidates           (~20ms)
+  3. LightGBM ranker: score 1000 -> top-25    (~5ms)
+  4. business rules: diversity, freshness, dedupe
+  5. return ordered carousel
 ```
 
-**Results after 3 months**: Homepage CTR +18%, add-to-cart rate +12%, revenue per session +9%. Cold start users (fallback to content-based) showed +6% CTR vs previous popularity baseline. Position bias correction via IPW reduced ranking model's tendency to favor historically top-placed items, improving bottom-of-page CTR by 31%.
+Offline NDCG@10 = 0.42, retrieval recall@1000 = 0.94, ranking AUC = 0.81. Online: retrieval 20ms, ranking 5ms, total p99 < 30ms. The ranker uses cross features (user_genre_affinity x item_genre, recency, watch-completion rate) that the retrieval tower cannot afford to compute over the full catalog.
+
+**Two-tower training (TensorFlow, in-batch negatives):**
+
+```python
+import tensorflow as tf
+
+class TwoTower(tf.keras.Model):
+    def __init__(self, n_users: int, n_items: int, dim: int = 128) -> None:
+        super().__init__()
+        self.user_emb = tf.keras.layers.Embedding(n_users, dim)
+        self.item_emb = tf.keras.layers.Embedding(n_items, dim)
+        self.user_mlp = tf.keras.Sequential([
+            tf.keras.layers.Dense(256, activation="relu"),
+            tf.keras.layers.Dense(dim),
+        ])
+        self.item_mlp = tf.keras.Sequential([
+            tf.keras.layers.Dense(256, activation="relu"),
+            tf.keras.layers.Dense(dim),
+        ])
+
+    def call(self, batch: dict[str, tf.Tensor]) -> tf.Tensor:
+        u = tf.math.l2_normalize(self.user_mlp(self.user_emb(batch["user"])), axis=1)
+        i = tf.math.l2_normalize(self.item_mlp(self.item_emb(batch["item"])), axis=1)
+        # in-batch negatives: logits[a, b] = sim(user_a, item_b)
+        return tf.matmul(u, i, transpose_b=True)
+
+def in_batch_loss(logits: tf.Tensor) -> tf.Tensor:
+    labels = tf.range(tf.shape(logits)[0])  # diagonal are the positives
+    return tf.reduce_mean(
+        tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits)
+    )
+```
+
+**Online serving path (FAISS retrieval + LightGBM ranking):**
+
+```python
+import faiss
+import lightgbm as lgb
+import numpy as np
+
+class RecommenderService:
+    def __init__(self, item_index: faiss.Index, ranker: lgb.Booster,
+                 item_meta: dict[int, dict]) -> None:
+        self.index = item_index          # IVF-PQ over 15k item vectors
+        self.ranker = ranker
+        self.item_meta = item_meta
+
+    def recommend(self, user_vec: np.ndarray, user_ctx: dict,
+                  k: int = 25) -> list[int]:
+        # stage 1: ANN retrieval, top-1000
+        _, cand = self.index.search(user_vec.reshape(1, -1), 1000)
+        cand_ids = cand[0].tolist()
+        # stage 2: build cross features and rank
+        feats = np.array([self._cross_features(user_ctx, c) for c in cand_ids])
+        scores = self.ranker.predict(feats)
+        ranked = [cid for _, cid in sorted(zip(scores, cand_ids), reverse=True)]
+        return self._apply_diversity(ranked, k)
+
+    def _apply_diversity(self, ranked: list[int], k: int,
+                         max_per_genre: int = 4) -> list[int]:
+        out: list[int] = []
+        genre_count: dict[str, int] = {}
+        for cid in ranked:
+            g = self.item_meta[cid]["genre"]
+            if genre_count.get(g, 0) < max_per_genre:
+                out.append(cid)
+                genre_count[g] = genre_count.get(g, 0) + 1
+            if len(out) == k:
+                break
+        return out
+```
+
+**Pitfall 1 — Popularity bias.** The retrieval tower learns to recommend only blockbusters because they dominate the training log; the long tail never surfaces.
+
+```python
+# BROKEN: sampled softmax treats all items equally -> head items always win
+loss = in_batch_loss(logits)
+
+# FIX: logQ correction (subtract log of item sampling probability) so frequent
+# items are penalized in the softmax denominator (exposure penalty).
+log_q = tf.math.log(item_freq_prob)            # P(item) estimated from log
+corrected_logits = logits - log_q[tf.newaxis, :]
+loss = in_batch_loss(corrected_logits)
+```
+
+**Pitfall 2 — Cold start for new users.** A brand-new profile has no embedding, so the lookup returns a zero vector and FAISS returns garbage.
+
+```python
+# BROKEN: missing user -> zero vector -> nonsense neighbors
+user_vec = feature_store.get(user_id) or np.zeros(128)
+
+# FIX: content-based fallback from onboarding genre picks until enough history
+vec = feature_store.get(user_id)
+if vec is None:
+    picks = onboarding_genres(user_id)            # genres chosen at signup
+    user_vec = np.mean([genre_centroid[g] for g in picks], axis=0)
+```
+
+**Pitfall 3 — Train/serve skew.** Watch-completion rate is computed with one SQL query in the training pipeline and a slightly different formula in the serving code, so the ranker sees inconsistent inputs.
+
+```python
+# BROKEN: two implementations of the same feature drift apart over time
+train_feat = sql("SELECT plays_completed / plays AS rate ...")   # batch
+serve_feat = redis_plays_completed / max(redis_plays, 1)         # online
+
+# FIX: a single feature definition materialized in a feature store (Feast),
+# read identically offline (training) and online (serving).
+rate = feature_store.get_online_features(["watch.completion_rate"], entity)
+```
+
+**Interview Q&A:**
+
+**Why split retrieval and ranking instead of one model scoring the full catalog?** Scoring 15k items per request with a heavy cross-feature model would blow the 30ms budget, and at 200M-item catalogs it is impossible. Retrieval uses a cheap dot-product over precomputed vectors to cut the candidate set to 1000; ranking then spends its compute budget on the cross features that actually drive accuracy. This is a recall-then-precision decomposition.
+
+**Why are in-batch negatives used for the two-tower model?** They give free negatives: every other item in the mini-batch is a negative for a given user, so a batch of 8192 yields 8191 negatives per positive at no extra sampling cost. The catch is sampling bias toward popular items, which is corrected with logQ subtraction.
+
+**How do you keep the FAISS index fresh as new movies launch?** New items get an embedding from the item tower at ingest time and are inserted into the index incrementally; the full IVF-PQ is rebuilt nightly. Until an item has interaction data its vector relies purely on content features (title, genre, cast), which is acceptable for cold items.
+
+**Why use LightGBM for ranking rather than a deep net?** With well-engineered cross features, gradient-boosted trees match or beat deep models on tabular ranking, train in minutes, and infer in microseconds per row, which fits the 5ms ranking budget. A deep ranker is justified only when raw multimodal features (image, text) must be consumed directly.
+
+**How do you measure whether the recommender actually helps the business?** Offline NDCG@10 and recall@1000 gate model promotion, but the decision metric is an online A/B test on engagement (play-through rate, retention) with a long-term holdback group. Offline gains that do not translate to online engagement are common, so the holdback prevents shipping vanity improvements.
+
+**How do you prevent a feedback loop where the model only learns from what it already showed?** Add exploration: reserve a small fraction of slots for epsilon-greedy or Thompson-sampled candidates outside the top-25, and log them with their propensity so future training can debias with inverse-propensity weighting.
+
+**Additional production patterns:**
+
+**Pitfall — Item embedding index not updated after new item ingestion.**
+
+```python
+# BROKEN: FAISS index is rebuilt only weekly; new products added daily
+# are invisible to the recommender for up to 7 days → missed revenue on new listings
+faiss_index = faiss.read_index("weekly_index.faiss")
+# New items: added to DB, but index not updated → never retrieved
+
+# FIX: incremental index update — add new item embeddings to a secondary small index
+# At query time, merge results from primary (stable, fast) and secondary (fresh) indexes
+primary_index = faiss.read_index("weekly_index.faiss")
+secondary_index = faiss.IndexFlatL2(embed_dim)  # rebuilt hourly with new items
+
+def search(query_embedding: np.ndarray, k: int = 100) -> list[int]:
+    D1, I1 = primary_index.search(query_embedding, k)
+    D2, I2 = secondary_index.search(query_embedding, k // 10)  # 10% budget for new items
+    combined = sorted(zip(np.concatenate([D1[0], D2[0]]),
+                           np.concatenate([I1[0], I2[0]])))
+    return [idx for _, idx in combined[:k]]
+```
+
+**Why is the two-tower model architecture the standard for large-scale retrieval?** Two-tower (dual encoder) computes user and item embeddings independently, enabling offline pre-computation of all item embeddings. At query time, only the user embedding needs to be computed online; item embeddings are pre-indexed in FAISS/ScaNN. This enables ANN search over billions of items in < 5ms. A single (cross-encoder) model that encodes user-item pairs jointly achieves higher quality but requires a forward pass per item — infeasible at the retrieval stage with 1B+ items. The standard pipeline: two-tower for retrieval (top-1000 candidates) + cross-encoder or pointwise ranker for ranking (top-10 from 1000).
+
+**How do you handle position bias in implicit feedback for training a recommender?** Items shown in higher positions receive more clicks regardless of quality (position bias). Training on raw click labels without debiasing teaches the model to rank by position rather than relevance. Fix: inverse propensity scoring (IPS) — `loss = -y * log(p) / propensity_position` where `propensity_position` is the probability of the item being clicked given its position (estimated from randomization experiments). Alternatively, use unbiased learning-to-rank losses (ListNet with IPS weights) or run periodic randomization experiments to collect unbiased labels for model evaluation even if training uses biased clicks.

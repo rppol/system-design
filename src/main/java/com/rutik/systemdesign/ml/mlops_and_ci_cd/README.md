@@ -754,64 +754,289 @@ A model signature in MLflow specifies the expected schema (column names, dtypes,
 
 ## 14. Case Study
 
-### Problem: Fraud Detection Model at a Payments Company
+**Scenario:** A ride-sharing company (12M daily rides, 4M active drivers) runs a surge pricing model that updates every 5 minutes. The current manual promotion process takes 3 days from "model passes offline eval" to "model in production", causing 4-6 stale model incidents per quarter where drift degrades pricing accuracy. The goal: implement a CI/CD pipeline with MLflow Registry + GitHub Actions that promotes models automatically when AUC-ROC >= 0.92 and MAPE <= 8% on a rolling 7-day holdout, with promotion-to-serving in under 45 minutes and automatic rollback if production error rate exceeds 2x baseline within 30 minutes.
 
-A payments company runs a fraud detection model that scores every transaction in real time (P99 latency requirement: 50 ms). The model is a Gradient Boosted Tree trained on 180 days of transaction history with 47 features. Before MLOps investment, the team retrained monthly by running a notebook manually, copying the output to S3, and restarting the serving fleet. Three incidents occurred in 18 months: one wrong model deployed, one NaN feature incident, one failed rollback.
-
-**Architecture Overview**
-
+**Architecture:**
 ```
-GitHub PR (model code / config change)
-        |
-        v
-GitHub Actions CI
-  |-- code tests (pytest, mypy, ruff)
-  |-- data tests (Great Expectations on last 7-day sample)
-  |-- feature store skew check (offline vs online, threshold 5%)
-  |-- fast training (20% data sample, <10 min)
-  |-- performance gate (AUC >= 0.80 on sample, P99 <= 50ms)
-        |
-        v (merge to main)
-Kubeflow Pipeline triggered (full training, 180-day data)
-  |-- preprocess_data component (DVC-versioned dataset)
-  |-- train_model component (GBT, 200 estimators, logged to MLflow)
-  |-- validate_and_register component
-       |-- AUC >= 0.855 (production baseline: 0.872, max regression: 0.02)
-       |-- P99 latency <= 50ms (load test against model server)
-       |-- demographic parity diff <= 0.04
-       |-- model signature attached (47 features, float64)
-       |
-       | PASS
-       v
-MLflow Model Registry: Staging
-       |
-       | Automated promotion to canary (no manual approval for non-critical changes)
-       v
-Canary Deployment (Istio VirtualService)
-  5% traffic -> 30-min soak -> check AUC on real-time labeled transactions
-  25% traffic -> 30-min soak -> check AUC
-  50% traffic -> 60-min soak -> check AUC + precision + conversion impact
-  100% traffic -> promote to Production in registry
-       |
-       | AUC regression > 2% at any stage
-       v
-Automatic Rollback: traffic 0%, previous Production model restored
-       |
-Monitoring (always on)
-  Prometheus: prediction score distribution (mean, P5, P95)
-  Evidently: PSI on top 10 features, daily batch report
-  Alert: PSI > 0.2 on any top-5 feature -> trigger retraining pipeline
-  Alert: online AUC < 0.85 (sampled labeled transactions) -> PagerDuty
+Data Pipeline (hourly Spark job)
+  Feature store refresh: driver supply, demand signals,
+  weather, events, historical price elasticity
+         |
+         v
+MLflow Experiment Tracking
+  Parameterised training run (XGBoost or LightGBM)
+  Logs: params, metrics, model artifact, feature schema
+  Registry: Staging -> Production transition gate
+         |
+         v
+GitHub Actions CI Workflow  (triggered on model tag push)
+  +----------------------------------------------+
+  |  1. Checkout model code + MLflow artifact     |
+  |  2. Run offline validation gate               |
+  |     - AUC-ROC >= 0.92 on 7-day holdout       |
+  |     - MAPE <= 8% on surge windows            |
+  |     - PSI <= 0.15 vs production model        |
+  |     - Schema compatibility check             |
+  |  3. Integration test (shadow traffic, 15min) |
+  |  4. MLflow transition: Staging -> Production  |
+  |  5. Deploy to K8s (rolling update, 10% canary)|
+  +----------------------------------------------+
+         |
+         v
+Model Serving (FastAPI + TorchServe, 400 RPS)
+  Blue-green deployment with 10%/90% canary split
+  Prometheus metrics: request rate, error rate, p99 latency
+         |
+         v
+Automated Rollback Monitor
+  Compares canary error_rate vs baseline
+  Triggers rollback if ratio > 2.0 within 30min window
 ```
 
-**Key Design Decisions**
+**Step-by-step implementation:**
 
-The team chose an sklearn `Pipeline` (Scaler + GBT) as the model artifact to eliminate training-serving skew permanently. The MLflow model signature enforces 47 named float64 columns; any upstream schema change that drops or renames a column fails at the signature validation layer in the serving container before a single prediction is computed.
+```python
+from __future__ import annotations
+import mlflow
+import mlflow.lightgbm
+from mlflow.tracking import MlflowClient
+import lightgbm as lgb
+import numpy as np
+import pandas as pd
+from sklearn.metrics import roc_auc_score, mean_absolute_percentage_error
 
-The Great Expectations suite includes a custom expectation: `expect_column_mean_to_be_between` with bounds derived from the last 30 days of production traffic, not from the training data. This detects concept drift in input features even before model performance metrics degrade.
+EXPERIMENT_NAME = "surge_pricing_model"
+MODEL_NAME = "surge_pricing_lgbm"
+PROMOTION_THRESHOLDS: dict[str, float] = {
+    "auc_roc": 0.92,
+    "mape": 0.08,
+    "psi_score": 0.15,
+}
 
-The canary controller polls an online evaluation service that labels a 2% sample of transactions using delayed ground truth (chargebacks confirmed within 48 hours). The AUC computed on this sample is the rollback trigger metric — not a proxy metric like click rate, but the actual model objective. This required building a labeling pipeline that joins prediction logs with chargeback events, but eliminated two false-positive rollbacks that would have occurred using only system-level metrics.
+def train_and_log_model(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_val: pd.DataFrame,
+    y_val: pd.Series,
+    params: dict,
+    feature_schema: dict[str, str],   # col -> dtype mapping
+) -> str:
+    mlflow.set_experiment(EXPERIMENT_NAME)
 
-**Outcome**
+    with mlflow.start_run() as run:
+        mlflow.log_params(params)
+        mlflow.log_dict(feature_schema, "feature_schema.json")
 
-After 6 months of full MLOps Level 2 implementation: zero production incidents caused by model deployment; mean time to detect model degradation reduced from 4 days (quarterly review) to 3 hours (automated alert); retraining cycle reduced from monthly manual to weekly automated with zero engineer time; three silent drift events detected and retraining triggered automatically before any user-visible impact.
+        dtrain = lgb.Dataset(X_train, label=y_train)
+        dval = lgb.Dataset(X_val, label=y_val, reference=dtrain)
+        model = lgb.train(
+            params,
+            dtrain,
+            valid_sets=[dval],
+            num_boost_round=1000,
+            callbacks=[lgb.early_stopping(50), lgb.log_evaluation(0)],
+        )
+
+        val_probs = model.predict(X_val)
+        auc_roc = roc_auc_score(y_val, val_probs)
+        mape = mean_absolute_percentage_error(y_val, val_probs.clip(1e-6, 1))
+
+        mlflow.log_metric("val_auc_roc", auc_roc)
+        mlflow.log_metric("val_mape", mape)
+        mlflow.lightgbm.log_model(model, "model")
+
+        # Register model in Staging
+        model_uri = f"runs:/{run.info.run_id}/model"
+        mlflow.register_model(model_uri, MODEL_NAME)
+        print(f"Run {run.info.run_id}: AUC-ROC={auc_roc:.4f}, MAPE={mape:.4f}")
+        return run.info.run_id
+```
+
+```python
+def compute_psi(
+    baseline_scores: np.ndarray,
+    candidate_scores: np.ndarray,
+    n_bins: int = 10,
+) -> float:
+    bins = np.percentile(baseline_scores, np.linspace(0, 100, n_bins + 1))
+    bins[0] = -np.inf
+    bins[-1] = np.inf
+
+    baseline_hist, _ = np.histogram(baseline_scores, bins=bins)
+    candidate_hist, _ = np.histogram(candidate_scores, bins=bins)
+
+    baseline_pct = baseline_hist / baseline_hist.sum() + 1e-6
+    candidate_pct = candidate_hist / candidate_hist.sum() + 1e-6
+
+    psi = float(np.sum((candidate_pct - baseline_pct) * np.log(candidate_pct / baseline_pct)))
+    return psi
+
+def validate_model_for_promotion(
+    client: MlflowClient,
+    run_id: str,
+    X_holdout: pd.DataFrame,
+    y_holdout: pd.Series,
+    production_scores: np.ndarray,
+    feature_schema_production: dict[str, str],
+) -> dict[str, bool | float]:
+    model_uri = f"runs:/{run_id}/model"
+    model = mlflow.lightgbm.load_model(model_uri)
+
+    # Schema compatibility check
+    candidate_schema: dict = client.download_artifacts(run_id, "feature_schema.json")
+    schema_ok = (set(candidate_schema.keys()) == set(feature_schema_production.keys()))
+
+    candidate_probs = model.predict(X_holdout)
+    auc_roc = roc_auc_score(y_holdout, candidate_probs)
+    mape = mean_absolute_percentage_error(y_holdout, candidate_probs.clip(1e-6, 1))
+    psi = compute_psi(production_scores, candidate_probs)
+
+    results = {
+        "auc_roc": auc_roc,
+        "mape": mape,
+        "psi_score": psi,
+        "schema_compatible": schema_ok,
+        "auc_roc_pass": auc_roc >= PROMOTION_THRESHOLDS["auc_roc"],
+        "mape_pass": mape <= PROMOTION_THRESHOLDS["mape"],
+        "psi_pass": psi <= PROMOTION_THRESHOLDS["psi_score"],
+        "schema_pass": schema_ok,
+    }
+    results["all_pass"] = all(
+        results[k] for k in ["auc_roc_pass", "mape_pass", "psi_pass", "schema_pass"]
+    )
+    return results
+```
+
+```python
+import subprocess
+import time
+import requests
+
+def promote_and_deploy(
+    client: MlflowClient,
+    run_id: str,
+    model_name: str = MODEL_NAME,
+    canary_weight: float = 0.1,
+    canary_monitor_minutes: int = 30,
+    error_rate_multiplier_threshold: float = 2.0,
+) -> bool:
+    # Transition to Production in MLflow Registry
+    versions = client.search_model_versions(f"name='{model_name}'")
+    staging_version = next(
+        v for v in versions if v.run_id == run_id and v.current_stage == "Staging"
+    )
+    client.transition_model_version_stage(
+        name=model_name, version=staging_version.version, stage="Production"
+    )
+    print(f"Model version {staging_version.version} promoted to Production")
+
+    # Deploy canary via kubectl
+    subprocess.run([
+        "kubectl", "set", "image",
+        "deployment/surge-pricing-canary",
+        f"model-server=registry/surge-model:{run_id}",
+    ], check=True)
+    subprocess.run([
+        "kubectl", "patch", "virtualservice", "surge-pricing-vs",
+        "--patch", f'{{"spec":{{"http":[{{"weight":{int(canary_weight*100)}}},{{"weight":{int((1-canary_weight)*100)}}}]}}}}'
+    ], check=True)
+
+    # Monitor canary error rate for 30 minutes
+    baseline_error_rate = get_prometheus_metric("surge_pricing_error_rate{canary='false'}")
+    poll_interval_s = 60
+    for minute in range(canary_monitor_minutes):
+        time.sleep(poll_interval_s)
+        canary_error_rate = get_prometheus_metric("surge_pricing_error_rate{canary='true'}")
+        if canary_error_rate > baseline_error_rate * error_rate_multiplier_threshold:
+            print(f"Canary error rate {canary_error_rate:.4f} > {baseline_error_rate * 2:.4f}; rolling back")
+            subprocess.run(["kubectl", "rollout", "undo", "deployment/surge-pricing-canary"], check=True)
+            client.transition_model_version_stage(
+                name=model_name, version=staging_version.version, stage="Archived"
+            )
+            return False
+
+    # Promote canary to 100%
+    subprocess.run([
+        "kubectl", "patch", "virtualservice", "surge-pricing-vs",
+        "--patch", '{"spec":{"http":[{"weight":100},{"weight":0}]}}'
+    ], check=True)
+    return True
+
+def get_prometheus_metric(query: str) -> float:
+    resp = requests.get(
+        "http://prometheus:9090/api/v1/query",
+        params={"query": query},
+        timeout=5,
+    )
+    return float(resp.json()["data"]["result"][0]["value"][1])
+```
+
+**Key pitfalls (3 with BROKEN->FIX):**
+
+**Pitfall 1 - Using validation set AUC as the promotion gate without holdout temporal split:**
+```python
+# BROKEN: validation set overlaps temporally with training window
+# XGBoost optimised on val; AUC on val is inflated by hyperparameter tuning
+train_df = df[df["date"] < "2025-01-01"]
+val_df = df[(df["date"] >= "2024-12-01") & (df["date"] < "2025-01-01")]  # in training window
+# AUC on this val = 0.944 -> passes gate; true 7-day forward holdout AUC = 0.906 -> fails
+
+# FIX: strict temporal holdout; promotion gate uses ONLY future data never seen during training
+train_df = df[df["date"] < "2025-01-01"]
+holdout_df = df[(df["date"] >= "2025-01-01") & (df["date"] < "2025-01-08")]  # future window
+# No overlap between training and promotion evaluation data
+```
+
+**Pitfall 2 - MLflow model registration without schema validation causes silent type mismatches:**
+```python
+# BROKEN: register model without logging feature schema;
+# new model trained with "driver_supply" as float64, production serves int32 -> score drift
+mlflow.lightgbm.log_model(model, "model")   # no schema logged
+# Production serving converts features to training dtype -> wrong predictions for int features
+
+# FIX: log feature schema as artifact; validate compatibility before promotion
+feature_schema = {col: str(dtype) for col, dtype in X_train.dtypes.items()}
+mlflow.log_dict(feature_schema, "feature_schema.json")
+# CI gate checks schema before promoting: all column names and dtypes must match
+```
+
+**Pitfall 3 - Promoting directly to 100% traffic without canary causes widespread incidents:**
+```python
+# BROKEN: immediate full traffic switch on promotion
+kubectl set image deployment/surge-pricing model-server=registry/surge-model:v2
+# If model has latency regression (p99: 12ms -> 180ms), 100% of users affected immediately
+
+# FIX: 10% canary for 30 minutes with automated rollback on error spike
+subprocess.run(["kubectl", "patch", "virtualservice", "surge-pricing-vs",
+    "--patch", '{"spec":{"http":[{"weight":10},{"weight":90}]}}'])
+# Monitor p99 latency and error_rate; auto-rollback if degraded
+# Only then ramp to 100% after 30-minute clean window
+```
+
+**Metrics and results:**
+
+| Metric | Before (manual) | After (MLflow + GH Actions CI) |
+|---|---|---|
+| Promotion cycle time | 3 days | 42 min |
+| Stale model incidents/quarter | 4-6 | 0 |
+| Promotion gate failure rate | N/A | 18% (correctly blocked) |
+| Canary rollbacks triggered | N/A | 3 (prevented 3 incidents) |
+| Model AUC-ROC (production) | 0.89 | 0.93 |
+| MAPE (surge windows) | 11.2% | 6.8% |
+| Pricing accuracy (revenue impact) | baseline | +$4.2M/month |
+| Time-to-detect model drift | ~72 hr | 30 min |
+| Engineering hours per promotion | 8 hr | 0 (fully automated) |
+
+**Interview discussion points:**
+
+**What is the difference between a Staging and Production stage in MLflow Model Registry?** MLflow Registry stages (None -> Staging -> Production -> Archived) are metadata labels on model versions, not deployment states. Staging means "passed offline eval, candidate for deployment." Production means "approved for serving." The CI pipeline enforces that only models passing the validation gate (AUC-ROC, MAPE, PSI, schema checks) transition from Staging to Production. The registry provides a single source of truth for which model version should be served, decoupling the decision to promote from the mechanics of deployment.
+
+**Why is PSI used as a promotion gate criterion alongside AUC-ROC?** PSI measures how much the new model's score distribution differs from the production model's score distribution. A new model can achieve high AUC-ROC on the validation holdout while generating completely different score distributions in production, causing downstream systems (fraud score thresholds, pricing bands) calibrated to the old distribution to behave incorrectly. PSI > 0.2 on the score distribution flags this structural mismatch before deployment, preventing silent system breakage that AUC-ROC alone would not detect.
+
+**How does the 10% canary deployment protect against latency regressions that offline eval misses?** Offline eval computes metrics on a static dataset using single-process prediction; it does not reflect production conditions: concurrent requests, JVM warm-up, serialisation overhead, and network latency to feature stores. A model that scores in 4ms in batch evaluation may have p99 latency of 180ms under 400 RPS concurrent load due to memory pressure or I/O serialisation. The 10% canary exposes the new model to real production traffic and load patterns, with Prometheus scraping p99 latency and error rate every 15 seconds. If p99 exceeds 2x baseline during the 30-minute window, the rollback fires before the majority of users are affected.
+
+**What is the risk of using early stopping patience of 50 rounds in LightGBM training and how does it interact with MLflow logging?** Early stopping halts training when validation metric does not improve for 50 consecutive rounds. If the learning rate is too high (e.g., 0.1), the model converges in 80 rounds and early stopping fires at round 130, logging a model that appears well-trained but is actually underfit. MLflow logs the model at the best checkpoint (round 80) automatically when `mlflow.lightgbm.autolog()` is enabled, but the logged `num_boost_round` param is 1000 (the max), misleading for reproducibility. The fix is to log `model.best_iteration` explicitly: `mlflow.log_metric("best_iteration", model.best_iteration)`.
+
+**How do you handle feature store schema drift between model training and serving?** At training time, each feature's name and dtype is serialised to a JSON artifact in MLflow alongside the model. At serving time, the prediction handler loads this schema and validates incoming feature vectors against it before prediction. If a feature has been renamed (e.g., "demand_index_v2" -> "demand_index_v3") or its dtype changed (float32 -> int32), the schema check fails at deployment time rather than silently producing wrong predictions. The schema artifact is versioned with each model version in the registry, ensuring schema and model are always co-located and auditable.
+
+**What monitoring beyond error rate and latency should be applied to the surge pricing model post-deployment?** Three additional monitors are essential: (1) prediction distribution monitoring - track mean and standard deviation of model output scores using a rolling 1-hour window; sudden shift > 2 standard deviations from historical baseline triggers an alert; (2) feature drift monitoring - compute PSI for the top 10 most important features daily, with PSI > 0.2 triggering retraining; (3) business metric monitoring - track revenue per ride and cancellation rate at 5-minute granularity aligned with model update cycles; degradation > 5% from 7-day rolling average triggers an incident despite healthy technical metrics.

@@ -786,3 +786,69 @@ Iteration roadmap:
 - Online conversion rate: +8% vs. popularity-based ranking
 - P95 latency: 190ms (within 200ms budget)
 - NDCG@10 stability over 6 months: standard deviation < 0.02 (monitoring effective)
+
+---
+
+### More Mock Interview Scenarios (6-step framework applied)
+
+**Scenario 2: Search ranking for a marketplace.** Scale: 50M queries/day, 100M listings, 300ms budget. (1) Requirements: maximize purchase rate, guardrail on CTR and latency. (2) Formulation: learning-to-rank, listwise, optimize NDCG@10; labels = purchase(3) > add-to-cart(2) > click(1) > skip(0). (3) Data/features: query-listing BM25 + semantic similarity, listing freshness, seller rating, personalization embedding; time-based split. (4) Model: two-tower retrieval (top-1000) -> LambdaMART/DCN ranker. (5) Serving: ANN (ScaNN) + feature store + batched ranker, ~250ms. (6) Monitoring: NDCG on labeled holdout, PSI, online purchase rate via A/B. Key tradeoff: semantic recall vs lexical precision, hybrid retrieval resolves it.
+
+**Scenario 3: Content moderation.** Scale: 5M posts/day (text+image), <500ms, must catch 99% of policy violations. (1) Requirements: high recall on violations, low false-positive burden on reviewers, multilingual. (2) Formulation: multi-label classification per policy + a severity score; human-in-the-loop for borderline. (3) Data: heavily imbalanced (violations rare), adversarial users, label noise; use weighted loss + active learning on hard cases. (4) Model: fine-tuned multilingual transformer (text) + vision model (image) fused; ensemble per policy. (5) Serving: tiered, cheap filter first, expensive model only on uncertain cases. (6) Monitoring: recall on audited samples, appeal-overturn rate, drift on emerging slang/memes. Key tradeoff: precision vs recall, set the threshold to favor recall and route uncertain cases to humans.
+
+**Scenario 4: ETA prediction for delivery.** Scale: 10M deliveries/day, 200ms, MAE target < 3 min. (1) Requirements: accurate and well-calibrated ETA, avoid systematic underestimation (worse UX). (2) Formulation: regression on travel time, possibly quantile regression for an honest upper bound. (3) Data/features: distance, historical segment speeds, time-of-day, weather, courier features; spatial + temporal. (4) Model: gradient-boosted trees baseline, graph/sequence model for routing context; quantile loss. (5) Serving: feature store with real-time traffic, low-latency inference. (6) Monitoring: MAE/quantile coverage by region and hour, drift on traffic patterns. Key tradeoff: point accuracy vs calibrated bounds, predict a quantile (e.g. P80) so the shown ETA is rarely beaten.
+
+**Scenario 5: Dynamic pricing.** Scale: 1M price decisions/hour, must respect fairness/legal constraints. (1) Requirements: maximize revenue subject to price-fairness and inventory constraints; avoid feedback loops. (2) Formulation: demand model (price -> conversion probability) + optimization layer choosing price; or contextual bandit for exploration. (3) Data: confounded historical prices (only saw outcomes for prices charged); needs causal/counterfactual handling. (4) Model: demand curve estimation with debiasing (IPW), then constrained optimization. (5) Serving: precompute price grids, real-time lookup. (6) Monitoring: revenue lift via A/B, fairness audits, demand-model calibration. Key tradeoff: exploit known-good prices vs explore to learn the demand curve, contextual bandits balance it.
+
+**Scenario 6: Medical image diagnosis.** Scale: 100k scans/day, no hard latency limit but high accuracy/safety bar. (1) Requirements: high sensitivity (missing disease is catastrophic), interpretability, regulatory approval. (2) Formulation: classification/segmentation with an abstain option; clinician-in-the-loop. (3) Data: scarce expert labels, class imbalance, domain shift across scanners/hospitals; strong augmentation + SSL pretraining. (4) Model: CNN/ViT with uncertainty estimation (ensembles/MC-dropout); calibrated. (5) Serving: on-prem for privacy, with saliency maps for clinician review. (6) Monitoring: sensitivity/specificity by subgroup, drift across sites, calibration. Key tradeoff: sensitivity vs specificity, operate at high sensitivity and abstain on low-confidence cases for human review.
+
+---
+
+### Common Interview Mistakes
+
+**Mistake 1: Jumping to the model before clarifying requirements.** Candidates name "I'll use XGBoost" in the first minute. Correct approach: spend the first 5 minutes pinning down scale, latency budget, the business metric, label definition, and constraints. The model choice falls out of these; choosing it first means you optimize the wrong thing.
+
+**Mistake 2: Optimizing the wrong metric.** Proposing accuracy for a 1%-positive fraud or default problem, or offline AUC when the business cares about calibrated probabilities or revenue. Correct approach: derive the metric from the business goal, PR-AUC and recall-at-threshold for rare positives, calibration when probabilities feed decisions, and always name an online north-star metric distinct from the offline proxy.
+
+**Mistake 3: Ignoring data leakage and split strategy.** Using a random train/test split on temporal data, or including features unavailable at prediction time. Correct approach: use a time-based split for any temporal problem, audit each feature's availability timestamp against prediction time, and call out leakage explicitly; an interviewer who hears "I'd use a time-based split to avoid leakage" sees seniority.
+
+**Mistake 4: Designing only the offline model, not the serving system.** Stopping at "train a ranker" without addressing latency, feature stores, retrieval-then-rank decomposition, train/serve skew, or A/B rollout. Correct approach: cover the full lifecycle, feature store to eliminate skew, two-stage retrieval+ranking for latency, shadow/canary deployment, and a monitoring plan. The job is a system, not a notebook.
+
+**Mistake 5: No monitoring or retraining plan.** Treating the model as static and never mentioning drift, label lag, or retraining triggers. Correct approach: specify input-drift monitoring (PSI), performance monitoring on (possibly lagged) labels, alerting that avoids fatigue, and concrete retraining triggers with champion/challenger promotion. Production ML degrades silently; saying how you would catch it demonstrates real-world experience.
+
+**Additional interview pitfall — framing the problem incorrectly at the start.**
+
+The most common interview failure is jumping to model selection before defining success metrics and constraints. Interviewers specifically test whether you ask:
+- "What does success look like? Precision? Recall? Revenue?" before proposing XGBoost or BERT
+- "What is the label delay?" before proposing online learning
+- "What is the latency budget?" before proposing a 7B LLM
+
+**BROKEN approach (starts with model):**
+"I would use a transformer-based model fine-tuned on the dataset."
+→ No mention of data availability, latency, cost, or business metric.
+
+**FIX (starts with problem framing):**
+"Before choosing a model, I want to clarify: What is the latency SLA? What data do we have labeled? What is the cost of a false positive vs. a false negative for this business? With those constraints, I would narrow to…"
+
+**Interview anti-pattern — conflating accuracy with business value.**
+
+```
+Interviewer: "How would you improve the fraud detection model?"
+
+BROKEN answer: "Increase AUC-ROC from 0.95 to 0.97 by tuning hyperparameters."
+
+FIX answer:
+"AUC-ROC is not the primary optimization target here. The cost of a false negative
+(missed fraud: $200 average loss) is 100× the cost of a false positive (manual review: $2).
+I would optimize the decision threshold on the business cost function:
+  cost = FP × $2 + FN × $200
+Then evaluate whether better recall at a lower precision threshold is worth it.
+Feature engineering (adding velocity features, device fingerprinting) would
+likely move the AUC from 0.95 → 0.97, but the threshold optimization might
+reduce total daily cost by 50% without changing the model at all."
+```
+
+**Interview Q&A — additional common questions:**
+
+**How do you handle a case where the interviewer says "you can use any model you want"?** This is a constraint elicitation trap. Say: "I would start with the simplest model that meets the latency and accuracy constraints — likely logistic regression or LightGBM on tabular data, or a fine-tuned BERT-base for text. I'd only move to a larger model (GPT-4, 7B LLM) if the simpler model demonstrably failed to meet the accuracy requirement. Complexity has costs: training time, serving infrastructure, maintenance burden, and model explainability for regulated use cases."
+
+**The interviewer asks: 'Your model is in production and accuracy has degraded — what do you do?'** Structured response: (1) Diagnose — check input PSI for feature drift, prediction distribution shift, label distribution shift; check serving logs for schema changes; check if a data pipeline job failed recently. (2) Triage — if data pipeline is broken, fix it first (model is correct, inputs are wrong). If data has drifted, determine if the model is still calibrated (retrain with recent data). (3) Rollback — if the cause is unclear and the regression is severe, roll back to the previous model version immediately; investigate with zero production pressure. (4) Fix root cause — add monitoring alerts that would have caught this earlier (PSI > 0.20 → alert).

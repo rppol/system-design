@@ -438,81 +438,294 @@ Three main strategies: (1) Weighted loss — set per-class weights inversely pro
 
 ## 14. Case Study
 
-**Task**: Fine-tune ResNet-50 for defect detection on a manufacturing line with 8 defect classes + 1 normal class (9 classes total).
+**Scenario:** A consumer electronics manufacturer (12 production lines, 2.4M units/month) needs automated visual defect detection on PCB assemblies. Each PCB goes through 6 inspection points; human inspectors miss 8.2% of defects at the current 1.8-second inspection window, causing $14M/year in field failures. The target: EfficientNet-B3 transfer learning achieving precision >= 0.96, recall >= 0.94 on 8 defect classes, with inference time under 120ms per image (1920x1080, downsampled to 300x300) on edge GPUs (NVIDIA Jetson AGX Xavier, 32 TOPS).
 
-**Problem Statement**: 12,000 labeled images (heavily imbalanced: 8,000 normal, 500 per defect class), 224x224 grayscale converted to 3-channel by replication, must classify in real-time at 30 FPS on a workstation GPU. Business requirement: recall >= 0.95 on all defect classes (missed defects are costly).
-
-**Architecture Decisions**:
-
+**Architecture:**
 ```
-Input: 224x224x3 (grayscale replicated to 3 channels)
-Backbone: ResNet-50 pretrained on ImageNet
-    Phase 1: freeze all backbone layers, train head only (5 epochs)
-    Phase 2: unfreeze layer4, lr_backbone = 1e-5, lr_head = 1e-4 (10 epochs)
-    Phase 3: unfreeze layer3+layer4, same LR split (5 epochs)
-Head: GlobalAvgPool -> Dropout(0.4) -> Linear(2048, 512) -> ReLU -> Linear(512, 9)
-Loss: CrossEntropyLoss with class_weights (inverse frequency)
-Augmentation: RandomHorizontalFlip, RandomRotation(10), ColorJitter(0.2, 0.2), RandomCrop(224, padding=16)
+Camera Array (6 cameras per line, 4K at 30 FPS)
+  Resolution: 1920x1080, JPEG-compressed
+         |
+         v
+Preprocessing Pipeline (CUDA, Jetson)
+  Resize: 1920x1080 -> 300x300 (EfficientNet-B3 input)
+  Normalise: mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+  Augment (training only): random flip, rotation +-15deg, colour jitter
+         |
+         v
+EfficientNet-B3 (ImageNet pretrained, torchvision)
+  Backbone: frozen for first 10 epochs (feature extraction)
+  Backbone: unfrozen with 10x lower LR for 20 epochs (fine-tuning)
+  Head: replaced FC(1000) with FC(512) -> BN -> ReLU -> Dropout(0.4) -> FC(8)
+         |
+         v
+Multi-class + Multi-label Output
+  8 defect classes: solder_bridge, missing_component, tombstoning,
+                    lifted_pad, flux_residue, wrong_polarity, pcb_crack, ok
+  Threshold tuning: per-class thresholds optimised on val set
+         |
+         v
+Edge Inference (TensorRT INT8, Jetson AGX Xavier)
+  Inference: 85ms p50, 112ms p99
+  Model size: 18 MB (INT8 quantised)
+  Throughput: 11 boards/second per camera
 ```
+
+**Step-by-step implementation:**
 
 ```python
+from __future__ import annotations
 import torch
 import torch.nn as nn
 import torchvision.models as models
-from torch import Tensor
+from torchvision.models import EfficientNet_B3_Weights
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+from PIL import Image
+import numpy as np
+from pathlib import Path
 
+DEFECT_CLASSES: list[str] = [
+    "solder_bridge", "missing_component", "tombstoning",
+    "lifted_pad", "flux_residue", "wrong_polarity", "pcb_crack", "ok",
+]
+NUM_CLASSES = len(DEFECT_CLASSES)
 
-def build_defect_detector(num_classes: int = 9) -> nn.Module:
-    model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+class PCBDefectDataset(Dataset):
+    def __init__(
+        self,
+        image_paths: list[Path],
+        labels: list[list[int]],   # multi-label: list of class indices per image
+        transform: transforms.Compose | None = None,
+    ) -> None:
+        self.image_paths = image_paths
+        self.labels = labels
+        self.transform = transform
 
-    # Phase 1: freeze backbone
-    for param in model.parameters():
-        param.requires_grad = False
+    def __len__(self) -> int:
+        return len(self.image_paths)
 
-    # Replace head
-    model.fc = nn.Sequential(
-        nn.Dropout(p=0.4),
-        nn.Linear(2048, 512),
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        img = Image.open(self.image_paths[idx]).convert("RGB")
+        if self.transform:
+            img = self.transform(img)
+        label = torch.zeros(NUM_CLASSES, dtype=torch.float32)
+        for cls_idx in self.labels[idx]:
+            label[cls_idx] = 1.0
+        return img, label
+
+def get_transforms(is_train: bool) -> transforms.Compose:
+    if is_train:
+        return transforms.Compose([
+            transforms.Resize((300, 300)),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomRotation(degrees=15),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+    return transforms.Compose([
+        transforms.Resize((300, 300)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+```
+
+```python
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from sklearn.metrics import f1_score, precision_score, recall_score
+
+def build_efficientnet_b3(
+    num_classes: int = 8,
+    dropout_rate: float = 0.4,
+) -> nn.Module:
+    model = models.efficientnet_b3(weights=EfficientNet_B3_Weights.IMAGENET1K_V1)
+
+    # Replace classifier head
+    in_features = model.classifier[1].in_features   # 1536 for B3
+    model.classifier = nn.Sequential(
+        nn.Linear(in_features, 512),
+        nn.BatchNorm1d(512),
         nn.ReLU(inplace=True),
+        nn.Dropout(dropout_rate),
         nn.Linear(512, num_classes),
     )
     return model
 
+def train_two_phase(
+    model: nn.Module,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    device: torch.device,
+    freeze_epochs: int = 10,
+    finetune_epochs: int = 20,
+    base_lr: float = 3e-4,
+) -> nn.Module:
+    # Phase 1: freeze backbone, train head only
+    for param in model.features.parameters():
+        param.requires_grad = False
+    optimizer = AdamW(model.classifier.parameters(), lr=base_lr, weight_decay=1e-4)
+    scheduler = CosineAnnealingLR(optimizer, T_max=freeze_epochs)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=compute_pos_weights(train_loader, device))
 
-def get_class_weights(class_counts: list[int], device: torch.device) -> Tensor:
-    total = sum(class_counts)
-    weights = [total / (len(class_counts) * count) for count in class_counts]
-    return torch.tensor(weights, dtype=torch.float32, device=device)
+    model = run_epochs(model, optimizer, scheduler, criterion, train_loader, val_loader, device, freeze_epochs)
+    print("Phase 1 complete: backbone frozen")
 
-
-def training_pipeline(model: nn.Module, device: torch.device) -> None:
-    class_counts = [8000, 500, 500, 500, 500, 500, 500, 500, 500]
-    weights = get_class_weights(class_counts, device)
-    criterion = nn.CrossEntropyLoss(weight=weights)
-
-    # Phase 1: head-only
-    optimizer = torch.optim.Adam(model.fc.parameters(), lr=1e-3)
-    # ... train 5 epochs ...
-
-    # Phase 2: unfreeze layer4
-    for param in model.layer4.parameters():
+    # Phase 2: unfreeze backbone with 10x lower LR
+    for param in model.features.parameters():
         param.requires_grad = True
-    optimizer = torch.optim.Adam([
-        {"params": model.layer4.parameters(), "lr": 1e-5},
-        {"params": model.fc.parameters(), "lr": 1e-4},
-    ])
-    # ... train 10 epochs ...
+    optimizer = AdamW([
+        {"params": model.features.parameters(), "lr": base_lr / 10},
+        {"params": model.classifier.parameters(), "lr": base_lr},
+    ], weight_decay=1e-4)
+    scheduler = CosineAnnealingLR(optimizer, T_max=finetune_epochs)
+
+    model = run_epochs(model, optimizer, scheduler, criterion, train_loader, val_loader, device, finetune_epochs)
+    print("Phase 2 complete: backbone fine-tuned")
+    return model
+
+def compute_pos_weights(loader: DataLoader, device: torch.device) -> torch.Tensor:
+    """Compute BCEWithLogitsLoss positive weights for class imbalance."""
+    all_labels = torch.cat([labels for _, labels in loader], dim=0)
+    n_positive = all_labels.sum(dim=0)
+    n_negative = len(all_labels) - n_positive
+    pos_weight = (n_negative / (n_positive + 1)).to(device)
+    return pos_weight
 ```
 
-**Results**:
-- Phase 1 (head only, 5 epochs): validation accuracy 78%, defect recall avg 0.71
-- Phase 2 (unfreeze layer4, 10 epochs): validation accuracy 91%, defect recall avg 0.88
-- Phase 3 (unfreeze layer3+4, 5 epochs): validation accuracy 94%, defect recall avg 0.96 (meets 0.95 requirement)
-- Inference: 2.1ms per image on RTX 3080 (475 FPS >> 30 FPS requirement)
-- Training total: 47 minutes
+```python
+def tune_thresholds(
+    model: nn.Module,
+    val_loader: DataLoader,
+    device: torch.device,
+) -> np.ndarray:
+    """Find per-class decision threshold maximising F1 on validation set."""
+    model.eval()
+    all_probs: list[np.ndarray] = []
+    all_labels: list[np.ndarray] = []
 
-**Key Lessons**:
-- Class-weighted loss was essential: without it, the model had 0.12 average defect recall despite 89% overall accuracy (dominated by the 8000 normal samples).
-- Greyscale-to-3-channel replication worked well — ImageNet features still transferred meaningfully even though the appearance domain differed.
-- Phase 3 (unfreezing layer3) gave the largest per-epoch gain because layer3 features in ImageNet models encode mid-level textures and patterns highly relevant to surface defects.
-- Using `cudnn.benchmark = True` reduced per-epoch training time from 4.2 to 3.1 minutes.
+    with torch.no_grad():
+        for images, labels in val_loader:
+            logits = model(images.to(device))
+            probs = torch.sigmoid(logits).cpu().numpy()
+            all_probs.append(probs)
+            all_labels.append(labels.numpy())
+
+    probs_arr = np.vstack(all_probs)
+    labels_arr = np.vstack(all_labels)
+    thresholds = np.zeros(NUM_CLASSES)
+
+    for cls_idx in range(NUM_CLASSES):
+        best_f1 = 0.0
+        best_thresh = 0.5
+        for thresh in np.arange(0.1, 0.9, 0.01):
+            preds = (probs_arr[:, cls_idx] >= thresh).astype(int)
+            f1 = f1_score(labels_arr[:, cls_idx], preds, zero_division=0)
+            if f1 > best_f1:
+                best_f1 = f1
+                best_thresh = thresh
+        thresholds[cls_idx] = best_thresh
+        print(f"{DEFECT_CLASSES[cls_idx]}: threshold={best_thresh:.2f}, F1={best_f1:.4f}")
+
+    return thresholds
+
+def run_epochs(model, optimizer, scheduler, criterion, train_loader, val_loader, device, n_epochs):
+    for epoch in range(n_epochs):
+        model.train()
+        for images, labels in train_loader:
+            images, labels = images.to(device), labels.to(device)
+            optimizer.zero_grad()
+            logits = model(images)
+            loss = criterion(logits, labels)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+        scheduler.step()
+    return model
+```
+
+**Key pitfalls (3 with BROKEN->FIX):**
+
+**Pitfall 1 - Fine-tuning backbone from scratch without warmup causes catastrophic forgetting:**
+```python
+# BROKEN: immediately unfreeze all layers and train with high LR
+for param in model.parameters():
+    param.requires_grad = True
+optimizer = AdamW(model.parameters(), lr=3e-4)
+# Backbone features learned on ImageNet are overwritten in first 2 epochs;
+# val precision drops to 0.61 as model relearns from scratch on 8K PCB images
+
+# FIX: two-phase training with 10x lower LR on backbone
+# Phase 1: train only head (10 epochs) - backbone frozen
+# Phase 2: unfreeze with backbone_lr = head_lr / 10
+optimizer = AdamW([
+    {"params": model.features.parameters(), "lr": 3e-5},  # 10x lower
+    {"params": model.classifier.parameters(), "lr": 3e-4},
+])
+# Backbone features preserved; precision improves from 0.61 to 0.97
+```
+
+**Pitfall 2 - Using CrossEntropyLoss for multi-label defect classification:**
+```python
+# BROKEN: CrossEntropyLoss assumes mutually exclusive classes
+# A PCB can have both solder_bridge AND missing_component simultaneously
+criterion = nn.CrossEntropyLoss()
+# Forces the model to predict exactly one class; multi-defect boards scored incorrectly
+# Recall on co-occurring defect pairs drops to 0.52
+
+# FIX: BCEWithLogitsLoss with per-class positive weights for imbalance
+pos_weight = compute_pos_weights(train_loader, device)   # rare defects weighted up
+criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+# Apply sigmoid per class, then threshold independently per class
+probs = torch.sigmoid(logits)
+preds = (probs >= thresholds).float()   # thresholds tuned per-class
+```
+
+**Pitfall 3 - INT8 quantisation without calibration causes precision degradation on defect-heavy images:**
+```python
+# BROKEN: use default TensorRT INT8 quantisation without calibration dataset
+# TensorRT uses random or uniform calibration; defect-specific activation ranges are missed
+engine = builder.build_engine(network, config)   # no calibration
+# Solder bridge detection precision drops from 0.97 to 0.71 post-quantisation
+
+# FIX: use INT8 calibration with representative defect images (min 500 per class)
+from tensorrt import IInt8EntropyCalibrator2
+class PCBCalibrator(IInt8EntropyCalibrator2):
+    def __init__(self, calibration_images: list[np.ndarray], cache_file: str) -> None:
+        self.images = calibration_images   # 500 images covering all defect types
+        self.cache_file = cache_file
+        self.current_index = 0
+    # get_batch_size, get_batch, read/write_calibration_cache methods...
+
+config.int8_calibrator = PCBCalibrator(calib_images, "pcb_calib.cache")
+# Post-calibration precision: 0.96 (< 1% drop from fp32)
+```
+
+**Metrics and results:**
+
+| Metric | Human inspection | EfficientNet-B3 (fp32) | EfficientNet-B3 (INT8 edge) |
+|---|---|---|---|
+| Overall precision | 0.91 | 0.972 | 0.963 |
+| Overall recall | 0.918 | 0.948 | 0.941 |
+| Solder bridge precision | 0.87 | 0.981 | 0.971 |
+| Missing component recall | 0.82 | 0.963 | 0.952 |
+| Inference p50 | N/A | 8ms (A100) | 85ms (Jetson) |
+| Inference p99 | 1800ms (human) | 14ms (A100) | 112ms (Jetson) |
+| Throughput | 0.56 boards/s | 71 boards/s | 8.9 boards/s |
+| Model size | N/A | 47 MB (fp32) | 18 MB (INT8) |
+| Field failure reduction | baseline | N/A | 73% |
+| Annual savings | baseline | N/A | $10.2M |
+
+**Interview discussion points:**
+
+**Why is EfficientNet-B3 chosen over ResNet-50 or VGG-16 for edge deployment on Jetson?** EfficientNet-B3 achieves 82.1% ImageNet top-1 accuracy with 12M parameters and 1.8 GFLOPS, versus ResNet-50's 80.4% with 25M parameters and 4.1 GFLOPS. The compound scaling (width, depth, resolution simultaneously) gives better accuracy-to-compute trade-off. On Jetson AGX Xavier with 32 TOPS, EfficientNet-B3 achieves 85ms inference versus 148ms for ResNet-50, fitting within the 120ms SLA. VGG-16's 138M parameters would require 512 MB model storage and 2.1 GFLOPS - infeasible for edge deployment.
+
+**What is compound scaling in EfficientNet and why does it outperform scaling a single dimension?** EfficientNet's compound scaling multiplies width (number of channels), depth (number of layers), and input resolution simultaneously by factors derived from a grid search, controlled by a single compound coefficient phi. Scaling only depth (adding more layers) hits diminishing returns past a certain depth; scaling only width fails to capture long-range spatial dependencies. Compound scaling maintains the aspect ratio of the feature map across all dimensions, achieving better accuracy per FLOP because wider, deeper, and higher-resolution networks are balanced against each other rather than creating bottlenecks in one dimension.
+
+**How does BCEWithLogitsLoss with positive weights handle the class imbalance between "ok" and rare defects?** In the training set, 82% of images are labelled "ok" (no defects), while "pcb_crack" appears in 0.4% of images. Without reweighting, the model minimises loss by predicting "ok" always, achieving near-zero loss on the majority class. BCEWithLogitsLoss pos_weight = (n_negative / n_positive) per class assigns a weight of (0.996 / 0.004) = 249 to the "pcb_crack" class, making each false negative for pcb_crack 249x more costly in the loss than a false negative for the majority "ok" class. This forces the model to attend to rare defect signals.
+
+**What is catastrophic forgetting and why does the two-phase training prevent it?** Catastrophic forgetting occurs when a neural network rapidly overwrites previously learned representations when exposed to a new task. When fine-tuning EfficientNet-B3 on 8K PCB images with a high backbone LR (3e-4), the ImageNet-learned edge and texture detectors in early layers are overwritten within 2 epochs because the gradient signal from 8K samples is insufficient to maintain 12M parameter values. Phase 1 (frozen backbone) trains only the 1.6M head parameters on the new task, allowing the head to learn PCB-relevant feature combinations from the existing backbone. Phase 2 uses 10x lower LR on the backbone to make small, targeted adjustments to domain-specific features (solder texture, PCB green colour) without destroying the general visual primitives.
+
+**How do you validate that INT8 quantisation does not degrade safety-critical defect recall?** Run the INT8 model and the fp32 model on a held-out test set of 10,000 images, computing per-class precision and recall. For safety-critical classes (solder_bridge, missing_component), set a maximum acceptable precision/recall drop of 2pp versus fp32. If any class exceeds this threshold, use mixed precision quantisation: INT8 for early and middle layers (low sensitivity), fp16 for the final two convolutional blocks and classifier head (high sensitivity). NVIDIA TensorRT supports layer-by-layer precision assignment, typically achieving <0.5% per-class accuracy drop with mixed precision versus full INT8's 3-5% drop on defect-heavy classes.
+
+**What data augmentation strategy is most effective for PCB defect detection and why?** Geometric augmentations (rotation +-15 degrees, horizontal flip) simulate PCB orientation variations on the conveyor belt. Colour jitter (brightness +-20%, contrast +-20%) simulates lighting variations across production lines and times of day. MixUp and CutMix are avoided because combining two PCB images creates unrealistic composite boards that confuse defect localisation. Mosaic augmentation (combining 4 images into one) from YOLOv5 is effective if using a detection head rather than classification, as it increases the effective number of defect instances per training step. Cutout (random rectangular masking) improves robustness to partial occlusion from surface contaminants.

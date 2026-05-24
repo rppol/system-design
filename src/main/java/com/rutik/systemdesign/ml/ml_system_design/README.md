@@ -481,34 +481,151 @@ Automate model validation gates. No model should reach production without passin
 
 ## 14. Case Study
 
-### Design a Content Feed Ranking System (Instagram-scale)
+**Scenario: Real-time ad click-through-rate (CTR) prediction.** An ad exchange serves 5M ad impressions/hour. For each impression it must predict p(click) to rank ads and set bids, with a hard 10ms model-latency budget inside the bidding pipeline. We apply the 6-step ML system design framework end to end.
 
-**Problem**: Rank 500 potential feed items for each of 500 million daily active users. Requirements: P99 latency < 100ms, 50,000 QPS, optimize for long-form engagement (views > 3 seconds), retrain daily.
+```
+Step 2 data flow:
+  ad serving -> Kafka (impression + click events)
+       |
+   Flink streaming job (join impression<->click within attribution window)
+       |
+   Feature Store (Feast): online=Redis (2ms), offline=warehouse (training)
+       |
+   Step 3 model: LightGBM, AUC 0.78
+       |
+   Step 4 serving: ONNX Runtime, 2ms p99
+       |
+   Step 5 monitoring: PSI (feature drift), online AUC on hour-old labels
+       |
+   Step 6 retraining: daily full batch + hourly delta on fresh labels
+```
 
-**Requirements clarification**:
-- Scale: 500M DAU, 50K QPS peak
-- Latency: P99 < 100ms end-to-end
-- Metric: weighted engagement score (3s view = 1pt, like = 2pt, comment = 5pt, share = 10pt)
-- Data: 500M users, 100M items, 10B interaction events/day
-- Retraining: daily, with shadow mode before promotion
+LightGBM offline AUC = 0.78, log-loss = 0.39, calibration error < 2%. Serving p99 = 2ms (ONNX, batch of 1), throughput 5M/hr = ~1400 req/s sustained per replica. Online AUC tracked on labels that arrive ~1 hour after impression (click attribution window).
 
-**Architecture decision: Two-stage**:
-- Retrieval: two-tower model generates top-500 candidates from social graph + interest embeddings in <15ms
-- Ranking: LightGBM with 200 features scores 500 candidates in <25ms
-- Business logic: diversity constraint, ads insertion, policy filters in <5ms
-- Total model inference: <45ms, leaving headroom for network + feature fetch
+**Step 1 requirements as code (latency-aware feature budget):**
 
-**Feature store design**:
-- User features (interest embeddings, historical engagement rates): batch computed daily, synced to Redis
-- Item features (content embeddings, creator stats): computed at upload time, stored in Redis
-- Real-time features (views in last 1 hour): Flink job consuming engagement events, written to Redis
+```python
+from dataclasses import dataclass
 
-**Training pipeline**:
-- Daily Spark job joins interaction logs with point-in-time correct features
-- Validation gate: weighted NDCG@10 must exceed 0.72 (baseline 0.68)
-- Shadow deploy for 2 hours before 5% A/B test
+@dataclass(frozen=True)
+class SLA:
+    qps: int = 1400               # 5M/hour
+    p99_latency_ms: float = 10.0
+    model_latency_ms: float = 2.0
+    feature_fetch_ms: float = 5.0  # leaves 3ms headroom
+    min_auc: float = 0.75
+    max_calibration_error: float = 0.02
+```
 
-**Monitoring**:
-- Feature drift: PSI monitored hourly for top-20 features; alert if PSI > 0.2
-- Business metric: weighted engagement rate monitored in real-time; rollback if drops > 3% from baseline
-- Retraining trigger: daily scheduled + performance-triggered if engagement drops > 5%
+**Step 3-4: training and ONNX export for low-latency serving:**
+
+```python
+import lightgbm as lgb
+import numpy as np
+from onnxmltools import convert_lightgbm
+from onnxconverter_common import FloatTensorType
+
+def train_ctr(X: np.ndarray, y: np.ndarray, n_features: int):
+    model = lgb.LGBMClassifier(
+        objective="binary", num_leaves=63, n_estimators=500,
+        learning_rate=0.05, feature_fraction=0.8, metric="auc",
+    )
+    model.fit(X, y)
+    onnx = convert_lightgbm(
+        model, initial_types=[("input", FloatTensorType([None, n_features]))],
+        zipmap=False,
+    )
+    return model, onnx
+```
+
+```python
+import onnxruntime as ort
+import numpy as np
+
+class CTRService:
+    def __init__(self, onnx_path: str, feature_store) -> None:
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = 1     # single request, minimize latency
+        self.sess = ort.InferenceSession(onnx_path, opts)
+        self.fs = feature_store
+
+    def predict(self, impression: dict) -> float:
+        feats = self.fs.get_online(impression["user_id"], impression["ad_id"])
+        x = np.asarray(feats, dtype=np.float32).reshape(1, -1)
+        proba = self.sess.run(None, {"input": x})[1]   # class-1 probability
+        return float(proba[0][1])
+```
+
+**Pitfall 1 — Train/serve feature skew.** The training pipeline computes "user 7-day click rate" with a SQL window; the serving path computes it with a different aggregation. The model sees inconsistent inputs and online AUC collapses below offline AUC.
+
+```python
+# BROKEN: feature defined twice, in batch SQL and in online code
+train_rate = sql("clicks_7d / impressions_7d")
+serve_rate = redis.get("clicks") / redis.get("impressions")   # subtly different
+
+# FIX: one feature definition in Feast, materialized to both stores from the
+# same transformation, read identically offline and online.
+rate = feature_store.get_online_features(["user.ctr_7d"], entity_rows=[ent])
+```
+
+**Pitfall 2 — Training on biased click logs.** Ads shown in the top slot get more clicks because of position, not relevance; a model trained on raw clicks learns position, not quality.
+
+```python
+# BROKEN: label = click, ignoring that position drove the click
+y = clicked
+
+# FIX: inverse-propensity weighting to debias by display position
+w = 1.0 / position_propensity[position]    # P(examined | position)
+model.fit(X, y, sample_weight=w)
+```
+
+**Pitfall 3 — Latency SLA breach under load.** A traffic spike makes synchronous prediction queue up and breaches the 10ms budget, stalling the auction.
+
+```python
+# BROKEN: synchronous predict blocks the bid; a GC pause spikes p99
+score = service.predict(impression)   # no timeout, no fallback
+
+# FIX: bounded-timeout async call with a fast fallback (historical CTR prior)
+async def score_with_fallback(svc, imp, timeout_s: float = 0.008) -> float:
+    try:
+        return await asyncio.wait_for(svc.apredict(imp), timeout_s)
+    except asyncio.TimeoutError:
+        return historical_ctr_prior(imp["ad_id"])   # degrade gracefully
+```
+
+**Interview Q&A:**
+
+**Why LightGBM rather than a deep model for CTR here?** Tabular features (categorical IDs, counts, ratios) with a hard 2ms latency budget favor gradient-boosted trees: they train fast, infer in microseconds via ONNX, and match deep models on tabular data without GPUs. Deep CTR models (DeepFM, DCN) win mainly when learning embeddings for very high-cardinality features or fusing raw multimodal inputs.
+
+**Why is calibration as important as AUC for CTR?** The predicted probability feeds the bid (bid is proportional to predicted CTR times value). AUC only measures ranking; a model can rank perfectly yet output probabilities that are systematically too high, causing overbidding and budget loss. Calibration (reliability curve, isotonic/Platt scaling) ensures the predicted 0.02 actually clicks 2% of the time.
+
+**How do you handle labels that arrive an hour late?** The click attribution window means a label is only known after a delay. Stream the impression immediately, then join the click within the window in Flink; for monitoring, compute online AUC on a sliding window of attributed labels, accepting that the freshest impressions are still "pending" and excluded from the metric.
+
+**What is the retraining strategy and why both daily and hourly?** A daily full retrain captures broad distribution shifts and rebuilds feature stats; an hourly delta (incremental warm-start or fine-tune on fresh attributed labels) keeps the model responsive to fast-moving campaigns and trending ads. The daily run is the safety net; the hourly delta is the freshness lever.
+
+**How do you detect that the model is degrading in production?** Track input PSI per feature (alert > 0.2), prediction-distribution drift (KS test on the score histogram), and the gold metric, online AUC/log-loss on attributed labels. Accuracy is not used; CTR is a low-positive-rate problem. A silent feature-pipeline bug usually shows up as PSI drift before AUC moves.
+
+**Walk through the 6-step framework for this system.** (1) Requirements: 5M/hr, 10ms, AUC>0.75, calibrated. (2) Data: Kafka events, Flink impression-click join, Feast feature store. (3) Model: LightGBM, binary log-loss, calibrated. (4) Serving: ONNX Runtime single-thread, async with fallback. (5) Monitoring: PSI, online AUC on hour-old labels, latency p99. (6) Retraining: daily full + hourly delta, champion/challenger promotion.
+
+**Pitfall — Training on all historical data without a time-aware split causes future data leakage.**
+
+```python
+# BROKEN: random train/test split on time-series data — test set includes
+# events BEFORE some training events → model sees the "future" during training
+from sklearn.model_selection import train_test_split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+# X_test may include t=100; X_train may include t=110 → leakage!
+
+# FIX: time-ordered split — training data must be strictly before test data
+cutoff_date = pd.Timestamp("2024-09-01")
+train_mask = df["timestamp"] < cutoff_date
+X_train, y_train = X[train_mask], y[train_mask]
+X_test,  y_test  = X[~train_mask], y[~train_mask]
+# Also: use walk-forward validation (TimeSeriesSplit) for cross-validation
+from sklearn.model_selection import TimeSeriesSplit
+tscv = TimeSeriesSplit(n_splits=5)
+```
+
+**How do you apply the 6-step ML system design framework to a cold-start recommendation problem?** (1) Requirements: new user/item must receive useful recommendations within 1 request, no click history available. (2) Data: item metadata (category, price, description embeddings), demographics if available. (3) Model: content-based filtering using item embedding similarity for new users; collaborative filtering only activates after 10+ interactions. (4) Serving: two-stage — content-based retrieval for cold users, collaborative ranking for warm users; shared item embedding index. (5) Monitoring: track cold-start CTR separately from warm-user CTR; alert if cold-start CTR drops below 50% of warm-user CTR. (6) Retraining: content-based model retrained weekly (item catalog changes); collaborative model retrained daily.
+
+**What is the difference between online learning and retraining, and when do you choose each?** Online learning updates model parameters incrementally as each new example arrives — no batch retraining required. Suitable for simple models (logistic regression, linear contextual bandits) where gradients are cheap to compute. Retraining replaces the model periodically with a fresh run on recent data — required for complex models (XGBoost, neural nets) where online updates are unstable or computationally prohibitive. Choose online learning when: label delay is short (< 1 hour), the model is simple, and distribution shifts are gradual. Choose retraining when: labels arrive in batches (daily chargebacks), the model is complex, or the distribution shift is large and non-stationary.

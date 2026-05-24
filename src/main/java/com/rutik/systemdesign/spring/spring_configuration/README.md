@@ -527,58 +527,215 @@ Four steps: (1) Create a module with your auto-configuration class annotated wit
 
 ## 14. Case Study
 
-### Problem: Starter Library Configuration Not Applied to User Application
+### Scenario: Multi-Environment Configuration for a Service Deployed to 5 Regions
 
-**Scenario:** A team writes an internal `observability-spring-boot-starter`. Users add it to `pom.xml` but metrics are not being exported.
+**Context.** A SaaS service ships the same JAR to **5 environments** — `dev`, `test`, `staging`, `prod-eu`, `prod-us` — handling 8,000 req/sec in production. Each environment differs in data sources, external service URLs, and feature flags. The strategy combines `@Profile` (environment selection), `@Conditional`/`@ConditionalOnProperty` (feature toggling), validated `@ConfigurationProperties`, and `@Import` to compose modular configuration classes without duplication.
 
-**Broken Implementation:**
+### Configuration Layout
 
-```java
-// Starter's auto-configuration
-@Configuration  // WRONG: no @AutoConfiguration, no conditions, no registration
-@ComponentScan("com.company.observability")  // WRONG: scans starter's own packages
-public class ObservabilityAutoConfiguration {
-    @Bean
-    public MetricsExporter exporter() { return new PrometheusExporter(); }
-}
-// Missing: META-INF/spring/...AutoConfiguration.imports
-// Missing: @ConditionalOnMissingBean
+```
+application.yml                  (shared defaults)
+application-dev.yml
+application-test.yml
+application-staging.yml
+application-prod-eu.yml          (eu data residency, eu external URLs)
+application-prod-us.yml          (us data residency, us external URLs)
+
+  +-- @Import composes ---------------------------+
+  |  DataSourceConfig   (@Profile per env)        |
+  |  ExternalServiceConfig (@ConditionalOnProperty)|
+  |  FeatureFlagConfig  (@Conditional)            |
+  +-----------------------------------------------+
 ```
 
-**Problems:**
-1. No `META-INF/spring/...AutoConfiguration.imports` — Spring Boot never discovers this class
-2. `@ComponentScan` on the starter scans its own packages into the user's context (wrong)
-3. No `@ConditionalOnMissingBean` — would conflict with user-defined exporters
-
-**Fixed Implementation:**
+### Composed Config
 
 ```java
-// META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports:
-// com.company.observability.ObservabilityAutoConfiguration
+@Configuration
+@Import({ DataSourceConfig.class, ExternalServiceConfig.class, ResilienceConfig.class })
+public class AppConfig { }
 
-@AutoConfiguration  // Spring Boot 3.x annotation
-@ConditionalOnClass(MeterRegistry.class)        // only if Micrometer on classpath
-@ConditionalOnMissingBean(MetricsExporter.class) // don't replace user-defined exporter
-@EnableConfigurationProperties(ObservabilityProperties.class)
-public class ObservabilityAutoConfiguration {
+@Configuration
+public class ResilienceConfig {
     @Bean
-    @ConditionalOnProperty(
-        prefix = "observability",
-        name = "enabled",
-        havingValue = "true",
-        matchIfMissing = true  // enabled by default
-    )
-    public MetricsExporter exporter(ObservabilityProperties props) {
-        return new PrometheusExporter(props.getEndpoint());
+    @ConditionalOnProperty(prefix = "resilience.circuit-breaker", name = "enabled",
+                           havingValue = "true", matchIfMissing = true)
+    public CircuitBreaker paymentBreaker(ResilienceProps props) {
+        return CircuitBreaker.of("payment", CircuitBreakerConfig.custom()
+            .failureRateThreshold(props.getFailureRate())
+            .waitDurationInOpenState(props.getOpenWait()).build());
+    }
+}
+```
+
+```java
+@Validated
+@ConfigurationProperties(prefix = "resilience")
+public class ResilienceProps {
+    @NotNull private Duration openWait;
+    @Min(10) @Max(100) private float failureRate;       // rejected at startup if out of range
+    // getters / setters
+}
+```
+
+```java
+// Full @Configuration mode: calls between @Bean methods return the SAME singleton (CGLIB-proxied)
+@Configuration
+public class DataSourceConfig {
+    @Bean public DataSource dataSource(DbProps p) { return build(p); }
+    @Bean public JdbcTemplate jdbc()  { return new JdbcTemplate(dataSource(dbProps())); } // same DataSource
+    @Bean public DbProps dbProps()    { return new DbProps(); }
+}
+```
+
+### Metrics
+
+- One JAR, 5 environments: zero environment-specific builds, profile chosen by `SPRING_PROFILES_ACTIVE`.
+- Validation failures (e.g. `failureRate=200`) fail fast at boot in **<1s**, before traffic is served.
+- Disabling the circuit breaker in `dev` via `resilience.circuit-breaker.enabled=false` removes the bean entirely — no runtime branch.
+
+### Pitfalls
+
+**Pitfall 1 — Lite-mode `@Bean` methods are not proxied, creating duplicate instances.**
+```java
+// BROKEN: class lacks @Configuration (lite mode); jdbc() calls dataSource() as a PLAIN method,
+// producing a SECOND DataSource (and a second connection pool)
+@Component
+class DataSourceConfig {
+    @Bean DataSource dataSource() { return build(); }
+    @Bean JdbcTemplate jdbc()    { return new JdbcTemplate(dataSource()); } // new pool!
+}
+```
+```java
+// FIXED: @Configuration (full mode) CGLIB-proxies the class so inter-bean calls return the singleton
+@Configuration
+class DataSourceConfig {
+    @Bean DataSource dataSource() { return build(); }
+    @Bean JdbcTemplate jdbc()    { return new JdbcTemplate(dataSource()); } // same singleton
+}
+```
+
+**Pitfall 2 — `@Profile` on an inner `@Configuration` ignored when the outer class is already loaded.**
+```java
+// BROKEN: nested config's @Profile evaluated in the outer class's context;
+// if the outer @Configuration is registered, the inner beans load regardless of active profile
+@Configuration
+class Outer {
+    @Configuration @Profile("prod-eu")
+    static class Inner { @Bean EuClient client() { return new EuClient(); } }
+}
+```
+```java
+// FIXED: make profile-specific config a top-level class so the profile gate applies to the whole class
+@Configuration @Profile("prod-eu")
+class EuConfig { @Bean EuClient client() { return new EuClient(); } }
+```
+
+**Pitfall 3 — `@Value` resolved before its `PropertySource` is loaded.**
+```java
+// BROKEN: a @Value used in a static or early-initialized context reads before the source is registered,
+// yielding the literal placeholder "${external.url}" instead of the value
+@Component
+class EarlyBean {
+    static String URL;
+    @Value("${external.url}") public void set(String v) { URL = v; }  // ordering-fragile
+}
+```
+```java
+// FIXED: read the value through @ConfigurationProperties (bound after all PropertySources load),
+// or inject via constructor on a normal singleton so resolution happens after the Environment is ready
+@ConfigurationProperties(prefix = "external")
+class ExternalProps { private String url; /* bound once Environment is complete */ }
+```
+
+### Interview Q&A
+
+**What is the difference between full `@Configuration` and lite-mode bean declarations?** A `@Configuration` class is CGLIB-proxied, so calling one `@Bean` method from another returns the cached singleton. Lite mode (`@Bean` methods on a `@Component` or plain class) is not proxied, so inter-bean method calls execute the method normally and create new instances.
+
+**How do `@Profile` and `@Conditional` differ?** `@Profile` is a specialized `@Conditional` keyed on active profile names, used for coarse environment selection. `@Conditional`/`@ConditionalOnProperty` evaluate arbitrary conditions (a property value, a class on the classpath, a bean's presence) for finer-grained toggling like enabling a circuit breaker.
+
+**Why does `@ConditionalOnProperty(matchIfMissing = true)` matter for defaults?** It makes a bean present unless explicitly disabled. Production gets the safe default (circuit breaker on) with no config, while a developer can set the property to `false` to opt out, avoiding the need to enable it in every environment file.
+
+**When does `@ConfigurationProperties` validation fire, and why prefer it over runtime checks?** With `@Validated`, JSR-303 constraints are checked at bean binding during startup, so an invalid value fails fast before the app serves traffic. This is safer than discovering a bad config value via a runtime exception under load.
+
+**Why use `@Import` instead of one giant `@Configuration`?** `@Import` composes small, cohesive config classes (data source, external services, resilience) that can be reused and reasoned about independently, and lets you include or omit modules per profile rather than maintaining one monolithic class.
+
+**How do you ship one artifact to five environments safely?** Keep shared defaults in `application.yml`, override per environment in `application-<profile>.yml`, select the profile via `SPRING_PROFILES_ACTIVE`, keep secrets out of the JAR (injected at deploy time), and validate bound properties so a misconfigured environment fails at boot rather than mid-request.
+
+---
+
+**Additional war stories and interview Q&As:**
+
+**Pitfall: @Configuration full mode — circular dependency through @Bean methods.**
+
+```java
+// BROKEN: two @Bean methods call each other — circular reference at startup
+@Configuration
+public class AppConfig {
+    @Bean
+    public ServiceA serviceA() {
+        return new ServiceA(serviceB());  // calls serviceB() below
+    }
+
+    @Bean
+    public ServiceB serviceB() {
+        return new ServiceB(serviceA());  // calls serviceA() above → cycle!
     }
 }
 
-@ConfigurationProperties(prefix = "observability")
-public class ObservabilityProperties {
-    private boolean enabled = true;
-    private String endpoint = "localhost:9090";
-    // getters, setters
+// FIX: inject via method parameter (Spring resolves the cycle via CGLIB proxy)
+@Configuration
+public class AppConfig {
+    @Bean
+    public ServiceA serviceA(ServiceB serviceB) {  // injected, not called directly
+        return new ServiceA(serviceB);
+    }
+
+    @Bean
+    public ServiceB serviceB() {
+        return new ServiceB();
+    }
 }
 ```
 
-**Result:** The starter is discovered via the `AutoConfiguration.imports` file, is conditional on Micrometer being present, does not conflict with user-defined beans, and exposes configurable properties. Users can override behavior by defining their own `MetricsExporter` bean or setting `observability.enabled=false`.
+**Pitfall: @Profile mismatch causes "No qualifying bean" in test.**
+
+```java
+// BROKEN: production bean gated on @Profile("prod") — not loaded in test context
+@Configuration
+@Profile("prod")
+public class ProdSecurityConfig { @Bean SecurityFilter securityFilter() { ... } }
+
+// Test context uses no profile → SecurityFilter missing → NoSuchBeanDefinitionException
+@SpringBootTest
+class ServiceTest { @Autowired SecurityFilter filter; }  // fails in test
+
+// FIX: provide a test double with @Profile("!prod") or use @ConditionalOnMissingBean
+@Configuration
+@Profile("!prod")
+public class TestSecurityConfig {
+    @Bean
+    public SecurityFilter securityFilter() { return new NoopSecurityFilter(); }
+}
+```
+
+**@ConditionalOnProperty for feature flags:**
+
+```java
+@Bean
+@ConditionalOnProperty(name = "features.new-pricing-engine", havingValue = "true")
+public PricingEngine newPricingEngine() { return new NewPricingEngine(); }
+
+@Bean
+@ConditionalOnProperty(name = "features.new-pricing-engine",
+                       havingValue = "false", matchIfMissing = true)
+public PricingEngine legacyPricingEngine() { return new LegacyPricingEngine(); }
+```
+
+**Additional interview Q&As:**
+
+**What is the difference between @Configuration full mode and lite mode?** A class annotated with `@Configuration` (full mode) is subclassed by CGLIB — inter-`@Bean` method calls are intercepted so that the container returns the same singleton instance each time. A `@Component` or `@Bean` class without `@Configuration` (lite mode) is not proxied — calling one `@Bean` method from another creates a new instance, bypassing the singleton guarantee. Always use `@Configuration` for beans with inter-dependencies; use lite mode (or `@Configuration(proxyBeanMethods = false)`) in Spring Boot 3 for performance when `@Bean` methods are independent.
+
+**When should you use @Import vs component scanning?** `@Import` explicitly imports a configuration class — useful for library starters, infrastructure configuration, or test configurations that must not be auto-detected. Component scanning (`@ComponentScan`) discovers all `@Component`-annotated classes in a package — useful for application beans but gives up explicit control. In library code (starters, framework modules), always use `@Import` to avoid polluting application scan paths.
+
+**How does @Conditional work under the hood?** Spring evaluates `@Conditional` during the `BeanDefinition` post-processing phase, before bean instantiation. The `Condition.matches()` method receives a `ConditionContext` (access to `Environment`, `BeanDefinitionRegistry`, `ResourceLoader`) and a `AnnotatedTypeMetadata` (access to the annotation's attributes). Spring Boot's `@ConditionalOnProperty`, `@ConditionalOnClass`, and `@ConditionalOnMissingBean` are all implemented as `Condition` implementations that inspect these contexts.

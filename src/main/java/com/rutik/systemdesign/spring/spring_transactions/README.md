@@ -941,3 +941,192 @@ public void savePaymentTransactionally(PaymentRequest req) {
 ```
 
 **Outcome after fixes**: Zero data inconsistencies in a 30-day post-fix monitoring window. P99 transaction duration dropped from 950ms to 12ms. Connection pool exhaustion incidents eliminated. Audit record integrity at 100% (REQUIRES_NEW correctly isolates audit writes from payment rollbacks).
+
+---
+
+**Expanded Case Study: Transactional Integrity in a Multi-Step Payment Settlement Pipeline**
+
+**Scenario:** A fintech platform settles 50,000 payment transactions per hour across 4 sequential steps: (1) validate payment, (2) debit customer account, (3) credit merchant account, (4) publish settlement event to Kafka. Each step touches a different aggregate. A partial failure (debit succeeds, credit fails) causes real money imbalance. The existing code used a single `@Transactional` method wrapping all four steps — but step 4 (Kafka publish) is non-transactional and fires before the DB commits, causing duplicate events on retry.
+
+**Scale:** 50k tx/hr = ~14 TPS sustained, peak 80 TPS during business hours. Settlement SLA: < 2s end-to-end. Postgres with `READ_COMMITTED` isolation.
+
+```
+Settlement pipeline — transactions and boundaries:
+
+  [SettlementService.settle()]
+        │
+        │── TX_1 (REQUIRED) ─────────────────────────────────────────────┐
+        │   validate(payment)         -- read-only check                  │
+        │   accountService.debit()    -- write to accounts table          │
+        │   accountService.credit()   -- write to accounts table          │
+        │   outbox.record()           -- write to outbox table (same tx!) │
+        └─────────────────────────────────────────────────────────────────┘
+                                              │
+                                              │  TX commits
+                                              │
+        [OutboxPoller @Scheduled]             │
+              │── TX_2 (REQUIRES_NEW) ────────┘
+              │   publish to Kafka
+              │   mark outbox row SENT
+              └──────────────────────────────────
+
+Invariants:
+  - If TX_1 rolls back: outbox row also rolls back → no Kafka event
+  - If Kafka publish fails: TX_2 rolls back → outbox row stays PENDING → retried
+  - Debit + credit + outbox: atomic — all succeed or all roll back
+```
+
+**Settlement service — correct transactional boundaries:**
+
+```java
+@Service
+@Transactional                        // default: REQUIRED, READ_COMMITTED
+public class SettlementService {
+
+    private final AccountRepository accounts;
+    private final OutboxRepository outbox;
+    private final ValidationService validation;
+
+    public SettlementResult settle(Payment payment) {
+        // Step 1: validate (read-only — same tx, no separate tx overhead)
+        validation.validate(payment);
+
+        // Step 2+3: debit + credit in one atomic write
+        accounts.debit(payment.customerId(), payment.amount());
+        accounts.credit(payment.merchantId(), payment.amount());
+
+        // Step 4: write to outbox table (same tx — committed atomically with above)
+        outbox.record(new OutboxEvent("payment.settled", payment.id(), payment));
+
+        return SettlementResult.success(payment.id());
+    }
+}
+```
+
+**Outbox poller — REQUIRES_NEW for independent retry:**
+
+```java
+@Component
+public class OutboxPoller {
+
+    private final OutboxRepository outbox;
+    private final KafkaTemplate<String, Object> kafka;
+    private final OutboxPublisher publisher;
+
+    @Scheduled(fixedDelay = 500)       // poll every 500ms
+    @Transactional(readOnly = true)
+    public void poll() {
+        outbox.findByStatus("PENDING").forEach(publisher::publish);
+    }
+}
+
+@Component
+public class OutboxPublisher {
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)  // independent tx per event
+    public void publish(OutboxEvent event) {
+        kafka.send(event.topic(), event.payload()).get(2, SECONDS);
+        outbox.markSent(event.id());
+        // If kafka.send() throws, REQUIRES_NEW tx rolls back → row stays PENDING → retried
+    }
+}
+```
+
+**BROKEN→FIX: Kafka publish inside the settlement transaction**
+
+```java
+// BROKEN: KafkaTemplate.send() fires before DB commits
+// If DB commit fails after Kafka, consumers see the event but DB has no record
+@Service
+@Transactional
+public class SettlementService {
+    public void settle(Payment p) {
+        accounts.debit(p.customerId(), p.amount());
+        accounts.credit(p.merchantId(), p.amount());
+        // DANGER: Kafka publish here fires BEFORE the enclosing @Transactional commits!
+        // On DB commit failure → Kafka already has the event → duplicate/phantom event
+        kafka.send("payment.settled", p);
+    }
+}
+
+// FIX: Transactional Outbox pattern (shown above)
+// Publish to outbox table inside tx, then poll and publish to Kafka separately
+```
+
+**BROKEN→FIX: REQUIRES_NEW audit creates phantom reads under SERIALIZABLE**
+
+```java
+// BROKEN: AuditService uses REQUIRES_NEW → suspends outer tx
+// Under SERIALIZABLE isolation, the newly started tx sees committed data
+// that the outer (suspended) tx hasn't committed — phantom read risk
+@Transactional(propagation = Propagation.REQUIRES_NEW, isolation = Isolation.SERIALIZABLE)
+public void auditSettlement(Payment p) {
+    // reads accounts that the suspended tx hasn't committed yet
+    BigDecimal balance = accounts.getBalance(p.customerId());  // stale!
+}
+
+// FIX: audit after the outer tx commits using @TransactionalEventListener
+// Fired AFTER_COMMIT — guaranteed to see committed state
+@TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+public void onSettlementCommitted(SettlementCommittedEvent event) {
+    auditRepository.save(new AuditEntry(event.paymentId(), Instant.now()));
+}
+
+// In SettlementService: publish event (handled AFTER_COMMIT, not immediately)
+applicationEventPublisher.publishEvent(new SettlementCommittedEvent(payment.id()));
+```
+
+**BROKEN→FIX: Optimistic locking for concurrent settlement attempts**
+
+```java
+// BROKEN: two threads settle the same payment concurrently → double-debit
+@Entity
+public class Account {
+    private BigDecimal balance;
+    // No version field → last-write-wins → balance incorrect
+}
+
+// FIX: @Version for optimistic locking — second committer gets ObjectOptimisticLockingFailureException
+@Entity
+public class Account {
+    @Version
+    private Long version;
+
+    public void debit(BigDecimal amount) {
+        if (balance.compareTo(amount) < 0) throw new InsufficientFundsException();
+        this.balance = balance.subtract(amount);
+    }
+}
+
+// Caller retries on OptimisticLockException (Spring Retry or @Retryable)
+@Retryable(value = ObjectOptimisticLockingFailureException.class, maxAttempts = 3)
+public SettlementResult settle(Payment p) { ... }
+```
+
+**Isolation levels chosen per operation:**
+
+| Operation | Isolation | Reason |
+|---|---|---|
+| Debit/credit | READ_COMMITTED (default) | Sees committed balances; performance |
+| Balance check for approval | REPEATABLE_READ | Re-read must see same balance within single tx |
+| Settlement audit query | READ_UNCOMMITTED | Read-only report; dirty reads acceptable |
+| Idempotency check | SERIALIZABLE | Must not allow two concurrent new records for same payment_id |
+
+**Metrics and results:**
+- Pre-fix: 12 duplicate settlement events per day (Kafka publish before DB commit)
+- Post-fix: 0 duplicate events in 90 days (transactional outbox pattern)
+- Settlement latency p99: 180ms (vs. 450ms with distributed 2PC attempt)
+- Optimistic lock conflicts: 0.3% of settlements (retried successfully, max 2 attempts)
+- Outbox poll lag: < 600ms from commit to Kafka delivery (500ms poll interval + 100ms Kafka)
+
+**Interview discussion points:**
+
+**Why is the Transactional Outbox pattern better than publishing to Kafka inside the settlement transaction?** Kafka's `KafkaTemplate.send()` is not part of the database transaction. Firing it inside `@Transactional` means the Kafka message can be sent before the DB commits (false positive) or after a partial failure (orphaned event). The outbox pattern writes a record to a DB table inside the same ACID transaction as the business data, then a separate poller reads and publishes committed records, guaranteeing at-least-once Kafka delivery only after DB commit.
+
+**What is the difference between @TransactionalEventListener(AFTER_COMMIT) and a regular @EventListener?** A regular `@EventListener` fires synchronously within the current transaction — if the tx rolls back, the listener has already executed (side effects are permanent). `@TransactionalEventListener(AFTER_COMMIT)` fires only if the enclosing transaction successfully commits, making it ideal for sending notifications, publishing events, or triggering async workflows that must reflect committed state.
+
+**How do you handle a Kafka publish failure in the outbox poller?** The `publish()` method runs in `REQUIRES_NEW`. If `kafka.send().get()` throws, the transaction rolls back — the outbox row stays `PENDING`. The next poll cycle retries it. After N retries (configurable), move the row to a `DEAD_LETTER` table and alert ops. This gives you exactly-once delivery semantics on the DB side with at-least-once on Kafka (consumers must be idempotent).
+
+**When should you use REQUIRES_NEW vs NESTED propagation?** `REQUIRES_NEW` suspends the current transaction and starts a completely independent one — fully isolated, commits and rolls back independently. Use for audit writes that must persist even if the outer tx rolls back. `NESTED` uses a savepoint within the current transaction — rolls back to the savepoint on failure but the outer tx can still commit. Use when you want partial rollback within one transaction (e.g., retry a sub-step without losing all prior work). Postgres supports `NESTED` (via savepoints); not all databases do.
+
+**What is the risk of REQUIRES_NEW with high transaction volume?** Each `REQUIRES_NEW` opens a new connection from the pool. If 80 settlement threads each fire a `REQUIRES_NEW` audit, that's 160 total connections — doubling HikariCP pool pressure. Size the pool accounting for nested transactions, or use `@TransactionalEventListener(AFTER_COMMIT)` which runs after the outer connection is released.

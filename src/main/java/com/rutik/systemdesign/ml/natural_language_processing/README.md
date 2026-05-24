@@ -584,42 +584,152 @@ BLEU (Bilingual Evaluation Understudy) measures the geometric mean of modified n
 
 ## 14. Case Study
 
-### Problem: E-commerce Product Review Classifier
-
-**Context:** An e-commerce platform receives 500K product reviews per day across 50 product categories. The task: classify each review as positive/negative AND extract product aspect mentions (battery, display, camera) for structured analytics.
-
-**Phase 1 — Classification Baseline (Week 1)**
-
-TF-IDF (unigrams + bigrams, 100K features, sublinear_tf=True) + LogisticRegression (C=0.1, class_weight="balanced"). Training time: 4 minutes on 2M historical reviews. Inference: 0.3ms per review on a single CPU core. Accuracy: 91.2%; F1: 0.903.
-
-**Phase 2 — Improving with Embeddings (Week 3)**
-
-FastText pretrained on Common Crawl (300d) used as input to a TextCNN with filter sizes [2,3,4], 128 filters each, dropout 0.5. Training: 2 hours on GPU (Tesla T4). Inference: 2.1ms per review. Accuracy: 93.8%; F1: 0.931. Improvement justified by: star-rating discrepancy cases where "this is fine I guess" has five stars but negative sentiment.
-
-**Phase 3 — Aspect NER (Week 6)**
-
-BiLSTM (256 hidden units, bidirectional) + CRF trained on 15K manually labeled reviews with aspect entity types: BATTERY, DISPLAY, CAMERA, BUILD_QUALITY, PRICE, SHIPPING. Training: 6 hours. Entity-level F1: 0.847 overall; BATTERY: 0.91; SHIPPING: 0.72 (shipping terms overlap with general delivery language). Fix: added 2K shipping-specific annotated examples, raising SHIPPING F1 to 0.83.
-
-**Deployment Architecture:**
+**Scenario: Customer-support ticket classification.** A SaaS company routes incoming tickets to 47 queues (billing, auth, API errors, etc.). A fine-tuned bert-base-uncased model, trained on 500k labeled historical tickets, predicts the queue. It is served behind FastAPI with the HuggingFace `transformers` pipeline and dynamic batching. The system handles 800 tickets/sec on 2x A10G GPUs at macro-F1 0.89.
 
 ```
-Review submission
-      |
-      v
-[FastAPI service: TextCNN sentiment]  <-- model loaded at startup, 400MB RAM
-      |
-      v
-[AsyncIO: BiLSTM NER inference]       <-- batched, 32 reviews per batch, 67ms p99
-      |
-      v
-[Structured output: {sentiment, aspects, confidence}]
-      |
-      v
-[Analytics DB: Redshift]
+ticket text
+        |
+   tokenizer (bert-base-uncased, max_length=512)
+        |
+   dynamic batcher (max_batch=32, max_wait=10ms)
+        |
+   BERT classifier (47-way softmax head)   GPU, batched
+        |
+   argmax + confidence
+        |
+   confident? --yes--> route to queue
+              --no---> human triage
 ```
 
-**Key Decisions:**
-- Kept TF-IDF pipeline for real-time search ranking (0.3ms latency vs 2.1ms for neural)
-- TextCNN for sentiment (100ms SLA, GPU-backed)
-- BiLSTM-CRF for aspect extraction (async, 500ms SLA acceptable for analytics)
-- Rejected transformer-based approach in 2021: would have required 8x GPU cost for 2.6% accuracy gain
+Macro-F1 0.89 across 47 classes, p99 latency 45ms under load, throughput 800 tickets/sec. Dynamic batching trades up to 10ms of queueing for far higher GPU utilization, the key lever that turns single-digit to 800 req/s.
+
+**Sliding-window tokenization for long tickets:**
+
+```python
+from transformers import AutoTokenizer
+import torch
+
+tok = AutoTokenizer.from_pretrained("bert-base-uncased")
+
+def encode_long(text: str, max_len: int = 512, stride: int = 128) -> dict:
+    """Split long tickets into overlapping windows instead of truncating,
+    so information at the end of a long ticket is not lost."""
+    return tok(
+        text, max_length=max_len, truncation=True, stride=stride,
+        return_overflowing_tokens=True, return_tensors="pt", padding="max_length",
+    )
+```
+
+**Class-weighted training for imbalanced queues:**
+
+```python
+import torch
+from torch import nn
+from transformers import AutoModelForSequenceClassification
+
+def make_loss(label_counts: torch.Tensor) -> nn.Module:
+    # inverse-frequency weights so rare queues are not ignored
+    weights = label_counts.sum() / (len(label_counts) * label_counts)
+    return nn.CrossEntropyLoss(weight=weights)
+
+model = AutoModelForSequenceClassification.from_pretrained(
+    "bert-base-uncased", num_labels=47
+)
+```
+
+**FastAPI serving with dynamic batching and window pooling:**
+
+```python
+import numpy as np
+import torch
+
+class TicketClassifier:
+    def __init__(self, model, tokenizer, id2label: dict[int, str]) -> None:
+        self.model = model.eval().cuda()
+        self.tok = tokenizer
+        self.id2label = id2label
+
+    @torch.inference_mode()
+    def predict(self, text: str) -> tuple[str, float]:
+        enc = encode_long(text)
+        logits = self.model(**{k: v.cuda() for k, v in enc.items()
+                               if k in ("input_ids", "attention_mask")}).logits
+        probs = logits.softmax(-1).mean(dim=0)   # pool over windows
+        idx = int(probs.argmax())
+        return self.id2label[idx], float(probs[idx])
+```
+
+**Pitfall 1 — Right-truncation on long tickets.** Default truncation cuts the end of the text; for tickets where the actual problem is described last (after a long greeting/log dump), the signal is discarded.
+
+```python
+# BROKEN: truncate to 512 from the right -> loses the end of long tickets
+enc = tok(text, max_length=512, truncation=True)
+
+# FIX: sliding window with stride, then mean-pool the per-window logits so
+# every part of a long ticket contributes (see encode_long + window pooling).
+enc = encode_long(text, max_len=512, stride=128)
+```
+
+**Pitfall 2 — Label imbalance.** Some queues are 1000x rarer than "general inquiry"; with plain cross-entropy the model never predicts the rare classes and their recall is near zero.
+
+```python
+# BROKEN: unweighted loss -> model collapses onto majority queues
+loss_fn = nn.CrossEntropyLoss()
+
+# FIX: inverse-frequency class weights (and/or oversample rare queues in the
+# sampler) so rare-but-important queues are learned.
+loss_fn = make_loss(label_counts)
+```
+
+**Pitfall 3 — CPU-only inference too slow.** Running BERT on a CPU-only server gives ~15s/ticket, far too slow for live routing.
+
+```python
+# BROKEN: PyTorch BERT on CPU -> ~15s/ticket, unusable online
+out = model(**enc)   # on CPU
+
+# FIX: export to ONNX and run with ONNX Runtime (graph optimizations +
+# quantization) for ~3x CPU speedup, or serve on GPU with batching.
+import onnxruntime as ort
+sess = ort.InferenceSession("bert.onnx",
+                            providers=["CPUExecutionProvider"])
+```
+
+**Interview Q&A:**
+
+**Why fine-tune BERT instead of using a zero-shot LLM for ticket routing?** With 500k labeled tickets and 47 fixed classes, a fine-tuned encoder is far cheaper and faster at inference (tens of ms on a small GPU), gives calibrated class probabilities, and is easy to monitor. A zero-shot LLM costs more per call, is slower, and is harder to keep stable across prompt changes; it is better reserved for low-volume or open-ended labels.
+
+**What is dynamic batching and what does it trade off?** The server waits up to a small window (10ms) to collect requests into one batch before running the GPU, dramatically improving throughput because GPUs are most efficient on batches. The trade-off is added latency, bounded by the max-wait. Tuning max_batch and max_wait balances p99 latency against throughput.
+
+**How do you handle tickets longer than the 512-token limit?** Use a sliding window with overlap (stride) to split the ticket into chunks, encode each, and pool the per-chunk logits (mean or max). This preserves information across the whole ticket rather than truncating. Alternatively use a long-context encoder (Longformer), at higher compute cost.
+
+**How do you evaluate a 47-class imbalanced classifier?** Macro-F1 (unweighted mean of per-class F1) is the headline metric because it weights rare queues equally with common ones, exposing collapse on rare classes that accuracy would hide. Inspect the confusion matrix for systematic confusions between semantically close queues, and track per-class recall for the business-critical rare queues.
+
+**Why and how would you export to ONNX?** ONNX decouples the model from PyTorch and lets ONNX Runtime apply graph fusion, constant folding, and quantization, giving roughly 3x CPU speedup and portability across hardware. You export with `torch.onnx.export` (or the transformers ONNX exporter), validate output parity against the PyTorch model, then serve with onnxruntime.
+
+**How do you set a confidence threshold for auto-routing vs human triage?** Calibrate the softmax probabilities (temperature or isotonic), then choose a threshold where the auto-routed precision meets the business SLA (e.g. 97% correct routing). Tickets below the threshold go to human triage. This trades automation rate against routing errors; monitor both in production and adjust as the model and ticket mix drift.
+
+**Pitfall — Tokenizing at inference with a different tokenizer than training.**
+
+```python
+# BROKEN: training uses 'bert-base-uncased' tokenizer (lowercases + WordPiece)
+# inference accidentally uses 'bert-base-cased' (case-sensitive + different vocab)
+# Token IDs diverge → model output is nonsense
+
+from transformers import AutoTokenizer, AutoModel
+
+# Training:
+tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+
+# Inference (wrong model name — easy typo in a config file):
+tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")  # MISMATCH!
+
+# FIX: save tokenizer alongside model checkpoint
+model.save_pretrained("./saved_model")
+tokenizer.save_pretrained("./saved_model")   # always save tokenizer with model
+# Inference: load both from the same directory
+tokenizer = AutoTokenizer.from_pretrained("./saved_model")
+```
+
+**How does BERT's masked language model pre-training differ from GPT's causal language model, and which is better for classification?** BERT uses bidirectional attention — every token attends to all others in both directions — making it optimal for tasks requiring full-context understanding (NER, classification, question answering). GPT uses causal (left-to-right) attention — each token attends only to previous tokens — making it optimal for text generation. For classification, BERT-style models (RoBERTa, DeBERTa) consistently outperform GPT-style because they encode the entire input context before producing a representation. GPT-style models can do classification via prompt engineering ("Is this review positive? Answer:"), but fine-tuned BERT-style models win on precision at production scale.
+
+**What is the difference between BPE, WordPiece, and SentencePiece tokenization, and why does it matter for production?** BPE (Byte Pair Encoding) merges the most frequent character pairs iteratively — used by GPT-2/3, RoBERTa. WordPiece uses a likelihood-based merge criterion — used by BERT. SentencePiece is language-agnostic, treating text as a raw byte stream without pre-tokenization — used by T5, LLaMA, enabling multilingual models. In production: tokenizer choice affects vocabulary size (32k-100k), OOV rate for domain-specific terms, and inference speed (longer sequences after tokenization = more compute). For code or structured data with rare symbols, SentencePiece or BPE with a large vocabulary (100k) handles OOV better than WordPiece.

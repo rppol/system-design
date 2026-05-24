@@ -672,97 +672,331 @@ Latent space interpolation creates a sequence of images by linearly interpolatin
 
 ## 14. Case Study
 
-**Task**: Build a product image generation system for an e-commerce platform to augment a sparse catalog. The platform has 50K product images across 200 categories, many categories with < 100 images. Goal: generate diverse, high-quality product images for data augmentation and catalog preview.
+**Scenario:** A health AI company (partnered with 12 hospital systems, HIPAA Business Associate Agreement in place) needs to expand a radiology AI training dataset. The existing dataset has 18,000 chest X-rays with rare pathologies (pneumothorax: 340 samples, aortic dissection: 127 samples) - insufficient for training robust detection models. The goal: train a DDPM on the existing images, generate 5,000 synthetic X-rays per pathology class while maintaining HIPAA compliance (no real patient identifiers in synthetic images), achieving FID <= 28 and verified clinical fidelity (board-certified radiologist review, 80% pass rate), with synthetic data improving downstream classifier AUC-ROC by >= 0.04.
 
-**Problem Statement**: Training downstream classifiers with 50K real images yields 82% accuracy. Adding 200K synthetic images should improve to 90%+. Synthetic images must be: (1) photorealistic (FID < 20 vs real products), (2) category-consistent (a generated "shoe" looks like a shoe), (3) diverse (no mode collapse).
-
-**Architecture Decision: Conditional LDM (Latent Diffusion Model)**
-
-Rationale for LDM over GAN: training stability (no mode collapse risk), better diversity, text-conditional control via CLIP. Against pixel-space diffusion: compute efficiency (8x compression).
-
+**Architecture:**
 ```
-Pipeline:
-  1. VQ-VAE: compress 256x256 product images to 32x32x4 latent
-  2. CLIP: encode category names to text embeddings
-  3. LDM U-Net: diffuse in 32x32x4 latent space, conditioned on CLIP embeddings
-  4. VQ-VAE decoder: decode 32x32x4 latent to 256x256 RGB image
-
-Training:
-  - VQ-VAE: train on all 50K products first (reconstruction + codebook loss)
-    Reconstruction loss: L1 + perceptual (VGG) + patch discriminator (adversarial)
-  - LDM: train U-Net in latent space with CFG (10% unconditional drops)
-  - Optimizer: AdamW, lr=1e-4, weight_decay=1e-2
-  - LR schedule: constant (LDM is less sensitive to schedule than discriminative models)
-  - Mixed precision: fp16 + GradScaler
-  - Batch: 64 per GPU, 4 GPUs, gradient_accumulation=2 -> effective batch=512
-  - Epochs: 300 for VQ-VAE (fast), 500 for LDM
+Real X-ray Dataset (18,000 images, 512x512, 16-bit DICOM)
+  De-identified: patient ID, date, DOB stripped (HIPAA Safe Harbor)
+  Normalised: 16-bit -> 8-bit float via window/level adjustment
+  Class labels: 14 pathology categories + "normal"
+         |
+         v
+Class-Conditional DDPM Training
+  Backbone: U-Net with residual blocks (256 base channels)
+  Class conditioning: label embedding added to timestep embedding
+  Noise schedule: cosine beta schedule, T=1000 steps
+  Training: 200 epochs, batch=16, lr=2e-4, EMA decay=0.9999
+  GPU: 4x A100 40GB, training time: 72 hours
+         |
+         v
+Synthetic Image Generation (DDPM Sampling)
+  Class-conditional generation: specify pathology class
+  Sampling: DDIM (50 steps, deterministic, 20x faster than DDPM)
+  Batch generation: 100 images/GPU * 4 GPUs = 400 images/hour
+  5,000 images per class = 12.5 hours for two classes
+         |
+         v
+HIPAA Compliance Verification
+  k-anonymity check: nearest-neighbour distance to training set
+  If min_NN_distance < threshold -> reject synthetic image
+  Ensure no memorisation of rare training examples
+         |
+         v
+Clinical Fidelity Review (20% sample = 200 images per class)
+  Board-certified radiologist scores each image 1-5 (realistic scale)
+  Pass threshold: >= 4 for >= 80% of reviewed images
+         |
+         v
+Augmented Dataset Training
+  Original: 18,000 real + 10,000 synthetic (5K per pathology class)
+  Downstream: EfficientNet-B3 classifier trained on augmented set
+  Evaluation: AUC-ROC on held-out real images only
 ```
+
+**Step-by-step implementation:**
 
 ```python
+from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import Tensor
-from diffusers import UNet2DConditionModel, DDIMScheduler
+import numpy as np
+from dataclasses import dataclass
 
+@dataclass
+class DDPMConfig:
+    image_size: int = 512
+    in_channels: int = 1           # grayscale X-ray
+    base_channels: int = 256
+    channel_multipliers: tuple[int, ...] = (1, 2, 4, 8)
+    num_res_blocks: int = 2
+    num_classes: int = 15          # 14 pathologies + normal
+    dropout: float = 0.1
+    T: int = 1000                  # diffusion timesteps
+    beta_start: float = 1e-4
+    beta_end: float = 0.02
 
-class ProductImageGenerator:
+class ResBlock(nn.Module):
     def __init__(
         self,
-        vqvae: nn.Module,
-        unet: UNet2DConditionModel,
-        clip_encoder: nn.Module,
-        device: torch.device,
+        in_ch: int,
+        out_ch: int,
+        time_emb_dim: int,
+        class_emb_dim: int,
+        dropout: float = 0.1,
     ) -> None:
-        self.vqvae = vqvae
-        self.unet = unet
-        self.clip = clip_encoder
-        self.scheduler = DDIMScheduler(num_train_timesteps=1000)
-        self.scheduler.set_timesteps(50)   # 50 DDIM steps at inference
-        self.device = device
+        super().__init__()
+        self.conv1 = nn.Sequential(nn.GroupNorm(32, in_ch), nn.SiLU(), nn.Conv2d(in_ch, out_ch, 3, padding=1))
+        self.time_proj = nn.Linear(time_emb_dim, out_ch)
+        self.class_proj = nn.Linear(class_emb_dim, out_ch)
+        self.conv2 = nn.Sequential(nn.GroupNorm(32, out_ch), nn.SiLU(), nn.Dropout(dropout), nn.Conv2d(out_ch, out_ch, 3, padding=1))
+        self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
 
-    @torch.no_grad()
-    def generate(
-        self,
-        category: str,
-        n_images: int = 4,
-        cfg_scale: float = 7.5,
-    ) -> Tensor:
-        """Generate product images for a given category."""
-        self.unet.eval()
-        self.vqvae.eval()
+    def forward(self, x: torch.Tensor, t_emb: torch.Tensor, c_emb: torch.Tensor) -> torch.Tensor:
+        h = self.conv1(x)
+        h = h + self.time_proj(t_emb)[:, :, None, None]
+        h = h + self.class_proj(c_emb)[:, :, None, None]
+        h = self.conv2(h)
+        return h + self.skip(x)
 
-        # Encode category text with CLIP
-        text_emb = self.clip.encode_text([category] * n_images)           # (n, 77, 768)
-        null_emb = self.clip.encode_text([""] * n_images)                 # unconditional
-
-        # Start from noise in latent space (32x32x4 for 256x256 images with 8x compression)
-        latent = torch.randn(n_images, 4, 32, 32, device=self.device)
-
-        for t in self.scheduler.timesteps:
-            # Predict noise with and without conditioning (CFG)
-            eps_cond   = self.unet(latent, t, encoder_hidden_states=text_emb).sample
-            eps_uncond = self.unet(latent, t, encoder_hidden_states=null_emb).sample
-            eps_guided = eps_uncond + cfg_scale * (eps_cond - eps_uncond)
-
-            latent = self.scheduler.step(eps_guided, t, latent).prev_sample
-
-        # Decode latent to pixel space
-        images = self.vqvae.decode(latent)          # (n, 3, 256, 256), values in [-1, 1]
-        images = (images + 1) / 2                   # rescale to [0, 1]
-        return images.clamp(0, 1)
+def cosine_beta_schedule(T: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Cosine noise schedule (Nichol & Dhariwal 2021): smoother than linear."""
+    steps = torch.arange(T + 1, dtype=torch.float64)
+    alphas_cumprod = torch.cos(((steps / T) + 0.008) / 1.008 * torch.pi / 2) ** 2
+    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
+    betas = betas.clamp(0, 0.999)
+    alphas = 1 - betas
+    alphas_cumprod = torch.cumprod(alphas, dim=0)
+    return betas.float(), alphas_cumprod.float()
 ```
 
-**Results**:
-- VQ-VAE reconstruction: PSNR=28.4 dB, SSIM=0.87 — high-quality lossless compression
-- LDM FID on held-out product images: 14.3 (vs target < 20) — photorealistic
-- Category consistency: 91% of generated images correctly classified by a pretrained ResNet-50 into the intended category
-- Diversity: mean pairwise cosine similarity 0.42 (vs 0.97 for mode-collapsed GAN baseline tested earlier)
-- Downstream classifier impact: adding 200K synthetic images improved product classification from 82% to 91% val accuracy (target 90% achieved)
-- Generation throughput: 4 images per second on A100 (50 DDIM steps, 256x256)
+```python
+class DDPMTrainer:
+    def __init__(
+        self,
+        model: nn.Module,
+        config: DDPMConfig,
+        device: torch.device,
+        ema_decay: float = 0.9999,
+    ) -> None:
+        self.model = model
+        self.config = config
+        self.device = device
+        self.ema_decay = ema_decay
 
-**Key Lessons**:
-- CFG scale required per-category tuning: apparel worked best at 6.0 (needs diversity — many styles), electronics at 9.0 (needs prompt adherence — specific product details matter). A fixed scale of 7.5 was suboptimal.
-- VQ-VAE training with a patch discriminator (adversarial component) was critical — without it, decoded images had soft, blurry textures despite good PSNR. The adversarial loss adds perceptual sharpness.
-- Generating images for rare categories (< 50 training images) produced lower quality (FID 28 vs 12 for common categories). Fine-tuning the LDM for 100 steps on rare category images improved FID to 17 — full fine-tuning was not needed.
-- FID computed on only 1K generated images was unreliable (variance +-8 FID) vs 10K images (variance +-1.5). Initial FID evaluation with 1K samples led to premature conclusions about model quality.
+        self.betas, self.alphas_cumprod = cosine_beta_schedule(config.T)
+        self.betas = self.betas.to(device)
+        self.alphas_cumprod = self.alphas_cumprod.to(device)
+        self.sqrt_alphas_cumprod = self.alphas_cumprod.sqrt()
+        self.sqrt_one_minus_alphas_cumprod = (1 - self.alphas_cumprod).sqrt()
+
+        # EMA model for stable generation
+        import copy
+        self.ema_model = copy.deepcopy(model)
+        for p in self.ema_model.parameters():
+            p.requires_grad_(False)
+
+    def q_sample(
+        self,
+        x0: torch.Tensor,
+        t: torch.Tensor,
+        noise: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Forward diffusion: add noise to x0 at timestep t."""
+        if noise is None:
+            noise = torch.randn_like(x0)
+        sqrt_alpha_t = self.sqrt_alphas_cumprod[t][:, None, None, None]
+        sqrt_one_minus_t = self.sqrt_one_minus_alphas_cumprod[t][:, None, None, None]
+        return sqrt_alpha_t * x0 + sqrt_one_minus_t * noise
+
+    def compute_loss(
+        self,
+        x0: torch.Tensor,
+        class_labels: torch.Tensor,
+    ) -> torch.Tensor:
+        """Simple denoising loss: predict noise from noisy image."""
+        B = x0.shape[0]
+        t = torch.randint(0, self.config.T, (B,), device=self.device)
+        noise = torch.randn_like(x0)
+        x_t = self.q_sample(x0, t, noise)
+        predicted_noise = self.model(x_t, t, class_labels)
+        return F.mse_loss(predicted_noise, noise)
+
+    def update_ema(self) -> None:
+        for ema_param, model_param in zip(self.ema_model.parameters(), self.model.parameters()):
+            ema_param.data.mul_(self.ema_decay).add_(model_param.data, alpha=1 - self.ema_decay)
+
+    @torch.no_grad()
+    def ddim_sample(
+        self,
+        class_label: int,
+        n_samples: int = 8,
+        ddim_steps: int = 50,
+        eta: float = 0.0,   # deterministic sampling (eta=0)
+    ) -> torch.Tensor:
+        """DDIM sampling: 20x faster than full DDPM, same quality."""
+        self.ema_model.eval()
+        B = n_samples
+        img = torch.randn(B, self.config.in_channels,
+                         self.config.image_size, self.config.image_size, device=self.device)
+        labels = torch.full((B,), class_label, dtype=torch.long, device=self.device)
+
+        # Select timestep subset for DDIM
+        timesteps = torch.linspace(self.config.T - 1, 0, ddim_steps, dtype=torch.long)
+        for i, t in enumerate(timesteps):
+            t_batch = torch.full((B,), t.item(), dtype=torch.long, device=self.device)
+            eps = self.ema_model(img, t_batch, labels)
+            alpha_t = self.alphas_cumprod[t]
+            alpha_t_prev = self.alphas_cumprod[timesteps[i + 1]] if i + 1 < len(timesteps) else torch.tensor(1.0)
+            pred_x0 = (img - (1 - alpha_t).sqrt() * eps) / alpha_t.sqrt()
+            pred_x0 = pred_x0.clamp(-1, 1)
+            sigma = eta * ((1 - alpha_t_prev) / (1 - alpha_t) * (1 - alpha_t / alpha_t_prev)).sqrt()
+            direction = (1 - alpha_t_prev - sigma ** 2).sqrt() * eps
+            img = alpha_t_prev.sqrt() * pred_x0 + direction
+            if eta > 0:
+                img = img + sigma * torch.randn_like(img)
+
+        return img
+```
+
+```python
+import torchvision.models as vision_models
+from torchvision.models.inception import inception_v3
+from scipy.linalg import sqrtm
+
+def compute_fid(
+    real_images: torch.Tensor,    # shape (N, 3, 299, 299), normalised to [-1,1]
+    synthetic_images: torch.Tensor,
+    device: torch.device,
+    batch_size: int = 64,
+) -> float:
+    """Frechet Inception Distance using InceptionV3 pool3 features."""
+    inception = inception_v3(pretrained=True, transform_input=False)
+    inception.fc = nn.Identity()   # use pool3 features (2048d)
+    inception = inception.to(device).eval()
+
+    def get_features(images: torch.Tensor) -> np.ndarray:
+        feats: list[np.ndarray] = []
+        for i in range(0, len(images), batch_size):
+            batch = images[i : i + batch_size].to(device)
+            # InceptionV3 expects 3-channel input; replicate grayscale
+            if batch.shape[1] == 1:
+                batch = batch.repeat(1, 3, 1, 1)
+            with torch.no_grad():
+                f = inception(F.interpolate(batch, 299)).cpu().numpy()
+            feats.append(f)
+        return np.vstack(feats)
+
+    real_feats = get_features(real_images)
+    synth_feats = get_features(synthetic_images)
+
+    mu_r, sigma_r = real_feats.mean(0), np.cov(real_feats, rowvar=False)
+    mu_s, sigma_s = synth_feats.mean(0), np.cov(synth_feats, rowvar=False)
+
+    diff = mu_r - mu_s
+    covmean = sqrtm(sigma_r @ sigma_s)
+    if np.iscomplexobj(covmean):
+        covmean = covmean.real   # discard numerical imaginary component
+
+    fid = float(np.sum(diff ** 2) + np.trace(sigma_r + sigma_s - 2 * covmean))
+    return fid
+
+def verify_hipaa_compliance(
+    synthetic_images: np.ndarray,       # shape (N, H, W)
+    training_images: np.ndarray,        # shape (M, H, W)
+    min_distance_threshold: float = 0.05,   # min L2 dist in normalised feature space
+) -> tuple[np.ndarray, float]:
+    """Nearest-neighbour distance check to detect memorised training images."""
+    from sklearn.metrics.pairwise import euclidean_distances
+    # Flatten images for distance computation (in practice use inception features)
+    synth_flat = synthetic_images.reshape(len(synthetic_images), -1).astype(np.float32)
+    train_flat = training_images.reshape(len(training_images), -1).astype(np.float32)
+    # Normalise to unit norm
+    synth_flat /= np.linalg.norm(synth_flat, axis=1, keepdims=True) + 1e-8
+    train_flat /= np.linalg.norm(train_flat, axis=1, keepdims=True) + 1e-8
+    # Compute minimum distance from each synthetic to any training image
+    min_distances = euclidean_distances(synth_flat, train_flat).min(axis=1)
+    valid_mask = min_distances >= min_distance_threshold
+    rejection_rate = float((~valid_mask).mean())
+    print(f"HIPAA compliance: rejected {rejection_rate:.1%} of synthetic images as too similar to training set")
+    return valid_mask, rejection_rate
+```
+
+**Key pitfalls (3 with BROKEN->FIX):**
+
+**Pitfall 1 - Using linear beta schedule causes poor image quality at high resolutions:**
+```python
+# BROKEN: linear beta schedule destroys too much signal at early timesteps
+# for 512x512 images; the majority of denoising happens at near-pure-noise levels
+betas = torch.linspace(1e-4, 0.02, T)   # linear schedule
+# At T=1000 with linear schedule: by timestep 800, images are 94% noise
+# Network wastes capacity on near-Gaussian denoising; fine details lost
+# FID = 52 with linear vs 24 with cosine schedule
+
+# FIX: cosine beta schedule (Nichol & Dhariwal 2021) is smoother
+# Most timesteps are spent in the medium-noise regime where structure forms
+betas, alphas_cumprod = cosine_beta_schedule(T=1000)
+# FID drops from 52 to 24; clinical fidelity pass rate from 61% to 83%
+```
+
+**Pitfall 2 - Generating synthetic images without HIPAA compliance check memorises rare training images:**
+```python
+# BROKEN: generate and use all synthetic images without memorisation check
+synthetic_images = [ddim_sample(class_label=2, n_samples=100) for _ in range(50)]
+all_synth = torch.cat(synthetic_images)   # 5000 images, some may be near-copies of training data
+augmented_dataset = ConcatDataset([real_dataset, SyntheticDataset(all_synth)])
+# With only 127 aortic dissection training images, DDPM memorises ~4% of them
+# Synthetic dataset leaks de-identified but reconstructible training images -> HIPAA violation
+
+# FIX: compute nearest-neighbour distance and reject memorised images
+valid_mask, rejection_rate = verify_hipaa_compliance(
+    synth_np, train_np, min_distance_threshold=0.05
+)
+compliant_synthetic = all_synth[valid_mask]   # ~3.8% rejected; oversample to reach 5000
+# Generate extra images to compensate for rejections
+```
+
+**Pitfall 3 - Training classifier on combined real + synthetic without stratified split leaks synthetic to validation:**
+```python
+# BROKEN: random split mixes synthetic and real images across train/val splits
+from sklearn.model_selection import train_test_split
+all_images = real_images + synthetic_images   # 23,000 total
+X_train, X_val, y_train, y_val = train_test_split(all_images, labels, test_size=0.2)
+# Validation set contains synthetic images; AUC on synthetic != AUC on real patients
+
+# FIX: always validate on REAL IMAGES ONLY; synthetic augments training only
+X_train_real, X_val_real = train_test_split(real_images, test_size=0.2, stratify=real_labels)
+X_train_augmented = X_train_real + synthetic_images   # synthetic added to train only
+# Evaluate downstream model exclusively on X_val_real -> unbiased real-world performance
+```
+
+**Metrics and results:**
+
+| Metric | Baseline (real only) | DDPM augmented |
+|---|---|---|
+| Pneumothorax AUC-ROC | 0.871 | 0.923 |
+| Aortic dissection AUC-ROC | 0.834 | 0.891 |
+| Normal class AUC-ROC | 0.954 | 0.961 |
+| FID (chest X-ray vs synthetic) | N/A | 26.4 |
+| Radiologist pass rate (fidelity) | N/A | 82% (avg score 4.1/5) |
+| HIPAA rejection rate | N/A | 3.8% |
+| Synthetic generation throughput | N/A | 400 images/hr (4xA100) |
+| Training time (DDPM) | N/A | 72 hr (4xA100) |
+| DDIM inference per image (50 steps) | N/A | 1.8s (vs 36s for DDPM) |
+| Rare class data increase | 127 / 340 samples | +5,000 per class |
+
+**Interview discussion points:**
+
+**What is the DDPM loss function and what does it measure?** DDPM is trained with a simplified denoising objective: the mean squared error between the true noise epsilon added to the image at timestep t and the noise predicted by the U-Net given the noisy image and timestep. The original DDPM paper (Ho et al. 2020) showed this simplified objective outperforms predicting x0 directly or the variational lower bound, because it weights all noise levels equally rather than over-weighting the low-noise regime. For chest X-rays, the training loss stabilises around 0.04 MSE after 200 epochs, corresponding to the network becoming accurate at predicting both the coarse structure (learned at high noise levels) and fine anatomical detail (learned at low noise levels).
+
+**Why does DDIM sampling achieve 20x speedup over DDPM sampling without retraining?** DDPM sampling requires T=1000 sequential denoising steps, each requiring a U-Net forward pass (~180ms on A100 for 512x512 images) - total 3 minutes per image. DDIM (Denoising Diffusion Implicit Models, Song et al. 2021) replaces the stochastic reverse process with a deterministic ODE that allows larger step sizes. By selecting 50 representative timesteps from the T=1000 schedule and using the DDIM update rule (which does not add stochastic noise at each step), high-quality images are generated in 50 steps (1.8 seconds per image). The quality tradeoff is minimal: FID increases from 24.1 (DDPM, 1000 steps) to 26.4 (DDIM, 50 steps).
+
+**How do you ensure HIPAA compliance when generating synthetic medical images?** HIPAA Safe Harbor requires that generated images contain no information from which an individual could reasonably be re-identified. The primary risk is memorisation: a DDPM with insufficient training data can interpolate close to rare training images, potentially reconstructing identifying features. Mitigation: (1) apply differential privacy training (DP-SGD with epsilon=3.0, delta=1e-5) which adds calibrated noise during training to prevent memorisation; (2) post-generation nearest-neighbour distance check using inception features - reject any synthetic image within distance threshold of a real training image; (3) radiologist review of 20% random sample to confirm images do not appear to depict a specific patient. These three layers collectively reduce re-identification risk below HIPAA's "very small risk" standard.
+
+**What is the FID metric and what does FID=26 mean for medical imaging quality?** FID (Frechet Inception Distance) computes the Frechet distance between the Gaussian distributions fitted to InceptionV3 pool3 features of real and synthetic images. FID = ||mu_r - mu_s||^2 + Tr(Sigma_r + Sigma_s - 2*(Sigma_r * Sigma_s)^{1/2}). Lower FID means more realistic images. For natural images, state-of-the-art GANs achieve FID < 5; for medical X-rays, domain-specific models typically achieve FID 20-40 due to higher texture regularity. FID=26 means the synthetic X-ray distribution is close to the real distribution in feature space but not identical, corresponding to the 82% clinical pass rate where radiologists judge images as realistic.
+
+**Why is class-conditional generation via label embedding superior to training a separate DDPM per class?** Training a separate DDPM per class requires sufficient training data for each class independently: 127 aortic dissection images is too few to train a 200-million-parameter U-Net from scratch. Class-conditional training shares all U-Net weights across classes, allowing the model to learn general X-ray structure from all 18,000 images while conditioning generation on pathology-specific features via the class embedding. The class embedding is added to the timestep embedding, allowing the model to learn "what makes an aortic dissection different from normal" by contrasting the conditional outputs during training - leveraging the 14x larger normal class to learn what to modify.
+
+**What is the trade-off between differential privacy and image quality for medical DDPM?** DP-SGD adds Gaussian noise to gradients during training, with noise magnitude proportional to 1/(epsilon * sqrt(n_steps)). At epsilon=3.0 (moderate privacy), the gradient noise reduces effective learning signal, increasing DDPM training time from 72 to 140 hours and raising FID from 26 to 41 (images noticeably less realistic, radiologist pass rate drops from 82% to 64%). At epsilon=8.0 (weaker privacy, NIST acceptable threshold for some healthcare uses), FID = 29 and pass rate 79%. The practical recommendation is epsilon=8.0 for augmentation use cases (where individual image re-identification risk is not the primary concern) and epsilon=3.0 for any use case where synthetic images are shared externally.
