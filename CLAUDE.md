@@ -134,6 +134,24 @@ LLM case studies under `llm/case_studies/` use the principal-grade 11-section te
 - Section 9 must have quantified impact ($ lost, users affected, SLA violated)
 - Section 11: minimum 10 Q&As (not 8)
 
+### Case Study Learning Path (case_studies/README.md)
+
+Every `case_studies/` directory MUST contain a `README.md` that serves as a learning path index. This file is not optional — it is the entry point a reader opens before touching any individual case study.
+
+**Required sections in every `case_studies/README.md`:**
+
+1. **Quick Start** — 3 files to read if you only have time for three, with a one-sentence justification for each.
+2. **Full Learning Path** — All case studies grouped by phase or primary engineering concern (not by product category). Each entry must include: file link, primary engineering concern (one phrase), and a 1–2 sentence "what it teaches" summary.
+3. **Cross-Cutting / Shared Primitives** — If a `cross_cutting/` subdirectory exists, a table mapping each sub-file to the phase where it becomes relevant, so readers consume it just-in-time.
+4. **Dependency Map** — ASCII tree showing which case studies build on patterns from others (e.g., `design_rag_pipeline` → `design_legal_ai_platform`).
+5. **Interview Prep Shortcuts** — Table mapping common "design X" interview questions to the best case study file.
+
+**Maintenance rule:** Every time a new case study is added to any `case_studies/` directory, the `README.md` learning path in that directory MUST be updated in the same change — add the new file to its correct phase, update the dependency map if applicable, and add an interview prep row if the topic is commonly asked.
+
+Reference implementation: `llm/case_studies/README.md`
+
+---
+
 ### Interview Q&A Rules
 
 - **Bold the question**, plain text the answer
@@ -352,6 +370,12 @@ Master index: `ml/README.md` (topics table + Sub-Files Index + LLM non-overlap b
 3. Add 10+ interview Q&As (15–18 for deep modules)
 4. Update the section's master `README.md` (the index file for that section)
 5. Update the root `README.md` table
+
+### Adding a case study (any section):
+- Write the case study file following the section's template (11-section principal template for LLM/ML; 7-section for Java/Spring)
+- Update the section's master `README.md` case study table
+- **Update `case_studies/README.md` (the learning path)** — add the new file to its correct phase, update the dependency map if it builds on an existing case study, add an interview prep row if the topic is commonly asked. This step is mandatory; do not ship a new case study without it.
+- Update root `README.md` and `CLAUDE.md` case study lists
 
 ### Adding an LLM sub-file (deep-dive within an existing topic):
 - Create `src/main/java/com/rutik/systemdesign/llm/<topic>/<subtopic>.md`
