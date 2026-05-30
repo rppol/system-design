@@ -345,6 +345,65 @@ Conclusion: NMT wins on high-resource pairs (speed + quality).
             Hybrid routing captures the best of both.
 ```
 
+### 4.2a NMT vs LLM Routing Code
+
+The `TranslationRouter` makes the cheapest-model decision for every request. Three tiers:
+
+```python
+from enum import Enum
+
+class TranslationModel(Enum):
+    NLLB_200      = "nllb-200-3.3b"     # 80ms,  $0.001/1K — 80% of volume
+    GPT4O_MINI    = "gpt-4o-mini"       # 250ms, $0.010/1K — 18% of volume
+    CLAUDE_SONNET = "claude-sonnet-4-6" # 350ms, $0.030/1K —  2% of volume (domain)
+
+HIGH_RESOURCE_PAIRS: frozenset[tuple[str, str]] = frozenset({
+    ("en","es"),("en","fr"),("en","de"),("en","pt"),("en","zh"),
+    ("en","ja"),("en","ko"),("en","ar"),("en","ru"),("en","it"),
+    ("en","nl"),("en","pl"),("en","tr"),("en","th"),("en","vi"),
+    ("es","fr"),("es","pt"),("zh","ja"),("de","fr"),("ar","fr"),  # top-20; 30 more in prod
+})
+DOMAIN_SPECIFIC = frozenset({"legal","medical","technical","financial"})
+
+class TranslationRouter:
+    def route(self, src_lang: str, tgt_lang: str,
+              text_complexity: float, domain: str = "general") -> TranslationModel:
+        # complexity 0.0-0.3=simple, 0.3-0.6=medium, 0.6-1.0=rare-vocab/long
+        pair = (src_lang.lower(), tgt_lang.lower())
+        is_hr = pair in HIGH_RESOURCE_PAIRS or pair[::-1] in HIGH_RESOURCE_PAIRS
+        if domain in DOMAIN_SPECIFIC and text_complexity >= 0.5:
+            return TranslationModel.CLAUDE_SONNET   # glossary + domain prompt, 2%
+        if is_hr and text_complexity < 0.6:
+            return TranslationModel.NLLB_200         # NMT fast path, 80%
+        return TranslationModel.GPT4O_MINI           # low-resource / complex, 18%
+
+    async def translate(self, src_lang: str, tgt_lang: str, text: str,
+                        domain: str = "general", glossary: dict[str,str] | None = None) -> str:
+        words = text.split()
+        complexity = (min(len(words)/40.0,1.0)*0.6 +
+                      min(sum(len(w) for w in words)/max(len(words),1)/10.0,1.0)*0.4)
+        model = self.route(src_lang, tgt_lang, complexity, domain)
+        if model == TranslationModel.NLLB_200:
+            return await self._translate_nllb(src_lang, tgt_lang, text, glossary)
+        mid = "gpt-4o-mini" if model == TranslationModel.GPT4O_MINI else "claude-sonnet-4-6"
+        return await self._translate_llm(mid, src_lang, tgt_lang, text, glossary,
+                                         domain_prompt=(domain if mid != "gpt-4o-mini" else None))
+
+class QualityEstimator:
+    """COMET-QE (Unbabel/wmt22-cometkiwi-da, 30ms GPU). Threshold 0.60 → human review.
+    Production: mean 0.83 (NLLB), 0.87 (GPT-4o-mini); 3.1%/1.8% below 0.60 respectively."""
+    HUMAN_REVIEW_THRESHOLD = 0.60
+    def score(self, src: str, translation: str) -> float:
+        raise NotImplementedError("delegate to COMET-QE batch inference endpoint")
+```
+
+Cost breakdown at scale (200M translations/day):
+- NLLB 80% at $0.001/1K → $160/day; GPT-4o-mini 18% at $0.010/1K → $360/day
+- Claude Sonnet 2% at $0.030/1K → $60/day
+- Blended effective cost: $0.002/1K tokens — 5x cheaper than routing everything to GPT-4o-mini
+
+---
+
 ### 4.3 Context Preservation
 
 ```
@@ -472,6 +531,9 @@ Glossary management:
 
 ### 4.5 Streaming Partial Translations
 
+For the underlying WebSocket infrastructure that delivers these events at scale, see
+[Streaming at Scale](./cross_cutting/streaming_at_scale.md).
+
 ```
 Streaming design for real-time conversational feel:
 
@@ -527,6 +589,83 @@ WebSocket delivery protocol:
 
   Client renders: progressive text update with typing indicator animation.
 ```
+
+### 4.5a STT→MT→TTS WebSocket Pipeline (Voice Mode)
+
+For voice-enabled translation (video calls, voice messages), the pipeline extends to STT then
+TTS. See [Streaming at Scale](./cross_cutting/streaming_at_scale.md) for the WebSocket infra.
+
+**BROKEN: Sequential pipeline**
+
+```python
+# BROKEN: each stage blocks on the previous — total latency ~2.1s
+async def translate_voice_naive(audio: bytes, src_lang: str, tgt_lang: str) -> bytes:
+    transcript = await stt_model.transcribe(audio)        # 600ms — waits for full utterance
+    translated = await nmt_model.translate(transcript)    # 200ms — waits for full transcript
+    audio_out  = await tts_model.synthesise(translated)   # 300ms — waits for full translation
+    return audio_out
+```
+
+**FIX: Streaming pipeline — STT emits partials every 200ms, NMT translates each partial,
+TTS starts while the next partial arrives. Perceived latency drops from 2.1s to 540ms.**
+
+```python
+# Latency budget (A10G GPU): STT 120ms + NMT 80ms + TTS 90ms = 540ms total target
+# (LLM path: 250ms for NMT step on complex sentences → still under 540ms with pipelining)
+
+class TranslationStreamPipeline:
+    VAD_ENERGY_THRESHOLD = 0.5  # RMS energy ratio; below = silence, skip STT (saves ~15%)
+    CHUNK_DURATION_MS    = 200  # minimum chunk size for Whisper (smaller → hallucination)
+    SENTENCE_MIN_TOKENS  = 4    # ignore partials shorter than 4 words
+
+    def __init__(self, stt, router, tts, src_lang: str, tgt_lang: str) -> None:
+        self._stt, self._router, self._tts = stt, router, tts
+        self._src_lang, self._tgt_lang = src_lang, tgt_lang
+        self._last_partial: str = ""
+
+    async def process_audio_chunk(self, chunk: bytes):
+        import time, struct, math
+        samples = struct.unpack(f"{len(chunk)//2}h", chunk)
+        if math.sqrt(sum(s*s for s in samples)/len(samples))/32768.0 < self.VAD_ENERGY_THRESHOLD:
+            return  # silence gate
+        t0 = time.monotonic()
+        async for stt_result in self._stt.stream_transcribe(chunk):
+            partial, is_final = stt_result.partial_text, stt_result.is_sentence_final
+            if len(partial.split()) < self.SENTENCE_MIN_TOKENS and not is_final:
+                continue
+            stt_ms = int((time.monotonic() - t0) * 1000)
+            t1 = time.monotonic()
+            translated = await self._router.translate(self._src_lang, self._tgt_lang, partial)
+            nmt_ms = int((time.monotonic() - t1) * 1000)
+            if is_final:
+                correction = await self._handle_asr_finalization(self._last_partial, partial)
+                if correction:
+                    yield {"event": "correction", "text": correction,
+                           "latency": {"stt": stt_ms, "nmt": nmt_ms}}
+                t2 = time.monotonic()
+                async for _ in self._tts.stream_synthesise(translated, lang=self._tgt_lang):
+                    yield {"event": "final", "text": translated,
+                           "latency": {"stt": stt_ms, "nmt": nmt_ms,
+                                       "tts": int((time.monotonic()-t2)*1000)}}
+                self._last_partial = partial
+            else:
+                yield {"event": "partial", "text": translated,
+                       "latency": {"stt": stt_ms, "nmt": nmt_ms}}
+
+    async def _handle_asr_finalization(self, partial: str, final: str) -> str | None:
+        """Re-translate when ASR corrects itself; emit SSE event: correction to fix UI text."""
+        if not partial:
+            return None
+        pw, fw = set(partial.lower().split()), set(final.lower().split())
+        if len(pw & fw) / max(len(pw | fw), 1) < 0.85:  # ASR changed meaning materially
+            return await self._router.translate(self._src_lang, self._tgt_lang, final)
+        return None
+```
+
+Key numbers: VAD 0.5 energy ratio; 200ms min chunk; 4-token partial gate; 0.85 similarity
+threshold for ASR correction. SSE events: `partial`, `final`, `correction`.
+
+---
 
 ### 4.6 Quality Estimation
 
@@ -723,6 +862,9 @@ Cost savings from caching:
 
 ## 6. Monitoring and Quality Assurance
 
+For the full eval harness implementation including golden dataset management and CI/CD
+integration, see [LLM Eval Harness in Production](./cross_cutting/llm_eval_harness_in_production.md).
+
 ```
 Translation quality cannot be measured automatically with certainty.
 A multi-signal monitoring system is required.
@@ -848,6 +990,93 @@ Comparison: all-NMT approach:
   Quality on low-resource pairs: BLEU 14-22 (unacceptable).
   Hybrid approach is the clear winner.
 ```
+
+---
+
+## 8a. Operational Playbook
+
+### Eval Pipeline
+
+Daily BLEU/COMET checks on 100 locked golden pairs per language pair across the top 20 pairs
+(2,000 evaluations total). Golden pairs are human-translated and never mutated after approval.
+
+Alert thresholds: BLEU drops > 3 points vs 7-day baseline → page on-call. COMET drops > 0.05
+→ page on-call. QE mean or p10 shifts > 0.05 in 1 hour → page on-call. Track QE distribution
+weekly per model tier; NLLB vs GPT-4o-mini divergence signals one model drifting.
+
+See [LLM Eval Harness in Production](./cross_cutting/llm_eval_harness_in_production.md)
+for golden-dataset management and CI/CD integration patterns.
+
+---
+
+### Observability: OpenTelemetry Trace Structure
+
+Every translation request produces a single OTel trace with the following span hierarchy.
+See [OpenTelemetry for LLM Apps](./cross_cutting/opentelemetry_for_llm_apps.md) for
+instrumentation patterns.
+
+```
+translation.request  [root span]
+  attributes: src_lang, tgt_lang, audio_duration_ms (voice), modality (text|voice),
+              conversation_id, domain, formality_level
+  ├── vad.detection          chunk_count, silence_ms, energy_threshold
+  ├── stt.transcription      partial_count, final_transcript_tokens, whisper_model,
+  │                          asr_finalization_corrections (int)       [voice only]
+  ├── language.detection     detected_lang, confidence, method (fasttext|script|profile_prior)
+  ├── cache.lookup           tier_hit (exact|fuzzy|translation_memory|miss), lookup_ms
+  ├── translation.routing    model_selected, complexity_score, is_high_resource_pair,
+  │                          domain, routing_reason
+  ├── translation.inference  input_tokens, output_tokens, latency_ms, model_version,
+  │                          comet_qe_score, qe_flag (bool), nmt_fallback_to_llm (bool)
+  ├── postprocessing         entity_restorations (int), glossary_enforcements (int), length_ratio
+  └── tts.synthesis          output_audio_ms, tts_model, first_chunk_latency_ms  [voice only]
+```
+
+Key dashboards: P50/P95/P99 per span by model_selected and language pair; comet_qe_score
+histogram per tier (alert on left-tail growth); nmt_fallback_to_llm rate > 5% alerts NMT issue;
+cache.lookup exact-hit drop > 3 points signals an invalidation storm.
+
+---
+
+### Incident Runbooks
+
+**Runbook 1: Translation quality regression**
+
+Symptom: COMET-QE drops more than 0.05 for a language pair within 1 hour.
+1. Check model registry for NLLB deployment in last 6h → A/B vs previous checkpoint on 500 golden pairs; rollback if previous scores >= baseline.
+2. If no model change: check glossary version updated in last 24h → constrained-decoding failures raise low-QE rate. Revert glossary version and investigate term conflicts.
+3. If no glossary change: check GPT-4o-mini provider status page → failover router to Claude Sonnet for affected pairs until restored.
+4. Escalate to ML team if BLEU also drops and no deployment change is detected.
+
+**Runbook 2: STT pipeline latency spike (voice mode)**
+
+Symptom: stt.transcription P99 exceeds 300ms (budget is 120ms per 200ms chunk).
+1. Check Whisper GPU utilization (`kubectl top pods -n translation-stt`). Target < 70%.
+2. GPU util > 85%: client likely sending 400ms+ chunks. Enforce 200ms cap at WebSocket gateway.
+3. GPU util normal but slow: batch size may have dropped to 1 (target = 8). Restart STT pods.
+4. Isolated to one AZ: check GPU ECC errors causing throttling. Drain node; let auto-replace.
+5. General capacity: `kubectl scale deployment whisper-stt --replicas=12`.
+
+**Runbook 3: ASR finalization storm**
+
+Symptom: asr_finalization_corrections rate exceeds 15% (baseline < 3%). Cause: VAD splitting
+utterances mid-word — short partials are overridden by final transcripts, triggering corrections.
+1. Check vad.detection span: if silence_ms P50 < 300ms, VAD threshold is too aggressive.
+2. Increase VAD_ENERGY_THRESHOLD from 0.5 to 0.65 via feature flag; canary at 10% traffic.
+3. Add 400ms minimum inter-sentence silence gap to prevent splitting on breath pauses.
+4. SLA breach (> 10% corrections for > 5 min): degrade voice mode to text-only until resolved.
+
+---
+
+### Multi-Region Topology
+
+The translation service runs active-active across three AWS regions (us-east-1, eu-west-1,
+ap-southeast-1). Each region handles its closest users. NMT GPU clusters are regional;
+LLM calls fan out to whichever API endpoint has lowest measured latency.
+
+For the full active-active deployment topology, cross-region failover design, and
+latency-based routing configuration, see
+[Multi-Region LLM Topology](./cross_cutting/multi_region_llm_topology.md).
 
 ---
 

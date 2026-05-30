@@ -18,7 +18,7 @@ A comprehensive, one-stop reference for understanding everything about Large Lan
 
 ## What This Section Covers
 
-This section is organized into **45 topic directories** plus **13 real-world case studies**, covering the full LLM lifecycle. Nine topics have **deep-dive sub-files** (65 sub-files total, see the Sub-Files Index below):
+This section is organized into **45 topic directories** plus **29 real-world case studies**, covering the full LLM lifecycle. Nine topics have **deep-dive sub-files** (74 sub-files total — 65 module sub-files + 9 cross-cutting case study sub-files — see the Sub-Files Index below):
 
 - How models are built (architecture, tokenization, pre-training, fine-tuning, alignment)
 - How to use models effectively (prompting, RAG, reasoning, code generation)
@@ -382,3 +382,35 @@ Step 5: Evaluate and Iterate
 | [Design AI Data Analyst](case_studies/design_ai_data_analyst.md) | File upload, auto-EDA, NL-to-SQL, code sandbox, visualization, report synthesis | Intermediate |
 | [Design AI Code Review](case_studies/design_ai_code_review.md) | PR diff analysis, security/performance detection, CI/CD gate, learning loop | Advanced |
 | [Design Real-Time Translation](case_studies/design_real_time_translation.md) | Sub-1s latency, context preservation, streaming partial translations, confidence scoring | Advanced |
+| [Design GPU Inference Platform](case_studies/design_gpu_inference_platform.md) | Multi-tenant GPU serving, LoRA multiplexing, cold-start, MFU/MBU, spot blending | Principal |
+| [Design Autonomous SWE Agent](case_studies/design_autonomous_swe_agent.md) | Long-horizon planning, SWE-bench, durable execution, sandboxed code, self-correction | Principal |
+| [Design Computer Use Agent](case_studies/design_computer_use_agent.md) | VLM grounding, action confirmation gates, VM sandboxing, trajectory replay | Principal |
+| [Design Deep Research Agent](case_studies/design_browser_research_agent.md) | Parallel web crawl, citation grounding, gap detection, iterative deepening | Principal |
+| [Design Legal AI Platform](case_studies/design_legal_ai_platform.md) | Citation-grade RAG, matter isolation, privilege classification, conflict check | Principal |
+| [Design Video Generation Platform](case_studies/design_video_generation_platform.md) | DiT inference, temporal consistency, async job queue, per-second economics | Principal |
+| [Design Image Generation Platform](case_studies/design_image_generation_platform.md) | LoRA adapter hot-swap, CFG batching, safety pipeline, ResolutionRouter economics | Principal |
+| [Design LLM Eval Platform](case_studies/design_llm_eval_platform.md) | Golden-set CI, LLM-as-judge, regression detection, Welch t-test, eval-gated deploys | Principal |
+| [Design Voice Cloning & TTS Platform](case_studies/design_voice_cloning_tts_platform.md) | TTFB <200ms streaming, consent verification, C2PA watermarking, RTF metrics | Principal |
+| [Design Medical AI Scribe](case_studies/design_medical_ai_scribe.md) | HIPAA-compliant STT, PHI boundary enforcement, FHIR write-back, speaker diarization | Principal |
+| [Design Sales AI Agent](case_studies/design_sales_ai_agent.md) | Multi-week durable sequences, TCPA/CAN-SPAM compliance, CRM integration, deliverability | Principal |
+| [Design AI Companion Platform](case_studies/design_ai_companion_platform.md) | Prefix cache hit rate economics, INT8 inference, episodic memory, minor protection | Principal |
+| [Design AI Meeting Assistant](case_studies/design_ai_meeting_assistant.md) | Bot-in-meeting vs local-process, sliding-window Whisper, speaker diarization, GDPR | Principal |
+| [Design Financial Research Agent](case_studies/design_financial_research_agent.md) | XBRL-first extraction, citation verification, per-matter isolation, fiscal alignment | Principal |
+| [Design Synthetic Data Platform](case_studies/design_synthetic_data_platform.md) | Diversity sampling, best-of-N preference pairs, quality filter pipeline, lineage tracking | Principal |
+| [Design Avatar Video Platform](case_studies/design_avatar_video_platform.md) | Sequential pipeline pipelining, lip-sync tier economics, deepfake consent gates, C2PA | Principal |
+
+### Cross-Cutting Case Study Sub-Files (`case_studies/cross_cutting/`)
+
+Shared infrastructure primitives referenced by multiple case studies. Each follows the 14-section module template with 15+ Q&As.
+
+| File | Topic | Referenced by |
+|------|-------|---------------|
+| [llm_eval_harness_in_production.md](case_studies/cross_cutting/llm_eval_harness_in_production.md) | Golden-set construction, LLM-as-judge, regression detection, eval-gated CI | 8 case studies |
+| [opentelemetry_for_llm_apps.md](case_studies/cross_cutting/opentelemetry_for_llm_apps.md) | gen_ai.* semconv, trace propagation, streaming spans, cost attribution | 7 case studies |
+| [multi_region_llm_topology.md](case_studies/cross_cutting/multi_region_llm_topology.md) | Active-active, anycast routing, KV-cache locality, region failover | 6 case studies |
+| [red_team_eval_harness.md](case_studies/cross_cutting/red_team_eval_harness.md) | Adversarial datasets, jailbreak scoring, prompt injection CI gate | 5 case studies |
+| [gpu_pool_economics.md](case_studies/cross_cutting/gpu_pool_economics.md) | MFU/MBU math, H100/H200 specs, spot blending, prefill/decode disaggregation | 5 case studies |
+| [tenant_isolation_patterns.md](case_studies/cross_cutting/tenant_isolation_patterns.md) | Per-tenant vector DB, ACL pushdown, noisy-neighbor mitigation | 6 case studies |
+| [streaming_at_scale.md](case_studies/cross_cutting/streaming_at_scale.md) | SSE vs WebSocket, half-open detection, backpressure, partial-token replay | 6 case studies |
+| [agent_durability_patterns.md](case_studies/cross_cutting/agent_durability_patterns.md) | Checkpointing, idempotent tool calls, Temporal/LangGraph, interrupt-resume | 4 case studies |
+| [training_loop_internals.md](case_studies/cross_cutting/training_loop_internals.md) | Forward/backward/optimizer, FSDP, gradient accumulation, loss-spike detection | 4 case studies |

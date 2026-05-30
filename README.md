@@ -169,6 +169,22 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 | [Design AI Data Analyst](src/main/java/com/rutik/systemdesign/llm/case_studies/design_ai_data_analyst.md) | File upload, NL-to-SQL, code sandbox, visualization |
 | [Design AI Code Review](src/main/java/com/rutik/systemdesign/llm/case_studies/design_ai_code_review.md) | PR diff analysis, security detection, CI/CD gate |
 | [Design Real-Time Translation](src/main/java/com/rutik/systemdesign/llm/case_studies/design_real_time_translation.md) | Sub-1s latency, context preservation, streaming translations |
+| [Design GPU Inference Platform](src/main/java/com/rutik/systemdesign/llm/case_studies/design_gpu_inference_platform.md) | Multi-tenant GPU serving, LoRA multiplexing, MFU/MBU, spot blending |
+| [Design Autonomous SWE Agent](src/main/java/com/rutik/systemdesign/llm/case_studies/design_autonomous_swe_agent.md) | Durable agent execution, SWE-bench, sandboxed code, self-correction loop |
+| [Design Computer Use Agent](src/main/java/com/rutik/systemdesign/llm/case_studies/design_computer_use_agent.md) | VLM grounding, action confirmation, VM sandboxing, audit trail |
+| [Design Deep Research Agent](src/main/java/com/rutik/systemdesign/llm/case_studies/design_browser_research_agent.md) | Parallel web crawl, citation grounding, gap detection, iterative deepening |
+| [Design Legal AI Platform](src/main/java/com/rutik/systemdesign/llm/case_studies/design_legal_ai_platform.md) | Citation-grade RAG, matter isolation, privilege classification, conflict check |
+| [Design Video Generation Platform](src/main/java/com/rutik/systemdesign/llm/case_studies/design_video_generation_platform.md) | DiT inference, temporal consistency, async queuing, per-second GPU economics |
+| [Design Image Generation Platform](src/main/java/com/rutik/systemdesign/llm/case_studies/design_image_generation_platform.md) | LoRA hot-swap, CFG batching, safety pipeline, resolution-tier routing |
+| [Design LLM Eval Platform](src/main/java/com/rutik/systemdesign/llm/case_studies/design_llm_eval_platform.md) | Golden-set CI, LLM-as-judge, Welch t-test regression detection, eval-gated deploys |
+| [Design Voice Cloning & TTS Platform](src/main/java/com/rutik/systemdesign/llm/case_studies/design_voice_cloning_tts_platform.md) | Streaming TTS <200ms TTFB, speaker encoder, C2PA watermark, consent token |
+| [Design Medical AI Scribe](src/main/java/com/rutik/systemdesign/llm/case_studies/design_medical_ai_scribe.md) | HIPAA-compliant STT in VPC, PHI boundary, SOAP extraction, FHIR write-back |
+| [Design Sales AI Agent](src/main/java/com/rutik/systemdesign/llm/case_studies/design_sales_ai_agent.md) | Multi-week durable sequences, TCPA compliance, deliverability management, CRM sync |
+| [Design AI Companion Platform](src/main/java/com/rutik/systemdesign/llm/case_studies/design_ai_companion_platform.md) | Prefix-cache economics at 1B msg/day, episodic memory, minor protection gate |
+| [Design AI Meeting Assistant](src/main/java/com/rutik/systemdesign/llm/case_studies/design_ai_meeting_assistant.md) | Bot-in-meeting vs local-process, sliding-window Whisper, diarization, GDPR consent |
+| [Design Financial Research Agent](src/main/java/com/rutik/systemdesign/llm/case_studies/design_financial_research_agent.md) | XBRL-first extraction, citation verification, per-matter isolation, fiscal alignment |
+| [Design Synthetic Data Platform](src/main/java/com/rutik/systemdesign/llm/case_studies/design_synthetic_data_platform.md) | Diversity sampling, best-of-N DPO pairs, quality filter pipeline, dataset lineage |
+| [Design Avatar Video Platform](src/main/java/com/rutik/systemdesign/llm/case_studies/design_avatar_video_platform.md) | TTS→lip-sync pipeline pipelining, tier economics, deepfake consent, C2PA signing |
 
 See the [LLM Master Index](src/main/java/com/rutik/systemdesign/llm/README.md) for the full 6-phase learning path and system design interview framework.
 

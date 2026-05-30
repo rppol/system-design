@@ -458,6 +458,80 @@ Cost reduction levers:
 
 ---
 
+## Operational Playbook
+
+### Eval Pipeline
+
+Run a daily check over 50 golden queries — each has a known correct answer and a set of expected source domains. The eval harness executes the full retrieval + generation pipeline against these queries and computes two scores:
+
+- **Faithfulness score**: fraction of factual claims in the generated answer that are entailment-supported (NLI threshold 0.80) by at least one cited source. Target >= 0.90.
+- **Citation accuracy**: fraction of [N] markers that resolve to a source whose content actually supports the cited claim. Target >= 0.95.
+
+If faithfulness drops below 0.90 across three consecutive daily runs, page the on-call engineer. If a single run drops below 0.80, alert immediately. Scores are written to the eval database and plotted in Grafana alongside model version and prompt hash so regressions can be correlated with deploys.
+
+Cross-reference: See [LLM Eval Harness in Production](./cross_cutting/llm_eval_harness_in_production.md).
+
+### Observability
+
+Every query produces one root OTel trace with the following span hierarchy:
+
+```
+root span (query_hash, intent_type, session_id)
+  ├── query_analysis span (intent, entities, expansion_ms)
+  ├── web_fetch span (num_urls, parallel_fetch_ms, cache_hit_rate)
+  ├── retrieval span
+  │     ├── bm25_search span (bm25_ms=80ms, num_results)
+  │     ├── dense_search span (dense_ms=120ms, index_name)
+  │     └── rrf_merge span (rrf_ms=10ms, num_candidates, k=60)
+  ├── reranking span (cross_encoder_ms=90ms, top_k_in=50, top_k_out=10)
+  ├── generation span
+  │     ├── input_tokens, output_tokens, model_version
+  │     └── citation_count, streaming_ttft_ms
+  └── faithfulness_check span (verified_citations, unverified_count, nli_ms)
+```
+
+Trace attributes on the root span: `query_hash` (SHA-256 of normalized query), `intent_type` (factual/news/opinion/academic/conversational), `session_id`. Sampling: 100% for error traces; 1% for successful traces at steady-state; 100% during incident investigation.
+
+Cross-reference: See [OpenTelemetry for LLM Apps](./cross_cutting/opentelemetry_for_llm_apps.md).
+
+### Incident Runbooks
+
+**Runbook 1 — Faithfulness Regression (>5% unverified citations)**
+
+Trigger: faithfulness score alert fires (daily eval faithfulness < 0.90 or unverified_count / total_citations > 0.05 in production sample).
+
+Steps:
+1. Check if LLM model version changed in the last 24 hours. Compare `model_version` tag in generation spans vs. yesterday's baseline.
+2. If model version changed: roll back to previous model version in the LLM gateway config. Faithfulness regressions from model updates are common when moving between minor versions (e.g., GPT-4o-2024-05-13 → GPT-4o-2024-08-06 can shift citation behavior).
+3. If model version unchanged: diff the citation prompt template against the last known-good hash in the prompt registry. A prompt drift (whitespace or instruction reordering) can cause citation suppression.
+4. Tighten the citation enforcement instruction: add "You MUST include at least one [N] citation per sentence containing a factual claim" to the system prompt.
+5. Re-run the 50-query golden eval. If faithfulness recovers above 0.90, deploy the prompt update and close the incident.
+6. Alert the ML team if root cause is not found within 30 minutes.
+
+**Runbook 2 — Web Fetch Blocked by Anti-Bot Measures (>30% of URLs returning 403/429)**
+
+Trigger: `web_fetch` span error rate alert fires (>30% of fetch attempts returning 403 or 429 within a 5-minute window).
+
+Steps:
+1. Inspect the blocked domains from the fetch error logs. Check if the blocking is domain-specific (one large publisher changed anti-bot rules) or broad (IP-level block from a cloud provider range).
+2. Rotate the user-agent pool. The fetch service maintains a list of 20 browser user-agent strings; cycle to the next 10 and restart the fetch workers.
+3. If rotating user-agents does not reduce error rate within 5 minutes: fall back to Jina Reader API (`https://r.jina.ai/{url}`) for the affected domains. Jina Reader extracts main content without requiring direct page access. Latency impact: +150ms per URL. Cost impact: $0.001/page additional.
+4. If the block is IP-level: request a new egress IP pool from the network team and update the NAT gateway configuration. Estimated remediation time: 20 minutes.
+5. Alert ops. Log the blocked domain list for manual review of terms-of-service compliance.
+
+**Runbook 3 — Latency SLA Breach (P99 > 5 seconds)**
+
+Trigger: P99 end-to-end response latency exceeds 5 seconds sustained over 3 minutes.
+
+Steps:
+1. Check reranker queue depth from the `reranking` span histogram. If cross-encoder queue depth > 100 requests, the reranker is the bottleneck.
+2. Scale the cross-encoder fleet horizontally: trigger manual HPA scale-out from 4 pods to 8 pods (`kubectl scale deployment cross-encoder --replicas=8`). Target: queue drains within 2 minutes.
+3. As an immediate load-shedding measure while pods scale: reduce `top_k` in the retrieval config from 50 to 30. This cuts cross-encoder work by 40% at the cost of marginally lower recall (NDCG@10 drops from 0.87 to 0.84 — acceptable during incidents).
+4. If the bottleneck is in generation (check `generation` span p99): the LLM provider may be experiencing degraded performance. Switch the LLM gateway to the fallback model (Claude Haiku instead of Sonnet — 3x faster TTFT). Faithfulness may drop slightly; acceptable during a latency incident.
+5. Alert on-call. Page the infrastructure team if fleet scale-out does not reduce P99 below 4 seconds within 5 minutes. Cross-reference: See [Multi-Region LLM Topology](./cross_cutting/multi_region_llm_topology.md) for failover routing.
+
+---
+
 ## 10. Interview Discussion Points
 
 **Why is Perplexity faster than you'd expect?** Progressive streaming and parallelism. The UI shows search cards immediately (T=200ms) while fetching happens in background. The LLM starts generating before all URLs are fetched. The user sees progress at every step — the perceived latency is much lower than the actual end-to-end latency.
@@ -557,47 +631,136 @@ Return JSON: {{"queries": ["variant1", "variant2", "variant3"]}}"""
 
 ## Re-Ranking with Cross-Encoder
 
-After BM25 + dense retrieval returns 50 candidate documents, a cross-encoder reranker scores each query-document pair jointly (not independently like bi-encoder retrieval models):
-
-```python
-from sentence_transformers import CrossEncoder
-from dataclasses import dataclass
-
-@dataclass
-class RankedDocument:
-    content: str
-    url: str
-    cross_encoder_score: float
-    original_retrieval_rank: int
-
-cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-12-v2")  # 12ms inference
-
-def rerank_documents(
-    query: str,
-    candidates: list[dict],
-    top_k: int = 10,
-) -> list[RankedDocument]:
-    """Rerank top-50 retrieval candidates using cross-encoder."""
-    pairs = [(query, doc["content"][:512]) for doc in candidates]  # truncate to 512 tokens
-    scores = cross_encoder.predict(pairs, batch_size=50)  # batch all 50 at once
-
-    ranked = sorted(
-        [
-            RankedDocument(
-                content=doc["content"],
-                url=doc["url"],
-                cross_encoder_score=float(scores[i]),
-                original_retrieval_rank=i,
-            )
-            for i, doc in enumerate(candidates)
-        ],
-        key=lambda x: x.cross_encoder_score,
-        reverse=True,
-    )
-    return ranked[:top_k]
-```
+After BM25 + dense retrieval returns 50 candidate documents, a cross-encoder reranker scores each query-document pair jointly (not independently like bi-encoder retrieval models). See `CrossEncoderReranker.rerank` in the Hybrid Retrieval Pipeline section for the production implementation.
 
 **Why cross-encoders outperform bi-encoders for reranking:** Bi-encoders embed query and document independently (fast, but missing interaction signals). Cross-encoders process the full query+document pair jointly through all attention layers, capturing query-document interaction (e.g., "headphones" in query attends to "over-ear" in document). Cross-encoders are 40x slower but 15-25% more accurate on NDCG@10. The two-stage architecture uses bi-encoder for recall (top-50 candidates, fast) and cross-encoder for precision (top-10 reranked, slow).
+
+---
+
+## Hybrid Retrieval Pipeline
+
+The retrieval stage combines BM25 (keyword precision) and dense vector search (semantic recall) in parallel, merging results with Reciprocal Rank Fusion. Running them sequentially costs 200ms unnecessarily; `asyncio.gather` brings total retrieval time to 130ms.
+
+**BROKEN — sequential retrieval (400ms total):**
+
+```python
+# Anti-pattern: run BM25 then dense search sequentially
+bm25_results = await self._bm25_search(query)          # 80ms
+dense_results = await self._dense_search(query_emb)    # 120ms
+# Total: 80 + 120 = 200ms just for retrieval; adds up to 400ms with overhead
+```
+
+**FIX — parallel retrieval with asyncio.gather (130ms total):**
+
+```python
+import asyncio
+import numpy as np
+from dataclasses import dataclass, field
+from sentence_transformers import CrossEncoder
+
+
+@dataclass
+class SearchResult:
+    doc_id: str
+    content: str
+    url: str
+    bm25_score: float = 0.0
+    dense_score: float = 0.0
+    rrf_score: float = 0.0
+
+
+class HybridRetriever:
+    # BM25: 80ms (Elasticsearch), dense HNSW: 120ms (FAISS), parallel total: 130ms, sequential: 200ms+
+
+    def __init__(self, es_client, faiss_index, embed_model):
+        self._es = es_client
+        self._faiss = faiss_index
+        self._embed_model = embed_model
+
+    async def retrieve(self, query: str, top_k: int = 50) -> list[SearchResult]:
+        """Run BM25 and dense search in parallel; merge with RRF."""
+        query_embedding = self._embed_model.encode(query)  # ~10ms
+
+        # gather: total wall time = max(80ms, 120ms) + ~10ms overhead = 130ms
+        bm25_results, dense_results = await asyncio.gather(
+            self._bm25_search(query),
+            self._dense_search(query_embedding),
+        )
+        return self._rrf_merge(bm25_results, dense_results, k=60)[:top_k]
+
+    async def _bm25_search(self, query: str) -> list[tuple[str, float]]:
+        hits = await self._es.search(
+            index="passages",
+            body={"query": {"match": {"content": query}}, "size": 100},
+        )
+        return [(h["_id"], h["_score"]) for h in hits["hits"]["hits"]]
+
+    async def _dense_search(self, query_embedding: np.ndarray) -> list[tuple[str, float]]:
+        distances, indices = await asyncio.to_thread(
+            self._faiss.search, query_embedding.reshape(1, -1), 100
+        )
+        return [(str(idx), float(1 / (1 + dist)))
+                for dist, idx in zip(distances[0], indices[0]) if idx != -1]
+
+    def _rrf_merge(
+        self,
+        bm25_results: list[tuple[str, float]],
+        dense_results: list[tuple[str, float]],
+        k: int = 60,
+    ) -> list[SearchResult]:
+        # RRF: score(d) = sum(1 / (k + rank_i(d))). k=60 from Cormack et al. 2009.
+        rrf_scores: dict[str, float] = {}
+        for rank, (doc_id, _) in enumerate(bm25_results, start=1):
+            rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + 1.0 / (k + rank)
+        for rank, (doc_id, _) in enumerate(dense_results, start=1):
+            rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + 1.0 / (k + rank)
+
+        bm25_map = dict(bm25_results)
+        dense_map = dict(dense_results)
+        return [
+            SearchResult(
+                doc_id=doc_id, content="", url="",
+                bm25_score=bm25_map.get(doc_id, 0.0),
+                dense_score=dense_map.get(doc_id, 0.0),
+                rrf_score=rrf_score,
+            )
+            for doc_id, rrf_score in sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+        ]
+
+
+class CrossEncoderReranker:
+    # Adds ~90ms; cross-encoder NDCG@10 is 15-25% higher than bi-encoder alone.
+
+    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-12-v2"):
+        self._model = CrossEncoder(model_name)
+
+    def rerank(self, query: str, candidates: list[SearchResult], top_k: int = 10) -> list[SearchResult]:
+        """Batch all 50 candidates in one forward pass; ~90ms on A10G GPU."""
+        pairs = [(query, c.content[:512]) for c in candidates]
+        scores = self._model.predict(pairs, batch_size=50)
+        for candidate, score in zip(candidates, scores):
+            candidate.rrf_score = float(score)
+        candidates.sort(key=lambda x: x.rrf_score, reverse=True)
+        return candidates[:top_k]
+```
+
+**End-to-end latency budget with this pipeline:**
+
+```
+BM25 + dense parallel:   130ms
+Document store lookup:    20ms  (fetch content for top-50 doc IDs from Redis)
+Cross-encoder rerank:     90ms  (top-50 → top-10)
+Total retrieval+rerank:  240ms
+
+Full pipeline:
+  Query analysis + embedding:  15ms
+  Web search API (Bing):      150ms  (parallel with retrieval when using cached passages)
+  Retrieval + rerank:         240ms
+  LLM generation (streaming): 800ms to first token, 2,000ms full answer
+  NLI faithfulness check:     180ms  (3 citations × 60ms each, post-generation)
+  P50 end-to-end:            ~2,400ms
+  P99 end-to-end:            ~4,200ms  (slow LLM provider + cache miss)
+```
 
 ---
 
@@ -659,6 +822,109 @@ RULES:
         "sources_used": [doc.url for doc in documents[:10]],
     }
 ```
+
+---
+
+## Citation Grounding and Answer Faithfulness
+
+After generation, every [N] citation marker in the answer is verified by an NLI entailment check. Claims not supported by the cited source are flagged `[UNVERIFIED]` in the returned answer, surfaced as a warning in the sources panel, and counted toward the daily faithfulness score.
+
+**Latency cost:** NLI check adds 60ms per citation; average 3 citations per answer = 180ms overhead. This is acceptable because AI search is latency-tolerant at a 2-3 second total budget — users are already reading the streamed answer while verification runs in the background.
+
+```python
+import re
+import anthropic
+from dataclasses import dataclass, field
+from transformers import pipeline
+
+
+@dataclass
+class GroundedAnswer:
+    text: str
+    citations: list[dict]          # [{"index": 1, "url": "...", "excerpt": "..."}]
+    unverified_claims: list[str]   # claims flagged [UNVERIFIED] after NLI check
+
+
+class CitationVerifier:
+    # NLI model: cross-encoder/nli-deberta-v3-small. Threshold: 0.80 entailment probability.
+    # Below threshold → sentence flagged [UNVERIFIED]. 60ms per citation (GPU).
+
+    def __init__(self):
+        self._nli = pipeline("text-classification",
+                             model="cross-encoder/nli-deberta-v3-small", device=0)
+
+    def verify_all(self, answer: str, sources: list[SearchResult]) -> tuple[str, list[str]]:
+        """NLI-check each [N] citation. Returns (annotated_answer, unverified_sentences)."""
+        citation_pattern = re.compile(r'\[(\d+)\]')
+        sentences = answer.split('. ')
+        unverified: list[str] = []
+        annotated_sentences: list[str] = []
+
+        for sentence in sentences:
+            flagged = False
+            for marker in citation_pattern.findall(sentence):
+                idx = int(marker) - 1
+                if not (0 <= idx < len(sources)):
+                    continue
+                result = self._nli({"text": sources[idx].content[:512], "text_pair": sentence},
+                                   truncation=True)[0]
+                score = result["score"] if result["label"] == "entailment" else 1 - result["score"]
+                if score < 0.80 and not flagged:
+                    unverified.append(sentence)
+                    flagged = True
+            annotated_sentences.append(sentence + (" [UNVERIFIED]" if flagged else ""))
+
+        return '. '.join(annotated_sentences), unverified
+
+
+class GroundedAnswerGenerator:
+    """Generates citation-grounded answer; verifies every [N] via NLI before returning."""
+
+    def __init__(self, anthropic_client: anthropic.Anthropic, verifier: CitationVerifier):
+        self._client = anthropic_client
+        self._verifier = verifier
+
+    def generate(self, query: str, sources: list[SearchResult]) -> GroundedAnswer:
+        source_block = "\n\n".join(
+            f"[{i + 1}] {src.url}\n{src.content[:800]}"
+            for i, src in enumerate(sources[:10])
+        )
+
+        response = self._client.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=1024,
+            system=(
+                "You are a search assistant. Answer using ONLY the provided sources. "
+                "Cite every factual claim with [N] where N is the source number. "
+                "If sources conflict, say: 'Sources disagree: [A] states X, [B] states Y.' "
+                "Never use knowledge not confirmed by provided sources."
+            ),
+            messages=[{
+                "role": "user",
+                "content": f"Sources:\n{source_block}\n\nQuestion: {query}",
+            }],
+        )
+
+        raw_answer = response.content[0].text
+        annotated_answer, unverified = self._verifier.verify_all(raw_answer, sources)
+
+        citations = [
+            {"index": i + 1, "url": src.url, "excerpt": src.content[:200]}
+            for i, src in enumerate(sources[:10])
+        ]
+
+        return GroundedAnswer(
+            text=annotated_answer,
+            citations=citations,
+            unverified_claims=unverified,
+        )
+```
+
+**Production behaviour:**
+
+- `unverified_claims` is empty for ~94% of answers (internal eval on 500 golden queries).
+- When `unverified_claims` is non-empty, the sources panel displays a yellow "citation unverified" badge next to the affected source card.
+- Faithfulness metrics from `CitationVerifier` feed the daily golden-query eval (see Operational Playbook above).
 
 ---
 

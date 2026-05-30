@@ -326,6 +326,77 @@ Job submission flow:
     - Checkpoint retention: 7 days after job completion
 ```
 
+**Real PyTorch training loop with FSDP:** gradient accumulation 8 steps (70B LoRA); bf16 halves memory (140GB -> 70GB); FSDP on 8x H100 shards 70B to ~20GB/GPU.
+
+```python
+from __future__ import annotations
+from contextlib import nullcontext
+from dataclasses import dataclass
+import torch, torch.distributed as dist
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+from torch.cuda.amp import autocast
+from transformers import LlamaDecoderLayer
+
+@dataclass
+class TrainingConfig:
+    model_name: str; dataset_path: str; output_dir: str
+    learning_rate: float = 2e-4; gradient_accumulation_steps: int = 8  # 8 steps typical for 70B LoRA
+    max_grad_norm: float = 1.0; bf16: bool = True
+    checkpoint_every_steps: int = 500; loss_spike_multiplier: float = 3.0
+
+class FineTuningTrainer:
+    """FSDP-wrapped training loop with gradient accumulation and loss-spike detection."""
+
+    def train(self, config: TrainingConfig) -> dict:
+        mp = torch.distributed.fsdp.MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16)
+        model = FSDP(self._load_model(config.model_name),
+                     auto_wrap_policy=transformer_auto_wrap_policy(transformer_layer_cls={LlamaDecoderLayer}),
+                     mixed_precision=mp if config.bf16 else None)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
+        amp_ctx = autocast(dtype=torch.bfloat16) if config.bf16 else nullcontext()
+        running_sum, running_n, last_ckpt = 0.0, 0, ""
+        for step, batch in enumerate(self._build_dataloader(config.dataset_path)):
+            with amp_ctx:
+                loss = model(**batch).loss
+            # BROKEN: loss.backward() without normalization makes the effective LR scale with
+            # gradient_accumulation_steps (8x larger gradient than a single-step update).
+            # FIX: divide loss before .backward() so accumulated gradient == single-step gradient.
+            loss = loss / config.gradient_accumulation_steps   # FIX
+            loss.backward()
+            raw_loss = loss.item() * config.gradient_accumulation_steps
+            running_sum += raw_loss; running_n += 1
+            # Loss spike: auto-checkpoint + alert if loss > 3x rolling mean.
+            if running_n > 20 and raw_loss > config.loss_spike_multiplier * (running_sum / running_n):
+                self._save_checkpoint(model, optimizer, step, config.output_dir, tag="spike")
+                import logging; logging.warning(f"Loss spike step {step}: {raw_loss:.3f} > {config.loss_spike_multiplier}x mean")
+            if (step + 1) % config.gradient_accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+                optimizer.step(); optimizer.zero_grad()
+            if (step + 1) % config.checkpoint_every_steps == 0:  # write to temp, atomic rename
+                last_ckpt = self._save_checkpoint(model, optimizer, step, config.output_dir)
+        return {"final_loss": raw_loss, "steps": step + 1, "checkpoint": last_ckpt}
+
+    def _save_checkpoint(self, model, optimizer, step, out, tag="ckpt") -> str:
+        """Atomic write: temp -> rename. FSDP consolidates shards on rank 0 only."""
+        tmp, final = f"{out}/.tmp_{tag}_{step}", f"{out}/{tag}_{step}"
+        with FSDP.state_dict_type(model, torch.distributed.fsdp.StateDictType.FULL_STATE_DICT):
+            if dist.get_rank() == 0:
+                torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "step": step}, tmp)
+                import shutil; shutil.move(tmp, final)
+        return final
+
+    def _load_model(self, name):
+        from transformers import AutoModelForCausalLM
+        return AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.bfloat16)
+
+    def _build_dataloader(self, path):
+        from torch.utils.data import DataLoader; from datasets import load_from_disk
+        return DataLoader(load_from_disk(path), batch_size=1, shuffle=True)
+```
+
+> See [Training Infrastructure](../training_infrastructure/README.md) for the full FSDP wrap policy and ZeRO sharding details.
+
 ### 4.3 Hyperparameter Management
 
 ```
@@ -460,6 +531,68 @@ Evaluation record:
   }
 ```
 
+**Eval-gated promotion gate (Python):** FAIL if PPL increases >5% or task metric drops >3%; REVIEW within +-1%; else PASS. Runs 15-30 min on 500 examples (1x A100).
+
+```python
+from __future__ import annotations
+import math
+from dataclasses import dataclass
+from enum import Enum
+
+class GateDecision(str, Enum):
+    PASS = "PASS"; FAIL = "FAIL"; REVIEW = "REVIEW"
+
+@dataclass
+class EvalDataset:
+    task_type: str; examples: list[dict]  # {"input": str, "expected": str}
+
+@dataclass
+class GateResult:
+    decision: GateDecision; perplexity_delta_pct: float; task_metric_delta_pct: float; details: dict
+
+class EvalGate:
+    PPL_FAIL = 0.05; TASK_FAIL = 0.03; REVIEW_BAND = 0.01
+
+    def check(self, model_checkpoint: str, baseline_checkpoint: str, eval_dataset: EvalDataset) -> GateResult:
+        # Perplexity eval (model-agnostic): positive delta = lower (better) PPL.
+        baseline_ppl = self._perplexity(baseline_checkpoint, eval_dataset.examples)
+        finetuned_ppl = self._perplexity(model_checkpoint, eval_dataset.examples)
+        ppl_delta_pct = (baseline_ppl - finetuned_ppl) / baseline_ppl
+        # Task-specific golden-set metric (BLEU/pass@1/accuracy/ROUGE-L by task_type).
+        baseline_score = self._golden_score(baseline_checkpoint, eval_dataset)
+        finetuned_score = self._golden_score(model_checkpoint, eval_dataset)
+        task_delta_pct = (finetuned_score - baseline_score) / max(baseline_score, 1e-9)
+
+        details = {
+            "baseline_ppl": round(baseline_ppl, 3), "finetuned_ppl": round(finetuned_ppl, 3),
+            "ppl_delta_pct": round(ppl_delta_pct * 100, 2),
+            "task_delta_pct": round(task_delta_pct * 100, 2), "task_type": eval_dataset.task_type,
+        }
+        if ppl_delta_pct < -self.PPL_FAIL:
+            return GateResult(GateDecision.FAIL, ppl_delta_pct, task_delta_pct, details)
+        if task_delta_pct < -self.TASK_FAIL:
+            return GateResult(GateDecision.FAIL, ppl_delta_pct, task_delta_pct, details)
+        if abs(task_delta_pct) < self.REVIEW_BAND:
+            return GateResult(GateDecision.REVIEW, ppl_delta_pct, task_delta_pct, details)
+        return GateResult(GateDecision.PASS, ppl_delta_pct, task_delta_pct, details)
+
+    def _perplexity(self, checkpoint: str, examples: list[dict]) -> float:
+        """Load checkpoint; forward pass on up to 500 examples; return exp(mean CE loss). ~15-30 min 1x A100."""
+        import torch, math
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        m = AutoModelForCausalLM.from_pretrained(checkpoint, torch_dtype=torch.bfloat16).cuda().eval()
+        tok = AutoTokenizer.from_pretrained(checkpoint)
+        with torch.no_grad():
+            losses = [m((ids := tok(e["input"], return_tensors="pt").input_ids.cuda()), labels=ids).loss.item() for e in examples[:500]]
+        return math.exp(sum(losses) / len(losses))
+
+    def _golden_score(self, checkpoint: str, dataset: EvalDataset) -> float:
+        """Generate predictions; score with BLEU/pass@1/accuracy/ROUGE-L by task_type."""
+        raise NotImplementedError("See evaluation_and_benchmarks module.")
+```
+
+> See [LLM Evaluation and Benchmarks](../evaluation_and_benchmarks/README.md) for the full eval harness including LLM-as-judge pipelines and RAGAS integration.
+
 ### 4.5 Model Registry
 
 ```
@@ -539,6 +672,53 @@ Model lifecycle:
     Evaluated models never promoted: 90 days
     Archived: metadata kept forever, artifacts deleted after 1 year
 ```
+
+**LoRA adapter serving with LRU hot-swap:**
+
+Memory budget per H100 node: ~70GB base weights + 4GB adapter cache (20 x 200MB rank-16 LoRA) = 74GB reserved; 1,000 adapters served from one replica via LRU eviction.
+
+```python
+from __future__ import annotations
+import time; from collections import OrderedDict; from threading import Lock
+import boto3, torch; from peft import PeftModel
+
+MAX_CACHED_ADAPTERS = 20; NVME_CACHE_DIR = "/nvme/adapters"  # 20 x 200MB = 4GB; NVMe <50ms vs S3 ~2s
+
+class LoRAServingManager:
+    """Hot-swaps LoRA adapters onto shared base model. No 140GB reload between requests."""
+
+    def __init__(self, base_model: str, s3_bucket: str) -> None:
+        self._s3 = boto3.client("s3"); self._bucket = s3_bucket
+        self._cache: OrderedDict[str, tuple[PeftModel, float]] = OrderedDict(); self._lock = Lock()
+        from transformers import AutoModelForCausalLM  # bf16 device_map="auto"; loaded once at startup
+        self._base = AutoModelForCausalLM.from_pretrained(base_model, torch_dtype=torch.bfloat16, device_map="auto")
+
+    def load_adapter(self, adapter_id: str, base_model: str) -> None:
+        """Load into GPU cache: <500ms from NVMe, ~2s from S3 on first access."""
+        with self._lock:
+            if adapter_id in self._cache:
+                self._cache.move_to_end(adapter_id); self._cache[adapter_id] = (self._cache[adapter_id][0], time.monotonic()); return
+            if len(self._cache) >= MAX_CACHED_ADAPTERS:
+                self.unload_lru()
+            self._cache[adapter_id] = (PeftModel.from_pretrained(self._base, self._ensure_local(adapter_id), is_trainable=False).eval(), time.monotonic())
+
+    def unload_lru(self) -> str:  # evict LRU; free GPU memory; return evicted adapter_id
+        lru_id, (model, _) = next(iter(self._cache.items()))
+        del self._cache[lru_id]; del model; torch.cuda.empty_cache(); return lru_id
+
+    def list_loaded(self) -> list[str]:  # MRU first
+        with self._lock: return list(reversed(list(self._cache.keys())))
+
+    def _ensure_local(self, adapter_id: str) -> str:
+        import os; local = f"{NVME_CACHE_DIR}/{adapter_id}"
+        if not os.path.isdir(local):
+            os.makedirs(local, exist_ok=True)
+            for f in ["adapter_model.safetensors", "adapter_config.json"]:
+                self._s3.download_file(self._bucket, f"models/{adapter_id}/{f}", f"{local}/{f}")
+        return local
+```
+
+> See [Inference Engines](../inference_engines/README.md) for vLLM's LoRA multiplexing implementation and PagedAttention KV cache interaction with multi-adapter serving.
 
 ### 4.6 Multi-Tenancy and Isolation
 
@@ -860,7 +1040,44 @@ Key cost levers:
 
 ---
 
-## 8. Interview Discussion Points
+## 8. Operational Playbook
+
+### Eval Pipeline (every job, automated)
+
+Every fine-tuning job must pass the eval gate before promotion. Gate runs automatically on job completion:
+1. Perplexity + token accuracy from validation loss: <5 minutes.
+2. Golden-set eval on 500 examples: 15-30 minutes on 1x A100.
+3. Task-specific metric (BLEU / pass@1 / accuracy / ROUGE-L).
+4. Decision: PASS auto-promotes; FAIL surfaces regression diff in dashboard; REVIEW routes to human queue.
+
+See [LLM Evaluation and Benchmarks](../evaluation_and_benchmarks/README.md) for the full eval harness.
+
+### Observability (OpenTelemetry trace per job)
+
+```
+job_span: job_id, tenant_id, base_model, method, dataset_hash
+  +-- data_pipeline_span: num_examples, num_tokens, pii_redacted, quality_score
+  +-- training_span (per 500-step checkpoint): train_loss, val_loss, grad_norm,
+  |     gpu_util_pct, mfu_pct, tokens_per_second, learning_rate
+  +-- eval_span: perplexity_delta_pct, task_metric_delta_pct, gate_decision
+```
+
+GPU-seconds per span tagged with tenant_id + job_id feed billing directly. See [LLM Observability and Monitoring](../llm_observability_and_monitoring/README.md).
+
+### Incident Runbooks
+
+**Runbook 1 — Loss spike mid-training**
+Symptom: loss > 3x rolling mean. Auto-response: `FineTuningTrainer` saves emergency checkpoint `spike_{step}` and logs WARNING. Diagnosis: inspect the batch at that step index in training span -- common cause is a corrupted JSONL line with garbled token sequences that passed format validation. Resolution: if loss does not recover within 50 steps, cancel job, remove offending batch, restart from last clean checkpoint (max 500 steps lost).
+
+**Runbook 2 — GPU OOM during FSDP**
+Symptom: `torch.cuda.OutOfMemoryError` at step N; pod exits, node stays healthy (OOM is per-pod). Diagnosis: check `sequence_length_max` in training span -- a batch with 8192 tokens vs typical 2048 can exceed per-GPU HBM even with FSDP sharding. Resolution: reduce `max_length` or `per_device_batch_size` by 1 and resubmit; orchestrator auto-retries up to 3 times from last checkpoint. Persistent failure at same step -> manual review for pathologically long examples.
+
+**Runbook 3 — Eval gate regression blocking tenant**
+Symptom: `gate_decision=FAIL` on every job iteration; tenant reports "model is worse than base." Diagnosis: open eval report -- common causes: (a) golden set misaligned with task, (b) golden set too small (<50 examples, metric estimate noisy), (c) catastrophic forgetting from too-narrow training data. Resolution: (a)/(b) replace golden set or allow manager-approved gate bypass (audit-logged for SOC 2); (c) recommend data augmentation or reduce LoRA rank.
+
+---
+
+## 9. Interview Discussion Points
 
 **Why default to LoRA instead of full fine-tuning?** LoRA trains only 0.1-1% of model parameters (low-rank adapters injected into attention layers), reducing GPU memory by 60-70% and training time by 5-10x. For a 70B model, full fine-tuning requires 32 A100 GPUs and costs $1,000+; LoRA achieves 90-95% of the quality improvement on 4 GPUs for $60-90. Full fine-tuning is only justified when the domain shift is extreme (e.g., English model to Japanese medical) and the dataset exceeds 100K examples. The platform should steer users toward LoRA by default and require explicit justification (minimum dataset size, budget confirmation) for full fine-tuning jobs.
 

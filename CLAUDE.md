@@ -5,7 +5,7 @@
 A comprehensive system design study repository covering:
 - **LLD** — Design patterns (GoF), SOLID, anti-patterns
 - **HLD** — Distributed system concepts (CAP, caching, queues, sharding, etc.) + case studies
-- **LLM** — Complete LLM engineering guide (45 modules, 13 case studies, 65 deep-dive sub-files across 9 topics)
+- **LLM** — Complete LLM engineering guide (45 modules, 29 case studies, 74 deep-dive sub-files across 9 topics)
 - **ML** — Complete Machine Learning guide (32 modules, 10 case studies, 26 deep-dive sub-files across 6 topics)
 - **Java** — Pure Java senior-engineer + interview prep guide (17 modules, 4 case studies)
 - **Spring** — Spring Framework senior-engineer + interview prep guide (23 modules, 5 case studies)
@@ -68,7 +68,8 @@ Every module README must follow this exact structure (matches `llm/foundations_a
 
 ### Case Study Files (in `case_studies/` directories)
 
-Case study files do NOT use the 14-section template. They use:
+#### Java / Spring case studies (legacy, 7-section)
+Java and Spring case studies under `java/case_studies/` and `spring/case_studies/` use the original template:
 ```
 ## Problem Statement
 ## Architecture Overview   (ASCII diagram)
@@ -78,6 +79,60 @@ Case study files do NOT use the 14-section template. They use:
 ## Tradeoffs and Alternatives
 ## Interview Discussion Points
 ```
+
+#### LLM / ML / Java / Spring case studies — Principal Case Study Template (11-section)
+
+LLM case studies under `llm/case_studies/` use the principal-grade 11-section template below. This is the authoritative format for all new LLM case studies. Reference file: `llm/case_studies/design_gpu_inference_platform.md`.
+
+```
+## Intuition
+(one-line analogy in a blockquote + bold **Key insight** + mental model + why this system exists)
+
+## 1. Requirements Clarification
+(Functional requirements; Non-functional requirements with concrete latency/throughput/availability targets; Out of scope)
+
+## 2. Scale Estimation
+(Traffic math, storage math, GPU/compute sizing, cost math — all with real numbers derived from the requirements)
+
+## 3. High-Level Architecture
+(Primary ASCII diagram spanning the full system; component inventory; data flow narrative; multi-region sub-diagram with cross-reference to ./cross_cutting/multi_region_llm_topology.md)
+
+## 4. Component Deep Dives
+(Per-component sub-sections, each with: ASCII sub-diagram, real Python/Java code, concrete numbers. Minimum 4 components. Show broken code then fix at least once across this section.)
+
+## 5. Design Decisions & Tradeoffs
+(5-7 major architectural choices: state the decision, alternatives considered, rationale, consequences. Include a comparison table.)
+
+## 6. Real-World Implementations
+(How 3-5 named companies actually build this system. Specific technical choices, not generic patterns. Cite public engineering posts, papers, postmortems.)
+
+## 7. Technologies & Tools
+(Comparison table: 4-6 relevant tools vs each other on the dimensions that matter most for this system.)
+
+## 8. Operational Playbook
+(a) Eval Pipeline — golden-set checks, LLM-as-judge, regression gate. Cross-reference ./cross_cutting/llm_eval_harness_in_production.md
+(b) Observability — OTel span hierarchy specific to this system. Cross-reference ./cross_cutting/opentelemetry_for_llm_apps.md
+(c) Incident Runbooks — 4 named runbooks with: symptom → diagnosis → mitigation → resolution)
+
+## 9. Common Pitfalls & War Stories
+(5-6 production incidents: named company or anonymized scenario, specific failure mode, root cause, resolution, quantified impact — $ or users affected)
+
+## 10. Capacity Planning
+(Scaling formula for the primary bottleneck resource + worked example with real hardware specs and costs)
+
+## 11. Interview Discussion Points
+(10-12 Q&As testing design rationale. Bold the question, plain text answer. Format: direct answer → mechanism/tradeoff → practical guidance.)
+```
+
+**Principal case study quality bar:**
+- 900-1100 lines per file
+- Minimum 4 cross-references to `cross_cutting/` sub-files via relative links
+- Real executable-shaped Python code in Section 4 (not pseudocode or prose)
+- Concrete numbers in every quantitative claim (no "a few", "some", "significant")
+- At least one "show broken code, then fix" example in Section 4
+- Section 6 must name actual companies with specific technical details
+- Section 9 must have quantified impact ($ lost, users affected, SLA violated)
+- Section 11: minimum 10 Q&As (not 8)
 
 ### Interview Q&A Rules
 
@@ -165,7 +220,11 @@ Current modules under `src/main/java/com/rutik/systemdesign/llm/`:
 | `context_engineering/` | Context budget allocation, "lost in the middle", KV-cache-aware ordering, compaction, retrieval vs long-context decision matrix | — |
 | `llm_caching/` | Exact-match, semantic cache, provider prompt caching, vLLM APC, embedding cache, threshold tuning, invalidation | — |
 
-Case studies in `llm/case_studies/`: design_chatgpt, design_copilot, design_rag_pipeline, design_ai_search_engine, design_llm_gateway, design_ai_coding_assistant, design_customer_support_bot, design_ai_content_moderation, design_llm_fine_tuning_platform, design_notion_ai, design_ai_data_analyst, design_ai_code_review, design_real_time_translation.
+Case studies in `llm/case_studies/` (29 total): design_chatgpt, design_copilot, design_rag_pipeline, design_ai_search_engine, design_llm_gateway, design_ai_coding_assistant, design_customer_support_bot, design_ai_content_moderation, design_llm_fine_tuning_platform, design_notion_ai, design_ai_data_analyst, design_ai_code_review, design_real_time_translation, design_gpu_inference_platform, design_autonomous_swe_agent, design_computer_use_agent, design_browser_research_agent, design_legal_ai_platform, design_video_generation_platform, design_image_generation_platform, design_llm_eval_platform, design_voice_cloning_tts_platform, design_medical_ai_scribe, design_sales_ai_agent, design_ai_companion_platform, design_ai_meeting_assistant, design_financial_research_agent, design_synthetic_data_platform, design_avatar_video_platform.
+
+Cross-cutting sub-files in `llm/case_studies/cross_cutting/` (9 files, 14-section template): llm_eval_harness_in_production, opentelemetry_for_llm_apps, multi_region_llm_topology, red_team_eval_harness, gpu_pool_economics, tenant_isolation_patterns, streaming_at_scale, agent_durability_patterns, training_loop_internals.
+
+Reference file for new LLM case study format: `llm/case_studies/design_gpu_inference_platform.md` (11-section principal case study template).
 
 Master index: `llm/README.md` (topics table + Sub-Files Index section).
 

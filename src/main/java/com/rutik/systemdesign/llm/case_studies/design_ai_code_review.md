@@ -273,6 +273,47 @@ Context assembly time: < 2 seconds
   Token counting: tiktoken (cl100k_base) for budget enforcement
 ```
 
+#### DiffContextBuilder — real implementation
+
+```python
+from dataclasses import dataclass
+from pathlib import Path
+import re, tiktoken
+_ENC = tiktoken.get_encoding("cl100k_base")
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
+@dataclass
+class Hunk:
+    file: str; line_start: int; line_end: int  # 1-based, new file
+    added_lines: list[int]; removed_lines: list[int]
+@dataclass
+class ReviewContext:
+    hunks: list[Hunk]; file_contents: dict[str, str]   # file -> ±10-line context
+    symbol_definitions: dict[str, str]; test_coverage: dict[str, str]; total_tokens: int
+class DiffContextBuilder:
+    # Token budget (default 4,000): hunks 40% | context 30% | LSP symbols 20% | tests 10%.
+    SPLIT = {"hunks": 0.40, "ctx": 0.30, "sym": 0.20, "test": 0.10}
+    def build(self, diff_text: str, repo_path: Path, budget_tokens: int = 4000) -> ReviewContext:
+        b = {k: int(budget_tokens * v) for k, v in self.SPLIT.items()}
+        hunks = self._parse_hunks(diff_text)
+        contents = {h.file: self._ctx_snippet(repo_path, h, b["ctx"]) for h in hunks}
+        syms, tests = self._symbols(repo_path, hunks, b["sym"]), self._tests(repo_path, hunks, b["test"])
+        total = len(_ENC.encode(diff_text + "".join((*contents.values(), *syms.values(), *tests.values()))))
+        return ReviewContext(hunks, contents, syms, tests, total)
+    def _parse_hunks(self, diff_text: str) -> list[Hunk]:
+        ...  # "+++ b/" -> file; _HUNK_RE groups(1,2) -> Hunk(new_start, new_start+count-1)
+    def _ctx_snippet(self, repo_path: Path, h: Hunk, budget: int) -> str:
+        """Read ±10 lines from disk around the hunk; hard-trim to token budget."""
+        if not (p := repo_path / h.file).exists(): return ""
+        lines = p.read_text(errors="replace").splitlines()
+        chunk = "\n".join(lines[max(0, h.line_start - 11):min(len(lines), h.line_end + 10)])
+        ids = _ENC.encode(chunk)
+        return _ENC.decode(ids[:budget]) if len(ids) > budget else chunk
+    def _symbols(self, r: Path, h: list[Hunk], b: int) -> dict[str, str]:
+        ...  # LSP textDocument/definition; fallback: import-line extraction
+    def _tests(self, r: Path, h: list[Hunk], b: int) -> dict[str, str]:
+        ...  # rglob(f"*{stem}*test*"); first 400 chars per matched test file
+```
+
 ### 4.2 Security Detection
 
 ```
@@ -659,6 +700,50 @@ Rate limiting against Git provider APIs:
   Backpressure: if approaching rate limit, queue reviews with delay
 ```
 
+#### Webhook-to-review pipeline
+
+BROKEN: synchronous review in the webhook handler causes GitHub's 10-second timeout → 3 retries
+→ 3 duplicate review comment sets on every PR.
+
+```python
+# BROKEN — blocks 15-45s; GitHub retries 3x after 10s
+async def broken(req): await run_full_review(await req.json()); return {"status": "done"}
+# FIX: HMAC-SHA256 verify, enqueue to Redis, return job_id in <2s
+import hashlib, hmac, json, uuid
+from dataclasses import dataclass
+import httpx, redis.asyncio as aioredis
+_redis = aioredis.from_url("redis://localhost:6379")
+GITHUB_API = "https://api.github.com"
+@dataclass
+class ReviewJob:
+    job_id: str; owner: str; repo: str; pr_number: int; head_sha: str; token: str
+async def handle_pr_event(payload: dict) -> str:
+    """Return job_id in <2s. ReviewWorker.process() runs the 15-45s review out-of-band."""
+    if payload.get("action") not in {"opened", "synchronize", "reopened"}: return "ignored"
+    pr = payload["pull_request"]
+    job = ReviewJob(str(uuid.uuid4()), payload["repository"]["owner"]["login"],
+                    payload["repository"]["name"], pr["number"],
+                    pr["head"]["sha"], payload.get("installation_token", ""))
+    if not await _redis.set(f"review:q:{job.owner}:{job.repo}:{job.head_sha}",
+                            job.job_id, nx=True, ex=300):
+        return job.job_id  # dedup: same head SHA already queued
+    await _redis.rpush("review:jobs", json.dumps(job.__dict__))
+    return job.job_id
+async def post_review_comment(job: ReviewJob, findings: list[dict]) -> None:
+    """POST findings as a single GitHub PR review; X-Idempotency-Key prevents duplicates."""
+    idem = hashlib.sha256(f"{job.pr_number}:{job.head_sha}".encode()).hexdigest()[:16]
+    comments = [{"path": f["file"], "line": f["line"], "side": "RIGHT",
+                 "body": f"**[{f['severity'].upper()}] {f['type']}**\n\n{f['explanation']}"}
+                for f in findings]
+    async with httpx.AsyncClient() as c:
+        await c.post(f"{GITHUB_API}/repos/{job.owner}/{job.repo}/pulls/{job.pr_number}/reviews",
+                     headers={"Authorization": f"Bearer {job.token}", "X-Idempotency-Key": idem},
+                     json={"event": "COMMENT", "comments": comments}, timeout=15)
+```
+
+Webhook responds in <2s; full review takes 15-45s; Redis bridges the gap.
+`X-Idempotency-Key = sha256(pr_number+head_sha)[:16]` prevents duplicates on worker retry.
+
 ### 4.8 Learning from Feedback
 
 ```
@@ -969,6 +1054,30 @@ Dashboard layout:
   Row 3: acceptance rates by category, false positive trend
   Row 4: cost per review, daily spend, model distribution
 ```
+
+---
+
+## Operational Playbook
+
+**Eval Pipeline.** Weekly FP check against golden PRs (known-good PRs that should produce zero
+comments in specific categories). Target FP rate <10%; freeze prompt version if FP rate exceeds
+15% on two consecutive runs. Metrics: `eval.fp_rate` (by category), `eval.total_comments_on_golden`.
+See [LLM Eval Harness in Production](./cross_cutting/llm_eval_harness_in_production.md).
+**Observability.** OTel trace at `pr_review` (attrs: pr_id, repo, num_files_changed, org_tier)
+with spans: `diff_parse` [200-400ms], `context_build` [800-1800ms, budget_tokens/symbols_resolved],
+`llm_review` [parallel: security_pass, performance_pass, logic_pass — each carries model,
+input_tokens, output_tokens, findings_count], `comment_post` [500-1500ms, idempotency_key]. P95
+SLO 60,000ms; `llm_review` spans aggregate `cost_usd` per review for billing. See
+[OpenTelemetry for LLM Apps](./cross_cutting/opentelemetry_for_llm_apps.md).
+**Incident Runbooks.** Runbook 1 — Duplicate comments storm. Symptom: 3 identical comments per PR
+line. Root cause: webhook retry (handler >10s) + missing idempotency key. Fix: confirm
+`handle_pr_event` returns in <2s; set `X-Idempotency-Key: sha256(pr_number+head_sha)[:16]`.
+Runbook 2 — False positive spike. Symptom: FP rate >15% on golden set. Root cause: prompt
+regression or silent model upgrade (check `x-model-version` header). Fix: roll back prompt alias;
+pin model (`model="gpt-4o-2024-05-13"`); re-run golden eval; fire `alert.fp_rate_spike`.
+Runbook 3 — Latency SLA breach. Symptom: P95 `pr_review` >90,000ms for >5 minutes. Root cause:
+LLM rate limit (429) or insufficient workers (>2,000 PRs/hour needs >40). Fix: token-bucket queue
+per org tier, failover to Claude Sonnet; scale worker replicas 20→60; target queue depth <50.
 
 ---
 

@@ -542,6 +542,56 @@ Context assembly for writing assist:
       skip  # user cannot access this linked page; do not include
 ```
 
+#### Block-Level SSE Streaming Handler
+
+Writing assist streams generated text into the block editor via SSE. The handler uses `id:` sequence numbers for reconnect support and cancels in-flight GPU work on client disconnect. Concrete numbers: average block generation = 150 tokens at 40 tok/s = 3.75s; p95 = 500 tokens = 12.5s. Disconnect is checked every 5 tokens (~125ms) to free the A100 (~$2/hr) promptly.
+
+```python
+from __future__ import annotations
+import asyncio
+from typing import AsyncIterator
+from fastapi import Request
+from fastapi.responses import StreamingResponse
+
+
+async def block_stream_handler(
+    request: Request,
+    instruction: str,
+    context_tokens: str,
+    llm_client: "LLMClient",
+) -> StreamingResponse:
+    async def event_generator() -> AsyncIterator[str]:
+        seq = 0
+        check_counter = 0
+        task = asyncio.create_task(
+            llm_client.stream_completion(context_tokens, instruction, max_tokens=1024)
+        )
+        try:
+            async for token in await task:
+                seq += 1
+                check_counter += 1
+                if check_counter >= 5:          # check every 5 tokens
+                    check_counter = 0
+                    if await request.is_disconnected():
+                        task.cancel()           # free GPU immediately
+                        return
+                yield f"id: {seq}\ndata: {token}\n\n"
+            yield f"id: {seq + 1}\ndata: [DONE]\n\n"
+        except asyncio.CancelledError:
+            return
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+```
+
+Disconnect without cancellation risks tokens appended to the wrong block on reconnect — a silent data-corruption bug. See [Streaming at Scale](./cross_cutting/streaming_at_scale.md) for the full SSE infrastructure (backpressure, reconnect recovery, multi-region proxying).
+
 ### 4.6 Multi-Tenant Data Isolation
 
 ```
@@ -583,7 +633,114 @@ Cross-workspace isolation guarantees:
   6. Audit trail: all AI queries logged with workspace_id, user_id, chunks_accessed
 ```
 
-### 4.7 Structured Content: Database Queries
+### 4.7 Per-Workspace ACL Pushdown: WorkspaceRetriever
+
+Enforce the permission model at the vector DB routing layer, not as a post-retrieval metadata filter. `WorkspaceRetriever` routes every query to the correct per-workspace Qdrant collection — making cross-workspace contamination architecturally impossible.
+
+Storage math: 1M workspaces x 50MB avg collection = 50TB vector storage. Qdrant collections are lightweight (~4KB overhead) — 1M collections feasible on a sharded cluster.
+
+BROKEN pattern (single shared collection with metadata filter):
+```python
+# BROKEN: a prompt-injection attack that influences query-rewriting bypasses the filter.
+qdrant_client.search(collection_name="all_workspaces", ...)  # wrong
+# BUG 1: filter bypass -> any workspace content returned.
+# BUG 2: HNSW scan over 40B vectors across all tenants on every query.
+```
+
+FIX — `WorkspaceRetriever` with per-workspace collection routing:
+
+```python
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import NamedTuple
+import logging
+
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import Filter, FieldCondition, MatchAny
+
+
+@dataclass(frozen=True)
+class UserPermissions:
+    user_id: str
+    workspace_id: str
+    allowed_page_ids: frozenset[str]      # O(1) membership checks
+    allowed_group_ids: frozenset[str]     # 10-50 groups replaces 50K page IDs in filter
+
+
+class Block(NamedTuple):
+    chunk_id: str
+    page_id: str
+    workspace_id: str
+    content: str
+    score: float
+
+
+class WorkspaceRetriever:
+    def __init__(self, qdrant: QdrantClient, embed_fn) -> None:
+        self._qdrant = qdrant
+        self._embed = embed_fn
+
+    def _get_collection(self, workspace_id: str) -> str:
+        return f"ws_{workspace_id}"  # wrong collection simply does not exist
+
+    def _apply_permission_filter(
+        self, results: list, user_permissions: UserPermissions
+    ) -> list[Block]:
+        # Secondary ACL check (defense-in-depth). Primary: Qdrant group-ID filter.
+        # Catches stale permission bitmaps and over-broad group-ID expansions.
+        # See [Tenant Isolation Patterns](./cross_cutting/tenant_isolation_patterns.md).
+        allowed: list[Block] = []
+        for hit in results:
+            payload = hit.payload
+            chunk_ws = payload["workspace_id"]
+            if chunk_ws != user_permissions.workspace_id:
+                # Should never happen — collection routing guarantees isolation.
+                logging.critical(
+                    "CROSS_WORKSPACE_LEAK: chunk %s from ws %s in query for ws %s",
+                    payload["chunk_id"], chunk_ws, user_permissions.workspace_id,
+                )
+                continue
+
+            permission_groups: set[str] = set(payload.get("permission_groups", []))
+            user_grants = user_permissions.allowed_page_ids | user_permissions.allowed_group_ids
+            if permission_groups.isdisjoint(user_grants):
+                continue  # stale permission bitmap — drop silently
+
+            allowed.append(Block(
+                chunk_id=payload["chunk_id"],
+                page_id=payload["page_id"],
+                workspace_id=chunk_ws,
+                content=payload["content"],
+                score=hit.score,
+            ))
+        return allowed
+
+    def retrieve(
+        self,
+        query: str,
+        workspace_id: str,
+        user_permissions: UserPermissions,
+        top_k: int = 50,
+    ) -> list[Block]:
+        """Route query to the workspace-dedicated collection and apply ACL."""
+        collection = self._get_collection(workspace_id)
+        results = self._qdrant.search(
+            collection_name=collection,
+            query_vector=self._embed(query),
+            query_filter=Filter(must=[
+                FieldCondition(
+                    key="permission_groups",
+                    match=MatchAny(any=list(user_permissions.allowed_group_ids)),
+                )
+            ]),
+            limit=top_k,
+        )
+        return self._apply_permission_filter(results, user_permissions)
+```
+
+See [Tenant Isolation Patterns](./cross_cutting/tenant_isolation_patterns.md) for Qdrant shard topology, ES index routing, and PG Citus co-location by workspace_id.
+
+### 4.8 Structured Content: Database Queries
 
 ```
 Notion databases are structured data: tables with typed properties
@@ -754,14 +911,10 @@ Revenue estimation:
   Margin: ($45M - $4.65M) / $45M = ~90% gross margin
 
 Cost optimization levers:
-  - Semantic caching for repeated workspace queries (est. 20% hit rate)
-    -> save $27,100/day on LLM costs
-  - Route simple AI search queries to Claude Haiku (est. 40% of search)
-    -> save $40,000/day
-  - Quantize Qdrant vectors from float32 to int8 (4x storage reduction)
-    -> reduce Qdrant cluster from 40 to 12 nodes, save $5,600/day
-  - Embed with local model (e5-small-v2 on GPU) -> eliminate embedding API costs
-
+  - Semantic cache (20% hit rate) -> save $27,100/day
+  - Route 40% of AI search to Claude Haiku -> save $40,000/day
+  - Quantize Qdrant float32 -> int8 (4x reduction) -> 40 nodes -> 12, save $5,600/day
+  - Local embedding model (e5-small-v2 on GPU) -> eliminate embedding API costs
   Optimized total: ~$80,000/day = ~$2.4M/month
 ```
 
@@ -771,17 +924,14 @@ Cost optimization levers:
 
 ```
 1. Permission leakage (severity: critical)
-   Symptom: AI response contains content from a page the user cannot access.
-   Cause: stale permission cache after a permission change;
-          race condition between permission revocation and cache invalidation.
-   Detection: audit every AI response -- check every chunk's page_id against
-              user's permission set at response time (async, post-delivery).
-              Alert on any mismatch.
-   Fix: deny-by-default during permission propagation. When a permission change
-        event arrives, immediately invalidate cache. Until propagation completes,
-        affected chunks are excluded from search results.
-   Prevention: integration test suite that simulates permission changes and
-               verifies AI search results within 60 seconds.
+   Symptom: AI response contains content the user cannot access.
+   Cause: stale permission cache; race between permission revocation and cache invalidation.
+   Detection: async audit of every response — check each chunk's page_id against the user's
+              permission set after delivery. Alert on any mismatch.
+   Fix: deny-by-default during propagation; immediately invalidate cache on permission-change
+        event; exclude affected chunks until propagation completes.
+   Prevention: integration test that simulates permission changes and verifies AI search
+               results within 60 seconds.
 
 2. Stale content in search results
    Symptom: user edits a page, but AI search still returns old content.
@@ -801,30 +951,24 @@ Cost optimization levers:
 
 4. Cross-workspace data leak (severity: critical)
    Symptom: content from Workspace A appears in Workspace B query.
-   Cause: bug in collection routing; wrong workspace_id in chunk metadata.
-   Prevention: collection-per-workspace isolation; workspace_id in Qdrant
-               collection name (not just metadata filter). Each query
-               hardcodes the collection name from the authenticated session.
-   Detection: canary workspaces with known content; automated tests verify
-              no cross-workspace retrieval.
+   Cause: bug in collection routing; wrong workspace_id ingested with chunk.
+   Prevention: collection-per-workspace (workspace_id embedded in collection name, not
+               just metadata filter); hardcode collection name from authenticated session.
+   Detection: canary workspaces with known content; automated cross-workspace retrieval tests.
 
 5. Indexing pipeline data loss
    Symptom: recently created pages never become searchable.
-   Cause: Kafka consumer crash before offset commit; embedding API timeout
-          not retried.
-   Fix: at-least-once delivery with idempotent upserts (content_hash
-        deduplication); dead-letter queue for failed events; daily
-        reconciliation job compares Notion Core DB page list against
+   Cause: Kafka consumer crash before offset commit; embedding API timeout not retried.
+   Fix: at-least-once delivery with idempotent upserts (content_hash dedup); dead-letter
+        queue for failed events; daily reconciliation job checks Core DB page list vs
         Qdrant chunk count per workspace.
 
 6. LLM hallucination beyond retrieved context
-   Symptom: AI answer references a policy or fact not in any workspace page.
+   Symptom: AI answer references a fact not in any workspace page.
    Cause: model uses parametric knowledge instead of retrieved context.
-   Detection: faithfulness check -- compare claims in response against
-              retrieved chunks using NLI model.
-   Fix: stronger grounding prompt: "Answer ONLY based on the provided
-        workspace content. If the information is not in the provided
-        context, say: I could not find this information in your workspace."
+   Detection: faithfulness check — compare response claims against retrieved chunks via NLI.
+   Fix: grounding prompt: "Answer ONLY from provided workspace content. If not found, say:
+        I could not find this information in your workspace."
 ```
 
 ---
@@ -854,18 +998,55 @@ Latency percentiles:
   AI search p99: < 5.0s
   Writing assist p50: < 800ms to first token
   Writing assist p95: < 1.5s to first token
-
-Evaluation pipeline:
-  1. Golden dataset: 500 question-answer pairs per workspace size tier
-     (small/medium/enterprise), manually curated with ground truth answers
-     and source pages
-  2. Weekly automated evaluation: run golden dataset queries through
-     production pipeline, measure RAGAS metrics
-  3. Permission audit: nightly job runs queries as users with restricted
-     access, verifies no unauthorized content in responses
-  4. A/B testing framework: test prompt changes, model changes,
-     chunking changes with 10,000 queries minimum per variant
 ```
+
+See Operational Playbook below for the eval pipeline, OTel trace hierarchy, and incident runbooks.
+
+---
+
+## Operational Playbook
+
+### Eval Pipeline
+
+Weekly workspace-grounded Q&A eval: 50 golden questions per workspace type (personal / team / enterprise), replayed through the production pipeline under known permission sets.
+
+Quality gates: Faithfulness > 0.92; Answer relevancy > 0.88; Citation accuracy > 0.99 (stricter than typical RAG's 0.90 — a wrong citation implies the answer may reference content the user cannot access); Permission compliance = 1.00 (any non-permitted chunk in the context window fails the gate and triggers a P1 investigation). A metric drop below threshold blocks the deployment.
+
+See [LLM Eval Harness in Production](./cross_cutting/llm_eval_harness_in_production.md) for golden-set management, LLM-as-judge scoring, and CI/CD integration.
+
+### Observability
+
+Every AI query emits an OTel trace. All user-identifying fields are hashed before export.
+
+```
+root span: notion_ai_query
+  workspace_id_hash, request_type, user_tier, scope
+
+  child: permission_check
+    cache_hit, num_allowed_groups, check_duration_ms (2-5ms hit / 50-200ms cold)
+
+  child: vector_retrieval
+    collection_name (hashed), top_k_requested=50, top_k_returned,
+    similarity_scores_p50, retrieval_duration_ms
+
+  child: reranking
+    input_passages, output_passages=8, reranker_model, reranking_duration_ms
+
+  child: llm_generation
+    model, input_tokens, output_tokens, streaming_ttft_ms, client_disconnected
+```
+
+Alert rules: `permission_check.check_duration_ms p95 > 25ms` (cache degradation); `top_k_returned < top_k_requested * 0.5` (permission bitmap staleness spike — ACL post-check dropping >50% of results).
+
+Cross-reference: See [OpenTelemetry for LLM Apps](./cross_cutting/opentelemetry_for_llm_apps.md) for the full observability design covering span naming conventions, sampling strategy, cost attribution by workspace_id, and Langfuse/Arize Phoenix integration.
+
+### Incident Runbooks
+
+| # | Name | Severity | Symptom | Diagnosis | Mitigation |
+|---|------|----------|---------|-----------|-----------|
+| 1 | Cross-workspace retrieval | P0 | Audit log: chunk from workspace A in workspace B's context; `_alert_cross_workspace_leak` fires | (a) Confirm chunk `workspace_id` != session `workspace_id`. (b) Determine if leak bypassed Qdrant filter or ACL post-check. (c) Find indexing worker that wrote chunk to wrong collection. | Terminate affected sessions; place AI features in maintenance mode; delete misrouted chunk. Add ingestion-time assertion `chunk.workspace_id == collection_workspace_id`. Post-mortem mandatory regardless of whether data was read. |
+| 2 | Indexing lag (freshness > 5 min) | P2 | `kafka_consumer_lag_seconds > 300`; users report stale search results | (a) Worker pod health (`kubectl get pods -n indexing`): OOMKilled / CrashLoopBackOff? (b) Embedding API error rate > 5% (throttling)? (c) `qdrant_ingest_queue_depth > 100K` (upsert bottleneck)? | Worker crash: scale replicas 200 -> 400. Embedding throttle: failover to local e5-small-v2 GPU cluster. Qdrant bottleneck: increase write threads, reduce replication factor 2 -> 1 for catch-up. Run reconciliation job after lag clears. |
+| 3 | Writing assist TTFT > 2s | P2 | `streaming_ttft_ms p95 > 2000ms`; user acceptance rate drops | (a) Provider TTFT elevated (>1.5s)? Upstream issue, no Notion action. (b) `retrieval_duration_ms p95 > 200ms`? Hot Qdrant shard. (c) Inference cluster GPU util > 90%? Self-hosted cluster saturated. | Provider issue: activate LLM gateway failover (Anthropic <-> OpenAI). Hot shard: migrate top-10 largest collections to dedicated nodes. GPU saturated: add 4 x A100 nodes (~15 min); route writing assist to provider API in the interim. |
 
 ---
 
@@ -877,13 +1058,13 @@ Evaluation pipeline:
 
 **Hierarchical chunking for block-based documents is not the same as chunking PDFs.** Notion pages have explicit structure: headings define sections, databases define rows, toggles nest content. Ignoring this structure and doing fixed-size chunking loses the semantic boundaries that make retrieval precise. The chunking strategy must be structure-aware, splitting at heading boundaries and serializing database rows as individual chunks with their property schemas.
 
-**Real-time indexing with permission consistency is the hardest engineering problem in this system.** Content changes and permission changes flow through different pipelines but must be consistent: if a page is moved to a restricted team space, the permission change must propagate before (or at least simultaneously with) the page appearing in its new location's search results. Using Kafka with workspace-level partitioning ensures ordering within a workspace, but cross-topic ordering (content-changes vs. permission-changes) requires a coordination mechanism like version vectors or a two-phase commit on the indexing side.
+**Real-time indexing with permission consistency is the hardest engineering problem in this system.** Content and permission changes flow through separate Kafka topics but must be consistent: if a page moves to a restricted team space, the permission change must propagate before (or simultaneously with) the new content location becoming searchable. Workspace-level partitioning ensures within-workspace ordering, but cross-topic ordering (content-changes vs. permission-changes) requires version vectors or a two-phase commit on the indexing side.
 
 **Structured database queries cannot be solved with embeddings alone.** When a user asks "show me P0 bugs assigned to Alice due this week," semantic search over serialized rows may return P1 bugs or bugs assigned to Bob that mention Alice in comments. The system needs a structured query path that translates natural language into typed property filters against the database schema. The hybrid approach (semantic + structured, merged) handles both fuzzy conceptual queries and precise filtered queries.
 
 **Collection-per-workspace in the vector DB is a multi-tenancy decision with major operational implications.** A single collection for all workspaces would simplify operations but make tenant deletion (GDPR Article 17) extremely expensive (scan and delete vs. drop collection). It would also mean a single HNSW index for 40 billion vectors, which is impractical. Collection-per-workspace enables independent scaling, fast deletion, and workspace-level performance isolation -- at the cost of managing millions of small collections.
 
-**Scope detection is the most impactful latency optimization.** If the system can detect that a query only needs the current page ("summarize this"), it skips workspace-wide vector search entirely and serves a response in under 1 second. Getting scope detection wrong in the permissive direction (searching the workspace when the page would suffice) wastes compute and adds latency. Getting it wrong in the restrictive direction (searching only the page when the user meant the workspace) gives incomplete answers. A rule-based first pass with LLM fallback balances speed and accuracy.
+**Scope detection is the most impactful latency optimization.** Detecting a current-page query ("summarize this") skips workspace-wide vector search and serves a response in under 1 second. Permissive errors waste compute; restrictive errors return incomplete answers. A rule-based first pass with LLM fallback balances speed and recall.
 
 **The cost structure is dominated by LLM generation, not embeddings or vector search.** At $135K/day for LLM generation vs. $17.5K/day for all infrastructure, the obvious optimization target is the LLM. Model routing (Haiku for simple tasks, GPT-4o for complex reasoning), semantic caching for repeated queries, and scope detection (current-page queries skip RAG entirely) can reduce LLM costs by 50-60%. The $10/user/month pricing works at scale because the per-query marginal cost is low (under $0.01/query after optimization) and most users make fewer than 50 AI queries per month.
 
@@ -906,19 +1087,14 @@ Phase 2 (6 months):
   - Model routing (Haiku + GPT-4o)
 
 Phase 3 (12 months):
-  - Cross-workspace search for enterprise (search across multiple workspaces
-    the user belongs to, with per-workspace permission enforcement)
-  - AI-generated page summaries (precomputed, shown in search results)
-  - Workspace-specific fine-tuned embedding model (improves retrieval for
-    domain-specific terminology in large enterprises)
-  - Agentic workflows: "Create a new page summarizing all Q1 decisions"
-    (requires write-back capability with confirmation flow)
+  - Cross-workspace search for enterprise (per-workspace permission enforcement)
+  - AI-generated page summaries (precomputed, surfaced in search results)
+  - Workspace-specific fine-tuned embedding model (domain terminology)
+  - Agentic workflows: write-back with confirmation ("Summarize all Q1 decisions")
 
 Phase 4 (18+ months):
-  - Multimodal: index image content (OCR + VLM captions) in workspace pages
+  - Multimodal: index image content (OCR + VLM captions)
   - Voice queries in mobile app
-  - Proactive AI: suggest related content while user is writing
-    ("You might want to link to the API Design doc here")
-  - Graph-based retrieval: use page link graph to improve retrieval
-    for interconnected workspace content
+  - Proactive AI: suggest related content while writing
+  - Graph-based retrieval: page link graph for interconnected content
 ```
