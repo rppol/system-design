@@ -1,6 +1,6 @@
 # System Design Master Repository
 
-A comprehensive, one-stop repository for learning **Low-Level Design (LLD)**, **High-Level Design (HLD)**, **Large Language Models (LLM)**, **Machine Learning (ML)**, **Java**, **Spring**, **Backend Engineering**, and **Database Engineering** — with practical examples, real-world scenarios, and interview preparation material.
+A comprehensive, one-stop repository for learning **Low-Level Design (LLD)**, **High-Level Design (HLD)**, **Large Language Models (LLM)**, **Machine Learning (ML)**, **Java**, **Spring**, **Python + FastAPI**, **Backend Engineering**, and **Database Engineering** — with practical examples, real-world scenarios, and interview preparation material.
 
 ---
 
@@ -314,6 +314,88 @@ See the [Spring Master Index](src/main/java/com/rutik/systemdesign/spring/README
 
 ---
 
+### Python + FastAPI — Senior Engineer & Interview Prep Guide
+
+A comprehensive, one-stop reference for mastering **Python** and **FastAPI** — from language internals and CPython mechanics through asyncio, the type system, and FastAPI's ASGI stack, to production concerns (async SQLAlchemy, JWT/OAuth2, task queues, observability, K8s deployment, and OWASP hardening). Everything a senior Python software engineer is expected to know in technical interviews.
+
+#### Phase 1 — Language Core & Data Model
+| Module | Key Concepts |
+|--------|-------------|
+| [Data Model & Objects](src/main/java/com/rutik/systemdesign/python/data_model_and_objects/) | Dunder methods, `__slots__`, MRO/C3 linearization, operator overloading, hashing/equality contract |
+| [Core Language Idioms](src/main/java/com/rutik/systemdesign/python/core_language_idioms/) | Mutability vs identity, EAFP vs LBYL, comprehensions, walrus `:=`, `match`/`case` (3.10) |
+| [Iterators & Generators](src/main/java/com/rutik/systemdesign/python/iterators_and_generators/) | Iterator protocol, `yield`/`yield from`, lazy pipelines, `itertools`, generator coroutines |
+| [Decorators & Closures](src/main/java/com/rutik/systemdesign/python/decorators_and_closures/) | Closures, function/class/parametrized decorators, `functools.wraps/lru_cache/cached_property` |
+| [Context Managers & Exceptions](src/main/java/com/rutik/systemdesign/python/context_managers_and_exceptions/) | `contextlib`, `ExitStack`, async CMs, `ExceptionGroup`/`except*` (3.11), traceback manipulation |
+| [Collections & Data Structures](src/main/java/com/rutik/systemdesign/python/collections_and_data_structures/) | `list`/`dict`/`set` internals, `collections` module, `heapq`, `bisect`, Big-O |
+| [Strings, Bytes, Encoding & Regex](src/main/java/com/rutik/systemdesign/python/strings_bytes_encoding_and_regex/) | `str` vs `bytes`, Unicode/codecs, `re` engine, catastrophic backtracking |
+| [File I/O & Serialization](src/main/java/com/rutik/systemdesign/python/file_io_and_serialization/) | `pathlib`, text/binary I/O, `json`/`csv`, `pickle` security |
+
+#### Phase 2 — CPython Internals & Type System
+| Module | Key Concepts |
+|--------|-------------|
+| [CPython Memory Model](src/main/java/com/rutik/systemdesign/python/cpython_memory_model/) | Reference counting, generational GC, `PyObject` header, arenas/pools/blocks, interning |
+| [GIL & Free-Threading](src/main/java/com/rutik/systemdesign/python/the_gil_and_free_threading/) | GIL mechanics, GIL release points, contention profiling, PEP 703 (3.13), sub-interpreters |
+| [Metaclasses & Metaprogramming](src/main/java/com/rutik/systemdesign/python/metaclasses_and_metaprogramming/) | `type()`, metaclasses, `__init_subclass__`, descriptors (non-data/data), `__getattr__` |
+| [Type System & Typing](src/main/java/com/rutik/systemdesign/python/the_type_system_and_typing/) | Type hints, generics, `Protocol`, `TypeVar`/`ParamSpec`, variance, PEP 695 (3.12), mypy/pyright |
+| [Performance & Profiling](src/main/java/com/rutik/systemdesign/python/performance_and_profiling/) | `cProfile`/`dis`, CPython 3.11+ speedups, Cython/mypyc/C extensions, common slow patterns |
+| [Functional Programming](src/main/java/com/rutik/systemdesign/python/functional_programming/) | `map`/`filter`/`reduce`, `functools`, immutability, currying/partial, comprehension vs generator perf |
+
+#### Phase 3 — Concurrency, Async & Quality
+| Module | Key Concepts |
+|--------|-------------|
+| [Threading & Multiprocessing](src/main/java/com/rutik/systemdesign/python/threading_and_multiprocessing/) | `threading`, GIL impact, `multiprocessing`, `concurrent.futures`, shared memory, pickling |
+| [asyncio & Event Loop](src/main/java/com/rutik/systemdesign/python/asyncio_and_event_loop/) | Coroutines, event-loop internals, `gather`/`wait`, `TaskGroup` (3.11), structured concurrency |
+| [Async Patterns & Pitfalls](src/main/java/com/rutik/systemdesign/python/async_patterns_and_pitfalls/) | Blocking-in-async detection, `run_in_executor`, backpressure, async generators, retries |
+| [Design Patterns in Python](src/main/java/com/rutik/systemdesign/python/design_patterns_in_python/) | Pythonic GoF, singleton via module, strategy via callables, anti-patterns |
+| [stdlib: datetime & Logging](src/main/java/com/rutik/systemdesign/python/stdlib_datetime_and_logging/) | `datetime`/`zoneinfo`/tz pitfalls, structured logging, `argparse`, `subprocess` |
+| [Testing with pytest](src/main/java/com/rutik/systemdesign/python/testing_with_pytest/) | pytest, fixtures/scopes, `parametrize`, `monkeypatch`, `hypothesis`, `pytest-asyncio` |
+| [Packaging & Project Tooling](src/main/java/com/rutik/systemdesign/python/packaging_and_project_tooling/) | `pyproject.toml`, `uv`/poetry/pip, `ruff`/mypy, wheels/sdist, dependency resolution |
+
+#### Phase 4 — FastAPI Core & ASGI
+| Module | Key Concepts |
+|--------|-------------|
+| [FastAPI Fundamentals & ASGI](src/main/java/com/rutik/systemdesign/python/fastapi_fundamentals_asgi/) | ASGI vs WSGI, Starlette, Uvicorn, `lifespan`, ASGI 3 scope/receive/send, auto OpenAPI/Swagger |
+| [Pydantic v2 — Deep Dive](src/main/java/com/rutik/systemdesign/python/pydantic_v2_deep_dive/) | Validation/serialization, `@field_validator`, `pydantic-core` Rust, v1→v2 migration, `BaseSettings` |
+| [Routing & Request Handling](src/main/java/com/rutik/systemdesign/python/routing_and_request_handling/) | Path operations, `APIRouter`, response models, status codes, content negotiation |
+| [Dependency Injection in FastAPI](src/main/java/com/rutik/systemdesign/python/dependency_injection_in_fastapi/) | `Depends`, sub-dependencies, `yield` deps, caching/scopes, `dependency_overrides` for tests |
+| [Middleware & Lifecycle](src/main/java/com/rutik/systemdesign/python/middleware_and_lifecycle/) | Middleware stack, `BackgroundTasks`, CORS/GZip, custom middleware, exception handler ordering |
+| [Configuration & Settings](src/main/java/com/rutik/systemdesign/python/configuration_and_settings_management/) | `pydantic-settings`, 12-factor config, env vars/secrets, layered settings, per-env overrides |
+
+#### Phase 5 — FastAPI Production Concerns
+| Module | Key Concepts |
+|--------|-------------|
+| [Async Database & SQLAlchemy](src/main/java/com/rutik/systemdesign/python/async_database_sqlalchemy/) | SQLAlchemy 2.0 async, `AsyncSession`, Alembic, SQLModel, session-per-request via `Depends`, N+1 |
+| [Authentication & Security](src/main/java/com/rutik/systemdesign/python/authentication_and_security/) | OAuth2 password flow, JWT, scopes, passlib/bcrypt/argon2, OIDC, security deps, CSRF/CORS |
+| [Error Handling & Validation](src/main/java/com/rutik/systemdesign/python/error_handling_and_validation/) | `HTTPException`, custom handlers, `RequestValidationError`, RFC 7807 Problem Details |
+| [Testing FastAPI](src/main/java/com/rutik/systemdesign/python/testing_fastapi/) | `TestClient`, `httpx.AsyncClient`, `pytest-asyncio`, `dependency_overrides`, transactional rollback |
+| [WebSockets, SSE & Streaming](src/main/java/com/rutik/systemdesign/python/websockets_sse_and_streaming/) | WebSockets, SSE, `StreamingResponse`, Redis pub/sub fan-out, connection registry, backpressure |
+| [Background Jobs & Task Queues](src/main/java/com/rutik/systemdesign/python/background_jobs_and_task_queues/) | `BackgroundTasks` vs Celery vs ARQ vs Dramatiq, idempotency, retries, dead-letter queues |
+| [HTTP Clients & External APIs](src/main/java/com/rutik/systemdesign/python/http_clients_and_external_apis/) | `httpx`/`aiohttp` async clients, connection pooling, retries/backoff, circuit breakers |
+| [Message Queues & Event-Driven](src/main/java/com/rutik/systemdesign/python/message_queues_and_event_driven/) | `aiokafka`/`aio-pika`, outbox pattern, consumer groups, idempotent consumers |
+
+#### Phase 6 — Deployment, Observability & Scale
+| Module | Key Concepts |
+|--------|-------------|
+| [Production Deployment & Scaling](src/main/java/com/rutik/systemdesign/python/production_deployment_and_scaling/) | Gunicorn+Uvicorn workers, worker tuning, container/K8s, graceful shutdown, ASGI scaling |
+| [Observability & Monitoring](src/main/java/com/rutik/systemdesign/python/observability_and_monitoring/) | Structured logging, OpenTelemetry tracing, Prometheus metrics, health/readiness probes |
+| [Caching & Performance](src/main/java/com/rutik/systemdesign/python/caching_and_performance/) | Redis caching, response/in-process caching, connection pooling, async perf pitfalls |
+| [API Design & Versioning](src/main/java/com/rutik/systemdesign/python/api_design_and_versioning/) | REST best practices, versioning, cursor pagination, rate limiting in FastAPI, idempotency keys |
+| [Security Hardening & OWASP](src/main/java/com/rutik/systemdesign/python/security_hardening_and_owasp/) | OWASP API Top 10 in FastAPI, injection/SSRF, secrets handling, pip-audit, input validation |
+
+#### Python Case Studies
+| Case Study | Core Concepts |
+|------------|--------------|
+| [Design a Rate-Limited API with FastAPI](src/main/java/com/rutik/systemdesign/python/case_studies/design_rate_limited_api_fastapi.md) | Token-bucket via Redis Lua, `Depends`-injected limiter, async middleware, 429 error handling |
+| [Design a Multi-Tenant SaaS API](src/main/java/com/rutik/systemdesign/python/case_studies/design_multi_tenant_saas_api.md) | Async SQLAlchemy tenant isolation, JWT/RBAC, `Depends` scoping, schema-per-tenant |
+| [Design a Real-Time Chat System](src/main/java/com/rutik/systemdesign/python/case_studies/design_realtime_chat_fastapi.md) | WebSockets, Redis pub/sub fan-out, connection registry, backpressure |
+| [Design an Async Task Queue System](src/main/java/com/rutik/systemdesign/python/case_studies/design_async_task_queue.md) | ARQ/Celery, idempotency, retries with exponential backoff, dead-letter queues |
+| [Design an Async Web Scraper](src/main/java/com/rutik/systemdesign/python/case_studies/design_async_web_scraper.md) | asyncio + aiohttp, `Semaphore`, producer/consumer, politeness/crawl budget |
+| [Design an ML Inference API (FastAPI)](src/main/java/com/rutik/systemdesign/python/case_studies/design_ml_inference_api_fastapi.md) | Async model serving, micro-batching, async cache, `lifespan` model loading, streaming responses |
+
+See the [Python Master Index](src/main/java/com/rutik/systemdesign/python/README.md) for the full 6-phase learning path, version matrix, build tracker, and cross-reference map.
+
+---
+
 ### Backend Engineering — Senior Engineer & Interview Prep Guide
 
 A deep-dive guide to building, optimizing, inspecting, and testing production backend systems. Primary focus is Java/Spring. Covers networking fundamentals, API design, performance engineering, database internals, resilience patterns, security, testing, event-driven architecture, and microservices — with production war stories, concrete numbers, and broken-code-then-fix examples throughout.
@@ -478,7 +560,7 @@ See the [Database Engineering Master Index](src/main/java/com/rutik/systemdesign
 
 ### Machine Learning (ML) — Senior ML/AI Engineer & Interview Prep Guide
 
-A comprehensive, senior-engineer-level guide to Machine Learning — from mathematical foundations through production MLOps. Covers classical algorithms, deep learning, ML system design, domain specializations (CV, RecSys, NLP, RL, time series), and 10 end-to-end case studies. Deliberately scoped to not overlap with the LLM section (which handles transformers, fine-tuning, RAG, and agents).
+A comprehensive, senior-engineer-level guide to Machine Learning — from mathematical foundations through production MLOps. Covers classical algorithms, deep learning, ML system design, domain specializations (CV, RecSys, NLP, RL, time series), a dedicated algorithm-selection module (#33), and 22 end-to-end case studies (12 using the principal 11-section template, 5 cross-cutting shared-primitive files). Deliberately scoped to not overlap with the LLM section (which handles transformers, fine-tuning, RAG, and agents).
 
 #### Phase 1 — Mathematical Foundations
 | Module | Key Concepts |
@@ -544,7 +626,12 @@ A comprehensive, senior-engineer-level guide to Machine Learning — from mathem
 |--------|-------------|
 | [ML Interview Patterns](src/main/java/com/rutik/systemdesign/ml/ml_interview_patterns/) | 6-step design framework, debug checklist, system design templates, tradeoff tables |
 
-#### ML Case Studies
+#### Cross-Cutting Reference (Module #33)
+| Module | Key Concepts |
+|--------|-------------|
+| [Model Selection and Algorithm Choice](src/main/java/com/rutik/systemdesign/ml/model_selection_and_algorithm_choice/) | Algorithm decision matrix, problem-type → algorithm mapping, constraint-driven elimination (latency, interpretability, regulatory), baseline discipline |
+
+#### ML Case Studies (14 total — 10 legacy, 4 principal-template)
 | Case Study | Core ML Concepts |
 |------------|-----------------|
 | [Design Recommendation Engine](src/main/java/com/rutik/systemdesign/ml/case_studies/design_recommendation_engine.md) | Two-tower retrieval, LightGBM ranking, FAISS ANN, MMR diversity, cold start |
@@ -557,6 +644,18 @@ A comprehensive, senior-engineer-level guide to Machine Learning — from mathem
 | [Design Content Feed Ranking](src/main/java/com/rutik/systemdesign/ml/case_studies/design_content_feed_ranking.md) | MMOE multi-task, DPP diversity, position bias IPW, feedback loop handling |
 | [Design Autonomous Driving Perception](src/main/java/com/rutik/systemdesign/ml/case_studies/design_autonomous_driving_perception.md) | Sensor fusion, Kalman filter, Hungarian tracking, 3D detection, safety margins |
 | [Design ML Platform](src/main/java/com/rutik/systemdesign/ml/case_studies/design_ml_platform.md) | Feature store, Kubeflow, MLflow registry, A/B routing, GPU cost tracking |
+| [Design Churn Prediction](src/main/java/com/rutik/systemdesign/ml/case_studies/design_churn_prediction.md) | Temporal CV, GBDT vs survival vs uplift, T-learner, calibration for budgeting, SHAP |
+| [Design Credit Risk Scoring](src/main/java/com/rutik/systemdesign/ml/case_studies/design_credit_risk_scoring.md) | WOE/scorecard, monotonic constraints, reject inference, ECOA/FCRA, fairness audit |
+| [Design ETA Prediction](src/main/java/com/rutik/systemdesign/ml/case_studies/design_eta_prediction.md) | Quantile regression, cyclic geo features, real-time Flink pipeline, p90 coverage SLO |
+| [Design Marketplace Matching](src/main/java/com/rutik/systemdesign/ml/case_studies/design_marketplace_matching.md) | Demand/supply forecasting, LambdaRank scoring, Hungarian assignment, switchback A/B |
+| [Design Customer LTV Prediction](src/main/java/com/rutik/systemdesign/ml/case_studies/design_customer_ltv_prediction.md) | BG/NBD vs LightGBM Cox survival, censoring correction, cohort CV, bid optimization |
+| [Design Multi-Touch Attribution](src/main/java/com/rutik/systemdesign/ml/case_studies/design_multi_touch_attribution.md) | Markov removal effects, Shapley Monte Carlo, SUTVA violations, geo holdout |
+| [Design Dynamic Pricing](src/main/java/com/rutik/systemdesign/ml/case_studies/design_dynamic_pricing.md) | Demand elasticity, constrained price optimizer, contextual bandits, price war dampening |
+| [Design NLP Classification Pipeline](src/main/java/com/rutik/systemdesign/ml/case_studies/design_nlp_classification_pipeline.md) | TF-IDF+LR → DistilBERT cascade, active learning, knowledge distillation |
+| [Design Real-Time Personalization](src/main/java/com/rutik/systemdesign/ml/case_studies/design_real_time_personalization.md) | Session encoder GRU, two-tower + FAISS 50k req/s, exploration, cold-start |
+| [Design Semantic Search Engine](src/main/java/com/rutik/systemdesign/ml/case_studies/design_semantic_search_engine.md) | Bi-encoder SBERT, FAISS IVF, RRF hybrid, cross-encoder reranking, hard negative mining |
+| [Design NER Pipeline](src/main/java/com/rutik/systemdesign/ml/case_studies/design_ner_pipeline.md) | BERT-CRF, BIO tagging, span extraction, subword alignment, active learning for annotation |
+| [Design Question Answering System](src/main/java/com/rutik/systemdesign/ml/case_studies/design_question_answering_system.md) | DPR dual-encoder, BERT-large reader, SQuAD 2.0 null score, multi-hop, hybrid RRF |
 
 See the [ML Master Index](src/main/java/com/rutik/systemdesign/ml/README.md) for the full 8-phase learning path, sub-files index, and LLM/ML non-overlap boundary.
 

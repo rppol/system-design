@@ -18,11 +18,11 @@ Key insight: the majority of ML failures are not algorithm failures — they are
 
 ## What This Section Covers
 
-Thirty-two modules organized across eight learning phases take you from linear algebra through production MLOps. Six topics contain deep-dive sub-files (26 sub-files total) that follow the same 14-section template used throughout this repository. Ten end-to-end case studies — each covering a real-world ML system — demonstrate how individual concepts combine into full system designs. The section is structured so it can be read sequentially as a learning curriculum or used as a reference when preparing for a specific interview topic.
+Thirty-three modules organized across eight learning phases take you from linear algebra through production MLOps. Six topics contain deep-dive sub-files (26 sub-files total), and `case_studies/cross_cutting/` contains five shared-primitive files, all following the same 14-section template used throughout this repository. Twenty-two end-to-end case studies — each covering a real-world ML system — demonstrate how individual concepts combine into full system designs. A dedicated algorithm-selection module (#33) consolidates the "which algorithm, when and why" rationale referenced by every case study. The section is structured so it can be read sequentially as a learning curriculum or used as a reference when preparing for a specific interview topic.
 
 ---
 
-## All Topics (32 Modules)
+## All Topics (33 Modules)
 
 | # | Topic | Key Concepts | Phase | Difficulty |
 |---|-------|-------------|-------|------------|
@@ -58,6 +58,7 @@ Thirty-two modules organized across eight learning phases take you from linear a
 | 30 | [Self-Supervised and Contrastive Learning](self_supervised_and_contrastive_learning/README.md) | SimCLR, MoCo, BYOL, masked autoencoders, representation learning, downstream tasks | 7 — Advanced Topics | Advanced |
 | 31 | [Causal Inference and ML](causal_inference_and_ml/README.md) | Potential outcomes, DAGs, propensity scores, uplift modeling, A/B test analysis | 7 — Advanced Topics | Advanced |
 | 32 | [ML Interview Patterns](ml_interview_patterns/README.md) | End-to-end design framework, common question archetypes, anti-patterns, cheat sheets | 8 — Interview Consolidation | Intermediate |
+| 33 | [Model Selection and Algorithm Choice](model_selection_and_algorithm_choice/README.md) | Algorithm decision matrix, problem-type → algorithm mapping, data-size vs complexity regimes, constraint-driven elimination (latency, interpretability, regulatory), baseline discipline | Cross-Cutting Reference | Advanced |
 
 ---
 
@@ -121,24 +122,50 @@ Twenty-two deep-dive sub-files provide topic-level detail beyond what a single R
 | [ab_testing_for_ml.md](ml_system_design/ab_testing_for_ml.md) | A/B Testing for ML | Treatment/control design, minimum detectable effect, p-values, Bonferroni, interleaving, switchback |
 | [latency_and_throughput_optimization.md](ml_system_design/latency_and_throughput_optimization.md) | Latency and Throughput Optimization | Batching strategies, caching predictions, model cascades, early exit, p99 vs p50, SLO budgeting |
 
+### case_studies/cross_cutting/ (5 shared-primitive files)
+
+Infrastructure patterns referenced by multiple case studies. Read just-in-time when a case study references the topic.
+
+| File | Topic | Key Concepts | Referenced by |
+|------|-------|-------------|--------------|
+| [feature_store_and_point_in_time_correctness.md](case_studies/cross_cutting/feature_store_and_point_in_time_correctness.md) | Feature Store and PIT Correctness | Online/offline stores, PIT joins, training-serving skew detection, Feast, PSI/KS skew alerts | Churn, Credit Risk, ETA, Marketplace |
+| [model_calibration_and_thresholding.md](case_studies/cross_cutting/model_calibration_and_thresholding.md) | Model Calibration and Thresholding | Platt scaling, isotonic regression, ECE, reliability diagrams, cost-sensitive threshold optimization | Churn, Credit Risk, Fraud, Ads |
+| [responsible_ai_fairness_and_explainability.md](case_studies/cross_cutting/responsible_ai_fairness_and_explainability.md) | Responsible AI, Fairness, and Explainability | Demographic parity, equalized odds, SHAP TreeExplainer, LIME, DiCE counterfactuals, GDPR Art. 22 | Credit Risk, Churn, Marketplace |
+| [experimentation_and_online_evaluation.md](case_studies/cross_cutting/experimentation_and_online_evaluation.md) | Experimentation and Online Evaluation | OEC, guardrail/counter-metrics, CUPED, sequential testing (mSPRT), SRM detection, switchback | Churn, ETA, Marketplace |
+| [drift_monitoring_and_retraining.md](case_studies/cross_cutting/drift_monitoring_and_retraining.md) | Drift Monitoring and Retraining | Data/concept drift, PSI thresholds, champion/challenger, label latency, retraining triggers | All 4 principal-template studies |
+
+See [`case_studies/cross_cutting/README.md`](case_studies/cross_cutting/README.md) for the full index.
+
 ---
 
-## Case Studies (10)
+## Case Studies (22)
 
-All case studies are in `case_studies/`. Each follows the case study template: Problem Statement, Architecture Overview (ASCII diagram), Key Design Decisions, Implementation, Components Used, Tradeoffs and Alternatives, Interview Discussion Points.
+All case studies are in `case_studies/`. Studies #1–10 use the legacy 12-section template. Studies #11–22 use the 11-section principal template (same format as LLM case studies). See [`case_studies/README.md`](case_studies/README.md) for the full learning-path index with dependency map and interview prep shortcuts.
 
-| # | Case Study | Core ML Concepts | Link |
-|---|-----------|-----------------|------|
-| 1 | Design a Recommendation Engine | Two-tower retrieval, ANN, ranking, A/B testing, feature store | [design_recommendation_engine](case_studies/design_recommendation_engine/README.md) |
-| 2 | Design a Fraud Detection System | Supervised learning, class imbalance, real-time inference, concept drift, graph features | [design_fraud_detection](case_studies/design_fraud_detection/README.md) |
-| 3 | Design a Search Ranking System | Learning to rank, query understanding, feature engineering, online evaluation, BM25 + ML blend | [design_search_ranking](case_studies/design_search_ranking/README.md) |
-| 4 | Design an Image Classification Pipeline | CNN, transfer learning, data augmentation, distributed training, model registry, serving | [design_image_classification_pipeline](case_studies/design_image_classification_pipeline/README.md) |
-| 5 | Design an Ads Click Prediction System | Logistic regression, GBDT, DLRM, sparse embeddings, calibration, low-latency serving | [design_ads_click_prediction](case_studies/design_ads_click_prediction/README.md) |
-| 6 | Design an Anomaly Detection System | Unsupervised baselines, isolation forest, autoencoders, streaming detection, alerting | [design_anomaly_detection](case_studies/design_anomaly_detection/README.md) |
-| 7 | Design a Demand Forecasting System | Time series, ARIMA, Prophet, LightGBM, hierarchical forecasting, uncertainty quantification | [design_demand_forecasting](case_studies/design_demand_forecasting/README.md) |
-| 8 | Design a Content Feed Ranking System | Engagement prediction, multi-objective ranking, explore-exploit, position bias correction | [design_content_feed_ranking](case_studies/design_content_feed_ranking/README.md) |
-| 9 | Design Autonomous Driving Perception | Multi-sensor fusion, object detection, BEV representation, safety constraints, latency budget | [design_autonomous_driving_perception](case_studies/design_autonomous_driving_perception/README.md) |
-| 10 | Design an ML Platform | Feature store, training orchestration, model registry, serving infrastructure, experiment tracking | [design_ml_platform](case_studies/design_ml_platform/README.md) |
+| # | Case Study | Core ML Concepts | Template | Link |
+|---|-----------|-----------------|----------|------|
+| 1 | Design a Recommendation Engine | Two-tower retrieval, ANN, ranking, A/B testing, feature store | Legacy | [design_recommendation_engine](case_studies/design_recommendation_engine.md) |
+| 2 | Design a Fraud Detection System | Supervised learning, class imbalance, real-time inference, concept drift, graph features | Legacy | [design_fraud_detection](case_studies/design_fraud_detection.md) |
+| 3 | Design a Search Ranking System | Learning to rank, query understanding, feature engineering, online evaluation, BM25 + ML blend | Legacy | [design_search_ranking](case_studies/design_search_ranking.md) |
+| 4 | Design an Image Classification Pipeline | CNN, transfer learning, data augmentation, distributed training, model registry, serving | Legacy | [design_image_classification_pipeline](case_studies/design_image_classification_pipeline.md) |
+| 5 | Design an Ads Click Prediction System | Logistic regression, GBDT, DLRM, sparse embeddings, calibration, low-latency serving | Legacy | [design_ads_click_prediction](case_studies/design_ads_click_prediction.md) |
+| 6 | Design an Anomaly Detection System | Unsupervised baselines, isolation forest, autoencoders, streaming detection, alerting | Legacy | [design_anomaly_detection](case_studies/design_anomaly_detection.md) |
+| 7 | Design a Demand Forecasting System | Time series, ARIMA, Prophet, LightGBM, hierarchical forecasting, uncertainty quantification | Legacy | [design_demand_forecasting](case_studies/design_demand_forecasting.md) |
+| 8 | Design a Content Feed Ranking System | Engagement prediction, multi-objective ranking, explore-exploit, position bias correction | Legacy | [design_content_feed_ranking](case_studies/design_content_feed_ranking.md) |
+| 9 | Design Autonomous Driving Perception | Multi-sensor fusion, object detection, BEV representation, safety constraints, latency budget | Legacy | [design_autonomous_driving_perception](case_studies/design_autonomous_driving_perception.md) |
+| 10 | Design an ML Platform | Feature store, training orchestration, model registry, serving infrastructure, experiment tracking | Legacy | [design_ml_platform](case_studies/design_ml_platform.md) |
+| 11 | Design a Churn Prediction System | Temporal CV, GBDT vs survival vs uplift, T-learner, calibration for budgeting, SHAP adverse-action | Principal | [design_churn_prediction](case_studies/design_churn_prediction.md) |
+| 12 | Design a Credit Risk Scoring System | WOE/scorecard, monotonic constraints, reject inference, ECOA/FCRA adverse-action, fairness audit | Principal | [design_credit_risk_scoring](case_studies/design_credit_risk_scoring.md) |
+| 13 | Design an ETA Prediction System | Quantile regression, cyclic geo features, real-time traffic pipeline, p90 coverage SLO | Principal | [design_eta_prediction](case_studies/design_eta_prediction.md) |
+| 14 | Design a Marketplace Matching System | Demand/supply forecasting, LambdaRank scoring, Hungarian assignment, switchback experiments | Principal | [design_marketplace_matching](case_studies/design_marketplace_matching.md) |
+| 15 | Design a Customer LTV Prediction System | BG/NBD vs LightGBM Cox, censored survival labels, cohort CV, P25/P75 intervals, bid optimization | Principal | [design_customer_ltv_prediction](case_studies/design_customer_ltv_prediction.md) |
+| 16 | Design a Multi-Touch Attribution System | Markov removal effects, Shapley Monte Carlo, SUTVA violations, geo-holdout incrementality | Principal | [design_multi_touch_attribution](case_studies/design_multi_touch_attribution.md) |
+| 17 | Design a Dynamic Pricing System | Demand elasticity estimation, constrained optimizer, contextual bandits, price war prevention | Principal | [design_dynamic_pricing](case_studies/design_dynamic_pricing.md) |
+| 18 | Design an NLP Classification Pipeline | TF-IDF+LR → DistilBERT cascade, active learning, knowledge distillation, class imbalance | Principal | [design_nlp_classification_pipeline](case_studies/design_nlp_classification_pipeline.md) |
+| 19 | Design a Real-Time Personalization System | Session encoder (GRU), two-tower + FAISS at 50k req/s, exploration/exploitation, cold-start | Principal | [design_real_time_personalization](case_studies/design_real_time_personalization.md) |
+| 20 | Design a Semantic Search Engine | Bi-encoder (SBERT), FAISS IVF, RRF hybrid merge, cross-encoder reranking, hard negative mining, Matryoshka | Principal | [design_semantic_search_engine](case_studies/design_semantic_search_engine.md) |
+| 21 | Design a Named Entity Recognition Pipeline | BERT-CRF, BIO tagging, span extraction, subword alignment, domain fine-tuning, active learning | Principal | [design_ner_pipeline](case_studies/design_ner_pipeline.md) |
+| 22 | Design a Question Answering System | DPR dual-encoder, BERT-large extractive reader, SQuAD 2.0 null-score, multi-hop retrieval, hybrid RRF | Principal | [design_question_answering_system](case_studies/design_question_answering_system.md) |
 
 ---
 
@@ -202,6 +229,11 @@ Phase 7 — Advanced Topics
         v
 Phase 8 — Interview Consolidation
   ml_interview_patterns
+
+[Cross-Cutting Reference — consult any phase]
+  model_selection_and_algorithm_choice  ← "which algorithm, when & why"
+  case_studies/cross_cutting/           ← feature store, calibration, fairness,
+                                           experimentation, drift (read just-in-time)
 ```
 
 For interview preparation specifically, prioritize:
