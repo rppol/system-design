@@ -128,11 +128,11 @@ Infrastructure patterns referenced by multiple case studies. Read just-in-time w
 
 | File | Topic | Key Concepts | Referenced by |
 |------|-------|-------------|--------------|
-| [feature_store_and_point_in_time_correctness.md](case_studies/cross_cutting/feature_store_and_point_in_time_correctness.md) | Feature Store and PIT Correctness | Online/offline stores, PIT joins, training-serving skew detection, Feast, PSI/KS skew alerts | Churn, Credit Risk, ETA, Marketplace |
-| [model_calibration_and_thresholding.md](case_studies/cross_cutting/model_calibration_and_thresholding.md) | Model Calibration and Thresholding | Platt scaling, isotonic regression, ECE, reliability diagrams, cost-sensitive threshold optimization | Churn, Credit Risk, Fraud, Ads |
+| [feature_store_and_point_in_time_correctness.md](case_studies/cross_cutting/feature_store_and_point_in_time_correctness.md) | Feature Store and PIT Correctness | Online/offline stores, PIT joins, training-serving skew detection, Feast, PSI/KS skew alerts | Churn, Credit Risk, ETA, Marketplace, QA |
+| [model_calibration_and_thresholding.md](case_studies/cross_cutting/model_calibration_and_thresholding.md) | Model Calibration and Thresholding | Platt scaling, isotonic regression, ECE, reliability diagrams, cost-sensitive threshold optimization | Churn, Credit Risk, Fraud, Ads, NER, QA |
 | [responsible_ai_fairness_and_explainability.md](case_studies/cross_cutting/responsible_ai_fairness_and_explainability.md) | Responsible AI, Fairness, and Explainability | Demographic parity, equalized odds, SHAP TreeExplainer, LIME, DiCE counterfactuals, GDPR Art. 22 | Credit Risk, Churn, Marketplace |
-| [experimentation_and_online_evaluation.md](case_studies/cross_cutting/experimentation_and_online_evaluation.md) | Experimentation and Online Evaluation | OEC, guardrail/counter-metrics, CUPED, sequential testing (mSPRT), SRM detection, switchback | Churn, ETA, Marketplace |
-| [drift_monitoring_and_retraining.md](case_studies/cross_cutting/drift_monitoring_and_retraining.md) | Drift Monitoring and Retraining | Data/concept drift, PSI thresholds, champion/challenger, label latency, retraining triggers | All 4 principal-template studies |
+| [experimentation_and_online_evaluation.md](case_studies/cross_cutting/experimentation_and_online_evaluation.md) | Experimentation and Online Evaluation | OEC, guardrail/counter-metrics, CUPED, sequential testing (mSPRT), SRM detection, switchback | Churn, ETA, Marketplace, QA |
+| [drift_monitoring_and_retraining.md](case_studies/cross_cutting/drift_monitoring_and_retraining.md) | Drift Monitoring and Retraining | Data/concept drift, PSI thresholds, champion/challenger, label latency, retraining triggers | Fraud, Churn, ETA, Marketplace, Semantic Search, NER, QA |
 
 See [`case_studies/cross_cutting/README.md`](case_studies/cross_cutting/README.md) for the full index.
 

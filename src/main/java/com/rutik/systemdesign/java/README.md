@@ -167,12 +167,27 @@ Advanced topics for senior engineers building services that talk to other servic
 
 ## Case Studies
 
+For a guided learning path through all 8 case studies, see [case_studies/README.md](case_studies/README.md).
+
 | Case Study | Core Java Concepts | Difficulty |
 |------------|-------------------|------------|
 | [Design Connection Pool](case_studies/design_connection_pool.md) | ThreadPoolExecutor, BlockingQueue, AtomicInteger, timeouts | Advanced |
 | [Design Rate Limiter (Java)](case_studies/design_rate_limiter_java.md) | AtomicLong, ScheduledExecutor, token bucket, CAS | Intermediate |
 | [Design Event Bus](case_studies/design_event_bus.md) | Observer, CompletableFuture, WeakReference, ConcurrentHashMap | Intermediate |
 | [Design LRU Cache (Java)](case_studies/design_lru_cache_java.md) | LinkedHashMap, ConcurrentHashMap, WeakReference, ReentrantReadWriteLock | Advanced |
+| [Design Thread Pool (Java)](case_studies/design_thread_pool_java.md) | ThreadPoolExecutor internals, ctl AtomicInteger, Worker extends AQS, rejection policies | Advanced |
+| [Design DI Container (Java)](case_studies/design_di_container_java.md) | Reflection, @Inject/@Named/@PostConstruct, Binding record, cycle detection | Advanced |
+| [Design Circuit Breaker (Java)](case_studies/design_circuit_breaker_java.md) | Sliding window ring buffer, CAS state transitions, HALF_OPEN probe counting | Advanced |
+| [Design Snowflake ID Generator (Java)](case_studies/design_snowflake_id_generator_java.md) | 41+10+12 bit layout, CAS, clock skew, virtual thread pinning pitfall | Advanced |
+
+**Cross-cutting shared primitives** (consumed by the case studies above):
+
+| Primitive | What it covers |
+|-----------|---------------|
+| [JVM Tuning & GC for Services](case_studies/cross_cutting/jvm_tuning_and_gc_for_services.md) | G1/ZGC/Shenandoah, heap sizing, JFR, GC log analysis |
+| [Benchmarking with JMH](case_studies/cross_cutting/benchmarking_with_jmh.md) | Dead-code elimination, constant folding, false sharing, CI regression gating |
+| [Concurrency & Memory Visibility Primitives](case_studies/cross_cutting/concurrency_memory_visibility_primitives.md) | Happens-before, volatile, AtomicXxx, LongAdder, VarHandle acquire/release |
+| [Backpressure & Bounded Resources](case_studies/cross_cutting/backpressure_and_bounded_resources.md) | Little's Law, ArrayBlockingQueue, CallerRunsPolicy, Semaphore, HikariCP sizing |
 
 ---
 

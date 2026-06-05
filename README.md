@@ -369,43 +369,43 @@ A comprehensive, one-stop reference for mastering **Python** and **FastAPI** —
 #### Phase 4 — FastAPI Core & ASGI
 | Module | Key Concepts |
 |--------|-------------|
-| [FastAPI Fundamentals & ASGI](src/main/java/com/rutik/systemdesign/python/fastapi_fundamentals_asgi/) | ASGI vs WSGI, Starlette, Uvicorn, `lifespan`, ASGI 3 scope/receive/send, auto OpenAPI/Swagger |
-| [Pydantic v2 — Deep Dive](src/main/java/com/rutik/systemdesign/python/pydantic_v2_deep_dive/) | Validation/serialization, `@field_validator`, `pydantic-core` Rust, v1→v2 migration, `BaseSettings` |
-| [Routing & Request Handling](src/main/java/com/rutik/systemdesign/python/routing_and_request_handling/) | Path operations, `APIRouter`, response models, status codes, content negotiation |
-| [Dependency Injection in FastAPI](src/main/java/com/rutik/systemdesign/python/dependency_injection_in_fastapi/) | `Depends`, sub-dependencies, `yield` deps, caching/scopes, `dependency_overrides` for tests |
-| [Middleware & Lifecycle](src/main/java/com/rutik/systemdesign/python/middleware_and_lifecycle/) | Middleware stack, `BackgroundTasks`, CORS/GZip, custom middleware, exception handler ordering |
-| [Configuration & Settings](src/main/java/com/rutik/systemdesign/python/configuration_and_settings_management/) | `pydantic-settings`, 12-factor config, env vars/secrets, layered settings, per-env overrides |
+| [FastAPI Fundamentals & ASGI](src/main/java/com/rutik/systemdesign/python/fastapi/fastapi_fundamentals_asgi/) | ASGI vs WSGI, Starlette, Uvicorn, `lifespan`, ASGI 3 scope/receive/send, auto OpenAPI/Swagger |
+| [Pydantic v2 — Deep Dive](src/main/java/com/rutik/systemdesign/python/fastapi/pydantic_v2_deep_dive/) | Validation/serialization, `@field_validator`, `pydantic-core` Rust, v1→v2 migration, `BaseSettings` |
+| [Routing & Request Handling](src/main/java/com/rutik/systemdesign/python/fastapi/routing_and_request_handling/) | Path operations, `APIRouter`, response models, status codes, content negotiation |
+| [Dependency Injection in FastAPI](src/main/java/com/rutik/systemdesign/python/fastapi/dependency_injection_in_fastapi/) | `Depends`, sub-dependencies, `yield` deps, caching/scopes, `dependency_overrides` for tests |
+| [Middleware & Lifecycle](src/main/java/com/rutik/systemdesign/python/fastapi/middleware_and_lifecycle/) | Middleware stack, `BackgroundTasks`, CORS/GZip, custom middleware, exception handler ordering |
+| [Configuration & Settings](src/main/java/com/rutik/systemdesign/python/fastapi/configuration_and_settings_management/) | `pydantic-settings`, 12-factor config, env vars/secrets, layered settings, per-env overrides |
 
 #### Phase 5 — FastAPI Production Concerns
 | Module | Key Concepts |
 |--------|-------------|
-| [Async Database & SQLAlchemy](src/main/java/com/rutik/systemdesign/python/async_database_sqlalchemy/) | SQLAlchemy 2.0 async, `AsyncSession`, Alembic, SQLModel, session-per-request via `Depends`, N+1 |
-| [Authentication & Security](src/main/java/com/rutik/systemdesign/python/authentication_and_security/) | OAuth2 password flow, JWT, scopes, passlib/bcrypt/argon2, OIDC, security deps, CSRF/CORS |
-| [Error Handling & Validation](src/main/java/com/rutik/systemdesign/python/error_handling_and_validation/) | `HTTPException`, custom handlers, `RequestValidationError`, RFC 7807 Problem Details |
-| [Testing FastAPI](src/main/java/com/rutik/systemdesign/python/testing_fastapi/) | `TestClient`, `httpx.AsyncClient`, `pytest-asyncio`, `dependency_overrides`, transactional rollback |
-| [WebSockets, SSE & Streaming](src/main/java/com/rutik/systemdesign/python/websockets_sse_and_streaming/) | WebSockets, SSE, `StreamingResponse`, Redis pub/sub fan-out, connection registry, backpressure |
-| [Background Jobs & Task Queues](src/main/java/com/rutik/systemdesign/python/background_jobs_and_task_queues/) | `BackgroundTasks` vs Celery vs ARQ vs Dramatiq, idempotency, retries, dead-letter queues |
-| [HTTP Clients & External APIs](src/main/java/com/rutik/systemdesign/python/http_clients_and_external_apis/) | `httpx`/`aiohttp` async clients, connection pooling, retries/backoff, circuit breakers |
-| [Message Queues & Event-Driven](src/main/java/com/rutik/systemdesign/python/message_queues_and_event_driven/) | `aiokafka`/`aio-pika`, outbox pattern, consumer groups, idempotent consumers |
+| [Async Database & SQLAlchemy](src/main/java/com/rutik/systemdesign/python/fastapi/async_database_sqlalchemy/) | SQLAlchemy 2.0 async, `AsyncSession`, Alembic, SQLModel, session-per-request via `Depends`, N+1 |
+| [Authentication & Security](src/main/java/com/rutik/systemdesign/python/fastapi/authentication_and_security/) | OAuth2 password flow, JWT, scopes, passlib/bcrypt/argon2, OIDC, security deps, CSRF/CORS |
+| [Error Handling & Validation](src/main/java/com/rutik/systemdesign/python/fastapi/error_handling_and_validation/) | `HTTPException`, custom handlers, `RequestValidationError`, RFC 7807 Problem Details |
+| [Testing FastAPI](src/main/java/com/rutik/systemdesign/python/fastapi/testing_fastapi/) | `TestClient`, `httpx.AsyncClient`, `pytest-asyncio`, `dependency_overrides`, transactional rollback |
+| [WebSockets, SSE & Streaming](src/main/java/com/rutik/systemdesign/python/fastapi/websockets_sse_and_streaming/) | WebSockets, SSE, `StreamingResponse`, Redis pub/sub fan-out, connection registry, backpressure |
+| [Background Jobs & Task Queues](src/main/java/com/rutik/systemdesign/python/fastapi/background_jobs_and_task_queues/) | `BackgroundTasks` vs Celery vs ARQ vs Dramatiq, idempotency, retries, dead-letter queues |
+| [HTTP Clients & External APIs](src/main/java/com/rutik/systemdesign/python/fastapi/http_clients_and_external_apis/) | `httpx`/`aiohttp` async clients, connection pooling, retries/backoff, circuit breakers |
+| [Message Queues & Event-Driven](src/main/java/com/rutik/systemdesign/python/fastapi/message_queues_and_event_driven/) | `aiokafka`/`aio-pika`, outbox pattern, consumer groups, idempotent consumers |
 
 #### Phase 6 — Deployment, Observability & Scale
 | Module | Key Concepts |
 |--------|-------------|
-| [Production Deployment & Scaling](src/main/java/com/rutik/systemdesign/python/production_deployment_and_scaling/) | Gunicorn+Uvicorn workers, worker tuning, container/K8s, graceful shutdown, ASGI scaling |
-| [Observability & Monitoring](src/main/java/com/rutik/systemdesign/python/observability_and_monitoring/) | Structured logging, OpenTelemetry tracing, Prometheus metrics, health/readiness probes |
-| [Caching & Performance](src/main/java/com/rutik/systemdesign/python/caching_and_performance/) | Redis caching, response/in-process caching, connection pooling, async perf pitfalls |
-| [API Design & Versioning](src/main/java/com/rutik/systemdesign/python/api_design_and_versioning/) | REST best practices, versioning, cursor pagination, rate limiting in FastAPI, idempotency keys |
-| [Security Hardening & OWASP](src/main/java/com/rutik/systemdesign/python/security_hardening_and_owasp/) | OWASP API Top 10 in FastAPI, injection/SSRF, secrets handling, pip-audit, input validation |
+| [Production Deployment & Scaling](src/main/java/com/rutik/systemdesign/python/fastapi/production_deployment_and_scaling/) | Gunicorn+Uvicorn workers, worker tuning, container/K8s, graceful shutdown, ASGI scaling |
+| [Observability & Monitoring](src/main/java/com/rutik/systemdesign/python/fastapi/observability_and_monitoring/) | Structured logging, OpenTelemetry tracing, Prometheus metrics, health/readiness probes |
+| [Caching & Performance](src/main/java/com/rutik/systemdesign/python/fastapi/caching_and_performance/) | Redis caching, response/in-process caching, connection pooling, async perf pitfalls |
+| [API Design & Versioning](src/main/java/com/rutik/systemdesign/python/fastapi/api_design_and_versioning/) | REST best practices, versioning, cursor pagination, rate limiting in FastAPI, idempotency keys |
+| [Security Hardening & OWASP](src/main/java/com/rutik/systemdesign/python/fastapi/security_hardening_and_owasp/) | OWASP API Top 10 in FastAPI, injection/SSRF, secrets handling, pip-audit, input validation |
 
 #### Python Case Studies
 | Case Study | Core Concepts |
 |------------|--------------|
-| [Design a Rate-Limited API with FastAPI](src/main/java/com/rutik/systemdesign/python/case_studies/design_rate_limited_api_fastapi.md) | Token-bucket via Redis Lua, `Depends`-injected limiter, async middleware, 429 error handling |
-| [Design a Multi-Tenant SaaS API](src/main/java/com/rutik/systemdesign/python/case_studies/design_multi_tenant_saas_api.md) | Async SQLAlchemy tenant isolation, JWT/RBAC, `Depends` scoping, schema-per-tenant |
-| [Design a Real-Time Chat System](src/main/java/com/rutik/systemdesign/python/case_studies/design_realtime_chat_fastapi.md) | WebSockets, Redis pub/sub fan-out, connection registry, backpressure |
-| [Design an Async Task Queue System](src/main/java/com/rutik/systemdesign/python/case_studies/design_async_task_queue.md) | ARQ/Celery, idempotency, retries with exponential backoff, dead-letter queues |
-| [Design an Async Web Scraper](src/main/java/com/rutik/systemdesign/python/case_studies/design_async_web_scraper.md) | asyncio + aiohttp, `Semaphore`, producer/consumer, politeness/crawl budget |
-| [Design an ML Inference API (FastAPI)](src/main/java/com/rutik/systemdesign/python/case_studies/design_ml_inference_api_fastapi.md) | Async model serving, micro-batching, async cache, `lifespan` model loading, streaming responses |
+| [Design a Rate-Limited API with FastAPI](src/main/java/com/rutik/systemdesign/python/fastapi/case_studies/design_rate_limited_api_fastapi.md) | Token-bucket via Redis Lua, `Depends`-injected limiter, async middleware, 429 error handling |
+| [Design a Multi-Tenant SaaS API](src/main/java/com/rutik/systemdesign/python/fastapi/case_studies/design_multi_tenant_saas_api.md) | Async SQLAlchemy tenant isolation, JWT/RBAC, `Depends` scoping, schema-per-tenant |
+| [Design a Real-Time Chat System](src/main/java/com/rutik/systemdesign/python/fastapi/case_studies/design_realtime_chat_fastapi.md) | WebSockets, Redis pub/sub fan-out, connection registry, backpressure |
+| [Design an Async Task Queue System](src/main/java/com/rutik/systemdesign/python/fastapi/case_studies/design_async_task_queue.md) | ARQ/Celery, idempotency, retries with exponential backoff, dead-letter queues |
+| [Design an Async Web Scraper](src/main/java/com/rutik/systemdesign/python/fastapi/case_studies/design_async_web_scraper.md) | asyncio + aiohttp, `Semaphore`, producer/consumer, politeness/crawl budget |
+| [Design an ML Inference API (FastAPI)](src/main/java/com/rutik/systemdesign/python/fastapi/case_studies/design_ml_inference_api_fastapi.md) | Async model serving, micro-batching, async cache, `lifespan` model loading, streaming responses |
 
 See the [Python Master Index](src/main/java/com/rutik/systemdesign/python/README.md) for the full 6-phase learning path, version matrix, build tracker, and cross-reference map.
 
@@ -646,7 +646,7 @@ A comprehensive, senior-engineer-level guide to Machine Learning — from mathem
 |--------|-------------|
 | [Model Selection and Algorithm Choice](src/main/java/com/rutik/systemdesign/ml/model_selection_and_algorithm_choice/) | Algorithm decision matrix, problem-type → algorithm mapping, constraint-driven elimination (latency, interpretability, regulatory), baseline discipline |
 
-#### ML Case Studies (14 total — 10 legacy, 4 principal-template)
+#### ML Case Studies (22 total)
 | Case Study | Core ML Concepts |
 |------------|-----------------|
 | [Design Recommendation Engine](src/main/java/com/rutik/systemdesign/ml/case_studies/design_recommendation_engine.md) | Two-tower retrieval, LightGBM ranking, FAISS ANN, MMR diversity, cold start |
@@ -678,13 +678,27 @@ See the [ML Master Index](src/main/java/com/rutik/systemdesign/ml/README.md) for
 
 ## How to Use This Repository
 
-1. **Learning Path**: Start with SOLID principles, then move to Creational -> Structural -> Behavioral patterns
-2. **Each Pattern Contains**:
-   - `README.md` - Comprehensive explanation with UML, pros/cons, pitfalls, tradeoffs, when/where to use, interview tips
-   - `Template.java` - Clean pattern skeleton you can copy and adapt
-   - `RealWorldExample.java` - Practical implementation from real software systems
-3. **Interview Prep**: Use the pattern comparisons and decision flowcharts to solidify understanding
-4. **HLD Section**: System design concepts with diagrams and real-world case studies
+### By role
+
+| You are... | Start here |
+|------------|-----------|
+| **Java/Spring backend engineer** | `java/` phases 1-4 → `spring/` phases 1-5 → `hld/` case studies |
+| **Python/FastAPI engineer** | `python/` phases 1-3 → `python/fastapi/` phases 4-6 → Python case studies |
+| **ML engineer** | `ml/` phases 1-3 (math + classical) → phase 5 (ML systems) → ML case studies |
+| **LLM/AI engineer** | `llm/foundations_and_architecture/` → `llm/rag_fundamentals/` → `llm/agents_and_tool_use/` → LLM case studies |
+| **System design interview** | `hld/` core concepts → `lld/` design patterns → section-specific case studies |
+| **Database/backend infra** | `database/` phases 1-3 → `backend/` phases 1-4 → respective case studies |
+
+### Navigation
+
+- Every section has a **master index** (`README.md`) with a phase diagram and cross-reference map
+- Every `case_studies/` directory has a **learning path** (`case_studies/README.md`) showing reading order
+- All modules follow the **14-section template**: §2 Intuition, §6 Mechanics, §12 Interview Q&As — same structure everywhere
+- **Cross-links** connect related concepts across sections (e.g., SQLAlchemy pooling → `database/connection_pool_management`, FastAPI WebSockets → `backend/websockets_and_sse`)
+
+### Content format
+
+Each module README contains: concept overview, intuition analogy, core principles, architecture diagrams (ASCII), detailed mechanics with real code, real-world examples, tradeoff tables, pitfalls with BROKEN→FIX examples, 10+ interview Q&As, best practices, and a capstone case study.
 
 ## Quick Reference: Pattern Selection Flowchart
 

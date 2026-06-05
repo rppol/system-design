@@ -229,6 +229,8 @@ Dependencies to note:
 
 ## 7. Case Studies
 
+For a guided learning path through all 9 case studies, see [case_studies/README.md](case_studies/README.md).
+
 | Case Study | Core Concepts | Difficulty |
 |------------|---------------|------------|
 | [Design a Multi-Tenant API](case_studies/design_multitenant_api.md) | IoC container customization, request-scoped beans, per-tenant data sources, dynamic routing, security context propagation | Advanced |
@@ -236,6 +238,19 @@ Dependencies to note:
 | [Design an API Gateway](case_studies/design_api_gateway.md) | Spring Cloud Gateway, WebFlux, global filters, circuit breaker integration, rate limiting, JWT relay | Advanced |
 | [Design a Spring Batch ETL Pipeline](case_studies/design_batch_pipeline.md) | Spring Batch chunk model, Job/Step orchestration, ItemReader/Processor/Writer, restartability, partitioning | Advanced |
 | [Design a Distributed Caching Layer](case_studies/design_distributed_caching.md) | Spring Cache abstraction, Redis CacheManager, cache stampede prevention, multi-level caching, eviction policies | Advanced |
+| [Design a Distributed Rate Limiter](case_studies/design_distributed_rate_limiter_spring.md) | Redis Lua token bucket, atomic check-and-decrement, OncePerRequestFilter, fail-open fallback | Advanced |
+| [Design an OAuth2 Authorization Server](case_studies/design_oauth2_authorization_server.md) | Spring Authorization Server 1.x, PKCE, refresh token rotation, dual-key JWKS rollover | Advanced |
+| [Design an Idempotent Payment API](case_studies/design_idempotent_payment_api.md) | Idempotency keys, pg_advisory_xact_lock, outbox pattern, exactly-once semantics | Advanced |
+| [Design a Real-Time Notification Service](case_studies/design_realtime_notification_service.md) | WebSocket fan-out, Redis Pub/Sub, ZSET history, virtual threads, backpressure | Advanced |
+
+**Cross-cutting shared primitives** (consumed by the case studies above):
+
+| Primitive | What it covers |
+|-----------|---------------|
+| [OTel Observability for Spring](case_studies/cross_cutting/otel_observability_for_spring.md) | @Observed, W3C traceparent, Kafka context propagation, exemplars, @Async fix |
+| [Resilience4j Patterns](case_studies/cross_cutting/resilience4j_patterns.md) | CB state machine, Retry/CB composition, SemaphoreBulkhead vs ThreadPoolBulkhead |
+| [Testcontainers & Test Strategy](case_studies/cross_cutting/testcontainers_and_test_strategy.md) | @ServiceConnection, Replace.NONE, transaction isolation test, Kafka idempotency test |
+| [Zero-Downtime Deploys & Config](case_studies/cross_cutting/zero_downtime_deploys_and_config.md) | Expand-Contract, readiness/liveness separation, preStop sleep, @RefreshScope pitfalls |
 
 ---
 
@@ -247,6 +262,6 @@ Recommended learning order for interview preparation:
 2. **Week 2**: Phases 3–4 (Spring Boot internals, MVC, WebFlux)
 3. **Week 3**: Phases 5–6 (Data, transactions, security)
 4. **Week 4**: Phases 7–8 (Cloud patterns, messaging, testing, performance)
-5. **Review**: Work through all 5 case studies end-to-end
+5. **Review**: Work through all 9 case studies end-to-end — see [case_studies/README.md](case_studies/README.md) for the recommended order
 
 Each module follows the standard 14-section template. See [llm/foundations_and_architecture/README.md](../llm/foundations_and_architecture/README.md) as the format reference.
