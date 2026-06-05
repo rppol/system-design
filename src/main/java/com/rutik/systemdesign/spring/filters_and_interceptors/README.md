@@ -738,6 +738,18 @@ Use `InterceptorRegistration.excludePathPatterns()` in `WebMvcConfigurer.addInte
 **Q: What is the difference between preHandle returning false vs. throwing an exception?**
 Returning `false` from `preHandle` halts the handler chain — DispatcherServlet stops processing and returns the response as-is (typically empty 200 if you haven't written anything, or whatever you wrote in `preHandle`). You are responsible for writing a meaningful error response before returning `false`. Throwing an exception triggers Spring MVC's exception handling pipeline (`@ExceptionHandler`, `@ControllerAdvice`) and results in a structured error response. For API error responses with proper JSON bodies and status codes, throw an appropriate exception rather than returning `false`.
 
+**What is `OncePerRequestFilter` and why is it preferred over implementing `Filter` directly?**
+`OncePerRequestFilter` (Spring's abstract class) guarantees the filter executes exactly once per request, even when the request is forwarded internally via `RequestDispatcher.forward()`. A plain `javax.servlet.Filter` is called on every dispatch — including `FORWARD` and `INCLUDE` dispatches within the same request, which means it runs multiple times for a request involving `RequestDispatcher`. `OncePerRequestFilter` achieves once-per-request by marking the request with a request attribute on first execution and skipping if the attribute is already set. Override `shouldNotFilter(HttpServletRequest)` to exclude specific requests (e.g., static resources). Almost all Spring Security filters extend `OncePerRequestFilter` for this reason.
+
+**How do you measure and record per-request latency in a `Filter` without blocking the response body write?**
+Timing in a filter wraps `chain.doFilter(request, response)` with `System.nanoTime()` measurements. However, for streaming responses, the response body write happens after `doFilter` returns — the `afterCompletion` timing in an interceptor or a `ContentCachingResponseWrapper` is needed for body size. For simple request latency (time to send the last byte of headers + body): use a `ContentCachingResponseWrapper` in the filter to buffer the response, record `nanoTime()` before and after `doFilter`, then write the cached response. For real production latency instrumentation, use Micrometer's `WebMvcMetricsFilter` (auto-configured by Spring Boot Actuator) which uses `HttpServletResponse.setStatus()` callback via `HandlerInterceptor.afterCompletion` to accurately attribute time.
+
+**What happens to a Spring Security filter that is ordered too early in the security filter chain?**
+Spring Security's `SecurityFilterChain` is itself a `Filter` registered in the Servlet filter chain at `SecurityProperties.DEFAULT_FILTER_ORDER` (-100 by default). Within the security chain, filters have a fixed order defined by `FilterOrderRegistration`. If you insert a custom filter too early (e.g., `addFilterBefore(myFilter, UsernamePasswordAuthenticationFilter.class)`) when your filter depends on the `SecurityContext` being populated, the context will not be set yet — `SecurityContextHolder.getContext().getAuthentication()` returns null. The correct pattern: know the security filter order, place authentication-dependent filters after `SecurityContextHolderFilter` (which restores the context from the session). Use `HttpSecurity.addFilterAfter` / `addFilterBefore` with precise reference filters.
+
+**How does `AsyncContext` and async servlet processing affect `HandlerInterceptor.afterCompletion`?**
+When a controller starts async processing (`DeferredResult`, `Callable`, `@Async` with `SseEmitter`), the servlet container thread that handled the request is released before the response is committed. Spring MVC's `HandlerInterceptor.afterCompletion` is called when the response is finally committed — but on a *different* thread than `preHandle` and `postHandle`. Implication: any thread-local state set in `preHandle` (e.g., in `MDC`) is not automatically available in `afterCompletion` unless you use `CallableProcessingInterceptor` or `DeferredResultProcessingInterceptor`, which provide explicit callbacks for the async processing lifecycle. For accurate async request timing, instrument `DeferredResult.setResult()` or the `Callable` body directly rather than relying on `afterCompletion` timing.
+
 ---
 
 ## 13. Best Practices
@@ -945,3 +957,11 @@ public boolean preHandle(HttpServletRequest req, HttpServletResponse res,
 **How do you pass data from a Filter to a Controller?** Set a request attribute: `request.setAttribute("key", value)`. In the controller, inject `HttpServletRequest` and call `request.getAttribute("key")`. Alternatively, put the data in the `SecurityContext` (for auth principal) or in an MDC thread-local (for trace IDs). Never use static fields or application-scope singletons for request-scoped data.
 
 **When would you choose HandlerInterceptor over a Filter?** Use `HandlerInterceptor` when you need access to Spring MVC concepts: the matched `HandlerMethod`, model attributes, or `ModelAndView`. Use a Filter when you need to intercept at the servlet level before Spring MVC: for raw request/response manipulation (GZIP, logging raw bytes), for requests that may not reach a Spring handler (static resources, error pages), or for security filters that must run before DispatcherServlet.
+
+---
+
+## Related / See Also
+
+- [Request Handling](../request_handling/README.md) — @ControllerAdvice
+- [Spring Security Architecture](../spring_security_architecture/README.md) — security filter chain
+- [Case Study: Rate Limiter](../case_studies/design_distributed_rate_limiter_spring.md) — OncePerRequestFilter

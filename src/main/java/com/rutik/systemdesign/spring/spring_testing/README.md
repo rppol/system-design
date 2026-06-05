@@ -1202,3 +1202,10 @@ class OrderServiceIntegrationTest {
 **What is @DynamicPropertySource and when is it essential?** It registers property overrides after the Testcontainers container has started and its random port is known. Without it, you'd need to hard-code ports in `@TestPropertySource` or use fixed-port containers. Use it whenever a test infrastructure component (Postgres, Redis, Kafka) binds to a random port.
 
 **How do you test security — authentication and authorization — without a real auth server?** Use `@WithMockUser` for simple role-based tests. For OAuth2, use `SecurityMockMvcRequestPostProcessors.jwt()` or `oidcLogin()` from Spring Security Test to inject a synthetic JWT claims set. Never start a real Keycloak or auth server in unit/integration tests — mock the token validation boundary instead.
+
+---
+
+## Related / See Also
+
+- [Spring Boot Auto-Configuration](../spring_boot_autoconfiguration/README.md) — test slices
+- [Case Study: Testcontainers & Test Strategy](../case_studies/cross_cutting/testcontainers_and_test_strategy.md) — @ServiceConnection, integration tests

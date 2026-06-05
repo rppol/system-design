@@ -7,8 +7,8 @@ A comprehensive system design study repository covering:
 - **HLD** — Distributed system concepts (CAP, caching, queues, sharding, etc.) + case studies
 - **LLM** — Complete LLM engineering guide (45 modules, 29 case studies, 74 deep-dive sub-files across 9 topics)
 - **ML** — Complete Machine Learning guide (33 modules, 22 case studies, 31 deep-dive sub-files across 7 groups — 26 topic sub-files + 5 cross-cutting shared primitives)
-- **Java** — Pure Java senior-engineer + interview prep guide (17 modules, 4 case studies)
-- **Spring** — Spring Framework senior-engineer + interview prep guide (23 modules, 5 case studies)
+- **Java** — Pure Java senior-engineer + interview prep guide (20 modules, 8 case studies)
+- **Spring** — Spring Framework senior-engineer + interview prep guide (27 modules, 9 case studies)
 - **Python** — Python + FastAPI senior-engineer + interview prep guide (40 modules, 6 case studies across 6 phases)
 
 All content is Markdown — no runnable application. Java source files under `src/main/java/` are documentation organized as a Maven project skeleton.
@@ -274,8 +274,15 @@ Current modules under `src/main/java/com/rutik/systemdesign/java/`:
 | `java_memory_model/` | Happens-before rules, memory barriers, safe publication, DRF |
 | `networking_and_http_client/` | HttpClient (Java 11), NIO Selector, Reactor pattern, HTTP/2 |
 | `jdbc_and_database/` | PreparedStatement, HikariCP, transaction isolation, batch inserts |
+| `strings_and_text/` | String immutability, constant pool, Compact Strings (JEP 254), invokedynamic concat (JEP 280), StringBuilder, text blocks (JEP 378), Unicode correctness |
+| `structured_concurrency_and_loom/` | Virtual threads (JEP 444), carrier threads, pinning, StructuredTaskScope (JEP 453), ScopedValue (JEP 446), Continuation internals, Java 21 GA |
+| `foreign_function_and_memory_api/` | Panama: Arena, MemorySegment, MemoryLayout, VarHandle, Linker (JEP 454), downcall/upcall handles, jextract, replacing Unsafe/JNI, Java 22 GA |
 
-Case studies in `java/case_studies/`: connection pool, rate limiter, event bus, LRU cache.
+Case studies in `java/case_studies/` (8 total): connection pool, rate limiter, event bus, LRU cache, thread pool, DI container, circuit breaker, snowflake ID generator.
+
+Cross-cutting shared primitives in `java/case_studies/cross_cutting/` (4 files, 14-section template): jvm_tuning_and_gc_for_services, benchmarking_with_jmh, concurrency_memory_visibility_primitives, backpressure_and_bounded_resources.
+
+Learning-path index: `java/case_studies/README.md` (mandatory; update with every new Java case study).
 
 ---
 
@@ -308,8 +315,16 @@ Current modules under `src/main/java/com/rutik/systemdesign/spring/`:
 | `spring_messaging/` | 7 | Kafka, RabbitMQ, Spring Cloud Stream, @Async, WebSocket |
 | `spring_testing/` | 8 | @SpringBootTest, test slices, MockMvc, @MockBean, Testcontainers |
 | `spring_performance/` | 8 | HikariCP tuning, lazy init, GraalVM native, virtual threads |
+| `spring_batch/` | 7 | Job/Step/chunk model, ItemReader/Processor/Writer, @StepScope/@JobScope, JobRepository, skip/retry, partitioning |
+| `spring_events_and_scheduling/` | 7 | ApplicationEventPublisher, @EventListener, @TransactionalEventListener, @Scheduled/@Async, ShedLock |
+| `validation_and_error_handling/` | 4 | Bean Validation (JSR-380), @Valid/@Validated, validation groups, custom ConstraintValidator, ProblemDetail (RFC 7807) |
+| `observability_and_tracing/` | 8 | Micrometer Observation API, Micrometer Tracing + OTLP, W3C traceparent, structured logging, exemplars |
 
-Case studies in `spring/case_studies/`: multitenant API, event-driven microservice, API gateway, batch pipeline, distributed caching.
+Case studies in `spring/case_studies/` (9 total): multitenant API, event-driven microservice, API gateway, batch pipeline, distributed caching, distributed rate limiter, OAuth2 authorization server, idempotent payment API, real-time notification service.
+
+Cross-cutting shared primitives in `spring/case_studies/cross_cutting/` (4 files, 14-section template): otel_observability_for_spring, resilience4j_patterns, testcontainers_and_test_strategy, zero_downtime_deploys_and_config.
+
+Learning-path index: `spring/case_studies/README.md` (mandatory; update with every new Spring case study).
 
 ---
 

@@ -1,101 +1,169 @@
-# Event-Driven Order Processing Microservice with Kafka and Saga Pattern
+# Design: Event-Driven Order Processing Microservice
 
-## Problem Statement
+> "A choreography saga is a distributed relay race where each runner hands the baton to the
+> next without a referee. If a runner drops the baton, every runner from that point
+> backwards must undo their leg — coordinated by reaction, not by command."
 
-Design an order processing microservice that uses event-driven architecture to coordinate a distributed transaction across four services: Order, Payment, Inventory, and Fulfillment. The system must:
+**Key insight:** An event-driven system never calls another service directly. It writes an
+event, disappears, and trusts that the subscriber will act on it — eventually, at least
+once. This indirection is what enables independent scaling and graceful failure isolation,
+but it moves consistency from synchronous guarantees to idempotent, compensating reactions.
 
-- Process 50,000 orders per hour with peak spikes of 5x
-- Guarantee no order is lost even if a downstream service is temporarily unavailable
-- Handle partial failures: if payment succeeds but inventory is unavailable, compensate by refunding the payment
-- Ensure each event is processed exactly once (no duplicate charges, no double-shipping)
-- Provide full auditability — every state transition must be logged
-
-Constraints: Spring Boot 3.x, Apache Kafka 3.x, PostgreSQL for the order service database, choreography-based Saga (no orchestrator service).
+See also: [Resilience4j patterns](./cross_cutting/resilience4j_patterns.md),
+[Testcontainers and test strategy](./cross_cutting/testcontainers_and_test_strategy.md)
 
 ---
 
-## Architecture Overview
+## 1. Requirements Clarification
+
+**Functional requirements:**
+- Accept orders and coordinate a distributed transaction across Order, Payment, Inventory,
+  and Fulfillment services via events (no synchronous inter-service calls).
+- Guarantee no order is silently lost even if a downstream service is temporarily
+  unavailable.
+- Compensate automatically: if payment succeeds but inventory is unavailable, trigger a
+  refund through the same event-driven pipeline.
+- Provide full auditability — every state transition (PENDING → PAYMENT_CONFIRMED →
+  COMPENSATION_IN_PROGRESS → FAILED) must be traceable by correlation ID.
+
+**Non-functional requirements:**
+- 50,000 orders/hour sustained; 5× peak = 250,000 orders/hour (~70 orders/sec peak).
+- At-least-once delivery with idempotent consumers (no duplicate charges, no
+  double-shipping).
+- End-to-end saga latency ≤ 5 seconds at P99 (order placed to CONFIRMED).
+- Recovery from broker partition outage within 30 seconds; consumer lag SLO < 60 seconds.
+
+**Constraints:** Spring Boot 3.x, Apache Kafka 3.x, PostgreSQL, choreography-based Saga
+(no orchestrator service).
+
+**Out of scope:** Payment gateway integration details, inventory management UI, A/B testing
+of routing strategies, multi-currency orders.
+
+---
+
+## 2. Scale Estimation
+
+**Traffic math:**
+```
+Sustained:      50,000 orders/hr = 13.9 orders/sec
+Peak (5×):      250,000 orders/hr = 69.4 orders/sec ~ 70 orders/sec
+Events per order (fanout): 1 order.created → 4 downstream events (payment, inventory,
+                           fulfillment, compensation path) → ~4× amplification
+Peak event rate:            70 × 4 = 280 events/sec across all topics
+```
+
+**Outbox throughput:**
+```
+Per instance:   100ms poll × batch 100 = 1,000 events/sec
+For 280 events/sec peak: 1 instance sufficient; 2 for HA failover
+Safety factor (5× spike): 10 poller instances via SELECT ... FOR UPDATE SKIP LOCKED
+```
+
+**Kafka partition sizing:**
+```
+Rule: partitions >= peak concurrent consumers per group
+Target consumer concurrency: 8 threads per service × 2 HA instances = 16 active consumers
+Partition count per topic:  16 partitions (never reduce — key ordering breaks)
+Replication factor:         3 (tolerate 1 broker loss without data loss)
+Retention:                  7 days for at-least-once replay
+Topic count:                8 (order.created, order.confirmed, payment.completed,
+                               payment.failed, payment.refund.requested, payment.refunded,
+                               inventory.reserved, inventory.failed)
+```
+
+**Storage:**
+```
+Event payload avg:   2 KB (JSON with order ID, customer ID, amount, timestamps)
+Peak event rate:     280 events/sec × 2 KB = 560 KB/sec
+Daily volume:        560 KB/sec × 86,400s = 47 GB/day across all topics
+Retention at 7 days: 330 GB total across Kafka cluster
+PostgreSQL outbox:   < 1 GB (published rows pruned after 7 days)
+```
+
+**Consumer lag budget:**
+```
+SLO: < 60s of volume = < 70 events/sec × 60s = 4,200 events behind (alert at 50%)
+Page threshold: 2,100 events of consumer lag per group
+```
+
+---
+
+## 3. High-Level Architecture
 
 ```
- [Client]
-    |
-    v
-[Order Service]
-    |
-    |---(1) INSERT order (PENDING) + INSERT outbox_events in same TX
-    |
-    v
-[Outbox Publisher] ---- scheduled every 100ms ---->  [Kafka: order.created]
-                                                           |
-                    +--------------------------------------+
-                    |                                      |
-                    v                                      v
-         [Payment Service]                     [Inventory Service]
-         (consumes order.created)              (consumes order.created)
-                    |                                      |
-          publish payment.completed            publish inventory.reserved
-          or payment.failed                    or inventory.failed
-                    |                                      |
-                    +---------- both events ------------->  [Order Service saga handler]
-                                                               |
-                                                     If both succeeded:
-                                                     publish order.confirmed
-                                                           |
-                                                           v
-                                                  [Fulfillment Service]
-                                                  (consumes order.confirmed)
-                                                           |
-                                                  publish fulfillment.shipped
-                                                           |
-                                                           v
-                                                  [Order Service]
-                                                  (marks order SHIPPED)
+ [Client HTTP]
+      |
+      v
+ [Order Service]
+      |
+      |---(1) INSERT orders + INSERT outbox_events (same DB TX, PostgreSQL)
+      |
+      v
+ [OutboxPublisher]-------@Scheduled 100ms----->[Kafka: order.created]
+                                                      |
+                          +--------------------------++--------------------------+
+                          |                                                     |
+                          v                                                     v
+               [Payment Service]                                    [Inventory Service]
+               consumes order.created                               consumes order.created
+               charges customer via gateway                         reserves SKUs
+                          |                                                     |
+               payment.completed                               inventory.reserved
+               OR payment.failed                               OR inventory.failed
+                          |                                                     |
+                          +----------->  [Order Service saga handler]  <-------+
+                                                    |
+                                        both events received?
+                                                    |
+                                     yes: publish order.confirmed
+                                     no:  publish payment.refund.requested
+                                                    |
+                                                    v
+                                         [Fulfillment Service]
+                                         consumes order.confirmed
+                                         ships package
+                                                    |
+                                         publishes fulfillment.shipped
+                                                    |
+                                                    v
+                                         [Order Service]
+                                         marks order SHIPPED
 
  Compensation path:
    payment.completed + inventory.failed
-        --> Order Service publishes payment.refund.requested
-        --> Payment Service refunds and publishes payment.refunded
-        --> Order Service marks order FAILED
+        --> Order Service publishes payment.refund.requested (via outbox)
+        --> Payment Service refunds, publishes payment.refunded
+        --> Order Service transitions: COMPENSATION_IN_PROGRESS -> FAILED
 ```
 
----
+**Component inventory:**
 
-## Key Design Decisions
+| Component | Responsibility |
+|---|---|
+| Order Service | Domain aggregate, outbox writer, saga state machine |
+| OutboxEventPublisher | Scheduled poller: unpublished rows → Kafka, `FOR UPDATE SKIP LOCKED` |
+| PaymentEventConsumer | Idempotent consumer with `processed_events` table check |
+| InventoryEventConsumer | `@RetryableTopic` with DLT handler for transient failures |
+| SagaCompensationService | Checks current order state before writing compensation outbox event |
+| KafkaProducerConfig | Idempotent producer (`ENABLE_IDEMPOTENCE_CONFIG=true`, `acks=all`) |
+| KafkaConsumerConfig | Manual ack (`MANUAL_IMMEDIATE`), concurrency=3, no auto-commit |
 
-### 1. Transactional Outbox Pattern over Direct Kafka Publish
-
-Publishing directly to Kafka inside a database transaction is impossible — the two resources are separate transactional domains. If the database commits but the Kafka publish fails, the event is lost. If Kafka publishes but the database rolls back, a phantom event is in the topic. The Outbox pattern resolves this: the event is written to an `outbox_events` table in the same database transaction as the business entity update, making both atomic. A separate scheduled publisher then reads unpublished events and sends them to Kafka, marking them published only after the Kafka acknowledgment. The worst case is at-least-once delivery, not loss.
-
-### 2. Choreography Saga over Orchestration
-
-An orchestrator service requires its own high-availability deployment, becomes a bottleneck, and adds a network hop. Choreography distributes the saga logic across services — each service reacts to events and publishes the next event. The tradeoff is that the overall flow is harder to visualize from a single place. This is mitigated by having each service log state transitions with a correlation ID (order ID), so a distributed trace query can reconstruct the full saga history.
-
-### 3. Idempotent Consumer Using Processed Events Table
-
-Kafka at-least-once delivery means a consumer may receive the same event multiple times (during rebalances, consumer restarts, or network retries). Without idempotency, a payment could be charged twice. A `processed_events` table stores `(event_id, consumer_group, processed_at)`. Each consumer checks this table before processing and inserts atomically. If the insert fails with a unique constraint violation, the event is a duplicate and is acknowledged without reprocessing. This check and the business update happen in the same database transaction.
-
-### 4. Dead Letter Topic with @RetryableTopic
-
-Transient failures (database connection timeout, downstream HTTP call failure) should be retried with backoff, not sent immediately to a dead letter topic. Spring Kafka's `@RetryableTopic` handles this by routing failed messages to intermediate retry topics (`order.created-retry-1`, `order.created-retry-2`) with configurable delays (1s, 10s, 60s) before the final dead letter topic. This avoids blocking the main partition while retrying.
-
-### 5. Kafka Transactions for Exactly-Once in the Outbox Publisher
-
-The outbox publisher reads an event from the database and writes it to Kafka. To prevent the same event from being published twice (publisher crash between publish and marking as published), the publisher uses a Kafka `KafkaTransactionManager` coordinated with a `ChainedTransactionManager`. The database UPDATE (marking event as published) and the Kafka send happen in the same logical transaction using Spring's `@Transactional` with the chained manager.
+**Data flow narrative:**
+1. `OrderService.createOrder()` writes `orders` row and `outbox_events` row in one `@Transactional` block. Both commit or both roll back — no dual-write window.
+2. `OutboxEventPublisher` polls every 100ms, locks unpublished rows with `FOR UPDATE SKIP LOCKED`, sends to Kafka synchronously, marks published.
+3. Downstream consumers check `processed_events` before acting. Idempotency key = `(event_id, consumer_group)` with a UNIQUE constraint. Duplicate = ack without processing.
+4. Compensation is triggered by the saga handler writing a `PAYMENT_REFUND_REQUESTED` outbox event in the same transaction as the status update.
 
 ---
 
-## Implementation
+## 4. Component Deep Dives
 
-### Domain Entity and Outbox Event
+### 4.1 Transactional Outbox — Domain Entity and Outbox Event
+
+The outbox pattern uses a single local transaction to solve the dual-write problem between
+a database and a message broker.
 
 ```java
-package com.rutik.systemdesign.spring.order;
-
-import jakarta.persistence.*;
-import java.math.BigDecimal;
-import java.time.Instant;
-import java.util.UUID;
-
 @Entity
 @Table(name = "orders")
 public class Order {
@@ -112,7 +180,6 @@ public class Order {
     private Instant createdAt;
     private Instant updatedAt;
 
-    // JPA requires no-arg constructor
     protected Order() {}
 
     public static Order create(String customerId, BigDecimal totalAmount) {
@@ -127,7 +194,6 @@ public class Order {
     }
 
     public void transitionTo(OrderStatus newStatus) {
-        // Enforce valid state transitions
         if (!status.canTransitionTo(newStatus)) {
             throw new IllegalStateException(
                 "Cannot transition from " + status + " to " + newStatus);
@@ -144,12 +210,6 @@ public class Order {
 ```
 
 ```java
-package com.rutik.systemdesign.spring.order;
-
-import jakarta.persistence.*;
-import java.time.Instant;
-import java.util.UUID;
-
 @Entity
 @Table(name = "outbox_events")
 public class OutboxEvent {
@@ -196,18 +256,9 @@ public class OutboxEvent {
 }
 ```
 
-### Order Service — Writes Order and Outbox in One Transaction
+**Order Service — atomic write of business row and outbox row:**
 
 ```java
-package com.rutik.systemdesign.spring.order;
-
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-
-import java.math.BigDecimal;
-import java.util.Map;
-
 @Service
 public class OrderService {
 
@@ -223,58 +274,69 @@ public class OrderService {
         this.objectMapper = objectMapper;
     }
 
-    @Transactional  // Both inserts happen atomically
+    @Transactional
     public Order createOrder(String customerId, BigDecimal totalAmount) throws Exception {
         Order order = Order.create(customerId, totalAmount);
         orderRepository.save(order);
 
-        // Write outbox event in the SAME transaction
         String payload = objectMapper.writeValueAsString(Map.of(
             "orderId", order.getId().toString(),
             "customerId", order.getCustomerId(),
             "totalAmount", order.getTotalAmount().toString()
         ));
 
-        OutboxEvent outboxEvent = OutboxEvent.of(
-            order.getId(), "Order", "ORDER_CREATED", payload
-        );
-        outboxEventRepository.save(outboxEvent);
+        outboxEventRepository.save(
+            OutboxEvent.of(order.getId(), "Order", "ORDER_CREATED", payload));
 
         return order;
     }
 
     @Transactional
     public void handlePaymentCompleted(String orderId) {
-        Order order = orderRepository.findById(java.util.UUID.fromString(orderId))
+        Order order = orderRepository.findById(UUID.fromString(orderId))
             .orElseThrow(() -> new IllegalArgumentException("Order not found: " + orderId));
         order.transitionTo(OrderStatus.PAYMENT_CONFIRMED);
-        orderRepository.save(order);
-    }
-
-    @Transactional
-    public void handlePaymentFailed(String orderId) {
-        Order order = orderRepository.findById(java.util.UUID.fromString(orderId))
-            .orElseThrow(() -> new IllegalArgumentException("Order not found: " + orderId));
-        order.transitionTo(OrderStatus.FAILED);
         orderRepository.save(order);
     }
 }
 ```
 
-### Transactional Outbox Publisher (Scheduled Poller)
+### 4.2 BROKEN/FIX — Event Published Before Commit
+
+**Broken:** publishing directly to Kafka inside the service method but outside outbox:
 
 ```java
-package com.rutik.systemdesign.spring.order;
+// BROKEN: Kafka send is not part of the DB transaction
+@Transactional
+public void createOrder(OrderRequest req) {
+    Order order = orderRepository.save(toEntity(req));
+    kafkaTemplate.send("orders", new OrderCreatedEvent(order)); // escapes if TX rolls back
+    paymentService.charge(req); // if THIS throws, TX rolls back but event is already on wire
+}
+```
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
+If `paymentService.charge()` throws, the DB transaction rolls back — but the Kafka message
+is already published. Downstream services ship goods for a non-existent order.
 
-import java.util.List;
+**Fix:** write the event to the outbox table in the same transaction; let a poller publish
+it post-commit:
 
+```java
+// FIX: transactional outbox — event row committed atomically with order row
+@Transactional
+public void createOrder(OrderRequest req) {
+    Order order = orderRepository.save(toEntity(req));
+    paymentService.charge(req);
+    outboxRepository.save(new OutboxEvent(
+        "orders", order.getId().toString(),
+        serialize(new OrderCreatedEvent(order)))); // commits or rolls back with order
+    // No kafkaTemplate.send here. Outbox poller publishes after commit is durable.
+}
+```
+
+### 4.3 Outbox Publisher with `FOR UPDATE SKIP LOCKED`
+
+```java
 @Component
 public class OutboxEventPublisher {
 
@@ -290,43 +352,37 @@ public class OutboxEventPublisher {
         this.kafkaTemplate = kafkaTemplate;
     }
 
-    @Scheduled(fixedDelay = 100)  // Poll every 100ms
+    @Scheduled(fixedDelay = 100)
     @Transactional
     public void publishPendingEvents() {
         List<OutboxEvent> pending = outboxEventRepository
             .findTop100ByPublishedFalseOrderByCreatedAtAsc();
 
-        if (pending.isEmpty()) {
-            return;
-        }
+        if (pending.isEmpty()) return;
 
         for (OutboxEvent event : pending) {
             try {
                 String topic = resolveKafkaTopic(event.getEventType());
-                // Use aggregateId as the Kafka message key for partition ordering per order
                 kafkaTemplate.send(topic,
                                    event.getAggregateId().toString(),
                                    event.getPayload())
-                             .get(); // Synchronous send — ensures Kafka ack before marking published
+                             .get(); // synchronous: ensures Kafka ack before marking published
 
                 event.markPublished();
                 outboxEventRepository.save(event);
-
-                log.debug("Published outbox event id={} type={} topic={}",
-                          event.getId(), event.getEventType(), topic);
             } catch (Exception e) {
-                // Log and continue — this event will be retried in the next poll cycle
                 log.error("Failed to publish outbox event id={}: {}",
                           event.getId(), e.getMessage());
+                // leave published=false; retry in next poll cycle
             }
         }
     }
 
     private String resolveKafkaTopic(String eventType) {
         return switch (eventType) {
-            case "ORDER_CREATED"    -> "order.created";
-            case "ORDER_CONFIRMED"  -> "order.confirmed";
-            case "ORDER_FAILED"     -> "order.failed";
+            case "ORDER_CREATED"            -> "order.created";
+            case "ORDER_CONFIRMED"          -> "order.confirmed";
+            case "ORDER_FAILED"             -> "order.failed";
             case "PAYMENT_REFUND_REQUESTED" -> "payment.refund.requested";
             default -> throw new IllegalArgumentException("Unknown event type: " + eventType);
         };
@@ -334,37 +390,31 @@ public class OutboxEventPublisher {
 }
 ```
 
-### Idempotent Kafka Consumer (Payment Events)
+PostgreSQL query for multi-instance safety:
+```java
+// In OutboxEventRepository:
+@Query(value = """
+    SELECT * FROM outbox_events
+    WHERE published = false
+    ORDER BY created_at ASC
+    LIMIT :limit
+    FOR UPDATE SKIP LOCKED
+    """, nativeQuery = true)
+List<OutboxEvent> findAndLockUnpublished(@Param("limit") int limit);
+```
+
+`SKIP LOCKED` means each poller instance grabs non-overlapping rows rather than queueing
+behind the same lock, achieving ~N× throughput across N instances.
+
+### 4.4 Idempotent Consumer and `@RetryableTopic`
 
 ```java
-package com.rutik.systemdesign.spring.order;
-
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.kafka.annotation.KafkaListener;
-import org.springframework.kafka.support.Acknowledgment;
-import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
-
 @Component
 public class PaymentEventConsumer {
-
-    private static final Logger log = LoggerFactory.getLogger(PaymentEventConsumer.class);
 
     private final ProcessedEventRepository processedEventRepository;
     private final OrderService orderService;
     private final ObjectMapper objectMapper;
-
-    public PaymentEventConsumer(ProcessedEventRepository processedEventRepository,
-                                 OrderService orderService,
-                                 ObjectMapper objectMapper) {
-        this.processedEventRepository = processedEventRepository;
-        this.orderService = orderService;
-        this.objectMapper = objectMapper;
-    }
 
     @KafkaListener(
         topics = "payment.completed",
@@ -376,121 +426,21 @@ public class PaymentEventConsumer {
                                     Acknowledgment ack) throws Exception {
         String eventId = extractEventId(record);
 
-        // Idempotency check — insert-or-ignore
         if (processedEventRepository.existsByEventIdAndConsumerGroup(
                 eventId, "order-service-payment-consumer")) {
-            log.warn("Duplicate event received, skipping eventId={}", eventId);
             ack.acknowledge();
             return;
         }
 
-        try {
-            JsonNode payload = objectMapper.readTree(record.value());
-            String orderId = payload.get("orderId").asText();
-
-            orderService.handlePaymentCompleted(orderId);
-
-            // Mark as processed in the same transaction as the business update
-            processedEventRepository.save(
-                new ProcessedEvent(eventId, "order-service-payment-consumer"));
-
-            ack.acknowledge();
-            log.info("Processed payment.completed for orderId={}", orderId);
-        } catch (Exception e) {
-            log.error("Failed to process payment.completed eventId={}: {}", eventId, e.getMessage());
-            // Do NOT ack — Spring Kafka will retry according to RetryableTopic config
-            throw e;
-        }
-    }
-
-    private String extractEventId(ConsumerRecord<String, String> record) {
-        // Event ID is carried in a Kafka header set by the publishing service
-        var header = record.headers().lastHeader("event-id");
-        if (header != null) {
-            return new String(header.value());
-        }
-        // Fallback: use topic + partition + offset as a synthetic event ID
-        return record.topic() + "-" + record.partition() + "-" + record.offset();
-    }
-}
-```
-
-### Dead Letter Topic Configuration with @RetryableTopic
-
-```java
-package com.rutik.systemdesign.spring.order;
-
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.kafka.annotation.DltHandler;
-import org.springframework.kafka.annotation.KafkaListener;
-import org.springframework.kafka.annotation.RetryableTopic;
-import org.springframework.kafka.retrytopic.TopicSuffixingStrategy;
-import org.springframework.kafka.support.KafkaHeaders;
-import org.springframework.messaging.handler.annotation.Header;
-import org.springframework.retry.annotation.Backoff;
-import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
-
-@Component
-public class InventoryEventConsumer {
-
-    private static final Logger log = LoggerFactory.getLogger(InventoryEventConsumer.class);
-
-    private final ProcessedEventRepository processedEventRepository;
-    private final SagaCompensationService sagaCompensationService;
-    private final ObjectMapper objectMapper;
-
-    public InventoryEventConsumer(ProcessedEventRepository processedEventRepository,
-                                   SagaCompensationService sagaCompensationService,
-                                   ObjectMapper objectMapper) {
-        this.processedEventRepository = processedEventRepository;
-        this.sagaCompensationService = sagaCompensationService;
-        this.objectMapper = objectMapper;
-    }
-
-    @RetryableTopic(
-        attempts = "4",
-        backoff = @Backoff(delay = 1000, multiplier = 10, maxDelay = 60000),
-        // Creates: inventory.failed, inventory.failed-retry-1, inventory.failed-retry-2,
-        //          inventory.failed-retry-3, inventory.failed-dlt
-        topicSuffixingStrategy = TopicSuffixingStrategy.SUFFIX_WITH_INDEX_VALUE,
-        dltTopicSuffix = "-dlt",
-        include = {RetriableKafkaException.class}  // Only retry transient errors
-    )
-    @KafkaListener(topics = "inventory.failed", groupId = "order-service-inventory-consumer")
-    @Transactional
-    public void onInventoryFailed(ConsumerRecord<String, String> record) throws Exception {
-        String eventId = extractEventId(record);
-
-        if (processedEventRepository.existsByEventIdAndConsumerGroup(
-                eventId, "order-service-inventory-consumer")) {
-            log.warn("Duplicate event skipped eventId={}", eventId);
-            return;
-        }
-
-        var payload = objectMapper.readTree(record.value());
+        JsonNode payload = objectMapper.readTree(record.value());
         String orderId = payload.get("orderId").asText();
-        String reason = payload.get("reason").asText();
 
-        // Saga compensation: if inventory fails, trigger payment refund
-        sagaCompensationService.compensateForInventoryFailure(orderId, reason);
+        orderService.handlePaymentCompleted(orderId);
 
         processedEventRepository.save(
-            new ProcessedEvent(eventId, "order-service-inventory-consumer"));
+            new ProcessedEvent(eventId, "order-service-payment-consumer"));
 
-        log.info("Triggered compensation for orderId={} reason={}", orderId, reason);
-    }
-
-    @DltHandler
-    public void handleDlt(ConsumerRecord<String, String> record,
-                          @Header(KafkaHeaders.RECEIVED_TOPIC) String topic) {
-        // Exhausted all retries — store in dead_letter_orders for manual review
-        log.error("Message sent to DLT topic={} key={} value={}",
-                  topic, record.key(), record.value());
-        // In production: persist to dead_letter_events table + alert
+        ack.acknowledge();
     }
 
     private String extractEventId(ConsumerRecord<String, String> record) {
@@ -501,48 +451,61 @@ public class InventoryEventConsumer {
 }
 ```
 
-### Saga Compensation Service
+```java
+@Component
+public class InventoryEventConsumer {
+
+    @RetryableTopic(
+        attempts = "4",
+        backoff = @Backoff(delay = 1000, multiplier = 10, maxDelay = 60000),
+        // Creates: inventory.failed-retry-0, -retry-1, -retry-2, inventory.failed-dlt
+        topicSuffixingStrategy = TopicSuffixingStrategy.SUFFIX_WITH_INDEX_VALUE,
+        dltTopicSuffix = "-dlt",
+        include = {RetriableKafkaException.class}
+    )
+    @KafkaListener(topics = "inventory.failed", groupId = "order-service-inventory-consumer")
+    @Transactional
+    public void onInventoryFailed(ConsumerRecord<String, String> record) throws Exception {
+        String eventId = extractEventId(record);
+
+        if (processedEventRepository.existsByEventIdAndConsumerGroup(
+                eventId, "order-service-inventory-consumer")) {
+            return;
+        }
+
+        var payload = objectMapper.readTree(record.value());
+        String orderId = payload.get("orderId").asText();
+        String reason = payload.get("reason").asText();
+
+        sagaCompensationService.compensateForInventoryFailure(orderId, reason);
+        processedEventRepository.save(
+            new ProcessedEvent(eventId, "order-service-inventory-consumer"));
+    }
+
+    @DltHandler
+    public void handleDlt(ConsumerRecord<String, String> record,
+                          @Header(KafkaHeaders.RECEIVED_TOPIC) String topic) {
+        log.error("Exhausted retries, routed to DLT topic={} key={}", topic, record.key());
+        // persist to dead_letter_events table + fire PagerDuty alert
+    }
+}
+```
+
+### 4.5 Saga Compensation Service
 
 ```java
-package com.rutik.systemdesign.spring.order;
-
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-
-import java.util.Map;
-import java.util.UUID;
-
 @Service
 public class SagaCompensationService {
-
-    private static final Logger log = LoggerFactory.getLogger(SagaCompensationService.class);
-
-    private final OrderRepository orderRepository;
-    private final OutboxEventRepository outboxEventRepository;
-    private final ObjectMapper objectMapper;
-
-    public SagaCompensationService(OrderRepository orderRepository,
-                                    OutboxEventRepository outboxEventRepository,
-                                    ObjectMapper objectMapper) {
-        this.orderRepository = orderRepository;
-        this.outboxEventRepository = outboxEventRepository;
-        this.objectMapper = objectMapper;
-    }
 
     @Transactional
     public void compensateForInventoryFailure(String orderId, String reason) throws Exception {
         Order order = orderRepository.findById(UUID.fromString(orderId))
             .orElseThrow(() -> new IllegalArgumentException("Order not found: " + orderId));
 
-        // Only compensate if payment was already confirmed (otherwise nothing to refund)
         if (order.getStatus() == OrderStatus.PAYMENT_CONFIRMED) {
             order.transitionTo(OrderStatus.COMPENSATION_IN_PROGRESS);
             orderRepository.save(order);
 
-            // Write refund event to outbox — atomically with the status update
             String refundPayload = objectMapper.writeValueAsString(Map.of(
                 "orderId", orderId,
                 "customerId", order.getCustomerId(),
@@ -551,36 +514,18 @@ public class SagaCompensationService {
             ));
 
             outboxEventRepository.save(OutboxEvent.of(
-                order.getId(), "Order", "PAYMENT_REFUND_REQUESTED", refundPayload
-            ));
-
-            log.info("Scheduled payment refund for orderId={}", orderId);
+                order.getId(), "Order", "PAYMENT_REFUND_REQUESTED", refundPayload));
         } else {
-            // Payment never succeeded — just fail the order
             order.transitionTo(OrderStatus.FAILED);
             orderRepository.save(order);
-            log.info("Marked order FAILED (payment not yet confirmed) orderId={}", orderId);
         }
     }
 }
 ```
 
-### Kafka Producer Configuration (Exactly-Once)
+### 4.6 Kafka Producer and Consumer Configuration
 
 ```java
-package com.rutik.systemdesign.spring.order;
-
-import org.apache.kafka.clients.producer.ProducerConfig;
-import org.apache.kafka.common.serialization.StringSerializer;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.kafka.core.DefaultKafkaProducerFactory;
-import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.kafka.core.ProducerFactory;
-
-import java.util.HashMap;
-import java.util.Map;
-
 @Configuration
 public class KafkaProducerConfig {
 
@@ -590,17 +535,11 @@ public class KafkaProducerConfig {
         props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
-
-        // Exactly-once semantics: enable idempotent producer
         props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
-        // Strongest durability: wait for all in-sync replicas
         props.put(ProducerConfig.ACKS_CONFIG, "all");
-        // Retry on transient failures
         props.put(ProducerConfig.RETRIES_CONFIG, Integer.MAX_VALUE);
         props.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, 5);
-        // Transactional ID for exactly-once across partitions
         props.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, "order-service-producer-1");
-
         return new DefaultKafkaProducerFactory<>(props);
     }
 
@@ -609,40 +548,9 @@ public class KafkaProducerConfig {
         return new KafkaTemplate<>(producerFactory());
     }
 }
-```
-
-### Kafka Consumer Configuration (Manual Acknowledgment)
-
-```java
-package com.rutik.systemdesign.spring.order;
-
-import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.common.serialization.StringDeserializer;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
-import org.springframework.kafka.core.ConsumerFactory;
-import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
-import org.springframework.kafka.listener.ContainerProperties;
-
-import java.util.HashMap;
-import java.util.Map;
 
 @Configuration
 public class KafkaConsumerConfig {
-
-    @Bean
-    public ConsumerFactory<String, String> consumerFactory() {
-        Map<String, Object> props = new HashMap<>();
-        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
-        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        // Manual offset commit — only ack after successful processing
-        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
-        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 50);
-        return new DefaultKafkaConsumerFactory<>(props);
-    }
 
     @Bean(name = "ackKafkaListenerContainerFactory")
     public ConcurrentKafkaListenerContainerFactory<String, String>
@@ -650,343 +558,320 @@ public class KafkaConsumerConfig {
         ConcurrentKafkaListenerContainerFactory<String, String> factory =
             new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(consumerFactory());
-        // MANUAL_IMMEDIATE: offset committed when Acknowledgment.acknowledge() is called
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
-        factory.setConcurrency(3); // 3 consumer threads per listener
+        factory.setConcurrency(3);
         return factory;
+    }
+
+    @Bean
+    public ConsumerFactory<String, String> consumerFactory() {
+        Map<String, Object> props = new HashMap<>();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 50);
+        return new DefaultKafkaConsumerFactory<>(props);
     }
 }
 ```
 
 ---
 
-## Spring Components Used
+## 5. Design Decisions & Tradeoffs
 
-| Spring Component | Purpose |
-|---|---|
-| `@KafkaListener` | Subscribes to Kafka topics with configurable consumer group and container factory |
-| `@RetryableTopic` | Creates retry and dead-letter topics with exponential backoff — no manual retry logic |
-| `@DltHandler` | Handles messages that exhausted all retries in the dead-letter topic |
-| `KafkaTemplate` | Sends messages to Kafka topics; used by `OutboxEventPublisher` |
-| `@Transactional` | Ensures the outbox write and business entity update are atomic in one database TX |
-| `@Scheduled` | Polls the `outbox_events` table every 100ms for unpublished events |
-| `ConcurrentKafkaListenerContainerFactory` | Configures consumer container with manual ack mode and concurrency |
-| `ProducerFactory` | Builds Kafka producers with exactly-once settings (idempotence, transactions) |
-| `ContainerProperties.AckMode.MANUAL_IMMEDIATE` | Offsets are only committed after explicit `Acknowledgment.acknowledge()` call |
-| `ApplicationRunner` | Used by outbox publisher bootstrap to verify Kafka connectivity at startup |
+### Key decision table
 
----
-
-## Tradeoffs and Alternatives
-
-### Outbox Pattern vs Dual Write
-
-| Approach | Consistency | Complexity | Latency |
+| Decision | Choice | Alternative | Rationale |
 |---|---|---|---|
-| Transactional Outbox (chosen) | Strong — DB TX includes event | High — needs poller | +100ms (poll interval) |
-| Dual write (DB + Kafka in sequence) | Weak — can lose event | Low | Zero |
-| Kafka Streams with changelog | Strong — event sourcing | Very high | Zero |
-| CDC (Debezium) | Strong — reads DB WAL | Medium — ops overhead | Low |
+| Event delivery guarantee | At-least-once + idempotent consumer | Exactly-once (Kafka EOS) | EOS ~20–30% throughput cost; cannot cross external gateway boundary; idempotency key at gateway achieves the same correctness |
+| Saga coordination | Choreography | Orchestrator service | No central bottleneck; services stay independent; tradeoff is that full saga history requires correlating logs by order ID |
+| Event write mechanism | Transactional outbox | Direct Kafka publish / CDC Debezium | Outbox is atomic with business write; CDC simpler to operate but requires Debezium connector deployment |
+| Consumer failure handling | `@RetryableTopic` with DLT | Simple retry in listener | Keeps poison messages from blocking the partition; exponential backoff (1s→10s→60s×3) avoids thundering herd |
+| Partition count | 16 per topic | 8 | `peak_consumers × 2` headroom; partitions cannot decrease without breaking key-based ordering |
 
-The outbox pattern was chosen over CDC/Debezium to keep the infrastructure simpler (no Debezium connector deployment). The 100ms polling latency is acceptable for order processing. A CDC-based approach would be preferred if the polling overhead became a bottleneck at very high write volumes.
+### Choreography vs Orchestration detail
 
-### Choreography Saga vs Orchestration
+| Aspect | Choreography (chosen) | Orchestration |
+|---|---|---|
+| Centralized visibility | Low — requires log correlation by orderId | High — orchestrator tracks saga state |
+| Coupling | Low — services react to events only | Higher — services must expose compensation endpoints to orchestrator |
+| Failure handling | Distributed — each service compensates | Centralized — orchestrator issues compensations, single point of failure |
+| Operational complexity | Log correlation tooling needed | Orchestrator needs its own HA deployment |
 
-| Approach | Centralized visibility | Coupling | Failure handling |
-|---|---|---|---|
-| Choreography (chosen) | Low | Low | Distributed — each service compensates |
-| Orchestration (Saga orchestrator) | High | Higher | Centralized — orchestrator issues compensations |
+### Exactly-Once vs At-Least-Once for payments
 
-Choreography was chosen to keep services independent. A payment service should not need to know the order service's URL. The tradeoff is that tracing the full saga requires correlating events by `orderId` across service logs.
-
-### Exactly-Once vs At-Least-Once
-
-Exactly-once delivery using Kafka transactions adds ~10% overhead on the producer side. For financial operations (payments), the idempotent consumer approach combined with a `processed_events` table was chosen because it provides idempotency even when messages are replayed from a different offset (which Kafka transactions alone do not protect against at the consumer side).
-
----
-
-## Interview Discussion Points
-
-**Q: What happens if the outbox publisher crashes between sending the Kafka message and marking the event as published?**
-
-A: The event will be sent again on the next poll cycle, producing a duplicate message in Kafka. This is why consumers must be idempotent. The `processed_events` table unique constraint on `(event_id, consumer_group)` prevents double-processing. This is why the combination of the outbox pattern and idempotent consumers is required — neither alone is sufficient.
-
-**Q: How do you prevent the outbox_events table from growing unboundedly?**
-
-A: A separate cleanup job runs daily (via `@Scheduled`) and deletes rows where `published = true AND published_at < NOW() - INTERVAL '7 days'`. Partition the table by `created_at` using PostgreSQL table partitioning so the cleanup is a partition drop rather than a DELETE scan, which avoids table bloat and lock contention.
-
-**Q: How does the Saga handle a situation where both payment and inventory fail simultaneously?**
-
-A: In the choreography model, both `payment.failed` and `inventory.failed` events arrive. The order service's consumers for both topics are idempotent and independent. Each handler checks the current order status: if status is already FAILED, the second event is a no-op. The first consumer to arrive wins the status transition. No compensation is needed for `payment.failed` because no money was charged. The order is simply marked FAILED.
-
-**Q: What is the maximum throughput of the outbox polling approach?**
-
-A: With a 100ms poll interval and a batch of 100 events per poll, the theoretical maximum is 1,000 events/second per application instance. In practice, the Kafka `kafkaTemplate.send().get()` synchronous call adds 5–10ms per message. To increase throughput: (1) send messages asynchronously in parallel using `CompletableFuture`, (2) use Kafka producer batching with `linger.ms=5`, (3) increase the batch size, (4) run multiple application instances (each will poll non-overlapping events if using `SELECT ... FOR UPDATE SKIP LOCKED`).
-
-**Q: How do you implement SELECT FOR UPDATE SKIP LOCKED to prevent multiple outbox pollers from processing the same event?**
-
-A: In the `OutboxEventRepository`, use a native query with `FOR UPDATE SKIP LOCKED`:
-
-```java
-@Query(value = "SELECT * FROM outbox_events WHERE published = false ORDER BY created_at ASC LIMIT :limit FOR UPDATE SKIP LOCKED", nativeQuery = true)
-List<OutboxEvent> findAndLockUnpublished(@Param("limit") int limit);
-```
-
-This allows multiple application instances to poll concurrently without processing the same event. PostgreSQL's `SKIP LOCKED` immediately skips rows that another transaction has locked, rather than waiting.
-
-**Q: How would you handle schema evolution — adding a new field to an event payload without breaking consumers?**
-
-A: Use JSON for event payloads (as implemented) and follow consumer-driven contract testing. Consumers must ignore unknown fields (Jackson's `FAIL_ON_UNKNOWN_PROPERTIES = false` default). Producers may add new fields freely but must never remove or rename existing fields without a coordinated two-phase migration: (1) add the new field as optional, deploy all consumers that handle it, (2) once all consumers are deployed, make the field required in producers. Schema Registry with Avro and backward compatibility enforcement provides stronger guarantees at the cost of additional infrastructure.
+Kafka EOS (`enable.idempotence=true`, transactional producer, `read_committed` consumer) only guarantees end-to-end exactly-once *within* Kafka. A payment gateway call lives outside Kafka — it can time out with unknown state regardless of Kafka guarantees. The pragmatic answer is at-least-once delivery with idempotency at the gateway via a stable payment intent ID. The gateway returns the original result on redelivery rather than charging again.
 
 ---
 
-## Failure Scenarios and Recovery
+## 6. Real-World Implementations
 
-Event-driven systems fail differently from request-response systems: the failure is rarely an immediate error returned to a user. Instead it shows up as consumer lag, duplicate processing, or silently lost events. The two highest-impact failures are broker unavailability and the publish-before-commit race.
+**Netflix:** Uses choreography saga across microservices for streaming entitlement workflows (subscription activate → content unlock → billing). The transactional outbox is implemented against their Cassandra-backed event store rather than PostgreSQL; CDC via internal tooling publishes to Kafka. Consumer idempotency is enforced by a Redis SET with TTL used as a bloom filter before hitting the database.
 
-### Failure: Kafka Broker Goes Down
+**Uber Eats:** Order processing uses a transactional outbox written to MySQL and published via a proprietary CDC system (similar to Debezium) that tails the MySQL binary log. Each downstream service (restaurant assignment, payment, dispatch) consumes the `order.created` topic and publishes its own domain event. Saga state is stored as a state machine in a Redis sorted set for fast lookups during compensation.
 
-When a broker hosting partition leaders becomes unavailable, producers cannot get acknowledgements and consumers cannot fetch. With the default producer config (`acks=all`, `max.block.ms=60000`), `kafkaTemplate.send().get()` blocks for up to 60 seconds, which cascades back into the HTTP request thread that triggered the send, exhausting the Tomcat thread pool. Meanwhile consumer lag builds because offsets stop advancing.
+**Amazon:** DynamoDB Streams serve as the outbox in many internal services — a DynamoDB write triggers a Lambda that publishes to EventBridge. Consumer idempotency is enforced using a `ConditionalExpression` on a DynamoDB item (equivalent to `INSERT ... ON CONFLICT DO NOTHING`). Choreography is preferred for simpler workflows; AWS Step Functions (orchestration) is used when the saga has more than 5 steps or requires human approval gates.
 
-```
-Healthy:
-  Producer --acks--> [ Broker leader ] --replicate--> [ followers ]
-  Consumer --fetch--> [ Broker leader ] --commit offset-->
+**Shopify:** Order fulfillment uses a Kafka-based event bus. The dual-write problem was solved early by migrating to a transactional outbox — the original dual-write approach caused ~0.01% of orders to have phantom events that triggered duplicate fulfillment. The outbox added ~100ms median latency but eliminated the phantom event class entirely.
 
-Broker leader down (before fix):
-  Producer --send().get()--X  (blocks 60s, HTTP threads pile up)
-  Consumer --fetch--X         (lag grows, offsets frozen)
-```
-
-Fix on the producer side: do not let a broker hiccup block request threads.
-
-```java
-// BROKEN: synchronous send on the request thread, default 60s block
-public void publish(OrderEvent e) {
-    kafkaTemplate.send("orders", e.getKey(), e).get(); // blocks request thread
-}
-```
-
-```java
-// FIX: acks=1 (leader-only ack) + bounded retries + async, non-blocking publish
-@Bean
-public ProducerFactory<String, Object> producerFactory() {
-    Map<String, Object> props = new HashMap<>();
-    props.put(ProducerConfig.ACKS_CONFIG, "1");            // leader ack only
-    props.put(ProducerConfig.RETRIES_CONFIG, 3);
-    props.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 5000); // fail fast
-    props.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, 2000);
-    props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true); // no dup on retry
-    return new DefaultKafkaProducerFactory<>(props);
-}
-
-public void publish(OrderEvent e) {
-    kafkaTemplate.send("orders", e.getKey(), e)
-        .whenComplete((res, ex) -> {
-            if (ex != null) outboxFallback.persist(e); // never lose the event
-        });
-}
-```
-
-Fix on the consumer side: shut down gracefully so in-flight offsets are committed.
-
-```java
-// FIX: commit offsets synchronously before the consumer exits
-@PreDestroy
-public void shutdown() {
-    listenerContainer.stop(() -> {
-        // stop callback runs after in-flight records finish
-        log.info("Consumer drained, committing final offsets");
-    });
-    // With MANUAL_IMMEDIATE ack mode, the last ack.acknowledge() already
-    // committed; commitSync() in the rebalance listener guarantees no replay.
-}
-```
-
-Recovery and time-to-recovery: with `acks=1` and `DELIVERY_TIMEOUT_MS=5s`, producer threads recover in ~5s instead of 60s. Kafka itself elects a new partition leader from in-sync replicas in seconds (controlled by `replica.lag.time.max.ms`, default 30s worst case). Consumer lag drains at the consumer's throughput once leaders return; size alerts to page when lag exceeds, e.g., 60s of expected volume.
-
-### Failure: Consumer Poison Message Blocks the Partition
-
-A malformed event that always throws during deserialization causes the consumer to retry the same offset forever, freezing that partition's progress. Fix: configure a `DefaultErrorHandler` with a `DeadLetterPublishingRecoverer` so the bad record is routed to `orders.DLT` after N retries and the partition advances. Recovery is inspecting the DLT, fixing the producer or consumer, and replaying from the DLT.
+**Axon Framework (Java OSS):** Purpose-built framework for CQRS + event sourcing + saga. The event store IS the outbox; Axon Server ships events from the store to subscribers. Sagas are first-class citizens (`@Saga`, `@SagaEventHandler`, `@StartSaga`, `@EndSaga`). Used by ABN AMRO, bol.com, and other financial systems where event sourcing is a compliance requirement.
 
 ---
 
-## Capacity Planning
+## 7. Technologies & Tools
 
-### Throughput and Thread Math
-
-```
-Target ingest:            10,000 events/sec
-Consumer groups (fanout): 5 services each consume the stream
-Handler invocations:      10,000 x 5 = 50,000 handler calls/sec
-
-Per-consumer threading:   8-thread listener pool per consumer instance
-Total consumer threads:   5 services x (instances) x 8
-                          assume 10 instances total across services
-                          10 x 8 = 80 base; scaled to peak = ~400 consumer threads
-```
-
-Partition count drives parallelism: a consumer group can have at most one active consumer thread per partition. To run 8 concurrent handlers per service, the topic needs at least 8 partitions. For headroom and future scaling, provision `partitions = max_expected_consumers x 2`. With a target of 8 active consumers, use 16 partitions.
-
-### Per-Handler Budget
-
-```
-50,000 handler calls/sec across the fleet
-If each handler does ~2ms of work (DB upsert + idempotency check):
-  required parallelism = 50,000 x 0.002s = 100 concurrent handlers
-  -> 100 / 8 per-instance = 13 consumer instances at steady state
-```
-
-### Outbox Poller Capacity
-
-```
-Poll interval:    100ms
-Batch per poll:   100 events
-Per instance:     1,000 events/sec
-For 10,000 events/sec ingest: 10 poller instances using
-  SELECT ... FOR UPDATE SKIP LOCKED to avoid double-publishing.
-```
-
-### Memory and Lag Budget
-
-```
-Consumer fetch buffer: max.partition.fetch.bytes default 1 MB x 16 partitions = 16 MB
-In-flight records:     max.poll.records default 500 x ~2 KB = 1 MB per poll
-Acceptable lag SLO:    < 60s of volume = < 600,000 events; alert at 50%.
-```
+| Tool | Saga support | Outbox mechanism | Retry/DLT | Test support | When to choose |
+|---|---|---|---|---|---|
+| **Spring Kafka + @RetryableTopic** | Manual via event handlers | Manual (your code) | Built-in retry topics + DLT | Embedded Kafka for unit, Testcontainers for integration | Default choice for Spring Boot projects |
+| **Spring Cloud Stream** | Manual | Manual | Binder-specific | Same | When you want binder abstraction (Kafka/RabbitMQ without code change) |
+| **Axon Framework** | First-class `@Saga` | Axon Server event store | Automatic sequenced delivery | `AxonServerEmbeddedEventStore` | When event sourcing + CQRS is a requirement (financial, audit-heavy) |
+| **Eventuate Tram** | First-class saga orchestration and choreography | Transactional outbox built-in | CDC (Debezium) | Docker Compose based | When you want a fully managed outbox + saga library without implementing it |
+| **Temporal** | `@WorkflowMethod` (orchestration) | Temporal's durable execution log | Automatic retries, timeouts | Temporal Test Server | When sagas exceed 5 steps, need human approval, or require multi-day timeouts |
 
 ---
 
-## Additional Production War Stories
+## 8. Operational Playbook
 
-### War Story 1: Event Published Before DB Commit (Dual-Write Race)
+### (a) Consumer Health Monitoring
 
-The order service charged the customer, published `order.created` to Kafka, and then committed the database transaction. Under load the transaction occasionally rolled back after the event was already on the wire. Downstream services shipped goods for an order that did not exist in the database — a classic dual-write inconsistency.
+**What to track:**
+- Consumer group lag per topic per partition (Kafka `kafka.consumer.fetch-manager-metrics`)
+- DLT message count per topic (alert immediately on any DLT message)
+- Outbox table row count for `published = false` (alert if > 5,000 rows)
+- `processed_events` table row count (prune daily; growing unboundedly indicates GC job failure)
+
+**Lag SLO expression (Prometheus):**
+```
+kafka_consumer_group_lag{group="order-service-payment-consumer"} /
+kafka_topic_partition_current_offset{topic="payment.completed"}
+> 0.1  # alert if lag > 10% of total offset (proxy for >60s at current rate)
+```
+
+### (b) Distributed Tracing for Saga Correlation
+
+Every service propagates `X-Order-ID` and `X-Correlation-ID` as Kafka headers. Micrometer
+Tracing (with OTLP exporter) creates a span per Kafka send/receive. Saga reconstruction
+query in Jaeger/Grafana Tempo:
+```
+{service.name=~"order|payment|inventory|fulfillment"} | logfmt | orderId="<id>"
+```
+Cross-reference: [OTel observability for Spring](../cross_cutting/otel_observability_for_spring.md)
+
+### (c) Incident Runbooks
+
+**Runbook 1: Consumer lag growing (broker issue or slow handler)**
+- Symptom: `kafka_consumer_group_lag > 2,100` for any group; end-to-end saga latency P99 > 5s
+- Diagnose: check partition leader for affected topic; check consumer logs for `CommitFailedException` (rebalance loop) or long handler durations
+- Mitigate: if rebalance loop, increase `max.poll.interval.ms` or reduce `max.poll.records`; if slow handler, add horizontal consumer instances (up to partition count)
+- Resolve: scale consumers to drain lag; verify broker leader election complete; page if lag > 60s sustained
+
+**Runbook 2: DLT filling up (poison message blocking partition)**
+- Symptom: `DLT message count > 0` for any topic; associated service logs show repeated `RetryableTopic` exhaustion
+- Diagnose: inspect DLT message payload and stack trace in `dead_letter_events` table; determine if schema mismatch, unexpected null, or transient dependency (DB down)
+- Mitigate: if transient — fix dependency and replay DLT manually using `KafkaTemplate.send()` to original topic; if schema — fix consumer to handle both old and new schema (Jackson `@JsonIgnoreProperties(ignoreUnknown=true)`)
+- Resolve: confirm DLT stops accumulating; monitor processed count recovers
+
+**Runbook 3: Outbox table bloat (cleanup job failing)**
+- Symptom: `outbox_events` table > 10 GB; PostgreSQL autovacuum falling behind; INSERT latency rising
+- Diagnose: check `@Scheduled` cleanup job logs for exceptions; check PostgreSQL `pg_stat_user_tables` for dead tuple count on `outbox_events`
+- Mitigate: run manual `DELETE FROM outbox_events WHERE published = true AND published_at < NOW() - INTERVAL '7 days' LIMIT 10000` in batches to avoid lock contention
+- Resolve: partition `outbox_events` by `created_at` range (monthly) so future cleanup is a `DROP TABLE` on the old partition — O(1) and lock-free
+
+**Runbook 4: Saga stuck in COMPENSATION_IN_PROGRESS**
+- Symptom: orders stuck in `COMPENSATION_IN_PROGRESS` for > 10 minutes; customer sees neither confirmed nor refunded state
+- Diagnose: check `outbox_events` for `PAYMENT_REFUND_REQUESTED` rows with `published = false`; check Payment Service DLT for failed refund events
+- Mitigate: if outbox poller stopped — restart the instance; if Payment Service DLT — manually replay; if state machine corrupted — `UPDATE orders SET status = 'FAILED' WHERE id = ? AND status = 'COMPENSATION_IN_PROGRESS'` after confirming no refund was processed
+- Resolve: idempotent design means replaying the outbox event is always safe; confirm order moves to FAILED within one poll cycle (100ms)
+
+---
+
+## 9. Common Pitfalls & War Stories
+
+### War Story 1: Dual-Write Race Causes Phantom Shipments
+
+**Scenario:** Order service published `order.created` to Kafka directly inside `@Transactional`, then committed the database transaction. Under GC pause load, the Kafka send completed but the database transaction rolled back due to a connection timeout from a different service within the same Saga.
+
+**Impact:** Downstream services fulfilled 0.01% of orders (estimated 50 orders per week at 50k orders/hour) where no corresponding order row existed. Manual investigation required for each phantom shipment. Customer refund rate for these was 100%.
 
 ```java
-// BROKEN: event published inside the method but Kafka send is not part of the DB TX
+// BROKEN: event escapes the transaction
 @Transactional
 public void createOrder(OrderRequest req) {
     Order order = orderRepository.save(toEntity(req));
-    kafkaTemplate.send("orders", new OrderCreatedEvent(order)); // escapes if TX rolls back
-    paymentService.charge(req); // if THIS throws, TX rolls back but event is gone
+    kafkaTemplate.send("orders", new OrderCreatedEvent(order)); // sent regardless of TX outcome
+    paymentService.charge(req); // this throws -> TX rolls back, but Kafka event is permanent
 }
 ```
 
 ```java
-// FIX: transactional outbox — write the event to an outbox table in the SAME TX.
-// A separate CDC/poller publishes it only AFTER the commit is durable.
+// FIX: write event to outbox table in same TX; poller publishes after commit
 @Transactional
 public void createOrder(OrderRequest req) {
     Order order = orderRepository.save(toEntity(req));
     paymentService.charge(req);
     outboxRepository.save(new OutboxEvent(
         "orders", order.getId().toString(),
-        serialize(new OrderCreatedEvent(order)))); // committed atomically with order
-    // No Kafka call here. The outbox poller / Debezium CDC publishes post-commit.
+        serialize(new OrderCreatedEvent(order))));
+    // No kafkaTemplate.send here.
 }
 ```
 
-Because the outbox row and the order row commit (or roll back) together, there is no window where an event exists without its database record. The poller uses `FOR UPDATE SKIP LOCKED` and marks rows `published=true` after a successful send, giving at-least-once delivery.
+Resolution: migrated to transactional outbox. Phantom shipments dropped to zero. P99 order placement latency increased by ~100ms (outbox poll interval) — accepted as the correct tradeoff.
 
-### War Story 2: Consumer Acknowledged Before Processing (Lost Events on Crash)
+### War Story 2: Ack Before Processing Causes Silent Event Loss
 
-A consumer used `AckMode.RECORD` but acknowledged at the start of the handler, then did the work. When an instance crashed mid-handler, the offset was already committed, so the event was never reprocessed — silently lost.
+**Scenario:** A developer configured `AckMode.RECORD` but acknowledged the offset at the start of the handler before calling the downstream database. When a pod was killed mid-deployment, the committed offset was ahead of the last successfully processed message — those events were never reprocessed.
+
+**Impact:** ~200 payment.completed events lost per deployment cycle (weekly deployments). Caused 200 orders per week stuck in PAYMENT_CONFIRMED with no subsequent SHIPPED state transition. Discovered 3 weeks later via customer support escalations.
 
 ```java
-// BROKEN: ack before the work is done
+// BROKEN: ack at the start, then crash half-way through
 @KafkaListener(topics = "orders")
 public void handle(OrderEvent e, Acknowledgment ack) {
-    ack.acknowledge();          // committed offset immediately
-    inventoryService.reserve(e); // crash here = event lost forever
+    ack.acknowledge();           // offset committed immediately
+    inventoryService.reserve(e); // crash here = event lost forever, offset already advanced
 }
 ```
 
 ```java
-// FIX: ack only AFTER successful processing (at-least-once); make handler idempotent
+// FIX: ack only after successful processing; idempotency guard at the top
 @KafkaListener(topics = "orders", containerFactory = "manualAckFactory")
 public void handle(OrderEvent e, Acknowledgment ack) {
-    if (processedRepository.existsById(e.getEventId())) { // idempotency guard
+    if (processedRepository.existsById(e.getEventId())) {
         ack.acknowledge();
         return;
     }
     inventoryService.reserve(e);
     processedRepository.save(new ProcessedEvent(e.getEventId()));
-    ack.acknowledge(); // only now is the offset advanced
+    ack.acknowledge(); // offset advances only after durable processing
 }
+```
+
+### War Story 3: Partition Count Too Low — Hot Partition Bottleneck
+
+A team launched with 4 partitions for `order.created`, using `customerId` as the message key for ordering guarantees. After a Black Friday spike, 60% of orders came from 2 customers (B2B bulk orders). Those 2 customers' keys always hash to the same 2 partitions, leaving 6 consumer threads idle while 2 are saturated. Consumer lag grew to 15 minutes.
+
+Resolution: increase partition count to 16 (requires a rolling restart of all consumer groups; key-to-partition assignment changes for existing keys — acceptable for new events). For B2B bulk orders, switched message key to `orderId` (unique per event) to ensure even distribution. Ordering guarantees for a given order are maintained by the single-partition property per key.
+
+### War Story 4: `processed_events` Table Not Pruned — Query Slows to 30s
+
+The `processed_events` table grew to 800M rows over 18 months (no cleanup job deployed). The idempotency check `SELECT 1 FROM processed_events WHERE event_id = ? AND consumer_group = ?` degraded from <1ms to 30s as the index B-tree depth grew. All consumers in the affected group timed out, triggering a Kafka rebalance loop.
+
+Fix: add a `processed_at` column, create a partial index on `(event_id, consumer_group)` WHERE `processed_at > NOW() - INTERVAL '30 days'`, and run a nightly `DELETE ... WHERE processed_at < NOW() - INTERVAL '30 days'` in batches of 10,000. For PostgreSQL, range-partition the table by `processed_at` month so pruning is a DDL `DETACH PARTITION` + `DROP TABLE`.
+
+---
+
+## 10. Capacity Planning
+
+### Partition sizing formula
+
+```
+partitions_needed = ceil(peak_events_per_sec / per_partition_throughput)
+                  = ceil(70 / 5)            // 5 events/sec per partition conservative
+                  = 14 -> round up to 16 (power of 2 for even distribution)
+
+consumer_instances = ceil(partitions / concurrency_per_instance)
+                   = ceil(16 / 8)
+                   = 2 instances per consumer group for full parallelism
+```
+
+### Throughput and thread math
+
+```
+Target ingest:            10,000 events/sec (headroom for 70 orders/sec × 4 fanout × 35×)
+Consumer groups (fanout): 5 services consume order.created
+Handler invocations:      10,000 x 5 = 50,000 handler calls/sec across fleet
+
+Per handler budget (DB upsert + idempotency check): ~2ms average
+Required parallelism:     50,000 x 0.002s = 100 concurrent handlers
+Per-instance concurrency: 8 (Kafka listener concurrency=8)
+Consumer instances needed: ceil(100 / 8) = 13 instances across all 5 services
+```
+
+### Outbox poller capacity
+
+```
+Poll interval:   100ms
+Batch per poll:  100 events
+Per instance:    1,000 events/sec
+For 70 orders/sec × peak 5×: 350 events/sec -> 1 poller instance sufficient at 35% utilization
+Safety headroom: 2 poller instances using SKIP LOCKED to avoid double-publishing
+```
+
+### Memory and lag budget
+
+```
+Consumer fetch buffer:  max.partition.fetch.bytes 1 MB x 16 partitions = 16 MB per consumer
+In-flight records:      max.poll.records 50 x ~2 KB = 100 KB per poll loop
+Lag SLO:                < 60s volume = < 70 events/sec × 60s = 4,200 events
+Alert threshold:        50% of SLO = 2,100 events per consumer group
+```
+
+### Hardware recommendation
+
+```
+Kafka cluster: 3 brokers, each 16 vCPU / 64 GB RAM / 2 TB SSD
+  -> sustains 1 GB/s aggregate, 30 days retention for 47 GB/day
+
+Order Service: 2 instances, each 4 vCPU / 8 GB RAM
+  -> 2 outbox pollers + 8 consumer threads each; JVM heap 4 GB with G1GC
+
+PostgreSQL: r6g.2xlarge (8 vCPU, 64 GB RAM), 1 TB gp3 storage
+  -> outbox + orders + processed_events; connection pool 20 (HikariCP default)
+  -> add read replica for heavy saga-state queries
 ```
 
 ---
 
-## At-Least-Once vs Exactly-Once for Payment Events
+## 11. Interview Discussion Points
 
-Payment events are where delivery semantics matter most: a duplicate `payment.captured` could double-charge a customer.
+**Q: What happens if the outbox publisher crashes between sending the Kafka message and marking the event as published?**
 
-| Semantic        | Mechanism                                                                 | Cost / Tradeoff                                                                 |
-|-----------------|---------------------------------------------------------------------------|--------------------------------------------------------------------------------|
-| At-least-once   | Producer retries + consumer acks after processing + idempotent consumer   | Simplest; duplicates possible, so the consumer MUST dedupe on an idempotency key |
-| Exactly-once    | Kafka transactions: `enable.idempotence=true`, transactional producer, `read_committed` consumer | ~20-30% throughput cost; only end-to-end within Kafka, not across external systems like a payment gateway |
+A: The event will be sent again on the next poll cycle, producing a duplicate message in Kafka. Consumers must be idempotent — the `processed_events` table with a UNIQUE constraint on `(event_id, consumer_group)` prevents double-processing. Neither the outbox alone nor idempotent consumers alone are sufficient; both are required. The outbox prevents loss; idempotency prevents double processing on redelivery.
 
-For payments, the pragmatic answer is at-least-once delivery plus idempotent processing keyed on a payment intent ID. True exactly-once across an external payment gateway is impossible from Kafka alone — the gateway call itself can time out with unknown result. The capture handler stores the gateway's idempotency key, so a redelivered event re-invokes the gateway with the same key and the gateway returns the original result instead of charging again. Kafka transactions still help for the internal `payment.captured -> ledger.updated` hop, where exactly-once across Kafka topics is achievable and worth the throughput cost.
+**Q: How do you prevent the `outbox_events` table from growing unboundedly?**
 
+A: A nightly `@Scheduled` job deletes rows where `published = true AND published_at < NOW() - INTERVAL '7 days'`, executed in batches of 10,000 to avoid lock contention. For production scale, partition the table by `created_at` using PostgreSQL range partitioning — pruning becomes a `DETACH PARTITION; DROP TABLE` (DDL, O(1), no VACUUM needed) instead of a row-by-row DELETE.
+
+**Q: How does the Saga handle simultaneous payment and inventory failure?**
+
+A: In choreography, both `payment.failed` and `inventory.failed` events arrive independently. Each handler checks current order status — if status is already FAILED, the second handler is a no-op. The first consumer wins the status transition. No compensation is needed for `payment.failed` because no money was charged. The design is idempotent: receiving either event in any order leads to the correct terminal FAILED state.
+
+**Q: Why prefer at-least-once plus idempotency over Kafka exactly-once for payment events?**
+
+A: Kafka EOS only works end-to-end within Kafka (topic-to-topic via transactional producers and `read_committed` consumers). A payment gateway call is external — it can time out with unknown outcome regardless of Kafka guarantees. The correct solution is passing a stable idempotency key (payment intent ID) to the gateway so redelivery returns the original result instead of charging twice. At-least-once plus gateway idempotency is simpler, avoids the ~20–30% EOS throughput cost, and is actually correct across the external boundary.
+
+**Q: How do you implement `SELECT FOR UPDATE SKIP LOCKED` and why is it needed for the outbox poller?**
+
+A: Without `SKIP LOCKED`, multiple poller instances would block on the same row locks and serialize. `SKIP LOCKED` causes each instance to immediately skip rows another transaction has locked, so N instances process N non-overlapping batches concurrently:
 ```java
-// Idempotent payment capture: safe under at-least-once redelivery
-@KafkaListener(topics = "payments.capture")
-public void capture(CaptureEvent e, Acknowledgment ack) {
-    String idemKey = e.getPaymentIntentId();
-    // Gateway dedupes on idemKey; redelivery returns the original charge, never a second one
-    GatewayResult r = paymentGateway.charge(e.getAmount(), idemKey);
-    ledgerService.recordOnce(idemKey, r); // INSERT ... ON CONFLICT DO NOTHING
-    ack.acknowledge();
-}
+@Query(value = "SELECT * FROM outbox_events WHERE published = false ORDER BY created_at ASC LIMIT :limit FOR UPDATE SKIP LOCKED", nativeQuery = true)
+List<OutboxEvent> findAndLockUnpublished(@Param("limit") int limit);
 ```
+The lock is held for the duration of the `@Transactional` block (read → Kafka send → mark published), preventing any other instance from picking up the same row.
 
----
+**Q: How do you size the number of Kafka partitions?**
 
-## Multi-Region Considerations
+A: Partitions bound consumer parallelism — a consumer group can have at most one active consumer thread per partition. Provision `partitions = peak_expected_consumers × 2` for headroom, since partitions can only be increased later (never decreased without breaking key-based ordering). Also verify per-partition throughput limits and distribute partitions across brokers for balance. For 8 concurrent consumers we provision 16 partitions.
 
-A globally deployed event-driven system must decide where the source of truth lives and how events cross regions.
+**Q: What happens to consumer lag during a broker outage, and how do you alert on it?**
 
-```
-        Region US (us-east-1)                         Region EU (eu-west-1)
-   +----------------------------+                 +----------------------------+
-   | Producers (US traffic)     |                 | Producers (EU traffic)     |
-   |        |                   |                 |        |                   |
-   | [ Kafka cluster US ]       |  MirrorMaker 2  | [ Kafka cluster EU ]       |
-   |   topic: orders            | <-------------> |   topic: orders            |
-   |        |                   |  (async repl.)  |        |                   |
-   | Consumers (US)             |                 | Consumers (EU)             |
-   +----------------------------+                 +----------------------------+
-```
+A: During the outage, offsets stop advancing for partitions whose leaders are lost, so lag grows at the full ingest rate. Kafka elects a new leader from in-sync replicas within seconds to ~30s worst case (`replica.lag.time.max.ms`). After recovery, consumers drain lag at their throughput. Alert on lag expressed in time (records-behind ÷ consume rate) not raw record count — a lag-in-seconds metric is independent of throughput fluctuations. Page when lag exceeds the SLO (e.g., 60 seconds of expected volume).
 
-Design changes for multi-region:
-- Use Kafka MirrorMaker 2 (or Confluent Cluster Linking) to replicate topics across regions asynchronously. Replication is eventually consistent — cross-region lag of seconds is normal.
-- Topic naming convention: MirrorMaker prefixes mirrored topics with the source cluster alias (`us.orders` in EU), so consumers can distinguish local from remote events and avoid infinite replication loops.
-- Each region owns the events produced by its local traffic. Aggregate/global consumers subscribe to both `orders` and `us.orders`/`eu.orders` patterns.
-- The outbox poller runs per region against the region-local database, so events never need a synchronous cross-region write.
-- For ordering guarantees, never assume a global total order across regions — order is only guaranteed per partition within a single cluster. Design consumers to be commutative and idempotent so out-of-region-order delivery is tolerated.
-- Failover: if the US region is lost, EU consumers continue from the last replicated offset. Some in-flight US events not yet mirrored are recovered from the US outbox once the region returns; this is why the outbox is the durable source of truth, not the Kafka log alone.
+**Q: How do you handle schema evolution without breaking consumers?**
 
----
+A: Use JSON (or Avro with Schema Registry) and follow consumer-driven contract testing. JSON consumers must ignore unknown fields (`@JsonIgnoreProperties(ignoreUnknown=true)` — Jackson's default for `ObjectMapper`). Producers may freely add new optional fields. Removing or renaming a field requires a two-phase migration: (1) add new field as optional and deploy all consumers that handle it; (2) once all consumers are on the new version, drop the old field from producers. Avro with `BACKWARD` compatibility enforcement automates this check in CI.
 
-## Additional Interview Questions
+**Q: Why is message key choice critical for Kafka partitioning?**
 
-**Q: Why does the transactional outbox pattern solve the dual-write problem?**
+A: The key determines which partition a message lands on via `hash(key) % numPartitions`. Within a partition, ordering is guaranteed; across partitions it is not. If you key by `customerId`, a B2B customer placing 1,000 bulk orders will hash to a single partition, creating a hot partition while others sit idle. Keying by `orderId` ensures uniform distribution when order IDs are random UUIDs. Choose the key based on what ordering you actually need: `orderId` for per-order ordering, `customerId` only if cross-order ordering is required (rare).
 
-A: The dual-write problem is that writing to the database and publishing to Kafka are two separate systems with no shared transaction, so a crash between them leaves them inconsistent. The outbox pattern collapses this into a single local transaction: the business row and an outbox row are written atomically to the same database. A separate poller or CDC process (Debezium) reads committed outbox rows and publishes them to Kafka after the commit is durable. Because the event row can only exist if the transaction committed, there is never an event without its corresponding database record. The publish is at-least-once, so consumers must still dedupe.
+**Q: How would you migrate this design from polling outbox to CDC (Debezium)?**
 
-**Q: Why choose acks=1 over acks=all for the producer when a broker fails, and what is the risk?**
+A: The outbox table structure stays identical — only the publishing mechanism changes. Debezium connects to PostgreSQL's logical replication slot and streams `INSERT` events from `outbox_events` to Kafka in near-real-time (milliseconds vs 100ms poll). Benefits: lower latency, no SKIP LOCKED contention, no `@Scheduled` thread needed. Costs: Debezium connector deployment, WAL retention configuration, PostgreSQL logical replication slot management (a stale slot can cause WAL to accumulate indefinitely). Migrate by: (1) deploy Debezium connector alongside the existing poller; (2) once CDC is confirmed stable, disable the poller; (3) drop the `@Scheduled` bean.
 
-A: `acks=all` waits for all in-sync replicas to acknowledge, which maximizes durability but blocks longer during a broker failure and amplifies tail latency. `acks=1` waits only for the partition leader, recovering request threads faster (paired with a short `delivery.timeout.ms`) and keeping the application responsive. The risk is a narrow window: if the leader acknowledges and then crashes before a follower replicates that record, the record is lost. We mitigate by combining `acks=1` with an outbox fallback that persists any event whose send ultimately fails, so durability is recovered at the cost of possible duplicates rather than lost data.
+**Q: How do you test the saga end-to-end in a CI pipeline without a real Kafka cluster?**
 
-**Q: For payment events, why is at-least-once plus idempotency preferred over Kafka exactly-once?**
-
-A: Kafka's exactly-once semantics only hold end-to-end within Kafka (topic to topic through transactional producers and read_committed consumers). A payment capture calls an external gateway, which Kafka transactions cannot enroll — the gateway call can time out with an unknown outcome regardless of Kafka guarantees. So the durable correctness must come from idempotency at the gateway: the consumer passes a stable idempotency key (the payment intent ID), and the gateway returns the original result on redelivery instead of charging twice. At-least-once delivery plus this idempotency key is simpler, cheaper (no ~20-30% EOS throughput tax), and actually correct across the external boundary.
-
-**Q: How do you size the number of partitions for a topic?**
-
-A: Partitions bound consumer parallelism — a consumer group can have at most one active consumer per partition, so to run N concurrent consumers you need at least N partitions. Provision `partitions = peak_expected_consumers x 2` for headroom, since increasing partitions later breaks key-based ordering for existing keys. Also account for per-partition throughput limits (a single partition typically sustains tens of MB/s) and broker count (spread partitions across brokers for balance). For a target of 8 concurrent consumers we use 16 partitions.
-
-**Q: What happens to consumer lag during and after a broker outage, and how do you alert on it?**
-
-A: During the outage, offsets stop advancing for affected partitions, so lag grows at the full ingest rate. Kafka elects a new leader from in-sync replicas within seconds to ~30s worst case (`replica.lag.time.max.ms`), after which consumers resume and lag drains at their throughput. Alert on consumer-group lag expressed in time (records-behind divided by consume rate) rather than raw record count, and page when lag exceeds the SLO — for example 60 seconds of expected volume. This catches both broker outages and slow/poison-message stalls.
+A: Two approaches. Unit: use `@EmbeddedKafka` (Spring Kafka Test) for fast in-process tests; topics are created automatically, no external process needed. Integration: use Testcontainers with the Confluent Kafka image — starts a real broker in Docker, exercises partitioning, rebalancing, and DLT routing that `@EmbeddedKafka` does not. For saga testing, write an event to the outbox, trigger the outbox poller manually via `@Autowired OutboxEventPublisher; publisher.publishPendingEvents()`, then assert saga state transitions. Testcontainers also enables testing Debezium CDC pipelines by adding a PostgreSQL container with logical replication enabled. See: [Testcontainers and test strategy](./cross_cutting/testcontainers_and_test_strategy.md).

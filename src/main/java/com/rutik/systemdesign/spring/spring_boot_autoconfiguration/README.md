@@ -411,6 +411,21 @@ The processor runs at compile time and generates `META-INF/spring-autoconfigure-
 **What is the ApplicationContextRunner and how is it used for testing?**
 `ApplicationContextRunner` is a test utility from `spring-boot-test` that creates a minimal `ApplicationContext` for testing auto-configuration. It does not start a full Spring Boot application — just evaluates specific configurations in isolation. Example: `new ApplicationContextRunner().withConfiguration(AutoConfigurations.of(MyAutoConfig.class)).withPropertyValues("my.property=value").run(context -> { assertThat(context).hasSingleBean(MyBean.class); })`. This is the recommended way to test auto-configuration without requiring `@SpringBootTest`.
 
+**What is `@ConditionalOnBean` and how does it differ from `@ConditionalOnMissingBean`, and which ordering trap can affect both?**
+`@ConditionalOnBean(DataSource.class)` registers the bean only if a `DataSource` bean already exists. `@ConditionalOnMissingBean(DataSource.class)` registers the bean only if a `DataSource` does NOT exist — this is the "sensible default / override" pattern. The ordering trap: conditions are evaluated in the order auto-configuration classes are processed. If `JdbcTemplateAutoConfiguration` evaluates `@ConditionalOnBean(DataSource.class)` before `DataSourceAutoConfiguration` registers the `DataSource`, the condition incorrectly fails. Fix: declare `@AutoConfigureAfter(DataSourceAutoConfiguration.class)` to guarantee `DataSource` is registered first. Key principle: `@ConditionalOnBean` is inherently ordering-sensitive; `@ConditionalOnMissingBean` is less so (it only needs the bean definition to be absent at evaluation time).
+
+**What is a Spring Boot "failure analyser" and how do you write a custom one?**
+A failure analyser is a component that intercepts a startup failure, diagnoses the root cause, and displays a human-readable message with a suggested action — replacing a raw stack trace with a concise explanation. Examples: `PortInUseFailureAnalyzer` prints "Web server failed to start. Port 8080 was already in use" when `BindException` is thrown. To write one: implement `AbstractFailureAnalyzer<T extends Throwable>`, override `analyze(Throwable rootFailure, T cause)`, return a `FailureAnalysis` with a description and action, and register it in `META-INF/spring.factories` under `org.springframework.boot.diagnostics.FailureAnalyzer`. `@FailureAnalyzer` beans in the application context are also auto-discovered.
+
+**What does `@ImportAutoConfiguration` do and when is it used instead of `@EnableAutoConfiguration`?**
+`@ImportAutoConfiguration` imports specific auto-configuration classes explicitly, bypassing the full autoconfiguration discovery mechanism. It is used in test slices (`@WebMvcTest`, `@DataJpaTest`) to import only the subset of auto-configurations relevant to the tested layer — avoiding loading the entire application context for a narrow test. For example, `@DataJpaTest` applies `@ImportAutoConfiguration({JpaRepositoriesAutoConfiguration.class, DataSourceAutoConfiguration.class, ...})` — it only loads JPA-related auto-configurations, not security, web, or messaging. Use `@ImportAutoConfiguration` in your own test slices or when you need to import a specific subset of auto-configurations for integration tests.
+
+**How does Spring Boot 3.x GraalVM native image affect auto-configuration, and what is AOT processing?**
+Spring Boot 3.x introduced an AOT (Ahead-of-Time) processing phase that runs at build time. AOT processes the `ApplicationContext` at build time: evaluates conditions, determines which beans will be created for the active profile, and generates Java source code + reflection/proxy/resource hints that GraalVM's `native-image` tool needs. This means auto-configuration conditions are resolved at build time, not at runtime — the native image knows exactly which beans it will create. This removes the reflection overhead of runtime condition evaluation and enables native startup in ~50ms (vs ~2s for JVM). For your custom starter: if it uses reflection or dynamic proxies, you must provide `RuntimeHintsRegistrar` or `@RegisterReflectionForBinding` annotations to tell the AOT phase to preserve those types.
+
+**What is the difference between `@ConfigurationProperties` and `@Value`, and when should you choose each?**
+`@Value("${my.property}")` injects a single property directly — simple but has downsides: typo in the property name fails silently (evaluates to literal `${...}` or throws on startup), no type conversion for complex types, no IDE autocompletion, and no validation. `@ConfigurationProperties(prefix="my")` binds an entire prefix hierarchy to a typed POJO with: relaxed binding (camelCase, kebab-case, snake_case, env var all work), JSR-303 validation with `@Validated`, IDE autocompletion via `spring-configuration-metadata.json`, and structured documentation. Choose `@ConfigurationProperties` for any group of related properties (two or more); reserve `@Value` for single simple values that don't logically belong to a group or for SpEL expressions.
+
 ---
 
 ## 13. Best Practices
@@ -602,3 +617,11 @@ public class TracingAutoConfiguration { ... }
 **How do you debug whether an autoconfiguration was applied?** Run with `--debug` (or set `debug=true`) to print the condition evaluation report, which lists positive matches (with the satisfied conditions) and negative matches (with the reason a class was skipped). It immediately tells you whether the class was even discovered (registration file present), and which `@ConditionalOn*` gate failed.
 
 **How do `@EnableConfigurationProperties` and `@ConfigurationProperties` cooperate in a starter?** `@ConfigurationProperties(prefix="company.tracing")` defines a typed binding target, and `@EnableConfigurationProperties(TracingProperties.class)` registers and binds it within the autoconfiguration without requiring the consumer to scan or annotate anything. Consumers then tune behavior purely through `application.yml` keys under that prefix, with relaxed binding and validation support.
+
+---
+
+## Related / See Also
+
+- [Spring Boot Configuration](../spring_boot_configuration/README.md) — @ConfigurationProperties
+- [Spring Boot Actuator](../spring_boot_actuator/README.md) — auto-configured endpoints
+- [Dependency Injection](../dependency_injection/README.md) — auto-wired beans

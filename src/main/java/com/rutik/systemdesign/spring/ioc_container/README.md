@@ -614,3 +614,12 @@ class ReportRunner {
 **Why is a prototype injected into a singleton not "really" a prototype?** Dependency injection happens once, when the singleton is created. The container resolves the prototype a single time and stores that reference. To get a new instance per use, the singleton must ask the container each time via `ObjectProvider`, method injection (`@Lookup`), or `ApplicationContext.getBean()`.
 
 **How do you bound resource usage with 50 live tenant pools?** Cap each pool small (5 connections), evict idle pools after a timeout, and monitor total connections against the warehouse limits. Because each pool is a managed singleton, eviction means removing the bean definition and closing the `DataSource`, so reconnecting a tenant simply re-registers it.
+
+---
+
+## Related / See Also
+
+- [Bean Lifecycle](../bean_lifecycle/README.md) — instantiation and post-processing sequence
+- [Dependency Injection](../dependency_injection/README.md) — wiring beans together
+- [Spring Configuration](../spring_configuration/README.md) — @Configuration, @Conditional
+- [Case Study: DI Container (Java)](../../java/case_studies/design_di_container_java.md) — mini-IoC built from scratch

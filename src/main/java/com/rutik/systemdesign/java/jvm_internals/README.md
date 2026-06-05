@@ -625,4 +625,12 @@ The success criterion is not "no GC" but "old-gen occupancy is flat over the soa
 
 **What is the difference between `OutOfMemoryError: Java heap space` and `: Metaspace`?** Heap-space OOM means live objects exceed `-Xmx` (a data leak like our cache). Metaspace OOM means class metadata exceeds the Metaspace limit, almost always a ClassLoader leak where loaded classes can never unload. They have different root causes and different diagnostics (`class_histogram` vs `GC.class_stats`).
 
+---
+
+## Related / See Also
+
+- [Java Memory Model](../java_memory_model/README.md) — memory barriers, happens-before rules that underpin JVM memory guarantees
+- [Performance & Tuning](../performance_and_tuning/README.md) — GC tuning flags, JIT profiling, JMH methodology
+- [Foreign Function & Memory API](../foreign_function_and_memory_api/README.md) — MemorySegment, off-heap allocation, replacing Unsafe
+
 **Why is `InitiatingHeapOccupancyPercent` relevant to a pause storm?** IHOP controls when G1 starts the concurrent marking cycle. If it starts too late, the old gen fills before marking completes and G1 falls back to a costly full GC (evacuation failure). Lowering it starts reclamation earlier, smoothing pauses while the leak is being fixed.

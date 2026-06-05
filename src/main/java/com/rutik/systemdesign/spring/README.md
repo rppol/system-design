@@ -52,6 +52,10 @@ This section covers:
 | 21 | [spring_messaging](spring_messaging/) | 7 — Cloud & Messaging | Intermediate | @KafkaListener, @RabbitListener, message converters, DLQ, idempotency |
 | 22 | [spring_testing](spring_testing/) | 8 — Testing & Production | Intermediate | @SpringBootTest, @WebMvcTest, MockMvc, WebTestClient, Testcontainers, slice tests |
 | 23 | [spring_performance](spring_performance/) | 8 — Testing & Production | Advanced | Startup time, lazy init, virtual threads (Boot 3.2), GraalVM native, connection pools |
+| 24 | [spring_batch](spring_batch/) | 7 — Cloud & Messaging | Advanced | Job/Step/chunk model, ItemReader/Processor/Writer, @StepScope, JobRepository, partitioning, skip/retry |
+| 25 | [spring_events_and_scheduling](spring_events_and_scheduling/) | 7 — Cloud & Messaging | Intermediate | ApplicationEventPublisher, @EventListener, @TransactionalEventListener, @Scheduled, ShedLock |
+| 26 | [validation_and_error_handling](validation_and_error_handling/) | 4 — Spring Web | Intermediate | Bean Validation (JSR-380), @Valid/@Validated, custom ConstraintValidator, ProblemDetail (RFC 7807) |
+| 27 | [observability_and_tracing](observability_and_tracing/) | 8 — Testing & Production | Advanced | Micrometer Observation API, Micrometer Tracing + OTLP, W3C traceparent, structured logging, exemplars |
 
 ---
 
@@ -108,6 +112,8 @@ Phase 7: Spring Cloud & Messaging
 | spring_cloud_config              |
 | spring_cloud_patterns            |
 | spring_messaging                 |
+| spring_batch                     |
+| spring_events_and_scheduling     |
 +----------------+-----------------+
                  |
                  v
@@ -115,6 +121,11 @@ Phase 8: Testing & Production
 +----------------------------------+
 | spring_testing                   |
 | spring_performance               |
+| observability_and_tracing        |
++----------------------------------+
+
+Phase 4 additions:
+| validation_and_error_handling    |  (extends request_handling)
 +----------------------------------+
 ```
 
@@ -209,6 +220,10 @@ Dependencies to note:
 | [spring_messaging](spring_messaging/) | [spring_cloud_patterns](spring_cloud_patterns/), [spring_transactions](spring_transactions/) |
 | [spring_testing](spring_testing/) | All modules — slice tests isolate specific layers |
 | [spring_performance](spring_performance/) | [spring_boot_actuator](spring_boot_actuator/), [spring_boot_autoconfiguration](spring_boot_autoconfiguration/), [spring_webflux](spring_webflux/) |
+| [spring_batch](spring_batch/) | [spring_transactions](spring_transactions/), [spring_messaging](spring_messaging/), [spring_cloud_patterns](spring_cloud_patterns/) |
+| [spring_events_and_scheduling](spring_events_and_scheduling/) | [spring_transactions](spring_transactions/), [spring_messaging](spring_messaging/), [spring_aop](spring_aop/) |
+| [validation_and_error_handling](validation_and_error_handling/) | [request_handling](request_handling/), [spring_mvc_architecture](spring_mvc_architecture/), [spring_boot_autoconfiguration](spring_boot_autoconfiguration/) |
+| [observability_and_tracing](observability_and_tracing/) | [spring_boot_actuator](spring_boot_actuator/), [spring_cloud_patterns](spring_cloud_patterns/), [spring_performance](spring_performance/) |
 
 ---
 
@@ -216,11 +231,11 @@ Dependencies to note:
 
 | Case Study | Core Concepts | Difficulty |
 |------------|---------------|------------|
-| [Design a Multi-Tenant SaaS API](case_studies/design_multitenant_saas_api.md) | IoC container customization, request-scoped beans, per-tenant data sources, dynamic routing, security context propagation | Advanced |
-| [Design a Distributed Rate Limiter with Spring](case_studies/design_distributed_rate_limiter_spring.md) | Spring AOP (custom advice), Redis integration, Lua scripts, @Cacheable limitations, filter chain position | Advanced |
-| [Design a Secure OAuth2 Authorization Server](case_studies/design_oauth2_authorization_server.md) | Spring Authorization Server, PKCE, refresh token rotation, opaque vs. JWT tokens, token introspection | Advanced |
+| [Design a Multi-Tenant API](case_studies/design_multitenant_api.md) | IoC container customization, request-scoped beans, per-tenant data sources, dynamic routing, security context propagation | Advanced |
 | [Design a Spring Boot Event-Driven Microservice](case_studies/design_event_driven_microservice.md) | Spring Kafka, transactional outbox pattern, idempotent consumers, dead-letter topics, Saga orchestration | Advanced |
-| [Design a Reactive API Gateway](case_studies/design_reactive_api_gateway.md) | Spring Cloud Gateway, WebFlux, global filters, circuit breaker integration, rate limiting, JWT relay | Advanced |
+| [Design an API Gateway](case_studies/design_api_gateway.md) | Spring Cloud Gateway, WebFlux, global filters, circuit breaker integration, rate limiting, JWT relay | Advanced |
+| [Design a Spring Batch ETL Pipeline](case_studies/design_batch_pipeline.md) | Spring Batch chunk model, Job/Step orchestration, ItemReader/Processor/Writer, restartability, partitioning | Advanced |
+| [Design a Distributed Caching Layer](case_studies/design_distributed_caching.md) | Spring Cache abstraction, Redis CacheManager, cache stampede prevention, multi-level caching, eviction policies | Advanced |
 
 ---
 

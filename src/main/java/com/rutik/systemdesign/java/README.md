@@ -27,19 +27,22 @@ A comprehensive, one-stop reference for mastering **pure Java** — from languag
 | 2 | [Java 8 Features](java8_features/README.md) | Lambdas, Streams overview, Optional, Collectors, Date/Time API | Intermediate |
 | 3 | [Java Streams — Deep Dive](java_streams/README.md) | All ops, lazy eval, flatMap, reduce, collect, Spliterator, parallel rules | Intermediate |
 | 4 | [Java 9-21 Features](java9_to_21_features/README.md) | Records, Sealed classes, Virtual threads, Pattern matching, JPMS | Intermediate |
-| 4 | [JVM Internals](jvm_internals/README.md) | GC algorithms, JIT, Memory model, Class loading, Object layout | Advanced |
-| 5 | [Concurrency](concurrency/README.md) | synchronized, volatile, locks, ThreadPool, CompletableFuture, CAS | Advanced |
-| 6 | [Collections Internals](collections_internals/README.md) | HashMap/TreeMap/ArrayList internals, fail-fast, treeification | Advanced |
-| 7 | [Exceptions & I/O](exceptions_and_io/README.md) | Checked/unchecked, try-with-resources, NIO.2, serialization | Intermediate |
-| 8 | [Functional Programming](functional_programming/README.md) | Function composition, custom Collectors, parallel streams, immutability | Intermediate |
-| 9 | [Generics & Type System](generics_and_type_system/README.md) | PECS, type erasure, bridge methods, wildcards, dynamic proxies | Advanced |
-| 10 | [Performance & Tuning](performance_and_tuning/README.md) | GC tuning, JMH, heap/thread dumps, false sharing, async-profiler | Advanced |
-| 11 | [Java Interview Patterns](java_interview_patterns/README.md) | Immutable class, builder, equals contract, Integer cache, enum singleton | Intermediate |
-| 12 | [Design Patterns in Java](design_patterns_in_java/README.md) | GoF patterns in JDK, JDK Proxy vs CGLIB, Decorator chain, Strategy vs Template Method, concurrency patterns | Intermediate |
-| 13 | [Testing — JUnit 5 & Mockito](testing_junit_mockito/README.md) | JUnit 5 lifecycle, assertions, @ParameterizedTest, Mockito mocks/spies/captors, test doubles | Intermediate |
-| 14 | [Java Memory Model](java_memory_model/README.md) | Happens-before rules, memory barriers, safe publication, final fields, data race vs race condition | Advanced |
-| 15 | [Networking & HTTP Client](networking_and_http_client/README.md) | HttpClient (Java 11), NIO Selector/Reactor, HTTP/2 multiplexing, NIO2 async channels | Intermediate |
-| 16 | [JDBC & Database Access](jdbc_and_database/README.md) | PreparedStatement, HikariCP, transaction isolation levels, batch inserts, ResultSet streaming | Intermediate |
+| 5 | [JVM Internals](jvm_internals/README.md) | GC algorithms, JIT, Memory model, Class loading, Object layout | Advanced |
+| 6 | [Concurrency](concurrency/README.md) | synchronized, volatile, locks, ThreadPool, CompletableFuture, CAS | Advanced |
+| 7 | [Collections Internals](collections_internals/README.md) | HashMap/TreeMap/ArrayList internals, fail-fast, treeification | Advanced |
+| 8 | [Exceptions & I/O](exceptions_and_io/README.md) | Checked/unchecked, try-with-resources, NIO.2, serialization | Intermediate |
+| 9 | [Functional Programming](functional_programming/README.md) | Function composition, custom Collectors, parallel streams, immutability | Intermediate |
+| 10 | [Generics & Type System](generics_and_type_system/README.md) | PECS, type erasure, bridge methods, wildcards, dynamic proxies | Advanced |
+| 11 | [Performance & Tuning](performance_and_tuning/README.md) | GC tuning, JMH, heap/thread dumps, false sharing, async-profiler | Advanced |
+| 12 | [Java Interview Patterns](java_interview_patterns/README.md) | Immutable class, builder, equals contract, Integer cache, enum singleton | Intermediate |
+| 13 | [Design Patterns in Java](design_patterns_in_java/README.md) | GoF patterns in JDK, JDK Proxy vs CGLIB, Decorator chain, Strategy vs Template Method, concurrency patterns | Intermediate |
+| 14 | [Testing — JUnit 5 & Mockito](testing_junit_mockito/README.md) | JUnit 5 lifecycle, assertions, @ParameterizedTest, Mockito mocks/spies/captors, test doubles | Intermediate |
+| 15 | [Java Memory Model](java_memory_model/README.md) | Happens-before rules, memory barriers, safe publication, final fields, data race vs race condition | Advanced |
+| 16 | [Networking & HTTP Client](networking_and_http_client/README.md) | HttpClient (Java 11), NIO Selector/Reactor, HTTP/2 multiplexing, NIO2 async channels | Intermediate |
+| 17 | [JDBC & Database Access](jdbc_and_database/README.md) | PreparedStatement, HikariCP, transaction isolation levels, batch inserts, ResultSet streaming | Intermediate |
+| 18 | [Strings and Text](strings_and_text/README.md) | String immutability, constant pool, Compact Strings (JEP 254), invokedynamic concatenation, StringBuilder, text blocks, Unicode correctness | Intermediate |
+| 19 | [Structured Concurrency & Loom](structured_concurrency_and_loom/README.md) | Virtual threads, carrier threads, pinning, StructuredTaskScope, ScopedValue, Continuation internals, Java 21 GA | Advanced |
+| 20 | [Foreign Function & Memory API (Panama)](foreign_function_and_memory_api/README.md) | Arena, MemorySegment, MemoryLayout, VarHandle, Linker downcall/upcall, jextract, replacing Unsafe/JNI, Java 22 GA | Advanced |
 
 > **Note**: `java8_features` covers Streams as part of the full Java 8 overview. `java_streams` is the dedicated deep dive — all 20+ operations, `Spliterator` internals, parallel rules, `reduce` vs `collect`, and the full `Collectors` catalogue.
 
@@ -49,9 +52,9 @@ A comprehensive, one-stop reference for mastering **pure Java** — from languag
 
 ### Phase 1 — Language Core
 ```
-core_language  -->  generics_and_type_system  -->  exceptions_and_io
+core_language  -->  strings_and_text  -->  generics_and_type_system  -->  exceptions_and_io
 ```
-Understand what Java code actually means at the semantic level — object contracts, type system rules, and resource management.
+Understand what Java code actually means at the semantic level — object contracts, string internals, type system rules, and resource management.
 
 ### Phase 2 — Modern Java
 ```
@@ -83,7 +86,13 @@ java_interview_patterns  -->  testing_junit_mockito  -->  case_studies/
 ```
 Lock in the patterns and recipes that appear on whiteboard interviews. Testing module teaches how to write verifiable code — also an interview topic.
 
-### Phase 7 — Networking & Database (Optional Deep-Dives)
+### Phase 7 — New Java (Java 21+) Deep-Dives
+```
+structured_concurrency_and_loom  -->  foreign_function_and_memory_api
+```
+Project Loom virtual threads and Panama FFM/Memory API — Java 21/22 GA features that change how the JVM interacts with concurrency and native memory.
+
+### Phase 8 — Networking & Database (Optional Deep-Dives)
 ```
 networking_and_http_client  -->  jdbc_and_database
 ```
@@ -112,7 +121,10 @@ Advanced topics for senior engineers building services that talk to other servic
 
 | If you're reading... | Also see... |
 |---------------------|-------------|
-| core_language | generics_and_type_system (bridge methods, erasure), java_interview_patterns (equals/hashCode recipe), design_patterns_in_java (Builder, value objects) |
+| core_language | generics_and_type_system (bridge methods, erasure), java_interview_patterns (equals/hashCode recipe), design_patterns_in_java (Builder, value objects), strings_and_text (immutability, hashCode benign race) |
+| strings_and_text | core_language (immutability contract), java_memory_model (hashCode benign data race), jvm_internals (object layout, byte[] vs char[]), performance_and_tuning (StringBuilder vs format, GC allocation rate) |
+| structured_concurrency_and_loom | concurrency (ReentrantLock, ThreadPoolExecutor), java9_to_21_features (virtual threads overview), jvm_internals (ForkJoinPool, continuation internals), performance_and_tuning (carrier pool sizing, async-profiler) |
+| foreign_function_and_memory_api | jvm_internals (native memory, GC heap boundaries), java_memory_model (VarHandle memory ordering), performance_and_tuning (JMH benchmarks, off-heap profiling) |
 | java8_features | java_streams (full op reference), functional_programming (Collector internals), concurrency (CompletableFuture) |
 | java_streams | functional_programming (custom Collectors, Spliterator), java8_features (lambdas, functional interfaces), collections_internals (stream sources, Spliterator characteristics) |
 | jvm_internals | concurrency (Java Memory Model, happens-before), java_memory_model (full JMM spec), performance_and_tuning (GC tuning flags) |
@@ -136,13 +148,19 @@ Advanced topics for senior engineers building services that talk to other servic
 | Optional | Java 8 | Java 8 (LTS) | Universal |
 | var (local type inference) | Java 10 | Java 11 (LTS) | High |
 | Text Blocks | Java 15 | Java 17 (LTS) | High |
+| Compact Strings (JEP 254) | Java 9 | Java 11 (LTS) | Transparent (no API change) |
+| invokedynamic String concat | Java 9 (JEP 280) | Java 11 (LTS) | Transparent (compiler change) |
+| String.strip() / isBlank() | Java 11 | Java 11 (LTS) | High |
+| String.indent() | Java 12 | Java 17 (LTS) | Moderate |
+| String.formatted() | Java 15 | Java 17 (LTS) | Growing |
 | Records | Java 16 | Java 17 (LTS) | High |
 | Sealed Classes | Java 17 | Java 17 (LTS) | Growing |
 | Pattern Matching instanceof | Java 16 | Java 17 (LTS) | High |
 | Switch Expressions | Java 14 | Java 17 (LTS) | High |
 | Pattern Matching switch | Java 21 | Java 21 (LTS) | Growing |
-| Virtual Threads | Java 21 | Java 21 (LTS) | Growing fast |
-| StructuredTaskScope | Java 21 (preview→21) | Java 21 (LTS) | Early adoption |
+| Virtual Threads (`Thread.ofVirtual()`) | Java 21 GA (JEP 444) | Java 21 (LTS) | Growing fast |
+| StructuredTaskScope | Java 21 preview (JEP 453); re-preview 22–24 | Java 21 (LTS) | Early adoption |
+| ScopedValue | Java 21 preview (JEP 446); JEP 487 in 24 | Java 21 (LTS) | Early adoption |
 | Sequenced Collections | Java 21 | Java 21 (LTS) | Growing |
 
 ---

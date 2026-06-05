@@ -980,3 +980,11 @@ public class JwtBlocklist {
 **What is PKCE and why is it required for public clients?** PKCE (Proof Key for Code Exchange) prevents authorization code interception attacks. A public client (mobile app, SPA) generates a random `code_verifier` and sends its SHA-256 hash (`code_challenge`) in the authorization request. The token endpoint verifies the original `code_verifier` — an attacker who intercepts the authorization code cannot exchange it without the `code_verifier` that never left the legitimate client. Spring Authorization Server supports PKCE natively; Spring Boot 3.x resource servers can enforce it.
 
 **How do you propagate the JWT to downstream microservices?** Use a `WebClient` `ExchangeFilterFunction` (or Feign `RequestInterceptor`) that reads the current `SecurityContext`, extracts the Bearer token, and adds it to the outbound `Authorization` header. Never store the token in a thread-local that spans reactive pipelines — in WebFlux, use `ReactiveSecurityContextHolder` and read the token in a `.flatMap` operator.
+
+---
+
+## Related / See Also
+
+- [Spring Security Architecture](../spring_security_architecture/README.md) — FilterChainProxy
+- [Case Study: OAuth2 Authorization Server](../case_studies/design_oauth2_authorization_server.md) — PKCE, rotation
+- [Case Study: Multi-Tenant API](../case_studies/design_multitenant_api.md) — tenant isolation via JWT

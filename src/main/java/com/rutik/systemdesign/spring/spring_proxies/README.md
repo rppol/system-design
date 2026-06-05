@@ -472,6 +472,18 @@ Objenesis is a library that creates Java objects without calling their construct
 **How does the self-injection trick work for avoiding self-invocation?**
 When a bean injects itself via `@Autowired private MyService self`, Spring injects the proxy bean (from the context), not `this`. When application code calls `self.method()`, it goes through the proxy (which applies AOP advice) rather than directly calling the method on `this`. The reason Spring can inject the bean's own proxy is that the proxy is already in the singleton registry when field injection runs (phase 2 of lifecycle). This is a valid workaround but is considered a code smell — restructuring to separate services is preferred.
 
+**What is the difference between `proxyTargetClass=true` and `proxyTargetClass=false`, and when does Spring choose each automatically?**
+`proxyTargetClass=false` (default): Spring creates a JDK dynamic proxy that implements the same interfaces as the target bean. The proxy is injected anywhere the interface type is expected. If you try to inject by concrete class, `NoSuchBeanDefinitionException` or a `ClassCastException` occurs. `proxyTargetClass=true`: Spring creates a CGLIB subclass proxy that extends the concrete class. Injection by both interface and concrete type works. Spring Boot sets `spring.aop.proxy-target-class=true` by default (Boot 2.0+), meaning CGLIB is used everywhere unless the bean implements an interface and `proxy-target-class` is explicitly set to `false`. The implication: in Spring Boot, beans can always be injected by concrete type safely.
+
+**How does Spring's proxy mechanism interact with `@Transactional` on a final method?**
+CGLIB subclasses cannot override `final` methods — they are not intercepted by the proxy. A `@Transactional` annotation on a `final` method is silently ignored: the method is called directly on the target object without any transaction management. Spring does not log a warning by default. Diagnosis: add `logging.level.org.springframework.aop=DEBUG` — Spring logs when it cannot proxy a method. Fix: remove `final` from the method (or use `@Transactional` on the class and ensure no methods are final). The same applies to any AOP advice on `final` methods — `@Cacheable`, `@Async`, `@Secured` all fail silently on `final` methods.
+
+**What happens to a Spring-managed bean's CGLIB proxy when the target class has a `@Bean` method with `@Scope("prototype")`?**
+When a `@Configuration` class (which is CGLIB-proxied in full mode) has a `@Bean` method annotated `@Scope("prototype")`, each call to the method returns a new prototype instance — the CGLIB proxy intercepts the method call, goes to the bean factory, and asks for a new prototype. However, if the method is called from within the same `@Configuration` class (e.g., one `@Bean` method calling another), the CGLIB proxy intercepts the call and still creates a new prototype instance. Contrast with `@Configuration` in lite mode (`@Component` + `@Bean`) — in lite mode, `@Bean` methods are NOT intercepted; calling them returns a new Java object, bypassing the container entirely (neither singleton nor prototype semantics are enforced). Full mode is the safe default for `@Configuration`.
+
+**What is `InfrastructureAdvisorAutoProxyCreator` and how does it differ from `AnnotationAwareAspectJAutoProxyCreator`?**
+Both are `BeanPostProcessor` implementations that create AOP proxies. `InfrastructureAdvisorAutoProxyCreator` only applies advisor beans with the `ROLE_INFRASTRUCTURE` role — internal Spring framework advisors (transaction advisor, async advisor, caching advisor). It is registered first and handles Spring's built-in AOP. `AnnotationAwareAspectJAutoProxyCreator` handles all advisors including user-defined `@Aspect` classes. It replaces `InfrastructureAdvisorAutoProxyCreator` when `@EnableAspectJAutoProxy` is present. Key implication: if both infrastructure advisors and user `@Aspect` classes apply to the same bean, they all go through `AnnotationAwareAspectJAutoProxyCreator`, and their relative order is controlled by `@Order` on the advisors.
+
 ---
 
 ## 13. Best Practices
@@ -655,3 +667,11 @@ session.setAttribute("orderId", order.getId());        // plain data, replicates
 **How does `AopContext.currentProxy()` fix self-invocation, and what is its downside?** With `exposeProxy=true`, Spring places the current proxy in a `ThreadLocal`; calling a method on that reference re-enters the proxy so advice applies. The downside is that it couples business code to Spring's AOP infrastructure and is easy to misuse, so extracting the advised method into a separate bean is usually the cleaner fix.
 
 **Why must you avoid storing Spring proxies in serializable state like the HTTP session?** CGLIB proxies (and most beans) are not `Serializable`, so a clustered/replicated session serialization attempt throws `NotSerializableException`. Sessions should hold only plain, serializable data (IDs, value objects); behavior should be obtained from the container per request, not persisted.
+
+---
+
+## Related / See Also
+
+- [Spring AOP](../spring_aop/README.md) — AOP uses proxies
+- [Spring Transactions](../spring_transactions/README.md) — @Transactional self-invocation
+- [Spring Caching](../spring_caching/README.md) — @Cacheable self-invocation

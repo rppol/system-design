@@ -529,6 +529,26 @@ Annotate the method with `@PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_
 **What is the difference between @RequestMapping(method=GET) and @GetMapping?**
 `@GetMapping` is a composed annotation: `@RequestMapping(method = RequestMethod.GET)`. It is shorter, more readable, and statically typed (IDE warns if you use `@GetMapping` with `method = RequestMethod.POST`). All `@GetMapping`, `@PostMapping`, `@PutMapping`, `@PatchMapping`, `@DeleteMapping` are composed annotations added in Spring 4.3. Use them instead of `@RequestMapping` with `method=` for all new code. Reserve `@RequestMapping` for class-level base path declarations where the method is not yet known.
 
+**What is `ProblemDetail` (RFC 7807) and how do you return it from a Spring MVC controller in Boot 3.x?**
+`ProblemDetail` (Spring 6.0 / Boot 3.0) is a standardised error response body conforming to RFC 7807 Problem Details for HTTP APIs. It includes: `type` (URI identifier of the problem type), `title` (human-readable summary), `status` (HTTP status code), `detail` (specific problem description for this occurrence), `instance` (URI of the specific request). Enable it with `spring.mvc.problemdetails.enabled=true`. All built-in Spring exceptions (`MethodArgumentNotValidException`, `HttpMessageNotReadableException`, etc.) are automatically mapped to `ProblemDetail` responses. Throw `ResponseStatusException` with a problem detail or implement `ErrorResponseException` for custom problems:
+
+```java
+// Boot 3.x: throw a structured problem detail
+throw new ResponseStatusException(HttpStatus.NOT_FOUND,
+    "Order " + id + " not found");
+// Or use ErrorResponseException for richer customisation:
+// class OrderNotFoundException extends ErrorResponseException { ... }
+```
+
+**How does `@ResponseBody` work with message converters, and what determines which converter is used?**
+`@ResponseBody` (included in `@RestController`) instructs Spring MVC to write the return value directly to the HTTP response body via a `HttpMessageConverter`, bypassing view resolution. The converter is selected by content negotiation: (1) Check the `Accept` header from the client; (2) Match against the `produces` attribute of `@RequestMapping`; (3) Find the first registered `HttpMessageConverter` that supports the return type AND the accepted media type. Built-in converters (in order): `ByteArrayHttpMessageConverter` → `StringHttpMessageConverter` → `MappingJackson2HttpMessageConverter` (for JSON, if Jackson is on classpath) → others. If no converter matches, Spring returns `406 Not Acceptable`. Custom converters: implement `HttpMessageConverter<T>` and register via `WebMvcConfigurer.configureMessageConverters()`.
+
+**What is `@RequestBody` deserialization and what exception is thrown for malformed JSON?**
+`@RequestBody` reads the HTTP request body and deserialises it using a `HttpMessageConverter`. For JSON bodies, `MappingJackson2HttpMessageConverter` uses Jackson's `ObjectMapper`. If the JSON is syntactically invalid (not well-formed JSON), Jackson throws `JsonParseException`, wrapped by Spring as `HttpMessageNotReadableException` — resulting in a `400 Bad Request`. If the JSON is valid but the type does not match the annotated parameter (e.g., a string where an integer is expected), Jackson throws `InvalidDefinitionException` or `MismatchedInputException`, also wrapped as `HttpMessageNotReadableException`. Handle it in `@ExceptionHandler(HttpMessageNotReadableException.class)` to return a structured error response with details about the malformed input.
+
+**How does Spring MVC's `@CrossOrigin` annotation compare to a global CORS configuration?**
+`@CrossOrigin` on a controller or handler method enables CORS for that specific endpoint, configuring allowed origins, methods, and headers per-mapping. Global CORS configuration in `WebMvcConfigurer.addCorsMappings()` applies across all matching URL patterns without modifying any controller. Use global CORS for consistent policy across all endpoints — avoids scatter and ensures the policy is in one place. `@CrossOrigin` is useful for exceptions: a public endpoint in an otherwise restricted API. Important: `@CrossOrigin` and `WebMvcConfigurer` CORS config are additive — both can apply to the same endpoint. Spring Security's CORS integration must also be enabled (`http.cors(Customizer.withDefaults())`) — Spring MVC CORS config is ignored if Spring Security intercepts the preflight `OPTIONS` request before it reaches Spring MVC.
+
 ---
 
 ## 13. Best Practices
@@ -697,3 +717,11 @@ spring:
 **Why centralize error handling in `@ControllerAdvice` rather than per controller?** A single advice class maps every exception type to one RFC 7807 contract, so all 600 partners get a consistent error shape and new exception types are handled in one place. A per-controller `@ExceptionHandler` only covers that controller, leading to inconsistent formats.
 
 **What is the advantage of `ProblemDetail` for a partner-facing API?** It is a standardized (RFC 7807) media type `application/problem+json` with predictable fields plus typed extensions like `fieldErrors`. Partners can write one parser for all error responses instead of branching on ad hoc shapes per endpoint.
+
+---
+
+## Related / See Also
+
+- [Spring MVC Architecture](../spring_mvc_architecture/README.md) — DispatcherServlet
+- [Validation & Error Handling](../validation_and_error_handling/README.md) — @Valid, ProblemDetail
+- [Filters & Interceptors](../filters_and_interceptors/README.md) — pre/post request processing

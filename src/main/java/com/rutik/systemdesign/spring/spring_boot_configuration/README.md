@@ -452,6 +452,18 @@ A YAML file can contain multiple documents separated by `---`. Each document can
 **What does /actuator/env expose and what are the security risks?**
 `/actuator/env` exposes the full `Environment` including all property source values, showing which property source provides each property. The response masks values matching patterns like `*password*`, `*secret*`, `*key*` with `******`. However, this masking is pattern-based and not exhaustive — less obvious secret names may be exposed. In production, always secure actuator endpoints with Spring Security: `management.endpoints.web.exposure.include=health,info` (whitelist), and require authentication for the rest via `SecurityFilterChain`. Never expose `/actuator/env` without authentication.
 
+**What is relaxed binding in `@ConfigurationProperties` and what are the four binding conventions it supports?**
+Relaxed binding means Spring automatically matches property keys in multiple formats to the same `@ConfigurationProperties` field. For a field `private String myApiKey`, all four formats bind to it: (1) `my.api-key` (kebab-case — recommended for `.yml`/`.properties` files), (2) `MY_API_KEY` (upper-case with underscore — OS environment variables, also allows `MY.API_KEY`), (3) `my.apiKey` (camelCase — older convention), (4) `my.api_key` (underscore — legacy). This relaxed binding is crucial for containerised deployments: `MY_DATABASE_URL=jdbc:...` in a Kubernetes Secret mounts as an environment variable and maps cleanly to `spring.datasource.url` without any custom mapping code.
+
+**What is `@ConfigurationPropertiesScan` and when is it needed?**
+Without `@ConfigurationPropertiesScan`, `@ConfigurationProperties` classes are only registered if they have `@Component` (not recommended) or are referenced via `@EnableConfigurationProperties(MyProps.class)`. `@ConfigurationPropertiesScan("com.example")` (Spring Boot 2.2+, analogous to `@ComponentScan` for `@ConfigurationProperties`) automatically registers all `@ConfigurationProperties` classes found in the specified packages without needing `@EnableConfigurationProperties` per class. In practice: use `@ConfigurationPropertiesScan` at the application level (alongside `@SpringBootApplication`) for automatic discovery; use `@EnableConfigurationProperties` inside autoconfiguration classes where you want explicit, self-contained registration.
+
+**How do you validate `@ConfigurationProperties` fields, and what happens if validation fails at startup?**
+Add `@Validated` to the `@ConfigurationProperties` class and use JSR-380 annotations (`@NotNull`, `@Min`, `@Max`, `@Pattern`, `@NotEmpty`, etc.) on the fields. Spring Boot evaluates validation during `ApplicationContext` refresh (before the app starts serving traffic). If any constraint fails, a `BindValidationException` is thrown with a clear message listing every failing constraint — the application does not start. Custom validators: implement `Validator` (Spring's interface) or `javax.validation.ConstraintValidator` and annotate the class with `@Validated`. Example: `@NotNull @URL private String externalApiUrl` — the app refuses to start if `external-api.url` is missing or not a valid URL, preventing deployment of misconfigured images.
+
+**How do Spring profiles interact with `@ConfigurationProperties` and what is the profile-specific properties file convention?**
+Profiles activate profile-specific property sources loaded after (and overriding) the base `application.yml`. Convention: `application-{profile}.yml` (e.g., `application-prod.yml`, `application-staging.yml`) is automatically loaded when that profile is active. For `@ConfigurationProperties`, there is no per-profile annotation — the binding applies to whatever the active `Environment` contains. The active profiles' property files override the base file for matching keys. Multi-document YAML with `spring.config.activate.on-profile` achieves the same in a single file. Key pitfall: `@Profile("prod")` on a `@ConfigurationProperties` class means the class is not registered in non-prod environments, so non-prod code that injects it will fail. Prefer single always-registered `@ConfigurationProperties` class with profile-specific values handled by different `application-{profile}.yml` files.
+
 ---
 
 ## 13. Best Practices
@@ -727,3 +739,11 @@ public WebClient webClient(ExternalApiProperties props) {
 **What happens if a required property is missing when using @ConfigurationProperties with @Validated?** The `ApplicationContext` fails to start and throws `BindValidationException` listing every constraint violation. This is fail-fast behavior: misconfiguration is caught before any request is served, unlike `@Value` which can return null at runtime.
 
 **How do you test configuration binding without starting the full application context?** Use `@ConfigurationPropertiesTest` (from `spring-boot-test`) with a small `@TestConfiguration` that loads only the properties class under test. This starts faster than `@SpringBootTest` and validates binding and constraints without any beans except the properties record.
+
+---
+
+## Related / See Also
+
+- [Spring Configuration](../spring_configuration/README.md) — @Configuration internals
+- [Spring Boot Auto-Configuration](../spring_boot_autoconfiguration/README.md) — conditional config
+- [Spring Cloud Config](../spring_cloud_config/README.md) — external config server

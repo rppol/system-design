@@ -589,6 +589,37 @@ Spring caching uses AOP proxies. When a method calls `this.method()`, it bypasse
 **How do you test `@Cacheable` behavior in a Spring Boot integration test?**
 Annotate the test with `@SpringBootTest` to load the full context. Inject the service under test and call the method twice. Verify the underlying dependency (repository mock) was called exactly once using `Mockito.verify(repository, times(1)).findById(anyLong())`. Alternatively, use `@CacheConfig` on the test configuration with a `ConcurrentMapCacheManager` to avoid Redis dependency in unit tests. Use `CacheManager.getCache("products").clear()` in `@BeforeEach` to reset state between tests.
 
+**What is cache stampede (thundering herd) and how does Spring's `@Cacheable` expose your system to it — and how do you mitigate it?**
+Cache stampede occurs when a cached key expires and many concurrent threads simultaneously find a cache miss, all execute the expensive source query, and all try to populate the cache — multiplying load on the backing store. `@Cacheable` provides no built-in protection: if 500 threads call `getProduct(id)` within the same millisecond after the TTL expires, all 500 call the database. Mitigation strategies: (1) **Probabilistic early expiry (jitter)** — randomise the TTL slightly so keys expire at different times, preventing simultaneous expiry of related keys. (2) **Mutex / distributed lock on cache miss** — only one thread computes the value; others wait. Implement with `RedisTemplate.opsForValue().setIfAbsent()` as a distributed lock in a custom `CacheManager`. (3) **Background refresh** — use a scheduled job to proactively refresh near-expiry keys before they expire. For critical paths, option 2 (lock on miss) is the most robust.
+
+**What is the difference between `@CachePut` and `@Cacheable`, and when should you use each?**
+`@Cacheable` performs a cache-read: it checks the cache first; if a hit is found, returns the cached value without executing the method. If a miss, executes the method and populates the cache. `@CachePut` always executes the method AND always writes the result to the cache — no cache read is performed. Use `@CachePut` on update/create operations where you want to refresh the cache with the newly written value without requiring a subsequent cache miss to repopulate it. Example: a `save(Product)` method annotated with `@CachePut(key="#product.id")` ensures the cache is always consistent with what was just persisted. Never put `@Cacheable` and `@CachePut` with the same key on the same method — the write path would be skipped by `@Cacheable` if a cached value already exists.
+
+**How do you configure Redis as the Spring cache backend with per-cache TTLs?**
+Configure a `RedisCacheManager` with a `RedisCacheConfiguration` that sets default TTL and per-cache overrides:
+
+```java
+@Bean
+RedisCacheManager cacheManager(RedisConnectionFactory cf) {
+    RedisCacheConfiguration defaults = RedisCacheConfiguration.defaultCacheConfig()
+        .entryTtl(Duration.ofMinutes(30))
+        .serializeValuesWith(
+            RedisSerializationContext.SerializationPair
+                .fromSerializer(new GenericJackson2JsonRedisSerializer()));
+    Map<String, RedisCacheConfiguration> perCacheConfig = Map.of(
+        "products",    defaults.entryTtl(Duration.ofHours(2)),
+        "sessions",    defaults.entryTtl(Duration.ofMinutes(10)),
+        "rateLimits",  defaults.entryTtl(Duration.ofSeconds(60))
+    );
+    return RedisCacheManager.builder(cf)
+        .cacheDefaults(defaults)
+        .withInitialCacheConfigurations(perCacheConfig)
+        .build();
+}
+```
+
+Use JSON serialization (not Java serialization) so cached objects survive rolling deploys that rename classes. Java serialization is the default and will throw `SerializationException` when a cached class has changed between versions.
+
 ---
 
 ## 13. Best Practices
@@ -829,3 +860,11 @@ public void updateProduct(Long id, Product updated) { ... }
 **What is the risk of caching with @Cacheable on a method that returns a mutable object?** The cached value is stored by reference in in-process caches (Caffeine, Ehcache). If the caller mutates the returned object, the cached version is also mutated — other callers see the mutated state. Fix: cache immutable types, return defensive copies, or use a serializing cache (Redis) which copies the object on put/get.
 
 **How do you implement cache warming on application startup?** Implement `ApplicationRunner` or `CommandLineRunner` and pre-populate the cache in `run()`. For critical hot paths (product catalog, config data), load top-N items on startup to avoid cold-start latency on first requests. Use `@CachePut` in the warm-up code so the cache is populated without requiring a prior read miss.
+
+---
+
+## Related / See Also
+
+- [Spring Data JPA](../spring_data_jpa/README.md) — caching queries
+- [Spring Proxies](../spring_proxies/README.md) — self-invocation breaks caching
+- [Case Study: Distributed Caching](../case_studies/design_distributed_caching.md) — two-level cache

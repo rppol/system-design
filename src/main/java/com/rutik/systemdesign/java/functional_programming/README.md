@@ -336,6 +336,51 @@ Record's auto-generated `equals()` is field-by-field comparison using `Objects.e
 **Q10: When would you choose an unmodifiable wrapper vs `List.of()`?**
 `Collections.unmodifiableList(list)` creates a view — changes to the underlying list are visible through the wrapper, but the wrapper itself rejects modifications. Use when you need to expose a list as read-only while still being able to mutate it internally. `List.of()` creates a truly immutable, independent list — no backing mutable list. Use for constant data, returning truly immutable results from API methods. Key tradeoff: `unmodifiableList` is a live view (changes propagate through); `List.of()` is a snapshot copy (no live relationship).
 
+**Q11: What is the difference between `reduce` and `collect`, and when is using `reduce` to build a `List` an anti-pattern?**
+`reduce` is designed for immutable accumulation — each step combines two values into a new value (fold). The combiner must be associative and the identity must be correct so parallel splits can merge safely without reordering results. `collect` is designed for *mutable* reduction — a `Supplier` creates a fresh container per thread, an `accumulator` mutates it, and a `combiner` merges two containers at parallel boundaries. Using `reduce` to build a `List` — `stream.reduce(new ArrayList<>(), (acc, e) -> { acc.add(e); return acc; }, (a, b) -> { a.addAll(b); return a; })` — mutates the "identity" object, which the spec forbids, and creates O(n) intermediate list copies in sequential mode. Use `Collectors.toList()` or `toUnmodifiableList()` instead; `collect` was designed exactly for container accumulation.
+
+**Q12: How do you write thread-safe memoization using `ConcurrentHashMap.computeIfAbsent`, and what is the broken alternative?**
+
+```java
+// BROKEN: HashMap + manual null-check has a race on concurrent first calls
+private final Map<String, BigDecimal> cache = new HashMap<>();
+public BigDecimal rate(String currency) {
+    if (!cache.containsKey(currency)) {
+        cache.put(currency, fxApi.fetch(currency)); // data race
+    }
+    return cache.get(currency);
+}
+
+// FIXED: computeIfAbsent is atomic for the key — only one call to fxApi.fetch()
+private final ConcurrentHashMap<String, BigDecimal> cache = new ConcurrentHashMap<>();
+public BigDecimal rate(String currency) {
+    return cache.computeIfAbsent(currency, fxApi::fetch);
+}
+```
+
+`ConcurrentHashMap.computeIfAbsent` holds a bin-level lock so the mapping function is called at most once per key (unless two keys hash to the same bin — use `putIfAbsent` for strict once-only semantics). Critical caveat: never call `computeIfAbsent` recursively on the same map inside the mapping function — it deadlocks because the bin lock is not reentrant.
+
+**Q13: What is the difference between `Supplier<T>` and `Callable<T>`, and when does the distinction matter?**
+Both represent deferred computation that produces a value, but `Callable<T>` declares `throws Exception` while `Supplier<T>` does not. This means `Supplier` cannot propagate checked exceptions without wrapping them in `RuntimeException`. `Callable` integrates with `ExecutorService.submit()` (returns a `Future<T>`) and is used wherever the computation may fail with a checked exception. `Supplier` is the functional-programming default for lazy initialization, factory methods, and `Optional.orElseGet()`. Practical rule: use `Callable` for I/O-bound deferred work submitted to a thread pool; use `Supplier` for pure lazy evaluation. Converting `Callable` to `Supplier` requires a try/catch wrapper — a sign the abstraction boundaries are mismatched.
+
+**Q14: Explain `Comparator.comparing()` chaining and its relationship to function composition.**
+`Comparator.comparing(Person::getLastName).thenComparing(Person::getFirstName).thenComparingInt(Person::getAge)` composes comparators left-to-right using `thenComparing`, which delegates to the next comparator only when the current one returns 0 (equal). Internally `thenComparing` wraps the composition: `(a, b) -> { int c = this.compare(a, b); return c != 0 ? c : other.compare(a, b); }`. This is conceptually `andThen` for comparators. Reverse a sub-key with `.thenComparing(Person::getAge, Comparator.reverseOrder())`. To sort null-safe: wrap the key extractor with `Comparator.nullsFirst()` or `nullsLast()`. Practical tip: always `thenComparing` by a unique field last (e.g., ID) to produce a stable, deterministic ordering for pagination.
+
+**Q15: What is referential transparency, and why does Java's functional interface design not enforce it?**
+Referential transparency means a function's output depends solely on its inputs with no observable side effects — calling `f(x)` twice always returns the same result and changes nothing external. Java's `Function`, `Predicate`, `Consumer` etc. do NOT enforce this — a lambda can close over mutable fields, write to a database, call `System.out.println`, or mutate a shared counter. The Stream API documentation says behavioral parameters "should be non-interfering and stateless" but nothing in the type system enforces it. Consequence: a parallel stream with a stateful lambda silently produces incorrect results (broken):
+
+```java
+// BROKEN: accumulating into a shared list inside a parallel stream
+List<Integer> result = new ArrayList<>();
+IntStream.range(0, 100).parallel().forEach(result::add); // data race, missing elements
+
+// FIXED: use collect(), which is parallel-safe by design
+List<Integer> result = IntStream.range(0, 100).parallel()
+    .boxed().collect(Collectors.toList());
+```
+
+Practical guidance: treat functional interfaces as trusted contracts; in code review, flag any lambda that reads or writes non-final external state, especially in streams.
+
 ---
 
 ## 13. Best Practices
@@ -482,5 +527,13 @@ load.andThen(filter).andThen(normalize);    // FIX: runs load, filter, normalize
 **Why model stages as `Function` objects rather than just calling methods in sequence?** Treating stages as first-class values lets you compose, reorder, unit-test, and conditionally insert stages (e.g. a debug logger) without rewriting the pipeline. The whole pipeline becomes a single `Function<Query, String>` value that can be passed, stored, and tested in isolation.
 
 **How does a custom Collector stay correct under `parallel()`?** Through its associative combiner: the framework splits the source, runs the accumulator on each chunk into a separate accumulator instance, then merges them pairwise with the combiner. As long as the combiner is associative and the supplier yields fresh state, the parallel result equals the sequential one.
+
+---
+
+## Related / See Also
+
+- [Java 8 Features](../java8_features/README.md) — lambda syntax, Optional, and stream overview as the entry point
+- [Java Streams — Deep Dive](../java_streams/README.md) — Spliterator internals, parallel stream mechanics, all terminal ops
+- [Generics & Type System](../generics_and_type_system/README.md) — Function/Supplier/Consumer type parameters, wildcard bounds in functional APIs
 
 **What is the risk of `Comparator.comparing` extractors that return null?** The natural-order comparison invoked on a null key throws NPE mid-sort, which can corrupt the sort or abort the job. Wrap the key comparator with `Comparator.nullsFirst`/`nullsLast` to define where nulls land, making the sort total.

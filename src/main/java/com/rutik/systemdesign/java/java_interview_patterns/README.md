@@ -401,6 +401,43 @@ A variable is effectively final if it's initialized once and never reassigned �
 **Q12: What is null handling best practice in Java?**
 Three approaches: (1) `Objects.requireNonNull(param, "name")` in constructor/method — fails fast with a clear NPE message. (2) Return `Optional<T>` from methods that may have no result — forces callers to handle the absence case. (3) Use `@NonNull`/`@Nullable` annotations (Lombok, IntelliJ, JetBrains) for static analysis documentation. Avoid: passing `null` as a sentinel value — use `Optional` or overloading instead. Never swallow `NullPointerException` — it indicates a programming error that should be fixed.
 
+**Q13: What is the Integer cache, what is its exact range, and what common bug does it cause?**
+The JVM caches `Integer` objects for values −128 to 127 (inclusive) — a fixed pool of 256 instances created at JVM startup. `Integer.valueOf(127) == Integer.valueOf(127)` is `true` (same cached object). `Integer.valueOf(128) == Integer.valueOf(128)` is `false` (two distinct heap objects). This causes real bugs when developers compare autoboxed `Integer` values with `==` instead of `.equals()`:
+
+```java
+// BROKEN: works for small values (returns from cache), fails for large ones
+Integer a = someService.getCount();  // e.g. returns 200
+Integer b = otherService.getCount(); // also returns 200
+if (a == b) { ... }  // false! Different Integer objects above 127
+
+// FIXED: always use .equals() for object comparison
+if (a.equals(b)) { ... }
+```
+
+The same cache applies to `Long` (same range), `Short` (−128 to 127), `Byte` (entire range −128 to 127), and `Character` (0 to 127). The upper bound for `Integer` can be raised with `-XX:AutoBoxCacheMax=N` but this is rarely advisable. Practical rule: never use `==` for `Integer`, `Long`, `Double`, `Boolean` — always `.equals()`.
+
+**Q14: What is defensive copying and when is it required to maintain class immutability?**
+Defensive copying means creating a copy of a mutable input or output so the caller cannot affect the class's internal state through a shared reference. Required in two places: (1) **constructor** — if a mutable object is passed in (e.g., `Date`, `byte[]`, `List`), copy it before storing; (2) **getter** — if you return a mutable field, return a copy so callers cannot mutate your state:
+
+```java
+// BROKEN: immutable Money class leaking mutable Date field
+public final class Contract {
+    private final Date signedOn;
+    public Contract(Date d) { this.signedOn = d; }         // no copy; caller retains reference
+    public Date getSignedOn() { return signedOn; }         // no copy; caller can mutate
+}
+// Caller: contract.getSignedOn().setTime(0); -> silently mutates Contract's date
+
+// FIXED: defensive copy in and out
+public Contract(Date d) { this.signedOn = new Date(d.getTime()); }  // copy on the way in
+public Date getSignedOn() { return new Date(signedOn.getTime()); }   // copy on the way out
+```
+
+In modern Java, prefer `Instant` / `LocalDate` (immutable) over `java.util.Date`. For collections: use `List.copyOf()` (Java 10) or `Collections.unmodifiableList()`. Effective Java Item 50: *Make defensive copies when needed*.
+
+**Q15: When should a class implement `Comparable<T>` vs. using an external `Comparator<T>`?**
+`Comparable<T>` expresses the **natural ordering** — the single most obvious ordering for the class (e.g., `String` lexicographically, `Integer` numerically, `LocalDate` chronologically). Classes that have a natural ordering should implement `Comparable`. When the ordering is contextual, situational, or you need multiple orderings (e.g., sort people by name OR by age OR by salary), use external `Comparator` instances. Key rule from Effective Java Item 14: *The natural ordering should be consistent with `equals()`* — `a.compareTo(b) == 0` should imply `a.equals(b)`. Violating this causes subtle bugs in `TreeSet`, `TreeMap`, and `SortedSet` (which use `compareTo` for equality, not `equals`). Example violation: `BigDecimal("1.0").compareTo(BigDecimal("1.00")) == 0` but `BigDecimal("1.0").equals(BigDecimal("1.00"))` is `false` — a `TreeSet` treats them as the same element; a `HashSet` treats them as different.
+
 ---
 
 ## 13. Best Practices
@@ -549,6 +586,14 @@ public List<String> tags() { return tags; }   // already unmodifiable
 **Assuming the classic singleton is safe — it is not against reflection/serialization.** Use the enum singleton (Item 3) which the JVM guarantees single-instance across reflection and deserialization; only fall back to a lazy holder class when the singleton must implement an interface from a hierarchy that cannot be an enum.
 
 **Factory method returning the concrete type.** Returning `CardProcessor` instead of `PaymentProcessor` couples every caller to the implementation, defeating the point of the factory. Always declare the factory's return type as the interface so new implementations are drop-in.
+
+---
+
+## Related / See Also
+
+- [Core Language](../core_language/README.md) — OOP fundamentals, equals/hashCode contract, polymorphism
+- [Concurrency](../concurrency/README.md) — thread-safe singleton, DCL with volatile
+- [Design Patterns in Java](../design_patterns_in_java/README.md) — full GoF pattern catalog beyond interview focus patterns
 
 ### Interview Discussion Points
 

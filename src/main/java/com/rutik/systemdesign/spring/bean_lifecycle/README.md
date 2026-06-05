@@ -771,3 +771,11 @@ public class TempBuffer implements AutoCloseable {
 **How do you guarantee graceful shutdown so connections are not leaked?** Set `server.shutdown=graceful` and a `spring.lifecycle.timeout-per-shutdown-phase` so the web server stops accepting new requests and lets in-flight ones drain before lifecycle teardown; `@PreDestroy` then closes each connection. Combined with a Kubernetes `terminationGracePeriodSeconds` longer than the phase timeout, this prevents abrupt socket termination.
 
 **What problems arise from a circular dependency with `@PostConstruct` cross-calls, and how do you resolve them?** Even when Spring resolves the cycle (via setter/field injection), the relative order of the two `@PostConstruct` methods is undefined, so one may observe the other in a half-initialized state. The clean fix is to remove init-time coupling and perform the cross-bean interaction after the context is fully refreshed, via an `ApplicationReadyEvent`/`ContextRefreshedEvent` listener.
+
+---
+
+## Related / See Also
+
+- [IoC Container](../ioc_container/README.md) — BeanFactory context and container bootstrap
+- [Spring Proxies](../spring_proxies/README.md) — BeanPostProcessor creates proxies
+- [Spring AOP](../spring_aop/README.md) — AOP lifecycle hooks

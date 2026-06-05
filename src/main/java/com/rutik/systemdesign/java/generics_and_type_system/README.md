@@ -508,6 +508,36 @@ Arrays are covariant (`String[]` is an `Object[]`) for historical reasons: Java 
 **Q12: What is a `MethodHandle` and when is it preferable to `Method.invoke()`?**
 A `MethodHandle` (Java 7, `java.lang.invoke.MethodHandles`) is a typed, executable reference to a method, constructor, or field, obtained via `MethodHandles.Lookup`. The JIT can optimize `MethodHandle` invocations much more aggressively than `Method.invoke()` — it can inline through the handle and even eliminate the call overhead entirely with `invokeExact()`. `Method.invoke()` has per-call overhead for access checking, argument boxing into `Object[]`, and dispatch overhead. Benchmark comparison: for 1M calls, `Method.invoke()` ~80ms, `MethodHandle.invoke()` ~10ms, `invokeExact()` ~2ms, direct call ~1ms. Prefer `MethodHandle` over `Method.invoke()` when the same method is called repeatedly (frameworks, serialization, DI containers). Use `invokeExact()` when you can guarantee exact type matches — it's the fastest option.
 
+**Q13: What is the difference between `getFields()` / `getMethods()` and their `getDeclared*()` counterparts, and which do framework code use?**
+`getFields()` returns all **public** fields from the class and its entire superclass/interface hierarchy. `getDeclaredFields()` returns **all fields declared directly in that class** — any visibility — but nothing inherited. Same pattern applies to `getMethods()` vs `getDeclaredMethods()` and constructors. Framework code (serializers, ORMs, DI containers) typically uses `getDeclaredFields()` to access private fields, then calls `field.setAccessible(true)`. Traversal of the full hierarchy requires a loop up the `getSuperclass()` chain — stop at `Object.class`. With JPMS (Java 9+), `setAccessible(true)` on a field in another module requires the module to open the package (e.g., `opens com.example to com.fasterxml.jackson.databind`); failing to do so throws `InaccessibleObjectException` at runtime.
+
+**Q14: What is `@SuppressWarnings("unchecked")` and when is it safe vs. dangerous to use it?**
+It suppresses the compiler's "unchecked cast" warning from generic type erasure. Safe to use when you have a provable invariant that the cast cannot fail: a private map you fully control, an explicit `instanceof` check before cast, or a well-typed internal API contract. Dangerous when external code can insert arbitrary types into the container, because erasure makes the cast invisible at runtime — the `ClassCastException` fires when the variable is *used*, not when it's cast, making the bug hard to trace:
+
+```java
+// DANGEROUS: cast is suppressed but the real ClassCastException fires far from here
+@SuppressWarnings("unchecked")
+Map<String, User> users = (Map<String, User>) externalMap; // any value type is silently accepted
+users.get("alice").getRoles(); // ClassCastException here, not at the cast above
+```
+
+Rule: always add a comment documenting the invariant. If you cannot articulate the invariant, the suppression is not safe.
+
+**Q15: What is `TypeToken` / `ParameterizedType` and why is it needed to preserve generic type information at runtime?**
+Type erasure removes generic type parameters at runtime — `List<String>` and `List<Integer>` are both just `List.class`. When a framework (JSON deserializer, DI container) needs the full parameterised type at runtime, it uses `ParameterizedType` via an anonymous subclass trick:
+
+```java
+// The anonymous class retains List<String> as its generic supertype in the .class file
+Type type = new TypeToken<List<String>>() {}.getType();
+// Guava or Gson introspect: type.getClass().getGenericSuperclass() -> ParameterizedType -> String
+
+// Gson usage
+List<String> result = gson.fromJson(json, new TypeToken<List<String>>(){}.getType());
+// Without TypeToken: gson.fromJson(json, List.class) -> List<Object> (erasure)
+```
+
+Jackson uses `TypeReference<T>` for the same purpose. This works because the byte code of an anonymous class stores its generic supertype in the `Signature` attribute, which `getGenericSuperclass()` reads at runtime — it's the one place erasure doesn't fully erase. Practical rule: whenever you write a method that must produce the right generic instance at runtime, accept `TypeToken<T>` as a parameter rather than `Class<T>`.
+
 ---
 
 ## 13. Best Practices
@@ -671,5 +701,13 @@ List<Dog> dogs = new ArrayList<>();
 **How would you store heterogeneous typed values in one map safely?** A typesafe heterogeneous container (Effective Java Item 33): `Map<Class<?>, Object>` with `<T> void put(Class<T> t, T v)` and `<T> T get(Class<T> t) { return t.cast(map.get(t)); }`. The `Class<T>` token re-establishes the type the erasure removed, and `Class.cast` makes the unchecked cast checked.
 
 **Why are arrays covariant but generics invariant, and why does that matter?** Arrays are reified and covariant (`Object[] a = new String[1]`), so a bad store throws `ArrayStoreException` at runtime. Generics are erased and invariant, pushing the same class of error to compile time. Mixing them (`List<String>[]`) is forbidden precisely because it would let heap pollution slip past the compiler.
+
+---
+
+## Related / See Also
+
+- [Collections Internals](../collections_internals/README.md) — generic collection implementations, bounded type parameters in practice
+- [Functional Programming](../functional_programming/README.md) — Function/Supplier/Consumer type parameters, variance in functional interfaces
+- [Core Language](../core_language/README.md) — polymorphism and OOP foundations that generics extend
 
 **When is `@SuppressWarnings("unchecked")` acceptable in a published library?** Only when you can prove the cast is safe from a surrounding invariant (such as a `Class<T>` key controlling the value type), the annotation is on the narrowest scope possible (ideally a single local variable, not a method), and you add a comment stating why it is safe so the next maintainer does not have to re-derive the proof.

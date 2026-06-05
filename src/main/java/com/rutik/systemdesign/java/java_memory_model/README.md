@@ -464,6 +464,35 @@ Memory visibility: whether a write by one thread is visible to a read by another
 **Q12: What is the StoreLoad barrier and why is volatile write the most expensive operation?**
 The `StoreLoad` barrier ensures that all stores before the barrier complete and become visible to all processors before any subsequent load executes. It is the only barrier that prevents store-load reordering — the most significant optimization a processor can do. On x86, `StoreLoad` requires an `MFENCE` or a locked instruction, which forces a full memory serialization point — all store buffers are flushed. This is why volatile write is expensive: it requires `StoreStore` (flush preceding stores) + `StoreLoad` (flush this store and prevent subsequent loads from reordering before it). Volatile read requires only `LoadLoad` + `LoadStore`, which are effectively free on x86.
 
+**Q13: What is double-checked locking (DCL), what was the original bug, and how does `volatile` fix it?**
+DCL is a lazy-initialization pattern that checks a null condition twice — once without locking (fast path) and once with a lock (slow path for initialization) — to avoid synchronization overhead on every access after initialization:
+
+```java
+// BROKEN (pre-Java 5 / without volatile): partial initialization is visible
+private static Singleton instance;
+public static Singleton getInstance() {
+    if (instance == null) {          // check 1: no lock
+        synchronized (Singleton.class) {
+            if (instance == null) {  // check 2: with lock
+                instance = new Singleton(); // object may be partially constructed
+            }
+        }
+    }
+    return instance; // another thread may see non-null but uninitialized object
+}
+
+// FIXED: volatile prevents reordering of the constructor write and the reference assignment
+private static volatile Singleton instance;
+```
+
+Without `volatile`, the JIT/CPU can reorder `instance = new Singleton()` so the reference is written before the constructor finishes. Another thread sees a non-null reference to a partially constructed object and uses it. With `volatile`, the write to `instance` has a StoreLoad barrier — the constructor must fully complete before the reference is published. Modern alternative: use `static final` holder idiom or `enum` singleton — both provide correct lazy initialization without `volatile`.
+
+**Q14: How does `final` field freezing provide visibility guarantees, and how does it differ from `volatile`?**
+The JMM's "freeze action" for `final` fields: when an object's constructor completes normally, a JMM freeze action fires for every `final` field written in that constructor. Any thread that obtains a reference to the fully-constructed object is guaranteed to see the `final` field values as written — this is a strong publication guarantee with **zero runtime barrier cost** after construction. Contrast with `volatile`: `volatile` guarantees visibility on every read and write (runtime barrier), suitable for fields that change after construction. `final` provides stronger guarantees but only for fields set once in the constructor. Caveat: the guarantee only holds if `this` does not escape the constructor — if the constructor passes `this` to another thread, the freeze action has not yet fired when that thread accesses the `final` fields.
+
+**Q15: What is `jcstress` and what category of JMM violations does it catch that JUnit tests cannot?**
+`jcstress` (Java Concurrency Stress Test) is an OpenJDK harness for testing memory model outcomes. It runs tests in tight concurrent loops on many CPU cores with various thread interleavings to probe for JMM violations. Unlike JUnit tests, which run sequentially or with controlled `Thread.join()` synchronization, `jcstress` instruments the runtime to observe all possible outcomes of racy concurrent accesses — including outcomes that only manifest on weakly ordered architectures (ARM, Power) but not on x86 (which enforces strong ordering beyond what the JMM requires). It categorises outcomes as: `ACCEPTABLE` (always valid), `FORBIDDEN` (never valid under JMM), `INTERESTING` (valid but surprising). Key uses: (1) Verify that a lock-free data structure is correct under all possible execution orders. (2) Prove that a specific use of `volatile` or `VarHandle` establishes the required happens-before edge. (3) Detect torn reads of `long`/`double` on 32-bit platforms.
+
 ---
 
 ## 13. Best Practices
@@ -603,5 +632,13 @@ At 40k reads/sec the `volatile` read cost is ~0.4 ms/sec total — negligible ag
 **When can you publish an object safely without `volatile`?** When all its fields are `final` and `this` does not escape during construction, the JMM's final-field semantics (Java 5+) guarantee visibility after the constructor completes; immutable objects exploit exactly this, costing nothing at read time.
 
 **Is `volatile` enough to make a counter increment thread-safe?** No. `count++` is read-modify-write, three operations; `volatile` makes each read and write visible but does not make the trio atomic, so two threads can lose an update. Use `AtomicInteger`/`AtomicLong` or a lock.
+
+---
+
+## Related / See Also
+
+- [Concurrency](../concurrency/README.md) — synchronized, volatile, CAS, AQS, and CompletableFuture in practice
+- [JVM Internals](../jvm_internals/README.md) — memory barriers, safepoints, how the JIT respects JMM ordering
+- [Structured Concurrency & Loom](../structured_concurrency_and_loom/README.md) — ScopedValue vs ThreadLocal, virtual thread memory visibility
 
 **Why is the enum singleton preferable to a volatile DCL singleton?** It is initialized once by the classloader with happens-before guarantees and no application-level synchronization, it cannot be duplicated by reflection or deserialization, and it removes the subtle volatile/reordering reasoning entirely — strictly less to get wrong.

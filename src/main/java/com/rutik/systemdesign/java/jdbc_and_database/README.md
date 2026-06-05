@@ -442,6 +442,99 @@ A `Savepoint` marks a point within a transaction to which you can partially roll
 **Q10: What `ResultSet` type should you use for a standard OLTP query?**
 `TYPE_FORWARD_ONLY` (default) with `CONCUR_READ_ONLY` — it is the fastest and most efficient. Forward-only means you can only call `next()` — no `previous()`, `absolute()`, or `relative()`. Read-only means no `updateRow()` or `insertRow()`. The JDBC driver can use a server-side cursor or buffer efficiently without supporting bidirectional navigation. `TYPE_SCROLL_INSENSITIVE` is needed only if you need random access within the result set (rare for OLTP). `CONCUR_UPDATABLE` is needed for `ResultSet`-based updates (almost never used in modern code — use separate UPDATE statements).
 
+**Q11: What are the four transaction isolation levels in SQL, which anomalies does each prevent, and what is the performance implication?**
+
+| Isolation Level | Dirty Read | Non-Repeatable Read | Phantom Read | Locking overhead |
+|-----------------|-----------|---------------------|--------------|------------------|
+| `READ_UNCOMMITTED` | Possible | Possible | Possible | Minimal |
+| `READ_COMMITTED` (PostgreSQL default) | Prevented | Possible | Possible | Low |
+| `REPEATABLE_READ` (MySQL/InnoDB default) | Prevented | Prevented | Possible* | Medium |
+| `SERIALIZABLE` | Prevented | Prevented | Prevented | High |
+
+*InnoDB's MVCC prevents most phantom reads in `REPEATABLE_READ` via gap locks. Practical rule: start with `READ_COMMITTED` for OLTP; escalate to `REPEATABLE_READ` if your service reads a value and writes a decision based on it in the same transaction (non-repeatable-read anomaly). Only use `SERIALIZABLE` for financial audit or reporting queries where phantom rows would produce incorrect totals.
+
+**Q12: What is a JDBC "dirty connection" from the pool and how does HikariCP prevent it?**
+A dirty connection is one returned to the pool with uncommitted transaction state — `autoCommit=false` and an open transaction. The next borrower inherits that transaction context and may see or commit data it did not intend to. HikariCP prevents this in two ways: (1) on connection return it calls `rollback()` if `autoCommit=false`, discarding any uncommitted work; (2) it resets `autoCommit` to the configured pool default before making the connection available. The broken pattern:
+
+```java
+// BROKEN: exception path skips rollback — connection returned dirty
+Connection conn = dataSource.getConnection();
+conn.setAutoCommit(false);
+try {
+    // ... some work ...
+    conn.commit();
+} catch (SQLException e) {
+    // forgot conn.rollback() — conn goes back mid-transaction
+} finally {
+    conn.close(); // returns to pool without rollback
+}
+
+// FIXED: always rollback in catch before closing
+} catch (SQLException e) {
+    conn.rollback(); // explicit rollback
+    throw e;
+} finally {
+    conn.close();
+}
+```
+
+**Q13: How does `SELECT ... FOR UPDATE SKIP LOCKED` implement a work queue on top of a relational database?**
+`SELECT ... FOR UPDATE` acquires exclusive row locks. `SKIP LOCKED` (PostgreSQL, MySQL 8+) extends this: instead of blocking on locked rows, the statement skips them and returns only unlocked rows. Multiple competing consumers can run the same query concurrently — each gets a disjoint set of rows. Pattern:
+
+```sql
+-- consumer loop
+BEGIN;
+SELECT id, payload FROM job_queue
+WHERE status = 'PENDING'
+ORDER BY created_at
+LIMIT 10
+FOR UPDATE SKIP LOCKED;
+-- process rows; on success:
+UPDATE job_queue SET status = 'DONE' WHERE id IN (...);
+COMMIT;
+-- on failure: ROLLBACK releases locks so another consumer can retry
+```
+
+This gives at-least-once delivery semantics (a failed/crashed consumer never commits, so the rows become visible to the next consumer). Throughput scales linearly with concurrent consumers up to the database connection limit.
+
+**Q14: What is `Statement.RETURN_GENERATED_KEYS` and how does it differ from a subsequent `SELECT LAST_INSERT_ID()`?**
+After an `INSERT` with an auto-generated PK, `Statement.RETURN_GENERATED_KEYS` retrieves the new key in the same network round trip as the insert — the driver includes a `RETURNING` clause or uses a protocol-level mechanism depending on the DB. A follow-up `SELECT LAST_INSERT_ID()` (MySQL) or `SELECT currval()` (PostgreSQL) is a second round trip and has a TOCTOU hazard in some configurations (scoped per-session in MySQL, but worth avoiding). Usage:
+
+```java
+try (PreparedStatement ps = conn.prepareStatement(
+        "INSERT INTO orders (user_id, amount) VALUES (?, ?)",
+        Statement.RETURN_GENERATED_KEYS)) {
+    ps.setLong(1, userId);
+    ps.setBigDecimal(2, amount);
+    ps.executeUpdate();
+    try (ResultSet keys = ps.getGeneratedKeys()) { // must close this too
+        if (keys.next()) {
+            long newId = keys.getLong(1);
+        }
+    }
+}
+```
+
+The `getGeneratedKeys()` `ResultSet` is a resource that must be closed explicitly or the underlying cursor leaks.
+
+**Q15: How does `setFetchSize()` affect memory use and database cursors for large result sets?**
+By default, most JDBC drivers buffer the entire `ResultSet` in the client JVM heap. For a query returning 1M rows, this can OOM the process. `stmt.setFetchSize(1000)` instructs the driver to fetch rows in pages of 1,000. PostgreSQL (`org.postgresql.Driver`) requires `autoCommit=false` for server-side cursors to be honoured; MySQL uses the special value `Integer.MIN_VALUE` to switch to row-by-row streaming. Broken:
+
+```java
+// BROKEN: entire 1M-row result loaded into heap — OOM
+Statement stmt = conn.createStatement();
+ResultSet rs = stmt.executeQuery("SELECT * FROM events");
+
+// FIXED (PostgreSQL): use a batch size and a transaction
+conn.setAutoCommit(false);
+Statement stmt = conn.createStatement();
+stmt.setFetchSize(1000);
+ResultSet rs = stmt.executeQuery("SELECT * FROM events");
+while (rs.next()) { /* process row */ }
+```
+
+Rule of thumb: always set `fetchSize` for any query where the result could exceed ~10,000 rows; default to 500–1,000 as a starting point.
+
 ---
 
 ## 13. Best Practices
@@ -572,5 +665,13 @@ conn.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
 **When is a unique constraint a better fix than raising the isolation level?** A unique constraint enforces the invariant at the database for all writers regardless of isolation and is cheaper than `SERIALIZABLE` (which adds locking/retry overhead and serialization failures); raise isolation only when the invariant cannot be expressed as a constraint, such as cross-row aggregate checks.
 
 **Why is batched `PreparedStatement` insert orders of magnitude faster?** It collapses N network round trips into one (or a few), amortizes statement parsing/planning, and with PostgreSQL `reWriteBatchedInserts=true` rewrites the batch into a single multi-row `INSERT`; the dominant cost in single inserts is per-statement round-trip latency, not the database work itself.
+
+---
+
+## Related / See Also
+
+- [Networking & HTTP Client](../networking_and_http_client/README.md) — connection management and pooling concepts that mirror HikariCP design
+- [Performance & Tuning](../performance_and_tuning/README.md) — HikariCP pool sizing math, profiling slow queries
+- [Case Study: Connection Pool](../case_studies/design_connection_pool.md) — complete connection pool design including eviction, validation, and sizing
 
 **What does `connection.close()` actually do with HikariCP?** It returns the connection to the pool rather than closing the physical socket, so try-with-resources is the correct idiom precisely because "close" means "release back to pool"; failing to call it leaks the connection for `maxLifetime` or forever, which is why leaks manifest as gradual pool exhaustion.

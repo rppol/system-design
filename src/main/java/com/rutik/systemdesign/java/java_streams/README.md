@@ -539,6 +539,37 @@ All three are short-circuit terminal operations. `anyMatch(p)`: returns `true` i
 **Q12: What is `Collectors.teeing()` and give a use case?**
 `Collectors.teeing(collector1, collector2, mergeFunction)` (Java 12) sends each element to two collectors simultaneously and combines their results with a merge function — all in a single pass. Use case: compute both count and average in one pass: `stream.collect(Collectors.teeing(Collectors.counting(), Collectors.averagingDouble(v -> v), (count, avg) -> new Stats(count, avg)))`. Without `teeing`, you'd need two separate stream passes or a custom `Collector`. Also useful for split-and-combine: partition into two groups and compute something different for each.
 
+**Q13: How does `Stream.iterate(seed, hasNext, next)` (Java 9) differ from the two-argument form and from `Stream.generate()`?**
+`Stream.iterate(seed, hasNext, next)` (Java 9) is a **finite** stream equivalent to `for (T t = seed; hasNext.test(t); t = next.apply(t))` — generates values while the predicate returns `true`. `Stream.iterate(0, n -> n < 10, n -> n + 1)` yields 0–9 and terminates. The two-argument form `Stream.iterate(seed, next)` is **infinite** — use `limit()` or `takeWhile()` to bound it. `Stream.generate(Supplier)` is also always **infinite** with no "previous value" concept — each call to the supplier is independent, making it naturally suited for random sequences or polling. Key difference: `iterate` is deterministic and ordered (each value derived from the previous, suitable for sequential integers or walks); `generate` has no inter-call ordering, so parallel `generate` is safe without coordination. Practical rule: `iterate` for mathematical recurrences and index ranges; `generate` for `UUID.randomUUID()`, sampling, or constant factories.
+
+**Q14: What is `Collectors.collectingAndThen()` and what are its two most common production uses?**
+`Collectors.collectingAndThen(downstream, finisher)` applies a `downstream` collector then transforms its result with a `finisher` — all in a single `collect()` call. Common use 1 — produce an unmodifiable list (pre-Java 16 pattern):
+
+```java
+List<String> names = people.stream()
+    .map(Person::getName)
+    .collect(Collectors.collectingAndThen(Collectors.toList(),
+                                          Collections::unmodifiableList));
+// Java 16+ equivalent: stream.toList()
+```
+
+Common use 2 — downcast `Long` to `int` from `counting()`:
+
+```java
+int size = stream.collect(Collectors.collectingAndThen(Collectors.counting(), Long::intValue));
+```
+
+Also useful for converting a collected `Map` to an `ImmutableMap`, or building a value object from aggregated fields in a single pass. In Java 16+, prefer `Stream.toList()` for the immutable-list case.
+
+**Q15: Under what four conditions does a parallel stream perform *worse* than sequential?**
+Parallel streams split work across the common `ForkJoinPool` (parallelism = CPU count − 1). They degrade when:
+1. **Small data** (< ~10,000 simple elements) — fork/join overhead (~microseconds per split/merge) dominates the work.
+2. **Non-splittable sources** — `LinkedList`, `Iterator`-backed streams, `BufferedReader.lines()` — the `Spliterator` cannot divide the source efficiently; the work stays on one thread anyway.
+3. **Stateful intermediates** — `sorted()`, `distinct()`, `limit()` require global coordination (barriers, sorted merge phases) that can make parallel slower than sequential for moderate-sized data.
+4. **Blocking inside the lambda** — I/O, DB calls, `Thread.sleep()` starve the shared `ForkJoinPool` and harm all other tasks using it (e.g., `CompletableFuture` pipelines). Use `Executors.newVirtualThreadPerTaskExecutor()` for blocking fan-out instead.
+
+Practical rule: benchmark with JMH under realistic data sizes before shipping `parallel()`; the default answer is "don't" unless the data is CPU-bound and large.
+
 ---
 
 ## 13. Best Practices
@@ -745,5 +776,13 @@ public class SalesReport {
 ```
 
 **Key stream concepts**: custom `Collector` with combiner (parallel-safe), single-pass aggregation, `Map.merge()` for concurrent accumulation, `finisher` for post-processing, `Records` for type-safe result objects.
+
+---
+
+## Related / See Also
+
+- [Java 8 Features](../java8_features/README.md) — lambda syntax, Optional, and stream overview that precedes this deep dive
+- [Functional Programming](../functional_programming/README.md) — custom Collectors, function composition, pipeline design
+- [Performance & Tuning](../performance_and_tuning/README.md) — parallel stream benchmarking with JMH, common allocation pitfalls
 
 **Performance**: One pass O(n) vs four passes O(4n). For 1M sales records, this matters — measured with JMH at ~4× faster than 4 separate stream passes due to better cache utilization (data touched once instead of 4 times).

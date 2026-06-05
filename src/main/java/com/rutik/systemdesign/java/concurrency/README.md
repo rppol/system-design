@@ -726,4 +726,13 @@ static Service get() {
 
 **Why remove the entry on failure, not just success?** Leaving a completed-exceptionally future in the map creates a negative cache: every subsequent caller receives the same failed future and the key can never reload, so a transient error becomes permanent. Removing on any completion lets the next request retry fresh.
 
+---
+
+## Related / See Also
+
+- [Java Memory Model](../java_memory_model/README.md) — happens-before rules, volatile semantics, safe publication
+- [Structured Concurrency & Loom](../structured_concurrency_and_loom/README.md) — virtual threads, StructuredTaskScope as a higher-level alternative
+- [Case Study: Rate Limiter](../case_studies/design_rate_limiter_java.md) — AtomicLong CAS loop for lock-free token-bucket rate limiting
+- [Case Study: Circuit Breaker](../case_studies/design_circuit_breaker_java.md) — CAS-based state machine for fault tolerance
+
 **Is `computeIfAbsent` safe to call recursively or with a slow mapping function?** No — the mapping function runs while holding the bin lock, so a long-running or re-entrant `computeIfAbsent` on the same map can block other writers to that bin or deadlock. Keep the mapping function fast; here it only *creates* the future (`supplyAsync` returns immediately) rather than performing the load inline.

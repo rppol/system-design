@@ -198,6 +198,9 @@ A comprehensive, one-stop reference for mastering **pure Java** — language int
 | Module | Key Concepts |
 |--------|-------------|
 | [Core Language](src/main/java/com/rutik/systemdesign/java/core_language/) | OOP, equals/hashCode contract, inner classes, polymorphism, Object methods |
+| [Strings and Text](src/main/java/com/rutik/systemdesign/java/strings_and_text/) | String immutability, constant pool, Compact Strings (JEP 254), invokedynamic concat, text blocks |
+| [Structured Concurrency & Loom](src/main/java/com/rutik/systemdesign/java/structured_concurrency_and_loom/) | Virtual threads, carrier threads, pinning, StructuredTaskScope, ScopedValue — Java 21 GA |
+| [Foreign Function & Memory API](src/main/java/com/rutik/systemdesign/java/foreign_function_and_memory_api/) | Arena, MemorySegment, Linker downcall/upcall, jextract, replacing Unsafe/JNI — Java 22 GA |
 | [Generics & Type System](src/main/java/com/rutik/systemdesign/java/generics_and_type_system/) | PECS, type erasure, bridge methods, wildcards, dynamic proxies |
 | [Exceptions & I/O](src/main/java/com/rutik/systemdesign/java/exceptions_and_io/) | Checked/unchecked, try-with-resources, NIO.2, serialization security |
 
@@ -237,6 +240,10 @@ A comprehensive, one-stop reference for mastering **pure Java** — language int
 | [Design Rate Limiter](src/main/java/com/rutik/systemdesign/java/case_studies/design_rate_limiter_java.md) | AtomicLong, CAS, token bucket, ScheduledExecutor |
 | [Design Event Bus](src/main/java/com/rutik/systemdesign/java/case_studies/design_event_bus.md) | WeakReference, CopyOnWriteArrayList, CompletableFuture, generics |
 | [Design LRU Cache](src/main/java/com/rutik/systemdesign/java/case_studies/design_lru_cache_java.md) | LinkedHashMap, ConcurrentHashMap, SoftReference, ReentrantLock |
+| [Design Thread Pool](src/main/java/com/rutik/systemdesign/java/case_studies/design_thread_pool_java.md) | ThreadPoolExecutor internals, ctl AtomicInteger, Worker extends AQS, queue growth model |
+| [Design DI Container](src/main/java/com/rutik/systemdesign/java/case_studies/design_di_container_java.md) | Reflection, Binding record, LinkedHashSet cycle detection, @Inject/@PostConstruct |
+| [Design Circuit Breaker](src/main/java/com/rutik/systemdesign/java/case_studies/design_circuit_breaker_java.md) | CountBasedSlidingWindow, CAS state machine, HALF_OPEN probes, transitionTo() |
+| [Design Snowflake ID Generator](src/main/java/com/rutik/systemdesign/java/case_studies/design_snowflake_id_generator_java.md) | 41+10+12 bit packing, custom epoch, clock-skew wait, virtual thread pinning |
 
 See the [Java Master Index](src/main/java/com/rutik/systemdesign/java/README.md) for the full 6-phase learning path, Java version matrix, and cross-reference map.
 
@@ -300,15 +307,23 @@ A comprehensive guide to mastering **Spring Framework internals**, Spring Boot, 
 |--------|-------------|
 | [Spring Testing](src/main/java/com/rutik/systemdesign/spring/spring_testing/) | @SpringBootTest, @WebMvcTest, @DataJpaTest, MockMvc, WebTestClient, Testcontainers, @MockBean |
 | [Spring Performance](src/main/java/com/rutik/systemdesign/spring/spring_performance/) | Startup optimization, lazy init, virtual threads (Boot 3.2+), GraalVM native, connection pool sizing |
+| [Spring Batch](src/main/java/com/rutik/systemdesign/spring/spring_batch/) | Job/Step/chunk model, ItemReader/Processor/Writer, JobRepository, @StepScope, partitioning, skip/retry |
+| [Spring Events & Scheduling](src/main/java/com/rutik/systemdesign/spring/spring_events_and_scheduling/) | ApplicationEventPublisher, @EventListener, @TransactionalEventListener, @Scheduled, ShedLock |
+| [Validation & Error Handling](src/main/java/com/rutik/systemdesign/spring/validation_and_error_handling/) | Bean Validation (JSR-380), @Valid/@Validated, custom ConstraintValidator, ProblemDetail (RFC 7807) |
+| [Observability & Tracing](src/main/java/com/rutik/systemdesign/spring/observability_and_tracing/) | Micrometer Observation API, Micrometer Tracing + OTLP, W3C traceparent, structured logging |
 
 #### Spring Case Studies
 | Case Study | Core Concepts |
 |------------|--------------|
-| [Design a Multi-Tenant SaaS API](src/main/java/com/rutik/systemdesign/spring/case_studies/design_multitenant_saas_api.md) | Request-scoped beans, per-tenant data sources, dynamic routing, security context propagation |
-| [Design a Distributed Rate Limiter with Spring](src/main/java/com/rutik/systemdesign/spring/case_studies/design_distributed_rate_limiter_spring.md) | Custom AOP advice, Redis integration, Lua scripts, filter chain position |
-| [Design a Secure OAuth2 Authorization Server](src/main/java/com/rutik/systemdesign/spring/case_studies/design_oauth2_authorization_server.md) | Spring Authorization Server, PKCE, refresh token rotation, opaque vs. JWT tokens |
-| [Design a Spring Boot Event-Driven Microservice](src/main/java/com/rutik/systemdesign/spring/case_studies/design_event_driven_microservice.md) | Spring Kafka, transactional outbox pattern, idempotent consumers, dead-letter topics |
-| [Design a Reactive API Gateway](src/main/java/com/rutik/systemdesign/spring/case_studies/design_reactive_api_gateway.md) | Spring Cloud Gateway, WebFlux, global filters, circuit breaker integration, JWT relay |
+| [Design a Multi-Tenant SaaS API](src/main/java/com/rutik/systemdesign/spring/case_studies/design_multitenant_api.md) | Request-scoped beans, per-tenant data sources, dynamic routing, security context propagation |
+| [Design an Event-Driven Microservice](src/main/java/com/rutik/systemdesign/spring/case_studies/design_event_driven_microservice.md) | Spring Kafka, transactional outbox, idempotent consumers, Saga choreography |
+| [Design a Reactive API Gateway](src/main/java/com/rutik/systemdesign/spring/case_studies/design_api_gateway.md) | Spring Cloud Gateway, WebFlux, global filters, Resilience4j circuit breaker, JWT relay |
+| [Design a Spring Batch Pipeline](src/main/java/com/rutik/systemdesign/spring/case_studies/design_batch_pipeline.md) | Job/Step/chunk model, partitioning, skip/retry, JobRepository, remote chunking |
+| [Design a Distributed Cache](src/main/java/com/rutik/systemdesign/spring/case_studies/design_distributed_caching.md) | Two-level cache, Redis Pub/Sub invalidation, stampede prevention, @Cacheable |
+| [Design a Distributed Rate Limiter](src/main/java/com/rutik/systemdesign/spring/case_studies/design_distributed_rate_limiter_spring.md) | Redis token bucket Lua script, OncePerRequestFilter, fail-open fallback |
+| [Design an OAuth2 Authorization Server](src/main/java/com/rutik/systemdesign/spring/case_studies/design_oauth2_authorization_server.md) | Spring Authorization Server, PKCE, refresh token rotation, JWKS key rollover |
+| [Design an Idempotent Payment API](src/main/java/com/rutik/systemdesign/spring/case_studies/design_idempotent_payment_api.md) | Idempotency keys, outbox pattern, pg_advisory_xact_lock, exactly-once semantics |
+| [Design a Real-Time Notification Service](src/main/java/com/rutik/systemdesign/spring/case_studies/design_realtime_notification_service.md) | WebSocket + SSE, Redis Pub/Sub fan-out, virtual threads, Redis ZSET history |
 
 See the [Spring Master Index](src/main/java/com/rutik/systemdesign/spring/README.md) for the full 8-phase learning path, version matrix, and cross-reference map.
 

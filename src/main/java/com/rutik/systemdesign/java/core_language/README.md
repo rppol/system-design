@@ -407,6 +407,28 @@ The JVM initializes classes lazily on first active use. When `new Child()` is ca
 **Q14: Can a subclass in a different package call a `protected` method defined in a superclass?**
 Yes, but only through a reference of the subclass type (or a more derived type), not through a reference of the superclass type. In a class `Child extends Parent` (different packages), inside `Child` you can call `this.hook()` or `new Child().hook()` — both compile. But `new Parent().hook()` from inside `Child` is a compile error — the protected access through a superclass reference from a different package is not permitted. The rationale: the protected method is inherited by `Child` and belongs to `Child`'s accessible members, but calling it on an arbitrary `Parent` reference would expose access that `Child` doesn't control.
 
+**Q15: What is the contract between `equals()` and `hashCode()`, and what breaks when you violate it?**
+The contract (from `Object` Javadoc): (1) **Reflexivity**: `x.equals(x)` is always `true`. (2) **Symmetry**: `x.equals(y)` iff `y.equals(x)`. (3) **Transitivity**: if `x.equals(y)` and `y.equals(z)`, then `x.equals(z)`. (4) **Consistency**: multiple calls with unchanged objects return the same result. (5) **Null-safety**: `x.equals(null)` is always `false`. The `hashCode` contract: **objects that are `equals()` must have the same `hashCode()`** — violating this breaks `HashMap`, `HashSet`, `Hashtable`. Classic violation: override `equals()` without overriding `hashCode()`:
+
+```java
+// BROKEN: equals() is overridden but hashCode() is not
+class Point { int x, y;
+    @Override public boolean equals(Object o) {
+        if (!(o instanceof Point p)) return false;
+        return x == p.x && y == p.y;
+    }
+    // hashCode() inherited from Object uses identity -> different for equal points
+}
+Set<Point> set = new HashSet<>();
+set.add(new Point(1, 2));
+set.contains(new Point(1, 2)); // false! Different hash buckets
+
+// FIXED
+@Override public int hashCode() { return Objects.hash(x, y); }
+```
+
+Also: never include mutable fields in `hashCode()` if the object will be stored in a `HashMap` or `HashSet` — mutating the key after insertion makes it permanently unreachable in the map.
+
 ---
 
 ## 13. Best Practices
@@ -575,5 +597,13 @@ if ("USD".equals(code)) { ... }     // FIX: value comparison, null-safe on the l
 **Why is integer subtraction a buggy `compareTo` idiom?** `a - b` overflows when the values straddle the int/long range (e.g. `Integer.MAX_VALUE - (-1)` wraps negative), producing the opposite sign. Use the type's own `compareTo` or `Integer.compare(a, b)`.
 
 **Why is immutability essential for a HashMap key?** The bucket index is derived from `hashCode()` at insertion time. If a field used by `hashCode` changes afterward, the entry sits in the wrong bucket and becomes unreachable. `final` fields and no setters guarantee a stable hash for the key's lifetime.
+
+---
+
+## Related / See Also
+
+- [Java Interview Patterns](../java_interview_patterns/README.md) — immutable class recipe, equals/hashCode contract, Builder pattern
+- [Generics & Type System](../generics_and_type_system/README.md) — type erasure, wildcards, polymorphism at the type level
+- [Java Memory Model](../java_memory_model/README.md) — safe publication of object construction, `final` field semantics
 
 **Should you use a record here?** A record removes the `equals`/`hashCode`/`toString` boilerplate, but you must still add a compact constructor for scale normalization and implement `Comparable` manually. Records are a good fit precisely because the type is an immutable data carrier.

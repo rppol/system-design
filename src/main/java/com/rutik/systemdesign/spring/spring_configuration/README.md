@@ -508,6 +508,28 @@ Four steps: (1) Create a module with your auto-configuration class annotated wit
 **What is @ImportBeanDefinitionRegistrar?**
 `ImportBeanDefinitionRegistrar` is an interface that allows programmatic registration of `BeanDefinition` objects during configuration processing. Unlike `ImportSelector` (which returns class names), the registrar directly calls `registry.registerBeanDefinition()`. It receives the annotation metadata of the `@Import` annotation's declaring class, enabling dynamic bean registration based on annotation attributes. Spring Data JPA uses this internally to register repository proxy bean definitions for each `@Repository` interface found during component scanning.
 
+**What is the difference between `@Configuration` full mode and lite mode, and when does it matter?**
+A `@Configuration` class (full mode) is CGLIB-proxied: `@Bean` method calls from within the class are intercepted and return the same singleton instance from the bean factory. A `@Component` or `@ComponentScan`-discovered class containing `@Bean` methods (lite mode) is NOT proxied: inter-`@Bean` calls create plain Java object instances, bypassing the container. This matters when one `@Bean` method calls another:
+
+```java
+@Configuration // FULL MODE — safe
+class AppConfig {
+    @Bean DataSource dataSource() { return new HikariDataSource(); }
+    @Bean JdbcTemplate jdbc() { return new JdbcTemplate(dataSource()); } // returns THE SAME singleton
+}
+
+@Component // LITE MODE — dangerous
+class AppConfig {
+    @Bean DataSource dataSource() { return new HikariDataSource(); }
+    @Bean JdbcTemplate jdbc() { return new JdbcTemplate(dataSource()); } // creates a NEW DataSource each call
+}
+```
+
+In lite mode, `dataSource()` creates a second `HikariDataSource` outside the container — a connection pool leak. Always use `@Configuration` for classes where `@Bean` methods call each other. Lite mode is appropriate only for simple factories that have no inter-`@Bean` dependencies.
+
+**What is `@Conditional` and how does it compare to `@ConditionalOnProperty` / `@ConditionalOnClass`?**
+`@Conditional(MyCondition.class)` is the meta-annotation that powers all `@ConditionalOn*` variants. The referenced `Condition` implementation receives `ConditionContext` (access to `Environment`, `BeanDefinitionRegistry`, `ClassLoader`) and `AnnotatedTypeMetadata` and returns `true` (include) or `false` (skip). `@ConditionalOnProperty`, `@ConditionalOnClass`, `@ConditionalOnBean` are Spring Boot's pre-built `Condition` implementations registered as composed annotations for common use cases. Write a custom `@Conditional` when the built-in variants don't cover your logic — e.g., enabling a bean only when running in Kubernetes (check for `KUBERNETES_SERVICE_HOST` env var) or only on a specific OS. Custom conditions are registered with `@Conditional(MyKubernetesCondition.class)` and can be composed into a custom `@ConditionalOnKubernetes` annotation.
+
 ---
 
 ## 13. Best Practices
@@ -739,3 +761,11 @@ public PricingEngine legacyPricingEngine() { return new LegacyPricingEngine(); }
 **When should you use @Import vs component scanning?** `@Import` explicitly imports a configuration class — useful for library starters, infrastructure configuration, or test configurations that must not be auto-detected. Component scanning (`@ComponentScan`) discovers all `@Component`-annotated classes in a package — useful for application beans but gives up explicit control. In library code (starters, framework modules), always use `@Import` to avoid polluting application scan paths.
 
 **How does @Conditional work under the hood?** Spring evaluates `@Conditional` during the `BeanDefinition` post-processing phase, before bean instantiation. The `Condition.matches()` method receives a `ConditionContext` (access to `Environment`, `BeanDefinitionRegistry`, `ResourceLoader`) and a `AnnotatedTypeMetadata` (access to the annotation's attributes). Spring Boot's `@ConditionalOnProperty`, `@ConditionalOnClass`, and `@ConditionalOnMissingBean` are all implemented as `Condition` implementations that inspect these contexts.
+
+---
+
+## Related / See Also
+
+- [Dependency Injection](../dependency_injection/README.md) — @Qualifier, @Primary
+- [Spring Boot Configuration](../spring_boot_configuration/README.md) — @ConfigurationProperties
+- [Spring Boot Auto-Configuration](../spring_boot_autoconfiguration/README.md) — @Conditional

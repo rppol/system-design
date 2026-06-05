@@ -509,6 +509,35 @@ When a `Runnable` submitted to an `ExecutorService` throws an unchecked exceptio
 **Q13: What is a memory-mapped file and when would you use `FileChannel.map()`?**
 A memory-mapped file maps a region of a file into the process's virtual address space via `FileChannel.map()`, returning a `MappedByteBuffer`. The OS manages paging: reading a byte triggers a page fault that loads the 4KB OS page from disk into memory. No explicit `read()` calls needed — the buffer is accessed like a byte array. Benefits: (1) Zero-copy read — no user-space buffer, data goes from OS page cache to application directly. (2) Random access: seeking to position N is O(1) — no stream seeking needed. (3) Shared across processes — multiple JVMs mapping the same file share the OS page cache. Use when: parsing large binary files (log files, database files), implementing file-backed caches, random access to large data sets. Limitation: `MappedByteBuffer` cannot be explicitly unmapped — it relies on GC which can delay file release.
 
+**Q14: What happens when `try`, `catch`, and `finally` all throw exceptions, and which one propagates?**
+When `finally` throws an exception, it **suppresses** any exception from `try` or `catch` — the `finally` exception propagates and the others are silently discarded. This is a particularly dangerous failure mode: the original exception that caused the `catch` block to execute is lost:
+
+```java
+// BROKEN: exception from finally silently swallows the try exception
+try {
+    riskyOperation();          // throws IOException "disk full"
+} finally {
+    closeResource();           // throws IllegalStateException "already closed"
+    // IOException is silently discarded; IllegalStateException propagates
+}
+
+// FIXED: catch and suppress, or use try-with-resources
+try {
+    riskyOperation();
+} catch (Exception primary) {
+    try { closeResource(); } catch (Exception suppressed) {
+        primary.addSuppressed(suppressed); // attach, don't replace
+    }
+    throw primary;
+}
+// Or: just use try-with-resources — it calls addSuppressed() automatically
+```
+
+`try-with-resources` (Java 7) handles this correctly: if both the body and `close()` throw, the close exception is added as a suppressed exception via `Throwable.addSuppressed()` — the primary exception propagates and nothing is lost.
+
+**Q15: What is serialization `serialVersionUID` and what happens when it is absent or mismatched?**
+`serialVersionUID` is a 64-bit long stored in the serialized byte stream that identifies the version of the class used to serialize the object. On deserialization, the JVM compares the stream's UID with the class's UID; a mismatch throws `InvalidClassException`. When `serialVersionUID` is absent, the JVM computes a default UID from the class's structure (fields, methods, access modifiers) via a SHA-1-based algorithm. Any structural change (adding a field, renaming a method) changes the computed UID, breaking deserialization of previously serialized data. Two failure modes: (1) **Unintentional break** — adding a field to a class without declaring `serialVersionUID` silently breaks deserialization across deploys. (2) **Declared UID mismatch** — deliberately changing it signals an incompatible version change. Best practice: always declare `private static final long serialVersionUID = 1L;` in all `Serializable` classes, increment it manually only for truly incompatible structural changes.
+
 ---
 
 ## 13. Best Practices
@@ -651,5 +680,12 @@ throw new ConfigParseException("load failed", e);  // FIX: cause preserved, full
 **Why is preserving the cause critical?** Passing the original `Throwable` to the wrapper's constructor keeps the full causal chain (`Caused by:` in the stack trace), which is the single most important artifact for debugging a production failure. Copying only `getMessage()` throws away the line where it actually broke.
 
 **Why a `volatile` reference for the config?** Readers on many threads must see the new `Properties` object immediately after a reload swaps the reference. `volatile` provides the visibility (happens-before) guarantee; the swap itself is a single atomic reference assignment, so no lock is needed for the read path.
+
+---
+
+## Related / See Also
+
+- [Networking & HTTP Client](../networking_and_http_client/README.md) — IOException handling in HTTP calls, connection-level error hierarchies
+- [JDBC & Database](../jdbc_and_database/README.md) — SQLException hierarchy, try-with-resources for connection cleanup
 
 **Why never catch `Throwable` broadly?** `Throwable` includes `Error` subclasses (`OutOfMemoryError`, `StackOverflowError`) that signal JVM-level failures you cannot meaningfully recover from. Swallowing them keeps a doomed process running in a corrupt state; catch `Exception` or the specific types instead.

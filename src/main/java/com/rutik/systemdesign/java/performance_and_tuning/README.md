@@ -508,6 +508,30 @@ Shallow heap: memory consumed by the object itself — its fields' total size (e
 **Q12: What is the JIT inline threshold and how does a megamorphic call site prevent optimization?**
 The default JIT inline threshold is approximately 35 bytecodes (`-XX:MaxInlineSize=35`). Methods within this size are candidates for inlining — the JIT replaces the call instruction with the method body, enabling further optimizations like constant folding, escape analysis, and dead code elimination. A megamorphic call site has 3 or more concrete receiver types. The JIT cannot inline megamorphic virtual calls because it would need to enumerate all possible implementations (unlike monomorphic sites where one type is inlined, or bimorphic where two are if-else'd). Megamorphic sites fall back to vtable dispatch (~10-15% slower than inlined monomorphic). Diagnostic: `-XX:+UnlockDiagnosticVMOptions -XX:+PrintInlining` shows "not inlineable" for megamorphic sites. Fix: reduce type diversity at hot call sites, or use `final` methods where possible.
 
+**Q13: What is JVM escape analysis and how can it eliminate heap allocations entirely?**
+Escape analysis (enabled by default since Java 6, `-XX:+DoEscapeAnalysis`) determines whether an object reference "escapes" its creating method/thread — stored in a field accessible to other threads, returned to the caller, or passed to a non-inlinable method. If the object does not escape: (1) **Stack allocation** — object lives on the thread stack, freed at method return, zero GC pressure. (2) **Scalar replacement** — the object is decomposed into its individual fields, which are kept in CPU registers or on the stack; the object allocation itself is eliminated entirely. Example: `new Point(x, y)` used only within one method for a calculation is scalar-replaced. Verification: run `java -XX:+PrintEscapeAnalysis` (requires debug JVM) or observe with JMH `@Benchmark` using a GC profiler (`-prof gc`) — allocation rate should be 0 B/op for a properly escaped-analysed result.
+
+**Q14: What is false sharing and how does `@Contended` prevent it?**
+False sharing occurs when two threads write to distinct variables that reside on the same CPU cache line (~64 bytes on x86). Each write by one thread invalidates the other thread's cached copy, even though the data is logically independent — the CPU cannot invalidate at sub-cache-line granularity. Symptom: linear throughput degradation as core count increases for a supposedly independent concurrent write workload. Fix — pad fields so each occupies a full cache line:
+
+```java
+// BROKEN: counter1 and counter2 share a cache line -> false sharing
+class Counters { volatile long counter1; volatile long counter2; }
+
+// FIXED: @Contended pads the field to a full cache line (requires -XX:-RestrictContended)
+class Counters {
+    @jdk.internal.vm.annotation.Contended volatile long counter1;
+    @jdk.internal.vm.annotation.Contended volatile long counter2;
+}
+// or: manual 7-long padding to reach 64 bytes
+class PaddedCounter { volatile long value; long p1,p2,p3,p4,p5,p6,p7; }
+```
+
+`LongAdder` uses internal `Cell` padding to avoid false sharing between its striped accumulators. Detection tool: `async-profiler -e cache-misses` or `perf stat -e cache-misses`.
+
+**Q15: What is the "time to safepoint" (TTSP) problem and how does a long-running counted loop trigger it?**
+A JVM safepoint is a global stop where all threads pause at "safe" positions (method calls, backward branches in byte code) — required for GC, class redefinition, deoptimization. The "time to safepoint" is the interval from when the JVM requests a safepoint to when all threads actually stop. A thread inside a counted integer loop (`for (int i = 0; i < N; i++)`) only reaches a safepoint at the loop's exit — not at each iteration. If `N` is large (e.g., 10M iterations of a tight loop), that thread blocks the global safepoint for the duration of the loop, halting all other threads — GC pauses, thread-dump requests, and profiling samples all wait. Diagnose with `-XX:+PrintSafepointStatistics -XX:PrintSafepointStatisticsCount=1`; look for high "spin" values. Fix: use `LongStream` (checks safepoints more frequently than `int` loops), or split the loop into bounded chunks.
+
 ---
 
 ## 13. Best Practices
@@ -657,5 +681,13 @@ for (var entry : byType.entrySet())
 **What is a megamorphic callsite and how does it hurt performance?** A virtual call that observes more than two receiver types at runtime; the JIT cannot speculate a single target, so it emits a real virtual dispatch, stops inlining the callee, and may deoptimize — costing both the call overhead and the lost cross-method optimizations.
 
 **Why prefer `long` cents over `BigDecimal` in a numeric hot loop?** `BigDecimal` is immutable, so every operation allocates; in a 10M-iteration loop that is tens of millions of short-lived objects driving young-gen GC. `long` arithmetic is register-resident, allocation-free, and exact for fixed two-decimal money.
+
+---
+
+## Related / See Also
+
+- [JVM Internals](../jvm_internals/README.md) — GC algorithms, JIT compilation tiers, safepoints
+- [Java Memory Model](../java_memory_model/README.md) — false sharing, cache-line effects on concurrent performance
+- [Case Study: Connection Pool](../case_studies/design_connection_pool.md) — pool sizing math and throughput measurement with realistic load
 
 **How do you tune G1 to eliminate the full GCs you saw, and what is the risk?** Lower `-XX:InitiatingHeapOccupancyPercent` so concurrent marking starts earlier (e.g. 35 instead of 45) and size regions to fit your object distribution; the risk is starting marking too early, spending CPU on concurrent work and reducing mutator throughput, so validate with GC logs that pauses drop without throughput regressing.

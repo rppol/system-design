@@ -441,6 +441,12 @@ Spring Boot auto-configures an embedded Tomcat with a thread pool (default max 2
 **What is the difference between @Controller and @RestController?**
 `@RestController` is `@Controller` + `@ResponseBody` — every handler method's return value is serialized directly to the response body via `HttpMessageConverter`. `@Controller` is for MVC controllers that return view names (String) or `ModelAndView` objects resolved by `ViewResolver`. In REST API development, always use `@RestController`. Use `@Controller` only when rendering server-side templates (Thymeleaf, FreeMarker, JSP).
 
+**What is content negotiation in Spring MVC and how does `produces` on `@RequestMapping` control it?**
+Content negotiation is the process by which Spring MVC selects the response media type (e.g., `application/json`, `application/xml`) based on the client's `Accept` header and the handler's declared capabilities. `produces = "application/json"` on `@GetMapping` narrows the handler to only handle requests that accept JSON — if the client sends `Accept: application/xml`, this mapping is skipped and Spring looks for another handler. If no handler matches, Spring returns `406 Not Acceptable`. Content negotiation order: `Accept` header → path extension (deprecated) → query parameter (`?format=json`, disabled by default). In REST APIs, always declare `produces = MediaType.APPLICATION_JSON_VALUE` on all handlers for clear documentation and to prevent accidental content type negotiation fall-through.
+
+**How does Spring MVC's `HandlerExceptionResolver` hierarchy work, and in what order are resolvers consulted?**
+`DispatcherServlet` catches handler exceptions and passes them through a chain of `HandlerExceptionResolver` beans in order: (1) `ExceptionHandlerExceptionResolver` — processes `@ExceptionHandler` methods in `@Controller` and `@ControllerAdvice` (highest priority, handles most cases). (2) `ResponseStatusExceptionResolver` — handles `@ResponseStatus` on exception classes and `ResponseStatusException` thrown programmatically. (3) `DefaultHandlerExceptionResolver` — handles standard Spring MVC exceptions (e.g., `MethodArgumentNotValidException` → 400, `HttpRequestMethodNotSupportedException` → 405, `HttpMediaTypeNotSupportedException` → 415). (4) Fallback: unhandled exceptions propagate to the Servlet container, which renders a generic 500 error page. Boot 3.x adds `ResponseEntityExceptionHandler` as a convenient base class for `@ControllerAdvice` that handles all standard Spring MVC exceptions and returns RFC 7807 `ProblemDetail` bodies.
+
 ---
 
 ## 13. Best Practices
@@ -670,3 +676,11 @@ public class GlobalExceptionHandler { ... }
 **What happens during content negotiation when a client sends `Accept: application/xml` but only Jackson is on the classpath?** `AbstractMessageConverterMethodProcessor` iterates registered `HttpMessageConverter` instances to find one that can write the requested media type. With only Jackson (JSON), no converter can produce XML — Spring returns 406 Not Acceptable. Add `jackson-dataformat-xml` to enable XML output, or configure `ContentNegotiationStrategy` to always default to JSON for unknown accept types.
 
 **How do you stream a large response (1M rows) without loading it all into memory?** Return a `StreamingResponseBody` or `ResponseBodyEmitter` from the controller. Spring writes directly to the response `OutputStream` as data is produced without buffering the full response. For database streaming, use JPA `@QueryHints({@QueryHint(name = HINT_FETCH_SIZE, value = "1000")})` or Spring Data's `Stream<Entity>` return type (requires a transaction around the streaming read).
+
+---
+
+## Related / See Also
+
+- [Request Handling](../request_handling/README.md) — @RequestMapping, argument resolvers
+- [Filters & Interceptors](../filters_and_interceptors/README.md) — filter vs interceptor
+- [Spring WebFlux](../spring_webflux/README.md) — reactive alternative

@@ -1,132 +1,230 @@
 # Case Study: Design an LRU Cache in Pure Java
 
-## Problem Statement
+## Intuition
 
-Design a thread-safe LRU (Least Recently Used) cache with:
-- O(1) `get(key)` — return value, move to most-recently-used position
-- O(1) `put(key, value)` — add entry; evict LRU entry if at capacity
-- `maxSize` — configurable capacity
-- Thread-safe for concurrent reads and writes
-- Optional: **soft/weak references** for automatic eviction under memory pressure
-- Optional: **TTL (time-to-live)** per entry
-- Metrics: hit rate, eviction count
+> An LRU cache is a hotel with a fixed number of rooms. When it fills up, the guest who checked in longest ago (and hasn't moved since) is asked to leave to make room for the new arrival. The front desk keeps a list sorted by most recent activity — O(1) eviction because you always remove from the tail.
 
-**Constraints**: Pure Java, production-ready.
+**Key insight**: LRU is secretly two data structures glued together — a hash map for O(1) lookup and a doubly-linked list for O(1) order maintenance. `LinkedHashMap(accessOrder=true)` bundles them so you get a correct LRU cache in 20 lines. The hard part is concurrency: `get()` in LRU *modifies* the access-order list (moving the node to the head), so it is a write operation disguised as a read — this negates the read-write lock optimization and forces every operation through the same lock.
 
----
+The production path: `LinkedHashMap` (embedded), then Caffeine W-TinyLFU (in-process high-throughput), then Redis Cluster near-cache (multi-instance). Each tier serves 10× more traffic than the previous.
 
-## Key Java Concepts Used
-
-| Concept | Module | Why Used |
-|---------|--------|---------|
-| `LinkedHashMap` (accessOrder=true) | [Collections Internals](../collections_internals/README.md) | O(1) LRU ordering built-in |
-| `ReentrantReadWriteLock` | [Concurrency](../concurrency/README.md) | Multiple concurrent reads; exclusive writes |
-| `ConcurrentHashMap` | [Collections Internals](../collections_internals/README.md) | Alternative: lock-free reads |
-| `SoftReference` | [JVM Internals](../jvm_internals/README.md) | Auto-eviction under GC memory pressure |
-| `WeakReference` | [JVM Internals](../jvm_internals/README.md) | Alternative: evicted at next GC |
-| `AtomicLong` | [Concurrency](../concurrency/README.md) | Lock-free hit/miss counters |
-| Immutable value objects | [Java Interview Patterns](../java_interview_patterns/README.md) | CacheEntry with TTL, value, and metadata |
+See also:
+- [JVM Tuning & GC for Services](cross_cutting/jvm_tuning_and_gc_for_services.md) — heap sizing for large caches, GC pause impact, off-heap options
+- [Backpressure & Bounded Resources](cross_cutting/backpressure_and_bounded_resources.md) — cache stampede / thundering-herd mitigation patterns
 
 ---
 
-## Architecture
+## 1. Requirements Clarification
+
+### Functional requirements
+- `get(key)` — O(1); return the value and move the entry to most-recently-used position; return `null` on miss
+- `put(key, value)` — O(1); insert or update; evict the least-recently-used entry if at capacity
+- `invalidate(key)` / `invalidateAll()` — explicit eviction
+- `getOrLoad(key, Supplier)` — load from source if absent; single-flight to prevent stampedes
+- `stats()` — hit count, miss count, eviction count, hit rate
+
+### Non-functional requirements
+| Dimension | Target |
+|-----------|--------|
+| `get` latency (in-process, cache hit) | < 1 µs |
+| Concurrency model | Thread-safe for any number of concurrent callers |
+| Eviction policy | LRU (order by last access time) |
+| Memory cap | `maxSize` entries; optional TTL per entry |
+| Optional | `SoftReference` wrapping — auto-evict under GC pressure |
+
+### Out of scope
+- Distributed (multi-JVM) invalidation — handled at the Redis layer (§6)
+- Write-through or write-behind persistence (application concern, not cache concern)
+- Eviction callbacks (can be added as `EvictionListener<K,V>` — straightforward extension)
+
+---
+
+## 2. Scale Estimation
+
+### Heap budget for a 10M-entry cache
 
 ```
-Three implementation levels (each module presents one):
+Payload:    10,000,000 entries × 500 bytes avg value  = 5,000 MB = ~5.0 GB
 
-Level 1: Simple (single-threaded)
-  LinkedHashMap(capacity, 0.75f, true) with removeEldestEntry override
+Per-entry JVM overhead (LinkedHashMap on 64-bit JVM, compressed oops):
+  Object header:          16 bytes
+  key, value references:   8 bytes each
+  hash, next references:   8 bytes each
+  before, after refs (LHM access-order list): 8 bytes each
+  Effective:               ~56 bytes per Entry object
 
-Level 2: Thread-safe LRU
-  LinkedHashMap + ReentrantReadWriteLock (multiple readers, exclusive writer)
+Overhead total: 10M × 56 B = 560 MB
 
-Level 3: High-performance (ConcurrentHashMap + doubly-linked list)
-  ConcurrentHashMap for O(1) lookup
-  + doubly-linked list for LRU ordering (requires fine-grained locking)
+Live heap: ~5.0 GB + 0.56 GB = ~5.6 GB
 
-Level 4: Production (TTL + SoftReference + metrics)
-  Level 2 or 3 + TTL expiry + SoftReference wrapping values + LongAdder metrics
+G1GC sizing (×1.5 headroom for allocation + survivor + metaspace):
+  -Xmx9g
+```
+
+### Throughput under contention
+
+```
+Single-lock LinkedHashMap (get + access-order reorder):
+  ~45k ops/sec at 32 threads (lock contention dominates)
+
+Segmented (16 segments, each a locked LinkedHashMap):
+  ~320k ops/sec (7× improvement; per-segment LRU is approximate)
+
+Caffeine W-TinyLFU:
+  ~650k ops/sec (reads via per-thread ring buffer; effectively lock-free get)
+```
+
+### Working set sizing
+
+```
+Working set: distinct hot keys accessed in a typical 5-minute window.
+Measure via: HyperLogLog over access log; instrument cache.missCount() over time.
+
+If miss rate > 30%: working set > cache capacity → resize or accept misses.
+Rule of thumb: set maxSize ≥ 1.2 × observed_hot_key_count.
+```
+
+### Per-entry memory: SoftReference cost
+
+```
+SoftReference wrapper object: ~16 bytes header + 8 bytes referent
+Extra overhead per entry: ~24 bytes
+For 10M entries: +240 MB
+Benefit: GC auto-evicts under pressure → prevents OOM at the cost of ~5% more heap overhead
 ```
 
 ---
 
-## Step-by-Step Design Decisions
+## 3. High-Level Architecture
 
-### Decision 1: LinkedHashMap vs custom doubly-linked list
+```
+  ┌──────────────────────────────────────────────────────────────┐
+  │                     Caller Threads                           │
+  │   thread-1    thread-2    thread-3    ...    thread-N        │
+  └───────┬─────────────┬──────────────────────────────────────┘
+          │ get/put      │
+          ▼              ▼
+  ┌───────────────────────────────────────────────────────────┐
+  │                ThreadSafeLruCache                          │
+  │                                                           │
+  │   lock: Object (intrinsic monitor)                        │
+  │                                                           │
+  │   cache: LinkedHashMap<K, CacheEntry<V>>                  │
+  │     ├── hash table: O(1) lookup by key                    │
+  │     └── doubly-linked list (access-order):                │
+  │           HEAD (LRU) ─────────────── TAIL (MRU)          │
+  │           get()    moves accessed entry to TAIL           │
+  │           put()    evicts HEAD if size > maxSize          │
+  │                                                           │
+  │   hits: AtomicLong    misses: AtomicLong                  │
+  │   evictions: AtomicLong                                   │
+  └───────────────────────────────────────────────────────────┘
+```
 
-**LinkedHashMap(accessOrder=true)**: O(1) LRU ordering built in. `get()` moves entry to tail. `removeEldestEntry()` evicts head. 20-line implementation. Not thread-safe.
+### Implementation levels
 
-**Custom DoublyLinkedList + HashMap**: more control, can be made thread-safe at fine granularity (e.g., lock only the moved node and its neighbors). Standard LeetCode solution. More code.
+```
+Level 1: SimpleLruCache (not thread-safe)
+  LinkedHashMap(capacity, 0.75f, true) + removeEldestEntry override
+  20 lines; correct LRU; use in single-threaded contexts or tests
 
-**Production choice**: `LinkedHashMap` for non-concurrent or low-contention caches (most cases). Custom for very high concurrent write throughput.
+Level 2: ThreadSafeLruCache (this case study)
+  Level 1 + intrinsic synchronized lock + AtomicLong metrics
 
-### Decision 2: Thread-safety strategy
+Level 3: TtlLruCache (TTL + SoftReference)
+  Level 2 + CacheEntry<V> wrapper: {SoftReference<V>, expiresAt}
 
-**Option A**: `Collections.synchronizedMap(linkedHashMap)` — every operation serialized, including reads. Simple but read throughput limited.
-
-**Option B**: `ReentrantReadWriteLock` — multiple concurrent readers, exclusive writer. `get()` acquires read lock (if no LRU reordering) or write lock (if LRU reordering needed, because `get()` modifies the doubly-linked list).
-
-**Critical insight**: With `accessOrder=true`, `LinkedHashMap.get()` *modifies* the list (moves to tail). So `get()` requires a **write lock** even though it's semantically a read. This means ReentrantReadWriteLock gives no advantage over a plain lock for standard LRU — you lose read concurrency.
-
-**Option C**: `ConcurrentHashMap` for lookup + separate LRU list with fine-grained locks. More complex but allows concurrent reads.
-
-**Production choice**: For most use cases, `synchronized` on a `LinkedHashMap` is correct and sufficient. For high read throughput, use a separate `ConcurrentHashMap` + LRU list.
-
-### Decision 3: SoftReference for memory-sensitive caches
-
-`SoftReference<V>`: GC will NOT collect it unless the JVM needs memory (approaching OOM). Ideal for caches — entries are evicted automatically when memory is tight, preventing `OutOfMemoryError`.
-
-`WeakReference<V>`: GC collects at the next GC cycle regardless of memory pressure. Too aggressive for caches — entries evicted even when memory is plentiful.
-
-**Choice**: `SoftReference` for the value in cache entries — allows auto-eviction under pressure.
+Level 4: ConcurrentLruCache (high-throughput)
+  ConcurrentHashMap (lock-free reads) + doubly-linked list (list lock)
+  Separates lookup from order-maintenance; concurrent reads with list lock
+  only on reorder
+```
 
 ---
 
-## Level 1: Simple LRU Cache (Non-Thread-Safe)
+## 4. Component Deep Dives
+
+### 4.1 Why LRU `get()` requires a write lock
+
+BROKEN — using `ReentrantReadWriteLock`, thinking `get()` is a read operation:
+
+```java
+// BROKEN: get() acquires read lock but LinkedHashMap.get(accessOrder=true)
+// modifies the doubly-linked list (moves node to tail) -> data race
+private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
+
+public V get(K key) {
+    rwLock.readLock().lock();          // concurrent readers allowed
+    try {
+        return cache.get(key);         // MODIFIES list order under read lock -> corruption
+    } finally {
+        rwLock.readLock().unlock();
+    }
+}
+// Two threads both reading the same key concurrently each try to update
+// the before/after pointers of the accessed node -> linked-list corruption
+```
+
+FIX — `get()` must hold the write lock because it modifies list structure:
+
+```java
+// FIX: synchronized on a single monitor — only correct option for LinkedHashMap LRU
+private final Object lock = new Object();
+
+public V get(K key) {
+    synchronized (lock) {
+        V value = cache.get(key);      // read + reorder: single critical section
+        if (value != null) hits.incrementAndGet();
+        else misses.incrementAndGet();
+        return value;
+    }
+}
+```
+
+This is the counterintuitive insight: `ReadWriteLock` buys you nothing for `LinkedHashMap`-based LRU because every `get()` is a structural write. Alternatives for concurrent reads: (a) probabilistic LRU that skips reorder with probability P (amortizes the write cost); (b) per-thread ring buffers that replay reorders asynchronously (Caffeine's approach).
+
+### 4.2 Level 1 — Simple LRU (20 lines)
 
 ```java
 public class SimpleLruCache<K, V> extends LinkedHashMap<K, V> {
     private final int maxSize;
 
     public SimpleLruCache(int maxSize) {
-        super(maxSize, 0.75f, true);  // true = access-order (LRU)
+        super(maxSize, 0.75f, true);  // true = access-order mode
         this.maxSize = maxSize;
     }
 
     @Override
     protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
-        return size() > maxSize;  // evict LRU when over capacity
+        return size() > maxSize;  // LinkedHashMap calls this after every put()
     }
 }
 
 // Usage:
-SimpleLruCache<String, String> cache = new SimpleLruCache<>(100);
-cache.put("key1", "val1");
-cache.get("key1");  // moves to most-recently-used position
-// After 100 entries: oldest-accessed entry is evicted on next put()
+var cache = new SimpleLruCache<String, String>(100);
+cache.put("user:1", "Alice");
+cache.get("user:1");  // moves to MRU position
+// 101st put() evicts whoever was at the LRU (tail) position
 ```
 
----
-
-## Level 2: Thread-Safe LRU Cache
+### 4.3 Level 2 — Thread-safe LRU with metrics
 
 ```java
 public class ThreadSafeLruCache<K, V> {
     private final int maxSize;
+    private final Object lock = new Object();
     private final LinkedHashMap<K, V> cache;
-    private final Object lock = new Object();  // simple intrinsic lock
 
-    // Metrics
-    private final AtomicLong hits = new AtomicLong(0);
-    private final AtomicLong misses = new AtomicLong(0);
-    private final AtomicLong evictions = new AtomicLong(0);
+    private final AtomicLong hits = new AtomicLong();
+    private final AtomicLong misses = new AtomicLong();
+    private final AtomicLong evictions = new AtomicLong();
 
     public ThreadSafeLruCache(int maxSize) {
         this.maxSize = maxSize;
         this.cache = new LinkedHashMap<>(maxSize, 0.75f, true) {
             @Override
             protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
-                boolean evict = size() > maxSize;
+                boolean evict = size() > ThreadSafeLruCache.this.maxSize;
                 if (evict) evictions.incrementAndGet();
                 return evict;
             }
@@ -135,89 +233,54 @@ public class ThreadSafeLruCache<K, V> {
 
     public V get(K key) {
         synchronized (lock) {
-            V value = cache.get(key);  // moves to tail (LRU update)
-            if (value != null) hits.incrementAndGet();
-            else misses.incrementAndGet();
-            return value;
+            V v = cache.get(key);
+            (v != null ? hits : misses).incrementAndGet();
+            return v;
         }
     }
 
     public void put(K key, V value) {
-        synchronized (lock) {
-            cache.put(key, value);
-        }
+        synchronized (lock) { cache.put(key, value); }
     }
 
+    // Double-checked load: avoids holding lock during slow DB call
     public V getOrLoad(K key, Supplier<V> loader) {
-        // Double-checked pattern: check without lock, then with lock, then load
-        V value;
         synchronized (lock) {
-            value = cache.get(key);
-            if (value != null) {
-                hits.incrementAndGet();
-                return value;
-            }
+            V v = cache.get(key);
+            if (v != null) { hits.incrementAndGet(); return v; }
         }
-        // Load without holding lock (could be slow: DB call, network)
-        V loaded = loader.get();
-
+        V loaded = loader.get();                  // outside lock: may be slow
         synchronized (lock) {
-            // Check again in case another thread loaded the same key
-            value = cache.get(key);
-            if (value != null) {
-                hits.incrementAndGet();
-                return value;  // use the already-loaded value
-            }
+            V existing = cache.get(key);          // re-check: another thread may have loaded
+            if (existing != null) { hits.incrementAndGet(); return existing; }
             cache.put(key, loaded);
             misses.incrementAndGet();
             return loaded;
         }
     }
 
-    public void invalidate(K key) {
-        synchronized (lock) { cache.remove(key); }
-    }
-
-    public void invalidateAll() {
-        synchronized (lock) { cache.clear(); }
-    }
+    public void invalidate(K key) { synchronized (lock) { cache.remove(key); } }
+    public void invalidateAll()   { synchronized (lock) { cache.clear(); } }
+    public int size()             { synchronized (lock) { return cache.size(); } }
 
     public double hitRate() {
-        long h = hits.get(), m = misses.get();
-        long total = h + m;
-        return total == 0 ? 0.0 : (double) h / total;
+        long h = hits.get(), m = misses.get(), t = h + m;
+        return t == 0 ? 0.0 : (double) h / t;
     }
 
-    public int size() {
-        synchronized (lock) { return cache.size(); }
-    }
-
-    public CacheStats stats() {
-        return new CacheStats(hits.get(), misses.get(), evictions.get());
-    }
-
-    public record CacheStats(long hits, long misses, long evictions) {
-        public double hitRate() {
-            long total = hits + misses;
-            return total == 0 ? 0.0 : (double) hits / total;
-        }
-    }
+    public record CacheStats(long hits, long misses, long evictions) {}
+    public CacheStats stats() { return new CacheStats(hits.get(), misses.get(), evictions.get()); }
 }
 ```
 
----
-
-## Level 3: Production Cache with TTL and SoftReference
+### 4.4 Level 3 — TTL + SoftReference
 
 ```java
 public class TtlLruCache<K, V> {
     private final int maxSize;
     private final long ttlNanos;
     private final Object lock = new Object();
-
     private final LinkedHashMap<K, CacheEntry<V>> cache;
-    private final AtomicLong hits = new AtomicLong(0);
-    private final AtomicLong misses = new AtomicLong(0);
 
     public TtlLruCache(int maxSize, Duration ttl) {
         this.maxSize = maxSize;
@@ -225,7 +288,7 @@ public class TtlLruCache<K, V> {
         this.cache = new LinkedHashMap<>(maxSize, 0.75f, true) {
             @Override
             protected boolean removeEldestEntry(Map.Entry<K, CacheEntry<V>> eldest) {
-                return size() > maxSize;
+                return size() > TtlLruCache.this.maxSize;
             }
         };
     }
@@ -233,25 +296,11 @@ public class TtlLruCache<K, V> {
     public Optional<V> get(K key) {
         synchronized (lock) {
             CacheEntry<V> entry = cache.get(key);
-            if (entry == null) { misses.incrementAndGet(); return Optional.empty(); }
-
-            // Check TTL expiry
-            if (entry.isExpired()) {
-                cache.remove(key);
-                misses.incrementAndGet();
-                return Optional.empty();
-            }
-
-            // Check if soft-referenced value was GC'd
-            V value = entry.getValue();
-            if (value == null) {
-                cache.remove(key);
-                misses.incrementAndGet();
-                return Optional.empty();
-            }
-
-            hits.incrementAndGet();
-            return Optional.of(value);
+            if (entry == null) return Optional.empty();
+            if (entry.isExpired()) { cache.remove(key); return Optional.empty(); }
+            V v = entry.getValue();                    // null if GC reclaimed SoftReference
+            if (v == null)         { cache.remove(key); return Optional.empty(); }
+            return Optional.of(v);
         }
     }
 
@@ -261,65 +310,50 @@ public class TtlLruCache<K, V> {
         }
     }
 
-    // Purge expired entries (call periodically or on access)
-    public void purgeExpired() {
+    public void purgeExpired() {                      // call periodically (e.g., every 60 s)
         synchronized (lock) {
             cache.entrySet().removeIf(e -> e.getValue().isExpired());
         }
     }
 
     private static class CacheEntry<V> {
-        // SoftReference: GC may collect value when under memory pressure
-        private final SoftReference<V> valueRef;
-        private final long expiresAt; // System.nanoTime()
+        private final SoftReference<V> valueRef;      // GC may collect under memory pressure
+        private final long expiresAt;                 // System.nanoTime()
 
-        CacheEntry(V value, long expiresAt) {
-            this.valueRef = new SoftReference<>(value);
+        CacheEntry(V v, long expiresAt) {
+            this.valueRef = new SoftReference<>(v);
             this.expiresAt = expiresAt;
         }
-
-        V getValue() { return valueRef.get(); }  // null if GC'd
-
+        V getValue()     { return valueRef.get(); }   // null if GC reclaimed
         boolean isExpired() { return System.nanoTime() > expiresAt; }
     }
 }
 ```
 
----
-
-## Alternative: ConcurrentHashMap + LRU Doubly-Linked List (High Concurrency)
+### 4.5 ConcurrentLruCache (high-throughput variant)
 
 ```java
-// For very high read throughput: separate ConcurrentHashMap (lock-free reads)
-// + doubly-linked list with per-node locking for LRU ordering
-
+// When read throughput matters: ConcurrentHashMap (lock-free reads) +
+// doubly-linked list (list lock for LRU reorder)
 public class ConcurrentLruCache<K, V> {
     private final int maxSize;
     private final ConcurrentHashMap<K, Node<K, V>> map;
-    private final Node<K, V> head;  // MRU sentinel
-    private final Node<K, V> tail;  // LRU sentinel
+    private final Node<K, V> head = new Node<>(null, null); // MRU sentinel
+    private final Node<K, V> tail = new Node<>(null, null); // LRU sentinel
     private final ReentrantLock listLock = new ReentrantLock();
 
     public ConcurrentLruCache(int maxSize) {
         this.maxSize = maxSize;
         this.map = new ConcurrentHashMap<>(maxSize * 2);
-        this.head = new Node<>(null, null);
-        this.tail = new Node<>(null, null);
-        head.next = tail;
-        tail.prev = head;
+        head.next = tail; tail.prev = head;
     }
 
     public V get(K key) {
-        Node<K, V> node = map.get(key);
+        Node<K, V> node = map.get(key);   // lock-free ConcurrentHashMap read
         if (node == null) return null;
-
-        // Move to front (MRU position) — requires list lock
         listLock.lock();
-        try {
-            moveToFront(node);
-        } finally {
-            listLock.unlock();
-        }
+        try { moveToFront(node); }
+        finally { listLock.unlock(); }
         return node.value;
     }
 
@@ -327,10 +361,8 @@ public class ConcurrentLruCache<K, V> {
         listLock.lock();
         try {
             Node<K, V> existing = map.get(key);
-            if (existing != null) {
-                existing.value = value;
-                moveToFront(existing);
-            } else {
+            if (existing != null) { existing.value = value; moveToFront(existing); }
+            else {
                 Node<K, V> node = new Node<>(key, value);
                 map.put(key, node);
                 addToFront(node);
@@ -339,285 +371,322 @@ public class ConcurrentLruCache<K, V> {
                     if (lru != null) map.remove(lru.key);
                 }
             }
-        } finally {
-            listLock.unlock();
-        }
+        } finally { listLock.unlock(); }
     }
 
-    private void moveToFront(Node<K, V> node) {
-        if (node.prev == head) return; // already at front
-        // Remove from current position
-        node.prev.next = node.next;
-        node.next.prev = node.prev;
-        // Add to front
-        addToFront(node);
+    private void moveToFront(Node<K, V> n) {
+        if (n.prev == head) return;
+        n.prev.next = n.next; n.next.prev = n.prev;
+        addToFront(n);
     }
-
-    private void addToFront(Node<K, V> node) {
-        node.next = head.next;
-        node.prev = head;
-        head.next.prev = node;
-        head.next = node;
+    private void addToFront(Node<K, V> n) {
+        n.next = head.next; n.prev = head;
+        head.next.prev = n; head.next = n;
     }
-
     private Node<K, V> removeLru() {
         Node<K, V> lru = tail.prev;
         if (lru == head) return null;
-        lru.prev.next = tail;
-        tail.prev = lru.prev;
+        lru.prev.next = tail; tail.prev = lru.prev;
         return lru;
     }
 
     private static class Node<K, V> {
-        K key;
-        V value;
-        Node<K, V> prev, next;
-        Node(K key, V value) { this.key = key; this.value = value; }
+        K key; V value; Node<K, V> prev, next;
+        Node(K k, V v) { this.key = k; this.value = v; }
     }
 }
 ```
 
 ---
 
-## Tradeoffs Compared
+## 5. Design Decisions & Tradeoffs
 
-| Implementation | Read Throughput | Write Throughput | Complexity | Memory |
-|----------------|----------------|-----------------|-----------|--------|
-| LinkedHashMap + synchronized | Low (serialized) | Low (serialized) | Low | Low |
-| LinkedHashMap + RWLock | Low (get needs write lock) | Low | Medium | Low |
-| ConcurrentHashMap + doubly-linked | High (CAS on map) | Medium (list lock) | High | Higher |
-| Guava LoadingCache | High | High | None (library) | Medium |
+| Decision | Chosen | Alternatives | Rationale |
+|----------|--------|-------------|-----------|
+| Data structure | `LinkedHashMap(accessOrder=true)` | Custom doubly-linked list + HashMap | LHM gives correct LRU in 20 lines; custom structure needed only for fine-grained locking |
+| Thread-safety | Intrinsic `synchronized` on single lock | `ReentrantReadWriteLock`, `ConcurrentHashMap` | RWLock gives zero benefit: `get()` is a write; CHM needs external LRU list; single lock is correct and simple |
+| Memory safety | `SoftReference<V>` in CacheEntry | Strong reference, `WeakReference` | `SoftReference`: GC evicts only under pressure → prevents OOM while keeping cache warm; `WeakReference` is too aggressive (evicts freely) |
+| Eviction algorithm | LRU (access-order list) | LFU, W-TinyLFU (Caffeine), ARC | LRU: simple, predictable; W-TinyLFU: better hit rate on Zipf workloads (scan-resistant); ARC: self-tuning between LRU and LFU |
+| TTL expiry | Lazy (check on `get`) | Background eviction thread | Lazy: simpler, no background thread, no clock-jitter; downside: expired entries consume memory until accessed |
 
-**Key insight**: For LRU caches, `get()` modifies the LRU order, so it's effectively a write operation — this negates the benefit of read-write locks unless you use a different synchronization strategy (e.g., probabilistic LRU that only reorders with some probability).
-
----
-
-## Interview Questions for This Case Study
-
-**Q: How does LinkedHashMap implement LRU in O(1)?**
-`LinkedHashMap` maintains a doubly-linked list overlay on top of its hash table. In `accessOrder=true` mode, every `get()` moves the accessed entry to the tail of the list. The head of the list is always the least-recently-used (LRU) entry. Eviction is O(1): `removeEldestEntry()` is called after each `put()` — it returns true when `size() > maxSize`, and `LinkedHashMap` removes the head entry.
-
-**Q: Why can't you use ReentrantReadWriteLock to improve LRU cache read concurrency?**
-With `accessOrder=true`, `LinkedHashMap.get()` modifies the doubly-linked list (moves the node to tail). This is a structural modification — it requires exclusive access. Any concurrent `get()` on the same node would cause a data race on the list pointers. Therefore, every `get()` must hold the write lock, giving no benefit over a plain `synchronized` lock. Solutions: (1) probabilistic LRU (skip reordering sometimes); (2) segment the cache; (3) use a different data structure for the LRU order with per-node locking.
-
-**Q: What is the difference between SoftReference and WeakReference for cache values?**
-`SoftReference`: GC tries to collect it only when the JVM is under memory pressure (approaching heap limit). Ideal for caches — entries survive while memory is available. `WeakReference`: GC collects it at the *next* GC cycle regardless of memory pressure. Too aggressive for caches — a GC immediately after a put would evict all entries. For cache values: use `SoftReference`. For event bus listeners (you want them GC'd when subscriber is gone): use `WeakReference`.
-
-**Q: What is the double-check pattern in `getOrLoad()` and why is it needed?**
-Without the pattern: `getOrLoad()` holds the lock while loading (DB call), serializing all callers waiting for the same key. With double-check: (1) check without lock (fast path for already-cached values); (2) acquire lock; (3) check again (someone else may have loaded while we waited for the lock); (4) load if still absent; (5) release lock. This ensures loading only happens once per key even under concurrent access, while allowing fast lock-free reads for already-cached values.
-
-**Q: How would you implement TTL without a background eviction thread?**
-Lazy eviction: check TTL in `get()` — if expired, remove and return `null`. Optionally, add a `purgeExpired()` that iterates and removes all expired entries, called on every N operations or periodically from a background thread. This is a common pattern in embedded caches. The trade-off: expired entries consume memory until next access or purge, but avoids background thread complexity and scheduling jitter.
-
-**Q: How would you make this cache distributed (across multiple JVM nodes)?**
-Replace the in-memory `LinkedHashMap`/`ConcurrentHashMap` with calls to Redis (using LPOS + ZADD for LRU) or Memcached. Use Redis' `EXPIRE` for TTL. Consistency challenge: LRU ordering across nodes requires a distributed coordination mechanism — typically you accept that each node has independent LRU order (good enough). For truly distributed LRU: use a distributed cache like Hazelcast with near-cache, or Redis sorted set with score = access timestamp. This is the transition from in-process cache to distributed cache architecture.
+**When LRU is the wrong algorithm**: production access is Zipfian — a few keys very hot, a long cold tail. A sequential scan over a large dataset touches many cold keys, each briefly becoming "recently used" and evicting hot keys. Caffeine's W-TinyLFU maintains a Count-Min frequency sketch and only admits a new key if it is estimated to be accessed more often than its candidate victim — scan-resistant by construction. Use LRU for short-window recency bias (CDN, session caches); use W-TinyLFU for general application caches.
 
 ---
 
-## Failure Scenarios
+## 6. Real-World Implementations
 
-| Component | Failure | Symptom | Recovery | Time-to-Recovery |
-|-----------|---------|---------|----------|------------------|
-| Cache process | Restart -> cold start | DB overwhelmed by reload traffic | Write-through persistence + warm-up | minutes |
-| Loader (DB call) | Slow/failing | Threads pile up in `getOrLoad` | Per-key lock + load timeout + negative cache | seconds |
-| Eviction | Working set > capacity | Thrashing, hit-rate collapse | Resize / frequency-based eviction | immediate after resize |
-| Heap | Cache too big | GC pauses / OOM | Cap entries; off-heap or distributed | depends |
+**Guava Cache** (now `com.google.common.cache`): similar API to this design — `CacheBuilder.newBuilder().maximumSize(n).expireAfterAccess(d)`. Internally uses `ConcurrentHashMap`-segmented approach with per-segment LRU queues. Hit/miss stats via `.recordStats()`. Largely superseded by Caffeine, which Guava now wraps internally.
 
-### Cache process restart -> cold start stampede
+**Caffeine** (Ben Manes): the standard in-process cache for Java. W-TinyLFU eviction via compact Count-Min sketch. Reads recorded in per-thread ring buffers (`StripedBuffer`) and replayed asynchronously, making `get()` effectively lock-free (~650k ops/sec at 32 threads vs ~45k for single-lock LRU). `AsyncLoadingCache` variant returns `CompletableFuture<V>` for non-blocking callers. Spring Boot 3's default cache implementation (`spring.cache.type=caffeine`).
 
-BROKEN — an empty cache lets every concurrent miss hit the DB for the same key:
+**Redis** (L2 tier): sorted set (`ZADD key score member`) with score = `System.currentTimeMillis()` gives distributed LRU. More commonly, Redis uses its own LRU approximation (samples N random keys and evicts the oldest) — `maxmemory-policy allkeys-lru`. Not true O(1) LRU but approaches it at large sample sizes with much less memory overhead (no per-key timestamp stored in a list).
 
-```java
-// BROKEN: cold cache + no per-key coordination => thundering herd
-public Value get(Key k) {
-    Value v = map.get(k);
-    if (v == null) {
-        v = db.load(k);     // 10,000 concurrent requests for hot key k all hit the DB
-        map.put(k, v);
-    }
-    return v;
-}
-// After restart: 10M entries gone; full production traffic stampedes the DB.
-```
+**Memcached**: true LRU per slab class (memory-size bucketed). The "slab calcification" problem occurs when the working set shifts size distribution — a slab full of large items will not shrink to accommodate many small items. Memcached 1.5+ introduced slab automover, but this remains an operational concern that Redis avoids with its unified allocator.
 
-FIX — write-through persistence plus a startup warm-up of the hottest keys, and single-flight loading:
-
-```java
-// FIX: warm the top-N keys on startup; single-flight per key avoids herd
-void warmUp() {
-    // load the 1,000 most-accessed keys (tracked in Redis sorted set by hit count)
-    redis.zrevrange("cache:hot", 0, 999).forEach(k -> map.put(k, db.load(k)));
-}
-
-public Value getOrLoad(Key k) {
-    Value v = map.get(k);
-    if (v != null) return v;
-    // single-flight: only ONE thread per key calls the DB; others wait on the future
-    CompletableFuture<Value> f = inflight.computeIfAbsent(k, key ->
-        CompletableFuture.supplyAsync(() -> db.load(key)));
-    try {
-        v = f.get();
-        map.put(k, v);
-        redisWriteThrough(k, v);   // persistent L2 survives restarts
-        return v;
-    } finally {
-        inflight.remove(k, f);
-    }
-}
-```
-
-Recovery procedure: on restart, warm-up seeds the top-1000 keys before accepting full traffic (or behind a slow-ramp load balancer); the persistent L2 (Redis) absorbs misses so the primary DB is never hit by a cold-start stampede. Time-to-recovery is the warm-up duration (seconds to a couple of minutes), not the time to organically refill 10M entries under load.
+**CPU hardware cache** (reference point): uses pseudo-LRU (approximated from tree bits per cache set) because true LRU hardware would require one timestamp per cache line. This is the same engineering tradeoff as probabilistic LRU in software — exact ordering is expensive; approximate ordering is good enough.
 
 ---
 
-## Capacity Planning Math
+## 7. Technologies & Tools
 
-### Heap budget for 10M entries
+| Tool | Algorithm | Throughput | Memory | Key Feature | Use When |
+|------|-----------|-----------|--------|-------------|---------|
+| Custom `LinkedHashMap` (this) | True LRU | ~45k ops/sec | Low | Zero dependencies | Embedded / test / learning |
+| Guava Cache | Segmented LRU | ~200k ops/sec | Medium | Built-in stats | Legacy codebases |
+| **Caffeine** | W-TinyLFU | ~650k ops/sec | Medium | Lock-free reads, scan-resistant | In-process production standard |
+| Redis `allkeys-lru` | Approximate LRU | Millions/sec (cluster) | Distributed | Multi-JVM, TTL built-in | Shared cache across services |
+| Memcached | True LRU per slab | Millions/sec | Distributed | Simple protocol | Read-heavy, object store |
+| Hazelcast near-cache | LRU / LFU | ~500k ops/sec | Distributed | Cross-JVM invalidation | Need consistency guarantees |
 
-```
-Payload:        10,000,000 entries x 500 bytes avg value = 5,000,000,000 = ~5.0 GB
-Per-entry overhead (LinkedHashMap.Entry on a 64-bit JVM, compressed oops):
-   object header        16 bytes
-   key/value/hash/next  references
-   before/after ptrs    (LinkedHashMap adds two extra refs for the access-order list)
-   ~24 bytes effective overhead per entry (conservative)
-Overhead:       10,000,000 x 24 bytes = 240,000,000 = ~240 MB
-Total live:     ~5.0 GB + ~0.24 GB = ~5.25 GB
-```
-
-### Heap sizing for G1GC
-
-```
-Rule of thumb: heap = cache_size x 1.5  (room for allocation, survivor space, headroom)
-heap = 5.25 GB x 1.5 = ~8 GB  ->  -Xmx8g
-
-G1GC at 8 GB:
-   target pause ~200ms default; a 5GB+ long-lived cache is mostly "old gen" survivors,
-   so keep allocation rate low (avoid per-get allocations) to limit mixed-GC pressure.
-   Consider -XX:MaxGCPauseMillis tuning and ensuring the cache lives in old gen quickly.
-```
-
-If 8 GB heap is unacceptable, move the cache off-heap (e.g., a byte-buffer backed store) or distribute it — see Evolution.
-
----
-
-## Benchmark Comparisons — Concurrency Strategy
-
-JMH-style, mixed 80/20 get/put, Zipfian key distribution, 32 threads, Java 17:
+JMH concurrency benchmark (32 threads, 80/20 get/put, Zipf distribution, Java 17):
 
 | Implementation | Throughput | Notes |
 |----------------|-----------|-------|
-| Single-lock `LinkedHashMap` (baseline) | ~45k ops/sec | Every `get` needs the write lock (access-order reorders the list) |
-| Segmented (16 segments) | ~320k ops/sec | Lock striping; ~7x baseline; per-segment LRU is approximate |
-| Caffeine (W-TinyLFU) | ~650k ops/sec | Lock-free reads via ring buffers; frequency+recency eviction |
-
-Why Caffeine's W-TinyLFU beats pure LRU on real workloads: production access follows a Zipf distribution — a few keys are extremely hot, a long tail is rarely touched. Pure LRU admits any recently-touched key and can evict a frequently-used key during a burst of one-time scans (cache pollution from a sequential scan). W-TinyLFU keeps a compact frequency sketch (Count-Min) and only admits a new key if it is estimated to be accessed more than the victim it would evict, giving scan resistance and a higher hit rate for the same capacity. Caffeine also records reads in per-thread ring buffers and replays them asynchronously, so `get` is effectively lock-free — eliminating the LRU reorder-on-read bottleneck that caps the single-lock design.
+| Single-lock `LinkedHashMap` | ~45k ops/sec | Every `get` holds write lock |
+| 16-segment `LinkedHashMap` | ~320k ops/sec | Approximate LRU per segment |
+| Caffeine W-TinyLFU | ~650k ops/sec | Per-thread ring buffer; async LRU drain |
 
 ---
 
-## Production War Stories
+## 8. Operational Playbook
 
-### War story 1 — LRU eviction thrashing (working set larger than cache)
+### a) Key metrics
 
-Symptom: hit rate below 5% despite a "large" cache; DB read load near 100%; cache CPU high from constant eviction churn.
+```java
+// Expose via Micrometer
+Gauge.builder("cache.size",        cache, c -> c.size())          .register(registry);
+Gauge.builder("cache.hit_rate",    cache, ThreadSafeLruCache::hitRate).register(registry);
+Counter.builder("cache.evictions").register(registry);   // increment in removeEldestEntry
+Counter.builder("cache.loads")    .register(registry);   // increment in getOrLoad on miss
+Timer.builder("cache.load.latency").register(registry);  // time the loader.get() call
+```
 
-BROKEN — cache sized far below the working set, so every access evicts something still needed:
+Alert thresholds:
+- `cache.hit_rate < 0.50` sustained > 5 min → working set exceeds capacity; resize or investigate access pattern change
+- `cache.load.latency p99 > 500 ms` → loader (DB) is slow; check DB health and query plan
+- `cache.evictions` > expected rate × 3 → working set churn; consider frequency-based eviction
+
+### b) Distributed trace span
+
+```
+HTTP request span
+  └── cache.getOrLoad (5 ms total)
+        ├── cache.hit  (0.001 ms)    ← fast path: lock + LinkedHashMap.get
+        └── cache.miss.load (5 ms)   ← slow path: DB query
+```
+
+Tag every span with `cache.name`, `cache.result` (hit/miss/expired), `key.type`.
+
+### c) Incident Runbooks
+
+**Runbook 1 — Hit rate collapse after restart (cold-start stampede)**
+
+Symptom: `cache.hit_rate` drops to 0 after deploy; DB CPU spikes to 100%; latency collapses.
+
+Diagnosis: cache is empty (cold start); every concurrent request misses and calls the DB for the same hot keys simultaneously.
+
+Mitigation:
+1. Enable single-flight loading: only one DB call per key; other waiters join the same `CompletableFuture`.
+2. Add a startup warm-up: load top-N hot keys from Redis (write-through L2) before opening traffic.
+3. Ramp traffic behind the load balancer with a warm-up gate (canary receives 1% → 10% → 100% over 2 min).
+
+Resolution: implement write-through to Redis on every `put()` so the L2 survives restarts and absorbs misses during cache rebuild.
+
+---
+
+**Runbook 2 — Hit rate collapse due to working set growth**
+
+Symptom: `cache.hit_rate` trending down over days; `cache.evictions` rising.
+
+Diagnosis: working set grew beyond `maxSize` — new feature added more distinct hot keys than the cache can hold.
+
+Mitigation:
+1. Measure distinct-hot-key count via `HyperLogLog` on access log (Redis `PFADD`/`PFCOUNT`).
+2. Increase `maxSize` if heap budget allows, or switch to a larger host.
+3. If not: switch to W-TinyLFU (Caffeine) — better hit rate at same capacity for Zipfian access.
+
+---
+
+**Runbook 3 — Zero hit rate (hashCode/equals bug)**
+
+Symptom: `cache.hit_rate ≈ 0%` for a specific key type; DB hammered; no obvious traffic change.
+
+Diagnosis: check `cache.getOrLoad(key, loader)` — does the second `cache.get(key)` immediately after `put` return the value? If not, the key's `equals`/`hashCode` is broken.
+
+Mitigation: instrument: `assert cache.get(k) != null` immediately after `cache.put(k, v)`. Migrate the key class to a `record` (Java 16+) which auto-generates correct `equals` and `hashCode` from all components.
+
+---
+
+## 9. Common Pitfalls & War Stories
+
+### War story 1 — LRU eviction thrashing (working set exceeds cache)
+
+**Scenario**: product search service; cache max 10,000 entries; DB read load near 100%; cache hit rate 3%.
+
+BROKEN — cache sized far below the working set; every access evicts a key still needed:
 
 ```java
 // BROKEN: maxSize 10,000 but working set is ~200,000 distinct hot keys
 LruCache<Key, Value> cache = new LruCache<>(10_000);
-// Each access misses, loads, and evicts a key that will be needed momentarily.
-// Pure LRU + a scan over 200k keys => 100% miss after one pass (thrash).
+// Each request: miss → load from DB → evict a key that was just loaded 200ms ago
+// A sequential scan of 10,001 products evicts 100% of the cache in one pass (cache pollution)
 ```
 
-FIX — measure the working set, size to it, and switch to frequency-aware eviction:
+FIX — measure the working set; size to it; switch to scan-resistant eviction:
 
 ```java
-// FIX: size to working set; use Caffeine's W-TinyLFU for scan resistance
+// FIX: profile access patterns first; size to ≥ working set; use Caffeine for scan resistance
 Cache<Key, Value> cache = Caffeine.newBuilder()
-    .maximumSize(250_000)              // >= measured working set
-    .recordStats()                     // monitor hitRate() continuously
+    .maximumSize(250_000)              // >= measured hot-key count
+    .recordStats()                     // expose hitRate(), evictionCount() continuously
     .build();
-// W-TinyLFU refuses to evict a hot key just because a one-off scan touched a cold key.
+// W-TinyLFU: a sequential scan cannot evict a hot key because the scan's access frequency
+// is estimated at 0 and any hot key's estimate is > 0 → scan-resistant by design
 ```
 
-Lesson: a sub-5% hit rate is almost never "the cache is broken" — it is the working set exceeding capacity, or pure LRU being polluted by scans. Profile access patterns first; resize and choose frequency-based eviction second.
+**Root cause**: cache sized by "feel" (10k sounds large) not by measured working set. Sequential product-listing scans polluted pure LRU, evicting all the hot item-detail keys.
+**Impact**: DB read replicas at 98% CPU; p99 latency 2.3s vs 50ms target; 3 h to diagnose because no `hitRate()` metric was exposed.
 
-### War story 2 — equals()/hashCode() bug in the cache key
+---
 
-Symptom: cache hit rate ~0% for a specific key type; DB hammered; two "identical" lookups never coalesced.
+### War story 2 — `equals()`/`hashCode()` contract violation disabling the cache
 
-BROKEN — a value-object key overrides `equals` but not `hashCode` (or neither), so logically equal keys land in different buckets:
+**Scenario**: user session cache; hit rate 0%; DB hammered; identical-looking keys always missed.
+
+BROKEN — `equals` overridden but `hashCode` is inherited from `Object` (identity-based):
 
 ```java
-// BROKEN: equals overridden, hashCode NOT -> violates the equals/hashCode contract
+// BROKEN: equals overridden, hashCode NOT -> violates equals/hashCode contract
 final class CacheKey {
-    final String tenant; final long id;
-    CacheKey(String t, long id) { this.tenant = t; this.id = id; }
-    @Override public boolean equals(Object o) {
-        return o instanceof CacheKey k && k.tenant.equals(tenant) && k.id == id;
+    final String tenantId;
+    final long userId;
+    CacheKey(String t, long id) { this.tenantId = t; this.userId = id; }
+
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof CacheKey k && k.tenantId.equals(tenantId) && k.userId == userId;
     }
-    // hashCode() inherited from Object -> identity-based -> equal keys hash differently
+    // hashCode() not overridden → inherits Object.hashCode() → identity-based hash
 }
-// map.put(new CacheKey("acme", 7), v); map.get(new CacheKey("acme", 7)) -> MISS
+
+cache.put(new CacheKey("acme", 7), session);
+// key instance A: hashCode = 0x1a2b3c4d
+cache.get(new CacheKey("acme", 7));
+// key instance B: hashCode = 0x5e6f7a8b  ← different hash → different bucket → MISS
 ```
 
-FIX — always override both, consistently:
+FIX — use a Java 16 record, which auto-generates both:
 
 ```java
-// FIX (Java 16+ record gives correct equals/hashCode for free)
-record CacheKey(String tenant, long id) {}
-// records generate equals() AND hashCode() from all components -> equal keys hash equally.
-// Pre-16: override hashCode() = Objects.hash(tenant, id) alongside equals().
+// FIX: record generates equals() + hashCode() from all components automatically
+record CacheKey(String tenantId, long userId) {}
+
+cache.put(new CacheKey("acme", 7), session);
+cache.get(new CacheKey("acme", 7));  // same hashCode → same bucket → HIT
+// Pre-16 alternative: @Override hashCode() { return Objects.hash(tenantId, userId); }
 ```
 
-Lesson: the `equals`/`hashCode` contract is load-bearing for every hash-based cache. A missing or inconsistent `hashCode` silently disables the cache. Prefer records or `Objects.hash`/`Objects.equals` and never override one without the other.
+**Root cause**: the `equals`/`hashCode` contract requires: `a.equals(b) → a.hashCode() == b.hashCode()`. Violation causes hash-based collections to silently treat logically equal keys as different.
+**Impact**: effectively no caching; DB load 50× higher than necessary; issue took 6 h to find because the code "looked correct" — equals returned true in unit tests using the same instance.
 
 ---
 
-## Evolution / Scalability at 10x Load
+### Failure scenarios summary
 
-At 100M entries / 50GB working set, a single-JVM heap cache is no longer viable (GC and memory limits). The architecture tiers:
-
-```
-   App instance
-   +-----------------------------+
-   |  L1: local Caffeine cache   |  <- near-cache, microsecond hits, small (hot subset)
-   +-----------------------------+
-            | miss
-            v
-   +-----------------------------+
-   |  L2: Redis Cluster          |  <- sharded by key, ~0.5ms, large capacity
-   |  (slots 0-16383, N shards)  |     invalidation via pub/sub to L1
-   +-----------------------------+
-            | miss
-            v
-   +-----------------------------+
-   |  System of record (DB)      |
-   +-----------------------------+
-```
-
-1. Distributed cache (Redis Cluster) — shard the keyspace across nodes (16384 hash slots) so capacity scales horizontally; per-node LRU/LFU eviction. Accept independent eviction order per shard.
-2. L1 local + L2 remote (near-cache) — keep a small Caffeine L1 in each app for microsecond hits on the hottest keys, backed by Redis L2. Invalidate L1 via Redis pub/sub or short L1 TTLs to bound staleness.
-3. Near-cache consistency — the hard problem is L1 invalidation. Options: short L1 TTL (bounded staleness, simple), or pub/sub invalidation messages (fresher, more moving parts). Choose based on tolerance for stale reads.
-
-Technical debt to track: the in-process cache has no cross-node invalidation and its single-lock LRU caps concurrency. Before scaling out, instrument `hitRate()`/`evictionCount()` and migrate to Caffeine for L1; the hand-rolled `LinkedHashMap` cache is a teaching/embedded artifact, not a fleet-scale tier.
+| Failure | Symptom | Recovery | TTR |
+|---------|---------|---------|-----|
+| Cold start (restart) | DB stampede, hit rate 0% | Single-flight load + L2 warm-up | Minutes |
+| Working set > capacity | Eviction thrashing, hit rate < 30% | Resize or frequency-based eviction | On deploy |
+| `hashCode` contract violation | Hit rate ~0%, cache effectively disabled | Switch to `record` or fix `hashCode` | On deploy |
+| GC pressure (large cache) | GC pauses > 200ms | Use `SoftReference` or off-heap cache | Tune / redeploy |
+| TTL too short | Unnecessary DB churn, high miss rate | Tune TTL to match data freshness SLA | Config change |
 
 ---
 
-## Additional Interview Questions
+## 10. Capacity Planning
 
-**Q: Estimate the heap for a 10M-entry LRU cache with 500-byte values.**
-Payload is `10M x 500 bytes = 5.0 GB`; per-entry JVM overhead (object header plus the extra before/after references LinkedHashMap adds for access order) is roughly 24 bytes, so `10M x 24 = ~240 MB` more, totaling about 5.25 GB live. Apply a 1.5x factor for allocation and GC headroom, giving `-Xmx8g` on G1GC. If 8 GB is unacceptable, go off-heap or distributed.
+### Heap sizing for a large in-process cache
 
-**Q: Why does W-TinyLFU outperform pure LRU on production traffic?**
-Real access is Zipfian — a few hot keys, a long cold tail — and pure LRU is polluted by sequential scans that evict hot keys in favor of one-time touches. W-TinyLFU keeps a compact Count-Min frequency sketch and only admits a new key if it is likely hotter than the victim, giving scan resistance and a higher hit rate for the same capacity. It also makes reads effectively lock-free via per-thread ring buffers, removing the LRU reorder-on-read bottleneck.
+```
+entries = maxSize
+avg_value_bytes = (measure from profiler or estimate)
+payload = entries × avg_value_bytes
+entry_overhead = 56 bytes (LinkedHashMap.Entry on 64-bit JVM, compressed oops)
+live_heap = payload + (entries × entry_overhead)
+jvm_heap_size = live_heap × 1.5    (headroom for allocation + survivor + metaspace)
 
-**Q: Your cache hit rate is under 5%. What's wrong and how do you fix it?**
-Almost always the working set exceeds the cache capacity (so every access evicts a key you still need) or pure LRU is being thrashed by scans. Measure the distinct-hot-key count, size the cache to at least the working set, and switch to frequency-aware eviction (Caffeine) for scan resistance. It is rarely a code bug in the cache itself — though a broken key `hashCode` can also produce near-zero hits.
+Example: 10M entries × 500 B value = 5.0 GB payload + 0.56 GB overhead = 5.56 GB live
+         → -Xmx9g
+```
 
-**Q: How do you prevent a cold-start stampede after a cache restart?**
-Combine a persistent L2 (write-through to Redis) so misses don't reach the primary DB, single-flight loading (one DB call per key while others await the same future), and a startup warm-up that seeds the top-N most-accessed keys before taking full traffic. Optionally ramp traffic via the load balancer while the cache fills. This caps DB load to one load per key rather than one per concurrent request.
+### G1GC tuning for large old-gen caches
 
-**Q: What's the consistency challenge with an L1/L2 near-cache, and how do you bound it?**
-The L1 in each app can serve stale data after the underlying value changes, because writes go to L2/DB but L1 copies linger. Bound staleness with a short L1 TTL (simple, accepts a fixed staleness window) or invalidate L1 entries via Redis pub/sub on writes (fresher, but adds messaging and ordering concerns). Pick based on how much stale-read tolerance the use case allows.
+```
+A cache with 10M long-lived entries fills the old generation.
+G1 evacuates regions to compact the heap; if old-gen is full, it triggers
+a Full GC — STW for many seconds at 5+ GB heaps.
+
+Mitigations:
+  - Keep allocation rate low: avoid per-get object creation (e.g., don't allocate
+    a new wrapper on every hit)
+  - -XX:MaxGCPauseMillis=200 (default G1 target)
+  - -XX:G1HeapRegionSize=32m for large heaps (fewer regions to track)
+  - SoftReference wrapping: GC can reclaim cache entries during old-gen pressure,
+    preventing promotion failure / Full GC
+
+See [JVM Tuning & GC for Services](cross_cutting/jvm_tuning_and_gc_for_services.md)
+for the full G1/ZGC tuning checklist.
+```
+
+### Two-tier cache architecture
+
+```
+Working set: 100M entries × 500 B = 50 GB — exceeds single JVM heap budget.
+
+Solution: L1 + L2 tier
+  L1 (in-process Caffeine): top 500k hot keys = 250 MB heap — fits in 1 GB JVM
+  L2 (Redis Cluster):       full 100M entries = 50 GB across Redis nodes
+  DB (source of truth):     only miss path
+
+Capacity math:
+  L1 hit rate target: 80% (most traffic hits L1)
+  L2 handles remaining 20%: 100 req/sec × 0.20 = 20 Redis calls/sec
+  DB sees: 20 × (1 - L2 hit rate 0.95) = 1 DB call/sec ← negligible
+```
+
+---
+
+## 11. Interview Discussion Points
+
+**Q: How does `LinkedHashMap` implement LRU in O(1) time?**
+`LinkedHashMap` maintains a doubly-linked list overlay on its hash table. In `accessOrder=true` mode, every `get()` moves the accessed entry to the tail of the list — O(1) pointer manipulation. The head is always the least-recently-used entry. `removeEldestEntry()` is called after every `put()` and returns `true` when `size() > maxSize`; `LinkedHashMap` then removes the head entry in O(1). Total: O(1) lookup, O(1) LRU reorder, O(1) eviction.
+
+**Q: Why can't you use `ReentrantReadWriteLock` to improve LRU cache read throughput?**
+With `accessOrder=true`, `LinkedHashMap.get()` structurally modifies the doubly-linked list — it updates the `before` and `after` pointers of the accessed node and its neighbors. Two concurrent reads on the same node both try to set the same pointers, causing a data race and potential list corruption. Every `get()` must hold the exclusive write lock, giving zero concurrency benefit over a plain `synchronized` lock. Alternatives: (1) probabilistic LRU — skip reorder on `get()` with probability P; (2) `ConcurrentHashMap` + separate LRU list with its own lock (concurrent reads; list lock only for reorder); (3) Caffeine's per-thread ring buffers.
+
+**Q: What is the difference between `SoftReference` and `WeakReference` for cache values?**
+`SoftReference`: GC collects it only when the JVM is approaching heap exhaustion — ideal for caches, because entries survive while memory is comfortable. `WeakReference`: GC collects it at the *next* GC cycle regardless of memory availability — too aggressive for caches, since a GC immediately after `put` would evict all entries. For cache values: use `SoftReference`. For event-bus handlers or interned objects where you want GC to collect when the last strong reference disappears: use `WeakReference`.
+
+**Q: How does the double-check pattern in `getOrLoad()` work, and why is it needed?**
+Without it: `getOrLoad()` would hold the lock during the loader (DB call), serializing all threads waiting for any key — not just the same key. With double-check: (1) check outside lock (fast for already-cached keys); (2) acquire lock; (3) re-check (another thread may have loaded while waiting for the lock); (4) load if still absent; (5) release lock. This ensures at most one DB call per key while all other threads wait for the in-progress load without holding the lock.
+
+**Q: How do you prevent a thundering-herd stampede on cache restart?**
+Three layers: (1) single-flight loading — one DB call per key, other threads await the same `CompletableFuture`; (2) write-through L2 (Redis) — every `put` also writes to Redis so the L2 survives restarts and absorbs misses during rebuild; (3) startup warm-up — seed the top-N keys from Redis before accepting full traffic. The combination means DB sees at most N warm-up loads, not one load per concurrent request per key.
+
+**Q: Your cache hit rate is under 5%. What are the two most likely causes?**
+First: working set exceeds `maxSize` — every access evicts a key needed a moment later. Diagnose by measuring distinct-hot-key count (`HyperLogLog`); fix by resizing to ≥ working set and switching to W-TinyLFU for scan resistance. Second: broken `equals`/`hashCode` on the key class — logically equal keys hash to different buckets, so every `get()` is a miss. Diagnose by asserting `cache.get(k) != null` immediately after `cache.put(k, v)`; fix by migrating to a `record` (Java 16+).
+
+**Q: Why does Caffeine W-TinyLFU outperform pure LRU on production workloads?**
+Production access is Zipfian: a few keys extremely hot, a long tail rarely touched. Pure LRU is vulnerable to cache pollution: a sequential scan over a large dataset makes every scanned key "recently used" and evicts genuinely hot keys. W-TinyLFU maintains a compact Count-Min sketch estimating access frequency per key; it only admits a new key if its estimated frequency exceeds the eviction candidate's frequency — scan-resistant. Additionally, Caffeine's per-thread `StripedBuffer` ring buffers amortize LRU reorders asynchronously, making `get()` effectively lock-free at ~650k ops/sec vs ~45k for single-lock LRU.
+
+**Q: When would you move from an in-process cache to a distributed cache?**
+When the working set exceeds JVM heap budget (50 GB is common at scale), when multiple JVM instances need consistent invalidation (shared writes must propagate to all L1 caches), or when cache state must survive app restarts. The standard tier is: Caffeine L1 (hot subset, per-instance) → Redis Cluster L2 (full working set, shared) → DB (source of truth). Invalidate L1 on writes via Redis pub/sub or short L1 TTLs depending on staleness tolerance.
+
+**Q: What is the `equals`/`hashCode` contract, and how does violating it break a cache?**
+The contract: if `a.equals(b)` is true, then `a.hashCode() == b.hashCode()` must also be true. Violation means two logically equal keys compute different hash codes, placing them in different hash table buckets — so `get(newKey)` never finds the value stored under `put(differentInstanceSameContent)`. The cache is silently disabled — misses look like working code. Always override both together; use `record` (Java 16+) for value-type keys to get correct implementations generated automatically.
+
+**Q: How do you size a thread pool for a cache's async loader?**
+Async loading with `getOrLoad()` makes a DB call per miss. Model it as a queue: `threads = (miss_rate × avg_load_latency)`. At 100 misses/sec × 50 ms each: 100 × 0.05 s = 5 thread-seconds/s → 5 threads at 100% utilization. Apply 2× headroom → 10 threads, bounded queue at 100 tasks (10 seconds of slack), `CallerRunsPolicy` as backpressure to avoid unbounded queue growth. With Java 21 virtual threads, use `newVirtualThreadPerTaskExecutor()` and skip the sizing math entirely.
+
+**Q: How do you evolve the LRU cache to support multi-level invalidation across services?**
+Add a write-through path: every `put()` also writes to Redis (L2); every write to the canonical DB publishes an invalidation message to a Redis pub/sub channel. Each app instance subscribes to that channel and calls `cache.invalidate(key)` on receipt. For eventual consistency: short L1 TTL (bound staleness, simple); for stronger consistency: pub/sub invalidation (fresher, but pub/sub delivery is best-effort — combine with short TTL as fallback). This is the near-cache invalidation pattern used by Hazelcast, Coherence, and Redis enterprise.

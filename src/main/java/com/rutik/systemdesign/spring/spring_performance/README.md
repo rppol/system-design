@@ -981,6 +981,12 @@ server.tomcat.threads.max controls the maximum number of platform threads in Tom
 **Q: How do you detect and diagnose a GC pause contributing to high latency P99 in a Spring Boot application?**
 Enable JFR (Java Flight Recorder) with -XX:+FlightRecorder and -XX:StartFlightRecording=filename=app.jfr. JFR records GC events with pause durations at microsecond resolution and zero production overhead. In JFR output, look for GC pause events that correlate with latency spikes. Also useful: -XX:+PrintGCDetails -Xlog:gc*:file=gc.log for traditional GC logging. For G1GC (default since Java 9), a target pause time of 200ms is the default — tune with -XX:MaxGCPauseMillis=50 for lower latency at the cost of some throughput. ZGC (Java 15+ production ready) provides sub-millisecond pauses at the cost of slightly higher CPU overhead — add -XX:+UseZGC. In Spring Boot applications, common GC pressure sources are: large response objects materialized in memory, Jackson serialization of deep object graphs, and Hibernate first-level cache accumulating entities in long-running transactions. Use async-profiler in allocation mode (-e alloc) to find the top allocation sites.
 
+**Q: How does Spring Boot's GraalVM native image compilation affect startup time, memory usage, and what you give up?**
+GraalVM native image AOT compilation (Spring Boot 3.x + GraalVM) produces a platform-native binary with: startup time ~50ms (vs ~2–4s for JVM), memory footprint ~50–200MB RSS (vs ~300–800MB for JVM), and zero JIT warmup overhead — first-request latency is as good as steady-state. What you give up: (1) **Dynamic class loading/reflection** — all reflection must be declared via hints at build time; frameworks that rely on runtime class scanning (Hibernate envers, some JPA providers) require additional configuration. (2) **JIT optimisations** — peak throughput is typically 10–20% lower than a warmed-up JVM. (3) **Build time** — native compilation takes 2–10 minutes vs ~30 seconds for JAR. (4) **Platform-specific binary** — you must build on the same OS/arch as the deployment target (cross-compilation requires QEMU or Docker). Use native image for serverless/FaaS (AWS Lambda), CLI tools, and edge deployments where startup and memory dominate. Stay on JVM for long-running services where peak throughput and operational flexibility matter more.
+
+**Q: What is Spring Boot lazy initialisation (`spring.main.lazy-initialization=true`) and what are its risks?**
+Lazy initialisation defers bean creation until the bean is first requested (first HTTP request, first use) instead of initialising all beans at startup. Benefits: faster startup (relevant for tests and development), lower initial memory. Risks: (1) **Deferred failure** — a misconfigured bean that would fail at startup now fails on the first user request, potentially in production. (2) **Slow first request** — initialising expensive beans (HikariCP pool establishment, cache warm-up) on the first request adds latency visible to the user. (3) **Kubernetes readiness probes** — the pod reports ready before it is actually ready to serve traffic efficiently. Mitigation: only enable lazy initialisation for development and test; use it in production only for clearly isolated optional feature modules. For production startup-time optimisation, prefer GraalVM native image or class data sharing (`-XX:+UseSharedSpaces`) over lazy initialisation.
+
 ---
 
 ## 13. Best Practices
@@ -1276,3 +1282,11 @@ spring:
 **What are the trade-offs of GraalVM Native Image for a Spring Boot service?** Native images compile ahead-of-time: startup drops from seconds to milliseconds, memory footprint shrinks 60-70%. The cost: JIT compilation is unavailable (peak throughput ~10-15% lower than warmed JVM), reflection requires explicit hints (`@RegisterReflectionForBinding`, `reflect-config.json`), build time is 3-5 minutes vs. 15 seconds, and runtime profiling (JFR, async-profiler) has limited support. Best fit: serverless functions, batch jobs that start/stop frequently, or microservices where memory cost dominates.
 
 **How does lazy initialization interact with health checks on startup?** With `spring.main.lazy-initialization=true`, beans initialize on first use. A readiness probe that calls `/actuator/health` before the first real request will get a "healthy" response — but the first real request hits cold beans and can be slow. For production, warm up critical paths in an `ApplicationReadyEvent` listener or use a dedicated readiness probe that exercises the critical bean path.
+
+---
+
+## Related / See Also
+
+- [Spring Boot Actuator](../spring_boot_actuator/README.md) — metrics, GraalVM native
+- [Observability & Tracing](../observability_and_tracing/README.md) — tracing overhead
+- [Structured Concurrency & Loom (Java)](../../java/structured_concurrency_and_loom/README.md) — virtual threads

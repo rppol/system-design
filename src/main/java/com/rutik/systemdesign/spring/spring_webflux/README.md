@@ -1011,3 +1011,11 @@ public Mono<Vehicle> getVehicle(@PathVariable String id) {
 **What is the difference between flatMap and concatMap in Reactor?** `flatMap` subscribes to inner publishers eagerly and merges results in arrival order — fast but unordered. `concatMap` subscribes to inner publishers sequentially — slower but preserves ordering. Use `flatMap` for independent I/O calls (enrichment API calls), `concatMap` when order matters (ordered event processing, sequential DB writes).
 
 **How do you propagate reactive context across service boundaries?** Use `Context` (Reactor's immutable key-value store) propagated automatically through the subscription chain. For HTTP headers (trace IDs), Spring's reactive WebClient supports `ExchangeFilterFunction` that reads from context and sets headers. Never use `ThreadLocal` in reactive code — the thread executing a step changes across operators; use `Mono.deferContextual` to read context at subscription time.
+
+---
+
+## Related / See Also
+
+- [Spring MVC Architecture](../spring_mvc_architecture/README.md) — Servlet stack comparison
+- [Spring Messaging](../spring_messaging/README.md) — reactive Kafka with WebFlux
+- [Concurrency (Java)](../../java/concurrency/README.md) — virtual threads vs reactive

@@ -1041,3 +1041,11 @@ public class SecurityAuditListener {
 - Admin portal uses sessions (supports forced logout, concurrent session control) while APIs remain fully stateless.
 - All authentication events feed a centralized audit log without polluting business logic.
 - Integration tests use `@WithMockUser(roles = "ADMIN")`, `@WithUserDetails`, and custom `SecurityMockMvcRequestPostProcessors` for API key headers, covering all three chains.
+
+---
+
+## Related / See Also
+
+- [Filters & Interceptors](../filters_and_interceptors/README.md) — security filter chain
+- [Spring Security JWT & OAuth2](../spring_security_jwt_oauth/README.md) — JWT resource server
+- [Case Study: OAuth2 Authorization Server](../case_studies/design_oauth2_authorization_server.md) — Spring Auth Server

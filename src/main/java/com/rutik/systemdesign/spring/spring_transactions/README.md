@@ -1130,3 +1130,11 @@ public SettlementResult settle(Payment p) { ... }
 **When should you use REQUIRES_NEW vs NESTED propagation?** `REQUIRES_NEW` suspends the current transaction and starts a completely independent one — fully isolated, commits and rolls back independently. Use for audit writes that must persist even if the outer tx rolls back. `NESTED` uses a savepoint within the current transaction — rolls back to the savepoint on failure but the outer tx can still commit. Use when you want partial rollback within one transaction (e.g., retry a sub-step without losing all prior work). Postgres supports `NESTED` (via savepoints); not all databases do.
 
 **What is the risk of REQUIRES_NEW with high transaction volume?** Each `REQUIRES_NEW` opens a new connection from the pool. If 80 settlement threads each fire a `REQUIRES_NEW` audit, that's 160 total connections — doubling HikariCP pool pressure. Size the pool accounting for nested transactions, or use `@TransactionalEventListener(AFTER_COMMIT)` which runs after the outer connection is released.
+
+---
+
+## Related / See Also
+
+- [Spring Data JPA](../spring_data_jpa/README.md) — @Transactional on repositories
+- [Spring Proxies](../spring_proxies/README.md) — self-invocation issue
+- [Case Study: Idempotent Payment API](../case_studies/design_idempotent_payment_api.md) — transactional outbox

@@ -514,6 +514,61 @@ Visitor solves "add an operation to a type hierarchy without modifying each type
 **Q12: What is the Immutable Object concurrency pattern and why does it eliminate synchronization?**
 An immutable object has no mutable state after construction: all fields are `final`, no setters, all methods are pure functions that return new objects rather than modifying state. Because the object can never change, threads can share it freely without synchronization — there is no write that could conflict with a read, so the happens-before rules are irrelevant. Examples: `String`, `BigDecimal`, Java `record`s. Construction must be done carefully: all fields must be set before the reference escapes the constructor (`this` must not be passed to other threads inside the constructor).
 
+**Q13: How does the Decorator pattern differ from inheritance, and how does Java I/O use it in practice?**
+Inheritance is compile-time, static, and "is-a" — a subclass permanently adds behaviour. Decorator is runtime, dynamic, and "wraps-a" — a Decorator holds a reference to the decorated component and delegates, adding behaviour before/after the delegation. The critical advantage: behaviours can be stacked in any combination without a class explosion. Java I/O is the canonical Decorator example:
+
+```
+InputStream (Component interface)
+  |-- FileInputStream          (Concrete Component — reads bytes from file)
+  |-- FilterInputStream        (Abstract Decorator — wraps InputStream)
+       |-- BufferedInputStream (Concrete Decorator — adds buffering)
+       |-- GZIPInputStream     (Concrete Decorator — adds decompression)
+
+// Stacked: read a gzip-compressed, buffered file
+InputStream in = new GZIPInputStream(new BufferedInputStream(new FileInputStream("data.gz")));
+```
+
+Pitfall: `instanceof` checks on a decorated object fail (a `BufferedInputStream` is not a `FileInputStream`) — avoid coupling code to concrete types in a Decorator chain.
+
+**Q14: What is the Command pattern and how do you add undo/redo functionality to it?**
+Command encapsulates a request as an object, separating the invoker (who triggers the action) from the receiver (who executes it). For undo/redo, each `Command` exposes both `execute()` and `undo()`, and the invoker maintains an `executeStack` and an `undoStack`:
+
+```java
+interface Command {
+    void execute();
+    void undo();
+}
+class TextEditor {
+    private final Deque<Command> history = new ArrayDeque<>();
+    private final Deque<Command> redoStack = new ArrayDeque<>();
+
+    void execute(Command cmd) {
+        cmd.execute();
+        history.push(cmd);
+        redoStack.clear(); // new action invalidates redo history
+    }
+    void undo() {
+        if (!history.isEmpty()) {
+            Command cmd = history.pop();
+            cmd.undo();
+            redoStack.push(cmd);
+        }
+    }
+    void redo() {
+        if (!redoStack.isEmpty()) {
+            Command cmd = redoStack.pop();
+            cmd.execute();
+            history.push(cmd);
+        }
+    }
+}
+```
+
+Lambda expressions can implement single-method `Command` for simple actions. For undo, pair two lambdas: `new LambdaCommand(() -> doSomething(), () -> undoSomething())`.
+
+**Q15: What is the Flyweight pattern, and where does the JDK use it concretely?**
+Flyweight shares one instance of an object among many contexts that need the same value, saving memory. The shared state (intrinsic) is stored in the flyweight; the per-context state (extrinsic) is passed on each call. JDK examples: (1) **String pool** — `String.intern()` returns the canonical instance; all string literals are interned automatically. (2) **Integer/Long/Short/Byte/Character cache** — `Integer.valueOf(n)` returns a cached instance for n ∈ [−128, 127]. (3) **`Boolean.TRUE` / `Boolean.FALSE`** — two singletons; `Boolean.valueOf(true)` never allocates. (4) **`Font` in AWT** — glyph bitmaps are shared flyweights; x/y position is extrinsic. Interview angle: the Integer cache is Flyweight in disguise — describe it in those terms and it reads much better than "it's just a cache." Limitation: Flyweights cannot have mutable intrinsic state; any mutation would affect all users simultaneously.
+
 ---
 
 ## 13. Best Practices
@@ -644,5 +699,13 @@ for (OrderListener l : listeners) {
 **What problem does the Facade solve that the other four patterns do not?** It collapses a six-subsystem orchestration into a single coarse-grained `placeOrder` call, decoupling clients from subsystem wiring and ordering; the internal patterns handle variation, while the Facade handles the surface area clients depend on.
 
 **When does combining patterns become an anti-pattern?** When the indirection exceeds the variability it serves — applying Strategy, Factory, and Builder to a class with one implementation that never changes adds layers, interfaces, and cognitive load with no payoff; patterns earn their keep only where a real axis of change exists.
+
+---
+
+## Related / See Also
+
+- [Java Interview Patterns](../java_interview_patterns/README.md) — interview-focused subset: immutable class, Builder, enum singleton, factory method
+- [Case Study: DI Container](../case_studies/design_di_container_java.md) — IoC pattern implemented end-to-end in Java
+- [Case Study: Event Bus](../case_studies/design_event_bus.md) — Observer pattern applied to a production-grade event bus
 
 **How do you keep Strategy and Observer thread-safe at 50 orders/sec peak?** Strategies must be stateless (all per-request data passed as arguments), and the observer list should be a `CopyOnWriteArrayList` so concurrent fan-out reads never collide with rare subscribe/unsubscribe writes; listeners themselves must be idempotent and order-independent.

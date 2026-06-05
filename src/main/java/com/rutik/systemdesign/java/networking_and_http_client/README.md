@@ -394,6 +394,64 @@ With virtual threads (Java 21), blocking I/O calls like `socket.read()` are reim
 **Q10: What happens to in-flight `HttpClient` requests when the application shuts down?**
 `HttpClient` implements `AutoCloseable` (Java 21). If not explicitly closed, the client's internal connection pool and executor survive until GC. For clean shutdown: call `client.close()` (Java 21) which waits for in-flight requests to complete then closes connections, or `client.shutdown()` (Java 21) which initiates graceful shutdown and returns a `CompletableFuture<Void>` completing when done. In Java 11-20, there is no `close()` method — shutdown is handled by the provided executor's shutdown. Best practice: use a custom executor so you control its lifecycle independently of the `HttpClient`.
 
+**Q11: How does `Selector`-based NIO differ from a thread-per-connection model, and what did Java 21 virtual threads change?**
+Thread-per-connection: one OS platform thread per socket (~1 MB stack, ~2,000 practical limit per JVM). `Selector`-based NIO: one or a few threads call `select()`, which returns only channels with pending I/O — each thread handles thousands of connections via a state machine per channel. NIO scales to 100k+ connections with fixed threads but requires explicit non-blocking state machines (complex code). Java 21 virtual threads change the calculus: they are lightweight (~few KB stack, millions possible) and automatically yield when blocked on I/O — giving you thread-per-connection's simple programming model with NIO's scalability. New server code should use virtual threads; NIO remains essential for understanding existing high-performance libraries (Netty, gRPC) and situations where sub-millisecond event-loop latency is required.
+
+**Q12: What is the `SelectionKey.OP_WRITE` pitfall and how does it cause a 100 % CPU spin?**
+`OP_WRITE` fires whenever the socket's outbound buffer has space — which is almost always true for a healthy connection. If you register `OP_WRITE` and forget to deregister it after the write completes, `Selector.select()` returns immediately every iteration, burning 100 % CPU in a tight loop. The correct pattern:
+
+```java
+// BROKEN: always registered, spins at 100% CPU
+channel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE);
+
+// FIXED: register OP_WRITE only when there is data to write; remove it when done
+// When you have data to send:
+key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
+// Inside the OP_WRITE handler, after writing:
+if (buffer.remaining() == 0) {
+    key.interestOps(key.interestOps() & ~SelectionKey.OP_WRITE); // deregister
+}
+```
+
+Practical guidance: always profile selector-loop CPU usage in load tests; a 100 % core indicates an always-ready `OP_WRITE` registration.
+
+**Q13: How do you implement retry with exponential backoff for `HttpClient.sendAsync()` without blocking executor threads?**
+
+```java
+// BROKEN: sleeping inside thenCompose blocks the executor thread
+client.sendAsync(request, BodyHandlers.ofString())
+    .thenCompose(resp -> {
+        if (resp.statusCode() == 503) {
+            Thread.sleep(1000); // blocks fork-join thread
+            return client.sendAsync(request, BodyHandlers.ofString());
+        }
+        return CompletableFuture.completedFuture(resp);
+    });
+
+// FIXED: use delayedExecutor (Java 9) — no thread blocked during the delay
+static CompletableFuture<HttpResponse<String>> sendWithRetry(
+        HttpClient client, HttpRequest req, int attempt, ScheduledExecutorService sched) {
+    return client.sendAsync(req, BodyHandlers.ofString())
+        .thenCompose(resp -> {
+            if (resp.statusCode() < 500 || attempt >= 4) {
+                return CompletableFuture.completedFuture(resp);
+            }
+            long delayMs = (1L << attempt) * 100 + ThreadLocalRandom.current().nextLong(50);
+            var delayedExec = CompletableFuture.delayedExecutor(delayMs, MILLISECONDS, sched);
+            return CompletableFuture.supplyAsync(() -> null, delayedExec)
+                .thenCompose(ignored -> sendWithRetry(client, req, attempt + 1, sched));
+        });
+}
+```
+
+`CompletableFuture.delayedExecutor` (Java 9) defers execution without blocking — no thread sits idle during the backoff delay.
+
+**Q14: What is HTTP/2 server push and why did most browsers and `HttpClient` abandon it?**
+HTTP/2 server push allows the server to proactively send resources to the client before the client requests them (e.g., pushing `style.css` when it sees `GET /index.html`). Java `HttpClient` supported it via `PushPromiseHandler`. In practice, server push proved harmful: the server often pushes resources the client already has cached, wasting bandwidth and causing cache collisions. Chrome removed server push support in 2022. `HttpClient`'s push API still exists but should not be used for new systems. The more useful HTTP/2 feature is multiplexed request pipelining — many concurrent requests over one connection — which `HttpClient` uses automatically when negotiated via ALPN.
+
+**Q15: How do you diagnose and fix connection pool exhaustion in `HttpClient` under high concurrency?**
+`HttpClient` uses an internal connection pool with no built-in metrics exposed via JMX or Micrometer. Symptoms of exhaustion: requests queue up, p99 latency spikes, `HttpTimeoutException` at `request.timeout()`. Diagnosis steps: (1) enable JDK HTTP client logging with `-Djdk.httpclient.HttpClient.level=ALL`; (2) check if target server closes connections early (look for `GOAWAY` in HTTP/2 or `Connection: close`); (3) measure actual concurrency — if `sendAsync()` is called with 1,000 unbounded `CompletableFuture`s, all 1,000 requests compete for pool slots. Fix: use a `Semaphore` to bound concurrent in-flight requests to a sensible limit (e.g., 50 per host); drain results before issuing more. For HTTP/2, confirm the server advertises `MAX_CONCURRENT_STREAMS` and that the client respects it — Java's `HttpClient` does respect the server's `MAX_CONCURRENT_STREAMS` setting automatically.
+
 ---
 
 ## 13. Best Practices
@@ -508,5 +566,13 @@ A blocking `send()` on a *virtual thread* (Java 21) is fine — it unmounts from
 **Why is blocking `send()` dangerous on the common ForkJoinPool but fine on a virtual thread?** The common pool has a small fixed number of carrier threads; a blocked `send()` pins one and starves all other parallel work. A virtual thread unmounts from its carrier while blocked on I/O, so thousands can block concurrently without consuming platform threads — making blocking the simpler, correct choice in Java 21.
 
 **How do you handle a `SSLHandshakeException` for a missing intermediate cert correctly?** Build a custom `SSLContext` initialized with a trust manager that contains the full chain (intermediate + root) and pass it to the client; disabling certificate validation to "make it work" turns a config bug into a man-in-the-middle vulnerability.
+
+---
+
+## Related / See Also
+
+- [JDBC & Database](../jdbc_and_database/README.md) — connection pooling patterns and pool sizing (same principles apply to HTTP pools)
+- [Concurrency](../concurrency/README.md) — async HTTP with CompletableFuture, non-blocking I/O patterns
+- [Case Study: Connection Pool](../case_studies/design_connection_pool.md) — full connection pooling design applicable to both DB and HTTP connections
 
 **Why prefer `sendAsync` over wrapping `send` in your own threads?** `sendAsync` uses the client's non-blocking I/O and its managed executor, returning a `CompletableFuture` you can compose (`allOf`, `thenApply`, `orTimeout`) without dedicating a thread per in-flight request, which is both more scalable and less error-prone than hand-rolled threading around the blocking API.

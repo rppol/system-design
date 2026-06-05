@@ -944,6 +944,25 @@ A high prefetchCount (e.g., 250, the old default) causes the broker to send up t
 **Q: How do you test a Kafka consumer in a Spring Boot integration test?**
 Use Testcontainers with KafkaContainer to start a real Kafka broker in Docker. Annotate the test class with @Testcontainers and @SpringBootTest. Use @DynamicPropertySource to set spring.kafka.bootstrap-servers to the container's mapped port. Publish messages using KafkaTemplate in the test and verify consumer behavior via assertions on the database or a CountDownLatch that the listener decrements. For unit tests of listener logic, test the handler method directly without Spring context overhead. The EmbeddedKafkaBroker (@EmbeddedKafka) is an alternative that avoids Docker but is less production-representative.
 
+**Q: What is exactly-once semantics in Kafka and how does Spring Kafka's `@Transactional` integration achieve it?**
+Kafka's exactly-once semantics (EOS) prevents duplicates and lost messages across a produce → consume → produce pipeline. Spring Kafka supports EOS via `KafkaTransactionManager` and Spring's `@Transactional`. When enabled: (1) The `KafkaProducer` is configured as an idempotent transactional producer (`enable.idempotence=true`, `transactional.id=...`). (2) `@Transactional` on a `@KafkaListener` method wraps the entire consume-process-produce in a single Kafka transaction — the consumer offset commit and the downstream produce are both included in the transaction. If the method throws, both the offset commit and any produced messages are rolled back. On retry, the consumer re-processes the same message. Config: `spring.kafka.producer.transaction-id-prefix=tx-` and `spring.kafka.consumer.isolation-level=read_committed` (consumers only see committed messages). Limitation: EOS adds ~20–30% throughput overhead and requires a Kafka broker ≥ 0.11.
+
+**Q: What is Spring AMQP's dead letter exchange (DLX) pattern and how do you implement retry with backoff?**
+A dead letter exchange receives messages that are rejected (NACK + requeue=false), expired (TTL), or overflow a queue limit. Configure a per-queue DLX: when a `@RabbitListener` throws and exhausts retries, Spring AMQP sends the message to the DLX with the original exchange/routing key as dead-letter headers. Retry with backoff: configure `RetryInterceptorBuilder.stateless()` (or stateful for commit semantics) on the listener container with exponential back-off (`ExponentialBackOffPolicy`). After max attempts, the interceptor calls the recoverer which publishes to the DLQ. Production pattern:
+
+```yaml
+# Queue definition: original queue with 3-retry DLX
+queue: orders.processing
+arguments:
+  x-dead-letter-exchange: orders.dlx
+  x-dead-letter-routing-key: orders.failed
+```
+
+The DLQ is consumed by a separate listener for manual review or republish after the downstream issue is resolved. Always set `defaultRequeueRejected=false` on the listener container when using DLX — otherwise rejected messages re-enter the queue indefinitely.
+
+**Q: How do `@Async` methods interact with Spring transactions and what is the "lost transaction context" problem?**
+`@Async` executes the annotated method on a separate thread from a `TaskExecutor`. Spring's `@Transactional` stores the transaction in a `ThreadLocal` (via `TransactionSynchronizationManager`). When a `@Transactional` method calls an `@Async` method, the async method runs on a different thread — it has no access to the caller's `ThreadLocal` transaction context. Consequences: (1) The async method starts a new transaction (if `@Transactional` is present), independent of the caller's transaction. (2) If the caller rolls back, the async method's already-committed transaction is NOT rolled back — you have an orphaned write. Fix for tight coupling: use `@TransactionalEventListener(phase = AFTER_COMMIT)` — the event listener fires only after the outer transaction commits successfully, and runs asynchronously via `@Async` without needing to participate in the outer transaction. This is the correct pattern for triggering async side effects (emails, notifications) after a database write.
+
 ---
 
 ## 13. Best Practices
@@ -1122,3 +1141,11 @@ ThreadPoolTaskExecutor notifyExecutor() {
 **Why does `@Async` lose the trace context, and how do you fix it?** `@Async` runs the method on a different thread, and `MDC` is thread-local, so the worker thread starts with an empty MDC and logs lose the `traceId`. A `TaskDecorator` copies the caller's MDC into the worker before running and clears it afterward.
 
 **How do you size the consumer's `max.poll.records` and `max.poll.interval.ms`?** Set `max.poll.records` so that batch processing time stays well under `max.poll.interval.ms`; otherwise the broker considers the consumer dead and triggers a rebalance storm. At ~45ms/event, a poll of 50 records (~2.3s) is safely under the default 5-minute interval.
+
+---
+
+## Related / See Also
+
+- [Spring Batch](../spring_batch/README.md) — event-driven batch triggers
+- [Spring Events & Scheduling](../spring_events_and_scheduling/README.md) — @TransactionalEventListener
+- [Case Study: Event-Driven Microservice](../case_studies/design_event_driven_microservice.md) — Kafka integration

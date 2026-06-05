@@ -492,6 +492,45 @@ When a `Runnable` submitted to an `ExecutorService` throws an unchecked exceptio
 **Q12: What is `@RepeatedTest` useful for and how does it differ from `@ParameterizedTest`?**
 `@RepeatedTest(n)` runs the same test method n times with no argument variation. Use it for: (1) Tests with random inputs (property-based testing style) where you want to exercise many random values. (2) Tests for eventually consistent behavior where you want to verify it passes consistently. (3) Performance tests or flakiness detection runs. `@ParameterizedTest` is for explicit different inputs — each invocation gets a distinct argument combination. `@RepeatedTest` is for running the same test repeatedly. Each repetition has a `RepetitionInfo` parameter you can inject to track which repetition is running.
 
+**Q13: What is the difference between `@Mock` and `@Spy` in Mockito, and when should you use each?**
+`@Mock` creates a completely fake object — all methods return default values (null, 0, false) unless stubbed. No real code from the original class is ever called. `@Spy` wraps a real instance — unstubbed methods invoke the real implementation; only explicitly stubbed methods are intercepted. Use `@Mock` by default for collaborators you want to fully control. Use `@Spy` when you need the real implementation for most methods but want to intercept specific ones — typically for partial mocking of legacy code or when you need to verify real side effects while controlling one method:
+
+```java
+@Mock  UserRepository mockRepo;  // all methods return null unless stubbed
+@Spy   EmailService spyEmail = new EmailService(); // real methods called unless stubbed
+
+// Stub only sendAlert(), let everything else run real
+doNothing().when(spyEmail).sendAlert(any()); // use doNothing/doReturn with Spy, not when().thenReturn()
+// BROKEN with Spy: when(spyEmail.sendAlert(any())).thenReturn(...) calls the real method before stubbing
+```
+
+**Q14: How do you capture and assert on method arguments using `ArgumentCaptor`?**
+`ArgumentCaptor` lets you capture the actual arguments passed to a mock method for detailed assertion — better than an `eq()` matcher when the argument is a complex object constructed inside the code under test:
+
+```java
+@Captor ArgumentCaptor<Order> orderCaptor;
+
+// Act
+orderService.placeOrder(userId, items);
+
+// Capture and assert
+verify(orderRepository).save(orderCaptor.capture());
+Order savedOrder = orderCaptor.getValue();
+assertThat(savedOrder.getUserId()).isEqualTo(userId);
+assertThat(savedOrder.getItems()).hasSize(3);
+assertThat(savedOrder.getStatus()).isEqualTo(Status.PENDING);
+```
+
+For multiple invocations, use `orderCaptor.getAllValues()` to get a `List<Order>`. Prefer `ArgumentCaptor` over over-specified `eq()` matchers for value objects that lack a custom `equals()` — it lets you assert on individual fields rather than needing exact equality.
+
+**Q15: What are the five test double types and when is each appropriate?**
+Martin Fowler's taxonomy (from xUnit Test Patterns):
+1. **Dummy** — passed as a placeholder, never called. Use for required method parameters that are irrelevant to the test.
+2. **Stub** — returns canned values. Use to isolate the SUT from slow/external collaborators (DB, HTTP). `when(repo.findById(1L)).thenReturn(Optional.of(user))`.
+3. **Fake** — a working implementation with simplified logic (e.g., `HashMap`-backed in-memory repository). Use when Stub becomes complex or for integration-style unit tests.
+4. **Spy** — wraps a real object and records calls. Use to verify that specific methods were called on an otherwise real implementation.
+5. **Mock** — a pre-programmed object with strict expectations; fails if unexpected calls happen or expected calls don't occur. Mockito's `@Mock` is a stub by default; add `verify()` to make it a mock. **Practical rule**: prefer stubs for "tell-don't-ask" APIs; use mocks (with `verify`) only for side effects you must assert on (emails sent, events published, DB writes). Over-mocking — asserting on every method call — makes tests brittle to refactoring.
+
 ---
 
 ## 13. Best Practices
@@ -620,5 +659,12 @@ service = new PaymentService(gateway, auditRepo, fraudDetector);
 **What is strict stubbing and why does `MockitoExtension` enable it?** Strict stubbing fails the test if a `when(...).thenReturn(...)` is never used (`UnnecessaryStubbingException`), catching dead setup and tests that drifted from the code they exercise; it pushes you toward stubbing only what the path under test actually calls.
 
 **How do you verify an ordering constraint between mocks?** Use `InOrder` over the relevant mocks and call `verify` on it in sequence; this proved the fraud check runs before the costly gateway call, a business rule that a set of unordered `verify` calls would not enforce.
+
+---
+
+## Related / See Also
+
+- [Concurrency](../concurrency/README.md) — concurrent test patterns, thread-safety verification strategies
+- [JDBC & Database](../jdbc_and_database/README.md) — integration test patterns for database code, Testcontainers usage
 
 **Why does the test pyramid put 80% of tests at the unit level?** Unit tests are the cheapest to run and the most precise at localizing failures; integration and e2e tests are slower and flakier, so you keep them few and reserve them for wiring and contract coverage that mocks cannot prove — inverting the ratio (the "ice-cream cone") yields slow, brittle suites.

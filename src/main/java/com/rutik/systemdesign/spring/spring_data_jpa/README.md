@@ -994,3 +994,11 @@ A related trap is `LazyInitializationException`: accessing `order.getItems()` in
 **How do `Specification` objects avoid SQL injection and stay composable?** They build a JPA Criteria tree (parameterized, type-checked) rather than concatenating strings, so user input always flows through bind parameters. Returning `null` from a spec means "no constraint," letting you compose only the filters the user actually supplied via `Specification.where(...).and(...)`.
 
 **What causes `LazyInitializationException` and how do you prevent it?** It happens when a lazy association is accessed after its Hibernate session/transaction has closed (commonly in the view layer). Prevent it by fetching the needed associations within the transaction (`JOIN FETCH`/`@EntityGraph`) or by mapping to a DTO before the transaction ends. Enabling `open-in-view` masks the symptom but holds connections open across rendering and is an anti-pattern at scale.
+
+---
+
+## Related / See Also
+
+- [Spring Transactions](../spring_transactions/README.md) — @Transactional on repositories
+- [Spring Caching](../spring_caching/README.md) — caching JPA query results
+- [JDBC & Database (Java)](../../java/jdbc_and_database/README.md) — underlying JDBC

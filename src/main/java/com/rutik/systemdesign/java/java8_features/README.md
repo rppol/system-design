@@ -400,6 +400,9 @@ A variable captured by a lambda must be effectively final — either explicitly 
 **Q14: Why prefer `IntStream` over `Stream<Integer>` in performance-critical paths?**
 `Stream<Integer>` requires boxing every primitive `int` into a heap-allocated `Integer` object. For 1M integers: 1M `Integer` allocations, GC pressure from short-lived objects, and CPU time for boxing/unboxing at every operation. `IntStream` stores elements as bare `int` primitives — no boxing, no heap allocation, cache-friendly. JMH benchmarks consistently show `IntStream` 5-10x faster than `Stream<Integer>` for numeric workloads. The standard library provides `IntStream`, `LongStream`, and `DoubleStream` for this reason. Always use `mapToInt()`/`mapToLong()`/`mapToDouble()` to convert to primitive streams when processing numbers.
 
+**Q15: What is the difference between `Optional.of()`, `Optional.ofNullable()`, and `Optional.empty()`, and what are the anti-patterns for `Optional` usage?**
+`Optional.of(value)` throws `NullPointerException` if `value` is null — use when you know the value is non-null and want to fail-fast. `Optional.ofNullable(value)` wraps null as `Optional.empty()` — use when the value may legitimately be null. `Optional.empty()` returns the canonical empty instance (a singleton). Common anti-patterns: (1) **Using `Optional.get()` without `isPresent()` check** — throws `NoSuchElementException`, defeating the purpose; use `orElse()`, `orElseGet()`, or `orElseThrow()` instead. (2) **`Optional` as a method parameter** — forces callers to wrap values; use overloading or nullable parameters. (3) **`Optional` as a field** — `Optional` is not `Serializable`, making the class non-serializable; use nullable field with a `getX()` returning `Optional`. (4) **Unnecessary `isPresent()` + `get()`** — use `map()`/`flatMap()` for transformations. The canonical use case for `Optional` is as a return type for a method that may have no result, explicitly communicating the absence to the caller.
+
 ---
 
 ## 13. Best Practices
@@ -549,5 +552,13 @@ Address a = list.stream().filter(Address::isPrimary).findFirst()
 **Why is `averagingDouble`/`summingDouble` preferable to mapping then averaging manually?** The downstream collector folds each element directly into the running aggregate in a single traversal, avoiding an intermediate collection and keeping the operation parallel-safe via the collector's combiner.
 
 **Does the Stream rewrite hurt throughput at 10M records/day?** No meaningfully — at ~115 records/sec sustained the bottleneck is I/O and downstream calls, not stream overhead, and JMH showed the in-memory transform within ~5% of a hand loop. The correctness and readability gains dominate, which is the typical real-world tradeoff for Java 8 stream adoption.
+
+---
+
+## Related / See Also
+
+- [Java Streams — Deep Dive](../java_streams/README.md) — full stream internals, Spliterator, parallel splitter mechanics
+- [Functional Programming](../functional_programming/README.md) — function composition, custom Collectors, memoization
+- [Java 9–21 Features](../java9_to_21_features/README.md) — records, sealed classes, virtual threads building on Java 8 foundations
 
 **When would you keep an imperative loop instead?** For tight numeric inner loops where you need fine control over allocation and early-exit, or where a stream's lambda capture and boxing would add overhead the JIT cannot remove. Profile with JMH before assuming streams are slower — they usually are not for I/O-bound ETL.

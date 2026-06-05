@@ -1318,3 +1318,11 @@ public class InventoryServiceApplication {
 **How do you choose a circuit breaker sliding window size?** The window size (20 in the example) must be large enough to distinguish transient from persistent failures: too small (5) and a single burst of failures opens the circuit; too large (200) and the circuit opens slowly, allowing more damage. A good heuristic: window = (expected RPS to this service) × (desired detection window in seconds). For 100 RPS to inventory and a 200ms detection window: 100 × 0.2 = 20 calls.
 
 **How does the rate limiter key resolver affect fairness?** The key resolver determines who shares a rate limit bucket. Using the user's JWT subject (`@userKeyResolver`) gives each user their own 500 req/sec bucket — fair per-user limiting. Using the IP address shares a bucket across users behind a NAT. Using a global key (same bucket for all) is a single choke point: one high-volume user starves others. Choose based on your billing model and fair-use policy.
+
+---
+
+## Related / See Also
+
+- [Spring Messaging](../spring_messaging/README.md) — Kafka + Spring Cloud Stream
+- [Case Study: API Gateway](../case_studies/design_api_gateway.md) — Spring Cloud Gateway
+- [Case Study: Resilience4j Patterns](../case_studies/cross_cutting/resilience4j_patterns.md) — CB, retry, bulkhead

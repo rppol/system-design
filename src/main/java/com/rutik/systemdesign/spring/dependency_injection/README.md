@@ -517,6 +517,12 @@ It throws `BeanCurrentlyInCreationException` immediately at startup. Spring trac
 **What is the difference between @Autowired on a field vs @Autowired on a constructor when a dependency is null?**
 With field injection, if the bean is not available and `required=false`, the field stays `null` — your code must null-check everywhere. With constructor injection, there is no `required=false` (the parameter is either resolved or startup fails). This makes constructor injection safer: a missing required dependency causes an informative startup failure rather than a silent `null` that causes a `NullPointerException` during a production request at 2am.
 
+**What is `ObjectProvider<T>` and when should you use it over `@Autowired(required=false)`?**
+`ObjectProvider<T>` (Spring 4.3) is an injection point that provides lazy, on-demand access to a bean with safe handling of optional and multiple-bean scenarios. Unlike `@Autowired(required=false)` which silently injects null when the bean is absent, `ObjectProvider` exposes `getIfAvailable()`, `getIfUnique()`, and `stream()`. Use cases: (1) **Optional dependency** — `provider.getIfAvailable()` returns null cleanly without `NullPointerException` surprises. (2) **Deferred resolution** — `provider.getObject()` resolves the bean lazily on first call, avoiding circular dependency issues. (3) **Multiple candidates** — `provider.stream()` iterates all matching beans, ordered by `@Order`. `ObjectProvider` is preferred over `@Autowired(required=false) Optional<T>` because it works for both single and multiple beans and gives the injection point a name that is visible in IDE warnings and Spring's actuator beans report.
+
+**What is `@Lazy` and how does it interact with circular dependencies?**
+`@Lazy` on a bean definition (class or `@Bean` method) defers instantiation until first access — the proxy is injected at wiring time, but the actual bean is created on first method call. On an injection point (`@Autowired @Lazy`), Spring injects a lazy-resolution proxy instead of the real bean. This can break circular dependency cycles: if A requires B (constructor) and B requires A (constructor), add `@Lazy` to one constructor parameter. Spring injects a proxy for A into B's constructor — B is fully created, then A's constructor completes using the real B, then the proxy for A in B's dependency resolves to the real A on first call. Caution: `@Lazy` on a class means it is not initialized during application startup, so startup-time validation (e.g., configuration binding errors) won't be caught until the first access. Use `@Lazy` only for genuinely expensive optional beans and circular dependency resolution of last resort.
+
 ---
 
 ## 13. Best Practices
@@ -721,3 +727,12 @@ public void record(Event e) {
 **Why does field injection in a `@Configuration` class cause subtle bugs?** `@Bean` methods can be invoked during context bootstrap before field injection on the configuration instance has completed, so an injected field may still be null when the bean method reads it. Declaring the dependency as a method parameter lets the container resolve and order creation correctly.
 
 **How do you resolve a genuine circular dependency safely?** First try to remove it by extracting the shared behavior into a third collaborator, since a cycle usually signals a design smell. If it is truly required, switch one side to setter injection or annotate one constructor parameter with `@Lazy` so Spring injects a proxy and defers full creation, breaking the construction-time cycle.
+
+---
+
+## Related / See Also
+
+- [IoC Container](../ioc_container/README.md) — ApplicationContext and bean registration
+- [Spring Configuration](../spring_configuration/README.md) — @Bean methods
+- [Spring Boot Auto-Configuration](../spring_boot_autoconfiguration/README.md) — auto-wiring
+- [Case Study: DI Container (Java)](../../java/case_studies/design_di_container_java.md) — reflection-based IoC

@@ -591,4 +591,12 @@ List<Chunk> out = new ArrayList<>(expectedSize); // FIX: one allocation
 
 **What is the cost of tracking recency in `ConcurrentLinkedDeque`?** `remove(key)` is O(n) because the deque is not indexed by key, so the read path pays a linear scan to move an element to the tail. This is the bottleneck that production caches like Caffeine eliminate by buffering reads and applying LRU updates in batches off the hot path.
 
+---
+
+## Related / See Also
+
+- [Java Memory Model](../java_memory_model/README.md) — safe publication of collection contents, `volatile` reference semantics
+- [Generics & Type System](../generics_and_type_system/README.md) — bounded type parameters and PECS in generic collection APIs
+- [Case Study: LRU Cache](../case_studies/design_lru_cache_java.md) — LinkedHashMap + lock pattern for a production-grade LRU cache
+
 **Why is `ConcurrentHashMap.size()` only approximate?** Under concurrent mutation the count is maintained across striped counter cells and summed without a global lock, so `size()` reflects a recent-but-not-instantaneous view. For a capacity-bounded cache, treat the eviction check as best-effort rather than an exact invariant.

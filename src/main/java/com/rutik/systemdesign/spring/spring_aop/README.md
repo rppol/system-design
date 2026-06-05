@@ -852,3 +852,11 @@ public void saveAudit(AuditEntry entry) {
 **How do you prevent the audit aspect from inadvertently logging sensitive PII in argsHash?** Hash the arguments with SHA-256 (as shown) rather than logging them verbatim. For regulatory compliance (GDPR), the hash satisfies "who did what" without exposing "what the arguments were". If specific arguments must be logged, use a custom `@AuditField` annotation and only extract annotated method parameters.
 
 **What happens to aspect ordering when @Transactional is also on the target method?** `@Transactional` is itself an AOP aspect with a default order of `Integer.MAX_VALUE` (lowest precedence — innermost proxy). Your aspects with lower `@Order` values wrap the transactional proxy. This means your `@Audited` aspect runs outside the transaction; if you want audit saves inside the same transaction, use `Propagation.MANDATORY` in the audit save method.
+
+---
+
+## Related / See Also
+
+- [Spring Proxies](../spring_proxies/README.md) — JDK proxy vs CGLIB
+- [Spring Transactions](../spring_transactions/README.md) — @Transactional is AOP
+- [Filters & Interceptors](../filters_and_interceptors/README.md) — filter vs AOP

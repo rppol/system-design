@@ -440,6 +440,9 @@ Switch expression (Java 14+) yields a value, uses arrow labels `->` (no fall-thr
 **Q14: What is record deconstruction and how does pattern matching for switch use it?**
 Record deconstruction (Java 21) allows extracting a record's components directly in a pattern. `case Point(int x, int y)` simultaneously matches a `Point` instance AND binds its `x()` and `y()` components to local variables `x` and `y`. No explicit casting or accessor calls needed. In `switch` expressions with sealed types, this creates exhaustive, type-safe dispatch that reads like algebraic data type matching. Nested deconstruction works too: `case Line(Point(int x1, int y1), Point(int x2, int y2))` extracts components from a `Line` and both its nested `Point` components in one pattern. Guarded patterns add `when` conditions: `case Point(int x, int y) when x > 0`.
 
+**Q15: What is virtual thread "pinning" and which constructs cause it in Java 21?**
+A virtual thread is "pinned" when it cannot be unmounted from its carrier platform thread while blocked. During pinning, the underlying platform thread is held — defeating the memory efficiency benefit of virtual threads (which is that thousands of virtual threads share a small pool of platform threads). Two constructs pin the carrier thread: (1) **`synchronized` blocks/methods** — if a virtual thread blocks inside `synchronized`, the carrier thread is pinned for the duration of the block. (2) **Native method frames** (`System.loadLibrary`, JNI calls) — the JVM cannot unmount while native code is on the stack. Diagnose pinning with `-Djdk.tracePinnedThreads=full` which logs stack traces. Fix: replace `synchronized` with `ReentrantLock` in code called from virtual threads — `ReentrantLock.lock()` allows unmounting while waiting. Java 25 is expected to remove the `synchronized` pinning restriction via opaque monitors. Practical rule: in Spring Boot 3.2+ with `spring.threads.virtual.enabled=true`, audit your code (and dependencies like JDBC drivers) for heavy `synchronized` usage in hot paths.
+
 ---
 
 ## 13. Best Practices
@@ -595,5 +598,13 @@ record Cart(List<Item> items) {
 **Why isn't a record a drop-in replacement for every class?** Records are shallowly immutable and final, cannot extend other classes, and expose all components. They fit value/data carriers. Anything needing mutability, inheritance, or hidden state (entities, services, builders with optional fields) should remain a regular class.
 
 **How do virtual threads interact with `ThreadLocal`?** They support `ThreadLocal`, but since you may create millions, per-thread copies can balloon memory. Prefer passing context explicitly or use `ScopedValue` (Java 21 preview), which shares an immutable binding across the structured scope without per-thread allocation.
+
+---
+
+## Related / See Also
+
+- [Structured Concurrency & Loom](../structured_concurrency_and_loom/README.md) — virtual threads GA (Java 21), StructuredTaskScope, ScopedValue deep dive
+- [JVM Internals](../jvm_internals/README.md) — class loading, JPMS module system, JIT tiers
+- [Java 8 Features](../java8_features/README.md) — evolution baseline: lambdas, streams, and Optional
 
 **Why does CPU rise from 25% to ~70% after the migration?** The platform-thread service had idle cores because threads sat blocked on I/O while the work was waiting. Virtual threads keep more requests progressing concurrently, so the cores spend their time on actual request processing instead of being stalled behind a bounded pool.
