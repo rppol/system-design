@@ -10,6 +10,7 @@ A comprehensive system design study repository covering:
 - **Java** — Pure Java senior-engineer + interview prep guide (20 modules, 8 case studies)
 - **Spring** — Spring Framework senior-engineer + interview prep guide (27 modules, 9 case studies)
 - **Python** — Python + FastAPI senior-engineer + interview prep guide (40 modules, 6 case studies across 6 phases)
+- **DevOps** — DevOps / Cloud / Platform engineering senior-engineer + interview prep guide (~36 modules across 7 phases, 12 principal case studies, 6 cross-cutting primitives; AWS-primary; cross-references backend/ and database/ rather than duplicating). Built in tracked chunks — see the build manifest in `devops/README.md` §8.
 
 All content is Markdown — no runnable application. Java source files under `src/main/java/` are documentation organized as a Maven project skeleton.
 
@@ -40,8 +41,11 @@ All content is Markdown — no runnable application. Java source files under `sr
     │   └── case_studies/
     ├── python/                        ← Python + FastAPI guide
     │   └── case_studies/
-    └── ml/                            ← Machine Learning guide
+    ├── ml/                            ← Machine Learning guide
+    │   └── case_studies/
+    └── devops/                        ← DevOps / Cloud / Platform guide
         └── case_studies/
+            └── cross_cutting/
 ```
 
 ---
@@ -448,6 +452,42 @@ Master index: `ml/README.md` (topics table + Sub-Files Index + LLM non-overlap b
 - Update `ml/README.md` module table
 - Update root `README.md` ML phase table
 - Update this CLAUDE.md ML module table
+
+---
+
+## DevOps Section Module List
+
+Current modules under `src/main/java/com/rutik/systemdesign/devops/` (~36 modules across 7 phases). AWS is the default cloud in worked examples; GCP/Azure appear in comparison tables. The section deliberately **cross-references** `backend/`, `database/`, and `hld/` instead of duplicating them — see the non-overlap boundary in `devops/README.md` §2.
+
+| Phase | Modules |
+|-------|---------|
+| 1 — Foundations | linux_and_os_fundamentals, shell_scripting_and_automation, networking_for_devops, version_control_and_git_workflows |
+| 2 — Containers & Kubernetes | containers_and_docker, container_runtimes_and_oci, kubernetes_architecture, kubernetes_workloads_and_objects, kubernetes_networking, kubernetes_storage_and_state, kubernetes_scheduling_and_autoscaling, kubernetes_security, helm_and_package_management, kubernetes_operators_and_crds |
+| 3 — CI/CD & GitOps | ci_cd_fundamentals, ci_cd_platforms, deployment_strategies, gitops_argocd_flux, artifact_and_registry_management |
+| 4 — IaC & Config | infrastructure_as_code_terraform, terraform_advanced_and_alternatives, configuration_management, secrets_management |
+| 5 — Cloud (AWS-primary) | cloud_fundamentals_and_aws, gcp_and_azure_essentials, serverless_and_faas, cloud_networking_and_cdn, cloud_cost_optimization_finops |
+| 6 — Observability & SRE | observability_metrics_prometheus, observability_logging, observability_tracing_and_otel, visualization_and_alerting, sre_principles_and_slos, incident_management_and_oncall |
+| 7 — DevSecOps & Reliability | devsecops_and_supply_chain_security, policy_as_code_and_compliance, disaster_recovery_and_resilience, platform_engineering_and_idp |
+
+Deep modules requiring 15 Q&As: kubernetes_architecture, kubernetes_networking, kubernetes_security, infrastructure_as_code_terraform, observability_metrics_prometheus, sre_principles_and_slos.
+
+Case studies in `devops/case_studies/` (12, principal 11-section template): design_ci_cd_platform, design_kubernetes_platform, design_observability_platform, design_gitops_delivery_pipeline, design_secrets_management_platform, design_multi_region_dr_architecture, design_autoscaling_platform, design_log_aggregation_pipeline, design_internal_developer_platform, design_incident_response_system, design_container_registry, design_zero_downtime_infra_migration.
+
+Cross-cutting shared primitives in `devops/case_studies/cross_cutting/` (6 files, 14-section template): kubernetes_production_hardening, terraform_state_at_scale, prometheus_cardinality_and_scale, slo_error_budget_math, supply_chain_security_pipeline, multi_cluster_networking.
+
+Master index: `devops/README.md` (module table + 7-phase path + AWS↔GCP↔Azure mapping + cross-reference map + non-overlap boundary + **build manifest §8**).
+Learning-path index: `devops/case_studies/README.md` (mandatory; update with every new DevOps case study).
+
+**Build manifest / chunked build**: The section is built across tracked chunks (the build is too large for one session). The authoritative tracker is the **Build Status & Implementation Tracker** in `devops/README.md` §8 — a per-file `pending`/`done` table plus a "NEXT UP" pointer. A fresh session resumes by reading that section. On finishing a chunk: flip statuses to `done`, advance NEXT UP, and update `devops/case_studies/README.md` + root `README.md` + this file as applicable.
+
+### Adding a DevOps module specifically:
+- Create `src/main/java/com/rutik/systemdesign/devops/<module_name>/README.md`
+- Follow the 14-section template; minimum 10 Q&As (15 for the deep modules listed above)
+- Code in realistic YAML / HCL / Dockerfile / Bash / PromQL / Rego / Go; AWS-default with GCP/Azure comparison tables
+- Concrete numbers everywhere; at least 1 BROKEN→FIX block in §10 and §14; no emojis; ASCII diagrams only
+- Update `devops/README.md` module table AND flip the file's status in the §8 build manifest
+- Update root `README.md` DevOps phase table
+- DevOps case studies use the principal 11-section template (reference: `llm/case_studies/design_gpu_inference_platform.md`)
 
 ---
 

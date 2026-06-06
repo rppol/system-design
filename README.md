@@ -1,6 +1,6 @@
 # System Design Master Repository
 
-A comprehensive, one-stop repository for learning **Low-Level Design (LLD)**, **High-Level Design (HLD)**, **Large Language Models (LLM)**, **Machine Learning (ML)**, **Java**, **Spring**, **Python + FastAPI**, **Backend Engineering**, and **Database Engineering** — with practical examples, real-world scenarios, and interview preparation material.
+A comprehensive, one-stop repository for learning **Low-Level Design (LLD)**, **High-Level Design (HLD)**, **Large Language Models (LLM)**, **Machine Learning (ML)**, **Java**, **Spring**, **Python + FastAPI**, **Backend Engineering**, **Database Engineering**, and **DevOps / Cloud / Platform Engineering** — with practical examples, real-world scenarios, and interview preparation material.
 
 ---
 
@@ -676,6 +676,96 @@ See the [ML Master Index](src/main/java/com/rutik/systemdesign/ml/README.md) for
 
 ---
 
+### DevOps, Cloud & Platform Engineering — Senior Engineer & Interview Prep Guide
+
+A comprehensive, senior-engineer-level guide to **DevOps, SRE, Cloud, and Platform Engineering** — from Linux/OS internals and container runtimes through the full Kubernetes stack, CI/CD and GitOps, Infrastructure as Code, cloud platforms (AWS-primary, GCP/Azure compared), the observability stack, SRE practice, and DevSecOps supply-chain security. ~36 modules across 7 phases + 12 principal case studies. Deliberately scoped to cross-reference (not duplicate) the `backend/` and `database/` sections.
+
+#### Phase 1 — Foundations
+| Module | Key Concepts |
+|--------|-------------|
+| [Linux & OS Fundamentals](src/main/java/com/rutik/systemdesign/devops/linux_and_os_fundamentals/) | Processes, signals, file descriptors, cgroups v2, namespaces, systemd, /proc, ulimits, OOM killer |
+| [Shell Scripting & Automation](src/main/java/com/rutik/systemdesign/devops/shell_scripting_and_automation/) | Bash, `sed`/`awk`/`jq`, Python for ops, idempotent scripts, `set -euo pipefail` |
+| [Networking for DevOps](src/main/java/com/rutik/systemdesign/devops/networking_for_devops/) | DNS, CIDR/subnetting, NAT, firewalls, L4/L7 load balancing, TLS/mTLS/certs, Nginx/Envoy |
+| [Version Control & Git Workflows](src/main/java/com/rutik/systemdesign/devops/version_control_and_git_workflows/) | Git internals, trunk-based vs GitFlow, monorepo vs polyrepo, hooks, release tagging |
+
+#### Phase 2 — Containers & Kubernetes
+| Module | Key Concepts |
+|--------|-------------|
+| [Containers & Docker](src/main/java/com/rutik/systemdesign/devops/containers_and_docker/) | Namespaces/cgroups, image layers, multi-stage builds, distroless, BuildKit, registries |
+| [Container Runtimes & OCI](src/main/java/com/rutik/systemdesign/devops/container_runtimes_and_oci/) | containerd, runc, CRI-O, OCI image/runtime spec, gVisor/Kata isolation |
+| [Kubernetes Architecture](src/main/java/com/rutik/systemdesign/devops/kubernetes_architecture/) | API server, etcd, scheduler, controller-manager, kubelet, kube-proxy, reconciliation loop |
+| [Kubernetes Workloads & Objects](src/main/java/com/rutik/systemdesign/devops/kubernetes_workloads_and_objects/) | Pods, Deployments, StatefulSets, DaemonSets, Jobs/CronJobs, Services, Ingress, ConfigMap/Secret |
+| [Kubernetes Networking](src/main/java/com/rutik/systemdesign/devops/kubernetes_networking/) | CNI (Calico/Cilium/eBPF), kube-proxy modes, Ingress, Gateway API, NetworkPolicy, CoreDNS |
+| [Kubernetes Storage & State](src/main/java/com/rutik/systemdesign/devops/kubernetes_storage_and_state/) | PV/PVC, StorageClass, CSI, StatefulSet storage, volume snapshots |
+| [Kubernetes Scheduling & Autoscaling](src/main/java/com/rutik/systemdesign/devops/kubernetes_scheduling_and_autoscaling/) | Affinity/taints/tolerations, requests/limits, QoS, HPA/VPA/KEDA, Cluster Autoscaler/Karpenter, PDB |
+| [Kubernetes Security](src/main/java/com/rutik/systemdesign/devops/kubernetes_security/) | RBAC, ServiceAccounts, Pod Security Standards, admission control, secrets-at-rest, image policy |
+| [Helm & Package Management](src/main/java/com/rutik/systemdesign/devops/helm_and_package_management/) | Helm charts/templating/releases, Kustomize overlays, repositories |
+| [Kubernetes Operators & CRDs](src/main/java/com/rutik/systemdesign/devops/kubernetes_operators_and_crds/) | CRDs, custom controllers, operator pattern, Operator SDK, reconcile loop |
+
+#### Phase 3 — CI/CD & GitOps
+| Module | Key Concepts |
+|--------|-------------|
+| [CI/CD Fundamentals](src/main/java/com/rutik/systemdesign/devops/ci_cd_fundamentals/) | Pipeline anatomy, stages, artifacts, caching, parallelism, ephemeral runners |
+| [CI/CD Platforms](src/main/java/com/rutik/systemdesign/devops/ci_cd_platforms/) | GitHub Actions, GitLab CI, Jenkins, Argo Workflows/Tekton, CircleCI |
+| [Deployment Strategies](src/main/java/com/rutik/systemdesign/devops/deployment_strategies/) | Rolling/blue-green/canary, feature flags, progressive delivery (Argo Rollouts/Flagger) |
+| [GitOps (ArgoCD & Flux)](src/main/java/com/rutik/systemdesign/devops/gitops_argocd_flux/) | Declarative delivery, ArgoCD, Flux, drift detection, app-of-apps, sync waves |
+| [Artifact & Registry Management](src/main/java/com/rutik/systemdesign/devops/artifact_and_registry_management/) | Container/artifact registries, Artifactory/Nexus, SemVer, promotion across envs |
+
+#### Phase 4 — Infrastructure as Code & Config
+| Module | Key Concepts |
+|--------|-------------|
+| [Infrastructure as Code (Terraform)](src/main/java/com/rutik/systemdesign/devops/infrastructure_as_code_terraform/) | Core, state, modules, providers, workspaces, drift, import, remote backends, locking |
+| [Terraform Advanced & Alternatives](src/main/java/com/rutik/systemdesign/devops/terraform_advanced_and_alternatives/) | Terragrunt, Pulumi, CloudFormation/CDK, OpenTofu, Terratest, policy (Sentinel/OPA) |
+| [Configuration Management](src/main/java/com/rutik/systemdesign/devops/configuration_management/) | Ansible/Chef/Puppet/Salt, idempotency, push vs pull, immutable infra, Packer |
+| [Secrets Management](src/main/java/com/rutik/systemdesign/devops/secrets_management/) | HashiCorp Vault, dynamic secrets, AWS/GCP secret managers, External Secrets Operator, SOPS, rotation |
+
+#### Phase 5 — Cloud Platforms (AWS-primary)
+| Module | Key Concepts |
+|--------|-------------|
+| [Cloud Fundamentals & AWS](src/main/java/com/rutik/systemdesign/devops/cloud_fundamentals_and_aws/) | IAM, VPC, EC2, S3/EBS, ELB/ALB, Route53, RDS, EKS, Well-Architected Framework |
+| [GCP & Azure Essentials](src/main/java/com/rutik/systemdesign/devops/gcp_and_azure_essentials/) | GKE/GCS/Cloud Run/IAM, AKS/Blob/Entra ID; AWS↔GCP↔Azure mapping |
+| [Serverless & FaaS](src/main/java/com/rutik/systemdesign/devops/serverless_and_faas/) | Lambda/Cloud Functions/Knative, cold starts, event-driven, API Gateway, Step Functions |
+| [Cloud Networking & CDN](src/main/java/com/rutik/systemdesign/devops/cloud_networking_and_cdn/) | VPC peering, Transit Gateway, PrivateLink, CloudFront/Cloudflare CDN, global LB, DNS |
+| [Cloud Cost Optimization (FinOps)](src/main/java/com/rutik/systemdesign/devops/cloud_cost_optimization_finops/) | Tagging, rightsizing, spot/reserved/savings plans, FinOps practice, cost allocation |
+
+#### Phase 6 — Observability & SRE
+| Module | Key Concepts |
+|--------|-------------|
+| [Observability: Metrics & Prometheus](src/main/java/com/rutik/systemdesign/devops/observability_metrics_prometheus/) | Prometheus architecture, PromQL, exporters, recording/alerting rules, Thanos/Mimir, cardinality |
+| [Observability: Logging](src/main/java/com/rutik/systemdesign/devops/observability_logging/) | Aggregation, EFK/ELK, Loki, structured logging, retention/sampling, parsing pipelines |
+| [Observability: Tracing & OTel](src/main/java/com/rutik/systemdesign/devops/observability_tracing_and_otel/) | OpenTelemetry collector pipelines, Jaeger/Tempo, sampling, span propagation |
+| [Visualization & Alerting](src/main/java/com/rutik/systemdesign/devops/visualization_and_alerting/) | Grafana dashboards, Alertmanager routing, PagerDuty/OpsGenie, SLO burn-rate alerts |
+| [SRE Principles & SLOs](src/main/java/com/rutik/systemdesign/devops/sre_principles_and_slos/) | SLI/SLO/SLA, error budgets, toil, capacity planning, Google SRE practices |
+| [Incident Management & On-Call](src/main/java/com/rutik/systemdesign/devops/incident_management_and_oncall/) | Incident command, severity levels, on-call rotations, blameless postmortems, MTTR/MTTD |
+
+#### Phase 7 — DevSecOps & Reliability
+| Module | Key Concepts |
+|--------|-------------|
+| [DevSecOps & Supply Chain Security](src/main/java/com/rutik/systemdesign/devops/devsecops_and_supply_chain_security/) | SAST/DAST/SCA, image scanning (Trivy/Grype), SBOM, Sigstore/cosign, SLSA levels |
+| [Policy as Code & Compliance](src/main/java/com/rutik/systemdesign/devops/policy_as_code_and_compliance/) | OPA/Rego, Gatekeeper, Kyverno, CIS benchmarks, SOC2/PCI/HIPAA controls, admission control |
+| [Disaster Recovery & Resilience](src/main/java/com/rutik/systemdesign/devops/disaster_recovery_and_resilience/) | RTO/RPO, multi-region DR (active-active/passive), failover, restore drills |
+| [Platform Engineering & IDP](src/main/java/com/rutik/systemdesign/devops/platform_engineering_and_idp/) | Internal developer platforms, Backstage, golden paths, self-service, Crossplane |
+
+#### DevOps Case Studies
+| Case Study | Core Concepts |
+|------------|--------------|
+| [Design a CI/CD Platform](src/main/java/com/rutik/systemdesign/devops/case_studies/design_ci_cd_platform.md) | Multi-tenant CI/CD at scale, ephemeral runners, distributed artifact caching, pipeline isolation |
+| [Design a Kubernetes Platform](src/main/java/com/rutik/systemdesign/devops/case_studies/design_kubernetes_platform.md) | Multi-cluster, multi-tenant K8s platform, control-plane scaling, admission policy, Karpenter |
+| [Design an Observability Platform](src/main/java/com/rutik/systemdesign/devops/case_studies/design_observability_platform.md) | Metrics+logs+traces at scale (Prometheus/Thanos + Loki + Tempo), cardinality, retention tiers |
+| [Design a GitOps Delivery Pipeline](src/main/java/com/rutik/systemdesign/devops/case_studies/design_gitops_delivery_pipeline.md) | ArgoCD app-of-apps, canary via Argo Rollouts, metric-gated promotion, automated rollback |
+| [Design a Secrets Management Platform](src/main/java/com/rutik/systemdesign/devops/case_studies/design_secrets_management_platform.md) | Vault dynamic secrets, External Secrets Operator, rotation, lease/revocation, audit |
+| [Design Multi-Region DR](src/main/java/com/rutik/systemdesign/devops/case_studies/design_multi_region_dr_architecture.md) | RTO/RPO targets, active-active vs active-passive, failover automation, restore drills |
+| [Design an Autoscaling Platform](src/main/java/com/rutik/systemdesign/devops/case_studies/design_autoscaling_platform.md) | HPA/VPA/KEDA, Karpenter consolidation, scale-to-zero, cost-aware elasticity |
+| [Design a Log Aggregation Pipeline](src/main/java/com/rutik/systemdesign/devops/case_studies/design_log_aggregation_pipeline.md) | High-volume ingestion, backpressure, parsing pipelines, hot/warm/cold retention |
+| [Design an Internal Developer Platform](src/main/java/com/rutik/systemdesign/devops/case_studies/design_internal_developer_platform.md) | Backstage golden paths, Crossplane infra abstraction, paved-road self-service |
+| [Design an Incident Response System](src/main/java/com/rutik/systemdesign/devops/case_studies/design_incident_response_system.md) | Alert routing, on-call escalation, SLO burn-rate alerting, postmortem workflow |
+| [Design a Container Registry](src/main/java/com/rutik/systemdesign/devops/case_studies/design_container_registry.md) | Image scanning, cosign signing, promotion across environments, admission enforcement |
+| [Design a Zero-Downtime Infra Migration](src/main/java/com/rutik/systemdesign/devops/case_studies/design_zero_downtime_infra_migration.md) | Strangler-fig infra migration, dual-run, traffic shifting, rollback safety |
+
+See the [DevOps Master Index](src/main/java/com/rutik/systemdesign/devops/README.md) for the full 7-phase learning path, AWS↔GCP↔Azure mapping, cross-reference map, non-overlap boundary, and the build-status tracker.
+
+---
+
 ## How to Use This Repository
 
 ### By role
@@ -688,6 +778,7 @@ See the [ML Master Index](src/main/java/com/rutik/systemdesign/ml/README.md) for
 | **LLM/AI engineer** | `llm/foundations_and_architecture/` → `llm/rag_fundamentals/` → `llm/agents_and_tool_use/` → LLM case studies |
 | **System design interview** | `hld/` core concepts → `lld/` design patterns → section-specific case studies |
 | **Database/backend infra** | `database/` phases 1-3 → `backend/` phases 1-4 → respective case studies |
+| **DevOps / SRE / Platform engineer** | `devops/` phase 1-2 (Linux → containers → Kubernetes) → phase 3-4 (CI/CD, IaC) → phase 6 (Observability, SRE) → DevOps case studies |
 
 ### Navigation
 
