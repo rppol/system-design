@@ -678,7 +678,7 @@ See the [ML Master Index](src/main/java/com/rutik/systemdesign/ml/README.md) for
 
 ### DevOps, Cloud & Platform Engineering — Senior Engineer & Interview Prep Guide
 
-A comprehensive, senior-engineer-level guide to **DevOps, SRE, Cloud, and Platform Engineering** — from Linux/OS internals and container runtimes through the full Kubernetes stack, CI/CD and GitOps, Infrastructure as Code, cloud platforms (AWS-primary, GCP/Azure compared), the observability stack, SRE practice, and DevSecOps supply-chain security. ~36 modules across 7 phases + 12 principal case studies. Deliberately scoped to cross-reference (not duplicate) the `backend/` and `database/` sections.
+A comprehensive, senior-engineer-level guide to **DevOps, SRE, Cloud, and Platform Engineering** — from Linux/OS internals and container runtimes through the full Kubernetes stack, CI/CD and GitOps, Infrastructure as Code, cloud platforms (AWS-primary, GCP/Azure compared), the observability stack, SRE practice, DevSecOps supply-chain security, and specialized platforms (ML/GPU infrastructure, event-streaming operations, performance/load testing). 41 modules across 8 phases + 13 principal case studies. Deliberately scoped to cross-reference (not duplicate) the `backend/` and `database/` sections.
 
 #### Phase 1 — Foundations
 | Module | Key Concepts |
@@ -746,6 +746,13 @@ A comprehensive, senior-engineer-level guide to **DevOps, SRE, Cloud, and Platfo
 | [Disaster Recovery & Resilience](src/main/java/com/rutik/systemdesign/devops/disaster_recovery_and_resilience/) | RTO/RPO, multi-region DR (active-active/passive), failover, restore drills |
 | [Platform Engineering & IDP](src/main/java/com/rutik/systemdesign/devops/platform_engineering_and_idp/) | Internal developer platforms, Backstage, golden paths, self-service, Crossplane |
 
+#### Phase 8 — Specialized Platforms & Performance
+| Module | Key Concepts |
+|--------|-------------|
+| [ML Platform & GPU Infrastructure](src/main/java/com/rutik/systemdesign/devops/ml_platform_and_gpu_infrastructure/) | NVIDIA GPU Operator, device plugin, MIG/time-slicing, Karpenter GPU NodePools, Kubeflow/Ray on K8s, training vs serving infra, multi-tenant GPU scheduling |
+| [Event Streaming Operations](src/main/java/com/rutik/systemdesign/devops/event_streaming_operations/) | Strimzi/Kafka operator, partition & disk sizing, consumer-lag monitoring, rebalancing, rack awareness, KRaft, tiered storage |
+| [Performance & Load Testing](src/main/java/com/rutik/systemdesign/devops/performance_and_load_testing/) | k6, Locust, distributed load generation, soak/spike/capacity tests, percentile latency, coordinated omission, CI performance gates |
+
 #### DevOps Case Studies
 | Case Study | Core Concepts |
 |------------|--------------|
@@ -761,8 +768,9 @@ A comprehensive, senior-engineer-level guide to **DevOps, SRE, Cloud, and Platfo
 | [Design an Incident Response System](src/main/java/com/rutik/systemdesign/devops/case_studies/design_incident_response_system.md) | Alert routing, on-call escalation, SLO burn-rate alerting, postmortem workflow |
 | [Design a Container Registry](src/main/java/com/rutik/systemdesign/devops/case_studies/design_container_registry.md) | Image scanning, cosign signing, promotion across environments, admission enforcement |
 | [Design a Zero-Downtime Infra Migration](src/main/java/com/rutik/systemdesign/devops/case_studies/design_zero_downtime_infra_migration.md) | Strangler-fig infra migration, dual-run, traffic shifting, rollback safety |
+| [Design an ML Platform Infrastructure](src/main/java/com/rutik/systemdesign/devops/case_studies/design_ml_platform_infrastructure.md) | Multi-tenant GPU scheduling (Kueue gang/quota/borrowing), MIG vs time-slicing, Karpenter Spot/On-Demand pools, KServe scale-to-zero, 22%→65% utilization |
 
-See the [DevOps Master Index](src/main/java/com/rutik/systemdesign/devops/README.md) for the full 7-phase learning path, AWS↔GCP↔Azure mapping, cross-reference map, non-overlap boundary, and the build-status tracker.
+See the [DevOps Master Index](src/main/java/com/rutik/systemdesign/devops/README.md) for the full 8-phase learning path, AWS↔GCP↔Azure mapping, cross-reference map, non-overlap boundary, and the build-status tracker.
 
 ---
 

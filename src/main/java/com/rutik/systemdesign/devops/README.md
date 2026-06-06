@@ -29,6 +29,7 @@ This section covers:
 - **Cloud platforms** — AWS (IAM/VPC/EC2/S3/EKS/Well-Architected) as the worked default, with GCP/Azure equivalents in comparison tables; serverless/FaaS; cloud networking & CDN; cost optimization / FinOps
 - **Observability & SRE** — Prometheus/PromQL/Thanos, logging (Loki/EFK), tracing (OpenTelemetry/Tempo/Jaeger), Grafana/Alertmanager, SLI/SLO/error budgets, incident management & on-call
 - **DevSecOps & Reliability** — supply-chain security (SAST/DAST/SCA, image scanning, SBOM, Sigstore/SLSA), policy-as-code (OPA/Gatekeeper/Kyverno), disaster recovery, platform engineering / IDPs
+- **Specialized Platforms & Performance** — ML platform / GPU infrastructure on Kubernetes (GPU Operator, MIG/time-slicing, Karpenter GPU pools, Kubeflow/Ray), event-streaming operations (Strimzi/Kafka, partition & disk sizing, consumer lag, rebalancing), performance & load testing (k6, Locust, capacity tests, CI perf gates)
 
 **Primary cloud:** AWS. GCP and Azure equivalents are given in comparison tables where relevant.
 
@@ -95,6 +96,9 @@ This section is deliberately scoped to **not duplicate** adjacent sections. Wher
 | 36 | [policy_as_code_and_compliance](policy_as_code_and_compliance/) | 7 — DevSecOps & Reliability | Advanced | OPA/Rego, Gatekeeper, Kyverno, CIS benchmarks, SOC2/PCI/HIPAA controls, admission control |
 | 37 | [disaster_recovery_and_resilience](disaster_recovery_and_resilience/) | 7 — DevSecOps & Reliability | Advanced | RTO/RPO, multi-region DR (active-active/passive), failover, restore drills |
 | 38 | [platform_engineering_and_idp](platform_engineering_and_idp/) | 7 — DevSecOps & Reliability | Intermediate | Internal developer platforms, Backstage, golden paths, self-service, Crossplane |
+| 39 | [ml_platform_and_gpu_infrastructure](ml_platform_and_gpu_infrastructure/) | 8 — Specialized Platforms & Performance | Advanced | NVIDIA GPU Operator, device plugin, MIG/time-slicing, Karpenter GPU NodePools, Kubeflow/Ray on K8s, training vs serving infra |
+| 40 | [event_streaming_operations](event_streaming_operations/) | 8 — Specialized Platforms & Performance | Advanced | Strimzi/Kafka operator, partition & disk sizing, consumer-lag monitoring, rebalancing, rack awareness, tiered storage |
+| 41 | [performance_and_load_testing](performance_and_load_testing/) | 8 — Specialized Platforms & Performance | Intermediate | k6, Locust, distributed load generation, soak/spike/capacity tests, latency percentiles, CI performance gates |
 
 ---
 
@@ -157,6 +161,14 @@ Phase 7 — DevSecOps & Reliability
 |  disaster_recovery_and_resilience                          |
 |  platform_engineering_and_idp                              |
 +------------------------------------------------------------+
+                               |
+                               v
+Phase 8 — Specialized Platforms & Performance (advanced electives)
++------------------------------------------------------------+
+|  ml_platform_and_gpu_infrastructure                        |
+|  event_streaming_operations                                |
+|  performance_and_load_testing                              |
++------------------------------------------------------------+
 ```
 
 **Dependencies to note:**
@@ -165,6 +177,7 @@ Phase 7 — DevSecOps & Reliability
 - Phase 5 (Cloud) is where IaC (Phase 4) is applied; study Terraform before/alongside the AWS module.
 - Phase 6 (Observability/SRE) assumes you can deploy to Kubernetes (Phase 2) and run pipelines (Phase 3).
 - Phase 7 (DevSecOps) layers gates onto the CI/CD (Phase 3) and admission control (Phase 2 security) you already understand.
+- Phase 8 (Specialized Platforms) is advanced electives that build directly on Phase 2 (Kubernetes scheduling, operators, storage) and Phase 6 (SLOs, observability) — study them after the core path, not instead of it. GPU/MLOps infra and Kafka ops are both "operate a stateful, expensive, scheduling-sensitive workload on Kubernetes"; load testing closes the SRE loop by validating the capacity numbers Phase 6 asks you to commit to.
 
 ---
 
@@ -239,9 +252,9 @@ Worked examples use AWS; this is the quick translation table referenced througho
 
 ## 8. Build Status & Implementation Tracker
 
-> **BUILD COMPLETE — all chunks done.** 38 modules + 6 cross-cutting primitives + 12 case studies + finalized `case_studies/README.md` learning path. No NEXT UP pointer remains; the DevOps section is feature-complete.
+> **BUILD COMPLETE through Chunk 11.** Core (chunks 0–10): 38 modules + 6 cross-cutting primitives + 12 case studies + finalized `case_studies/README.md`. **Phase 8 expansion (chunk 11): 41 modules total + 7 cross-cutting primitives + 13 case studies.** No NEXT UP pointer remains.
 >
-> Chunks 0–10 all complete: scaffold + ALL 38 modules + ALL 6 cross-cutting primitives + ALL 12 case studies + the case_studies/README.md learning-path finalization. Future additions should append modules/case studies following the "Adding a DevOps module" instructions in CLAUDE.md and flip new rows below.
+> Chunk 11 added Phase 8 — Specialized Platforms & Performance: 3 modules (`ml_platform_and_gpu_infrastructure`, `event_streaming_operations`, `performance_and_load_testing`), 1 case study (`design_ml_platform_infrastructure`), 1 cross-cutting primitive (`gpu_node_lifecycle`). Future additions should append modules/case studies following the "Adding a DevOps module" instructions in CLAUDE.md and flip new rows below.
 
 ### Chunk Plan
 
@@ -258,6 +271,7 @@ Worked examples use AWS; this is the quick translation table referenced througho
 | **8** | Phase 7 modules 35–38 (DevSecOps & reliability) | done |
 | **9** | 6 cross-cutting primitives + case studies 1–6 | done |
 | **10** | Case studies 7–12 + finalize `case_studies/README.md` | done |
+| **11 — Phase 8 expansion** | Modules 39–41 (GPU/MLOps, streaming ops, perf/load testing) + case study `design_ml_platform_infrastructure` + cross-cutting `gpu_node_lifecycle` | done |
 
 ### Module File Status
 
@@ -301,6 +315,9 @@ Worked examples use AWS; this is the quick translation table referenced througho
 | 36 | `policy_as_code_and_compliance/README.md` | 7 | 8 | done | 12 |
 | 37 | `disaster_recovery_and_resilience/README.md` | 7 | 8 | done | 12 |
 | 38 | `platform_engineering_and_idp/README.md` | 7 | 8 | done | 10 |
+| 39 | `ml_platform_and_gpu_infrastructure/README.md` | 8 | 11 | done | 15 |
+| 40 | `event_streaming_operations/README.md` | 8 | 11 | done | 12 |
+| 41 | `performance_and_load_testing/README.md` | 8 | 11 | done | 12 |
 
 ### Case Study & Cross-Cutting File Status
 
@@ -324,6 +341,8 @@ Worked examples use AWS; this is the quick translation table referenced througho
 | `case_studies/design_incident_response_system.md` | 10 | done |
 | `case_studies/design_container_registry.md` | 10 | done |
 | `case_studies/design_zero_downtime_infra_migration.md` | 10 | done |
+| `case_studies/cross_cutting/gpu_node_lifecycle.md` | 11 | done |
+| `case_studies/design_ml_platform_infrastructure.md` | 11 | done |
 
 ### Conventions Reminder (for future chunk agents)
 

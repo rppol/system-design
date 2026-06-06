@@ -1,10 +1,10 @@
 # DevOps Case Studies — Learning Path
 
-12 principal-grade case studies + 6 cross-cutting infrastructure deep-dives.
+13 principal-grade case studies + 7 cross-cutting infrastructure deep-dives.
 
 Each case study follows the 11-section principal template (reference: [`../../llm/case_studies/design_gpu_inference_platform.md`](../../llm/case_studies/design_gpu_inference_platform.md)): requirements clarification, scale estimation, ASCII architecture diagrams, executable-shaped YAML/HCL/Bash/Go, real-world implementations at named companies, an operational playbook (eval/observability/runbooks), quantified war stories, capacity planning, and 10+ design-rationale interview Q&As. Each cross-cutting file is 600–800 lines covering one infrastructure primitive that recurs across many platforms.
 
-> **Build status**: complete. All 12 case studies and 6 cross-cutting files are written. See the [Build Status & Implementation Tracker](../README.md#8-build-status--implementation-tracker) in the master index for the per-file record.
+> **Build status**: complete. All 13 case studies and 7 cross-cutting files are written. See the [Build Status & Implementation Tracker](../README.md#8-build-status--implementation-tracker) in the master index for the per-file record.
 
 ---
 
@@ -54,15 +54,22 @@ Case studies are grouped by the primary engineering concern they teach, not by p
 |------|-----------------------------|-----------------|
 | [design_secrets_management_platform.md](./design_secrets_management_platform.md) | Org-scale secret distribution | Vault dynamic secrets, External Secrets Operator, rotation, lease/revocation, audit |
 
+### Phase E — Specialized Platforms
+
+| File | Primary Engineering Concern | What It Teaches |
+|------|-----------------------------|-----------------|
+| [design_ml_platform_infrastructure.md](./design_ml_platform_infrastructure.md) | GPU economics & ML self-service | Multi-tenant GPU scheduling (Kueue gang/quota/borrowing), MIG vs time-slicing, Karpenter Spot/On-Demand pools, KServe scale-to-zero, raising fleet utilization from 22% to 65% |
+
 ---
 
 ## Cross-Cutting Infrastructure Files
 
-These six files live in `cross_cutting/` and are referenced by multiple case studies. Read each alongside the phase where it becomes relevant.
+These seven files live in `cross_cutting/` and are referenced by multiple case studies. Read each alongside the phase where it becomes relevant.
 
 | When to Read | File | What It Covers |
 |--------------|------|----------------|
 | Phase A | [kubernetes_production_hardening.md](./cross_cutting/kubernetes_production_hardening.md) | Resource limits/QoS, PodDisruptionBudgets, probe design, security context, multi-tenant isolation |
+| Phase E | [gpu_node_lifecycle.md](./cross_cutting/gpu_node_lifecycle.md) | GPU node bring-up (driver/toolkit/device-plugin), readiness gating via startup taints, DCGM health fencing, Spot interruption + checkpoint, graceful drain, decommission |
 | Phase A | [multi_cluster_networking.md](./cross_cutting/multi_cluster_networking.md) | Cluster mesh, cross-cluster service discovery, global load balancing, failover routing |
 | Phase B | [terraform_state_at_scale.md](./cross_cutting/terraform_state_at_scale.md) | Remote state, locking, workspace strategy, state splitting, blast-radius containment |
 | Phase B | [supply_chain_security_pipeline.md](./cross_cutting/supply_chain_security_pipeline.md) | Sign → scan → SBOM → admission gate end-to-end; SLSA provenance |
@@ -91,6 +98,11 @@ design_observability_platform
 
 design_multi_region_dr_architecture
     +-> design_zero_downtime_infra_migration (shares traffic-shifting + cutover)
+
+design_kubernetes_platform
+    +-> design_autoscaling_platform
+            +-> design_ml_platform_infrastructure (GPU scheduling + Spot autoscaling
+                                                   on top of the autoscaling platform)
 ```
 
 ---
@@ -110,3 +122,5 @@ design_multi_region_dr_architecture
 | "Design an internal developer platform" | [design_internal_developer_platform.md](./design_internal_developer_platform.md) |
 | "Secure the software supply chain" | [cross_cutting/supply_chain_security_pipeline.md](./cross_cutting/supply_chain_security_pipeline.md) |
 | "Design incident response / on-call" | [design_incident_response_system.md](./design_incident_response_system.md) |
+| "Design an ML platform / GPU infrastructure" | [design_ml_platform_infrastructure.md](./design_ml_platform_infrastructure.md) + [cross_cutting/gpu_node_lifecycle.md](./cross_cutting/gpu_node_lifecycle.md) |
+| "How do you schedule/share GPUs on Kubernetes?" | [design_ml_platform_infrastructure.md](./design_ml_platform_infrastructure.md) |
