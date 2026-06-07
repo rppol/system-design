@@ -615,3 +615,9 @@ model = DDP(model, bucket_cap_mb=100)  # 10 AllReduce calls → 2× throughput
 | Deep learning | Large data, unstructured input (images/text) | Expensive training, needs GPU |
 | Ensembling | Final 1-2% accuracy gain in competition | Complexity, inference latency |
 | Distillation/quantization | Inference cost reduction | Accuracy-efficiency trade-off |
+
+---
+
+## See Also
+- [Training Infrastructure (LLM)](../../llm/training_infrastructure/README.md) — tensor/pipeline parallelism, ZeRO, FSDP at LLM scale (70B+ parameters)
+- [ML Platform & GPU Infrastructure (DevOps)](../../devops/ml_platform_and_gpu_infrastructure/README.md) — GPU node lifecycle, cluster orchestration, cost management

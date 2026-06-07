@@ -192,3 +192,23 @@ Peak = 2-3× average
 5. **Over-engineering** — match the solution to the scale
 6. **Forgetting monitoring** — observability is part of the design
 7. **Ignoring security** — authentication, authorization, encryption
+
+---
+
+## Deep-Dive Companions
+
+HLD stays at architectural-overview depth. For production-grade implementation details, each HLD concept maps to a richer companion in `backend/` or `database/`:
+
+| HLD Concept | Backend Deep-Dive | Database Deep-Dive |
+|-------------|------------------|--------------------|
+| Microservices | [Microservices Fundamentals](../backend/microservices_fundamentals/README.md), [API Gateway Patterns](../backend/api_gateway_patterns/README.md), [Service Mesh](../backend/service_mesh_and_service_discovery/README.md) | — |
+| Message Queues | [Kafka Deep Dive](../backend/kafka_deep_dive/README.md), [Event-Driven Fundamentals](../backend/event_driven_fundamentals/README.md), [Messaging Patterns](../backend/messaging_patterns/README.md) | — |
+| Caching | [Caching Strategies Deep Dive](../backend/caching_strategies_deep_dive/README.md) | [Database Caching Patterns](../database/database_caching_patterns/README.md), [Key-Value Stores](../database/key_value_stores/README.md) |
+| Database Design | [Database Internals & Indexing](../backend/database_internals_and_indexing/README.md), [Query Optimization](../backend/query_optimization/README.md) | [Database Engineering (all 29 modules)](../database/README.md) |
+| Database Sharding | — | [Sharding & Partitioning](../database/sharding_and_partitioning/README.md) |
+| CAP Theorem | — | [Consistency Models & Consensus](../database/consistency_models_and_consensus/README.md), [Database Fundamentals](../database/database_fundamentals/README.md) |
+| Rate Limiting | [Rate Limiting In Depth](../backend/rate_limiting_in_depth/README.md) | — |
+| API Design | [REST API Design](../backend/rest_api_design/README.md), [gRPC & Protobuf](../backend/grpc_and_protobuf/README.md), [GraphQL](../backend/graphql/README.md) | — |
+| Consistent Hashing | — | [Sharding & Partitioning](../database/sharding_and_partitioning/README.md) |
+| Distributed Transactions | [Distributed Transactions & Consistency](../backend/distributed_transactions_and_consistency/README.md) | [Distributed Transactions](../database/distributed_transactions/README.md) |
+| Event Sourcing / CQRS | [Event Sourcing & CQRS](../backend/event_sourcing_and_cqrs/README.md) | [Polyglot Persistence Patterns](../database/polyglot_persistence_patterns/README.md) |

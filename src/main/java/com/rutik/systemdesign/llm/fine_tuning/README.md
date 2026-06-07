@@ -585,3 +585,8 @@ config = LoraConfig(
 | Hallucination rate | < 5% on factual tasks | LLM-as-judge on sampled outputs |
 | Context utilization | > 60% of max context used | Avg tokens / max_context |
 | Cache hit rate | > 30% with prompt caching | Cache hit counter / total requests |
+
+---
+
+## See Also
+- [Supervised Learning (ML)](../../ml/supervised_learning/README.md) — transfer learning theory, loss functions, regularization — foundational to understanding fine-tuning

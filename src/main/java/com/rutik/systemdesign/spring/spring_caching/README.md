@@ -868,3 +868,5 @@ public void updateProduct(Long id, Product updated) { ... }
 - [Spring Data JPA](../spring_data_jpa/README.md) — caching queries
 - [Spring Proxies](../spring_proxies/README.md) — self-invocation breaks caching
 - [Case Study: Distributed Caching](../case_studies/design_distributed_caching.md) — two-level cache
+- [Database Caching Patterns](../../database/database_caching_patterns/README.md) — stampede, write-behind, hot-key at the DB layer
+- [Key-Value Stores (Database)](../../database/key_value_stores/README.md) — Redis internals: persistence, Cluster, Streams, Redlock

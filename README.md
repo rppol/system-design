@@ -216,6 +216,7 @@ A comprehensive, one-stop reference for mastering **pure Java** — language int
 | Module | Key Concepts |
 |--------|-------------|
 | [JVM Internals](src/main/java/com/rutik/systemdesign/java/jvm_internals/) | G1/ZGC algorithms, JIT tiers, Java Memory Model, class loading, object layout |
+| [Java Memory Model](src/main/java/com/rutik/systemdesign/java/java_memory_model/) | Happens-before rules, memory barriers, volatile semantics, safe publication, double-checked locking without volatile |
 
 #### Phase 4 — Concurrency + Collections (Most Tested)
 | Module | Key Concepts |
@@ -223,15 +224,19 @@ A comprehensive, one-stop reference for mastering **pure Java** — language int
 | [Concurrency](src/main/java/com/rutik/systemdesign/java/concurrency/) | synchronized, volatile, ThreadPoolExecutor, CompletableFuture, CAS, virtual threads |
 | [Collections Internals](src/main/java/com/rutik/systemdesign/java/collections_internals/) | HashMap treeification, ArrayList growth, fail-fast, ConcurrentHashMap |
 
-#### Phase 5 — Performance
+#### Phase 5 — Performance & Integration
 | Module | Key Concepts |
 |--------|-------------|
 | [Performance & Tuning](src/main/java/com/rutik/systemdesign/java/performance_and_tuning/) | GC tuning, JMH, heap/thread dumps, false sharing, async-profiler |
+| [Networking & HTTP Client](src/main/java/com/rutik/systemdesign/java/networking_and_http_client/) | HttpClient (Java 11+), NIO Selector, Reactor pattern, HTTP/2, connection pooling |
+| [JDBC & Database](src/main/java/com/rutik/systemdesign/java/jdbc_and_database/) | PreparedStatement, HikariCP, transaction isolation, batch inserts, ResultSet streaming |
 
 #### Phase 6 — Interview Consolidation
 | Module | Key Concepts |
 |--------|-------------|
 | [Java Interview Patterns](src/main/java/com/rutik/systemdesign/java/java_interview_patterns/) | Immutable class, Builder, equals contract, Integer cache, enum singleton |
+| [Design Patterns in Java](src/main/java/com/rutik/systemdesign/java/design_patterns_in_java/) | GoF patterns with Java idioms, concurrency patterns, anti-patterns, Effective Java references |
+| [Testing with JUnit & Mockito](src/main/java/com/rutik/systemdesign/java/testing_junit_mockito/) | JUnit 5 lifecycle, Mockito argument matchers, test doubles, AAA pattern, parameterized tests |
 
 #### Java Case Studies
 | Case Study | Core Concepts |
@@ -500,7 +505,7 @@ See the [Backend Master Index](src/main/java/com/rutik/systemdesign/backend/READ
 
 ### Database Engineering — Principal Engineer & Interview Prep Guide
 
-A laser-focused, principal-engineer-level reference for database internals, selection strategies, production operations, distributed systems, and real-world case studies. 28 modules across 7 phases covering relational, NoSQL, emerging, and distributed database concepts.
+A laser-focused, principal-engineer-level reference for database internals, selection strategies, production operations, distributed systems, and real-world case studies. 29 modules across 7 phases covering relational, NoSQL, emerging, and distributed database concepts.
 
 #### Phase 1 — Foundations
 | Module | Key Concepts |
@@ -787,10 +792,12 @@ See the [DevOps Master Index](src/main/java/com/rutik/systemdesign/devops/README
 | **System design interview** | `hld/` core concepts → `lld/` design patterns → section-specific case studies |
 | **Database/backend infra** | `database/` phases 1-3 → `backend/` phases 1-4 → respective case studies |
 | **DevOps / SRE / Platform engineer** | `devops/` phase 1-2 (Linux → containers → Kubernetes) → phase 3-4 (CI/CD, IaC) → phase 6 (Observability, SRE) → DevOps case studies |
+| **Senior AI + Java engineer** | `java/` phases 1-4 → `spring/spring_ai/` *(planned)* → `llm/foundations_and_architecture/` → `llm/agents_and_tool_use/` → `llm/` case studies; cross-reference `hld/consensus_algorithms/` *(planned)* + `ml/neural_network_fundamentals/` |
 
 ### Navigation
 
 - Every section has a **master index** (`README.md`) with a phase diagram and cross-reference map
+- Every section has a **`CLAUDE.md`** with its module list, planned additions, cross-reference map, and section-specific authoring rules — used by Claude Code when editing that section
 - Every `case_studies/` directory has a **learning path** (`case_studies/README.md`) showing reading order
 - All modules follow the **14-section template**: §2 Intuition, §6 Mechanics, §12 Interview Q&As — same structure everywhere
 - **Cross-links** connect related concepts across sections (e.g., SQLAlchemy pooling → `database/connection_pool_management`, FastAPI WebSockets → `backend/websockets_and_sse`)

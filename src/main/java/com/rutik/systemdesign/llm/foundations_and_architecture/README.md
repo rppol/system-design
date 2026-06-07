@@ -986,3 +986,8 @@ Prefix caching reuses KV cache blocks from previous requests that share a common
 
 **Q: What determines whether to use TP=2, TP=4, or TP=8 for serving a 70B model?**
 The primary drivers are: (1) Model fit — 70B in FP8 is 70 GB; one H100 (80 GB) can barely hold it with no KV cache. TP=2 allows 35 GB per GPU + 45 GB for KV, which is viable. (2) Communication overhead — AllReduce per layer adds latency proportional to TP degree over the available bandwidth. With NVLink (600 GB/s), TP=4 adds ~2ms per layer vs 0.5ms for TP=2. For low-latency SLAs (p99 < 50ms/token), TP=2 with FP8 often wins. (3) Throughput — higher TP allows more KV cache headroom, supporting more concurrent sequences. For throughput-optimized serving (high RPS), TP=4 or TP=8 on NVLink systems is preferred.
+
+---
+
+## See Also
+- [Neural Network Fundamentals (ML)](../../ml/neural_network_fundamentals/README.md) — MLPs, backprop, activations, weight init — the mathematical foundation that transformers build on

@@ -691,3 +691,9 @@ Recall@10 is a proxy metric — you care about revenue and engagement. Measure: 
 
 **Q: How do you prevent the reranker from reordering results based on spurious features (e.g., product image background color)?**
 Cross-encoders can overfit to low-level visual features that correlate with engagement in training data. Mitigations: (1) Debias training data by stratifying on visual attributes (color, background) to ensure the cross-encoder sees examples where product similarity is driven by shape/function, not color; (2) Use multi-objective training loss that includes semantic similarity, not just click-through prediction; (3) Monitor per-attribute CTR — if CTR for "blue background products" spikes, investigate model attribution with SHAP or attention visualization.
+
+---
+
+## See Also
+- [Computer Vision (ML)](../../ml/computer_vision/README.md) — vision encoders, ViT, CLIP, object detection — the CV foundation of multimodal LLMs
+- [Generative Models (ML)](../../ml/generative_models/README.md) — VAEs, GANs, Diffusion (DDPM) — generative foundation for image/video generation

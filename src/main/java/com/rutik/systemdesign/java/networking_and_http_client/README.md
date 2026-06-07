@@ -573,6 +573,8 @@ A blocking `send()` on a *virtual thread* (Java 21) is fine — it unmounts from
 
 - [JDBC & Database](../jdbc_and_database/README.md) — connection pooling patterns and pool sizing (same principles apply to HTTP pools)
 - [Concurrency](../concurrency/README.md) — async HTTP with CompletableFuture, non-blocking I/O patterns
+- [HTTP Protocols (Backend)](../../backend/http_protocols/README.md) — HTTP/1.1 vs /2 vs /3, TLS 1.3, ALPN, SNI — the protocol deep-dive
+- [gRPC & Protobuf (Backend)](../../backend/grpc_and_protobuf/README.md) — Protobuf wire format, 4 RPC modes, interceptors, deadlines
 - [Case Study: Connection Pool](../case_studies/design_connection_pool.md) — full connection pooling design applicable to both DB and HTTP connections
 
 **Why prefer `sendAsync` over wrapping `send` in your own threads?** `sendAsync` uses the client's non-blocking I/O and its managed executor, returning a `CompletableFuture` you can compose (`allOf`, `thenApply`, `orTimeout`) without dedicating a thread per in-flight request, which is both more scalable and less error-prone than hand-rolled threading around the blocking API.

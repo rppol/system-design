@@ -1137,3 +1137,8 @@ Chinchilla shows the optimal token count for a 7B model is approximately 140B to
 
 **Q: How do you prevent data leakage from the evaluation benchmark (HumanEval) into the training corpus?**
 HumanEval problems are on GitHub. Exact deduplication via SHA-256 hash removes exact copies. Near-deduplication via MinHash catches paraphrased versions. Additionally: (1) Download a specific HumanEval commit and date-filter training data to exclude any GitHub repos created or modified after the HumanEval publication date (July 2021); (2) Monitor for suspiciously high pass@1 on very early training checkpoints — if pass@1 > 30% at 10B tokens, contamination is likely; (3) Create a held-out internal benchmark of original problems not on GitHub.
+
+---
+
+## See Also
+- [Data Pipelines & Processing (ML)](../../ml/data_pipelines_and_processing/README.md) — PySpark, Great Expectations, schema evolution — the data engineering behind LLM pre-training datasets

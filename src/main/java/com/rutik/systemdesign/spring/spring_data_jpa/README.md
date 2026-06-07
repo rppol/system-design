@@ -1002,3 +1002,5 @@ A related trap is `LazyInitializationException`: accessing `order.getItems()` in
 - [Spring Transactions](../spring_transactions/README.md) — @Transactional on repositories
 - [Spring Caching](../spring_caching/README.md) — caching JPA query results
 - [JDBC & Database (Java)](../../java/jdbc_and_database/README.md) — underlying JDBC
+- [SQL Query Optimization (Database)](../../database/sql_query_optimization/README.md) — EXPLAIN ANALYZE, join algorithms, keyset pagination — the DB-level view of N+1
+- [Indexing Deep Dive (Database)](../../database/indexing_deep_dive/README.md) — B+tree, GIN, covering indexes, composite index selection

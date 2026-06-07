@@ -1138,3 +1138,5 @@ public SettlementResult settle(Payment p) { ... }
 - [Spring Data JPA](../spring_data_jpa/README.md) — @Transactional on repositories
 - [Spring Proxies](../spring_proxies/README.md) — self-invocation issue
 - [Case Study: Idempotent Payment API](../case_studies/design_idempotent_payment_api.md) — transactional outbox
+- [Concurrency Control & Locking (Database)](../../database/concurrency_control_and_locking/README.md) — MVCC, gap locks, SELECT FOR UPDATE at the DB engine level
+- [Consistency Models & Consensus (Database)](../../database/consistency_models_and_consensus/README.md) — linearizability, Raft, distributed locks, fencing tokens

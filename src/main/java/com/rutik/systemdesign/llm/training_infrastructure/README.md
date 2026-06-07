@@ -771,3 +771,9 @@ A straggler is a GPU running significantly slower than peers, causing AllReduce 
 
 **Q: What is the relationship between global batch size, gradient accumulation steps, and training stability?**
 Global batch size (in tokens) determines the gradient noise level — larger batches produce lower-variance gradient estimates, allowing higher learning rates and more stable training. For a 7B model, 4M token batches (the Llama/Mistral standard) provide good signal-to-noise. Gradient accumulation achieves large effective batch sizes without requiring each GPU to hold all the samples simultaneously: if 64 GPUs each process 16K tokens per step with 4 accumulation steps, the effective batch is 64 × 16K × 4 = 4M tokens. Training stability is maintained because the gradient update uses the same 4M token aggregate regardless of how many accumulation steps are used.
+
+---
+
+## See Also
+- [Distributed Training (ML)](../../ml/distributed_training/README.md) — DDP, FSDP, DeepSpeed ZeRO, gradient accumulation — the ML foundations of LLM-scale distributed training
+- [GPU & Hardware Optimization (ML)](../../ml/gpu_and_hardware_optimization/README.md) — CUDA, tensor cores, gradient checkpointing

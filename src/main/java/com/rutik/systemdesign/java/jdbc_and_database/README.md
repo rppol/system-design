@@ -673,5 +673,7 @@ conn.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
 - [Networking & HTTP Client](../networking_and_http_client/README.md) — connection management and pooling concepts that mirror HikariCP design
 - [Performance & Tuning](../performance_and_tuning/README.md) — HikariCP pool sizing math, profiling slow queries
 - [Case Study: Connection Pool](../case_studies/design_connection_pool.md) — complete connection pool design including eviction, validation, and sizing
+- [Connection Pool Management (Database)](../../database/connection_pool_management/README.md) — PgBouncer, ProxySQL, K8s connection storm prevention
+- [SQL Query Optimization (Database)](../../database/sql_query_optimization/README.md) — EXPLAIN ANALYZE, CBO statistics, window functions
 
 **What does `connection.close()` actually do with HikariCP?** It returns the connection to the pool rather than closing the physical socket, so try-with-resources is the correct idiom precisely because "close" means "release back to pool"; failing to call it leaks the connection for `maxLifetime` or forever, which is why leaks manifest as gradual pool exhaustion.
