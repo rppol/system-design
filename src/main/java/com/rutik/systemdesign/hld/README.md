@@ -102,6 +102,8 @@ Pick 2-3 components to go deep on (interviewer often guides):
 | [Rate Limiting](rate_limiting/README.md) | Token bucket, sliding window, distributed | Intermediate |
 | [CDN](cdn/README.md) | Edge caching, push vs pull, TTL, geographic routing | Intermediate |
 | [Database Sharding](database_sharding/README.md) | Shard key, range vs hash sharding, resharding | Advanced |
+| [Consensus Algorithms](consensus_algorithms/README.md) | Raft leader election + log replication, Paxos variants, PBFT, etcd/ZooKeeper, fencing tokens | Advanced |
+| [Event Sourcing & CQRS](event_sourcing_cqrs/README.md) | Event sourcing (append-only log, projections, snapshots), CQRS (command/query separation), Saga pattern, eventual consistency | Advanced |
 
 ---
 
@@ -207,6 +209,7 @@ HLD stays at architectural-overview depth. For production-grade implementation d
 | Database Design | [Database Internals & Indexing](../backend/database_internals_and_indexing/README.md), [Query Optimization](../backend/query_optimization/README.md) | [Database Engineering (all 29 modules)](../database/README.md) |
 | Database Sharding | — | [Sharding & Partitioning](../database/sharding_and_partitioning/README.md) |
 | CAP Theorem | — | [Consistency Models & Consensus](../database/consistency_models_and_consensus/README.md), [Database Fundamentals](../database/database_fundamentals/README.md) |
+| Consensus Algorithms | [Kafka Deep Dive](../backend/kafka_deep_dive/README.md) | [Consistency Models & Consensus](../database/consistency_models_and_consensus/README.md) |
 | Rate Limiting | [Rate Limiting In Depth](../backend/rate_limiting_in_depth/README.md) | — |
 | API Design | [REST API Design](../backend/rest_api_design/README.md), [gRPC & Protobuf](../backend/grpc_and_protobuf/README.md), [GraphQL](../backend/graphql/README.md) | — |
 | Consistent Hashing | — | [Sharding & Partitioning](../database/sharding_and_partitioning/README.md) |

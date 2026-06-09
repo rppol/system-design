@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 45 Modules
+## Module List — 49 Modules
 
 | Module Directory | Topic | Sub-files |
 |-----------------|-------|-----------|
@@ -54,6 +54,10 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `prompt_management_and_promptops/` | Prompt versioning, registries, aliases, eval-gated CI, A/B testing, injection-safe templates | — |
 | `context_engineering/` | Context budget allocation, "lost in the middle", KV-cache-aware ordering, compaction, retrieval vs long-context decision matrix | — |
 | `llm_caching/` | Exact-match, semantic cache, provider prompt caching, vLLM APC, embedding cache, threshold tuning, invalidation | — |
+| `ai_regulations_and_compliance/` | EU AI Act risk tiers, GDPR Art. 22, NIST AI RMF, model cards, bias auditing, DPIA, right to explanation | — |
+| `llm_ops_platforms/` | MLflow, W&B, LangSmith, LangFuse, Braintrust, DeepEval, Ragas — experiment tracking, LLM observability, eval CI/CD | — |
+| `vision_language_models/` | CLIP dual encoder, LLaVA adapter architecture, BLIP-2 Q-Former, visual grounding, Grounding DINO, VQA benchmarks | — |
+| `constitutional_ai/` | SL-CAI critique-revision pipeline, RL-CAI/RLAIF, constitution design, RLAIF vs RLHF, Llama Guard | — |
 
 ---
 
@@ -63,10 +67,7 @@ The following topics are identified as gaps for senior AI engineer coverage. Add
 
 | Module Directory | Topic | Priority |
 |-----------------|-------|---------|
-| `ai_regulations_and_compliance/` | EU AI Act risk categories, SEC rules, GDPR for LLMs, responsible disclosure, model auditing | Critical |
 | `llm_ops_platforms/` | MLflow for LLMs, Weights & Biases, Neptune, experiment tracking, model registry, eval management | High |
-| `vision_language_models/` | VQA, vision-specific LoRA on encoders, CLIP-style training, VQA evaluation — distinct from multimodal_models | High |
-| `constitutional_ai/` | Anthropic Constitutional AI approach, harm definitions, value modeling, curriculum design, CAI vs RLHF | Medium |
 
 ---
 

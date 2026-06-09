@@ -34,6 +34,23 @@ LLD answers: *"What classes exist? What are their responsibilities? How do they 
 
 ---
 
+## Category Navigation
+
+Each category has a master index with a decision flowchart, pattern comparison table, and
+category-level Q&As. Start with the category index before diving into individual pattern files.
+
+| Category | Index File | Patterns / Topics |
+|----------|-----------|-------------------|
+| Design Principles | [design_principles/README.md](design_principles/README.md) | DRY, KISS, YAGNI, Law of Demeter, Composition over Inheritance, Program to Interface |
+| Creational Patterns | [creational/README.md](creational/README.md) | Singleton, Factory Method, Abstract Factory, Builder, Prototype |
+| Structural Patterns | [structural/README.md](structural/README.md) | Adapter, Bridge, Composite, Decorator, Facade, Flyweight, Proxy |
+| Behavioral Patterns | [behavioral/README.md](behavioral/README.md) | Chain of Responsibility, Command, Interpreter, Iterator, Mediator, Memento, Observer, State, Strategy, Template Method, Visitor |
+| Concurrency Patterns | [concurrency_patterns/README.md](concurrency_patterns/README.md) | Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, Thread Pool |
+| System Design Problems | [system_design_problems/README.md](system_design_problems/README.md) | Parking Lot, Elevator, Library, Chess, Vending Machine, ATM, Online Booking |
+| LLD Case Studies | [case_studies/README.md](case_studies/README.md) | Learning path, pattern matrix, interview shortcuts for 7 problems |
+
+---
+
 ## All Topics
 
 ### Design Principles

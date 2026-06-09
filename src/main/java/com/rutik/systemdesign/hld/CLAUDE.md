@@ -7,7 +7,7 @@ HLD is the architectural overview layer. The `backend/` section contains product
 
 ---
 
-## Module List — 13 Modules
+## Module List — 14 Modules
 
 | Module | Key Concepts |
 |--------|-------------|
@@ -23,18 +23,15 @@ HLD is the architectural overview layer. The `backend/` section contains product
 | `rate_limiting/` | Token bucket, sliding window, leaky bucket, distributed rate limiting |
 | `cdn/` | Edge caching, cache invalidation, geo-routing, origin shield, cache-control headers |
 | `database_sharding/` | Horizontal partitioning, shard key selection, resharding, cross-shard queries |
+| `consensus_algorithms/` | Raft leader election + log replication, Paxos variants, PBFT, ZAB, etcd/ZooKeeper internals, quorum sizing, term numbers |
+| `event_sourcing_cqrs/` | Event sourcing (append-only log, projections, snapshots), CQRS (command/query separation), Saga pattern, eventual consistency |
 | `case_studies/` | HLD case study problems |
 
 ---
 
 ## Planned / Missing Topics (not yet created)
 
-The following topics are missing from HLD but expected at senior engineer level:
-
-| Module Directory | Topic | Priority |
-|-----------------|-------|---------|
-| `consensus_algorithms/` | Raft leader election + log replication, Paxos variants, PBFT, etcd/ZooKeeper internals, fencing tokens — critical for understanding etcd, Kafka ISR, Consul | Critical |
-| `event_sourcing_cqrs/` | Event sourcing pattern (events as source of truth), CQRS read/write model separation, eventual consistency implications, snapshot strategy | High |
+No topics currently planned. All expected senior engineer topics have been created.
 
 ---
 
@@ -53,7 +50,9 @@ HLD modules intentionally stay at architectural-overview depth. For implementati
 | `rate_limiting/` | `../backend/rate_limiting_in_depth/` | — |
 | `api_design/` | `../backend/rest_api_design/`, `../backend/grpc_and_protobuf/`, `../backend/graphql/` | — |
 | `consistent_hashing/` | — | `../database/sharding_and_partitioning/` |
+| `consensus_algorithms/` | `../backend/kafka_deep_dive/` | `../database/consistency_models_and_consensus/` |
 | `load_balancing/` | `../backend/fault_tolerance_patterns/` | — |
+| `event_sourcing_cqrs/` | `../backend/event_sourcing_and_cqrs/` | `../database/polyglot_persistence_patterns/` |
 
 ---
 

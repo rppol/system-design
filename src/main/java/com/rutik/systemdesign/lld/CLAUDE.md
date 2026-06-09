@@ -79,6 +79,10 @@ LLD describes how individual components are implemented — class relationships,
 | `behavioral/strategy/` | `../../java/functional_programming/` — lambda as strategy object |
 | `behavioral/chain_of_responsibility/` | `../../spring/filters_and_interceptors/` — Spring filter chain |
 | `solid_principles/` | `../../java/design_patterns_in_java/` — SOLID applied to GoF patterns |
+| `design_principles/` | `../../java/design_patterns_in_java/` — SOLID + principles applied in Java |
+| `concurrency_patterns/` | `../../java/concurrency/` — ExecutorService internals, ThreadPoolExecutor tuning, deep Java concurrency |
+| `concurrency_patterns/` | `../../java/java_memory_model/` — happens-before, volatile semantics, DCL correctness |
+| `system_design_problems/` | `../../hld/microservices/` — Parking Lot / Elevator at distributed system scale |
 
 ---
 
@@ -95,5 +99,6 @@ LLD describes how individual components are implemented — class relationships,
 1. Create `<category>/<pattern_name>/README.md` — 14-section template
 2. Include: UML ASCII diagram, motivation, participants, Java implementation, real-world example, tradeoffs, Q&As
 3. Show the problem it solves (before-code) and the pattern applied (after-code)
-4. Update the relevant section of `README.md` (the LLD master index)
-5. Add to the `pattern_comparisons/` file if it overlaps with other patterns
+4. Update the relevant **category** `README.md` (e.g., `behavioral/README.md`) — add a row to the pattern catalogue table
+5. Update the **master** `README.md` (the LLD master index) — add a row to the appropriate section table
+6. Add to the `pattern_comparisons/` file if it overlaps with other patterns

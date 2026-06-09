@@ -156,6 +156,55 @@ Ask these questions during code review:
 
 ---
 
+## 12. Interview Q&As
+
+Questions are ordered by interview frequency: traps and gotchas first, then internal mechanics, then edge cases.
+
+**Explain SRP and give a class that violates it. How do you fix it?**
+SRP: a class should have only one reason to change — meaning it serves one stakeholder. A `UserService` class that both persists users to a database AND sends a welcome email violates SRP: a change in the email template forces a recompile/redeploy of the persistence code, and a database schema change risks breaking the email path. Fix: extract `UserRepository` for persistence and `EmailService` for notification. The `UserService` orchestrates them without owning either concern.
+
+**What is a "reason to change" in SRP? Is it "one method" or "one class"?**
+A "reason to change" maps to a stakeholder or actor whose requirements drive that change — not to a method count. A class with 20 methods that all serve the same business domain (e.g., all manipulate `Order` state for the order management team) satisfies SRP. A class with 2 methods that serve two different stakeholders (finance and logistics) violates SRP. Uncle Bob's test: "For whom does this class change?" If the answer is two different groups of people, split the class.
+
+**How does OCP work without modifying existing code? Show a concrete Java example.**
+OCP: open for extension, closed for modification. Payment processing: instead of `if (type == CREDIT_CARD) { ... } else if (type == PAYPAL) { ... }`, define `interface PaymentProcessor { void process(Payment p); }`. Add `CreditCardProcessor` and `PayPalProcessor` as implementations. Adding Bitcoin support means adding `BitcoinProcessor` — the existing `PaymentService` is never touched. The abstraction (interface) is the extension point; the if-else chain is the closed-for-extension design.
+
+**Square extends Rectangle: why does this violate LSP? Show the broken code.**
+LSP: subtypes must be substitutable for their base type without altering correctness. Rectangle has `setWidth(int)` and `setHeight(int)` as independent operations. Square must keep width == height, so overriding `setWidth` to also set height changes the postcondition. Broken:
+```java
+Rectangle r = new Square();
+r.setWidth(5);
+r.setHeight(4);
+assert r.area() == 20; // FAILS: Square sets both to 4, area = 16
+```
+Fix: don't model Square as a subtype of Rectangle. Model them as separate implementations of a `Shape` interface, or use a factory that returns the right shape for the dimensions.
+
+**What is ISP and how does it prevent the "fat interface" problem?**
+ISP: no client should depend on methods it does not use. A `Animal` interface with `eat()`, `fly()`, `swim()`, and `run()` forces `Dog` to implement `fly()` by throwing `UnsupportedOperationException`. Fix: split into `Flyable`, `Swimmable`, `Runnable` interfaces. `Dog` implements `Swimmable` and `Runnable`. `Bird` implements `Flyable`. Each class depends only on the methods it actually uses. Benefit: adding `Drone implements Flyable` never forces a change to `Dog`, `Fish`, or any unrelated class.
+
+**How does DIP differ from Dependency Injection? Which is the principle and which is the pattern?**
+DIP is the principle: high-level modules should not depend on low-level modules; both should depend on abstractions. Dependency Injection is a pattern that implements DIP: instead of the class creating its own dependency (`new JpaUserRepository()`), the dependency is passed in (injected) from outside. Spring's `@Autowired` is a DI mechanism. You can follow DIP without a DI framework (pass dependencies via constructor); you can use a DI framework without following DIP (inject concrete classes instead of interfaces). DIP is the goal; DI is the most common way to achieve it.
+
+**Give a Spring example of DIP in action.**
+`UserService` depends on `UserRepository` (an interface from Spring Data), not on `JpaUserRepository` (the concrete JPA implementation). Spring injects the concrete impl at runtime. In tests, inject `InMemoryUserRepository` instead — no changes to `UserService`. The high-level policy (`UserService`) is isolated from the low-level detail (JPA, database). Adding a MongoDB-backed `MongoUserRepository` requires zero changes to `UserService`. This is DIP enforced by the Spring container.
+
+**Which SOLID principle is violated when you add `if (type == CREDIT_CARD)` to handle a new payment type?**
+OCP. The existing `PaymentService.process()` method must be modified every time a new payment type is added. After 10 payment types, the method has 10 branches, each requiring a regression test, and all sharing the risk of a bug in one branch breaking the others. The correct design: `PaymentProcessor` interface + one class per payment type. Adding a new type adds a new class; `PaymentService` is never touched.
+
+**Which SOLID principle is most commonly violated in legacy codebases, and why?**
+SRP, because it's the most gradual violation. A class starts with one responsibility. A developer adds "just a small change" that introduces a second responsibility. Another adds a third. After 3 years, the class has 50 methods serving 6 different stakeholders. No single change felt wrong at the time. Detection: a class with more than one reason to appear in a sprint's JIRA tickets is likely violating SRP.
+
+**Can SOLID be over-applied? Give a concrete example of too much SOLID.**
+Yes. Extracting every single method into its own class in the name of SRP produces a "class-per-function" antipattern: 200 single-method classes that are harder to navigate than 10 well-organized classes with 20 methods each. Similarly, creating an interface for every concrete class even when there's only one implementation (and always will be one) adds indirection without value. The test: "Does this abstraction make the code easier to change or test?" If no, it's unnecessary complexity. SOLID is a diagnostic tool, not a scoring system.
+
+**How do the five SOLID principles relate to testability?**
+SRP: small, focused classes are easy to test in isolation. OCP: extension via interface means you can inject test doubles without changing production code. LSP: if subtypes are substitutable, tests written against the base type work for all subtypes. ISP: narrow interfaces make test setup minimal — mock only the methods the class actually uses. DIP: inject dependencies via constructor, and tests can pass fakes/mocks instead of real infrastructure. Together: SOLID principles are the single biggest enabler of unit testing in object-oriented code.
+
+**What is the most subtle SOLID violation to detect in code review?**
+LSP violations are the hardest to detect because they don't show up as a structural error — the code compiles and often passes unit tests. A subclass that weakens a postcondition (returns a narrower set of values than the parent promises), strengthens a precondition (requires more than the parent accepts), or throws an exception the parent never throws — all violate LSP silently. They cause failures at call sites that use polymorphism, which are often far from the class definition. Clue: a test that passes for the parent type but fails when you substitute the subclass.
+
+---
+
 ## Recommended Further Reading
 
 - *Clean Code* — Robert C. Martin

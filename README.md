@@ -74,6 +74,8 @@ Patterns that deal with communication between objects, defining how objects inte
 | [Rate Limiting](src/main/java/com/rutik/systemdesign/hld/rate_limiting/) | Throttling strategies and algorithms |
 | [CDN](src/main/java/com/rutik/systemdesign/hld/cdn/) | Content Delivery Network architecture |
 | [Database Sharding](src/main/java/com/rutik/systemdesign/hld/database_sharding/) | Partitioning data across databases |
+| [Consensus Algorithms](src/main/java/com/rutik/systemdesign/hld/consensus_algorithms/) | Raft, Paxos, PBFT, etcd/ZooKeeper, split-brain prevention, quorum math |
+| [Event Sourcing & CQRS](src/main/java/com/rutik/systemdesign/hld/event_sourcing_cqrs/) | Event sourcing, CQRS read/write separation, projections, Saga pattern, snapshots |
 
 ---
 
@@ -148,6 +150,10 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 | [MCP (Model Context Protocol)](src/main/java/com/rutik/systemdesign/llm/mcp_model_context_protocol/) | Universal LLM-tool protocol, servers/clients, JSON-RPC, A2A |
 | [Data Flywheels & Continuous Learning](src/main/java/com/rutik/systemdesign/llm/data_flywheels_and_continuous_learning/) | Production feedback loops, active learning, drift detection, A/B testing |
 | [LLM Testing Strategies](src/main/java/com/rutik/systemdesign/llm/llm_testing_strategies/) | Golden datasets, LLM-as-judge, regression eval, flakiness detection, CI/CD integration |
+| [AI Regulations & Compliance](src/main/java/com/rutik/systemdesign/llm/ai_regulations_and_compliance/) | EU AI Act risk tiers, GDPR Art. 22, NIST AI RMF, model cards, bias auditing, DPIA |
+| [LLMOps Platforms](src/main/java/com/rutik/systemdesign/llm/llm_ops_platforms/) | MLflow, W&B, LangSmith, LangFuse, Braintrust, DeepEval — experiment tracking, observability, eval CI/CD |
+| [Vision-Language Models](src/main/java/com/rutik/systemdesign/llm/vision_language_models/) | CLIP dual encoder, LLaVA adapter, BLIP-2 Q-Former, visual grounding, Grounding DINO, VQA |
+| [Constitutional AI](src/main/java/com/rutik/systemdesign/llm/constitutional_ai/) | SL-CAI critique-revision, RL-CAI/RLAIF, constitution design, RLAIF vs RLHF tradeoffs |
 | [Agentic Workflow Patterns](src/main/java/com/rutik/systemdesign/llm/agentic_workflow_patterns/) | Anthropic taxonomy — chaining, routing, parallelization, orchestrator-workers, evaluator-optimizer |
 | [Coding Agents](src/main/java/com/rutik/systemdesign/llm/coding_agents/) | SWE-agent ACI, OpenHands, Aider, Devin, Cursor Composer, Claude Code, SWE-bench |
 | [Voice Agents](src/main/java/com/rutik/systemdesign/llm/voice_agents/) | OpenAI Realtime, Gemini Live, STT→LLM→TTS pipelines, VAD, barge-in, telephony |
@@ -792,7 +798,7 @@ See the [DevOps Master Index](src/main/java/com/rutik/systemdesign/devops/README
 | **System design interview** | `hld/` core concepts → `lld/` design patterns → section-specific case studies |
 | **Database/backend infra** | `database/` phases 1-3 → `backend/` phases 1-4 → respective case studies |
 | **DevOps / SRE / Platform engineer** | `devops/` phase 1-2 (Linux → containers → Kubernetes) → phase 3-4 (CI/CD, IaC) → phase 6 (Observability, SRE) → DevOps case studies |
-| **Senior AI + Java engineer** | `java/` phases 1-4 → `spring/spring_ai/` *(planned)* → `llm/foundations_and_architecture/` → `llm/agents_and_tool_use/` → `llm/` case studies; cross-reference `hld/consensus_algorithms/` *(planned)* + `ml/neural_network_fundamentals/` |
+| **Senior AI + Java engineer** | `java/` phases 1-4 → `spring/spring_ai/` *(planned)* → `llm/foundations_and_architecture/` → `llm/agents_and_tool_use/` → `llm/` case studies; cross-reference `hld/consensus_algorithms/` + `ml/neural_network_fundamentals/` |
 
 ### Navigation
 
