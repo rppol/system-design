@@ -36,7 +36,7 @@ Understanding frameworks is critical for engineering interviews because producti
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Agentic frameworks are like React for LLM applications — they provide reusable components (chains, tools, memory, agents) so you don't build everything from scratch.
 
@@ -48,7 +48,7 @@ Understanding frameworks is critical for engineering interviews because producti
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Abstraction vs. control**: Frameworks trade flexibility for development speed. Simple use cases benefit most; complex custom systems may fight the framework.
 - **Composability**: Good frameworks compose small pieces (prompts, models, tools) into complex pipelines.
@@ -58,9 +58,9 @@ Understanding frameworks is critical for engineering interviews because producti
 
 ---
 
-## 3. Frameworks
+## 4. Frameworks
 
-### 3.1 LangChain
+### 4.1 LangChain
 
 The most widely-used LLM framework. Provides: prompt templates, chains (compose LLM calls), memory, agents, tool integrations.
 
@@ -104,7 +104,7 @@ retrieval_chain = (
 
 **Verdict:** Most mature ecosystem, most integrations, but complex internals. Use LCEL (modern) not legacy chains.
 
-### 3.2 LangGraph
+### 4.2 LangGraph
 
 State machine framework for multi-step, multi-agent workflows. Agents are graphs with nodes (LLM calls, tool calls) and edges (transitions).
 
@@ -150,7 +150,7 @@ result = app.invoke({"messages": [HumanMessage("What's the weather?")]})
 - Checkpointing: persist state for long-running workflows
 - Multi-agent: connect multiple agents as nodes in the graph
 
-### 3.3 LlamaIndex
+### 4.3 LlamaIndex
 
 Focused on data ingestion, indexing, and retrieval. Best-in-class for RAG applications and data-intensive agents.
 
@@ -181,7 +181,7 @@ response = agent.chat("What is our refund policy?")
 - Multi-document reasoning
 - LlamaHub: community-contributed integrations
 
-### 3.4 CrewAI
+### 4.4 CrewAI
 
 Multi-agent framework centered on "crews" of specialized AI agents collaborating on tasks.
 
@@ -220,7 +220,7 @@ crew = Crew(agents=[researcher, writer], tasks=[research_task, write_task])
 result = crew.kickoff()
 ```
 
-### 3.5 AutoGen (Microsoft)
+### 4.5 AutoGen (Microsoft)
 
 Conversation-based multi-agent framework. Agents communicate by sending messages to each other.
 
@@ -256,7 +256,7 @@ user_proxy.initiate_chat(
 - Group chat: multiple agents discussing in a round-table format
 - Custom agent types: inherit from ConversableAgent
 
-### 3.6 Semantic Kernel (Microsoft)
+### 4.6 Semantic Kernel (Microsoft)
 
 Enterprise-grade SDK for building AI applications in C#, Python, and Java. Focused on enterprise integration patterns.
 
@@ -284,7 +284,7 @@ result = await kernel.invoke(summarize, sk.KernelArguments(input="Long text...")
 - Memory: integrated memory concepts (embeddings, recallable memories)
 - Copilot Stack: foundational to Microsoft's AI product line
 
-### 3.7 Haystack (deepset)
+### 4.7 Haystack (deepset)
 
 Pipeline-based framework for building production RAG and NLP systems.
 
@@ -307,7 +307,7 @@ result = pipeline.run({"retriever": {"query": "What is AI?"}})
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Framework Comparison Overview
 ```
@@ -339,7 +339,7 @@ START
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### When to Build Custom vs. Use Framework
 
@@ -389,7 +389,7 @@ Cost control:
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### Notion AI (LangChain)
 - Uses LangChain for their Q&A and writing features
@@ -408,7 +408,7 @@ Cost control:
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Framework | Learning Curve | Flexibility | Production-Ready | Best For |
 |-----------|---------------|-------------|-----------------|---------|
@@ -423,7 +423,7 @@ Cost control:
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Frameworks When:
 - Rapid prototyping: frameworks turn 2-week builds into 2-day builds
@@ -437,7 +437,7 @@ Cost control:
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Over-relying on framework defaults**: Default chunk sizes, embedding models, retrieval k — always tune these for your use case.
 2. **Debug difficulty**: Stack traces go 10 levels deep through framework code. Learn to use LangSmith traces for debugging.
@@ -447,7 +447,7 @@ Cost control:
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Category | Notes |
 |------|----------|-------|
@@ -464,7 +464,7 @@ Cost control:
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is LangChain and what problem does it solve?**
 A: LangChain is an orchestration framework that provides building blocks for LLM applications: prompt templates, chain composition, memory management, agent patterns, and integrations with 100+ tools and data sources. It solves the problem of repeatedly writing boilerplate code for common patterns (RAG pipelines, agent loops, conversation memory). The main trade-off is added abstraction that can make debugging harder.

@@ -8,7 +8,7 @@ The key insight: **more test-time compute = better answers**, at least for tasks
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Reasoning models are like a student who thinks through a problem carefully before answering, versus one who blurts out the first thing that comes to mind.
 
@@ -20,7 +20,7 @@ The key insight: **more test-time compute = better answers**, at least for tasks
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Test-time compute scaling**: Performance scales with inference-time compute (thinking tokens), analogous to how training-time scaling improves base models.
 - **Chains of thought are emergent but trainable**: Base models exhibit CoT; reasoning models are explicitly trained to use extended CoT as a first-class capability.
@@ -30,9 +30,9 @@ The key insight: **more test-time compute = better answers**, at least for tasks
 
 ---
 
-## 3. Types / Strategies
+## 4. Types / Strategies
 
-### 3.1 OpenAI o1 / o3
+### 4.1 OpenAI o1 / o3
 
 OpenAI's reasoning model series (2024). Uses a hidden "thinking" phase before responding:
 
@@ -64,7 +64,7 @@ o1:      74%
 o3:      99.3%  (best in the world, surpasses expert humans)
 ```
 
-### 3.2 DeepSeek-R1
+### 4.2 DeepSeek-R1
 
 Open-source reasoning model (2025) trained entirely with RL:
 
@@ -87,7 +87,7 @@ Stage 2: SFT warm-up + GRPO (improved version)
 DeepSeek-R1 performance: comparable to o1 on many benchmarks.
 Impact: proved that reasoning can emerge from pure RL without supervised reasoning data.
 
-### 3.3 Process Reward Models (PRM)
+### 4.3 Process Reward Models (PRM)
 
 Score each reasoning step rather than just the final answer:
 
@@ -109,7 +109,7 @@ Benefits:
   - Filters high-quality reasoning chains for training data
 ```
 
-### 3.4 Self-Consistency
+### 4.4 Self-Consistency
 
 Generate multiple reasoning chains and vote:
 
@@ -132,7 +132,7 @@ Improves accuracy by 5-15% on reasoning tasks
 Useful when you can't afford a full reasoning model but need better reliability
 ```
 
-### 3.5 Tree of Thought (ToT)
+### 4.5 Tree of Thought (ToT)
 
 Explicitly maintain a tree of reasoning paths; evaluate and prune:
 
@@ -156,7 +156,7 @@ Best branch: 1b + 2a combination
 
 Useful for: planning, design problems, creative tasks with combinatorial space.
 
-### 3.6 MCTS (Monte Carlo Tree Search) for Reasoning
+### 4.6 MCTS (Monte Carlo Tree Search) for Reasoning
 
 Apply MCTS to LLM reasoning:
 
@@ -177,7 +177,7 @@ Used in: AlphaCode 2, AlphaProof (Google DeepMind math reasoning)
 Limitation: slow — requires many forward passes (10-1000× base inference)
 ```
 
-### 3.7 Reward Hacking and Mitigation
+### 4.7 Reward Hacking and Mitigation
 
 Reward hacking occurs when the model discovers unintended shortcuts to maximize reward without actually solving the problem:
 
@@ -223,7 +223,7 @@ format reward before the correctness signal dominated.
    qualitative hacking patterns that automated rewards miss
 ```
 
-### 3.8 Overthinking and Budget Control
+### 4.8 Overthinking and Budget Control
 
 Reasoning models sometimes generate unnecessarily long thinking chains on simple problems, wasting compute:
 
@@ -290,7 +290,7 @@ additional 1,000 tokens drops below a domain-specific threshold
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Test-Time Compute Scaling Curve
 ```
@@ -337,7 +337,7 @@ Prompt (math/code problem)
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Reward Modeling for Math/Code
 
@@ -396,7 +396,7 @@ This self-correction behavior was NOT explicitly trained —
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### OpenAI o1/o3 Achievements
 - AIME 2024: 99.3% (o3) vs human ~85% (competition math)
@@ -417,7 +417,7 @@ This self-correction behavior was NOT explicitly trained —
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Approach | Accuracy | Latency | Cost | Best For |
 |----------|---------|---------|------|---------|
@@ -430,7 +430,7 @@ This self-correction behavior was NOT explicitly trained —
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Reasoning Models When:
 - Multi-step math, logic proofs, formal verification
@@ -448,7 +448,7 @@ This self-correction behavior was NOT explicitly trained —
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Using reasoning models for everything**: They're 10-50× more expensive. Reserve for tasks that benefit.
 2. **Benchmarking on contaminated tasks**: AMC/AIME problems may appear in training data. Use held-out problems.
@@ -458,7 +458,7 @@ This self-correction behavior was NOT explicitly trained —
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -473,7 +473,7 @@ This self-correction behavior was NOT explicitly trained —
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is test-time compute scaling and why is it significant?**
 A: Test-time compute scaling means inference performance improves predictably with more compute spent on generation — more thinking tokens, more rollouts, or tree search. Before o1, the primary scaling axis was training compute (bigger model, more data). Now there are two independent axes: (1) train more → smarter base model; (2) think more at inference → better answer from the same model. This is significant because it provides an immediate path to better performance on hard tasks without retraining, and it enables dynamic compute allocation — spend 100 tokens on a simple query, 10,000 on a hard one.

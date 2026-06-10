@@ -8,7 +8,7 @@ The trend from 2023-2025: all frontier LLMs have become multimodal. GPT-4o, Clau
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Multimodal models are like a person who can look at an image and discuss it — they bridge the gap between the visual world and language by learning to represent both in the same "mental" space.
 
@@ -20,7 +20,7 @@ The trend from 2023-2025: all frontier LLMs have become multimodal. GPT-4o, Clau
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Shared representation space**: Multimodal models work by projecting different modalities into the same embedding space, where a text token and an image patch can "attend to each other" via the transformer's attention mechanism.
 - **Vision encoder + LLM**: The dominant architecture pairs a pre-trained vision encoder (CLIP, SigLIP) with a pre-trained LLM, connected by a learnable projection layer.
@@ -29,9 +29,9 @@ The trend from 2023-2025: all frontier LLMs have become multimodal. GPT-4o, Clau
 
 ---
 
-## 3. Types / Architectures
+## 4. Types / Architectures
 
-### 3.1 Vision Language Models (VLMs)
+### 4.1 Vision Language Models (VLMs)
 
 **Architecture (LLaVA / LLaMA-Vision style):**
 ```
@@ -80,7 +80,7 @@ Stage 2: Instruction fine-tuning
 | Claude 3.5 Sonnet | Unknown | Claude 3.5 | 200K | Best OCR; document understanding |
 | Qwen-VL | ViT | Qwen | 32K | Multilingual; open |
 
-### 3.2 Diffusion Models (Text-to-Image)
+### 4.2 Diffusion Models (Text-to-Image)
 
 Not LLMs but closely related in the AI landscape:
 
@@ -104,7 +104,7 @@ Key models:
   Imagen (Google): large T5 text encoder; photorealistic
 ```
 
-### 3.3 Speech Models
+### 4.3 Speech Models
 
 **Speech-to-Text (ASR):**
 ```
@@ -142,7 +142,7 @@ Gemini 1.5 Pro:
   Can analyze hour-long audio recordings
 ```
 
-### 3.4 Video Models
+### 4.4 Video Models
 
 ```
 Video understanding:
@@ -162,7 +162,7 @@ Architecture: DiT (Diffusion Transformer) replacing UNet for video
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### VLM Complete Flow
 ```
@@ -211,7 +211,7 @@ Result: shared embedding space where
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Vision Encoding Details
 
@@ -258,7 +258,7 @@ Medical multimodal:
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### GPT-4o Vision
 - Processes images up to 20MB
@@ -285,7 +285,7 @@ Medical multimodal:
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Model | Image Quality | Video | Audio | Context | Open? |
 |-------|-------------|-------|-------|---------|-------|
@@ -297,7 +297,7 @@ Medical multimodal:
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use VLMs When:
 - Input contains images, charts, diagrams, or screenshots
@@ -313,7 +313,7 @@ Medical multimodal:
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Image resolution too low**: Shrinking high-res images to 336×336 loses text and fine details. Use high-detail mode.
 2. **Overestimating OCR capability**: VLMs are better at understanding than exact transcription. For legal/financial, use specialized OCR.
@@ -323,7 +323,7 @@ Medical multimodal:
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -340,7 +340,7 @@ Medical multimodal:
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: How do Vision Language Models work architecturally?**
 A: Most VLMs use a three-component architecture: (1) a vision encoder (usually CLIP or SigLIP ViT) that divides an image into patches and encodes each patch as an embedding; (2) a projection layer (MLP) that maps vision embeddings into the same dimension as the LLM's text embeddings; (3) the LLM itself, which processes the interleaved sequence of visual and text tokens using standard self-attention. Training happens in two stages: alignment pre-training (trains only the projection layer on image-caption pairs) and instruction fine-tuning (trains the LLM + projection layer on visual instruction data).

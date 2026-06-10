@@ -8,7 +8,7 @@ Voice agents have stricter latency budgets than text agents (sub-800ms first aud
 
 ---
 
-## Intuition
+## 2. Intuition
 
 **One-line analogy**: A voice agent is like a phone conversation with a human — pauses, interruptions, "uh-huhs", talking-over, all need to feel natural. Latency tolerance is measured in milliseconds, not seconds.
 
@@ -20,7 +20,7 @@ Voice agents have stricter latency budgets than text agents (sub-800ms first aud
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Latency budget rules everything**: sub-300ms first audio byte premium; sub-800ms acceptable; >1s broken.
 - **Streaming end-to-end**: every stage streams; no batch processing in the hot path.
@@ -32,27 +32,27 @@ Voice agents have stricter latency budgets than text agents (sub-800ms first aud
 
 ---
 
-## 3. Types / Architectures / Strategies
+## 4. Types / Architectures / Strategies
 
-### 3.1 Pipeline (STT → LLM → TTS)
+### 4.1 Pipeline (STT → LLM → TTS)
 
 Three modules: Whisper / Deepgram / Speechmatics → Claude / GPT / Gemini → ElevenLabs / OpenAI TTS / Cartesia. Easy to swap components; total latency 800-1500ms even with streaming. Best for: cost-sensitive, multilingual, custom voice cloning.
 
-### 3.2 End-to-End Audio Model
+### 4.2 End-to-End Audio Model
 
 OpenAI Realtime API (GPT-4o), Gemini Live, Mistral Voxtral. Single model: audio in → audio out. Latency 200-800ms. Captures prosody, emotion, laughter. Best for: premium UX, low latency required.
 
-### 3.3 Hybrid Cascade
+### 4.3 Hybrid Cascade
 
 Pipeline with optimizations: streaming STT (Deepgram Nova-2 sends partial transcripts at <50ms), LLM starts processing on partial transcripts, TTS streams in chunks (ElevenLabs Flash at ~75ms latency). Achievable: 500-900ms total.
 
-### 3.4 Telephony Integration
+### 4.4 Telephony Integration
 
 Twilio, Vonage, LiveKit Cloud, Pipecat for routing phone calls through voice agents. Handle: SIP/PSTN connectivity, recording compliance, DTMF (touch-tone) detection.
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ```
 Pipeline Architecture
@@ -135,7 +135,7 @@ Turn Detection
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### OpenAI Realtime API Example
 
@@ -269,7 +269,7 @@ async def run_voice_agent():
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 **Customer support voice agents** — IVR replacement; companies like Replicant, Cresta, PolyAI deploy at telcos and large retailers.
 
@@ -285,7 +285,7 @@ async def run_voice_agent():
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Architecture | Latency | Prosody/Emotion | Cost | Control | Best For |
 |---|---|---|---|---|---|
@@ -296,7 +296,7 @@ async def run_voice_agent():
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 **Use voice agents when:**
 - Phone IVR / customer support routing
@@ -312,7 +312,7 @@ async def run_voice_agent():
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 ### Pitfall 1: No barge-in support
 
@@ -355,7 +355,7 @@ if silence_duration > 800:
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Category | Notes |
 |---|---|---|

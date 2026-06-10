@@ -8,7 +8,7 @@ Even the best-aligned LLMs (Claude, GPT-4) can be jailbroken, manipulated via pr
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Guardrails are like security checkpoints at an airport — even if everyone on the flight is trustworthy, you still scan bags because you can't verify that from a conversation.
 
@@ -20,7 +20,7 @@ Even the best-aligned LLMs (Claude, GPT-4) can be jailbroken, manipulated via pr
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Defense in depth**: Alignment + input guardrails + output guardrails. No single layer is sufficient.
 - **Pre-LLM vs. post-LLM**: Input guardrails block harmful inputs before they reach the LLM; output guardrails filter the LLM's response. Both are needed.
@@ -31,9 +31,9 @@ Even the best-aligned LLMs (Claude, GPT-4) can be jailbroken, manipulated via pr
 
 ---
 
-## 3. Types / Strategies
+## 4. Types / Strategies
 
-### 3.1 Input Guardrails
+### 4.1 Input Guardrails
 
 Applied to user input before it reaches the LLM.
 
@@ -93,7 +93,7 @@ def validate_input(text: str, max_tokens: int = 4096) -> bool:
     return True
 ```
 
-### 3.2 Output Guardrails
+### 4.2 Output Guardrails
 
 Applied to the LLM's response before delivery to the user.
 
@@ -149,7 +149,7 @@ def check_output_pii(response: str) -> bool:
     return False
 ```
 
-### 3.3 NeMo Guardrails (NVIDIA)
+### 4.3 NeMo Guardrails (NVIDIA)
 
 Programmable conversational guardrails using a domain-specific language (Colang):
 
@@ -192,7 +192,7 @@ User Input
 Filtered Response
 ```
 
-### 3.4 Llama Guard (Meta)
+### 4.4 Llama Guard (Meta)
 
 A fine-tuned LLaMA model trained as a safety classifier. Follows the MLCommons Hazard Taxonomy.
 
@@ -220,7 +220,7 @@ Model: LLaMA 3 8B fine-tuned; 7B parameters; runs on single GPU
 Output: "safe" or "unsafe \nS1,S7" (lists violated categories)
 ```
 
-### 3.5 Guardrails AI
+### 4.5 Guardrails AI
 
 Python library for output validation using Pydantic-style validators:
 
@@ -244,7 +244,7 @@ response, *rest = guard(
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Guardrail Placement
 ```
@@ -292,7 +292,7 @@ Parallel execution: total latency = max(LLM, classifier)
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Guardrail Latency Optimization
 
@@ -363,7 +363,7 @@ GDPR (EU):
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### OpenAI Moderation API
 - Pre-built toxicity classifier: `text-moderation-latest`
@@ -386,7 +386,7 @@ GDPR (EU):
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Guardrail Type | Latency | False Positive | Coverage | Cost |
 |---------------|---------|----------------|---------|------|
@@ -398,7 +398,7 @@ GDPR (EU):
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Must Use Guardrails When:
 - Consumer applications (any user-facing product)
@@ -413,7 +413,7 @@ GDPR (EU):
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Only checking inputs, not outputs**: LLMs can produce unsafe outputs even from safe inputs (jailbreak via indirect injection from web search results).
 2. **Too permissive thresholds**: "Mostly safe" is not safe enough for regulated industries. Tune to your risk tolerance, not the default.
@@ -423,7 +423,7 @@ GDPR (EU):
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -440,7 +440,7 @@ GDPR (EU):
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is the difference between model alignment and external guardrails?**
 A: Alignment (RLHF, Constitutional AI) teaches the model itself to refuse harmful requests and behave safely — it's baked into the weights. External guardrails are input/output filters at the API layer that operate independently of the model. Both are needed because: (1) even well-aligned models can be jailbroken; (2) guardrails provide auditable, programmable policies that compliance requires; (3) business rules change faster than you can retrain models; (4) defense in depth — no single layer is sufficient.

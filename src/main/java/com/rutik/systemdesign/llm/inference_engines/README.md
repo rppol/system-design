@@ -8,7 +8,7 @@ The landscape has exploded: vLLM dominates cloud serving; TensorRT-LLM is NVIDIA
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Inference engines are like optimized car engines — the same fuel (model weights) produces 10-50× more horsepower (tokens/second) with engineering optimization than a stock implementation.
 
@@ -20,7 +20,7 @@ The landscape has exploded: vLLM dominates cloud serving; TensorRT-LLM is NVIDIA
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **PagedAttention**: Efficient KV cache memory management — the key innovation that made continuous batching practical.
 - **Continuous batching**: Serve many users efficiently by dynamically adding/removing requests from batches.
@@ -30,9 +30,9 @@ The landscape has exploded: vLLM dominates cloud serving; TensorRT-LLM is NVIDIA
 
 ---
 
-## 3. Engines
+## 4. Engines
 
-### 3.1 vLLM
+### 4.1 vLLM
 
 **The de facto standard for open-source LLM serving.**
 
@@ -72,7 +72,7 @@ response = client.chat.completions.create(
 
 **Best for:** Production serving of large open-source models on cloud GPUs.
 
-### 3.2 TensorRT-LLM (NVIDIA)
+### 4.2 TensorRT-LLM (NVIDIA)
 
 NVIDIA's inference optimization library for H100/A100. Highest raw performance but more complex setup.
 
@@ -101,7 +101,7 @@ tritonserver --model-repository=./triton_models
 
 **Best for:** Maximum throughput in NVIDIA data center environments; enterprise deployments.
 
-### 3.3 llama.cpp
+### 4.3 llama.cpp
 
 CPU-first inference engine with Metal (Apple Silicon), CUDA, and OpenCL backends. Enables running LLMs on consumer hardware.
 
@@ -132,7 +132,7 @@ cmake -B build && cmake --build build --config Release
 
 **Best for:** Local inference, privacy-sensitive applications, edge devices, development.
 
-### 3.4 SGLang (Stanford)
+### 4.4 SGLang (Stanford)
 
 **Structural caching** innovation: caches KV computations across requests that share prefixes.
 
@@ -163,7 +163,7 @@ def multi_turn_chat(s, messages):
 
 **Best for:** Multi-turn chat systems, constrained generation (JSON mode), multi-modal.
 
-### 3.5 Ollama
+### 4.5 Ollama
 
 Easiest way to run LLMs locally. One-command download and run.
 
@@ -191,7 +191,7 @@ curl http://localhost:11434/api/chat -d '{
 
 **Best for:** Development, demos, personal use, testing models locally.
 
-### 3.6 HuggingFace TGI (Text Generation Inference)
+### 4.6 HuggingFace TGI (Text Generation Inference)
 
 Production inference server from HuggingFace. Tight integration with HuggingFace Hub.
 
@@ -217,7 +217,7 @@ docker run --gpus all \
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### vLLM Serving Architecture
 ```
@@ -271,7 +271,7 @@ What's your use case?
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Quantization Formats
 
@@ -324,7 +324,7 @@ Fix options:
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### Together AI (vLLM-based)
 - Serves 50+ open-source models via API
@@ -349,7 +349,7 @@ Fix options:
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Engine | Throughput | Ease of Use | Hardware | Model Support | License |
 |--------|-----------|-------------|---------|---------------|---------|
@@ -362,7 +362,7 @@ Fix options:
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use vLLM When:
 - Production cloud serving of open-source models
@@ -386,7 +386,7 @@ Fix options:
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Underestimating KV cache memory**: Calculating model weights but forgetting KV cache leads to OOM in production.
 2. **Not setting max_model_len**: vLLM defaults to model's max sequence length; if that's 128K tokens, KV cache preallocated for 128K → OOM.
@@ -396,7 +396,7 @@ Fix options:
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Notes |
 |------|-------|
@@ -413,7 +413,7 @@ Fix options:
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is vLLM and what makes it efficient?**
 A: vLLM is an open-source LLM inference engine known for two key innovations: (1) PagedAttention — manages KV cache like OS virtual memory, using fixed-size pages to eliminate fragmentation and enable near-zero waste; (2) Continuous batching — dynamically adds/removes requests from batches at each step, so fast requests complete quickly and slow ones don't hold GPU slots. Together these give 10-24× higher throughput than naive HuggingFace inference.

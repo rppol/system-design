@@ -10,7 +10,7 @@ The key innovation of the 2023-2024 era is **parameter-efficient fine-tuning (PE
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Fine-tuning is like teaching a well-educated person a specialized skill — you don't start from scratch, you build on existing knowledge.
 
@@ -22,7 +22,7 @@ The key innovation of the 2023-2024 era is **parameter-efficient fine-tuning (PE
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Catastrophic forgetting**: Fine-tuning on new data can cause the model to forget previously learned capabilities. Mitigate with low learning rates, mixing original data, and PEFT.
 - **Learning rate**: Fine-tuning requires much lower LR than pre-training (1e-5 to 1e-4 vs 1e-3 to 3e-4). Overly high LR destroys pre-trained representations.
@@ -32,9 +32,9 @@ The key innovation of the 2023-2024 era is **parameter-efficient fine-tuning (PE
 
 ---
 
-## 3. Types / Strategies
+## 4. Types / Strategies
 
-### 3.1 Full Fine-Tuning
+### 4.1 Full Fine-Tuning
 
 Update all parameters in the model. Most flexible but requires significant memory (same as pre-training) and risks catastrophic forgetting.
 
@@ -42,7 +42,7 @@ Update all parameters in the model. Most flexible but requires significant memor
 
 **Memory requirements**: Same as pre-training (weights + gradients + optimizer states).
 
-### 3.2 LoRA (Low-Rank Adaptation)
+### 4.2 LoRA (Low-Rank Adaptation)
 
 The most popular PEFT method. Instead of updating weight matrix W (d × k), add a low-rank adapter:
 
@@ -66,7 +66,7 @@ Forward pass: h = W_frozen × x + (B × A) × x × scaling_factor
 
 **When to use**: Task-specific fine-tuning, style/format adaptation, adding new capabilities to existing model.
 
-### 3.3 QLoRA (Quantized LoRA)
+### 4.3 QLoRA (Quantized LoRA)
 
 LoRA + quantize the base model to 4-bit NF4:
 
@@ -85,7 +85,7 @@ QLoRA enables fine-tuning a 7B model on a single 16GB consumer GPU (RTX 4080/409
 
 Tradeoff: 4-bit quantization introduces small quality degradation (~1-2% on benchmarks).
 
-### 3.4 Instruction Tuning
+### 4.4 Instruction Tuning
 
 Teach the model to follow natural language instructions by fine-tuning on (instruction, response) pairs.
 
@@ -99,7 +99,7 @@ Training format example:
 
 Instruction tuning is what transforms a base model (predicts next tokens) into a chat model (follows instructions and answers questions). Fine-tuning on ~1K-100K diverse instruction pairs achieves this.
 
-### 3.5 Domain Adaptation
+### 4.5 Domain Adaptation
 
 Fine-tune on domain-specific text to improve performance in a specialized area:
 
@@ -117,7 +117,7 @@ Strategies:
    Best results; most data required
 ```
 
-### 3.6 PEFT Taxonomy
+### 4.6 PEFT Taxonomy
 
 ```
 PEFT Methods:
@@ -138,7 +138,7 @@ PEFT Methods:
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### LoRA Applied to a Transformer
 ```
@@ -209,7 +209,7 @@ Pre-trained Base Model
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### LoRA Rank Selection
 
@@ -270,7 +270,7 @@ Benefits of keeping separate:
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### LLaMA → Vicuna (2023)
 - Fine-tuned LLaMA 13B on 70K ChatGPT conversations (user-shared)
@@ -296,7 +296,7 @@ Benefits of keeping separate:
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Method | VRAM (7B) | Speed | Quality | Forgetting Risk |
 |--------|-----------|-------|---------|----------------|
@@ -308,7 +308,7 @@ Benefits of keeping separate:
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Fine-Tuning When:
 - You need consistent output format (JSON, specific templates)
@@ -331,7 +331,7 @@ Benefits of keeping separate:
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Wrong prompt format**: Training with Alpaca format then inferring with ChatML format → garbage output. Match exactly.
 2. **Learning rate too high**: LoRA with LR=1e-3 destroys base model representations. Use 1e-4 to 3e-4 for LoRA.
@@ -342,7 +342,7 @@ Benefits of keeping separate:
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -375,7 +375,7 @@ model = get_peft_model(base_model, lora_config)
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: When should you fine-tune vs. just use prompting?**
 A: Fine-tune when: you need consistent output format, the task is highly repetitive at scale (cost justifies training), latency matters (fine-tuned 7B beats prompted 70B), or privacy requires not sending data to external APIs. Use prompting when: rapid iteration needed, task variety is high, dataset is too small, or the base model already handles the task adequately.

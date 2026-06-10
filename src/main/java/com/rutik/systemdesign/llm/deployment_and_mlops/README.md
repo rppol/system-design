@@ -8,7 +8,7 @@ LLM MLOps encompasses model serving infrastructure, cost management, monitoring 
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: LLM deployment is like running a restaurant — you need to manage capacity (GPU servers), quality (model outputs), cost (GPU hours), and freshness (model updates) all simultaneously.
 
@@ -20,7 +20,7 @@ LLM MLOps encompasses model serving infrastructure, cost management, monitoring 
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **GPU cost dominates**: For self-hosted LLMs, GPU compute is typically 60-80% of total cost. Every optimization decision flows from this.
 - **Observability is non-negotiable**: LLM outputs are non-deterministic and hard to validate. You need extensive logging to understand failures.
@@ -33,9 +33,9 @@ LLM MLOps encompasses model serving infrastructure, cost management, monitoring 
 
 ---
 
-## 3. Serving Architecture Patterns
+## 4. Serving Architecture Patterns
 
-### 3.1 API Gateway Pattern
+### 4.1 API Gateway Pattern
 
 A dedicated gateway handles all LLM traffic before reaching models:
 
@@ -61,7 +61,7 @@ Client Requests
   └── Specialized models (code, embedding, etc.)
 ```
 
-### 3.2 Model Routing
+### 4.2 Model Routing
 
 Route queries to the appropriate model based on complexity:
 
@@ -89,7 +89,7 @@ def estimate_complexity(query: str) -> float:
     # 4. Token confidence from cheap model: low confidence → escalate to expensive model
 ```
 
-### 3.3 Semantic Caching
+### 4.3 Semantic Caching
 
 Cache LLM responses by semantic similarity of queries:
 
@@ -118,7 +118,7 @@ Hit rates for common applications:
 - General Q&A: 10-20% cache hit rate
 - Code generation: <5% cache hit rate (unique code inputs)
 
-### 3.4 Prompt Versioning & Management
+### 4.4 Prompt Versioning & Management
 
 Prompts are the most frequently changed component in an LLM system. A git-like workflow for prompts prevents silent regressions:
 
@@ -172,7 +172,7 @@ Key principle: Prompt changes go through PR review just like code. A one-word ch
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Full LLM Production Stack
 ```
@@ -265,7 +265,7 @@ Full Rollout
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Cost Estimation and Optimization
 
@@ -504,7 +504,7 @@ class CostTracker:
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### OpenAI's Infrastructure
 - Thousands of H100s across Azure regions
@@ -536,7 +536,7 @@ class CostTracker:
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Decision | Self-Hosted | Managed API |
 |----------|------------|-------------|
@@ -570,7 +570,7 @@ class CostTracker:
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Self-Host When:
 - Processing >10M tokens/day (economies of scale justify GPU cost)
@@ -586,7 +586,7 @@ class CostTracker:
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **No prompt versioning**: A team changed one word in a system prompt ("concise" to "brief") and response quality dropped 15% across the board. Without versioning, it took 3 days to identify the change. Store every prompt version with metadata, diff capability, and instant rollback.
 2. **Ignoring TTFT**: Optimizing throughput but not latency; users perceive TTFT as the response time.
@@ -601,7 +601,7 @@ class CostTracker:
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -618,7 +618,7 @@ class CostTracker:
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: How would you design an LLM gateway for a large enterprise?**
 A: Key components: (1) Authentication — API key management per team/user with rate limits; (2) Request routing — complexity-based routing to appropriate model (cheap for simple, expensive for complex); (3) Semantic caching — cache responses for similar queries; (4) Cost tracking — per-team, per-user cost attribution and budgets; (5) Observability — structured logging of every request/response with cost, latency, model; (6) Guardrails — input/output filtering before/after LLM; (7) Fallback — if primary model is down/slow, route to fallback. Deploy as a horizontal service with load balancing.

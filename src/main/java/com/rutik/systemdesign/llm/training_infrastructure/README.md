@@ -10,7 +10,7 @@ Modern training infrastructure centers on three forms of parallelism: splitting 
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Training infrastructure is like orchestrating a factory assembly line across thousands of workers — if any worker is idle or miscommunicating, the whole line slows down.
 
@@ -22,7 +22,7 @@ Modern training infrastructure centers on three forms of parallelism: splitting 
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Maximize GPU utilization**: Every GPU-hour costs money. Idle GPUs waste resources.
 - **Memory hierarchy awareness**: HBM (GPU memory) → NVLink → PCIe → NVSwitch → InfiniBand — bandwidth drops 10-100x at each boundary.
@@ -33,9 +33,9 @@ Modern training infrastructure centers on three forms of parallelism: splitting 
 
 ---
 
-## 3. Types of Parallelism
+## 4. Types of Parallelism
 
-### 3.1 Data Parallelism (DP)
+### 4.1 Data Parallelism (DP)
 
 Each GPU holds a full copy of the model; each processes a different batch. Gradients are averaged across GPUs at the end of each step.
 
@@ -48,7 +48,7 @@ GPU 3: model copy + batch_3 --> grad_3 ]
 
 **Problem**: For a 70B model in BF16, each GPU needs ~140GB just for model weights. No single GPU has that much memory.
 
-### 3.2 Tensor Parallelism (TP)
+### 4.2 Tensor Parallelism (TP)
 
 Split individual layers horizontally across GPUs. Each GPU computes a portion of each matrix multiplication.
 
@@ -66,7 +66,7 @@ AllReduce at end of each layer to combine partial outputs
 - Best within a single node (NVLink bandwidth 600-900 GB/s)
 - Typical TP degree: 4-8 within a server
 
-### 3.3 Pipeline Parallelism (PP)
+### 4.3 Pipeline Parallelism (PP)
 
 Split model layers across different GPUs. Each GPU handles a set of consecutive transformer layers.
 
@@ -87,7 +87,7 @@ Micro-batch pipeline:
 - "Pipeline bubble" — GPUs idle at start/end of pipeline; minimize with micro-batching
 - Typical PP degree: 8-64 across nodes
 
-### 3.4 Sequence Parallelism (SP)
+### 4.4 Sequence Parallelism (SP)
 
 Split the sequence dimension across GPUs. Each GPU processes a chunk of the sequence in attention layers.
 
@@ -105,7 +105,7 @@ Reduce-scatter after attention
 - Enables long-context training by distributing sequence across GPUs
 - Ring Attention: extends SP to very long sequences without full all-gather
 
-### 3.5 Expert Parallelism (EP) — for MoE models
+### 4.5 Expert Parallelism (EP) — for MoE models
 
 In Mixture of Experts models, different GPUs host different expert FFNs:
 
@@ -121,7 +121,7 @@ All-to-all again to return results
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### 3D Parallelism (Standard for Large Model Training)
 ```
@@ -169,7 +169,7 @@ With ZeRO-3 + 16 GPUs:
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### FSDP (Fully Sharded Data Parallel)
 
@@ -237,7 +237,7 @@ FP8 training (emerging, H100+ only):
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### Meta LLaMA 3 405B Training Infrastructure
 - 16,384 H100 GPUs (2048 nodes × 8 GPUs)
@@ -261,7 +261,7 @@ FP8 training (emerging, H100+ only):
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Parallelism | Pros | Cons | Best For |
 |-------------|------|------|---------|
@@ -279,7 +279,7 @@ FP8 training (emerging, H100+ only):
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Distributed Training When:
 - Model + optimizer states exceed single GPU memory
@@ -292,7 +292,7 @@ FP8 training (emerging, H100+ only):
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Not profiling before optimizing**: Profile GPU utilization and communication before tuning parallelism settings.
 2. **Wrong TP/PP balance**: Too high TP across nodes kills performance due to slow inter-node all-reduce every layer.
@@ -303,7 +303,7 @@ FP8 training (emerging, H100+ only):
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -320,7 +320,7 @@ FP8 training (emerging, H100+ only):
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is the difference between tensor parallelism and pipeline parallelism?**
 A: Tensor parallelism (TP) splits individual matrix operations across GPUs — each GPU computes part of each layer's output. Requires all-reduce after every layer, so needs high-bandwidth connections (NVLink within node). Pipeline parallelism (PP) assigns different layers to different GPUs — data flows sequentially through pipeline stages. Requires only point-to-point communication between adjacent stages, tolerates lower bandwidth (can cross nodes). In practice: TP within nodes, PP across nodes.

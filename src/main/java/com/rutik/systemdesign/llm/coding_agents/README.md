@@ -8,7 +8,7 @@ The 2024-2025 coding-agent landscape spans IDE-integrated (Cursor Composer, Clau
 
 ---
 
-## Intuition
+## 2. Intuition
 
 **One-line analogy**: A coding agent is like an off-shore developer who can read your codebase, ask clarifying questions, write code, run your tests, and submit a PR — but operates at sub-second cost and millisecond latency.
 
@@ -20,7 +20,7 @@ The 2024-2025 coding-agent landscape spans IDE-integrated (Cursor Composer, Clau
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Navigate before reading**: grep/symbol-search/LSP to find relevant code; don't dump whole files into context.
 - **Test-driven loops**: write tests first when possible; run tests after every change; let test failures guide fixes.
@@ -32,35 +32,35 @@ The 2024-2025 coding-agent landscape spans IDE-integrated (Cursor Composer, Clau
 
 ---
 
-## 3. Types / Architectures / Strategies
+## 4. Types / Architectures / Strategies
 
-### 3.1 SWE-agent Style (Agent-Computer Interface, ACI)
+### 4.1 SWE-agent Style (Agent-Computer Interface, ACI)
 
 Custom shell-like commands optimized for LLM use: `find_file`, `goto`, `scroll_window`, `edit`, `submit`. Each command is precisely defined to fit LLM strengths. SWE-agent paper (Yang et al. 2024) showed ACI dramatically outperforms raw bash.
 
-### 3.2 OpenHands (formerly OpenDevin)
+### 4.2 OpenHands (formerly OpenDevin)
 
 Open-source autonomous coding platform. Event stream architecture: agent emits actions, runtime executes, results flow back as observations. Supports multiple agent backends (CodeActAgent, BrowsingAgent). Docker sandbox per session.
 
-### 3.3 Aider
+### 4.3 Aider
 
 Library-based coding agent (Python). Integrates with git — commits each agent change as a separate git commit. Uses repository "map" (file summaries + class/function signatures) for context-efficient navigation. Configurable model (OpenAI, Anthropic, local).
 
-### 3.4 Cursor Composer / Claude Code / Continue / Cline
+### 4.4 Cursor Composer / Claude Code / Continue / Cline
 
 IDE-integrated agents. Tight UX: inline diff previews, accept/reject per hunk, integrated terminal, file tree awareness. Often subagent dispatch (parallel file edits) for multi-file changes.
 
-### 3.5 Devin
+### 4.5 Devin
 
 Autonomous "AI software engineer". Long-running sessions (hours), full VM access, browser + terminal + IDE, plans tasks, asks clarifying questions, posts PRs. Targets enterprise dev orgs as a teammate.
 
-### 3.6 Plandex
+### 4.6 Plandex
 
 Open-source autonomous coding agent. Plan-first architecture: agent produces detailed plan before executing; user approves/edits plan; agent executes with checkpointing.
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ```
 SWE-agent ACI Loop
@@ -137,7 +137,7 @@ Cursor Composer Multi-File Edit
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Simplified SWE-agent ACI
 
@@ -245,7 +245,7 @@ async def test_driven_loop(task: str, max_iterations: int = 15) -> dict:
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 **Cursor Composer / Cursor Background Agents** — IDE-integrated; Composer handles multi-file edits; Background Agents run hours-long tasks autonomously.
 
@@ -263,7 +263,7 @@ async def test_driven_loop(task: str, max_iterations: int = 15) -> dict:
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | System | Autonomy Level | Best Use Case | Cost per Task | SWE-bench (approx) |
 |---|---|---|---|---|
@@ -277,7 +277,7 @@ async def test_driven_loop(task: str, max_iterations: int = 15) -> dict:
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 **Use coding agents when:**
 - Repetitive code changes across many files (refactors, migrations)
@@ -300,7 +300,7 @@ async def test_driven_loop(task: str, max_iterations: int = 15) -> dict:
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 ### Pitfall 1: Reading whole files into context
 
@@ -357,7 +357,7 @@ if any(re.search(p, command) for p in DESTRUCTIVE_GIT):
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Type | Strength |
 |---|---|---|
@@ -374,7 +374,7 @@ if any(re.search(p, command) for p in DESTRUCTIVE_GIT):
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **What is the Agent-Computer Interface (ACI) and why does it matter?**
 ACI is the set of commands/tools the agent uses to interact with a codebase. SWE-agent's contribution was showing that purpose-designed commands (find_file, goto, edit ranges) outperform raw bash because they reduce mistakes (clearer semantics, scoped operations) and match LLM strengths. A good ACI lifts SWE-bench scores by 10+ percentage points.
@@ -426,7 +426,7 @@ Sandboxed bash (E2B, Docker), no production credential access, approval gates on
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. Use targeted file extraction (grep, line ranges, LSP) instead of whole-file reads — 10-50× cost reduction.
 2. Always validate edits with tests/typecheck before reporting success — no silent failures.
@@ -441,7 +441,7 @@ Sandboxed bash (E2B, Docker), no production credential access, approval gates on
 
 ---
 
-## 13. Best Practices Continued
+### Best Practices (Continued)
 
 **Cursor Composer's Production Architecture**
 

@@ -1,5 +1,13 @@
 # Optimization & Quantization
 
+## Deep Dive Files
+
+| File | Topic |
+|------|-------|
+| [gpu_architecture_and_roofline.md](gpu_architecture_and_roofline.md) | GPU memory hierarchy, roofline model, prefill vs decode arithmetic intensity, tensor cores & FP8/FP4, NVLink/InfiniBand topology, H100/H200/B200 spec literacy, MFU/MBU |
+
+---
+
 ## 1. Concept Overview
 
 Model optimization encompasses all techniques that make LLM inference faster, cheaper, or more memory-efficient without retraining from scratch. The primary lever is quantization — reducing the numerical precision of weights from 32-bit floats to 8-bit or 4-bit integers, cutting memory by 4-8× and often speeding inference 2-4×.
@@ -10,7 +18,7 @@ These techniques are not mutually exclusive — production deployments often com
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Model quantization is like JPEG compression for model weights — you reduce precision (quality) to dramatically reduce size and speed up loading, with a controlled quality tradeoff.
 
@@ -22,7 +30,7 @@ These techniques are not mutually exclusive — production deployments often com
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Quantization degrades quality** — always evaluate on domain-specific benchmarks, not just general benchmarks. INT4 may have 1% general benchmark drop but 10% domain drop.
 - **Memory bandwidth is the bottleneck** — quantization helps primarily because it reduces data transferred from HBM per inference step.
@@ -32,9 +40,9 @@ These techniques are not mutually exclusive — production deployments often com
 
 ---
 
-## 3. Quantization Methods
+## 4. Quantization Methods
 
-### 3.1 Post-Training Quantization (PTQ)
+### 4.1 Post-Training Quantization (PTQ)
 
 Quantize a trained model without retraining. The most practical approach.
 
@@ -84,7 +92,7 @@ No Hessian computation needed; faster calibration
 Used by: LLaMA 70B serving at Together AI, AWS Bedrock
 ```
 
-### 3.2 Quantization-Aware Training (QAT)
+### 4.2 Quantization-Aware Training (QAT)
 
 Train or fine-tune with simulated quantization in the forward pass:
 
@@ -99,7 +107,7 @@ Cost: requires GPU training time (~1-10% of original training compute)
 Used for: production deployments where quality at INT4 is critical
 ```
 
-### 3.3 KV Cache Quantization
+### 4.3 KV Cache Quantization
 
 Quantize not the model weights but the KV cache:
 
@@ -129,7 +137,7 @@ vLLM supports: --kv-cache-dtype int8 or fp8
 - High concurrency: more users → more KV cache → sooner OOM
 - GQA already helps (fewer KV heads), but KV quantization compounds the savings
 
-### 3.4 GGUF Quantization (llama.cpp)
+### 4.4 GGUF Quantization (llama.cpp)
 
 llama.cpp's quantization format optimized for CPU/metal inference:
 
@@ -145,7 +153,7 @@ llama.cpp's quantization format optimized for CPU/metal inference:
 
 `Q4_K_M` is the community standard recommendation: best quality/size/speed balance.
 
-### 3.5 FP8 Quantization (H100-Specific)
+### 4.5 FP8 Quantization (H100-Specific)
 
 FP8 is a floating-point format (8 bits) with two variants, distinct from INT8 in how it handles numerical range:
 
@@ -192,7 +200,7 @@ Net: ~2× memory reduction vs BF16 training, ~2× faster Tensor Core throughput,
 
 ---
 
-## 4. Flash Attention
+## 5. Flash Attention & Mixture of Experts
 
 ### What It Solves
 
@@ -255,7 +263,7 @@ FlashAttention-3 (2024): H100-specific; FP8 support; asynchronous computation
 
 ---
 
-## 5. Mixture of Experts (MoE)
+### Mixture of Experts (MoE)
 
 ### Architecture
 

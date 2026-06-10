@@ -23,7 +23,7 @@ This architectural shift enabled:
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: A transformer is like a room of experts where everyone can instantly consult everyone else, then each person synthesizes the group's knowledge to refine their understanding.
 
@@ -35,7 +35,7 @@ This architectural shift enabled:
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Self-Attention**: Each token's representation is a weighted sum of all other tokens, where weights represent relevance. Captures context across arbitrary distances.
 - **Multi-Head Attention**: Running multiple attention "heads" in parallel allows the model to attend to different types of relationships simultaneously (syntactic, semantic, coreference).
@@ -51,29 +51,29 @@ This architectural shift enabled:
 
 ---
 
-## 3. Types / Architectures
+## 4. Types / Architectures
 
-### 3.1 Encoder-Only (BERT-style)
+### 4.1 Encoder-Only (BERT-style)
 - Sees the full bidirectional context during training (Masked Language Modeling)
 - Best for: classification, NER, semantic search, embeddings
 - Examples: BERT, RoBERTa, DeBERTa, ModernBERT
 
-### 3.2 Decoder-Only (GPT-style)
+### 4.2 Decoder-Only (GPT-style)
 - Causal (left-to-right) attention mask; each token only attends to previous tokens
 - Best for: text generation, completion, chat, reasoning — almost all modern LLMs
 - Examples: GPT-4, LLaMA 3, Mistral, Gemma, Qwen, Claude, DeepSeek
 
-### 3.3 Encoder-Decoder (T5-style)
+### 4.3 Encoder-Decoder (T5-style)
 - Encoder processes input; decoder generates output attending to encoder representations
 - Best for: translation, summarization, structured generation (seq2seq tasks)
 - Examples: T5, FLAN-T5, BART, mT5
 
-### 3.4 Mixture of Experts (MoE)
+### 4.4 Mixture of Experts (MoE)
 - Instead of a single FFN, multiple "expert" FFNs exist; a router selects K of N for each token
 - Total parameters >> active parameters → cheaper inference at same quality
 - Examples: Mixtral 8x7B, GPT-4 (rumored), DeepSeek-V3 (671B params, 37B active)
 
-### 3.5 Attention Variants by Span
+### 4.5 Attention Variants by Span
 
 Standard self-attention computes O(n^2) interactions — every token attends to every other token. Several architectural variants reduce this cost:
 
@@ -94,7 +94,7 @@ Standard self-attention computes O(n^2) interactions — every token attends to 
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Single Transformer Block
 ```
@@ -170,7 +170,7 @@ T5:       ✓    ✓    ✓    ✓    ✓
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Q/K/V Intuition & Setup
 
@@ -479,7 +479,7 @@ But in practice, models are often undertrained relative to Chinchilla-optimal be
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### OpenAI GPT Series
 - GPT-1 (2018): 117M params, pre-training on BooksCorpus, first demonstration of transfer learning
@@ -504,7 +504,7 @@ But in practice, models are often undertrained relative to Chinchilla-optimal be
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Aspect | Encoder-Only | Decoder-Only | Encoder-Decoder |
 |--------|-------------|--------------|-----------------|
@@ -523,7 +523,7 @@ But in practice, models are often undertrained relative to Chinchilla-optimal be
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Decoder-Only When:
 - You need open-ended text generation
@@ -547,7 +547,7 @@ But in practice, models are often undertrained relative to Chinchilla-optimal be
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Ignoring tokenization effects**: Model sees tokens, not characters. "1000000" might be 3 tokens; Chinese characters have different density. Affects prompt length estimation.
 2. **Confusing temperature=0 with determinism**: Temperature=0 is greedy but not perfectly reproducible across different hardware/batching.
@@ -557,7 +557,7 @@ But in practice, models are often undertrained relative to Chinchilla-optimal be
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool / Framework | Purpose | Notes |
 |-----------------|---------|-------|
@@ -573,7 +573,7 @@ But in practice, models are often undertrained relative to Chinchilla-optimal be
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is self-attention and why is it better than RNNs?**
 A: Self-attention computes relationships between all token pairs in O(n²) operations but O(1) sequential steps — fully parallelizable during training. RNNs process tokens sequentially (O(n) sequential steps), causing vanishing gradients for long-range dependencies. Self-attention captures any distance relationship in one step.

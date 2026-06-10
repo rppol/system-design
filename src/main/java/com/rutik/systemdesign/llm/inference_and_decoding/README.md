@@ -1,5 +1,13 @@
 # Inference & Decoding
 
+## Deep Dive Files
+
+| File | Topic |
+|------|-------|
+| [constrained_decoding_and_structured_outputs.md](constrained_decoding_and_structured_outputs.md) | Logit masking, FSM/CFG grammar compilation, XGrammar/llguidance internals, jump-forward decoding, provider structured outputs, quality tradeoffs |
+
+---
+
 ## 1. Concept Overview
 
 LLM inference is the process of generating tokens from a trained model. Unlike training (which is parallelizable across the sequence), inference is inherently sequential — each token can only be generated after the previous one. This fundamental constraint drives most of the complexity in LLM serving systems.
@@ -8,7 +16,7 @@ Understanding inference mechanics is critical for system design: the KV cache, b
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: LLM inference is like a chef cooking one dish at a time — each plate (token) must finish before the next starts, so you optimize by keeping the kitchen (GPU) constantly busy with multiple orders.
 
@@ -20,7 +28,7 @@ Understanding inference mechanics is critical for system design: the KV cache, b
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Sequential bottleneck**: Each output token depends on all previous tokens — inference can't be parallelized across tokens.
 - **Two phases**: Prefill (process input tokens, one forward pass) and decode (generate output tokens one at a time).
@@ -30,9 +38,9 @@ Understanding inference mechanics is critical for system design: the KV cache, b
 
 ---
 
-## 3. Concepts
+## 4. Concepts
 
-### 3.1 Autoregressive Generation
+### 4.1 Autoregressive Generation
 
 ```
 Prefill phase: Process all input tokens in parallel
@@ -52,7 +60,7 @@ Latency decomposition:
   Total latency = TTFT + TPOT × output_length
 ```
 
-### 3.2 Sampling Strategies
+### 4.2 Sampling Strategies
 
 **Greedy decoding**: Always pick highest probability token
 ```python
@@ -92,7 +100,7 @@ threshold = min_p * max(probs)
 valid_tokens = probs[probs >= threshold]
 ```
 
-### 3.3 KV Cache — Internals & Memory
+### 4.3 KV Cache — Internals & Memory
 
 The most important optimization for efficient inference:
 
@@ -136,7 +144,7 @@ LLaMA 3 70B worked example:
 
 This is why KV cache is the **primary memory bottleneck** in production LLM serving, not model weights.
 
-### 3.4 Continuous Batching (PagedAttention)
+### 4.4 Continuous Batching (PagedAttention)
 
 **Problem with naive batching:**
 ```
@@ -171,7 +179,7 @@ Benefits:
   - Enable preemption: swap out KV cache to CPU when GPU full
 ```
 
-### 3.5 Speculative Decoding
+### 4.5 Speculative Decoding
 
 Use a small draft model to speculatively generate multiple tokens; verify with large model in parallel:
 
@@ -224,7 +232,7 @@ Practical deployment:
   Creative writing: α ≈ 0.40-0.55 (high entropy) → usually not worth overhead
 ```
 
-### 3.6 Flash Attention
+### 4.6 Flash Attention
 
 Reorders attention computation to be memory-bandwidth efficient:
 
@@ -244,7 +252,7 @@ Speed: 2-4× faster for long sequences (memory bandwidth is the bottleneck)
 Flash Attention 2 (2023): 2× faster than Flash Attention 1
 Flash Attention 3 (2024): further optimizations for H100
 ```
-### 3.7 Q/K/V Roles During Inference
+### 4.7 Q/K/V Roles During Inference
 
 Understanding why the KV cache exists requires understanding what happens to Q, K, V during decode:
 
@@ -270,7 +278,7 @@ Why only Q is "live":
 
 This asymmetry is fundamental: K and V can be cached because past context doesn't change; Q cannot because each new token asks a different "question."
 
-### 3.8 Prompt Caching (Anthropic-Style)
+### 4.8 Prompt Caching (Anthropic-Style)
 
 For applications with repeated system prompts or shared prefixes across requests, recomputing KV for the shared prefix on every request wastes compute:
 
@@ -303,7 +311,7 @@ Effective: 90% cost reduction on shared prefix for high-traffic applications
 
 **Best for**: AI assistants with large system prompts, applications with shared document context, multi-turn conversations with long histories.
 
-### 3.9 Prefix Caching (SGLang RadixAttention)
+### 4.9 Prefix Caching (SGLang RadixAttention)
 
 SGLang (Stanford) takes prefix caching further with **RadixAttention** — automatic, fine-grained prefix reuse without explicit API breakpoints:
 
@@ -329,7 +337,7 @@ Match is at block granularity (e.g., 16 tokens per block).
 
 RadixAttention is especially effective for **tree-structured programs** (e.g., LLM-generated code that branches: same setup, different function implementations to evaluate).
 
-### 3.10 KV Cache Eviction Strategies
+### 4.10 KV Cache Eviction Strategies
 
 When KV cache fills GPU memory, older or less-important cache entries must be evicted:
 
@@ -436,7 +444,7 @@ Request resumed by loading blocks back to GPU
 Priority: preempt requests with most remaining to generate (LRU policy)
 ```
 
-### 3.11 Chunked Prefill
+### 4.11 Chunked Prefill
 
 **Problem:** A single long-context prefill (e.g., 32K tokens of a RAG document) monopolizes the GPU for 1-2 seconds. During this time, all ongoing decode-phase requests stall — their TPOT spikes from 30ms to 2,000ms, which is visible to users as a freeze.
 
@@ -485,7 +493,7 @@ vllm serve llama3-70b \
 
 Chunked prefill is enabled by default in vLLM >= 0.4.0 for models above 7B. SGLang also implements chunked prefill with similar semantics.
 
-### 3.12 Request Scheduling Strategies
+### 4.12 Request Scheduling Strategies
 
 How requests are ordered and batched determines both average and tail latency:
 
@@ -563,7 +571,7 @@ Incoming request
 [Continuous batching] → add to active batch at next iteration boundary
 ```
 
-### 3.13 Streaming Architectures
+### 4.13 Streaming Architectures
 
 Streaming delivers tokens to the client as they are generated rather than buffering the entire response. This is critical for perceived latency — a user waiting 3 seconds for a complete response feels slower than seeing the first token at 300ms with subsequent tokens flowing in.
 
@@ -658,7 +666,7 @@ WebSocket (when bidirectionality is required):
 Rule of thumb: use SSE unless you need the client to talk back mid-stream.
 ```
 
-### 3.14 Semantic Caching
+### 4.14 Semantic Caching
 
 Semantic caching avoids redundant LLM inference by detecting when a new prompt is semantically equivalent to a previously cached prompt and returning the cached response directly.
 
@@ -739,7 +747,7 @@ LiteLLM:        Built-in caching layer for multi-provider setups
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Prefill vs Decode Phases
 ```
@@ -813,7 +821,7 @@ SnapKV eviction (static, one-time pruning after observation):
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Memory Bandwidth Bottleneck and Arithmetic Intensity
 
@@ -979,7 +987,7 @@ Production gotchas:
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### vLLM (UC Berkeley, 2023)
 - PagedAttention + continuous batching
@@ -1000,7 +1008,7 @@ Production gotchas:
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Strategy | Latency | Throughput | Memory | Complexity |
 |----------|---------|-----------|--------|------------|
@@ -1013,7 +1021,7 @@ Production gotchas:
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Greedy Decoding (temp=0) When:
 - Factual Q&A, code generation, structured outputs
@@ -1032,7 +1040,7 @@ Production gotchas:
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **KV cache OOM**: Underestimating KV cache memory consumption causes OOM in production. Plan for 30-40% of GPU memory for KV cache.
 2. **Not streaming**: Buffering full response before sending → perceived latency is very high. Always stream tokens.
@@ -1042,7 +1050,7 @@ Production gotchas:
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -1057,7 +1065,7 @@ Production gotchas:
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: Why is LLM decode memory-bandwidth-bound rather than compute-bound? What does this mean for optimization?**
 A: During decode, each token generation requires loading all model weights from HBM. For a 70B BF16 model that is 140GB of data. An A100 loads this in 70ms (140GB / 2TB/s bandwidth) but computes it in 0.45ms (140B FLOPs / 312 TFLOPS). The GPU's compute units are idle 99.7% of the time waiting for data. The primary optimization lever is therefore reducing data movement: quantization (load INT4 instead of BF16, 4× fewer bytes), batching (amortize the 140GB weight load across many requests so each request "pays" 1/N of the bandwidth cost), and KV cache efficiency (fewer KV bytes transferred per step). Compute-bound optimizations like better algorithms have near-zero impact on memory-bandwidth-bound workloads.

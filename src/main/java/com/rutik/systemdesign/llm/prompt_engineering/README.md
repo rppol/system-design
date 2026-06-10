@@ -10,7 +10,7 @@ As LLMs become more capable and aligned, prompt engineering has evolved from hac
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Prompt engineering is like knowing exactly how to ask a question to get the answer you need — the same model gives dramatically different answers depending on how you phrase things.
 
@@ -22,7 +22,7 @@ As LLMs become more capable and aligned, prompt engineering has evolved from hac
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Be specific**: Vague instructions produce vague outputs. The model doesn't know what you want unless you tell it.
 - **Show, don't just tell**: Examples (few-shot) outperform instructions alone on complex tasks.
@@ -33,9 +33,9 @@ As LLMs become more capable and aligned, prompt engineering has evolved from hac
 
 ---
 
-## 3. Types / Strategies
+## 4. Types / Strategies
 
-### 3.1 Zero-Shot Prompting
+### 4.1 Zero-Shot Prompting
 
 Ask the model to complete a task with no examples:
 
@@ -49,7 +49,7 @@ Prompt:
 Works well for: simple tasks the model has seen during training; strongly aligned models.
 Fails for: complex, multi-step reasoning; tasks requiring precise formats.
 
-### 3.2 Few-Shot Prompting
+### 4.2 Few-Shot Prompting
 
 Provide examples (demonstrations) before the actual task:
 
@@ -71,7 +71,7 @@ Key insights:
 - Include edge cases and ambiguous examples
 - Balance examples across classes
 
-### 3.3 Chain-of-Thought (CoT)
+### 4.3 Chain-of-Thought (CoT)
 
 Prompt the model to reason step-by-step before answering. Dramatic improvement on math, logic, and multi-step tasks.
 
@@ -99,7 +99,7 @@ A: Let's think step by step.
 
 Works because: reasoning steps give the model intermediate context to condition on; serial computation helps for problems requiring depth.
 
-### 3.4 ReAct (Reasoning + Acting)
+### 4.4 ReAct (Reasoning + Acting)
 
 Interleave reasoning thoughts with actions (tool calls):
 
@@ -120,7 +120,7 @@ Final Answer: The population of Paris, the capital of France, is approximately 2
 
 ReAct enables agents to use tools (search, calculators, APIs) while maintaining a reasoning trace.
 
-### 3.5 Self-Consistency
+### 4.5 Self-Consistency
 
 Generate multiple reasoning chains; take majority vote:
 
@@ -138,7 +138,7 @@ Improves accuracy by 5-15% on math/reasoning tasks
 Cost: N× tokens (use for high-stakes decisions)
 ```
 
-### 3.6 Structured Outputs / JSON Mode
+### 4.6 Structured Outputs / JSON Mode
 
 Force the model to produce valid structured output:
 
@@ -175,7 +175,7 @@ response = client.beta.chat.completions.parse(
 )
 ```
 
-### 3.7 System Prompts
+### 4.7 System Prompts
 
 Persistent instructions that set the model's role, persona, and constraints:
 
@@ -200,7 +200,7 @@ Best practices for system prompts:
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Prompt Construction Pipeline
 ```
@@ -242,7 +242,7 @@ GPT-4, with CoT:                 92%  (+12%)
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Token Probabilities and Temperature
 
@@ -301,7 +301,7 @@ Mitigations:
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### GitHub Copilot
 - System prompt includes: file content, cursor position, open tabs, language, linter errors
@@ -320,7 +320,7 @@ Mitigations:
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Technique | Tokens Used | Latency | Accuracy Gain | Best For |
 |-----------|------------|---------|--------------|---------|
@@ -332,7 +332,7 @@ Mitigations:
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use CoT When:
 - Math, logic puzzles, multi-step reasoning
@@ -351,7 +351,7 @@ Mitigations:
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Too long, unfocused system prompts**: A 5000-token system prompt with vague instructions is worse than a focused 200-token one.
 2. **Mismatched few-shot examples**: Examples that don't match the actual task distribution confuse the model.
@@ -362,7 +362,7 @@ Mitigations:
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -378,7 +378,7 @@ Mitigations:
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is chain-of-thought prompting and why does it work?**
 A: CoT asks the model to reason step-by-step before giving a final answer (either by example or by adding "let's think step by step"). It works because: (1) intermediate reasoning steps provide the model with more context when generating the final answer; (2) it allocates more compute (tokens) to hard problems; (3) it forces the model into a sequential reasoning mode similar to how these problems were solved in training data.

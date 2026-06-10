@@ -8,7 +8,7 @@ Long context creates both opportunities (simpler architecture — just put every
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: The context window is like working memory — the more you can hold in mind at once, the more sophisticated the reasoning you can do, but filling it up gets exponentially expensive.
 
@@ -20,7 +20,7 @@ Long context creates both opportunities (simpler architecture — just put every
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Attention is O(n²)**: Standard attention grows quadratically with sequence length — 4× longer sequence = 16× compute. Optimizations (Flash Attention, GQA, ring attention) are critical.
 - **Positional encoding determines extrapolation**: Models trained on 4K context don't automatically generalize to 128K. Positional encoding design determines how well models extrapolate.
@@ -30,9 +30,9 @@ Long context creates both opportunities (simpler architecture — just put every
 
 ---
 
-## 3. Positional Encoding Strategies
+## 4. Positional Encoding Strategies
 
-### 3.1 Absolute Positional Encoding (APE)
+### 4.1 Absolute Positional Encoding (APE)
 
 Original transformer approach: add learned or sinusoidal position vectors to token embeddings:
 
@@ -48,7 +48,7 @@ Problem: model trained on 512 tokens has no embedding for position 513
 Used by: BERT, original GPT
 ```
 
-### 3.2 Relative Positional Encoding (RPE)
+### 4.2 Relative Positional Encoding (RPE)
 
 Encode relative distance between positions rather than absolute:
 
@@ -66,7 +66,7 @@ Problem: still needs learned embeddings for all distances seen in training
 Used by: T5, DeBERTa
 ```
 
-### 3.3 RoPE (Rotary Position Embedding)
+### 4.3 RoPE (Rotary Position Embedding)
 
 The dominant approach in modern LLMs. Encodes position as rotation in complex number space:
 
@@ -92,7 +92,7 @@ Long-context extensions:
 Used by: LLaMA (all versions), Mistral, Qwen, DeepSeek, most modern models
 ```
 
-### 3.4 ALiBi (Attention with Linear Biases)
+### 4.4 ALiBi (Attention with Linear Biases)
 
 Instead of positional embeddings, add a linear bias to attention scores:
 
@@ -119,7 +119,7 @@ Used by: MPT, BLOOM (older models)
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Context Window Comparison
 ```
@@ -168,7 +168,7 @@ Ring Attention (Sequence Parallelism for Long Context):
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Prompt & Prefix Caching for Long Context
 
@@ -323,7 +323,7 @@ Use BOTH (hybrid approach):
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### Gemini 1.5 Pro (1M Context)
 - Processed entire Apollo 11 transcript (400K tokens) to find specific quotes
@@ -344,7 +344,7 @@ Use BOTH (hybrid approach):
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Approach | Quality | Cost | Complexity | Freshness |
 |----------|---------|------|-----------|-----------|
@@ -362,7 +362,7 @@ Use BOTH (hybrid approach):
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Long Context When:
 - Full document coherence required (can't chunk)
@@ -378,7 +378,7 @@ Use BOTH (hybrid approach):
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Trusting long context for high-stakes fact retrieval**: "Lost in the middle" is real. For exact fact retrieval from long documents, RAG is more reliable.
 2. **Forgetting token cost**: 100K token context × $0.03/1K = $3 per query. High-frequency applications need RAG.
@@ -388,7 +388,7 @@ Use BOTH (hybrid approach):
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -404,7 +404,7 @@ Use BOTH (hybrid approach):
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is RoPE and why is it better than absolute positional encoding for long context?**
 A: RoPE (Rotary Position Embedding) encodes position by rotating query and key vectors in the complex plane. The key property: the inner product of rotated vectors depends only on their relative position (m-n), not absolute positions m and n. This enables: (1) better generalization to unseen positions (the model understands "5 tokens apart" regardless of absolute position); (2) graceful extrapolation with scaling techniques (YaRN, LongRoPE); (3) efficient computation (element-wise rotation is fast). Absolute positional encoding fails to extrapolate — position 5000 has no learned embedding if the model was trained on 4096 tokens.

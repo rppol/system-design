@@ -8,7 +8,7 @@ Code is an ideal domain for LLMs because: (1) it has enormous training data (bil
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Code generation is like having a pair programmer who has read every open-source repository ever written and can complete your thought before you finish typing.
 
@@ -20,7 +20,7 @@ Code is an ideal domain for LLMs because: (1) it has enormous training data (bil
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Context is everything**: Good code completion requires understanding the full codebase context — imports, variable names, function signatures, related functions. More context → better completions.
 - **Fill-in-the-Middle (FIM)**: Unlike text generation, code completion often needs to complete a middle section, not just the suffix. Models must be trained with FIM objective.
@@ -30,9 +30,9 @@ Code is an ideal domain for LLMs because: (1) it has enormous training data (bil
 
 ---
 
-## 3. Types / Strategies
+## 4. Types / Strategies
 
-### 3.1 Code Completion (Single/Multi-line)
+### 4.1 Code Completion (Single/Multi-line)
 
 Predict the next line(s) given the preceding code (and optionally, the remaining file):
 
@@ -46,7 +46,7 @@ def calculate_bmi(weight_kg, height_m):
 
 Requirements: low latency (<100ms feel), short context window typically sufficient.
 
-### 3.2 Fill-in-the-Middle (FIM)
+### 4.2 Fill-in-the-Middle (FIM)
 
 Complete code given both prefix (before cursor) and suffix (after cursor):
 
@@ -65,7 +65,7 @@ Model learns: given suffix + prefix, predict middle
 
 FIM is what enables IDE features like pressing Tab mid-function — the model sees both sides of your cursor.
 
-### 3.3 Code Editing / Instruction Following
+### 4.3 Code Editing / Instruction Following
 
 Given existing code + natural language instruction, produce modified code:
 
@@ -81,7 +81,7 @@ Output:
   result = [x * 2 for x in items if x > 0]
 ```
 
-### 3.4 Repository-Level Code Completion
+### 4.4 Repository-Level Code Completion
 
 Context extends beyond the current file to the entire codebase:
 
@@ -99,7 +99,7 @@ This "context window" may be assembled from 10+ files
 Prioritized by: proximity to cursor, recency, relevance
 ```
 
-### 3.5 Code Agents
+### 4.5 Code Agents
 
 Autonomous agents that write, execute, debug, and iterate on code:
 
@@ -118,7 +118,7 @@ Agent loop:
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### GitHub Copilot Architecture
 ```
@@ -177,7 +177,7 @@ Current cursor context
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Code LLM Training Data
 
@@ -267,7 +267,7 @@ Copilot's approach:
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### GitHub Copilot
 - 1M+ paid subscribers; 30%+ of code written with Copilot in some projects
@@ -297,7 +297,7 @@ Copilot's approach:
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Model | HumanEval | Latency | Cost | Context |
 |-------|-----------|---------|------|---------|
@@ -317,7 +317,7 @@ Copilot's approach:
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Code LLMs When:
 - Well-specified tasks with clear success criteria (tests)
@@ -334,7 +334,7 @@ Copilot's approach:
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Hallucinated APIs**: Models generate plausible but non-existent function calls (`pandas.read_json_fast()`). Always test before deploying.
 2. **Insecure code**: SQL injection, path traversal, hard-coded secrets in suggestions. Use security scanning.
@@ -345,7 +345,7 @@ Copilot's approach:
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -363,7 +363,7 @@ Copilot's approach:
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is Fill-in-the-Middle (FIM) and why is it important for code completion?**
 A: FIM trains the model to predict a middle section given both the prefix (code before cursor) and suffix (code after cursor). Standard autoregressive training only predicts suffixes. For IDE completion, the cursor is often mid-function, surrounded by existing code — FIM enables the model to complete this middle portion coherently. Training format: shuffle documents into [suffix][prefix][middle] order; the model learns the mapping.

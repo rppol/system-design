@@ -10,7 +10,7 @@ RAG is now the dominant architecture for enterprise LLM applications: customer s
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: RAG turns an LLM from a closed-book exam (relying only on memorized knowledge) to an open-book exam (reading relevant sources before answering).
 
@@ -22,7 +22,7 @@ RAG is now the dominant architecture for enterprise LLM applications: customer s
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Separation of concerns**: Retrieval handles access to current/private information; generation handles synthesis and reasoning.
 - **Context window as the interface**: Retrieved documents are injected into the LLM's context — the retrieval quality directly bounds RAG quality.
@@ -33,9 +33,9 @@ RAG is now the dominant architecture for enterprise LLM applications: customer s
 
 ---
 
-## 3. Components
+## 4. Components
 
-### 3.1 Chunking
+### 4.1 Chunking
 
 Documents must be split into chunks before embedding. Chunk size and strategy significantly impact retrieval quality.
 
@@ -78,7 +78,7 @@ Code:           1 function or class per chunk (semantic boundaries)
 Legal docs:     1 clause per chunk (natural legal unit)
 ```
 
-### 3.2 Embedding
+### 4.2 Embedding
 
 Convert text chunks to dense vectors for similarity search:
 
@@ -93,7 +93,7 @@ embeddings = model.encode(chunks)  # shape: [2, 768]
 
 At query time, embed the user query and find nearest neighbor chunks.
 
-### 3.3 Retrieval
+### 4.3 Retrieval
 
 **Dense retrieval** (semantic):
 - Query embedding → ANN search in vector DB
@@ -115,7 +115,7 @@ Dense score + Sparse score combined via:
     final_score = α × dense_score + (1-α) × sparse_score
 ```
 
-### 3.4 Reranking
+### 4.4 Reranking
 
 After initial retrieval (top-100 candidates), a cross-encoder reranker selects the best top-K (K=3-10):
 
@@ -133,7 +133,7 @@ Models:
 
 Cost: ~50ms for reranking top-100; worth it for precision-critical tasks.
 
-### 3.5 Context Injection
+### 4.5 Context Injection
 
 Retrieved chunks are inserted into the LLM prompt:
 
@@ -151,7 +151,7 @@ Assistant: Based on the provided context, Paris is the capital of France.
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Standard RAG Pipeline
 ```
@@ -225,7 +225,7 @@ User Query
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Chunking Strategies in Detail
 
@@ -297,7 +297,7 @@ Strategy 4: Long context models
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### Notion AI
 - RAG over user's workspace: notes, databases, pages
@@ -323,7 +323,7 @@ Strategy 4: Long context models
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Approach | Quality | Freshness | Cost | Complexity |
 |----------|---------|-----------|------|------------|
@@ -342,7 +342,7 @@ Strategy 4: Long context models
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use RAG When:
 - Knowledge changes frequently (news, product catalogs, documentation)
@@ -362,7 +362,7 @@ Strategy 4: Long context models
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Poor chunking**: Splitting mid-sentence destroys meaning. Use sentence-boundary chunking at minimum.
 2. **Chunk too large**: Large chunks embed poorly (embedding averages away specifics). 500 tokens is often the max.
@@ -374,7 +374,7 @@ Strategy 4: Long context models
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Type | Notes |
 |------|------|-------|
@@ -392,7 +392,7 @@ Strategy 4: Long context models
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is RAG and why is it preferred over fine-tuning for knowledge-intensive tasks?**
 A: RAG (Retrieval-Augmented Generation) retrieves relevant documents at query time and injects them into the LLM's context. It's preferred for knowledge-intensive tasks because: (1) knowledge changes frequently — RAG serves fresh data; (2) private data can't be in training data; (3) source attribution is built-in; (4) no training cycle needed. Fine-tuning teaches the model style and behavior, not knowledge — RAG handles the knowledge.
@@ -611,7 +611,7 @@ response = llm.complete(prompt)
 
 **How do you keep the retrieval index fresh for a corpus that changes daily?** Implement incremental indexing: new or modified documents are chunked and embedded immediately (stream processing via Kafka → embedding worker → FAISS/Weaviate upsert). Deleted documents trigger a tombstone flag in the metadata store (the index itself is not rebuilt — HNSW doesn't support deletion efficiently). Weekly: rebuild the index from the full corpus to clean up tombstones and rebalance the HNSW graph. Metadata filter (exclude tombstoned doc IDs) is applied at query time until the weekly rebuild.
 
-## 14. Case Study
+### Case Study 2: Enterprise Knowledge Assistant at Fortune 500 Scale
 
 **Scenario:** A Fortune 500 enterprise (35,000 employees, 280 business units) deploys an internal knowledge assistant over 10M documents: HR policies, legal contracts, technical documentation, financial reports, and internal wikis. Current state: SharePoint keyword search with 67% null result rate for natural language queries. Goal: answer 80%+ of employee questions from internal knowledge, p99 latency < 3 seconds, hallucination rate < 2%, $40k/month maximum infrastructure cost.
 

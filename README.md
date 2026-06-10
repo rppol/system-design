@@ -1,6 +1,6 @@
 # System Design Master Repository
 
-A comprehensive, one-stop repository for learning **Low-Level Design (LLD)**, **High-Level Design (HLD)**, **Large Language Models (LLM)**, **Machine Learning (ML)**, **Java**, **Spring**, **Python + FastAPI**, **Backend Engineering**, **Database Engineering**, and **DevOps / Cloud / Platform Engineering** — with practical examples, real-world scenarios, and interview preparation material.
+A comprehensive, one-stop repository for learning **Low-Level Design (LLD)**, **High-Level Design (HLD)**, **Large Language Models (LLM)**, **Machine Learning (ML)**, **Java**, **Spring**, **Python + FastAPI**, **Backend Engineering**, **Database Engineering**, **DevOps / Cloud / Platform Engineering**, and **CS Fundamentals** — with practical examples, real-world scenarios, and interview preparation material.
 
 ---
 
@@ -785,6 +785,81 @@ See the [DevOps Master Index](src/main/java/com/rutik/systemdesign/devops/README
 
 ---
 
+### CS Fundamentals — Senior Engineer & Interview Prep Guide
+
+The language-agnostic computer-science spine: 20 modules across 6 phases + 6 interview-problem walkthrough case studies. Teaches DS&A, operating systems, computer architecture, systems foundations, and cryptography at the CS-theory level, with explicit crosslinks to the deep applied treatments in `java/`, `python/`, `backend/`, `database/`, and `devops/`.
+
+#### Phase 1 — Complexity & Computation
+
+| Module | Key Concepts |
+|--------|-------------|
+| [complexity_analysis_and_big_o](src/main/java/com/rutik/systemdesign/cs_fundamentals/complexity_analysis_and_big_o/) | Big-O/Θ/Ω, amortized analysis, Master theorem, recurrences |
+| [number_systems_and_bit_manipulation](src/main/java/com/rutik/systemdesign/cs_fundamentals/number_systems_and_bit_manipulation/) | Binary/hex, two's complement, IEEE-754, bitwise ops and tricks, endianness |
+| [recursion_and_problem_solving_patterns](src/main/java/com/rutik/systemdesign/cs_fundamentals/recursion_and_problem_solving_patterns/) | Call stack, backtracking, two-pointer, sliding window, divide-and-conquer framing |
+
+#### Phase 2 — Data Structures
+
+| Module | Key Concepts |
+|--------|-------------|
+| [arrays_strings_and_hashing](src/main/java/com/rutik/systemdesign/cs_fundamentals/arrays_strings_and_hashing/) | Dynamic arrays (1.5–2× growth), hash tables (chaining/open addressing, load factor 0.75), sets |
+| [linked_lists_stacks_and_queues](src/main/java/com/rutik/systemdesign/cs_fundamentals/linked_lists_stacks_and_queues/) | Singly/doubly lists, stacks, queues, deques, monotonic stack/queue, circular buffers |
+| [trees_and_binary_search_trees](src/main/java/com/rutik/systemdesign/cs_fundamentals/trees_and_binary_search_trees/) | Binary tree traversals, BST, AVL/red-black (concept), B/B+ trees (concept), trie |
+| [heaps_and_priority_queues](src/main/java/com/rutik/systemdesign/cs_fundamentals/heaps_and_priority_queues/) | Binary heap, heapify O(n), d-ary heaps, extract-min O(log n), k-way merge |
+| [graphs_tries_and_advanced_structures](src/main/java/com/rutik/systemdesign/cs_fundamentals/graphs_tries_and_advanced_structures/) | Graph representations, trie, union-find/DSU (path compression + union by rank), segment tree, Fenwick tree, Bloom filter |
+
+#### Phase 3 — Algorithms
+
+| Module | Key Concepts |
+|--------|-------------|
+| [sorting_and_searching](src/main/java/com/rutik/systemdesign/cs_fundamentals/sorting_and_searching/) | Merge/quick/heap sort, counting/radix sort, binary search variants |
+| [dynamic_programming](src/main/java/com/rutik/systemdesign/cs_fundamentals/dynamic_programming/) | Memoisation vs tabulation, knapsack, LCS, edit distance, coin change |
+| [greedy_and_divide_and_conquer](src/main/java/com/rutik/systemdesign/cs_fundamentals/greedy_and_divide_and_conquer/) | Exchange argument, interval scheduling, Huffman coding, D&C recurrences |
+| [graph_and_string_algorithms](src/main/java/com/rutik/systemdesign/cs_fundamentals/graph_and_string_algorithms/) | BFS/DFS, Dijkstra, Bellman-Ford, Kruskal/Prim, KMP, Rabin-Karp, Z-algorithm |
+
+#### Phase 4 — Operating Systems
+
+| Module | Key Concepts |
+|--------|-------------|
+| [processes_threads_and_context_switching](src/main/java/com/rutik/systemdesign/cs_fundamentals/processes_threads_and_context_switching/) | Process vs thread, address spaces, user/kernel mode, context switch cost ~1–10 µs |
+| [cpu_scheduling_algorithms](src/main/java/com/rutik/systemdesign/cs_fundamentals/cpu_scheduling_algorithms/) | FCFS, SJF, Round-Robin, MLFQ, preemption, starvation, CFS concept |
+| [memory_management_and_virtual_memory](src/main/java/com/rutik/systemdesign/cs_fundamentals/memory_management_and_virtual_memory/) | Paging (4 KB pages), TLB, page faults, page-replacement (OPT/LRU/Clock) |
+| [deadlocks_and_synchronization](src/main/java/com/rutik/systemdesign/cs_fundamentals/deadlocks_and_synchronization/) | Mutex/semaphore/monitor, Coffman conditions, prevention/avoidance/detection, dining philosophers |
+
+#### Phase 5 — Systems & Security Foundations
+
+| Module | Key Concepts |
+|--------|-------------|
+| [computer_architecture_and_memory_hierarchy](src/main/java/com/rutik/systemdesign/cs_fundamentals/computer_architecture_and_memory_hierarchy/) | CPU pipeline, branch prediction, L1/L2/L3 cache (64 B line), false sharing, NUMA |
+| [networking_fundamentals](src/main/java/com/rutik/systemdesign/cs_fundamentals/networking_fundamentals/) | OSI/TCP-IP primer, TCP vs UDP, DNS resolution, TLS handshake concept |
+| [database_and_storage_fundamentals](src/main/java/com/rutik/systemdesign/cs_fundamentals/database_and_storage_fundamentals/) | ACID, isolation levels, indexing concept, storage hierarchy (SSD vs HDD latency) |
+| [cryptography_fundamentals](src/main/java/com/rutik/systemdesign/cs_fundamentals/cryptography_fundamentals/) | Hash functions, symmetric/asymmetric encryption, HMAC, digital signatures, Diffie-Hellman, salting |
+
+#### CS Fundamentals Case Studies (interview-problem walkthroughs)
+
+| Case Study | Core Concepts |
+|-----------|--------------|
+| [design_lru_cache.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/case_studies/design_lru_cache.md) | HashMap + doubly-linked list, O(1) get/put, eviction policy spectrum |
+| [top_k_and_streaming_problems.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/case_studies/top_k_and_streaming_problems.md) | Min-heap top-K, quickselect O(n), count-min sketch, streaming median with two heaps |
+| [dynamic_programming_patterns.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/case_studies/dynamic_programming_patterns.md) | Four DP families, memoisation vs tabulation, space optimisation |
+| [graph_traversal_and_shortest_path.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/case_studies/graph_traversal_and_shortest_path.md) | BFS/DFS/Dijkstra/topo sort/union-find on canonical interview problems |
+| [autocomplete_and_string_search.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/case_studies/autocomplete_and_string_search.md) | Trie + KMP/Rabin-Karp, search-engine and IDE autocomplete |
+| [interval_and_scheduling_problems.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/case_studies/interval_and_scheduling_problems.md) | Greedy + sorting + heap: merge intervals, meeting rooms, task scheduler |
+
+#### DSA Pattern Playbooks — L5 Interview Pattern-Recognition Layer
+
+> **New:** After completing Phases 1–3, use [dsa_patterns/](src/main/java/com/rutik/systemdesign/cs_fundamentals/dsa_patterns/) to develop the "fairly certain guess" skill — recognizing which pattern to apply to an unseen problem.
+
+| File | Purpose |
+|------|---------|
+| [dsa_patterns/README.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/dsa_patterns/README.md) | Recognition engine: UMPIRE method, constraints→complexity table, 40-row cue→pattern lookup, decision tree, 24-pattern index |
+| [dsa_patterns/interview_execution_playbook.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/dsa_patterns/interview_execution_playbook.md) | L5 rubric, 5-minute opening ritual, communication scripts, "what to say when stuck" |
+| [dsa_patterns/study_plans.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/dsa_patterns/study_plans.md) | Blind 75 + NeetCode 150 mapped to patterns with LeetCode links |
+| 24 pattern playbooks | Two pointers, sliding window, fast/slow, prefix sum, hashing, cyclic sort, monotonic stack, LL reversal, merge intervals, binary search, top-K, k-way merge, two heaps, tree BFS/DFS, graph traversal, topo sort, union-find, trie, shortest path, backtracking, DP, greedy, bit manipulation |
+
+See the [CS Fundamentals Master Index](src/main/java/com/rutik/systemdesign/cs_fundamentals/README.md) for the full 6-phase learning path, scope & non-overlap boundary, cross-reference map, and build-status tracker.
+
+---
+
 ## How to Use This Repository
 
 ### By role
@@ -798,6 +873,7 @@ See the [DevOps Master Index](src/main/java/com/rutik/systemdesign/devops/README
 | **System design interview** | `hld/` core concepts → `lld/` design patterns → section-specific case studies |
 | **Database/backend infra** | `database/` phases 1-3 → `backend/` phases 1-4 → respective case studies |
 | **DevOps / SRE / Platform engineer** | `devops/` phase 1-2 (Linux → containers → Kubernetes) → phase 3-4 (CI/CD, IaC) → phase 6 (Observability, SRE) → DevOps case studies |
+| **Algorithm / coding interview prep** | `cs_fundamentals/` phase 1 (Big-O) → phase 2 (data structures) → phase 3 (algorithms) → `cs_fundamentals/case_studies/` for walkthroughs |
 | **Senior AI + Java engineer** | `java/` phases 1-4 → `spring/spring_ai/` *(planned)* → `llm/foundations_and_architecture/` → `llm/agents_and_tool_use/` → `llm/` case studies; cross-reference `hld/consensus_algorithms/` + `ml/neural_network_fundamentals/` |
 
 ### Navigation

@@ -16,7 +16,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `training_infrastructure/` | Distributed training, tensor/pipeline parallelism, ZeRO, FSDP | — |
 | `synthetic_data_generation/` | Self-Instruct, Evol-Instruct, quality filtering, LIMA | — |
 | `fine_tuning/` | LoRA, QLoRA, PEFT, instruction tuning, domain adaptation | lora, qlora, peft_methods, instruction_tuning, domain_adaptation |
-| `alignment_and_rlhf/` | RLHF, DPO, Constitutional AI, ORPO, KTO, reward models | — |
+| `alignment_and_rlhf/` | RLHF, DPO, Constitutional AI, ORPO, KTO, reward models | grpo_and_rlvr |
 | `prompt_engineering/` | CoT, few-shot, ReAct, structured outputs, system prompts | — |
 | `rag_fundamentals/` | Chunking, vector DBs, retrieval, reranking, hybrid search | chunking_strategies, embedding_models, retrieval_methods, reranking |
 | `advanced_rag/` | Agentic RAG, Graph RAG, multimodal RAG, evaluation | agentic_rag, corrective_rag, graph_rag, multimodal_rag, query_transformation, self_rag |
@@ -29,9 +29,9 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `coding_agents/` | SWE-agent, OpenHands, Aider, Devin, Cursor, Claude Code, SWE-bench | — |
 | `voice_agents/` | Realtime API, Gemini Live, STT→LLM→TTS, VAD, barge-in, telephony | — |
 | `browser_agents_deep_dive/` | Browser Use, Stagehand, Playwright MCP, DOM vs vision, WebArena | — |
-| `inference_and_decoding/` | Sampling, KV cache, speculative decoding, continuous batching | — |
+| `inference_and_decoding/` | Sampling, KV cache, speculative decoding, continuous batching | constrained_decoding_and_structured_outputs |
 | `inference_engines/` | vLLM, TensorRT-LLM, llama.cpp, SGLang, Ollama, TGI | — |
-| `optimization_and_quantization/` | GPTQ, AWQ, Flash Attention, MoE, pruning, distillation | — |
+| `optimization_and_quantization/` | GPTQ, AWQ, Flash Attention, MoE, pruning, distillation | gpu_architecture_and_roofline |
 | `deployment_and_mlops/` | Serving, GPU cost, monitoring, routing, edge deployment | — |
 | `guardrails_and_content_safety/` | NeMo Guardrails, Llama Guard, input/output filters | — |
 | `safety_and_alignment/` | Jailbreaking, prompt injection, hallucination, bias, red teaming | — |
@@ -50,7 +50,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `llm_testing_strategies/` | Golden datasets, LLM-as-judge, regression eval, flakiness detection, CI/CD integration | — |
 | `knowledge_distillation_and_model_merging/` | Teacher-student distillation, SLERP/TIES/DARE merging, structured pruning, SparseGPT | — |
 | `llm_observability_and_monitoring/` | Tracing, quality monitoring, cost attribution, alerting, Langfuse, Arize Phoenix | — |
-| `llm_security/` | Prompt injection, data extraction, model theft, supply chain, adversarial robustness, red teaming | — |
+| `llm_security/` | Prompt injection, data extraction, model theft, supply chain, adversarial robustness, red teaming | privacy_and_data_governance |
 | `prompt_management_and_promptops/` | Prompt versioning, registries, aliases, eval-gated CI, A/B testing, injection-safe templates | — |
 | `context_engineering/` | Context budget allocation, "lost in the middle", KV-cache-aware ordering, compaction, retrieval vs long-context decision matrix | — |
 | `llm_caching/` | Exact-match, semantic cache, provider prompt caching, vLLM APC, embedding cache, threshold tuning, invalidation | — |
@@ -67,7 +67,7 @@ The following topics are identified as gaps for senior AI engineer coverage. Add
 
 | Module Directory | Topic | Priority |
 |-----------------|-------|---------|
-| `llm_ops_platforms/` | MLflow for LLMs, Weights & Biases, Neptune, experiment tracking, model registry, eval management | High |
+| `diffusion_language_models/` | Non-autoregressive text generation — Mercury, LLaDA, discrete diffusion, parallel decoding economics | Low (emerging) |
 
 ---
 

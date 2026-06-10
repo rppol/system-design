@@ -8,7 +8,7 @@ Understanding evaluation is critical for both building systems (how do you know 
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Evaluating LLMs is like grading essays — unlike math tests with clear right answers, quality is multidimensional, subjective, and context-dependent.
 
@@ -20,7 +20,7 @@ Understanding evaluation is critical for both building systems (how do you know 
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **No single benchmark captures everything**: MMLU measures knowledge; HumanEval measures coding; TruthfulQA measures honesty. No benchmark measures all.
 - **Benchmark contamination is pervasive**: If a model trains on data containing benchmark answers, scores are inflated. New benchmarks become contaminated within months.
@@ -30,9 +30,9 @@ Understanding evaluation is critical for both building systems (how do you know 
 
 ---
 
-## 3. Evaluation Frameworks
+## 4. Evaluation Frameworks
 
-### 3.1 Standard Benchmarks
+### 4.1 Standard Benchmarks
 
 **MMLU (Massive Multitask Language Understanding)**:
 ```
@@ -77,7 +77,7 @@ Requires multi-step reasoning, spatial understanding, logical deduction
 Current SOTA: ~90%+ with CoT
 ```
 
-### 3.2 Code Evaluation
+### 4.2 Code Evaluation
 
 **HumanEval**:
 ```
@@ -110,7 +110,7 @@ Simpler than HumanEval; good for smaller models
 pass@1: most 7B+ models score 60-80%
 ```
 
-### 3.3 Human Preference Evaluation
+### 4.3 Human Preference Evaluation
 
 **LMSYS Chatbot Arena**:
 ```
@@ -146,7 +146,7 @@ Why: tests multi-turn capability (most chatbot use is multi-turn)
 Score: most frontier models: 8.5-9.5/10
 ```
 
-### 3.4 RAG Evaluation (RAGAS)
+### 4.4 RAG Evaluation (RAGAS)
 
 ```python
 from ragas import evaluate
@@ -175,7 +175,7 @@ result = evaluate(
 # Returns: {"faithfulness": 0.87, "answer_relevancy": 0.93, ...}
 ```
 
-### 3.5 LLM-as-Judge
+### 4.5 LLM-as-Judge
 
 Use a capable LLM to evaluate another LLM's responses:
 
@@ -221,7 +221,7 @@ Instruction-following bias: prefers well-formatted responses regardless of accur
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Evaluation Pipeline
 ```
@@ -259,7 +259,7 @@ New Model / Prompt Change
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Benchmark Contamination
 
@@ -524,7 +524,7 @@ class DriftDetector:
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### OpenAI Evals
 - Open-source evaluation framework for GPT models
@@ -545,7 +545,7 @@ class DriftDetector:
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Evaluation Method | Accuracy | Scalability | Cost | Bias |
 |------------------|---------|-------------|------|------|
@@ -557,7 +557,7 @@ class DriftDetector:
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use MMLU / Standard Benchmarks When:
 - Comparing models for initial selection
@@ -576,7 +576,7 @@ class DriftDetector:
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Benchmark shopping**: Reporting only the benchmarks where your model looks good. Best practice: report a standardized suite and disclose any that are unfavorable.
 2. **Ignoring benchmark contamination**: Not checking if test set examples are in training data.
@@ -590,7 +590,7 @@ class DriftDetector:
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -607,7 +607,7 @@ class DriftDetector:
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is LLM-as-judge and what are its limitations?**
 A: LLM-as-judge uses a capable model (usually GPT-4) to evaluate another model's responses — rating quality, comparing two responses, or checking correctness. Limitations: (1) self-preference bias — GPT-4 rates GPT-4 style responses higher; (2) verbosity bias — longer responses rated higher regardless of quality; (3) position bias — first response shown often preferred; (4) instruction-following bias — well-formatted responses preferred; (5) can't catch factual errors the judge model also makes. Mitigations: use diverse judges, randomize position, include explicit rubrics, validate against human judgments.

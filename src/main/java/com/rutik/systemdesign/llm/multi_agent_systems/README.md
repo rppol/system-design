@@ -23,7 +23,7 @@ Multi-agent systems power ambitious applications: ChatDev simulates software com
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Multi-agent systems are like a software team — architect, developer, reviewer, tester — where each specialist handles their part rather than one person doing everything sequentially.
 
@@ -35,7 +35,7 @@ Multi-agent systems power ambitious applications: ChatDev simulates software com
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Specialization**: Each agent has a specific role, tools, and knowledge. A "researcher" knows how to search; a "coder" knows how to write tests; a "critic" knows how to review.
 - **Decomposition**: The orchestrator breaks down tasks so each agent has a well-scoped sub-task.
@@ -46,9 +46,9 @@ Multi-agent systems power ambitious applications: ChatDev simulates software com
 
 ---
 
-## 3. Architecture Patterns
+## 4. Architecture Patterns
 
-### 3.1 Orchestrator-Worker (Supervisor Pattern)
+### 4.1 Orchestrator-Worker (Supervisor Pattern)
 
 A central orchestrator agent manages specialized worker agents:
 
@@ -74,7 +74,7 @@ Flow:
 
 Best for: tasks with clear subtask boundaries and sequential dependencies.
 
-### 3.2 Peer-to-Peer / Debate Pattern
+### 4.2 Peer-to-Peer / Debate Pattern
 
 Agents debate and critique each other to improve output quality:
 
@@ -100,7 +100,7 @@ Final output: refined architecture incorporating all critique points
 
 Research shows multi-turn critique dramatically improves reasoning quality (Society of Mind pattern).
 
-### 3.3 Hierarchical Multi-Agent
+### 4.3 Hierarchical Multi-Agent
 
 Agents at different levels of abstraction:
 
@@ -115,7 +115,7 @@ Level 3     Lvl 3     Lvl 3  (Workers): Execute specific tasks
 
 Used in: ChatDev, MetaGPT — simulates organizational structures.
 
-### 3.4 Blackboard Pattern
+### 4.4 Blackboard Pattern
 
 Shared memory space where agents read/write:
 
@@ -136,7 +136,7 @@ Agents independently monitor the blackboard:
 No centralized orchestrator needed
 ```
 
-### 3.5 Message Passing / Actor Model
+### 4.5 Message Passing / Actor Model
 
 Agents communicate via explicit message channels:
 
@@ -159,7 +159,7 @@ Clean separation; easy to add/remove agents by changing message routing.
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### ChatDev Architecture
 ```
@@ -218,7 +218,7 @@ Triage Agent → routes to appropriate specialized agent
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Agent Communication Formats
 
@@ -289,7 +289,7 @@ Cascading failure prevention:
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### ChatDev (Open Source, 2023)
 - Simulates a software company with 5-7 agent roles
@@ -319,7 +319,7 @@ Cascading failure prevention:
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Pattern | Parallelism | Reliability | Complexity | Best For |
 |---------|------------|-------------|------------|---------|
@@ -331,7 +331,7 @@ Cascading failure prevention:
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Multi-Agent When:
 - Task naturally decomposes into specialized subtasks
@@ -348,7 +348,7 @@ Cascading failure prevention:
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Agent echo chambers**: Agents agree with each other without real critique. Build adversarial prompts into critic agents.
 2. **Infinite conversation loops**: Agents keep debating without convergence. Set max_rounds and exit conditions.
@@ -359,7 +359,7 @@ Cascading failure prevention:
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -375,7 +375,7 @@ Cascading failure prevention:
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is the orchestrator pattern in multi-agent systems?**
 A: The orchestrator pattern has a central coordinator (orchestrator) that manages multiple specialized worker agents. The orchestrator receives the overall task, decomposes it into subtasks, dispatches each to the appropriate worker, collects results, and assembles the final output. It handles sequencing (what runs after what), parallelism (what can run simultaneously), and error recovery (what to do if a worker fails). The orchestrator typically has the highest-capability model; workers can be smaller specialized models.

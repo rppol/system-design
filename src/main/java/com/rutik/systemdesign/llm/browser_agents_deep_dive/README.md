@@ -10,7 +10,7 @@ The fundamental design choice — DOM extraction vs vision vs hybrid — drives 
 
 ---
 
-## Intuition
+## 2. Intuition
 
 **One-line analogy**: A browser agent is like a Selenium test suite where the test cases are written by the LLM at runtime — flexible enough to handle never-seen sites, but as fragile as any DOM-based automation.
 
@@ -22,7 +22,7 @@ The fundamental design choice — DOM extraction vs vision vs hybrid — drives 
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Accessibility tree first**: cleaner, smaller than HTML; designed for semantic interpretation.
 - **Vision as fallback**: when DOM is opaque (Canvas, custom widgets), screenshot + multimodal LLM.
@@ -34,35 +34,35 @@ The fundamental design choice — DOM extraction vs vision vs hybrid — drives 
 
 ---
 
-## 3. Types / Architectures / Strategies
+## 4. Types / Architectures / Strategies
 
-### 3.1 Browser Use (Python)
+### 4.1 Browser Use (Python)
 
 Open-source library. Wraps Playwright. Default flow: extract accessibility tree → LLM picks action → execute → re-extract. Strong with Claude Sonnet 4 (~58% WebArena). Modular: swap models, customize extraction.
 
-### 3.2 Stagehand (TypeScript)
+### 4.2 Stagehand (TypeScript)
 
 Browserbase team. Three primitives: `page.act("click sign up")`, `page.extract({schema, instruction})`, `page.observe()`. Vision+DOM hybrid. Tight Browserbase integration for cloud browser infrastructure.
 
-### 3.3 Playwright MCP (Anthropic)
+### 4.3 Playwright MCP (Anthropic)
 
 Official MCP server exposing Playwright operations as tools. Standard tool interface; works with Claude, Claude Code, any MCP client. Lowest-friction integration for agent systems already on MCP.
 
-### 3.4 Browserbase (Cloud Infrastructure)
+### 4.4 Browserbase (Cloud Infrastructure)
 
 Managed browser-as-a-service: stealth-mode browsers running in cloud, session persistence, captcha solving, debugging UI. Used as the runtime by Stagehand and others.
 
-### 3.5 Skyvern
+### 4.5 Skyvern
 
 Form-filling specialist. Combines vision + LLM for complex multi-step web workflows (insurance claims, government forms).
 
-### 3.6 Anthropic Computer Use
+### 4.6 Anthropic Computer Use
 
 Generic computer control (screenshot + click/type/key) — works on browsers but not browser-specialized. Lower accuracy on web tasks than DOM-aware approaches.
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ```
 Browser Agent Loop
@@ -136,7 +136,7 @@ Semantic Selector Robustness
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Browser Use Example
 
@@ -229,7 +229,7 @@ context = await browser.new_context(storage_state="auth.json")
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 **Devin** uses browser automation for web research, form filling, and integration testing during coding tasks.
 
@@ -243,7 +243,7 @@ context = await browser.new_context(storage_state="auth.json")
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Approach | Speed | Accuracy | Cost | Site Compatibility |
 |---|---|---|---|---|
@@ -261,7 +261,7 @@ WebArena benchmark scores (approximate, 2024-2025):
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 **Use browser agents when:**
 - Target site has no API
@@ -278,7 +278,7 @@ WebArena benchmark scores (approximate, 2024-2025):
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 ### Pitfall 1: CSS selectors that break on next deploy
 
@@ -326,7 +326,7 @@ await secure_input_tool.fill("#password", credential_ref="user_pwd")
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose |
 |---|---|

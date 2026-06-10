@@ -35,7 +35,7 @@ The LIMA paper (2023) demonstrated a counterintuitive insight: **1000 carefully 
 
 ## 4. Types / Strategies
 
-### 3.1 Self-Instruct (Wang et al. 2022)
+### 4.1 Self-Instruct (Wang et al. 2022)
 
 Bootstrap instruction data from a small seed set using an LLM. The foundational technique for instruction dataset generation.
 
@@ -58,7 +58,7 @@ Quality filters applied:
 
 Generated the original Alpaca 52K dataset using GPT-3. Later improved by using GPT-4 → **Alpaca-GPT4**.
 
-### 3.2 Evol-Instruct (WizardLM, Xu et al. 2023)
+### 4.2 Evol-Instruct (WizardLM, Xu et al. 2023)
 
 Evolve simple instructions into more complex, challenging ones through iterative rewriting. Addresses the quality problem by specifically targeting harder examples.
 
@@ -78,7 +78,7 @@ Example (1 evolution step):
 
 WizardLM trained on Evol-Instruct data significantly outperformed models trained on self-instruct data.
 
-### 3.3 Persona-Driven Generation
+### 4.3 Persona-Driven Generation
 
 Assign diverse personas to guide diverse generation:
 
@@ -95,7 +95,7 @@ Result: naturally diverse vocabulary, complexity, and topic coverage
 
 Used in Cosmopedia (HuggingFace) to generate 30B tokens of synthetic educational text.
 
-### 3.4 Multi-Turn Conversation Synthesis
+### 4.4 Multi-Turn Conversation Synthesis
 
 Generate complete multi-turn dialogues:
 
@@ -117,7 +117,7 @@ Phase 4: Continue turn-by-turn
 Phase 5: Quality check: Is conversation coherent? Does assistant maintain role? Are facts correct?
 ```
 
-### 3.5 Distillation as Synthetic Data
+### 4.5 Distillation as Synthetic Data
 
 Use a larger model's (teacher's) outputs to train a smaller model (student):
 
@@ -135,7 +135,7 @@ This is "knowledge distillation" at the data level (not logit-level distillation
 
 Concerns: OpenAI ToS prohibits using outputs to train competing models. Use carefully.
 
-### 3.6 Rejection Sampling / Best-of-N
+### 4.6 Rejection Sampling / Best-of-N
 
 Generate multiple candidate responses; keep only the best:
 
@@ -152,7 +152,7 @@ Variant: Constitutional AI-style self-critique
   4. Use revised response as training data
 ```
 
-### 3.7 Preference Data Generation
+### 4.7 Preference Data Generation
 
 Generating (chosen, rejected) pairs for DPO, RLHF, and other alignment training methods:
 
@@ -179,7 +179,7 @@ Approach 3 — Constitutional AI Revision:
 
 Quality matters more than quantity: 10K high-quality preference pairs with clear quality margins can outperform 100K noisy pairs where chosen and rejected are barely distinguishable. Production pattern: generate 5-10 responses per prompt and use the best/worst for maximum margin.
 
-### 3.8 Backtranslation
+### 4.8 Backtranslation
 
 Generate input from output — the reverse of normal data generation:
 

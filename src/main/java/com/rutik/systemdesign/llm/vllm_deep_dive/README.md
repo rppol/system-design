@@ -1353,7 +1353,7 @@ Both PagedAttention (vLLM) and TensorRT-LLM's in-flight batching solve the same 
 
 ---
 
-## 14. Case Study
+## 21. Case Study
 
 **Scenario:** A generative AI startup serves a Llama-3-70B instruction model as their core product API. Current load: 500 RPS, average prompt 512 tokens, average output 256 tokens, p99 TTFT SLA < 800ms, p99 decode latency < 50ms/token. GPU budget: 8 x A100 80GB SXM. The naive deployment (HuggingFace `generate()` with static batching) saturates at 40 RPS with p99 TTFT > 3s.
 

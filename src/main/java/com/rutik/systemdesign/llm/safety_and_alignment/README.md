@@ -8,7 +8,7 @@ Unlike traditional software bugs, LLM safety issues are often subtle: a model mi
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: LLM safety is like nuclear safety — a powerful technology that's mostly beneficial but requires careful engineering and institutional safeguards because the tail risks are catastrophic.
 
@@ -20,7 +20,7 @@ Unlike traditional software bugs, LLM safety issues are often subtle: a model mi
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Safety is not binary**: There's a spectrum from mild (generating impolite text) to catastrophic (helping with WMDs). Systems should calibrate response proportionally.
 - **Overfitting to safety is harmful too**: Over-refusal blocks legitimate users, degrades trust, and reduces utility. The goal is calibrated helpfulness.
@@ -30,9 +30,9 @@ Unlike traditional software bugs, LLM safety issues are often subtle: a model mi
 
 ---
 
-## 3. Threat Models and Attack Vectors
+## 4. Threat Models and Attack Vectors
 
-### 3.1 Jailbreaking
+### 4.1 Jailbreaking
 
 Techniques to bypass model safety training:
 
@@ -86,7 +86,7 @@ Mitigation: Privilege separation (retrieved content ≠ system instructions);
   injection detection classifiers; careful tool authorization
 ```
 
-### 3.2 Hallucination
+### 4.2 Hallucination
 
 Models generate confident, plausible-sounding false information:
 
@@ -117,7 +117,7 @@ Entity hallucination: "CEO Tim Smith founded the company in..." (Tim Smith is fi
 6. Self-consistency: multiple generations; flag inconsistencies
 ```
 
-### 3.3 Bias and Fairness
+### 4.3 Bias and Fairness
 
 Models can exhibit harmful biases from training data:
 
@@ -147,7 +147,7 @@ BBQ (Bias Benchmark for QA):
 CrowS-Pairs: Stereotyping pairs
 ```
 
-### 3.4 Prompt Injection
+### 4.4 Prompt Injection
 
 Covered in Guardrails section. Key additional concern:
 
@@ -162,7 +162,7 @@ Mitigation: Train on refusing to reveal system prompts;
   "I have a system prompt but I can't share its contents"
 ```
 
-### 3.5 Cross-Modal Attacks
+### 4.5 Cross-Modal Attacks
 
 Multimodal models (GPT-4V, Gemini, Claude with vision) introduce attack surfaces that text-only safety filters cannot cover:
 
@@ -237,7 +237,7 @@ Apply safety filters to ALL modality-extracted text:
   5. Log and audit all multimodal inputs for post-hoc safety review
 ```
 
-### 3.6 Supply Chain Security
+### 4.6 Supply Chain Security
 
 Open-source model ecosystems introduce software supply chain risks beyond traditional LLM safety:
 
@@ -332,7 +332,7 @@ Safetensors (by HuggingFace):
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Safety Failure Modes
 ```
@@ -382,7 +382,7 @@ Mitigation Loop:
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Measuring Alignment Quality
 
@@ -453,7 +453,7 @@ Solutions:
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### Anthropic Red Teaming
 - External red team before each Claude version release
@@ -475,7 +475,7 @@ Solutions:
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Safety Level | Helpfulness | Use Case |
 |-------------|-------------|---------|
@@ -486,7 +486,7 @@ Solutions:
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Strict Safety Controls When:
 - Applications involving minors (always maximum safety)
@@ -502,7 +502,7 @@ Solutions:
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Safety washing**: Adding safety filters without understanding why they work; attackers quickly find bypasses.
 2. **False sense of security from alignment**: "The model is aligned, we don't need guardrails." Alignment is not perfect; defense in depth is required.
@@ -512,7 +512,7 @@ Solutions:
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -528,7 +528,7 @@ Solutions:
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is hallucination in LLMs and how do you mitigate it?**
 A: Hallucination is when an LLM generates confident but factually incorrect information. It occurs because models optimize for plausible text, not factual accuracy. Mitigation strategies: (1) RAG — ground responses in retrieved factual documents and check faithfulness; (2) Constitutional prompting — instruct the model to express uncertainty when it doesn't know; (3) Multi-sample consistency — if multiple generations disagree, flag uncertainty; (4) Factual training — include high-quality fact-checked data and Q&A pairs; (5) Citation requirements — require the model to cite sources (unverifiable claims are harder to make).

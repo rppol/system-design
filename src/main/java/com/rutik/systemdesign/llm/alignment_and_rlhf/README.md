@@ -1,5 +1,13 @@
 # Alignment & RLHF
 
+## Deep Dive Files
+
+| File | Topic |
+|------|-------|
+| [grpo_and_rlvr.md](grpo_and_rlvr.md) | GRPO vs PPO, RL with verifiable rewards, DeepSeek-R1 pipeline, DAPO/Dr. GRPO/GSPO, verifier design, reward hacking |
+
+---
+
 ## 1. Concept Overview
 
 Alignment is the process of making LLMs behave in ways that are helpful, harmless, and honest (Anthropic's "3 Hs"). A base pre-trained model predicts the next token — it has no concept of being helpful, refusing harmful requests, or being truthful. Alignment techniques transform this text predictor into a model that follows instructions, refuses dangerous outputs, and aligns with human values.
@@ -10,7 +18,7 @@ Understanding alignment is critical for anyone building LLM systems: it explains
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Alignment is like teaching a brilliant but amoral intern to be helpful and ethical — not by changing their intelligence, but by shaping their values and judgment.
 
@@ -22,7 +30,7 @@ Understanding alignment is critical for anyone building LLM systems: it explains
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **The alignment tax**: Aligned models are sometimes less capable on raw benchmarks — they refuse or hedge where a base model would just answer. This tradeoff between safety and helpfulness is central.
 - **Reward hacking**: If you optimize for a reward model, the LLM will find ways to maximize the reward proxy that don't match true human preferences (Goodhart's Law).
@@ -34,9 +42,9 @@ Understanding alignment is critical for anyone building LLM systems: it explains
 
 ---
 
-## 3. Types / Strategies
+## 4. Types / Strategies
 
-### 3.1 RLHF (Reinforcement Learning from Human Feedback)
+### 4.1 RLHF (Reinforcement Learning from Human Feedback)
 
 The original alignment pipeline. Three stages:
 
@@ -64,7 +72,7 @@ Stage 3: PPO (Proximal Policy Optimization)
 **Pros**: Strong empirical results; used by OpenAI for GPT-4, InstructGPT
 **Cons**: Complex (3 separate training runs); PPO is unstable; reward hacking; computationally expensive
 
-### 3.2 DPO (Direct Preference Optimization)
+### 4.2 DPO (Direct Preference Optimization)
 
 Reformulates RLHF as a supervised learning problem — no RL, no separate reward model. Directly optimizes on preference data.
 
@@ -90,7 +98,7 @@ Intuition: Increase likelihood of chosen relative to rejected,
 
 Used by: Llama 3, Mistral, many open-source models.
 
-### 3.3 Constitutional AI (CAI) — Anthropic
+### 4.3 Constitutional AI (CAI) — Anthropic
 
 Two-stage self-supervised alignment:
 
@@ -111,7 +119,7 @@ Stage 2: RL from AI Feedback (RLAIF)
 
 Constitutional AI reduces dependence on human labelers for safety data while maintaining strong alignment. Used by Anthropic for Claude.
 
-### 3.4 ORPO (Odds Ratio Preference Optimization)
+### 4.4 ORPO (Odds Ratio Preference Optimization)
 
 Single-stage alignment — combines SFT and preference learning in one loss:
 
@@ -126,7 +134,7 @@ More parameter efficient; faster training
 
 Used by: Phi-3, some Mistral variants.
 
-### 3.5 KTO (Kahneman-Tversky Optimization)
+### 4.5 KTO (Kahneman-Tversky Optimization)
 
 Aligns based on individual good/bad response labels rather than pairwise comparisons:
 
@@ -144,7 +152,7 @@ Uses independent positive and negative signals:
 
 Particularly useful when pairwise comparison data is hard to collect.
 
-### 3.6 RLAIF (RL from AI Feedback)
+### 4.6 RLAIF (RL from AI Feedback)
 
 Replace human raters with an AI judge:
 
@@ -158,7 +166,7 @@ Enables scaling feedback beyond human annotation capacity
 Quality depends heavily on judge model quality
 ```
 
-### 3.7 SimPO (Simple Preference Optimization)
+### 4.7 SimPO (Simple Preference Optimization)
 
 Reference-model-free preference optimization. Unlike DPO, SimPO eliminates the frozen reference policy entirely, using the average log probability of the response as an implicit reward.
 
@@ -184,7 +192,7 @@ Key differences from DPO:
 **Pros**: Simpler training pipeline; lower memory footprint; competitive with DPO on AlpacaEval 2 (44.7 vs 40.5 length-controlled win rate) and MT-Bench
 **Cons**: Gamma requires tuning per task; length normalization can under-reward genuinely detailed responses
 
-### 3.8 GRPO (Group Relative Policy Optimization)
+### 4.8 GRPO (Group Relative Policy Optimization)
 
 DeepSeek's RL approach used to train DeepSeek-R1. Groups multiple sampled outputs per prompt and computes advantages using within-group statistics, eliminating the need for a separate critic (value function) or reward model.
 
@@ -213,7 +221,7 @@ Key insight: no separate critic network needed -- the group
 
 Used by: DeepSeek-R1, DeepSeek-V3.
 
-### 3.9 Verifiable Rewards
+### 4.9 Verifiable Rewards
 
 For tasks with objectively checkable outputs, use execution-based or symbolic verification as the reward signal instead of a learned reward model.
 
@@ -239,7 +247,7 @@ Used in combination with RL (PPO or GRPO):
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### RLHF Full Pipeline
 ```
@@ -317,7 +325,7 @@ RL Update (PPO or GRPO)
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Reward Model Training
 
@@ -461,7 +469,7 @@ DeepSeek-R1 combined reward:
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### OpenAI InstructGPT / GPT-3.5-turbo
 - First large-scale RLHF-aligned model (Ouyang et al. 2022)
@@ -491,7 +499,7 @@ DeepSeek-R1 combined reward:
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Method | Complexity | Stability | Data Needed | Memory (7B) | Quality |
 |--------|-----------|-----------|-------------|-------------|---------|
@@ -517,7 +525,7 @@ DeepSeek-R1 combined reward:
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use RLHF/DPO When:
 - Building a general-purpose assistant (helpfulness + safety)
@@ -555,7 +563,7 @@ DeepSeek-R1 combined reward:
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Reward hacking**: Model exploits proxy reward (e.g., generates very long responses because length correlates with high ratings). Monitor reward model calibration.
 2. **Sycophancy**: Human raters prefer responses that agree with them; model learns sycophantic behavior. Use adversarial prompts that test factual accuracy despite user pressure.
@@ -565,7 +573,7 @@ DeepSeek-R1 combined reward:
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -581,7 +589,7 @@ DeepSeek-R1 combined reward:
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is RLHF and what problem does it solve?**
 A: RLHF (Reinforcement Learning from Human Feedback) aligns a pre-trained LLM with human preferences. Without alignment, the model just predicts next tokens — it might answer harmful questions, be inconsistent, or use undesirable formats. RLHF adds a reward model (trained on human comparisons of responses) and uses RL (PPO) to optimize the model's outputs for higher human preference scores. This transforms a text predictor into a helpful assistant.

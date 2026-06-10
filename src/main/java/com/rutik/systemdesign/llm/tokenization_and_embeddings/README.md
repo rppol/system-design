@@ -10,7 +10,7 @@ The key insight of modern tokenization: instead of splitting on words (leads to 
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Tokenization is like breaking a sentence into Lego bricks — common words are single bricks, rare words are split into recognizable pieces — before handing them to the model.
 
@@ -22,7 +22,7 @@ The key insight of modern tokenization: instead of splitting on words (leads to 
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Vocabulary**: A fixed set of tokens the model knows (typically 32K–200K for modern LLMs).
 - **Subword Units**: Most tokens represent common subwords; rare words decompose into known pieces.
@@ -33,9 +33,9 @@ The key insight of modern tokenization: instead of splitting on words (leads to 
 
 ---
 
-## 3. Tokenization Algorithms
+## 4. Tokenization Algorithms
 
-### 3.1 Byte Pair Encoding (BPE)
+### 4.1 Byte Pair Encoding (BPE)
 
 The most widely used algorithm. Starts with individual bytes/characters, iteratively merges the most frequent adjacent pair.
 
@@ -61,7 +61,7 @@ Output: ["token", "ization"] (2 tokens)
 
 Used by: GPT-2, GPT-3, GPT-4 (tiktoken), LLaMA (via SentencePiece BPE), Mistral, Qwen
 
-### 3.2 WordPiece
+### 4.2 WordPiece
 
 Similar to BPE but uses likelihood-based merge criterion instead of frequency. Merges the pair that maximizes language model likelihood when merged.
 
@@ -70,7 +70,7 @@ Similar to BPE but uses likelihood-based merge criterion instead of frequency. M
 
 Used by: BERT, DistilBERT, ELECTRA, most BERT-derived models
 
-### 3.3 SentencePiece (Unigram LM)
+### 4.3 SentencePiece (Unigram LM)
 
 Google's tokenization library. Key innovations:
 - **Language-agnostic**: Treats the input as a raw byte stream — no need for word boundaries (crucial for CJK languages with no spaces)
@@ -81,7 +81,7 @@ The Unigram model keeps multiple tokenization candidates and picks the highest l
 
 Used by: LLaMA (SentencePiece BPE), T5, ALBERT, mT5, PaLM, Gemma
 
-### 3.4 tiktoken (OpenAI)
+### 4.4 tiktoken (OpenAI)
 
 OpenAI's fast BPE implementation in Rust/Python. Used for GPT-3.5, GPT-4, embedding models.
 
@@ -92,7 +92,7 @@ Key vocabularies:
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Tokenization Pipeline
 ```
@@ -143,7 +143,7 @@ Input to Transformer = token_embedding + positional_embedding
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### The Encoding Process (Step by Step)
 
@@ -208,7 +208,7 @@ Modern trend: 100K+ vocabulary for broader language coverage (GPT-4o uses 200K, 
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### OpenAI tiktoken Evolution
 - GPT-2: 50K vocab (`gpt2` encoding), poor multilingual
@@ -240,7 +240,7 @@ Solutions: Use tokenizers with consistent number splitting
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Algorithm | Pros | Cons | Best For |
 |-----------|------|------|---------|
@@ -251,7 +251,7 @@ Solutions: Use tokenizers with consistent number splitting
 
 ---
 
-## 8. When to Use / When NOT to Use Custom Tokenizers
+## 9. When to Use / When NOT to Use Custom Tokenizers
 
 ### Use Default Model Tokenizer When:
 - Using a pretrained model (API or open-source) — **always use the model's own tokenizer**
@@ -270,7 +270,7 @@ Solutions: Use tokenizers with consistent number splitting
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Token counting != character counting**: "ChatGPT" is 1 token but has 7 characters. Always count tokens with the model's actual tokenizer.
 2. **Leading space matters**: `"hello"` and `" hello"` are different tokens in BPE. This matters for prompt construction.
@@ -281,7 +281,7 @@ Solutions: Use tokenizers with consistent number splitting
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -303,7 +303,7 @@ print(tokenizer.vocab_size)  # 128,256
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is Byte Pair Encoding and how does it work?**
 A: BPE starts with a character/byte-level vocabulary and iteratively merges the most frequent adjacent pair of tokens until the target vocabulary size is reached. At inference, the same merge operations are applied in order to tokenize new text. This creates a vocabulary that efficiently represents common subwords as single tokens while handling rare words by splitting them into known pieces.

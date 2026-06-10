@@ -32,7 +32,7 @@ Agents represent the frontier of LLM application development in 2024-2025, power
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: An LLM agent is like a brilliant intern who can think through problems and delegate to specialists (tools) — you give them a goal and they figure out how to get it done.
 
@@ -44,7 +44,7 @@ Agents represent the frontier of LLM application development in 2024-2025, power
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Planning**: Breaking down complex goals into executable sub-steps.
 - **Tool use**: Calling external functions (APIs, databases, code execution) to extend capabilities.
@@ -55,9 +55,9 @@ Agents represent the frontier of LLM application development in 2024-2025, power
 
 ---
 
-## 3. Types / Strategies
+## 4. Types / Strategies
 
-### 3.1 Function Calling (Tool Use)
+### 4.1 Function Calling (Tool Use)
 
 Modern LLMs are fine-tuned to recognize when to call tools and output structured calls:
 
@@ -89,7 +89,7 @@ response = client.chat.completions.create(
 
 The model outputs a structured tool call; your code executes it; result injected back into context.
 
-### 3.2 ReAct (Reasoning + Acting)
+### 4.2 ReAct (Reasoning + Acting)
 
 Interleave thoughts and actions in a structured format:
 
@@ -110,7 +110,7 @@ Final Answer: Tim Cook is the CEO of Apple. His net worth is approximately $1.5 
 
 ReAct was proposed as a prompting pattern (2022) and is now the default architecture for most agents.
 
-### 3.3 Plan-and-Execute
+### 4.3 Plan-and-Execute
 
 Separate planning from execution for more reliable long-horizon tasks:
 
@@ -135,7 +135,7 @@ Benefits: clear structure, each step can be independently validated
 Drawbacks: plan may become outdated as execution reveals new info
 ```
 
-### 3.4 Memory Systems
+### 4.4 Memory Systems
 
 Agents need memory to handle tasks that span multiple steps:
 
@@ -164,7 +164,7 @@ Procedural memory:
   Example: successful code templates
 ```
 
-### 3.5 Tool Library
+### 4.5 Tool Library
 
 Common tools given to agents:
 
@@ -179,19 +179,19 @@ Common tools given to agents:
 | LLM sub-calls | Summarizer, translator | Specialized sub-tasks |
 | Vector DB | Retrieval, storage | Long-term memory |
 
-### 3.6 Multi-Agent Systems
+### 4.6 Multi-Agent Systems
 
 Multiple specialized agents collaborate to tackle tasks that exceed any single agent's context or capability. An orchestrator decomposes the task, dispatches to specialized workers, and assembles results. Enables parallelism and specialization but requires careful failure isolation and inter-agent communication protocols. See [Multi-Agent Systems](../multi_agent_systems/README.md) for patterns (orchestrator-worker, debate, blackboard, Swarm) and full implementation.
 
-### 3.7 Agent Safety & Guardrails
+### 4.7 Agent Safety & Guardrails
 
 Guardrails are external safety layers that sit around agents: input filters (PII detection, injection detection), output filters (toxicity, grounding checks), and runtime constraints (rate limits, step budgets). Critical for production deployments, especially in regulated domains. Agents create unique guardrail challenges: indirect prompt injection via tool results and multi-turn jailbreak attacks. See [Guardrails & Content Safety](../guardrails_and_content_safety/README.md) for full coverage.
 
-### 3.8 Code Agents
+### 4.8 Code Agents
 
 Agents specialized for software engineering tasks: writing, executing, debugging, and iterating on code. The execution loop is tighter than standard ReAct — the primary tool is a code sandbox; feedback is structured (test results, stack traces); termination is programmatic (tests pass). Powers tools like Claude Code, Devin, Cursor Composer, and SWE-agent. See [Code Generation](../code_generation/README.md) for evaluation benchmarks (SWE-bench), security considerations, and architecture.
 
-### 3.9 Agentic Frameworks
+### 4.9 Agentic Frameworks
 
 LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, and Semantic Kernel provide reusable abstractions for agent loops, tool management, memory, and multi-agent coordination. Framework choice matters: LangGraph for complex stateful workflows; LlamaIndex for data-heavy RAG agents; CrewAI for quick role-based crews. See [Agentic Frameworks](../agentic_frameworks/README.md) for framework comparison and when to build custom.
 
@@ -201,7 +201,7 @@ Key framework references for agent patterns:
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Agent Loop
 ```
@@ -272,7 +272,7 @@ Agent
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Tool Definition Best Practices
 
@@ -348,7 +348,7 @@ System Prompt Structure for Agents:
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### Claude Code (Anthropic)
 - Terminal-based agent that reads/writes files, executes commands
@@ -373,7 +373,7 @@ System Prompt Structure for Agents:
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Factor | Simple Chain | ReAct Agent | Plan-Execute |
 |--------|-------------|-------------|--------------|
@@ -385,7 +385,7 @@ System Prompt Structure for Agents:
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Agents When:
 - Task requires dynamic tool calls (you don't know in advance which tools are needed)
@@ -401,7 +401,7 @@ System Prompt Structure for Agents:
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Infinite loops**: Agent keeps trying the same failing tool. Enforce max_iterations and detect repetitive patterns.
 2. **Tool overuse**: Agent calls tools when it already has the answer in context. Prompt: "Use your knowledge when confident, tools only when needed."
@@ -412,7 +412,7 @@ System Prompt Structure for Agents:
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -432,7 +432,7 @@ System Prompt Structure for Agents:
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is a LLM agent and how is it different from a standard LLM call?**
 A: An LLM agent places the LLM in a loop where it can call tools, observe results, and decide on next actions — iterating until a task is complete. A standard LLM call is a single round-trip: input → output. Agents handle tasks that require multiple steps, dynamic tool selection, real-time information, or actions on external systems. The cost is added latency, complexity, and failure modes.

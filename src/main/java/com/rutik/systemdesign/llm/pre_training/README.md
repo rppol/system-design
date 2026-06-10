@@ -308,7 +308,7 @@ In practice:
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### GPT-3 (OpenAI, 2020)
 - 175B parameters, 570GB of text data (~300B tokens)
@@ -338,7 +338,7 @@ In practice:
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Decision | Option A | Option B | Consider |
 |----------|----------|----------|---------|
@@ -350,7 +350,7 @@ In practice:
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Pre-Train From Scratch When:
 - Building a truly domain-specialized model (medical, legal, finance) where the knowledge base differs fundamentally
@@ -366,7 +366,7 @@ In practice:
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Training data contamination**: If benchmark test sets are in your training data, evaluation scores are inflated. Run deduplication between training data and all evaluation sets.
 2. **Epoch repetition**: For very large models, repeating data (>1 epoch) degrades quality. Use different data mixes across passes.
@@ -377,7 +377,7 @@ In practice:
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -394,7 +394,7 @@ In practice:
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is the difference between CLM and MLM training objectives?**
 A: CLM (Causal Language Modeling) predicts the next token given only previous tokens — unidirectional, autoregressive, enables text generation. MLM (Masked Language Modeling) masks random tokens and predicts them using bidirectional context — better for understanding tasks but can't generate text. Modern LLMs use CLM; embedding/classification models use MLM.
@@ -858,9 +858,7 @@ The Chinchilla scaling law (Hoffmann et al. 2022) was derived for full pre-train
 **Q: Why should you evaluate catastrophic forgetting on multiple general benchmarks rather than just one?**
 Different benchmarks probe different capabilities: MMLU tests knowledge recall, HellaSwag tests commonsense reasoning, GSM8K tests mathematical reasoning, HumanEval tests code generation. A model can retain MMLU performance (knowledge is domain-independent) while losing 15% on GSM8K (mathematical reasoning is in the tail of the biomedical data distribution). Single-benchmark evaluation gives a false sense of security. Track at minimum: a knowledge benchmark (MMLU), a reasoning benchmark (GSM8K or HellaSwag), and a language benchmark (writing quality via LLM judge). Alert if any drops > 5%.
 
-## 14. Case Study
-
-### Pre-Training a 7B Parameter Code-Specialized LLM
+### Case Study 2: Pre-Training a 7B Parameter Code-Specialized LLM
 
 **Problem Statement and Scale**
 

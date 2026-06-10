@@ -10,7 +10,7 @@ These techniques push RAG from a simple lookup system to a reasoning system that
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Advanced RAG is like upgrading from a library card catalog to a research librarian who understands your question, fetches multiple sources, and iterates until they find what you actually need.
 
@@ -22,7 +22,7 @@ These techniques push RAG from a simple lookup system to a reasoning system that
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Query and context are rarely aligned**: User queries are often ambiguous, vague, or assume context the retriever doesn't have. Query transformation bridges this gap.
 - **Retrieval should be iterative**: For complex questions, one retrieval step is insufficient. The LLM should decide what additional information to retrieve based on what it already has.
@@ -32,9 +32,9 @@ These techniques push RAG from a simple lookup system to a reasoning system that
 
 ---
 
-## 3. Types / Strategies
+## 4. Types / Strategies
 
-### 3.1 Query Transformation
+### 4.1 Query Transformation
 
 Transform the user's raw query before retrieval to improve recall.
 
@@ -75,7 +75,7 @@ Step-back: "What factors affect Brazil's GDP?"
 Retrieve: both specific and general context
 ```
 
-### 3.2 Agentic RAG (Iterative Retrieval)
+### 4.2 Agentic RAG (Iterative Retrieval)
 
 The LLM decides what to retrieve, evaluates whether it has enough information, and retrieves again if needed:
 
@@ -95,7 +95,7 @@ Example:
   Generate: comparative answer with citations
 ```
 
-### 3.3 Graph RAG (Microsoft, 2024)
+### 4.3 Graph RAG (Microsoft, 2024)
 
 Build a knowledge graph from documents; use graph traversal + LLM synthesis for complex queries:
 
@@ -121,7 +121,7 @@ Advantage: Handles "What themes appear across all documents?" type queries
   that vector search completely fails on (no single chunk contains the answer)
 ```
 
-### 3.4 Multi-Modal RAG
+### 4.4 Multi-Modal RAG
 
 Extend retrieval beyond text to images, tables, charts, and PDFs with mixed content:
 
@@ -142,7 +142,7 @@ Generation:
   LLM sees both text context and relevant images
 ```
 
-### 3.5 Self-RAG
+### 4.5 Self-RAG
 
 Model decides when to retrieve:
 
@@ -163,7 +163,7 @@ Benefits: adaptive retrieval (only when needed); built-in faithfulness checking
 Requires: fine-tuning a specialized model variant
 ```
 
-### 3.6 Corrective RAG (CRAG)
+### 4.6 Corrective RAG (CRAG)
 
 Evaluates retrieved documents and corrects the retrieval strategy if low quality:
 
@@ -181,7 +181,7 @@ Prevents using low-quality retrieved context as grounding
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Agentic RAG with Reflection
 ```
@@ -254,7 +254,7 @@ Perfect RAG system:
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Sentence Window Retrieval
 
@@ -309,7 +309,7 @@ result = evaluate(dataset, metrics=[faithfulness, answer_relevancy, ...])
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### Microsoft Graph RAG (2024)
 - Published as open source: graphrag Python library
@@ -330,7 +330,7 @@ result = evaluate(dataset, metrics=[faithfulness, answer_relevancy, ...])
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | RAG Strategy | Quality | Latency | Cost | Complexity |
 |-------------|---------|---------|------|------------|
@@ -343,7 +343,7 @@ result = evaluate(dataset, metrics=[faithfulness, answer_relevancy, ...])
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Advanced RAG When:
 - Simple RAG achieves <70% accuracy on your evaluation set
@@ -358,7 +358,7 @@ result = evaluate(dataset, metrics=[faithfulness, answer_relevancy, ...])
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Over-engineering early**: Start with standard RAG; only add complexity when you have evidence it's needed with evaluation data.
 2. **Graph RAG indexing cost**: Building entity graph and community summaries costs $10-100+ per 1M tokens of documents. Not suitable for frequently-changing data.
@@ -368,7 +368,7 @@ result = evaluate(dataset, metrics=[faithfulness, answer_relevancy, ...])
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -384,7 +384,7 @@ result = evaluate(dataset, metrics=[faithfulness, answer_relevancy, ...])
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: How do you evaluate a RAG system?**
 A: Evaluate two independent components: (1) Retrieval quality: context recall (did we retrieve all relevant docs?), context precision (fraction of retrieved docs that are relevant). (2) Generation quality: faithfulness (does the answer contradict retrieved context?), answer relevance (does the answer address the question?). Use frameworks like RAGAS or TruLens. Build a golden test set with hand-curated (question, context, answer) triples. Track all four metrics separately so you can diagnose whether failures are retrieval failures or generation failures.

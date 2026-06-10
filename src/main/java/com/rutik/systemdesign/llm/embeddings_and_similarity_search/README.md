@@ -10,7 +10,7 @@ Together, embeddings + similarity search power the retrieval component in RAG sy
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Embeddings are like GPS coordinates for meaning — similar ideas live close together, so finding related content is just finding nearby points in meaning-space.
 
@@ -22,7 +22,7 @@ Together, embeddings + similarity search power the retrieval component in RAG sy
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Semantic similarity**: Vectors that are "close" (high cosine similarity or low L2 distance) represent semantically similar content.
 - **Representation learning**: Good embeddings are trained so that the geometry of the space reflects meaningful relationships.
@@ -32,9 +32,9 @@ Together, embeddings + similarity search power the retrieval component in RAG sy
 
 ---
 
-## 3. Types / Strategies
+## 4. Types / Strategies
 
-### 3.1 Sentence Embeddings
+### 4.1 Sentence Embeddings
 
 **all-MiniLM-L6-v2** (SentenceTransformers)
 - 384 dimensions, 80M params, extremely fast
@@ -57,7 +57,7 @@ Together, embeddings + similarity search power the retrieval component in RAG sy
 - text-embedding-3-small (1536d) / text-embedding-3-large (3072d)
 - Supports Matryoshka truncation (see below)
 
-### 3.2 Contrastive Learning
+### 4.2 Contrastive Learning
 
 The dominant training paradigm for embedding models:
 
@@ -76,7 +76,7 @@ Loss = -log[ exp(sim(anchor, pos)/τ) / Σ exp(sim(anchor, neg_i)/τ) ]
 
 **In-batch negatives**: Other examples in the same training batch serve as negatives — allows large effective negative count without explicit negative mining.
 
-### 3.3 Matryoshka Representation Learning (MRL)
+### 4.3 Matryoshka Representation Learning (MRL)
 
 Train embeddings so that the first K dimensions already encode a good representation, and adding more dimensions improves quality monotonically.
 
@@ -91,7 +91,7 @@ Benefits:
 - Adaptive quality/cost tradeoff at inference time
 - OpenAI's text-embedding-3 supports this natively with `dimensions` parameter
 
-### 3.4 Bi-Encoder vs Cross-Encoder
+### 4.4 Bi-Encoder vs Cross-Encoder
 
 **Bi-Encoder**: Query and document encoded separately → very fast (precompute document embeddings)
 ```
@@ -109,7 +109,7 @@ Doc    → Encoder → d_vec  ]
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ### Embedding Retrieval Pipeline
 ```
@@ -171,7 +171,7 @@ Query:
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### Distance Metrics
 
@@ -251,7 +251,7 @@ Embeddings in production can drift when:
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 ### Pinecone at Scale
 - Powers semantic search for thousands of production applications
@@ -278,7 +278,7 @@ Embeddings in production can drift when:
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Index Type | Recall | Speed | Memory | Scalability |
 |------------|--------|-------|--------|-------------|
@@ -297,7 +297,7 @@ Embeddings in production can drift when:
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Embeddings + ANN When:
 - Semantic search (not keyword matching)
@@ -323,7 +323,7 @@ Embeddings in production can drift when:
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Using the wrong embedding model for the task**: Embedding model trained on NLI may not work well for code retrieval. Match model to domain.
 2. **Not normalizing vectors**: If your similarity metric assumes unit vectors but you store raw embeddings, results are wrong.
@@ -335,7 +335,7 @@ Embeddings in production can drift when:
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Type | Notes |
 |------|------|-------|
@@ -352,7 +352,7 @@ Embeddings in production can drift when:
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is the difference between HNSW and IVF indexing?**
 A: HNSW (Hierarchical Navigable Small World) is a graph-based index that creates a multi-layered graph for efficient navigation. It offers high recall (~99%) with fast queries (O(log N)) but uses more memory. IVF (Inverted File Index) clusters vectors with K-means and searches only nearby clusters. Lower memory overhead, slightly lower recall, great for very large datasets. HNSW is preferred for <100M vectors; IVF-PQ is preferred for billions of vectors.

@@ -1,5 +1,13 @@
 # LLM Security
 
+## Deep Dive Files
+
+| File | Topic |
+|------|-------|
+| [privacy_and_data_governance.md](privacy_and_data_governance.md) | Memorization & extraction attacks, membership inference, PII pipelines, DP-SGD, machine unlearning, deletion requests, retention & residency |
+
+---
+
 ## 1. Concept Overview
 
 LLM security addresses the protection of LLM-powered systems against adversarial attacks, data leakage, and supply chain compromise. Unlike traditional application security (SQL injection, XSS), LLM security must contend with natural language as both the interface and attack vector, making threats harder to detect and mitigate with conventional methods.
