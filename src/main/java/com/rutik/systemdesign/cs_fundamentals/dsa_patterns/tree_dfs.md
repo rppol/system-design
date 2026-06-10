@@ -306,6 +306,10 @@ from ambiguous shapes) and does a substring search.
 | [Lowest Common Ancestor of a Binary Tree (LC 236)](https://leetcode.com/problems/lowest-common-ancestor-of-a-binary-tree/) | Medium | "Found in both subtrees" | Returns a node, not a value |
 | [Path Sum III (LC 437)](https://leetcode.com/problems/path-sum-iii/) | Medium | Any-path + prefix sum | DFS combined with [prefix_sum](prefix_sum.md) hashmap |
 | [Construct Binary Tree from Preorder and Inorder Traversal (LC 105)](https://leetcode.com/problems/construct-binary-tree-from-preorder-and-inorder-traversal/) | Medium | Recursive split | Hashmap of inorder indices for O(n) |
+| [Balanced Binary Tree (LC 110)](https://leetcode.com/problems/balanced-binary-tree/) | Easy | Height + balance check | Return height, or -1 sentinel to short-circuit imbalance |
+| [Path Sum II (LC 113)](https://leetcode.com/problems/path-sum-ii/) | Medium | Collect all root-to-leaf paths | Backtrack the running path list at each return |
+| [Kth Smallest Element in a BST (LC 230)](https://leetcode.com/problems/kth-smallest-element-in-a-bst/) | Medium | In-order DFS | In-order visit yields sorted order; stop at the kth |
+| [House Robber III (LC 337)](https://leetcode.com/problems/house-robber-iii/) | Medium | Tree DP | Each node returns `(rob_this, skip_this)` to its parent |
 | [Serialize and Deserialize Binary Tree (LC 297)](https://leetcode.com/problems/serialize-and-deserialize-binary-tree/) | Hard | Preorder + sentinels | Unambiguous reconstruction |
 | [Binary Tree Maximum Path Sum (LC 124)](https://leetcode.com/problems/binary-tree-maximum-path-sum/) | Hard | Clip negatives + global best | The signature "hardest" tree DFS problem |
 

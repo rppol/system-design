@@ -317,6 +317,11 @@ for O(1)-ish lookup of "top suggestions for this prefix."
 | [Search Suggestions System (LC 1268)](https://leetcode.com/problems/search-suggestions-system/) | Medium | Prefix-sorted suggestions | Trie OR sort + binary search both work |
 | [Longest Common Prefix (LC 14)](https://leetcode.com/problems/longest-common-prefix/) | Easy | Shared-path length | Trivial with a trie; vertical scanning also works |
 | [Prefix and Suffix Search (LC 745)](https://leetcode.com/problems/prefix-and-suffix-search/) | Hard | Combined prefix+suffix trie | Insert `suffix + "#" + word` for every suffix |
+| [Map Sum Pairs (LC 677)](https://leetcode.com/problems/map-sum-pairs/) | Medium | Trie storing aggregate values | Sum the values of all keys under a prefix; insert overwrites |
+| [Word Break (LC 139)](https://leetcode.com/problems/word-break/) | Medium | Trie + DP (related) | Prefix membership drives `dp[i] = any(dp[j] and s[j:i] in trie)` |
+| [Concatenated Words (LC 472)](https://leetcode.com/problems/concatenated-words/) | Hard | Trie + DFS word-break | A word counts if splittable into ≥2 dictionary words |
+| [Stream of Characters (LC 1032)](https://leetcode.com/problems/stream-of-characters/) | Hard | Reversed (suffix) trie | Insert words reversed; match the incoming stream backward |
+| [Maximum XOR With an Element From Array (LC 1707)](https://leetcode.com/problems/maximum-xor-with-an-element-from-array/) | Hard | Binary trie + offline queries | Sort queries by limit; insert nums ≤ limit into the bit trie |
 
 ---
 

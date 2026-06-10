@@ -240,6 +240,10 @@ The O(n) bound (despite the `while` loop nested in the `for` loop) follows the s
 | [Sliding Window Maximum (LC 239)](https://leetcode.com/problems/sliding-window-maximum/) | Hard | Monotonic deque | Front of deque = current max |
 | [132 Pattern (LC 456)](https://leetcode.com/problems/132-pattern/) | Medium | Decreasing stack + tracking a "second max" | Subtle — track candidate "3" values while scanning right-to-left |
 | [Asteroid Collision (LC 735)](https://leetcode.com/problems/asteroid-collision/) | Medium | Stack as pairwise-collision simulation | Not "next greater" framed, but same push/pop-while-condition shape: pop smaller right-movers while the new left-mover survives |
+| [Final Prices With a Special Discount in a Shop (LC 1475)](https://leetcode.com/problems/final-prices-with-a-special-discount-in-a-shop/) | Easy | Next smaller-or-equal element | Plain next-smaller template applied as a discount |
+| [Remove Duplicate Letters (LC 316)](https://leetcode.com/problems/remove-duplicate-letters/) | Medium | Greedy increasing stack | Pop while top > current AND top appears again later; `seen` set guards duplicates |
+| [Sum of Subarray Minimums (LC 907)](https://leetcode.com/problems/sum-of-subarray-minimums/) | Medium | Prev/next smaller, contribution counting | Each element's contribution = (left span)·(right span)·value |
+| [Shortest Subarray with Sum at Least K (LC 862)](https://leetcode.com/problems/shortest-subarray-with-sum-at-least-k/) | Hard | Monotonic deque over prefix sums | Increasing deque of prefix sums; pop front when `prefix[i]-prefix[front] >= k` |
 
 ---
 

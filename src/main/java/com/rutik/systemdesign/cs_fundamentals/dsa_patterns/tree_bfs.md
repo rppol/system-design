@@ -317,6 +317,11 @@ level matters, not the visiting order within a level.
 | [N-ary Tree Level Order Traversal (LC 429)](https://leetcode.com/problems/n-ary-tree-level-order-traversal/) | Medium | N-ary generalization | Push `node.children`, not `left`/`right` |
 | [Cousins in Binary Tree (LC 993)](https://leetcode.com/problems/cousins-in-binary-tree/) | Easy | Track parent + depth | Same depth, different parent |
 | [Maximum Width of Binary Tree (LC 662)](https://leetcode.com/problems/maximum-width-of-binary-tree/) | Medium | Positional indexing | Track `2*i`/`2*i+1` indices per node |
+| [Populating Next Right Pointers in Each Node II (LC 117)](https://leetcode.com/problems/populating-next-right-pointers-in-each-node-ii/) | Medium | Level-linking, non-perfect tree | Use a dummy "next-level head" to chain children that may be missing |
+| [Find Largest Value in Each Tree Row (LC 515)](https://leetcode.com/problems/find-largest-value-in-each-tree-row/) | Medium | Per-level aggregate (max) | `max` over each BFS level |
+| [Maximum Level Sum of a Binary Tree (LC 1161)](https://leetcode.com/problems/maximum-level-sum-of-a-binary-tree/) | Medium | Track the level with the largest sum | Return the 1-indexed level, smallest on ties |
+| [Deepest Leaves Sum (LC 1302)](https://leetcode.com/problems/deepest-leaves-sum/) | Medium | Sum of the last level | Reset the running sum at the start of each level |
+| [Even Odd Tree (LC 1609)](https://leetcode.com/problems/even-odd-tree/) | Medium | Per-level parity/monotonic check | Even levels strictly increasing odds; odd levels strictly decreasing evens |
 
 ---
 

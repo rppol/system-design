@@ -851,10 +851,10 @@ The language-agnostic computer-science spine: 20 modules across 6 phases + 6 int
 
 | File | Purpose |
 |------|---------|
-| [dsa_patterns/README.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/dsa_patterns/README.md) | Recognition engine: UMPIRE method, constraints→complexity table, 40-row cue→pattern lookup, decision tree, 24-pattern index |
+| [dsa_patterns/README.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/dsa_patterns/README.md) | Recognition engine: UMPIRE method, constraints→complexity table, cue→pattern lookup, decision tree, 25-pattern index |
 | [dsa_patterns/interview_execution_playbook.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/dsa_patterns/interview_execution_playbook.md) | L5 rubric, 5-minute opening ritual, communication scripts, "what to say when stuck" |
 | [dsa_patterns/study_plans.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/dsa_patterns/study_plans.md) | Blind 75 + NeetCode 150 mapped to patterns with LeetCode links |
-| 24 pattern playbooks | Two pointers, sliding window, fast/slow, prefix sum, hashing, cyclic sort, monotonic stack, LL reversal, merge intervals, binary search, top-K, k-way merge, two heaps, tree BFS/DFS, graph traversal, topo sort, union-find, trie, shortest path, backtracking, DP, greedy, bit manipulation |
+| 25 pattern playbooks | Two pointers, sliding window, fast/slow, prefix sum, hashing, cyclic sort, monotonic stack, LL reversal, merge intervals, binary search, top-K, k-way merge, two heaps, tree BFS/DFS, graph traversal, topo sort, union-find, trie, shortest path, backtracking, DP, greedy, bit manipulation, matrix traversal |
 
 See the [CS Fundamentals Master Index](src/main/java/com/rutik/systemdesign/cs_fundamentals/README.md) for the full 6-phase learning path, scope & non-overlap boundary, cross-reference map, and build-status tracker.
 

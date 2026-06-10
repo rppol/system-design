@@ -231,15 +231,21 @@ The "Insert Interval" O(n) result (no sort needed, since input is pre-sorted) is
 
 | Problem | Difficulty | Variation | Recognition cue / twist |
 |---|---|---|---|
+| [Meeting Rooms (LC 252)](https://leetcode.com/problems/meeting-rooms/) | Easy | Can attend all? | Sort by start, check `start[i] < end[i-1]` (premium, foundational) |
+| [Summary Ranges (LC 228)](https://leetcode.com/problems/summary-ranges/) | Easy | Form intervals from runs | Group consecutive integers into ranges |
 | [Merge Intervals (LC 56)](https://leetcode.com/problems/merge-intervals/) | Medium | Base merge | Sort by start, compare with last merged |
 | [Insert Interval (LC 57)](https://leetcode.com/problems/insert-interval/) | Medium | Linear insert into sorted list | Three-phase scan, O(n) — input pre-sorted |
-| [Meeting Rooms II (LC 253)](https://leetcode.com/problems/meeting-rooms-ii/) | Medium | Min concurrent count | Two-pointer on sorted starts/ends, OR min-heap of end times |
-| [Non-overlapping Intervals (LC 435)](https://leetcode.com/problems/non-overlapping-intervals/) | Medium | Greedy selection (sort by END) | Maximize kept = minimize removed |
-| [Interval List Intersections (LC 986)](https://leetcode.com/problems/interval-list-intersections/) | Medium | Two-list merge | Two pointers, one per list |
+| [Interval List Intersections (LC 986)](https://leetcode.com/problems/interval-list-intersections/) | Medium | Two-list merge | Two pointers, one per list; overlap = `[max(lo), min(hi)]` |
+| [Non-overlapping Intervals (LC 435)](https://leetcode.com/problems/non-overlapping-intervals/) | Medium | Greedy selection (sort by END) | Maximize kept = minimize removed — see [greedy.md](greedy.md) |
 | [Minimum Number of Arrows to Burst Balloons (LC 452)](https://leetcode.com/problems/minimum-number-of-arrows-to-burst-balloons/) | Medium | Greedy, sort by end | Same shape as Non-overlapping Intervals |
-| [Car Pooling (LC 1094)](https://leetcode.com/problems/car-pooling/) | Medium | Delta array + prefix sum | Convert intervals to +/- events |
-| [My Calendar I (LC 729)](https://leetcode.com/problems/my-calendar-i/) | Medium | Online interval insertion with overlap rejection | Maintain sorted list; binary search or linear scan for overlap |
-| [Employee Free Time (LC 759)](https://leetcode.com/problems/employee-free-time/) | Hard | Merge across multiple lists, find gaps | Flatten + sort + merge + gap-finding |
+| [Meeting Rooms II (LC 253)](https://leetcode.com/problems/meeting-rooms-ii/) | Medium | Min concurrent count | Two-pointer on sorted starts/ends, OR a min-heap of end times |
+| [Remove Covered Intervals (LC 1288)](https://leetcode.com/problems/remove-covered-intervals/) | Medium | Sort start asc, end desc | An interval is covered iff its end ≤ the running max end |
+| [My Calendar I (LC 729)](https://leetcode.com/problems/my-calendar-i/) | Medium | Online insertion, reject overlap | Maintain sorted list; binary search for the neighbor |
+| [Car Pooling (LC 1094)](https://leetcode.com/problems/car-pooling/) | Medium | Delta array + prefix sum | Convert intervals to +/- events — see [prefix_sum.md](prefix_sum.md) |
+| [Maximum Number of Events That Can Be Attended (LC 1353)](https://leetcode.com/problems/maximum-number-of-events-that-can-be-attended/) | Medium | Greedy + heap | Sort by start; min-heap of ends — see [two_heaps.md](two_heaps.md) |
+| [Employee Free Time (LC 759)](https://leetcode.com/problems/employee-free-time/) | Hard | Merge across lists, find gaps | Flatten + sort + merge + gap-finding |
+| [Data Stream as Disjoint Intervals (LC 352)](https://leetcode.com/problems/data-stream-as-disjoint-intervals/) | Hard | Online interval merging | TreeMap / sorted structure; merge neighbors on each insert |
+| [Minimum Interval to Include Each Query (LC 1851)](https://leetcode.com/problems/minimum-interval-to-include-each-query/) | Hard | Sort intervals + queries, min-heap | Offline: sweep queries ascending, heap by interval size |
 
 ---
 

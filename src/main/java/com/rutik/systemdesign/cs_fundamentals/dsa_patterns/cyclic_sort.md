@@ -202,13 +202,21 @@ Cyclic sort is the *only* O(n) time **and** O(1) space approach for this family 
 
 | Problem | Difficulty | Variation | Recognition cue / twist |
 |---|---|---|---|
-| [Missing Number (LC 268)](https://leetcode.com/problems/missing-number/) | Easy | Find missing, range [0,n] | n elements, values 0..n, one missing |
-| [Find All Numbers Disappeared in an Array (LC 448)](https://leetcode.com/problems/find-all-numbers-disappeared-in-an-array/) | Easy | Find all missing | Values 1..n, duplicates allowed |
-| [Find All Duplicates in an Array (LC 442)](https://leetcode.com/problems/find-all-duplicates-in-an-array/) | Medium | Find all duplicates | Negation-marking variant works too |
+| [Build Array from Permutation (LC 1920)](https://leetcode.com/problems/build-array-from-permutation/) | Easy | In-place permutation, modular encoding | Store two values per slot as `a + n*b`, decode with `// n` |
+| [Missing Number (LC 268)](https://leetcode.com/problems/missing-number/) | Easy | Find missing, range [0,n] | n elements, values 0..n, one missing (XOR/sum also work) |
+| [Find All Numbers Disappeared in an Array (LC 448)](https://leetcode.com/problems/find-all-numbers-disappeared-in-an-array/) | Easy | Find all missing | Values 1..n, duplicates allowed; sign-marking also works |
 | [Set Mismatch (LC 645)](https://leetcode.com/problems/set-mismatch/) | Easy | Find duplicate AND missing | One pass after cyclic placement |
-| [Find the Duplicate Number (LC 287)](https://leetcode.com/problems/find-the-duplicate-number/) | Medium | Single duplicate, n+1 elements | Cannot mutate? Use fast/slow pointers instead |
-| [First Missing Positive (LC 41)](https://leetcode.com/problems/first-missing-positive/) | Hard | Unbounded values, find smallest missing positive | Pre-filter out-of-range values first |
-| [Couples Holding Hands (LC 765)](https://leetcode.com/problems/couples-holding-hands/) | Hard | Cyclic-sort-flavored greedy swap | Each "couple" should be at adjacent indices |
+| [Find the Missing and Repeated Values (LC 2965)](https://leetcode.com/problems/find-missing-and-repeated-values/) | Easy | 2D Set Mismatch | Flatten the n×n grid to values 1..n², then same logic |
+| [Kth Missing Positive Number (LC 1539)](https://leetcode.com/problems/kth-missing-positive-number/) | Easy | Related — counting / binary search | Not full cyclic sort; count gaps via `arr[i] - (i+1)` |
+| [Height Checker (LC 1051)](https://leetcode.com/problems/height-checker/) | Easy | Related — counting sort compare | Count positions that differ from the sorted order |
+| [Find All Duplicates in an Array (LC 442)](https://leetcode.com/problems/find-all-duplicates-in-an-array/) | Medium | Find all duplicates | Cyclic placement, or negate `nums[abs(v)-1]` to mark |
+| [Find the Duplicate Number (LC 287)](https://leetcode.com/problems/find-the-duplicate-number/) | Medium | Single duplicate, n+1 elements | Read-only? Use fast/slow pointers — see [fast_and_slow_pointers.md](fast_and_slow_pointers.md) |
+| [Array Nesting (LC 565)](https://leetcode.com/problems/array-nesting/) | Medium | Follow permutation cycles | Longest cycle in `i -> nums[i]`; mark visited in place |
+| [Smallest Missing Non-negative Integer After Operations (LC 2598)](https://leetcode.com/problems/smallest-missing-non-negative-integer-after-operations/) | Medium | Related — residue bucketing | Group by `value % value`, count per remainder class |
+| [Minimum Number of Operations to Make Array Continuous (LC 2009)](https://leetcode.com/problems/minimum-number-of-operations-to-make-array-continuous/) | Hard | Contrast — values are NOT a permutation | Dedup + sort + sliding window; shows the boundary of cyclic sort |
+| [First Missing Positive (LC 41)](https://leetcode.com/problems/first-missing-positive/) | Hard | Unbounded values, smallest missing positive | Pre-filter out-of-range, then standard cyclic sort |
+| [Couples Holding Hands (LC 765)](https://leetcode.com/problems/couples-holding-hands/) | Hard | Cyclic-swap greedy | Each couple to adjacent indices; swaps = n - cycle_count |
+| [Maximum Gap (LC 164)](https://leetcode.com/problems/maximum-gap/) | Hard | Contrast — bucket/radix sort | O(n) without comparison when the value range is large |
 
 ---
 

@@ -237,14 +237,20 @@ Compare to the hash-set approach: same O(n) time, but **O(n) space**. The fast/s
 | Problem | Difficulty | Variation | Recognition cue / twist |
 |---|---|---|---|
 | [Linked List Cycle (LC 141)](https://leetcode.com/problems/linked-list-cycle/) | Easy | Base cycle detection | Just need true/false |
-| [Middle of the Linked List (LC 876)](https://leetcode.com/problems/middle-of-the-linked-list/) | Easy | Find middle | Even-length: returns 2nd middle |
-| [Remove Nth Node From End of List (LC 19)](https://leetcode.com/problems/remove-nth-node-from-end-of-list/) | Medium | Fixed-gap two pointer | Use dummy head to handle removing the actual head |
-| [Happy Number (LC 202)](https://leetcode.com/problems/happy-number/) | Easy | Cycle detection on value sequence | "next" function is digit-square-sum, not `.next` |
-| [Linked List Cycle II (LC 142)](https://leetcode.com/problems/linked-list-cycle-ii/) | Medium | Find cycle start | Two-phase Floyd's; requires the math derivation |
+| [Middle of the Linked List (LC 876)](https://leetcode.com/problems/middle-of-the-linked-list/) | Easy | Find middle | Even-length returns the 2nd middle |
+| [Happy Number (LC 202)](https://leetcode.com/problems/happy-number/) | Easy | Cycle detection on a value sequence | "next" is digit-square-sum, not `.next` |
+| [Intersection of Two Linked Lists (LC 160)](https://leetcode.com/problems/intersection-of-two-linked-lists/) | Easy | Two-pointer head-switch | Switch each pointer to the other head at the end; they meet at the join |
 | [Palindrome Linked List (LC 234)](https://leetcode.com/problems/palindrome-linked-list/) | Easy | Middle + reversal combo | Find mid, reverse 2nd half, compare |
+| [Linked List Cycle II (LC 142)](https://leetcode.com/problems/linked-list-cycle-ii/) | Medium | Find cycle start | Two-phase Floyd's; reset slow to head after meeting |
+| [Remove Nth Node From End of List (LC 19)](https://leetcode.com/problems/remove-nth-node-from-end-of-list/) | Medium | Fixed-gap two pointers | Advance fast `n` steps first; dummy head handles head removal |
+| [Swapping Nodes in a Linked List (LC 1721)](https://leetcode.com/problems/swapping-nodes-in-a-linked-list/) | Medium | Fixed-gap two pointers | kth from front and kth from end found in one pass |
+| [Find the Duplicate Number (LC 287)](https://leetcode.com/problems/find-the-duplicate-number/) | Medium | Array-as-linked-list | `nums[i]` is the "next pointer"; cycle entry = duplicate |
+| [Circular Array Loop (LC 457)](https://leetcode.com/problems/circular-array-loop/) | Medium | Direction-constrained cycle | Cycle must be all-forward or all-backward, length > 1 |
 | [Reorder List (LC 143)](https://leetcode.com/problems/reorder-list/) | Medium | Middle + reversal + merge | Three sub-routines combined |
-| [Find the Duplicate Number (LC 287)](https://leetcode.com/problems/find-the-duplicate-number/) | Medium | Array-as-linked-list | `nums[i]` is the "next pointer"; find cycle entry = duplicate |
-| [Circular Array Loop (LC 457)](https://leetcode.com/problems/circular-array-loop/) | Medium | Cycle detection with direction constraint | Cycle must be all-forward or all-backward, length > 1 |
+| [Delete the Middle Node of a Linked List (LC 2095)](https://leetcode.com/problems/delete-the-middle-node-of-a-linked-list/) | Medium | Find middle, relink prev | Keep a `prev` of slow so you can splice it out |
+| [Sort List (LC 148)](https://leetcode.com/problems/sort-list/) | Medium | Fast/slow split for merge sort | Split at the middle, recurse, merge — O(n log n), O(1) extra |
+| [Convert Sorted List to Binary Search Tree (LC 109)](https://leetcode.com/problems/convert-sorted-list-to-binary-search-tree/) | Medium | Recursive fast/slow middle | Middle is the subtree root; recurse on the two halves |
+| [Maximum Twin Sum of a Linked List (LC 2130)](https://leetcode.com/problems/maximum-twin-sum-of-a-linked-list/) | Medium | Middle + reverse + pair | Fast/slow to mid, reverse 2nd half, max over twin pairs |
 
 ---
 

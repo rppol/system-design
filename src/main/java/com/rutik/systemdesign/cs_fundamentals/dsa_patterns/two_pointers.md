@@ -217,8 +217,11 @@ For plain pair-sum two pointers (no outer loop), it's **O(n log n)** if a sort i
 | [Sort Colors (LC 75)](https://leetcode.com/problems/sort-colors/) | Medium | Three pointers (Dutch flag) | low/mid/high partitioning, single pass |
 | [4Sum (LC 18)](https://leetcode.com/problems/4sum/) | Medium | Two fixed + two pointers | O(n^3); watch for integer overflow in other languages |
 | [Sort Array By Parity (LC 905)](https://leetcode.com/problems/sort-array-by-parity/) | Easy | Same-direction partition | Partition by predicate, not value |
+| [Is Subsequence (LC 392)](https://leetcode.com/problems/is-subsequence/) | Easy | Two-sequence advance | Advance the pattern pointer only on a match |
+| [Squares of a Sorted Array (LC 977)](https://leetcode.com/problems/squares-of-a-sorted-array/) | Easy | Opposite-ends merge | Largest squares come from the two ends; fill the result back-to-front |
+| [Backspace String Compare (LC 844)](https://leetcode.com/problems/backspace-string-compare/) | Medium | Two-sequence merge from the back | Scan right-to-left, skipping characters consumed by `#` |
 | [Trapping Rain Water (LC 42)](https://leetcode.com/problems/trapping-rain-water/) | Hard | Opposite ends + running max | Track left_max/right_max; move pointer with smaller max |
-| [Minimum Size Subarray Sum (LC 209)](https://leetcode.com/problems/minimum-size-subarray-sum/) | Medium | Boundary case | Often miscategorized as two pointers — it's sliding window |
+| [Minimum Size Subarray Sum (LC 209)](https://leetcode.com/problems/minimum-size-subarray-sum/) | Medium | Boundary case (anti-signal) | Often miscategorized as two pointers — it's sliding window |
 
 ---
 

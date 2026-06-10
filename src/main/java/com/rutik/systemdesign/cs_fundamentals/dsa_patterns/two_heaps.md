@@ -229,12 +229,21 @@ scale.)
 
 | Problem | Difficulty | Variation | Recognition cue / twist |
 |---|---|---|---|
-| [Find Median from Data Stream (LC 295)](https://leetcode.com/problems/find-median-from-data-stream/) | Hard | Canonical two-heap median | The signature problem for this pattern |
-| [Sliding Window Median (LC 480)](https://leetcode.com/problems/sliding-window-median/) | Hard | Two heaps + lazy deletion | Elements both enter and leave |
-| [IPO (LC 502)](https://leetcode.com/problems/ipo/) | Hard | "Available pool" two heaps | Min-heap (capital) feeds max-heap (profit) |
-| [Single-Threaded CPU (LC 1834)](https://leetcode.com/problems/single-threaded-cpu/) | Medium | Simulation two heaps | Arrival-time heap feeds a selection heap |
-| [Process Tasks Using Servers (LC 1882)](https://leetcode.com/problems/process-tasks-using-servers/) | Medium | Simulation two heaps | Free-server heap + busy-server heap |
-| [Median of Two Sorted Arrays (LC 4)](https://leetcode.com/problems/median-of-two-sorted-arrays/) | Hard | Related, but NOT optimal here | Binary search on a partition is O(log(min(m,n))) — see [modified_binary_search](modified_binary_search.md) |
+| [Single-Threaded CPU (LC 1834)](https://leetcode.com/problems/single-threaded-cpu/) | Medium | Simulation two heaps | Arrival-time heap feeds a selection heap (min by processing time, then index) |
+| [Process Tasks Using Servers (LC 1882)](https://leetcode.com/problems/process-tasks-using-servers/) | Medium | Simulation two heaps | Free-server heap (weight, id) + busy-server heap (free-time, weight, id) |
+| [Total Cost to Hire K Workers (LC 2462)](https://leetcode.com/problems/total-cost-to-hire-k-workers/) | Medium | Head + tail candidate heaps | Two min-heaps shrink toward the middle; pick the cheaper front |
+| [Stock Price Fluctuation (LC 2034)](https://leetcode.com/problems/stock-price-fluctuation/) | Medium | Max-heap + min-heap, lazy deletion | Both heaps store (price, ts); discard stale tops against a `latest` map |
+| [Maximum Number of Events That Can Be Attended (LC 1353)](https://leetcode.com/problems/maximum-number-of-events-that-can-be-attended/) | Medium | Heap-driven greedy scheduling | Sort by start; min-heap of end-days, attend the soonest-ending each day |
+| [Furthest Building You Can Reach (LC 1642)](https://leetcode.com/problems/furthest-building-you-can-reach/) | Medium | Related — single min-heap allocation | Spend ladders on the biggest gaps; min-heap holds the gaps bricks cover |
+| [Find Median from Data Stream (LC 295)](https://leetcode.com/problems/find-median-from-data-stream/) | Hard | Canonical two-heap median | Max-heap (lower half) + min-heap (upper half); rebalance so sizes differ by ≤1 |
+| [Sliding Window Median (LC 480)](https://leetcode.com/problems/sliding-window-median/) | Hard | Two heaps + lazy deletion | Elements both enter and leave; defer removals with a to-delete map |
+| [IPO (LC 502)](https://leetcode.com/problems/ipo/) | Hard | "Available pool" two heaps | Min-heap by capital unlocks projects into a max-heap by profit |
+| [Meeting Rooms III (LC 2402)](https://leetcode.com/problems/meeting-rooms-iii/) | Hard | Free + busy room simulation | Min-heap of free room ids + min-heap of (free-time, id) busy rooms |
+| [Finding MK Average (LC 1825)](https://leetcode.com/problems/finding-mk-average/) | Hard | Running percentile (3 partitions) | Generalizes the median to a trimmed mean via balanced multiset/heaps |
+| [The Skyline Problem (LC 218)](https://leetcode.com/problems/the-skyline-problem/) | Hard | Running max via max-heap + lazy deletion | Sweep x-events; max-heap of active heights, discard expired tops |
+| [Maximum Performance of a Team (LC 1383)](https://leetcode.com/problems/maximum-performance-of-a-team/) | Hard | Related — sort + min-heap | Sort by efficiency desc; min-heap keeps the k largest speeds |
+| [Minimize Deviation in Array (LC 1675)](https://leetcode.com/problems/minimize-deviation-in-array/) | Hard | Related — single heap, range shrink | Normalize odds up, then repeatedly shrink the current max via a max-heap |
+| [Median of Two Sorted Arrays (LC 4)](https://leetcode.com/problems/median-of-two-sorted-arrays/) | Hard | Anti-signal — NOT two heaps here | Binary search on a partition is O(log(min(m,n))) — see [modified_binary_search](modified_binary_search.md) |
 
 ---
 

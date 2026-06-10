@@ -317,6 +317,16 @@ checking all O(n²) word pairs, generate each word's neighbors by trying all
 in a word set — this turns an O(n² · L) edge-discovery cost into
 O(n · L · 26).
 
+**Bipartite check / 2-coloring** ([Is Graph Bipartite? (LC 785)](https://leetcode.com/problems/is-graph-bipartite/),
+[Possible Bipartition (LC 886)](https://leetcode.com/problems/possible-bipartition/)):
+a graph is bipartite iff it is 2-colorable. BFS/DFS from each uncolored node,
+assigning the *opposite* color to every neighbor; if you ever reach a neighbor
+that already has the *same* color, the graph is not bipartite (equivalently, it
+contains an odd-length cycle). This is the traversal analogue of "detect a
+constraint conflict" — and a sibling of directed-cycle detection via DFS
+3-coloring (white/gray/black), which is covered in
+[topological_sort.md](topological_sort.md).
+
 **4-directional vs. 8-directional**: most grid problems use
 `DIRECTIONS_4` (up/down/left/right). Problems involving diagonal adjacency
 (rare, but occurs in some "image region" problems) extend the directions list
@@ -328,16 +338,21 @@ with `(1,1), (1,-1), (-1,1), (-1,-1)`.
 
 | Problem | Difficulty | Variation | Recognition cue/twist |
 |---|---|---|---|
-| [Number of Islands (LC 200)](https://leetcode.com/problems/number-of-islands/) | Medium | DFS flood fill | The canonical signature problem |
 | [Flood Fill (LC 733)](https://leetcode.com/problems/flood-fill/) | Easy | DFS repaint | Guard against `new_color == old_color` infinite loop |
+| [Keys and Rooms (LC 841)](https://leetcode.com/problems/keys-and-rooms/) | Medium | DFS reachability | Can you visit all rooms starting from room 0? |
+| [Number of Islands (LC 200)](https://leetcode.com/problems/number-of-islands/) | Medium | DFS flood fill | The canonical signature problem |
 | [Max Area of Island (LC 695)](https://leetcode.com/problems/max-area-of-island/) | Medium | DFS with size accumulation | DFS returns `1 + sum(dfs(neighbors))` |
+| [Clone Graph (LC 133)](https://leetcode.com/problems/clone-graph/) | Medium | DFS + hashmap | Register old→new in the map *before* recursing (cycle-safe) |
+| [Number of Connected Components (LC 323)](https://leetcode.com/problems/number-of-connected-components-in-an-undirected-graph/) | Medium | General-graph DFS/BFS | Build adjacency list; same "count components" idea as islands |
+| [Is Graph Bipartite? (LC 785)](https://leetcode.com/problems/is-graph-bipartite/) | Medium | 2-coloring | BFS/DFS color alternately; conflict ⇒ not bipartite |
+| [Possible Bipartition (LC 886)](https://leetcode.com/problems/possible-bipartition/) | Medium | 2-coloring on a built graph | Build the "dislike" graph, then 2-color it |
 | [Rotting Oranges (LC 994)](https://leetcode.com/problems/rotting-oranges/) | Medium | Multi-source BFS | Seed ALL rotten oranges at once; track `fresh` count |
+| [01 Matrix (LC 542)](https://leetcode.com/problems/01-matrix/) | Medium | Multi-source BFS | Seed all 0s; BFS outward fills nearest-zero distance |
 | [Walls and Gates (LC 286)](https://leetcode.com/problems/walls-and-gates/) | Medium | Multi-source BFS, in-place distance | Seed all gates (0s); fill INF cells with BFS distance |
-| [Clone Graph (LC 133)](https://leetcode.com/problems/clone-graph/) | Medium | DFS + hashmap | Hashmap maps old node -> new node, registered before recursing (cycle-safe) |
-| [Surrounded Regions (LC 130)](https://leetcode.com/problems/surrounded-regions/) | Medium | Border-first DFS | Invert the problem: mark border-connected 'O's as safe first |
+| [Surrounded Regions (LC 130)](https://leetcode.com/problems/surrounded-regions/) | Medium | Border-first DFS | Invert: mark border-connected 'O's as safe first |
 | [Pacific Atlantic Water Flow (LC 417)](https://leetcode.com/problems/pacific-atlantic-water-flow/) | Medium | Two multi-source traversals + intersection | Flow "uphill" from both oceans' borders |
+| [Shortest Bridge (LC 934)](https://leetcode.com/problems/shortest-bridge/) | Hard | DFS-mark + multi-source BFS | DFS to flood island A, then BFS outward until island B is hit |
 | [Word Ladder (LC 127)](https://leetcode.com/problems/word-ladder/) | Hard | Implicit graph BFS | Generate neighbors via 26-letter substitution, not pairwise comparison |
-| [Number of Connected Components in an Undirected Graph (LC 323)](https://leetcode.com/problems/number-of-connected-components-in-an-undirected-graph/) | Medium | General-graph DFS/BFS | Build adjacency list first; same "count components" idea as islands |
 
 ---
 

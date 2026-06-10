@@ -2,7 +2,7 @@
 
 ## Purpose & How to Use This Guide
 
-The 24 pattern files in this section each have their own §7 Problem Bank —
+The 25 pattern files in this section each have their own §7 Problem Bank —
 but those banks are organized for *depth within a pattern*, not for
 *sequencing across patterns*. This guide does the opposite: it takes the two
 most widely used curated interview lists — **Blind 75** and
@@ -491,19 +491,20 @@ Phase 7: Bit Manipulation & Math/Simulation Wrap-up   (~3-4 days)
 
 ---
 
-### Appendix: Math & Simulation (Not Pattern-Mapped)
+### Appendix: Math & Simulation
 
-NeetCode 150's "Math & Geometry" category includes a handful of problems
-that are pure implementation/simulation exercises rather than instances of
-any of the 24 patterns above. They're listed here for completeness — there
-is no dedicated pattern file for these, but they're common warm-up
+NeetCode 150's "Math & Geometry" category mixes two kinds of problems. The
+**matrix** ones (rotate, spiral, set-zeroes) are now covered by their own
+pattern playbook — [matrix_traversal.md](matrix_traversal.md) (pattern #25).
+The rest are pure implementation/simulation exercises with no dedicated
+pattern file, listed here as common warm-up
 ("Easy-first-problem-of-the-loop") choices.
 
 | Problem | Difficulty | List | Note |
 |---|---|---|---|
-| [Rotate Image (LC 48)](https://leetcode.com/problems/rotate-image/) | Medium | B75 + NC150 | In-place matrix rotation: transpose, then reverse each row |
-| [Spiral Matrix (LC 54)](https://leetcode.com/problems/spiral-matrix/) | Medium | B75 + NC150 | Simulate boundary traversal with shrinking bounds |
-| [Set Matrix Zeroes (LC 73)](https://leetcode.com/problems/set-matrix-zeroes/) | Medium | B75 + NC150 | Use the first row/column as marker storage for O(1) extra space |
+| [Rotate Image (LC 48)](https://leetcode.com/problems/rotate-image/) | Medium | B75 + NC150 | Matrix manipulation — see [matrix_traversal.md](matrix_traversal.md) (transpose + reverse rows) |
+| [Spiral Matrix (LC 54)](https://leetcode.com/problems/spiral-matrix/) | Medium | B75 + NC150 | Matrix traversal — see [matrix_traversal.md](matrix_traversal.md) (four shrinking walls) |
+| [Set Matrix Zeroes (LC 73)](https://leetcode.com/problems/set-matrix-zeroes/) | Medium | B75 + NC150 | Matrix manipulation — see [matrix_traversal.md](matrix_traversal.md) (marker row/column, O(1) space) |
 | [Plus One (LC 66)](https://leetcode.com/problems/plus-one/) | Easy | NC150 | Digit-array increment with carry propagation |
 | [Pow(x, n) (LC 50)](https://leetcode.com/problems/powx-n/) | Medium | NC150 | Binary exponentiation — halve the exponent each step (see [bit_manipulation.md](bit_manipulation.md) for the bit-level view) |
 | [Multiply Strings (LC 43)](https://leetcode.com/problems/multiply-strings/) | Medium | NC150 | Simulate grade-school multiplication into a result digit array |

@@ -216,6 +216,9 @@ The amortized argument is the crux: even though there's a `for` loop with a nest
 | [Subarrays with K Different Integers (LC 992)](https://leetcode.com/problems/subarrays-with-k-different-integers/) | Hard | atMost(k) - atMost(k-1) | "Exactly k" framed via two "at most" calls |
 | [Sliding Window Maximum (LC 239)](https://leetcode.com/problems/sliding-window-maximum/) | Hard | Monotonic deque | Need running max, not sum/count |
 | [Max Consecutive Ones III (LC 1004)](https://leetcode.com/problems/max-consecutive-ones-iii/) | Medium | Variable, "at most k zeros flipped" | Same shape as Longest Repeating Char Replacement |
+| [Maximum Number of Vowels in a Substring of Given Length (LC 1456)](https://leetcode.com/problems/maximum-number-of-vowels-in-a-substring-of-given-length/) | Medium | Fixed-size window, count | Slide a length-k window, maintain a vowel count |
+| [Longest Substring with At Most K Distinct Characters (LC 340)](https://leetcode.com/problems/longest-substring-with-at-most-k-distinct-characters/) | Medium | Variable, "at most k distinct" | Shrink while the distinct-count map exceeds k |
+| [Minimum Operations to Reduce X to Zero (LC 1658)](https://leetcode.com/problems/minimum-operations-to-reduce-x-to-zero/) | Medium | Inverted / two-window framing | Find the longest middle subarray summing to `total - x` |
 
 ---
 

@@ -115,7 +115,7 @@ Files:
 - `dsa_patterns/README.md` — master recognition engine (decision tree, cue→pattern table, constraints→complexity table, complexity cheat sheet, pattern index)
 - `dsa_patterns/interview_execution_playbook.md` — UMPIRE method, L5 rubric, communication scripts, mock dialogue, "what to say when stuck"
 - `dsa_patterns/study_plans.md` — Blind 75 + NeetCode 150, pattern-mapped, LeetCode links, difficulty, suggested order
-- 24 pattern playbook files (one per pattern — see master README §6 Pattern Index for the full list)
+- 25 pattern playbook files (one per pattern — see master README §6 Pattern Index for the full list)
 
 ### Pattern-File Template (NEW — third template alongside module and case-study templates)
 
@@ -181,15 +181,16 @@ Record these here so future sessions pick them up. Do not link to them as if the
 
 See `README.md` §7 for the authoritative per-file `pending`/`done` status table and NEXT UP pointer.
 
-**DSA Pattern Playbooks — STATUS: COMPLETE (Chunks P0-P5 all done)**
+**DSA Pattern Playbooks — STATUS: COMPLETE (Chunks P0-P6 all done)**
 - Chunk P0: DONE — `dsa_patterns/README.md` (master recognition engine)
 - Chunk P1: DONE — `two_pointers.md`, `sliding_window.md`, `fast_and_slow_pointers.md`, `prefix_sum.md`, `cyclic_sort.md`, `monotonic_stack.md`, `in_place_linked_list_reversal.md`, `merge_intervals.md`, `hashing_patterns.md`
 - Chunk P2: DONE — `modified_binary_search.md`, `top_k_elements.md`, `k_way_merge.md`, `two_heaps.md`
 - Chunk P3: DONE — `tree_bfs.md`, `tree_dfs.md`, `graph_traversal.md`, `topological_sort.md`, `union_find.md`, `trie_patterns.md`, `shortest_path.md`
 - Chunk P4: DONE — `backtracking.md`, `dynamic_programming.md`, `greedy.md`, `bit_manipulation.md`
 - Chunk P5: DONE — `interview_execution_playbook.md`, `study_plans.md` + 100 bidirectional See Also links across the 12 Phase 1-3 concept modules
+- Chunk P6: DONE (2026-06-10) — comprehensive audit: all 24 problem banks expanded to ≥15 problems with full variation coverage; `matrix_traversal.md` added as pattern #25 and wired into README §3/§4/§6, study plans, and the `arrays_strings_and_hashing` See Also
 
-All 24 pattern files + master README + 2 guides are complete and verified (structure, Q&A counts, code sanity, link integrity, conventions). No further dsa_patterns/ chunks are queued. If this sub-section is revisited, see "Planned Topics" above for candidate additions to the broader cs_fundamentals section instead.
+All 25 pattern files + master README + 2 guides are complete and verified (structure, Q&A counts, code sanity, link integrity, conventions). No further dsa_patterns/ chunks are queued. If this sub-section is revisited, see "Planned Topics" above for candidate additions to the broader cs_fundamentals section instead.
 
 On finishing a module/chunk:
 1. Flip status to `done` in `README.md` §7

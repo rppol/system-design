@@ -268,6 +268,10 @@ The binary-search approach is asymptotically better for large `k`.
 | [Reorganize String (LC 767)](https://leetcode.com/problems/reorganize-string/) | Medium | Max-heap greedy | Always place the most frequent remaining char |
 | [Task Scheduler (LC 621)](https://leetcode.com/problems/task-scheduler/) | Medium | Max-heap + cooldown queue | Heap models "most remaining work first" |
 | [Last Stone Weight (LC 1046)](https://leetcode.com/problems/last-stone-weight/) | Easy | Max-heap simulation | Repeatedly pop the two largest |
+| [The K Weakest Rows in a Matrix (LC 1337)](https://leetcode.com/problems/the-k-weakest-rows-in-a-matrix/) | Easy | Heap of (strength, index) | Soldier count then index as tie-break |
+| [Sort Array by Increasing Frequency (LC 1636)](https://leetcode.com/problems/sort-array-by-increasing-frequency/) | Easy | Frequency sort with tie-break | Ascending frequency, descending value on ties |
+| [Find the Kth Largest Integer in the Array (LC 1985)](https://leetcode.com/problems/find-the-kth-largest-integer-in-the-array/) | Medium | Heap with numeric-string compare | Compare by length then lexicographically |
+| [Find K Closest Elements (LC 658)](https://leetcode.com/problems/find-k-closest-elements/) | Medium | k-sized window (binary search / two pointers) | Find the left edge of the best window of size k |
 
 ---
 

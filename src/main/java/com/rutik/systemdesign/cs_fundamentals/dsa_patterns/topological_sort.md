@@ -275,13 +275,19 @@ not a plain topo sort.
 |---|---|---|---|
 | [Course Schedule (LC 207)](https://leetcode.com/problems/course-schedule/) | Medium | Cycle detection only | "Can you finish all courses" = does a cycle exist |
 | [Course Schedule II (LC 210)](https://leetcode.com/problems/course-schedule-ii/) | Medium | Return the ordering | The signature problem — Kahn's BFS |
-| [Alien Dictionary (LC 269)](https://leetcode.com/problems/alien-dictionary/) | Hard | Build graph from adjacent-word comparisons | Watch the prefix-longer-than-word edge case |
-| [Minimum Height Trees (LC 310)](https://leetcode.com/problems/minimum-height-trees/) | Medium | Iterative leaf-trimming (topo-sort-like) | "Peel" leaves layer by layer until <=2 nodes remain |
+| [Minimum Height Trees (LC 310)](https://leetcode.com/problems/minimum-height-trees/) | Medium | Iterative leaf-trimming | "Peel" leaves layer by layer until ≤2 nodes remain |
+| [Find Eventual Safe States (LC 802)](https://leetcode.com/problems/find-eventual-safe-states/) | Medium | Reverse-graph topo / DFS 3-color | A node is safe iff all out-edges lead to safe nodes |
+| [Find All Possible Recipes from Given Supplies (LC 2115)](https://leetcode.com/problems/find-all-possible-recipes-from-given-supplies/) | Medium | Kahn over ingredient deps | Supplies have in-degree 0; recipes unlock as deps resolve |
+| [All Ancestors of a Node in a DAG (LC 2192)](https://leetcode.com/problems/all-ancestors-of-a-node-in-a-directed-acyclic-graph/) | Medium | Reachability via topo / DFS | Propagate ancestor sets forward in topo order |
+| [Loud and Rich (LC 851)](https://leetcode.com/problems/loud-and-rich/) | Medium | DFS propagation over a DAG | Memoize the quietest reachable richer person |
 | [Parallel Courses (LC 1136)](https://leetcode.com/problems/parallel-courses/) | Medium | Longest path / DAG DP | Topo order drives `dist[v] = max(dist[v], dist[u]+1)` |
-| [Course Schedule IV (LC 1462)](https://leetcode.com/problems/course-schedule-iv/) | Medium | Reachability via topo order | Propagate ancestor sets in topo order |
-| [Sequence Reconstruction (LC 444)](https://leetcode.com/problems/sequence-reconstruction/) | Medium | Uniqueness check | Valid ordering must be unique AND match target |
-| [Build a Matrix With Conditions (LC 2392)](https://leetcode.com/problems/build-a-matrix-with-conditions/) | Hard | Two independent topo sorts (rows + cols) | Combine two separate orderings into a grid |
-| [Sort Items by Groups Respecting Dependencies (LC 1203)](https://leetcode.com/problems/sort-items-by-groups-respecting-dependencies/) | Hard | Two-level topo sort | Topo sort groups, then topo sort items within each group |
+| [Course Schedule IV (LC 1462)](https://leetcode.com/problems/course-schedule-iv/) | Medium | Reachability matrix via topo | Propagate ancestor sets; answer reachability queries |
+| [Sequence Reconstruction (LC 444)](https://leetcode.com/problems/sequence-reconstruction/) | Medium | Uniqueness check | Queue must hold exactly one node at each Kahn step |
+| [Alien Dictionary (LC 269)](https://leetcode.com/problems/alien-dictionary/) | Hard | Build graph from adjacent words | Watch the prefix-longer-than-word invalid case |
+| [Largest Color Value in a Directed Graph (LC 1857)](https://leetcode.com/problems/largest-color-value-in-a-directed-graph/) | Hard | Topo + DP over path colors | DP `count[v][color]` in topo order; cycle ⇒ return -1 |
+| [Build a Matrix With Conditions (LC 2392)](https://leetcode.com/problems/build-a-matrix-with-conditions/) | Hard | Two independent topo sorts | One ordering for rows, one for columns; place on the diagonal |
+| [Sort Items by Groups Respecting Dependencies (LC 1203)](https://leetcode.com/problems/sort-items-by-groups-respecting-dependencies/) | Hard | Two-level topo sort | Topo sort groups, then items within each group |
+| [Reconstruct Itinerary (LC 332)](https://leetcode.com/problems/reconstruct-itinerary/) | Hard | Contrast — Eulerian path (Hierholzer) | Orders *edges* not vertices; not a true topo sort |
 
 ---
 

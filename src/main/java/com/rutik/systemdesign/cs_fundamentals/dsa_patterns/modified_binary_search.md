@@ -328,6 +328,8 @@ instead.
 | [Find K-th Smallest Pair Distance (LC 719)](https://leetcode.com/problems/find-k-th-smallest-pair-distance/) | Hard | Binary search on answer + counting | Binary search on *distance*, count pairs `<= mid` with two pointers |
 | [Split Array Largest Sum (LC 410)](https://leetcode.com/problems/split-array-largest-sum/) | Hard | Binary search on answer | Minimize the maximum subarray sum across k splits |
 | [Search a 2D Matrix (LC 74)](https://leetcode.com/problems/search-a-2d-matrix/) | Medium | 2D as 1D | Treat the matrix as one flattened sorted array |
+| [Single Element in a Sorted Array (LC 540)](https://leetcode.com/problems/single-element-in-a-sorted-array/) | Medium | Binary search on pair parity | Before the singleton, pairs start at even indices; after, they shift |
+| [Minimum Number of Days to Make m Bouquets (LC 1482)](https://leetcode.com/problems/minimum-number-of-days-to-make-m-bouquets/) | Medium | Binary search on answer | Search the day; `feasible(d)` greedily counts adjacent bloomed runs |
 | [Median of Two Sorted Arrays (LC 4)](https://leetcode.com/problems/median-of-two-sorted-arrays/) | Hard | Binary search on a partition | O(log(min(m,n))); balance + cross-sorted halves |
 
 ---

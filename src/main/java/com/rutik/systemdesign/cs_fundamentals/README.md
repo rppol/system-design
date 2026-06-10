@@ -214,7 +214,7 @@ The full description, templates, and problem banks live in [dsa_patterns/README.
 
 | File | Purpose |
 |------|---------|
-| [dsa_patterns/README.md](dsa_patterns/README.md) | Master recognition engine: UMPIRE method, constraints→complexity table, 40-row cue→pattern table, decision tree, complexity cheat sheet, pattern index (24 patterns) |
+| [dsa_patterns/README.md](dsa_patterns/README.md) | Master recognition engine: UMPIRE method, constraints→complexity table, cue→pattern table, decision tree, complexity cheat sheet, pattern index (25 patterns) |
 | [dsa_patterns/interview_execution_playbook.md](dsa_patterns/interview_execution_playbook.md) | L5 rubric, 5-minute opening ritual, communication scripts, "what to say when stuck" |
 | [dsa_patterns/study_plans.md](dsa_patterns/study_plans.md) | Blind 75 + NeetCode 150 mapped to patterns, with LeetCode links and suggested order |
 | [dsa_patterns/two_pointers.md](dsa_patterns/two_pointers.md) | Two-pointer template, 3Sum walkthrough, 12+ problems |
@@ -241,6 +241,7 @@ The full description, templates, and problem banks live in [dsa_patterns/README.
 | [dsa_patterns/dynamic_programming.md](dsa_patterns/dynamic_programming.md) | DP family recognition: 1-D, 2-D, grid, interval, bitmask, state-machine |
 | [dsa_patterns/greedy.md](dsa_patterns/greedy.md) | Exchange argument, interval scheduling, jump game |
 | [dsa_patterns/bit_manipulation.md](dsa_patterns/bit_manipulation.md) | XOR tricks, bitmask enumeration, set-bit counting |
+| [dsa_patterns/matrix_traversal.md](dsa_patterns/matrix_traversal.md) | Spiral, rotate, diagonal, set-zeroes, in-place grid transforms |
 
 The 6 case studies in [case_studies/](case_studies/) are the **worked-example companions** to the pattern playbooks: each case study implements one high-frequency pattern end-to-end at depth (900–1100 lines), whereas the pattern files are the reusable template library (350–600 lines each).
 
@@ -248,7 +249,7 @@ The 6 case studies in [case_studies/](case_studies/) are the **worked-example co
 
 ## 7. Build Status & Implementation Tracker
 
-> **Original 20 modules + 6 case studies: COMPLETE.** DSA Pattern Playbooks sub-section: Chunks P0–P5 COMPLETE — master README + 24 pattern files + 2 guides (`interview_execution_playbook.md`, `study_plans.md`) + 100 bidirectional "See Also" links across the 12 Phase 1–3 concept modules.
+> **Original 20 modules + 6 case studies: COMPLETE.** DSA Pattern Playbooks sub-section: Chunks P0–P6 COMPLETE — master README + 25 pattern files + 2 guides (`interview_execution_playbook.md`, `study_plans.md`) + 100 bidirectional "See Also" links across the 12 Phase 1–3 concept modules. P6 (2026-06-10): all problem banks expanded to ≥15, `matrix_traversal.md` added as pattern #25.
 >
 > **NEXT UP**: None queued for `cs_fundamentals/`. See `CLAUDE.md` "Planned Topics" (`theory_of_computation/`, `how_code_runs_compilers_and_interpreters/`, `discrete_math_for_engineers/`, `character_encoding_deep_dive/`) for candidate future modules if this section is revisited.
 
@@ -274,6 +275,7 @@ The 6 case studies in [case_studies/](case_studies/) are the **worked-example co
 | **P3 — Tree/Graph patterns** | `tree_bfs.md`, `tree_dfs.md`, `graph_traversal.md`, `topological_sort.md`, `union_find.md`, `trie_patterns.md`, `shortest_path.md` | done |
 | **P4 — Recursion/Optimization/Bit** | `backtracking.md`, `dynamic_programming.md`, `greedy.md`, `bit_manipulation.md` | done |
 | **P5 — Guides + Glue** | `interview_execution_playbook.md`, `study_plans.md`, bidirectional See Also in 12 concept modules | done |
+| **P6 — Comprehensive audit (2026-06-10)** | All 24 problem banks expanded to ≥15 problems + variation gaps closed; `matrix_traversal.md` added as pattern #25 and wired into README §3/§4/§6 + study plans | done |
 
 ### Module File Status
 
@@ -340,6 +342,7 @@ The 6 case studies in [case_studies/](case_studies/) are the **worked-example co
 | `dsa_patterns/dynamic_programming.md` | P4 | done |
 | `dsa_patterns/greedy.md` | P4 | done |
 | `dsa_patterns/bit_manipulation.md` | P4 | done |
+| `dsa_patterns/matrix_traversal.md` | P6 | done |
 | `dsa_patterns/interview_execution_playbook.md` | P5 | done |
 | `dsa_patterns/study_plans.md` | P5 | done |
 

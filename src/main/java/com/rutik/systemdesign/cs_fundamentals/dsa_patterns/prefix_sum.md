@@ -210,6 +210,11 @@ The hashmap variant trades O(n) space for collapsing O(n^2) brute force into O(n
 | [Range Sum Query 2D - Immutable (LC 304)](https://leetcode.com/problems/range-sum-query-2d-immutable/) | Medium | 2D prefix sum | Inclusion-exclusion on 4 corners |
 | [Maximum Size Subarray Sum Equals k (LC 325)](https://leetcode.com/problems/maximum-size-subarray-sum-equals-k/) | Medium | Track earliest index per prefix value | "Length" not "count" — store first occurrence index |
 | [Count Number of Nice Subarrays (LC 1248)](https://leetcode.com/problems/count-number-of-nice-subarrays/) | Medium | Prefix count of odd numbers | Reduces to "subarray sum == k" on a transformed array |
+| [Maximum Subarray (LC 53)](https://leetcode.com/problems/maximum-subarray/) | Medium | Prefix-min variant | `max(prefix[i] - min_prefix_so_far)`; equivalent to Kadane — see [dynamic_programming.md](dynamic_programming.md) |
+| [Binary Subarrays With Sum (LC 930)](https://leetcode.com/problems/binary-subarrays-with-sum/) | Medium | Prefix-count hashmap | Or the at-most(k) sliding-window trick — see [sliding_window.md](sliding_window.md) |
+| [Count Triplets That Can Form Two Arrays of Equal XOR (LC 1442)](https://leetcode.com/problems/count-triplets-that-can-form-two-arrays-of-equal-xor/) | Medium | Prefix XOR | `prefix[i] == prefix[k]` ⇒ any split between them works |
+| [Range Sum Query - Mutable (LC 307)](https://leetcode.com/problems/range-sum-query-mutable/) | Medium | Contrast — point updates | A static prefix array breaks on updates; use a Fenwick/segment tree |
+| [Number of Submatrices That Sum to Target (LC 1074)](https://leetcode.com/problems/number-of-submatrices-that-sum-to-target/) | Hard | 2D collapse + 1D prefix hashmap | Fix a row band, collapse to a 1D "subarray sum == target" |
 
 ---
 

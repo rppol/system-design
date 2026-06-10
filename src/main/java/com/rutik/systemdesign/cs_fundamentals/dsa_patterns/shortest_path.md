@@ -287,15 +287,21 @@ city count how many other cities are reachable within the threshold.
 
 | Problem | Difficulty | Variation | Recognition cue/twist |
 |---|---|---|---|
+| [Shortest Path in Binary Matrix (LC 1091)](https://leetcode.com/problems/shortest-path-in-binary-matrix/) | Medium | Unweighted BFS (contrast) | No weights → BFS by hops, not Dijkstra; 8-directional |
 | [Network Delay Time (LC 743)](https://leetcode.com/problems/network-delay-time/) | Medium | Plain Dijkstra | The signature problem — answer is `max(dist)` |
-| [Path With Minimum Effort (LC 1631)](https://leetcode.com/problems/path-with-minimum-effort/) | Medium | Minimax Dijkstra | Relax with `max(...)` instead of `+` |
-| [Path with Maximum Probability (LC 1514)](https://leetcode.com/problems/path-with-maximum-probability/) | Medium | Max-heap, multiplicative relaxation | Negate probabilities for a min-heap, or use a max-heap directly |
 | [Cheapest Flights Within K Stops (LC 787)](https://leetcode.com/problems/cheapest-flights-within-k-stops/) | Medium | Bellman-Ford with round limit | Dijkstra's greedy invariant doesn't respect "K stops" |
-| [Swim in Rising Water (LC 778)](https://leetcode.com/problems/swim-in-rising-water/) | Hard | Minimax Dijkstra on a grid | "Time to swim" = max elevation along the path |
-| [Minimum Cost to Make at Least One Valid Path in a Grid (LC 1368)](https://leetcode.com/problems/minimum-cost-to-make-at-least-one-valid-path-in-a-grid/) | Hard | 0-1 BFS | Following the arrow costs 0; redirecting costs 1 |
+| [Path with Maximum Probability (LC 1514)](https://leetcode.com/problems/path-with-maximum-probability/) | Medium | Max-heap, multiplicative relaxation | Use a max-heap directly; relax with `*` and `>` |
+| [Path With Minimum Effort (LC 1631)](https://leetcode.com/problems/path-with-minimum-effort/) | Medium | Minimax Dijkstra | Relax with `max(...)` instead of `+` |
 | [Number of Ways to Arrive at Destination (LC 1976)](https://leetcode.com/problems/number-of-ways-to-arrive-at-destination/) | Medium | Dijkstra + path counting | Track `ways[v]` alongside `dist[v]`, reset count on strict improvement |
-| [Find the City With the Smallest Number of Neighbors at a Threshold Distance (LC 1334)](https://leetcode.com/problems/find-the-city-with-the-smallest-number-of-neighbors-at-a-threshold-distance/) | Medium | Floyd-Warshall | All-pairs, then count reachable-within-threshold per city |
-| [Network Delay Time variants with negative weights] | — | Bellman-Ford | Whenever "discount" / "refund" / "cashback" implies a negative edge |
+| [Find the City ... at a Threshold Distance (LC 1334)](https://leetcode.com/problems/find-the-city-with-the-smallest-number-of-neighbors-at-a-threshold-distance/) | Medium | Floyd-Warshall | All-pairs (V≤100), then count reachable-within-threshold per city |
+| [The Maze II (LC 505)](https://leetcode.com/problems/the-maze-ii/) | Medium | Dijkstra, edge = rolling distance | A "move" rolls until a wall; edge weight is the roll length |
+| [Find the Safest Path in a Grid (LC 2812)](https://leetcode.com/problems/find-the-safest-path-in-a-grid/) | Medium | Multi-source BFS + max-min Dijkstra | BFS distance-to-threat, then maximize the minimum safeness |
+| [Swim in Rising Water (LC 778)](https://leetcode.com/problems/swim-in-rising-water/) | Hard | Minimax Dijkstra on a grid | "Time to swim" = max elevation along the path |
+| [Minimum Cost to Make at Least One Valid Path in a Grid (LC 1368)](https://leetcode.com/problems/minimum-cost-to-make-at-least-one-valid-path-in-a-grid/) | Hard | 0-1 BFS | Following the arrow costs 0 (push front); redirecting costs 1 (push back) |
+| [Shortest Path in a Grid with Obstacles Elimination (LC 1293)](https://leetcode.com/problems/shortest-path-in-a-grid-with-obstacles-elimination/) | Hard | BFS with state | State = (row, col, eliminations_left); visited keyed on state |
+| [Bus Routes (LC 815)](https://leetcode.com/problems/bus-routes/) | Hard | BFS on a route graph | Nodes are routes, not stops; answer = min transfers |
+| [Minimum Cost to Reach Destination in Time (LC 1928)](https://leetcode.com/problems/minimum-cost-to-reach-destination-in-time/) | Hard | Dijkstra/DP with budget state | State = (cost, node, time_used); prune when over the time limit |
+| [Second Minimum Time to Reach Destination (LC 2045)](https://leetcode.com/problems/second-minimum-time-to-reach-destination/) | Hard | BFS tracking two best distances | Plus traffic-light timing: wait when the signal is red |
 
 ---
 

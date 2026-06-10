@@ -284,6 +284,16 @@ visit all of these `n` items" where `n <= ~20`. State =
 transitions = `O(2^n * n^2)`. See [`bit_manipulation.md`](bit_manipulation.md)
 for bitmask mechanics.
 
+**Kadane / max-subarray family** — Maximum Subarray, Maximum Product Subarray,
+Maximum Sum Circular Subarray. The thinnest possible DP: a single running
+state `dp[i] = max(nums[i], dp[i-1] + nums[i])` (the best subarray *ending* at
+`i`), with a separate global maximum. The product variant carries *two*
+running states (max and min) because a negative factor swaps them; the
+circular variant computes both the normal Kadane max and `total - min_subarray`
+(the wrap-around case) and takes the larger. This family blurs into greedy —
+the recurrence is "extend or restart," a local decision that is provably
+globally optimal here.
+
 For a fully worked, line-by-line treatment of several of these families,
 see [`../case_studies/dynamic_programming_patterns.md`](../case_studies/dynamic_programming_patterns.md)
 — the deep companion to this playbook.
@@ -306,6 +316,9 @@ see [`../case_studies/dynamic_programming_patterns.md`](../case_studies/dynamic_
 | [Longest Palindromic Substring (LC 5)](https://leetcode.com/problems/longest-palindromic-substring/) | Medium | Interval DP | `dp[i][j] = dp[i+1][j-1] and s[i]==s[j]` |
 | [Burst Balloons (LC 312)](https://leetcode.com/problems/burst-balloons/) | Hard | Interval DP, "last to burst" | Think backward: which balloon is burst LAST in `[i,j]`? |
 | [Best Time to Buy and Sell Stock with Cooldown (LC 309)](https://leetcode.com/problems/best-time-to-buy-and-sell-stock-with-cooldown/) | Medium | State-machine DP | States: held / sold / cooldown |
+| [Maximum Subarray (LC 53)](https://leetcode.com/problems/maximum-subarray/) | Medium | Kadane (running best) | `dp[i] = max(nums[i], dp[i-1] + nums[i])`; track the global max |
+| [Maximum Product Subarray (LC 152)](https://leetcode.com/problems/maximum-product-subarray/) | Medium | Kadane with two states | Carry both `max` and `min` — a negative value flips them |
+| [Partition to K Equal Sum Subsets (LC 698)](https://leetcode.com/problems/partition-to-k-equal-sum-subsets/) | Medium | Bitmask DP | `dp[mask]` over used elements; fill buckets to the target sum |
 
 ---
 

@@ -269,14 +269,20 @@ database sort-merge joins on huge tables).
 | Problem | Difficulty | Variation | Recognition cue / twist |
 |---|---|---|---|
 | [Merge Two Sorted Lists (LC 21)](https://leetcode.com/problems/merge-two-sorted-lists/) | Easy | k=2 special case | Two pointers beat a heap here |
-| [Merge Sorted Array (LC 88)](https://leetcode.com/problems/merge-sorted-array/) | Easy | k=2, in-place from the back | Avoids overwriting unread elements |
-| [Merge k Sorted Lists (LC 23)](https://leetcode.com/problems/merge-k-sorted-lists/) | Hard | Canonical signature problem | Heap of (val, list_index, node) |
-| [Kth Smallest Element in a Sorted Matrix (LC 378)](https://leetcode.com/problems/kth-smallest-element-in-a-sorted-matrix/) | Medium | k-th smallest, partial merge | Pop k times, don't merge fully |
-| [Find K Pairs with Smallest Sums (LC 373)](https://leetcode.com/problems/find-k-pairs-with-smallest-sums/) | Medium | Implicit sum-matrix rows | Each row of `nums1[i]+nums2[j]` is sorted |
-| [Smallest Range Covering Elements from K Lists (LC 632)](https://leetcode.com/problems/smallest-range-covering-elements-from-k-lists/) | Hard | Heap + running max | Track max alongside heap min |
+| [Merge Sorted Array (LC 88)](https://leetcode.com/problems/merge-sorted-array/) | Easy | k=2, in-place from the back | Write from the back to avoid overwriting unread elements |
+| [Find Smallest Common Element in All Rows (LC 1198)](https://leetcode.com/problems/find-smallest-common-element-in-all-rows/) | Medium | k-pointer advance across sorted rows | Advance the pointer at the lagging row; common when all agree |
+| [Kth Smallest Element in a Sorted Matrix (LC 378)](https://leetcode.com/problems/kth-smallest-element-in-a-sorted-matrix/) | Medium | k-th smallest, partial merge | Treat each row as a list; pop k times, don't merge fully |
+| [Find K Pairs with Smallest Sums (LC 373)](https://leetcode.com/problems/find-k-pairs-with-smallest-sums/) | Medium | Implicit sum-matrix rows | Each row `nums1[i]+nums2[j]` is sorted; seed one frontier per row |
 | [Ugly Number II (LC 264)](https://leetcode.com/problems/ugly-number-ii/) | Medium | 3 implicit streams (x2, x3, x5) | Streams generated from the result itself |
 | [Super Ugly Number (LC 313)](https://leetcode.com/problems/super-ugly-number/) | Medium | k implicit streams (k primes) | Generalizes Ugly Number II |
 | [Sort List (LC 148)](https://leetcode.com/problems/sort-list/) | Medium | Merge sort on a linked list | The merge step is a k=2 k-way merge |
+| [Find K Closest Elements (LC 658)](https://leetcode.com/problems/find-k-closest-elements/) | Medium | Related — two-pointer / binary-search window | Shrink a window of size k around the target |
+| [Merge k Sorted Lists (LC 23)](https://leetcode.com/problems/merge-k-sorted-lists/) | Hard | Canonical signature problem | Min-heap of `(val, list_index, node)` |
+| [Smallest Range Covering Elements from K Lists (LC 632)](https://leetcode.com/problems/smallest-range-covering-elements-from-k-lists/) | Hard | Heap + running max | Track the running max alongside the heap min |
+| [Employee Free Time (LC 759)](https://leetcode.com/problems/employee-free-time/) | Hard | k-way merge of interval lists | Merge all schedules, then report the gaps between merged intervals |
+| [Kth Smallest Number in Multiplication Table (LC 668)](https://leetcode.com/problems/kth-smallest-number-in-multiplication-table/) | Hard | Contrast — binary search on value | The implicit matrix is too large for a heap; count ≤ mid |
+| [Find K-th Smallest Pair Distance (LC 719)](https://leetcode.com/problems/find-k-th-smallest-pair-distance/) | Hard | Contrast — binary search on answer | Binary search the distance; count pairs ≤ mid with two pointers |
+| [Median of Two Sorted Arrays (LC 4)](https://leetcode.com/problems/median-of-two-sorted-arrays/) | Hard | Contrast — k-way flavor, but partition wins | Binary-search a partition for O(log(min(m,n))) — see [modified_binary_search.md](modified_binary_search.md) |
 
 ---
 

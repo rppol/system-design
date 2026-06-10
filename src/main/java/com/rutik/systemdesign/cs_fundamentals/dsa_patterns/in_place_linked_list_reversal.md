@@ -255,14 +255,21 @@ The iterative `prev/curr/next_temp` approach is the O(1)-space "expected" answer
 
 | Problem | Difficulty | Variation | Recognition cue / twist |
 |---|---|---|---|
-| [Reverse Linked List (LC 206)](https://leetcode.com/problems/reverse-linked-list/) | Easy | Base template | Both iterative and recursive expected |
+| [Reverse Linked List (LC 206)](https://leetcode.com/problems/reverse-linked-list/) | Easy | Base template | Both iterative (`prev,curr,nxt`) and recursive expected |
+| [Merge Two Sorted Lists (LC 21)](https://leetcode.com/problems/merge-two-sorted-lists/) | Easy | Related — pointer relinking | No reversal, but the same O(1)-space pointer surgery |
+| [Palindrome Linked List (LC 234)](https://leetcode.com/problems/palindrome-linked-list/) | Easy | Middle + reverse 2nd half + compare | Combine with fast/slow pointers |
 | [Swap Nodes in Pairs (LC 24)](https://leetcode.com/problems/swap-nodes-in-pairs/) | Medium | k-group with k=2 | Watch dummy-head edge cases |
 | [Reverse Linked List II (LC 92)](https://leetcode.com/problems/reverse-linked-list-ii/) | Medium | Sub-range reversal | 3 reconnection pointers: before, new-head, new-tail |
-| [Palindrome Linked List (LC 234)](https://leetcode.com/problems/palindrome-linked-list/) | Easy | Middle + reversal + compare | Combination with fast/slow pointers |
-| [Reorder List (LC 143)](https://leetcode.com/problems/reorder-list/) | Medium | Middle + reversal + merge | Three combined sub-routines |
+| [Odd Even Linked List (LC 328)](https://leetcode.com/problems/odd-even-linked-list/) | Medium | Relink into two chains | Build odd and even chains, then join — no node copy |
+| [Partition List (LC 86)](https://leetcode.com/problems/partition-list/) | Medium | Split by predicate, relink | Two dummy heads (`< x` and `>= x`), stitch together |
+| [Remove Nth Node From End of List (LC 19)](https://leetcode.com/problems/remove-nth-node-from-end-of-list/) | Medium | Fixed-gap two pointers + relink | Dummy head handles removing the actual head |
+| [Rotate List (LC 61)](https://leetcode.com/problems/rotate-list/) | Medium | Relinking (not reversal) | `k %= length`; close into a ring, cut at new tail |
+| [Reorder List (LC 143)](https://leetcode.com/problems/reorder-list/) | Medium | Middle + reverse + merge | Three combined sub-routines |
+| [Add Two Numbers II (LC 445)](https://leetcode.com/problems/add-two-numbers-ii/) | Medium | Reverse as a sub-step | Forward digit order; reverse to add from least-significant digit (or use stacks) |
+| [Maximum Twin Sum of a Linked List (LC 2130)](https://leetcode.com/problems/maximum-twin-sum-of-a-linked-list/) | Medium | Middle + reverse + pair | Fast/slow to mid, reverse 2nd half, pair-sum across |
+| [Split Linked List in Parts (LC 725)](https://leetcode.com/problems/split-linked-list-in-parts/) | Medium | Relink into k parts | Count length, cut into `k` near-equal segments |
+| [Reverse Nodes in Even Length Groups (LC 2074)](https://leetcode.com/problems/reverse-nodes-in-even-length-groups/) | Medium | Reverse only even-length groups | Group sizes 1,2,3,...; reverse a group iff its actual length is even |
 | [Reverse Nodes in k-Group (LC 25)](https://leetcode.com/problems/reverse-nodes-in-k-group/) | Hard | Repeated reversal + recursion | "Check k nodes exist" guard before reversing |
-| [Rotate List (LC 61)](https://leetcode.com/problems/rotate-list/) | Medium | Relinking (not reversal) | `k %= length` to avoid redundant rotations |
-| [Add Two Numbers II (LC 445)](https://leetcode.com/problems/add-two-numbers-ii/) | Medium | Reverse as a sub-step | Numbers given in forward order; reverse to add from least-significant digit |
 
 ---
 

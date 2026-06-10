@@ -310,6 +310,10 @@ context.
 | [Combination Sum II (LC 40)](https://leetcode.com/problems/combination-sum-ii/) | Medium | No reuse + duplicates | Recurse with `i+1` AND skip duplicates |
 | [Letter Combinations of a Phone Number (LC 17)](https://leetcode.com/problems/letter-combinations-of-a-phone-number/) | Medium | Cartesian product | Each digit contributes 3-4 choices |
 | [Palindrome Partitioning (LC 131)](https://leetcode.com/problems/palindrome-partitioning/) | Medium | Substring choices | Choice = substring length, not element |
+| [Combinations (LC 77)](https://leetcode.com/problems/combinations/) | Medium | Choose k of n | Start-index template; prune when remaining < needed |
+| [Combination Sum III (LC 216)](https://leetcode.com/problems/combination-sum-iii/) | Medium | Fixed count k + target sum | Both a count and a sum constraint to prune on |
+| [Generate Parentheses (LC 22)](https://leetcode.com/problems/generate-parentheses/) | Medium | Counted choices + pruning | Prune when `close > open` or either count exceeds n |
+| [Restore IP Addresses (LC 93)](https://leetcode.com/problems/restore-ip-addresses/) | Medium | Segment partitioning | 4 segments, each 0–255, no leading zeros |
 | [Word Search (LC 79)](https://leetcode.com/problems/word-search/) | Medium | Grid + mark/unmark | Shares mechanism with `graph_traversal.md` |
 | [N-Queens (LC 51)](https://leetcode.com/problems/n-queens/) | Hard | Constraint propagation | The signature problem — `cols`/`diag1`/`diag2` sets |
 | [Sudoku Solver (LC 37)](https://leetcode.com/problems/sudoku-solver/) | Hard | 2D constraint propagation | Row/column/3x3-box sets, same idea as N-Queens extended |

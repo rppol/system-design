@@ -105,6 +105,8 @@ Scan the problem statement for these signals. The match does not have to be word
 | "Subarray with product/sum < k" | **Sliding window** (shrink left when constraint violated) | Non-negative values required |
 | Binary search candidate: "minimum X such that condition holds" / "maximum X such that condition holds" | **Binary search on answer** | Predicate must be monotonic: `f(x)` true → `f(x+1)` true |
 | "Search in sorted/rotated array" / "find first/last position" | **Modified binary search** | Handle rotation: one half is always sorted |
+| "Spiral order" / "rotate the image 90°" / "diagonal traverse" / "set row and column to zero" / "transpose" — especially **in place** | **Matrix traversal & manipulation** | Coordinate arithmetic, not reachability; O(1) space via marker rows or bit-encoding |
+| "Search a **sorted** matrix" (rows/cols sorted) | **Matrix traversal (staircase)** or **binary search** | Fully sorted → flatten + binary search; row/col sorted → staircase from top-right |
 
 ### Linked List Signals
 
@@ -238,6 +240,13 @@ What is the PRIMARY data shape / constraint?
 |   |
 |   +-- BST property (sorted order)?    ---> IN-ORDER DFS
 |
++-- Matrix / Grid — TRANSFORM or TRAVERSE (not connectivity)?
+|   |
+|   +-- Spiral / diagonal order?        ---> MATRIX TRAVERSAL
+|   +-- Rotate / transpose / set-zeroes in place?  ---> MATRIX TRAVERSAL
+|   +-- Search a sorted matrix?         ---> MATRIX (staircase) or BINARY SEARCH
+|   +-- Connectivity / islands / path?  ---> (see Graph / Grid below)
+|
 +-- Graph / Grid?
 |   |
 |   +-- Unweighted shortest path?       ---> GRAPH BFS
@@ -368,6 +377,7 @@ One row per pattern file. Click the pattern name to open the playbook. Each play
 | 22 | [Dynamic Programming](dynamic_programming.md) | Count ways / min-max cost / can-you-reach + overlapping subproblems | [dynamic_programming](../dynamic_programming/) | [Coin Change (LC 322)](https://leetcode.com/problems/coin-change/) |
 | 23 | [Greedy](greedy.md) | Interval scheduling / jump game / locally optimal = globally optimal | [greedy_and_divide_and_conquer](../greedy_and_divide_and_conquer/) | [Jump Game II (LC 45)](https://leetcode.com/problems/jump-game-ii/) |
 | 24 | [Bit Manipulation](bit_manipulation.md) | Single number / XOR tricks / bitmask enumeration / counting bits | [number_systems_and_bit_manipulation](../number_systems_and_bit_manipulation/) | [Single Number (LC 136)](https://leetcode.com/problems/single-number/) |
+| 25 | [Matrix Traversal & Manipulation](matrix_traversal.md) | Spiral / rotate / diagonal / set-zeroes / in-place grid transform | [arrays_strings_and_hashing](../arrays_strings_and_hashing/) | [Spiral Matrix (LC 54)](https://leetcode.com/problems/spiral-matrix/) |
 
 ---
 
@@ -387,6 +397,7 @@ These are the traps: problems that *look* like one pattern but require a differe
 | Union-Find (topological order) | Topological sort | DSU tells you whether connected, not the order |
 | Binary search (unsorted array) | Linear scan or hashing | Binary search requires sorted or monotonic predicate |
 | Monotonic stack (k-th largest) | Heap | Stack finds next-greater/smaller; heap answers k-th-order queries |
+| Matrix manipulation (islands / regions / shortest path on a grid) | Graph traversal (DFS/BFS) | Connectivity needs a visited-set + frontier, not coordinate rewriting |
 
 ---
 

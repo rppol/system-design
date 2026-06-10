@@ -214,6 +214,9 @@ All variants trade O(n) (or O(n*k)) space for collapsing an O(n^2) (or worse) br
 | [Two Sum (LC 1)](https://leetcode.com/problems/two-sum/) | Easy | Complement lookup | The canonical hashing problem |
 | [Valid Anagram (LC 242)](https://leetcode.com/problems/valid-anagram/) | Easy | Frequency counting | Compare two `Counter`s |
 | [Contains Duplicate (LC 217)](https://leetcode.com/problems/contains-duplicate/) | Easy | Set existence | `len(set(nums)) != len(nums)` |
+| [Ransom Note (LC 383)](https://leetcode.com/problems/ransom-note/) | Easy | Frequency subset | Every letter's count in the note ≤ count in the magazine |
+| [Isomorphic Strings (LC 205)](https://leetcode.com/problems/isomorphic-strings/) | Easy | Bijective char mapping | Two dicts (s→t and t→s) to enforce one-to-one |
+| [First Unique Character in a String (LC 387)](https://leetcode.com/problems/first-unique-character-in-a-string/) | Easy | Frequency, first count==1 | Two passes: count, then scan for the first singleton |
 | [Group Anagrams (LC 49)](https://leetcode.com/problems/group-anagrams/) | Medium | Grouping by key | Sorted-string or count-tuple key |
 | [Top K Frequent Elements (LC 347)](https://leetcode.com/problems/top-k-frequent-elements/) | Medium | Frequency + heap | Combination with [top_k_elements.md](top_k_elements.md) |
 | [Longest Consecutive Sequence (LC 128)](https://leetcode.com/problems/longest-consecutive-sequence/) | Medium | Set existence, sequence-start check | Must be O(n) — the "only start at sequence heads" trick |
@@ -222,6 +225,7 @@ All variants trade O(n) (or O(n*k)) space for collapsing an O(n^2) (or worse) br
 | [Insert Delete GetRandom O(1) (LC 380)](https://leetcode.com/problems/insert-delete-getrandom-o1/) | Medium | Hashmap + array | O(1) removal via swap-with-last |
 | [LRU Cache (LC 146)](https://leetcode.com/problems/lru-cache/) | Medium | Hashmap + doubly linked list | See [hld/caching](../../hld/caching/) for production context |
 | [Repeated DNA Sequences (LC 187)](https://leetcode.com/problems/repeated-dna-sequences/) | Medium | Rolling hash / fixed-window set | Fixed-length substrings, frequency-based |
+| [LFU Cache (LC 460)](https://leetcode.com/problems/lfu-cache/) | Hard | Two hashmaps + frequency buckets | key→node, freq→ordered list; evict least-frequent then least-recent (extends LRU) |
 
 ---
 

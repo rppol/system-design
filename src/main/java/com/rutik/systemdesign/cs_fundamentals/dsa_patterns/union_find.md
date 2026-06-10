@@ -281,7 +281,12 @@ beyond just cycles.
 | [Evaluate Division (LC 399)](https://leetcode.com/problems/evaluate-division/) | Medium | Weighted union-find | Track ratio/weight alongside parent pointer |
 | [Number of Islands II (LC 305)](https://leetcode.com/problems/number-of-islands-ii/) | Hard | Dynamic grid connectivity | `(r, c) -> r * cols + c`; union-find shines for incremental adds |
 | [Min Cost to Connect All Points (LC 1584)](https://leetcode.com/problems/min-cost-to-connect-all-points/) | Medium | Kruskal's MST | Sort all pairwise Manhattan distances, union-find skips cycle edges |
+| [Most Stones Removed with Same Row or Column (LC 947)](https://leetcode.com/problems/most-stones-removed-with-same-row-or-column/) | Medium | Union shared row/col | Removable = n - number_of_components |
+| [Smallest String With Swaps (LC 1202)](https://leetcode.com/problems/smallest-string-with-swaps/) | Medium | Component-wise sort | Union swappable index pairs, sort chars within each component |
+| [Number of Islands (LC 200)](https://leetcode.com/problems/number-of-islands/) | Medium | Contrast — DSU vs DFS | Union adjacent land cells; flood-fill DFS also works |
+| [Regions Cut By Slashes (LC 959)](https://leetcode.com/problems/regions-cut-by-slashes/) | Medium | Cell-splitting DSU | Split each cell into 4 triangles, union across `/` and `\` |
 | [Redundant Connection II (LC 685)](https://leetcode.com/problems/redundant-connection-ii/) | Hard | Directed variant | Two failure modes: a node with 2 parents, or a cycle |
+| [Checking Existence of Edge Length Limited Paths (LC 1697)](https://leetcode.com/problems/checking-existence-of-edge-length-limited-paths/) | Hard | Offline incremental union | Sort queries + edges by weight; union as the limit grows |
 
 ---
 

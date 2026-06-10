@@ -308,6 +308,9 @@ each level (opposite bits maximize XOR contribution at that position). See
 | [Subsets (LC 78)](https://leetcode.com/problems/subsets/) | Medium | Bitmask enumeration | `n <= ~20`; iterate `0..2^n-1` |
 | [Total Hamming Distance (LC 477)](https://leetcode.com/problems/total-hamming-distance/) | Medium | Per-bit-position counting | For each bit, `ones * zeros` pairs contribute |
 | [Maximum XOR of Two Numbers in an Array (LC 421)](https://leetcode.com/problems/maximum-xor-of-two-numbers-in-an-array/) | Medium | Binary trie greedy | Greedily pick opposite bit at each trie level |
+| [Sum of Two Integers (LC 371)](https://leetcode.com/problems/sum-of-two-integers/) | Medium | Add without `+` | XOR = sum-without-carry; `(a & b) << 1` = carry; loop until no carry |
+| [Bitwise AND of Numbers Range (LC 201)](https://leetcode.com/problems/bitwise-and-of-numbers-range/) | Medium | Common binary prefix | Strip differing low bits via `n & (n-1)` until `m == n` |
+| [Maximum Product of Word Lengths (LC 318)](https://leetcode.com/problems/maximum-product-of-word-lengths/) | Medium | Bitmask of letters | Words share no letter iff `mask_a & mask_b == 0` |
 
 ---
 

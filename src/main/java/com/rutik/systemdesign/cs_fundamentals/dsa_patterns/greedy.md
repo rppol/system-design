@@ -340,6 +340,8 @@ when an interviewer asks "why does this work?"):
 | [Reorganize String (LC 767)](https://leetcode.com/problems/reorganize-string/) | Medium | Frequency + max-heap | Never place same char as previous |
 | [Minimum Cost to Connect Sticks (LC 1167)](https://leetcode.com/problems/minimum-cost-to-connect-sticks/) | Medium | Huffman-style, min-heap merge | Opposite heap direction from Task Scheduler/Reorganize String above |
 | [Boats to Save People (LC 881)](https://leetcode.com/problems/boats-to-save-people/) | Medium | Sort + two-pointer matching | Pair lightest with heaviest that fits within limit |
+| [Hand of Straights (LC 846)](https://leetcode.com/problems/hand-of-straights/) | Medium | Greedy consecutive grouping | Always start a group from the smallest remaining card |
+| [Minimum Number of Refueling Stops (LC 871)](https://leetcode.com/problems/minimum-number-of-refueling-stops/) | Hard | Greedy + max-heap (regret) | Defer fuel choice; when stranded, retroactively take the largest seen tank |
 
 ---
 
