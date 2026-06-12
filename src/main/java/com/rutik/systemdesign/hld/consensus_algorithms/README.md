@@ -506,6 +506,10 @@ Consensus algorithms are CP: they choose Consistency and Partition-tolerance ove
 
 ---
 
+**Cross-references:** [database/consistency_models_and_consensus](../../database/consistency_models_and_consensus/) (how consensus underpins linearizable reads/writes), [backend/kafka_deep_dive](../../backend/kafka_deep_dive/) (ISR as a Raft-like replication mechanism), [database/distributed_transactions](../../database/distributed_transactions/).
+
+---
+
 ## 14. Case Study
 
 ### Design: etcd Cluster for a 5000-node Kubernetes Deployment

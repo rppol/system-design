@@ -496,6 +496,10 @@ Consistent hashing places servers on a virtual ring. Each key maps to the neares
 
 ---
 
+**Cross-references:** [backend/fault_tolerance_patterns](../../backend/fault_tolerance_patterns/) (retries, circuit breakers, and timeouts behind the LB), [devops/cloud_networking_and_cdn](../../devops/cloud_networking_and_cdn/) (ALB/NLB, Route 53 weighted/latency routing, global server load balancing), [devops/kubernetes_networking](../../devops/kubernetes_networking/) (Service/Ingress/IPVS load balancing in Kubernetes), [spring/spring_cloud_patterns](../../spring/spring_cloud_patterns/) (client-side load balancing with Spring Cloud LoadBalancer).
+
+---
+
 ## Case Study: Load Balancing a High-Traffic E-Commerce Platform
 
 ### Problem Statement

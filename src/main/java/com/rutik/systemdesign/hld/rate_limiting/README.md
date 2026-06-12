@@ -1,20 +1,16 @@
 # Rate Limiting
 
-## Table of Contents
-1. [Why Rate Limiting?](#why-rate-limiting)
-2. [Rate Limiting Algorithms](#rate-limiting-algorithms)
-   - [Token Bucket](#token-bucket)
-   - [Leaky Bucket](#leaky-bucket)
-   - [Fixed Window Counter](#fixed-window-counter)
-   - [Sliding Window Log](#sliding-window-log)
-   - [Sliding Window Counter](#sliding-window-counter)
-3. [Distributed Rate Limiting](#distributed-rate-limiting)
-4. [Rate Limiting Headers](#rate-limiting-headers)
-5. [Rate Limiting Dimensions](#rate-limiting-dimensions)
-6. [Real-World Examples](#real-world-examples)
-7. [Architecture Diagram](#architecture-diagram)
-8. [Interview Questions](#interview-questions)
-9. [Best Practices](#best-practices)
+## 1. Concept Overview
+
+**Rate limiting** is a control mechanism that caps how many requests a client — identified by IP address, user ID, API key, or tenant — can make to a service within a given time window. It is one of the first lines of defense in any production system: a gate between untrusted traffic and the resources (compute, database connections, third-party API budgets) that traffic would otherwise consume without bound.
+
+Architecturally, a rate limiter is almost never the business logic itself — it is **middleware**. It can live at several points in the request path (the API gateway, a service mesh sidecar, the application's own request-handling layer, or even the client SDK), and the choice of where to place it materially changes its effectiveness, latency overhead, and failure modes (covered in §5 and §9).
+
+At its core, every rate-limiting algorithm answers two questions:
+1. **How much state must be tracked per client**, and where does that state live (in-process memory vs. a shared store like Redis)?
+2. **How is "rate" measured** — as a hard ceiling per fixed time window, a continuously refilling budget (token bucket), or a precise sliding measurement?
+
+The answers produce the five canonical algorithms in §3, each trading off **accuracy** (can it be gamed at window boundaries?), **memory cost** (O(1) counters vs. O(N) timestamp logs), and **burst tolerance** (can a client bank "credit" while idle?).
 
 ---
 
@@ -30,7 +26,7 @@
 
 ---
 
-## Why Rate Limiting?
+## 2. Core Principles
 
 Rate limiting is a technique used to control the rate at which clients can make requests to a server or service. It is a foundational component of any production-grade API or distributed system.
 
@@ -56,7 +52,7 @@ Some APIs are rate-limited for business reasons: limiting free-tier scraping, en
 
 ---
 
-## Rate Limiting Algorithms
+## 3. Types / Strategies — Rate Limiting Algorithms
 
 ### Token Bucket
 
@@ -389,7 +385,7 @@ class SlidingWindowCounter:
 
 ---
 
-## Distributed Rate Limiting
+## 4. Distributed Rate Limiting
 
 ### The Problem
 
@@ -480,111 +476,7 @@ This is the most common production architecture. The gateway handles:
 
 ---
 
-## Rate Limiting Headers
-
-Standard headers clients should receive so they can back off gracefully:
-
-```
-HTTP/1.1 200 OK
-X-RateLimit-Limit: 100          # Total requests allowed in window
-X-RateLimit-Remaining: 42       # Requests remaining in current window
-X-RateLimit-Reset: 1700000120   # Unix timestamp when window resets
-X-RateLimit-Window: 60          # Window size in seconds
-
-# When rate limited (HTTP 429):
-HTTP/1.1 429 Too Many Requests
-Retry-After: 30                  # Seconds until client can retry
-X-RateLimit-Limit: 100
-X-RateLimit-Remaining: 0
-X-RateLimit-Reset: 1700000120
-Content-Type: application/json
-
-{
-  "error": "rate_limit_exceeded",
-  "message": "Too many requests. Retry after 30 seconds.",
-  "retry_after": 30
-}
-```
-
-**Why these headers matter:**
-- Clients can implement exponential backoff using `Retry-After`
-- Monitoring systems can track `X-RateLimit-Remaining` trends
-- Well-behaved SDK clients automatically throttle before hitting limits
-
----
-
-## Rate Limiting Dimensions
-
-Rate limiting can be applied at multiple granularities:
-
-| Dimension | Key | Use Case | Example |
-|-----------|-----|----------|---------|
-| IP Address | `rl:ip:1.2.3.4` | DDoS, anonymous abuse | Block scrapers |
-| User ID | `rl:user:u123` | Per-account fairness | API tier limits |
-| API Key | `rl:key:abc123` | B2B API metering | Partner quotas |
-| Route | `rl:route:/search` | Protect expensive endpoints | Search rate limit |
-| Tenant | `rl:tenant:acme` | Multi-tenancy SLAs | Enterprise vs. free |
-| Global | `rl:global` | System capacity cap | Total QPS ceiling |
-
-### Multi-Tenancy Example
-
-```
-Tier       | Requests/min | Burst | Monthly Quota
------------|--------------|-------|---------------
-Free       | 60           | 10    | 10,000
-Pro        | 600          | 100   | 500,000
-Enterprise | 6,000        | 1,000 | Unlimited
-```
-
-**Key design decision:** Use composite keys to apply multiple limits simultaneously.
-
-```python
-# A single request might check multiple limits:
-checks = [
-    f"rl:ip:{client_ip}",          # IP-level limit (anti-abuse)
-    f"rl:user:{user_id}",          # User-level limit (fairness)
-    f"rl:tenant:{tenant_id}",      # Tenant-level limit (SLA)
-    f"rl:route:{route}:{user_id}", # Route-specific limit
-]
-# ALL must pass for the request to be allowed
-```
-
----
-
-## Real-World Examples
-
-### Twitter / X API
-- Standard: 300 requests per 15-minute window per endpoint
-- Headers: `x-rate-limit-limit`, `x-rate-limit-remaining`, `x-rate-limit-reset`
-- Different limits per endpoint (timeline vs. search vs. streaming)
-- App-level limits separate from user-level limits
-
-### GitHub API
-- Unauthenticated: 60 requests/hour per IP
-- Authenticated: 5,000 requests/hour per user
-- Search API: 10 requests/minute (more expensive)
-- GraphQL: 5,000 points/hour (complexity-weighted)
-
-### Stripe
-- Test mode: 100 reads/sec, 100 writes/sec
-- Live mode: higher limits based on account history
-- Uses Token Bucket internally
-- Returns `429 Too Many Requests` with `Retry-After`
-
-### AWS API Gateway
-- Default: 10,000 requests/sec with burst of 5,000
-- Per-stage and per-client (API key) throttling
-- Usage Plans define rate + quota per API key
-- Uses Token Bucket algorithm
-
-### OpenAI API
-- Rate limits by tokens per minute (TPM) and requests per minute (RPM)
-- Different limits per model (GPT-4 vs. GPT-3.5)
-- Organization-level limits
-
----
-
-## Architecture Diagram
+## 5. Architecture Diagrams
 
 ```
                                     Rate Limiter Architecture
@@ -622,9 +514,227 @@ checks = [
     (Redis Sentinel or Cluster for failover)
 ```
 
+### Where Rate Limiting Lives in the Request Path
+
+```
+  Client SDK        Edge / API Gateway      Service Mesh Sidecar     Application Code
+  (proactive,        (centralized,           (per-pod local +         (business-aware,
+   self-throttle)     single chokepoint)      global descriptors)      fine-grained)
+
+  +--------+         +-------------+         +----------------+       +---------------+
+  | Client | ------> | Gateway     | ------> | Envoy sidecar   | ----> | Service logic |
+  | (knows |         | (Kong/AWS/  |         | (Istio local    |       | e.g. "1 more  |
+  |  limit)|         |  NGINX)     |         |  rate limit)    |       | if mid-       |
+  +--------+         +-------------+         +----------------+       |  checkout"    |
+                            |                                          +---------------+
+                     [Redis / ratelimit
+                      service: shared
+                      counters & policy]
+
+  Each layer can reject early (saving downstream resources) or pass
+  through with headers for the next layer to make a finer decision.
+  Most production systems combine at least two of these layers.
+```
+
 ---
 
-## Interview Questions
+## 6. How It Works — Detailed Mechanics
+
+### Rate Limiting Headers
+
+Standard headers clients should receive so they can back off gracefully:
+
+```
+HTTP/1.1 200 OK
+X-RateLimit-Limit: 100          # Total requests allowed in window
+X-RateLimit-Remaining: 42       # Requests remaining in current window
+X-RateLimit-Reset: 1700000120   # Unix timestamp when window resets
+X-RateLimit-Window: 60          # Window size in seconds
+
+# When rate limited (HTTP 429):
+HTTP/1.1 429 Too Many Requests
+Retry-After: 30                  # Seconds until client can retry
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 1700000120
+Content-Type: application/json
+
+{
+  "error": "rate_limit_exceeded",
+  "message": "Too many requests. Retry after 30 seconds.",
+  "retry_after": 30
+}
+```
+
+**Why these headers matter:**
+- Clients can implement exponential backoff using `Retry-After`
+- Monitoring systems can track `X-RateLimit-Remaining` trends
+- Well-behaved SDK clients automatically throttle before hitting limits
+
+---
+
+### Rate Limiting Dimensions
+
+Rate limiting can be applied at multiple granularities:
+
+| Dimension | Key | Use Case | Example |
+|-----------|-----|----------|---------|
+| IP Address | `rl:ip:1.2.3.4` | DDoS, anonymous abuse | Block scrapers |
+| User ID | `rl:user:u123` | Per-account fairness | API tier limits |
+| API Key | `rl:key:abc123` | B2B API metering | Partner quotas |
+| Route | `rl:route:/search` | Protect expensive endpoints | Search rate limit |
+| Tenant | `rl:tenant:acme` | Multi-tenancy SLAs | Enterprise vs. free |
+| Global | `rl:global` | System capacity cap | Total QPS ceiling |
+
+### Multi-Tenancy Example
+
+```
+Tier       | Requests/min | Burst | Monthly Quota
+-----------|--------------|-------|---------------
+Free       | 60           | 10    | 10,000
+Pro        | 600          | 100   | 500,000
+Enterprise | 6,000        | 1,000 | Unlimited
+```
+
+**Key design decision:** Use composite keys to apply multiple limits simultaneously.
+
+```python
+# A single request might check multiple limits:
+checks = [
+    f"rl:ip:{client_ip}",          # IP-level limit (anti-abuse)
+    f"rl:user:{user_id}",          # User-level limit (fairness)
+    f"rl:tenant:{tenant_id}",      # Tenant-level limit (SLA)
+    f"rl:route:{route}:{user_id}", # Route-specific limit
+]
+# ALL must pass for the request to be allowed
+```
+
+---
+
+## 7. Real-World Examples
+
+### Twitter / X API
+- Standard: 300 requests per 15-minute window per endpoint
+- Headers: `x-rate-limit-limit`, `x-rate-limit-remaining`, `x-rate-limit-reset`
+- Different limits per endpoint (timeline vs. search vs. streaming)
+- App-level limits separate from user-level limits
+
+### GitHub API
+- Unauthenticated: 60 requests/hour per IP
+- Authenticated: 5,000 requests/hour per user
+- Search API: 10 requests/minute (more expensive)
+- GraphQL: 5,000 points/hour (complexity-weighted)
+
+### Stripe
+- Test mode: 100 reads/sec, 100 writes/sec
+- Live mode: higher limits based on account history
+- Uses Token Bucket internally
+- Returns `429 Too Many Requests` with `Retry-After`
+
+### AWS API Gateway
+- Default: 10,000 requests/sec with burst of 5,000
+- Per-stage and per-client (API key) throttling
+- Usage Plans define rate + quota per API key
+- Uses Token Bucket algorithm
+
+### OpenAI API
+- Rate limits by tokens per minute (TPM) and requests per minute (RPM)
+- Different limits per model (GPT-4 vs. GPT-3.5)
+- Organization-level limits
+
+---
+
+## 8. Tradeoffs
+
+### Algorithm Comparison
+
+| Algorithm | Burst Handling | Memory / Key | Accuracy | Implementation Complexity | Best For |
+|-----------|----------------|--------------|----------|---------------------------|----------|
+| Token Bucket | Up to bucket capacity | O(1) — 2 fields | Exact (within refill granularity) | Low-Medium | Bursty client traffic, public APIs |
+| Leaky Bucket | None — smooths to constant rate | O(1) — queue size or counter | Exact | Low-Medium | Traffic shaping in front of fragile downstreams |
+| Fixed Window Counter | Up to 2x at window boundary | O(1) — 1 counter | Approximate (boundary flaw) | Very Low | Coarse, low-stakes limits where simplicity wins |
+| Sliding Window Log | None (precise) | O(N) — 1 timestamp/request | Exact | Medium | Low-volume, compliance-sensitive limits |
+| Sliding Window Counter | Bounded, no 2x spike | O(1) — 2 counters | ~99% accurate (uniform-traffic assumption) | Medium | High-volume APIs needing accuracy + low memory (most production systems) |
+
+### Distributed Enforcement Strategy Comparison
+
+| Strategy | Consistency | Latency Added | Operational Cost | Failure Mode |
+|----------|-------------|----------------|-------------------|--------------|
+| Centralized Redis (Lua) | Strong (atomic) | +0.5-1 ms per request | Redis cluster to operate | Redis down → must choose fail-open/fail-closed |
+| Local + periodic sync | Eventually consistent | ~0 ms (local) | Low — async background sync | Temporary over-limit during sync interval |
+| Sticky sessions (consistent hashing) | Strong per-node | ~0 ms (local) | Load balancer config | Node failure loses that node's client state |
+| API Gateway layer | Strong (single chokepoint) | +0.5-1 ms (gateway hop) | Gateway licensing/scaling | Gateway becomes a SPOF if not HA |
+
+---
+
+## 9. When to Use / When NOT to Use
+
+### When to Use
+
+- **Public-facing APIs** — any API consumed by external clients (partners, third-party developers, mobile apps) needs rate limiting so a single integration bug can't degrade service for everyone.
+- **Multi-tenant SaaS platforms** — to enforce per-tenant SLA tiers (Free vs. Pro vs. Enterprise) and prevent noisy-neighbor effects.
+- **In front of cost-bearing third-party dependencies** — LLM APIs, SMS gateways, payment processors — where unbounded calls translate directly into unbounded cost.
+- **Protecting expensive endpoints** — search, report generation, bulk export, and other operations with disproportionate resource cost relative to simple CRUD.
+- **Authentication endpoints** — to slow down credential-stuffing and brute-force attacks (combined with account lockout and CAPTCHA).
+- **Internal service-to-service calls during incidents** — a downstream slowdown can trigger a retry storm from upstream callers; rate limiting at ingress breaks this feedback loop.
+
+### When NOT to Use (or Not Sufficient Alone)
+
+- **As a substitute for authentication/authorization** — rate limiting controls *volume*, not *identity* or *permission*. An attacker with a valid (if low) quota can still attempt unauthorized actions within that quota.
+- **As the sole defense against application-layer DDoS** — a botnet with thousands of distinct IPs/accounts, each staying under its individual limit, can still aggregate to an overwhelming volume. This requires WAF rules, bot detection, and anomaly-based blocking in addition to per-client limits.
+- **As a substitute for capacity planning** — rate limiting protects against *abuse*, not against *underprovisioning*. If normal expected load exceeds infrastructure capacity, the fix is autoscaling/capacity, not a tighter limit on legitimate users.
+- **When limits are set so high they never trigger** — a rate limiter configured far above realistic usage adds latency and operational complexity for no protective benefit, while creating a false sense of security.
+- **For fine-grained, business-aware throttling decisions** — "allow this user one more request because they're mid-checkout" requires application-level logic, not a generic gateway-level rate limiter.
+
+---
+
+## 10. Common Pitfalls
+
+**1. Per-instance counters in a horizontally scaled deployment**
+*Broken:* Each of N API server instances runs its own in-memory counter for a "100 requests/minute" limit. A client load-balanced across all N instances effectively gets `100 x N` requests/minute — at N=10, a 100/min limit becomes a 1000/min limit.
+*Fix:* Use a centralized store (Redis) for the counter, or explicitly divide the limit by N for per-instance local enforcement (`limit / N`) as a fallback.
+
+**2. The fixed-window boundary spike**
+*Broken:* A "100 req/min" fixed window allows 100 requests at 00:59 and another 100 at 01:00 — 200 requests in a 2-second span, double the intended rate.
+*Fix:* Use Sliding Window Counter (or Sliding Window Log for exactness) instead of Fixed Window Counter for any limit where boundary gaming matters.
+
+**3. Clock skew across distributed rate-limit nodes**
+*Broken:* Each API server computes token-bucket refill using its own local clock. A 500ms drift between nodes causes buckets to "refill in the past" on lagging nodes, silently inflating the effective limit by ~10% on a 1000/min bucket.
+*Fix:* Use the rate-limit store's clock as the single source of truth (e.g., Redis `TIME` command) rather than each caller's wall clock.
+
+**4. No defined behavior when the rate limiter's own dependency fails**
+*Broken:* The Redis instance backing the rate limiter goes down. The rate-limit check throws an exception, and the API gateway returns 500 to *every* request — a rate-limiter outage becomes a full API outage.
+*Fix:* Wrap the rate-limit check in a timeout + circuit breaker. Decide explicitly: fail-open (allow traffic, log for post-hoc analysis — appropriate when availability matters more than strict enforcement, e.g. payments) or fail-closed (reject traffic — appropriate when unmetered access is dangerous, e.g. auth endpoints).
+
+**5. Shared quota across logically distinct clients**
+*Broken:* A platform issues one API key per top-level account, but that account has 1,000 sub-merchants making calls under it. One misbehaving sub-merchant exhausts the shared bucket, blocking all 999 others.
+*Fix:* Key the rate limiter at the actual unit of isolation (per sub-merchant, per integration), with an optional higher-level aggregate limit for billing visibility — not for throttling.
+
+**6. Missing or unhelpful 429 responses**
+*Broken:* A rate-limited request returns a bare `429` with no `Retry-After` header. Clients without a backoff strategy retry immediately, creating a thundering herd that keeps the limit perpetually exceeded.
+*Fix:* Always include `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset`. Well-built SDKs use these to implement exponential backoff with jitter automatically.
+
+---
+
+## 11. Technologies & Tools
+
+| Tool / Library | Algorithm(s) | Layer | Notes |
+|-----------------|-------------|-------|-------|
+| **Redis** (`INCR`+`EXPIRE`, or Lua scripts) | Fixed window, token bucket, sliding window counter | Shared state store, any layer | The de facto standard for distributed rate limiting; single-threaded atomicity makes Lua scripts race-free |
+| **Envoy / Lyft `ratelimit`** | Generic, descriptor-based | Service mesh sidecar / gateway | gRPC rate-limit service called per-request; widely used at Lyft, Stripe, and inside Istio |
+| **Kong API Gateway** (rate-limiting plugin) | Fixed window, sliding window | API gateway | Per-consumer, per-route limits with Redis or cluster-wide policy stores |
+| **AWS API Gateway** (Usage Plans) | Token bucket | Managed gateway | Per-API-key throttle (steady-state rate) + burst (bucket capacity) configured declaratively |
+| **NGINX** (`limit_req` module) | Leaky bucket | Edge / reverse proxy | `limit_req zone=... burst=... nodelay;` — classic edge-layer traffic shaping |
+| **Resilience4j `RateLimiter`** | Fixed window-ish (permits per period) | Java application code | In-process; pairs naturally with Resilience4j CircuitBreaker for layered resilience |
+| **Guava `RateLimiter`** | Token bucket (with "warm-up" period) | Java application code | Smooths sudden load spikes after idle periods via a warm-up ramp |
+| **Bucket4j** | Token bucket | Java, distributed via JCache/Redis/Hazelcast | Distributed token buckets with pluggable backends; popular for Spring Boot APIs |
+| **Istio (Envoy-based mesh)** | Local + global descriptors | Service mesh | Local rate limiting per-pod (no extra hop) plus global limits via the `ratelimit` service |
+
+> See [`spring/spring_cloud_patterns`](../../spring/spring_cloud_patterns/) for Spring-specific rate limiter integration and [`backend/rate_limiting_in_depth`](../../backend/rate_limiting_in_depth/) for production Redis/Lua implementations referenced throughout this module.
+
+---
+
+## 12. Interview Questions with Answers
 
 **Q1: What is the difference between Token Bucket and Leaky Bucket?**
 
@@ -687,7 +797,7 @@ A: Use a circuit breaker around the Redis call. Options: (1) fail open — allow
 
 ---
 
-## Best Practices
+## 13. Best Practices
 
 ### 1. Graceful Degradation
 Never make your rate limiter a hard single point of failure. If Redis goes down, fall back to local rate limiting rather than allowing all traffic or rejecting all traffic.
@@ -732,7 +842,11 @@ Provide SDK helpers that track and respect rate limits proactively, sending `X-R
 
 ---
 
-## Case Study: Stripe API Rate Limiting with Redis Token Bucket
+**Cross-references:** [backend/rate_limiting_in_depth](../../backend/rate_limiting_in_depth/) (production implementation: Redis Lua scripts, sliding-window counters, header conventions), [llm/token_economics_and_cost_optimization](../../llm/token_economics_and_cost_optimization/) (token-bucket rate limiting for LLM API quotas).
+
+---
+
+## 14. Case Study: Stripe API Rate Limiting with Redis Token Bucket
 
 ### Problem Statement
 

@@ -476,6 +476,10 @@ Deploy instances in multiple geographic regions (AWS regions or GCP regions). Us
 
 ---
 
+**Cross-references:** [database/replication_and_high_availability](../../database/replication_and_high_availability/) (read replicas, leader election, failover), [backend/distributed_system_operational_patterns](../../backend/distributed_system_operational_patterns/) (autoscaling, capacity planning), [devops/kubernetes_scheduling_and_autoscaling](../../devops/kubernetes_scheduling_and_autoscaling/) (HPA/VPA, cluster autoscaling).
+
+---
+
 ## Case Study: Scaling Discord to 1M Concurrent Users per Channel
 
 ### Problem Statement

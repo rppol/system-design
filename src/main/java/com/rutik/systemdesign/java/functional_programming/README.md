@@ -535,5 +535,6 @@ load.andThen(filter).andThen(normalize);    // FIX: runs load, filter, normalize
 - [Java 8 Features](../java8_features/README.md) — lambda syntax, Optional, and stream overview as the entry point
 - [Java Streams — Deep Dive](../java_streams/README.md) — Spliterator internals, parallel stream mechanics, all terminal ops
 - [Generics & Type System](../generics_and_type_system/README.md) — Function/Supplier/Consumer type parameters, wildcard bounds in functional APIs
+- [LLD: Strategy Pattern](../../lld/behavioral/strategy/README.md) — the GoF pattern that lambdas and method references implement without the boilerplate of a `Strategy` interface hierarchy
 
 **What is the risk of `Comparator.comparing` extractors that return null?** The natural-order comparison invoked on a null key throws NPE mid-sort, which can corrupt the sort or abort the job. Wrap the key comparator with `Comparator.nullsFirst`/`nullsLast` to define where nulls land, making the sort total.

@@ -444,6 +444,10 @@ When there is no audit requirement; when the domain model is still being discove
 
 ---
 
+**Cross-references:** [backend/event_sourcing_and_cqrs](../../backend/event_sourcing_and_cqrs/) (event store implementation, snapshotting code), [database/polyglot_persistence_patterns](../../database/polyglot_persistence_patterns/) (separate read/write stores for CQRS), [database/distributed_transactions](../../database/distributed_transactions/) (saga as a transaction-coordination alternative).
+
+---
+
 ## 14. Case Study — Order Management System with Full Audit, Multi-Model Reads, and Saga
 
 ### Domain

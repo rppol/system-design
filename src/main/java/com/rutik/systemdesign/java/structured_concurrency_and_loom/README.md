@@ -597,3 +597,4 @@ private AirlineResponse fetchAirline(Airline a, SearchRequest req) {
 - [Java 9–21 Features](../java9_to_21_features/README.md) — virtual threads GA (Java 21 LTS) as a language-feature overview
 - [Case Study: Thread Pool](../case_studies/design_thread_pool_java.md) — ThreadPoolExecutor internals and virtual thread pool comparison
 - [JVM Internals](../jvm_internals/README.md) — continuation implementation, ForkJoinPool internals
+- [LLD: Concurrency Patterns](../../lld/concurrency_patterns/README.md) — how Producer-Consumer and Thread Pool patterns adapt when threads become cheap (virtual threads)

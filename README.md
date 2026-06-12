@@ -76,6 +76,10 @@ Patterns that deal with communication between objects, defining how objects inte
 | [Database Sharding](src/main/java/com/rutik/systemdesign/hld/database_sharding/) | Partitioning data across databases |
 | [Consensus Algorithms](src/main/java/com/rutik/systemdesign/hld/consensus_algorithms/) | Raft, Paxos, PBFT, etcd/ZooKeeper, split-brain prevention, quorum math |
 | [Event Sourcing & CQRS](src/main/java/com/rutik/systemdesign/hld/event_sourcing_cqrs/) | Event sourcing, CQRS read/write separation, projections, Saga pattern, snapshots |
+| [Distributed Transactions](src/main/java/com/rutik/systemdesign/hld/distributed_transactions/) | 2PC, 3PC, Saga, TCC, outbox pattern, idempotency keys |
+| [Observability](src/main/java/com/rutik/systemdesign/hld/observability/) | Metrics, logs, traces, SLI/SLO/error budgets, distributed tracing |
+| [Security and Authentication/Authorization](src/main/java/com/rutik/systemdesign/hld/security_and_auth/) | AuthN vs AuthZ, OAuth2/OIDC, JWT, mTLS, RBAC vs ABAC, encryption |
+| [Resilience Patterns](src/main/java/com/rutik/systemdesign/hld/resilience_patterns/) | Circuit breaker, bulkhead, retries with backoff + jitter, graceful degradation, failover |
 
 ---
 
@@ -586,7 +590,7 @@ See the [Database Engineering Master Index](src/main/java/com/rutik/systemdesign
 
 ### Machine Learning (ML) — Senior ML/AI Engineer & Interview Prep Guide
 
-A comprehensive, senior-engineer-level guide to Machine Learning — from mathematical foundations through production MLOps. Covers classical algorithms, deep learning, ML system design, domain specializations (CV, RecSys, NLP, RL, time series), a dedicated algorithm-selection module (#33), and 22 end-to-end case studies (12 using the principal 11-section template, 5 cross-cutting shared-primitive files). Deliberately scoped to not overlap with the LLM section (which handles transformers, fine-tuning, RAG, and agents).
+A comprehensive, senior-engineer-level guide to Machine Learning — from mathematical foundations through production MLOps. Covers classical algorithms, deep learning, ML system design, domain specializations (CV, RecSys, NLP, RL, time series), trust-and-safety topics (adversarial ML and robustness, uncertainty quantification and conformal prediction, active learning and weak supervision), a dedicated algorithm-selection module (#33), and 22 end-to-end case studies (12 using the principal 11-section template, 5 cross-cutting shared-primitive files). 36 modules across 8 phases. Deliberately scoped to not overlap with the LLM section (which handles transformers, fine-tuning, RAG, and agents).
 
 #### Phase 1 — Mathematical Foundations
 | Module | Key Concepts |
@@ -618,7 +622,7 @@ A comprehensive, senior-engineer-level guide to Machine Learning — from mathem
 | Module | Key Concepts |
 |--------|-------------|
 | [Computer Vision](src/main/java/com/rutik/systemdesign/ml/computer_vision/) | Object detection, segmentation, ViT, CLIP, self-supervised vision — with 4 deep-dive sub-files |
-| [Natural Language Processing](src/main/java/com/rutik/systemdesign/ml/natural_language_processing/) | Word2Vec, GloVe, TF-IDF, text classification, NER (BIO tagging), CRF, topic modeling — with 4 deep-dive sub-files (BERT, attention/seq2seq, retrieval, evaluation) |
+| [Natural Language Processing](src/main/java/com/rutik/systemdesign/ml/natural_language_processing/) | Word2Vec, GloVe, TF-IDF, text classification, NER (BIO tagging), CRF, topic modeling — with 5 deep-dive sub-files (BERT, attention/seq2seq, retrieval, evaluation, tokenization) |
 | [Recommender Systems](src/main/java/com/rutik/systemdesign/ml/recommender_systems/) | Two-tower retrieval, collaborative filtering, LTR ranking, bandits — with 5 deep-dive sub-files |
 | [Time Series Forecasting](src/main/java/com/rutik/systemdesign/ml/time_series_forecasting/) | ARIMA, Prophet, DeepAR, Temporal Fusion Transformer, walk-forward validation |
 | [Reinforcement Learning](src/main/java/com/rutik/systemdesign/ml/reinforcement_learning/) | MDP, Q-learning, DQN, PPO, actor-critic, reward shaping, RLHF connection |
@@ -631,6 +635,7 @@ A comprehensive, senior-engineer-level guide to Machine Learning — from mathem
 | [Distributed Training](src/main/java/com/rutik/systemdesign/ml/distributed_training/) | PyTorch DDP, FSDP, DeepSpeed ZeRO stages, gradient accumulation, mixed precision BF16 |
 | [Experiment Tracking and Versioning](src/main/java/com/rutik/systemdesign/ml/experiment_tracking_and_versioning/) | MLflow, W&B, Optuna TPE, DVC, reproducibility checklist, hyperparameter sweeps |
 | [GPU and Hardware Optimization](src/main/java/com/rutik/systemdesign/ml/gpu_and_hardware_optimization/) | CUDA, tensor cores, memory hierarchy, profiling, gradient checkpointing, DataLoader tuning |
+| [Active Learning and Weak Supervision](src/main/java/com/rutik/systemdesign/ml/active_learning_and_weak_supervision/) | Uncertainty/diversity sampling, query-by-committee, BALD, Snorkel labeling functions, label model, pseudo-labeling, data-centric AI |
 
 #### Phase 6 — Production ML Engineering
 | Module | Key Concepts |
@@ -646,6 +651,8 @@ A comprehensive, senior-engineer-level guide to Machine Learning — from mathem
 | [Graph Neural Networks](src/main/java/com/rutik/systemdesign/ml/graph_neural_networks/) | GCN, GraphSAGE, GAT, GIN, message passing, oversmoothing, PyTorch Geometric |
 | [Self-Supervised and Contrastive Learning](src/main/java/com/rutik/systemdesign/ml/self_supervised_and_contrastive_learning/) | NT-Xent, InfoNCE, BYOL, ELECTRA, graph SSL, tabular SSL (SCARF) |
 | [Causal Inference and ML](src/main/java/com/rutik/systemdesign/ml/causal_inference_and_ml/) | Potential outcomes, propensity scores, uplift modeling, CausalForest, Double ML |
+| [Adversarial ML and Robustness](src/main/java/com/rutik/systemdesign/ml/adversarial_ml_and_robustness/) | FGSM/PGD/C&W evasion, data poisoning, backdoors, model extraction, membership inference, adversarial training, randomized smoothing |
+| [Uncertainty Quantification and Conformal Prediction](src/main/java/com/rutik/systemdesign/ml/uncertainty_quantification_and_conformal_prediction/) | Aleatoric vs epistemic, MC dropout, deep ensembles, ECE/temperature scaling, conformal prediction sets/intervals, CQR |
 
 #### Phase 8 — Interview Consolidation
 | Module | Key Concepts |

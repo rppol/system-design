@@ -854,6 +854,21 @@ A: Use `CopyOnWriteArrayList` for the observer list (snapshot on write, lock-fre
 **Q: How is Observer different from Pub/Sub?**
 A: In Observer, the Subject knows its Observers (holds references). In Pub/Sub, there's an intermediary broker; publishers and subscribers don't know about each other. Pub/Sub scales better across processes/machines.
 
+**Q: Should notification be synchronous or asynchronous?**
+A: Synchronous notification is simple and gives the Subject a guarantee that all Observers have processed the event before `notify()` returns, but a slow or blocked Observer stalls the Subject and every other Observer behind it. Asynchronous notification — dispatching to an executor, queue, or event bus — isolates failures and latency spikes in one Observer from the rest, at the cost of weaker ordering and harder-to-debug causality. Pick synchronous for in-process invariant updates (e.g., recalculating a derived field) and asynchronous for side effects like sending emails or writing audit logs.
+
+**Q: If one Observer throws an exception during notification, should it block the others?**
+A: No — by default, wrap each Observer's `update()` call in its own try/catch so one misbehaving Observer cannot prevent the rest from being notified. Log or collect the exception (e.g., into a list of `Throwable` to report after the loop) rather than letting it propagate from inside the iteration. This is exactly why frameworks like Spring's `ApplicationEventMulticaster` catch and log exceptions per-listener instead of failing the whole `publishEvent()` call.
+
+**Q: What's wrong with `java.util.Observable`, and what replaced it?**
+A: `java.util.Observable` is a concrete class (not an interface), so a Subject that already extends another class cannot use it — Java has no multiple inheritance. It was deprecated in Java 9. Modern replacements include `PropertyChangeSupport`/`PropertyChangeListener` for bean-style property notifications, `java.util.concurrent.Flow` (the `Flow.Publisher`/`Flow.Subscriber` reactive streams API) for backpressure-aware async streams, and Spring's `ApplicationEventPublisher` for application-level eventing.
+
+**Q: Does the order in which Observers are notified matter?**
+A: It can, and the GoF pattern makes no guarantee about ordering — it depends on the iteration order of the underlying collection (e.g., a `List` preserves insertion order, a `Set` may not). If ordering matters — for example, a logging Observer must run before a cache-invalidation Observer — either use an ordered collection and document the dependency, or assign explicit priorities (Spring's `@Order` / `Ordered` interface on `ApplicationListener`). Avoid designs where correctness silently depends on registration order; make ordering explicit if it's required.
+
+**Q: How do you avoid the lapsed listener problem without requiring callers to remember `detach()`?**
+A: Use weak references for the observer list (e.g., `WeakHashMap`-backed registration or `WeakReference<Observer>`) so the garbage collector can reclaim an Observer even if it was never explicitly detached — the Subject then just skips stale entries during notification. This trades a small runtime check for eliminating an entire class of memory-leak bugs, which is why Swing's `WeakListeners` and JavaFX's listener helpers exist. The tradeoff is that the Observer might disappear "silently" mid-lifecycle, so this is best for UI/cache-style listeners, not for Observers whose absence would be a correctness bug.
+
 ---
 
 ## Cross-Perspective: HLD Connections

@@ -558,3 +558,4 @@ See the Spring case study: [Design Batch Pipeline](../case_studies/design_batch_
 - [Spring Transactions](../spring_transactions/README.md) — chunk-level transactions
 - [Spring Events & Scheduling](../spring_events_and_scheduling/README.md) — job trigger events
 - [Case Study: Batch Pipeline](../case_studies/design_batch_pipeline.md) — full batch pipeline design
+- [LLD: Template Method Pattern](../../lld/behavioral/template_method/README.md) — the GoF pattern behind the fixed Reader/Processor/Writer skeleton

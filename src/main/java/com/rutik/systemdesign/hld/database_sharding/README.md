@@ -786,6 +786,10 @@ Putting sharding logic in application code creates a maintenance nightmare as ro
 
 ---
 
+**Cross-references:** [database/sharding_and_partitioning](../../database/sharding_and_partitioning/) (shard-key selection, resharding mechanics, hotspot mitigation), [database/newsql_and_distributed_sql](../../database/newsql_and_distributed_sql/) (Vitess, CockroachDB, Spanner-style auto-sharding).
+
+---
+
 ## Case Study: Instagram Photo Database Sharding
 
 ### Problem Statement

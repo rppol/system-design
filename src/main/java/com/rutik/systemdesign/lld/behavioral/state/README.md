@@ -510,6 +510,24 @@ A: Two approaches: (1) Context-driven — Context has a big switch/table that ma
 **Q: How would you make a State machine thread-safe?**
 A: Use `AtomicReference<State>` for the state field and compare-and-swap to transition atomically. Synchronize any shared data in the Context that states access. Be careful about re-entrant calls (a state transition during notification of another transition).
 
+**Q: What is "state explosion" and how do you manage it for a complex FSM?**
+A: State explosion happens when the number of (state x event) combinations grows large enough that a single Context class — or even one ConcreteState class per state — becomes unmanageable, with logic scattered and transitions hard to verify for completeness. The standard fixes are: a state transition table (a `Map<State, Map<Event, State>>` or similar data structure that's validated for missing/illegal transitions at startup), a framework like Spring State Machine that lets you declare states, events, and transitions in a configuration DSL, or a hierarchical state machine (HSM) where substates inherit transitions from a parent state so common edges aren't duplicated. Choose a table or framework once you have more than roughly 5-6 states or any states share significant transition logic.
+
+**Q: Enum-based State vs. class-based State — which would you pick and when?**
+A: An enum with abstract methods (`enum State { OPEN { void handle(Context c) {...} }, CLOSED {...} }`) is compact, gives you `valueOf`/`ordinal`/`switch` support for free, and works well when each state is stateless and the set of states is fixed at compile time. Class-based State (one class per `ConcreteState` implementing a `State` interface) is more verbose but allows each state to hold its own fields, be subclassed, be constructed with dependencies (DI-friendly), and supports adding new states without touching an existing enum declaration. Use enum-based State for small, closed, stateless FSMs (e.g., `OrderStatus`); use class-based State when states carry data, need polymorphism, or the set of states must be extensible.
+
+**Q: How do you add a new state without violating the Open/Closed Principle?**
+A: Create a new `ConcreteState` class implementing the existing `State` interface and wire up the transitions that lead into and out of it — the Context, the `State` interface, and existing ConcreteState classes that don't transition to the new state should not need modification. The OCP risk is in *transition* logic: if transitions are centralized in a switch statement in the Context, adding a state means editing that switch (a modification), whereas if each ConcreteState decides its own next state, only the states that can transition to/from the new state need edits. This is the practical tradeoff behind the "who triggers the transition" design choice.
+
+**Q: How do you unit-test a specific state transition in isolation?**
+A: Construct the Context and directly inject (or set via a package-private setter/constructor) the `ConcreteState` you want to start from, bypassing whatever transitions would normally be required to reach it. Then invoke the action method (e.g., `context.handle(event)`) and assert both the resulting behavior and the Context's new state (`assertThat(context.getState()).isInstanceOf(NextState.class)`). This avoids needing to replay an entire sequence of transitions just to test one edge of the FSM, and keeps each test focused on a single (state, event) -> (state', behavior) tuple.
+
+**Q: Can State objects be shared (singletons) across multiple Context instances?**
+A: Yes, if the ConcreteState classes are stateless (hold no per-Context fields) — in that case a single shared instance per state (e.g., `private static final State OPEN = new OpenState()`) is safe and avoids allocating a new state object on every transition. If a ConcreteState needs to store data specific to one Context (timestamps, retry counts, accumulated totals), it must be instantiated per-Context and cannot be a shared singleton. Java's enum-based State is a natural fit for the stateless/shared case since enum constants are inherently singletons.
+
+**Q: Does the State pattern guarantee valid transitions, or can a Context end up in an illegal state?**
+A: The pattern itself does not enforce a valid transition graph — it only guarantees that behavior is dispatched to *some* State object; whether `OpenState -> ClosedState -> OpenState` is a legal sequence is up to whatever code calls `setState()`. To get real guarantees, each ConcreteState's transition methods should only ever construct/return the states that are legal successors (encoding the transition table in code), or you validate transitions against an explicit table before calling `setState()`. Without one of these safeguards, a typo or missed case can silently put the Context into a state that violates the FSM's intended graph.
+
 ---
 
 ## Cross-Perspective: HLD Connections

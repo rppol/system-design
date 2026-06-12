@@ -23,6 +23,11 @@ LLD interview problems test five distinct skills:
 | Vending Machine | [VendingMachine_README.md](VendingMachine_README.md) | State (IDLE/HAS_MONEY/DISPENSING/OUT_OF_STOCK), Strategy (payment), Factory | Yes (primary) | Minimal |
 | ATM | [ATM_README.md](ATM_README.md) | State (IDLE/CARD_INSERTED/PIN_VERIFIED/TRANSACTION), Template Method (transaction) | Yes | Minimal |
 | Online Booking System | [OnlineBookingSystem_README.md](OnlineBookingSystem_README.md) | Strategy (pricing), Observer (confirmation), Builder (booking record) | Yes | Yes (double-booking) |
+| Ride Sharing | [RideSharing_README.md](RideSharing_README.md) | Strategy (fare calculation), Observer (ride status), Factory (vehicle type), State (ride lifecycle) | Yes | Minimal |
+| LRU Cache | [LRUCache_README.md](LRUCache_README.md) | Decorator (thread-safe wrapper), Observer (eviction listener) | No | Yes (lock-based) |
+| Rate Limiter | [RateLimiter_README.md](RateLimiter_README.md) | Strategy (4 algorithms), Factory (algorithm selection) | No | Yes (ConcurrentHashMap) |
+| Tic-Tac-Toe | [TicTacToe_README.md](TicTacToe_README.md) | Strategy (AI move selection), State (game state) | Yes | No |
+| Splitwise | [Splitwise_README.md](Splitwise_README.md) | Strategy (split type), Factory (split-strategy selection) | No | No |
 
 ---
 
@@ -185,18 +190,36 @@ BOOKED    -> CANCELLED (user cancels; refund issued)
 CANCELLED -> AVAILABLE (seat re-listed)
 ```
 
+**Ride (Ride Sharing):**
+```
+REQUESTED      -> ACCEPTED       (driver matched and accepts)
+REQUESTED      -> CANCELLED      (rider cancels before a match is found)
+ACCEPTED       -> DRIVER_ARRIVED (driver reaches the pickup location)
+ACCEPTED       -> CANCELLED      (rider or driver cancels before pickup)
+DRIVER_ARRIVED -> IN_PROGRESS    (rider boards; trip starts)
+IN_PROGRESS    -> COMPLETED      (trip ends; fare calculated via FareStrategy)
+```
+
+**Tic-Tac-Toe (Game):**
+```
+IN_PROGRESS -> X_WINS (X completes a row, column, or diagonal)
+IN_PROGRESS -> O_WINS (O completes a row, column, or diagonal)
+IN_PROGRESS -> DRAW   (board full, no winner)
+```
+
 ---
 
 ## 8. Cross-References
 
 | Pattern | See Also |
 |---------|---------|
-| State (Vending Machine, ATM, Elevator) | `../behavioral/state/` |
+| State (Vending Machine, ATM, Elevator, Ride Sharing, Tic-Tac-Toe) | `../behavioral/state/` |
 | Command (Chess undo) | `../behavioral/command/` |
-| Observer (Library overdue, Booking confirmation) | `../behavioral/observer/` |
-| Factory (Spot types, ticket types) | `../creational/factory_method/` |
-| Concurrency (Parking Lot, Elevator, Booking) | `../concurrency_patterns/` |
-| Strategy (pricing, search, payment) | `../behavioral/strategy/` |
+| Observer (Library overdue, Booking confirmation, Ride Sharing status, LRU Cache eviction) | `../behavioral/observer/` |
+| Factory (Spot types, ticket types, vehicle types, split strategies) | `../creational/factory_method/` |
+| Concurrency (Parking Lot, Elevator, Booking, Rate Limiter, LRU Cache) | `../concurrency_patterns/` |
+| Strategy (pricing, search, payment, fare calculation, rate-limiting algorithms, expense splits) | `../behavioral/strategy/` |
+| Decorator (LRU Cache thread-safe wrapper) | `../structural/decorator/` |
 
 ---
 
@@ -269,6 +292,55 @@ BookingObserver (interface)
   Implementations: EmailNotifier, SMSNotifier, InvoiceGenerator
 ```
 
+### Ride Sharing (State + Strategy + Observer + Factory)
+
+```
+RideSharingSystem
+  |-- drivers: List<Driver>
+  |-- riders: List<Rider>
+  |-- requestRide(rider, pickup, dropoff, vehicleType): Ride
+
+VehicleFactory
+  |-- create(VehicleType): Vehicle
+  Implementations: EconomyVehicle, PremiumVehicle, XLVehicle
+
+Ride
+  |-- state: RideState (REQUESTED/ACCEPTED/DRIVER_ARRIVED/IN_PROGRESS/COMPLETED/CANCELLED)
+  |-- fareStrategy: FareStrategy
+  |-- observers: List<RideObserver>
+  |-- requestTransition(RideState): throws on illegal transition
+
+FareStrategy (interface)
+  |-- calculateFare(distanceKm, durationMin, vehicleType)
+  Implementations: StandardFareStrategy, SurgePricingFareStrategy, PremiumFareStrategy
+
+RideObserver (interface)
+  |-- onRideStatusChanged(Ride)
+  Implementations: RiderNotifier, DriverNotifier, DispatchDashboard
+```
+
+### LRU Cache (Doubly-Linked List + HashMap)
+
+```
+LRUCacheImpl<K,V>
+  |-- capacity: int
+  |-- index: HashMap<K, Node<K,V>>     <- O(1) key lookup
+  |-- head/tail: Node<K,V>             <- sentinel nodes, MRU at head
+  |-- get(key)  -> moveToFront, return value
+  |-- put(k, v) -> if full, evictLRU (tail.prev); insert at front
+
+Node<K,V>
+  |-- key, value, prev, next
+
+ThreadSafeLRUCache<K,V>   <<Decorator>>
+  |-- delegate: LRUCacheImpl<K,V>
+  |-- lock: ReentrantLock
+  |-- get/put wrap delegate calls in lock.lock()/unlock()
+
+CacheEventListener<K,V> (interface)
+  |-- onEviction(K key, V value)
+```
+
 ---
 
 ## 11. Technologies and Tools
@@ -277,12 +349,15 @@ BookingObserver (interface)
 |-----------------|-------------------|
 | Java `enum` with abstract methods | State machine transitions (each enum constant overrides behavior) |
 | `AtomicReference.compareAndSet()` | Spot / seat reservation race conditions on single machine |
-| `ReentrantLock` | Elevator controller sequential access to request queue |
+| `ReentrantLock` | Elevator controller sequential access to request queue; `ThreadSafeLRUCache` wrapper around `LRUCacheImpl` |
 | `ScheduledExecutorService` | Library overdue notifications without polling |
-| `BigDecimal` | Money in ATM and Booking System |
+| `BigDecimal` | Money in ATM, Booking System, and Splitwise (split amounts, settlements) |
 | Spring `@Scheduled` | Production-grade overdue book notification job |
 | JPA `@Version` (optimistic locking) | Double-booking prevention in Online Booking System |
 | `Deque<Command>` | Chess move history for undo/redo |
+| `ConcurrentHashMap` | Per-client state in Rate Limiter (token buckets, sliding windows) |
+| `PriorityQueue` (max-heap) | Splitwise debt simplification — repeatedly match largest creditor with largest debtor |
+| `Deque<Long>` (timestamps) | Sliding Window Log rate limiter — evict timestamps older than the window |
 
 ---
 
@@ -355,5 +430,35 @@ Show that the design is open for extension without modification (OCP). Example: 
 **How do you handle the Library Management "search" feature in the class design?**
 
 Use the Strategy pattern for search: `SearchStrategy` interface with implementations like `TitleSearch`, `AuthorSearch`, `ISBNSearch`, `GenreSearch`. The `Library.search(String query, SearchStrategy strategy)` method delegates to the strategy. Adding a new search type (publication year, keywords) means adding a new strategy class — no change to `Library`. Alternative for simple cases: one `Catalog` class with multiple overloaded `findBy*()` methods. The Strategy approach is justified when search algorithms differ significantly in implementation (linear scan vs inverted index vs external search engine).
+
+---
+
+**Ride Sharing: how do you design driver-matching, and why is the naive approach a problem at scale?**
+
+The naive approach scans every available driver and computes Euclidean distance to the rider's pickup location, picking the nearest one — O(N) per request. This is fine for a 30-minute interview demo with a handful of drivers, but at city scale (tens of thousands of drivers) it's too slow. The production fix is geo-indexing: bucket drivers into geohash cells or an S2/quadtree grid, then only scan drivers in the rider's cell and its neighbors. For the interview: implement the O(N) scan, but explicitly call out the geo-indexing upgrade path — see [design_uber](../../hld/case_studies/design_uber.md) and [design_proximity_service](../../hld/case_studies/design_proximity_service.md) for the HLD-scale answer. Also discuss the `RideState` machine — every transition (`REQUESTED -> ACCEPTED -> DRIVER_ARRIVED -> IN_PROGRESS -> COMPLETED`) should be validated server-side to reject out-of-order client messages.
+
+---
+
+**LRU Cache: why do you need a doubly-linked list AND a HashMap — why not just one?**
+
+A HashMap alone gives O(1) key lookup but no ordering — you can't efficiently find "the least recently used entry" without an O(n) scan. A linked list alone gives ordering (move-to-front on access, evict from the tail) but O(n) lookup by key. Combining them gives O(1) for both: the HashMap maps `key -> Node`, and the node is already wired into the doubly-linked list, so `get()` does a HashMap lookup then an O(1) pointer-relinking to move the node to the front. A *singly*-linked list doesn't work either — removing a node from the middle requires its `prev` pointer to relink `prev.next`, which a singly-linked list doesn't have without an O(n) walk. This is the detail that separates a working O(1) LRU from an accidentally-O(n) one.
+
+---
+
+**Rate Limiter: which of the four algorithms would you pick for a public API, and why?**
+
+Token Bucket is the most common production choice because it allows controlled bursts (a client that's been idle can "save up" tokens) while still enforcing a steady-state average rate, and it's O(1) memory per client (just `tokens` and `lastRefillTimestamp`). Fixed Window Counter is simplest but allows up to 2x the limit at window boundaries (a burst at 11:59:59 and another at 12:00:00 both succeed). Sliding Window Log is the most accurate but costs O(N) memory per client where N = requests per window — at 1000 req/min that's 1000 timestamps per client, which doesn't scale to millions of clients. Sliding Window Counter (the Cloudflare/Kong approach — weighted average of current and previous fixed windows) is the pragmatic middle ground: O(1) memory, smooths boundary bursts, slightly approximate. For the interview: name all four, then justify Token Bucket or Sliding Window Counter as the default, falling back to Sliding Window Log only if exact accuracy is a hard requirement.
+
+---
+
+**Tic-Tac-Toe: how do you make win-checking work for an NxN board without it becoming the bottleneck?**
+
+The naive approach rescans the entire board after every move — O(N^2) per move, so O(N^2) work just to check 4 lines through the last-placed cell. The fix is incremental counters: maintain `rowCounts[N]`, `colCounts[N]`, and two diagonal counters, each storing a running sum where X contributes +1 and O contributes -1 (or separate counters per symbol). Placing a move updates at most 4 counters in O(1), and a win is detected the instant `|counter| == N`. At N=1000, that's the difference between 1,000,000 cell reads per move and 4 integer increments. This incremental-counter technique generalizes to any "check all lines through a point" problem — it's the same idea as maintaining row/column sums for a live spreadsheet.
+
+---
+
+**Splitwise: what does "debt simplification" mean, and is it guaranteed to find the minimum number of transactions?**
+
+Debt simplification takes a tangle of pairwise debts within a group (Alice owes Bob $10, Bob owes Carol $10) and reduces it to the minimum set of direct payments that settle everyone's net balance (Alice pays Carol $10 directly — Bob is removed from the chain entirely). The standard interview-feasible algorithm computes each user's net balance, then greedily matches the largest creditor with the largest debtor using two max-heaps, repeating until all balances are zero — this runs in O(N log N) and produces at most N-1 transactions for N participants. It is NOT guaranteed to find the absolute theoretical minimum in every case (that variant is NP-hard, related to subset-sum partitioning), but the greedy max-heap approach is the answer interviewers expect and performs well in practice. Mention `BigDecimal` throughout — splitting `$100.00` three ways produces `$33.33 + $33.33 + $33.34` (the extra cent goes to the first payer), never `double` arithmetic.
 
 ---

@@ -1,23 +1,5 @@
 # System Design: Uber
 
-## Table of Contents
-1. Requirements Clarification
-2. Scale Estimation
-3. High-Level Architecture
-4. Real-time Location Tracking
-5. Driver-Rider Matching
-6. Surge Pricing
-7. Trip State Machine
-8. Database Design
-9. Payment Processing
-10. Notifications
-11. Maps and ETA
-12. Bottlenecks and Solutions
-13. Trade-offs
-14. Interview Discussion Tips
-
----
-
 ## Intuition
 
 > **Design intuition**: Uber's core challenge is real-time geospatial matching at scale — matching millions of driver locations (updating every 4 seconds) to millions of ride requests, with sub-second response time. The key data structures are geohashing (for proximity queries) and the dispatch algorithm (ETA-based matching).
@@ -127,7 +109,9 @@
 
 ---
 
-## 4. Real-time Location Tracking
+## 4. Component Deep Dives
+
+### Real-time Location Tracking
 
 ### Why WebSocket (Not REST Polling)
 - REST polling (driver app calls `/update_location` every 4 sec): works but creates overhead per request (TCP handshake, HTTP headers, auth check)
@@ -199,7 +183,7 @@ ZREM drivers_available "driver_abc"
 
 ---
 
-## 5. Driver-Rider Matching
+### Driver-Rider Matching
 
 ### Matching Algorithm
 ```
@@ -237,7 +221,7 @@ SET driver:abc:status PENDING NX EX 15
 
 ---
 
-## 6. Surge Pricing
+### Surge Pricing
 
 ### Goal
 Dynamically adjust prices to balance supply (drivers) and demand (ride requests) in real time.
@@ -273,7 +257,7 @@ For each geohash cell (precision 6, ~1 km²) every 5 minutes:
 
 ---
 
-## 7. Trip State Machine
+### Trip State Machine
 
 ### States
 ```
@@ -329,7 +313,7 @@ def transition_trip(trip_id, new_state, actor_id):
 
 ---
 
-## 8. Database Design
+### Database Design
 
 ### Redis (Hot Data — Active Trips and Driver Locations)
 ```
@@ -427,7 +411,7 @@ CREATE TABLE vehicles (
 
 ---
 
-## 9. Payment Processing
+### Payment Processing
 
 ### Flow
 ```
@@ -462,7 +446,7 @@ Escrow Model:
 
 ---
 
-## 10. Notifications
+### Notifications
 
 ### Notification Types and Channels
 | Event | Recipient | Channel |
@@ -494,7 +478,7 @@ Notification Service
 
 ---
 
-## 11. Maps and ETA
+### Maps and ETA
 
 ### Map Data Options
 - **Google Maps Platform**: accurate, global coverage, expensive at scale
@@ -522,21 +506,7 @@ Resolution 11: ~25 m² hexagons  → precise driver positioning
 
 ---
 
-## 12. Bottlenecks and Solutions
-
-| Bottleneck | Impact | Solution |
-|---|---|---|
-| 375K location updates/sec | Redis write hotspot | Geo-partitioned Redis Cluster, partition by region |
-| Matching latency | Rider waits > 5 sec | Pre-built geospatial index in Redis, GEORADIUS < 1ms |
-| Driver double-booking | Two riders assigned same driver | Redis SET NX for atomic driver status claim |
-| Surge pricing computation | Stale surge data | Kafka Streams real-time aggregation, 1-minute refresh |
-| Trip state race conditions | Inconsistent trip state | Cassandra LWT (lightweight transactions), optimistic locking |
-| Payment failures | Revenue loss, rider friction | Pre-authorization, retry with exponential backoff, manual review queue |
-| Peak traffic (New Year's Eve) | All services overloaded | Horizontal auto-scaling, pre-provisioned capacity for known events |
-
----
-
-## 13. Trade-offs Made
+## 5. Design Decisions & Tradeoffs
 
 ### Geohash vs. H3 for Spatial Indexing
 - **Choice**: Redis geospatial (internally uses sorted set with geohash) for matching; H3 for analytics/surge
@@ -565,64 +535,161 @@ Resolution 11: ~25 m² hexagons  → precise driver positioning
 
 ---
 
-## 14. Interview Discussion Tips
+## 6. Real-World Implementations
 
-### How to Structure Your Answer (45-minute interview)
-1. **Clarify requirements** (5 min): ride request, matching, tracking, payment, surge
-2. **Scale estimation** (5 min): 25M rides/day, 1M drivers online, 375K location updates/sec
-3. **High-level architecture** (5 min): draw the service diagram
-4. **Location tracking deep dive** (10 min): WebSocket, Redis GEORADIUS, geohash — this is the most interesting part
-5. **Matching algorithm** (5 min): GEORADIUS query, driver claim with SET NX, fallback expansion
-6. **Surge pricing** (5 min): supply-demand ratio per geohash cell, real-time computation
-7. **Trip state machine** (5 min): states, transitions, Cassandra LWT for consistency
-8. **Database design** (5 min): Redis (hot), Cassandra (trips), PostgreSQL (profiles)
+### Uber's Actual Stack
 
-### Key Things Interviewers Look For
-- **Location update scale**: 375K/sec is the defining scalability challenge — must address it
-- **Geospatial indexing**: geohash or H3 with Redis GEORADIUS (not "just query the database")
-- **Driver double-booking prevention**: atomic Redis SET NX operation
-- **Eventual vs. strong consistency**: which parts need strong consistency (trip state, payment) vs. eventual (location, surge)
-- **State machine thinking**: explicit states for trip lifecycle
+- **H3 (Hexagonal Hierarchical Geospatial Indexing System)**: Uber open-sourced H3 in 2018. It tessellates the globe into hexagonal cells across 16 resolutions (resolution 0 ~ 1,107 km edge length down to resolution 15 ~ 0.5 m). DISCO uses H3 resolution 8-9 (~0.1-0.7 km²) for nearby-driver lookups and resolution 7 (~5 km²) for surge-pricing zones. Hexagons have uniform 6-neighbor adjacency with no corner cases — the reason Uber moved off pure geohash.
+- **DISCO (Dispatch Optimization)**: Uber's matching service. Combines a fast geospatial candidate lookup (H3 ring search, < 10ms) with a scoring pass that factors in driver rating, vehicle type, and ETA — and, for batched dispatch in dense cities, a small assignment-problem solver (similar in spirit to the Hungarian algorithm) that matches several drivers to several riders simultaneously rather than greedily one-at-a-time.
+- **Schemaless / Docstore**: Uber's original "Schemaless" datastore (2014) was a key-value abstraction sharded across MySQL instances, append-only with JSON blobs — it powered trip storage for years. Uber later built **Docstore**, a custom distributed database on top of MySQL and RocksDB, to replace Schemaless with stronger consistency guarantees and lower operational overhead.
+- **Ringpop**: Uber's open-source library for building scalable, fault-tolerant services using consistent hashing plus a SWIM gossip protocol for membership — used to shard stateful pieces of DISCO across a cluster without a central coordinator.
+- **TChannel -> gRPC**: Uber originally built TChannel, a custom RPC protocol with built-in multiplexing and tracing. Most services have since migrated to gRPC for ecosystem compatibility, while keeping the same tracing philosophy: every RPC carries trace context into Jaeger, which Uber also created and open-sourced.
+- **Kafka**: Backbone for location-update ingestion, trip-event streaming, and feeding the data warehouse and fraud-detection pipelines — one of the largest Kafka deployments in the industry (trillions of messages/day across all use cases).
+- **M3**: Uber's open-source metrics platform, purpose-built for the extremely high cardinality of per-city, per-driver, per-H3-cell metrics that a naive Prometheus deployment would choke on.
+- **Mezzanine**: Uber's internal payments platform, abstracting dozens of country-specific payment processors, currencies, and regulatory regimes behind a single "charge the rider, pay the driver" API.
 
-### Common Mistakes to Avoid
-- Polling for location updates (use WebSocket)
-- Querying relational DB for "find nearest drivers" (must use geospatial index)
-- Not mentioning the driver double-booking race condition
-- Ignoring surge pricing mechanism
-- Using a single database for everything
+### Comparable Systems for Cross-Reference
 
-### Follow-up Questions You May Get
-- "How do you handle a driver going offline mid-trip?" — Heartbeat timeout, flag trip, contact rider, attempt reassignment
-- "How does the driver app work offline (tunnel)?" — Local GPS buffering, replay when connection restored
-- "How do you calculate ETA accurately?" — ML model on historical trips + real-time traffic from driver GPS traces
-- "How do you handle payments in countries with different payment methods?" — Payment service abstraction layer with per-country payment adapters
-- "How does the surge pricing defend against manipulation?" — Rate limit requests, anomaly detection on request patterns
-
-### Numbers to Remember
-- 25M rides/day, 5M drivers globally, 1M online at peak
-- Location update: every 4 seconds
-- 375K location updates/sec
-- Match must happen in < 5 seconds
-- Geohash precision 6 = ~1km², precision 7 = ~150m
-- Redis GEORADIUS typical latency: < 1ms
-- H3 resolution 7 = ~5 km² hexagons for surge zones
+- **Lyft**: Solves the same core dispatch problem at smaller scale, but leans on AWS managed services (DynamoDB, Kinesis) rather than mostly self-built infrastructure, and uses Envoy-based service mesh (Lyft created Envoy) for inter-service communication — the same Envoy that became the data plane for Istio.
+- **DoorDash**: A structurally similar dispatch problem (match a Dasher to a delivery), with an added two-sided matching constraint (restaurant prep time) that rider-matching doesn't have. DoorDash's dispatch system uses a similar real-time geospatial index plus an ML ETA model.
+- **Grab (Southeast Asia)**: Faces extremely dense, GPS-unreliable urban environments (Jakarta, Manila), so Grab invests heavily in map-matching — snapping noisy GPS traces onto road segments — a problem Uber also solves but with lower relative GPS noise in its core US/EU markets.
 
 ---
 
-## 17. Failure Scenarios and Recovery
+## 7. Technologies & Tools
 
-### Failure 1: Driver Location Service Outage
-**Scenario**: The location ingestion service (consuming 1.25M location updates/sec via Kafka) fails in a region.
+| Component | Technology | Why |
+|---|---|---|
+| Geospatial indexing | H3 (Uber open-source) | Hexagonal grid: uniform 6-neighbor adjacency, multi-resolution, no geohash corner cases |
+| Driver location stream | WebSocket + Kafka | Persistent low-latency client connection feeding a durable, replayable ingestion pipeline |
+| Hot driver index | Redis Cluster (GEO commands) | Sub-millisecond GEORADIUS queries for "nearest N drivers" |
+| Matching/dispatch | DISCO (custom service) | Combines geospatial candidate search with a scoring/assignment solver |
+| Trip storage | Schemaless / Docstore (MySQL-based) | High write throughput, horizontal sharding, append-only history |
+| User profiles | PostgreSQL / MySQL | Relational queries and ACID guarantees for account data |
+| Surge computation | Kafka Streams | Real-time supply/demand aggregation per H3 cell, refreshed every 60s |
+| Service mesh / RPC | TChannel -> gRPC, Ringpop | RPC with built-in tracing; consistent-hash membership for stateful sharding |
+| Payments | Mezzanine + per-country processors | Single internal API abstracting dozens of payment rails and currencies |
+| Tracing & metrics | Jaeger, M3 | Distributed tracing across hundreds of microservices; high-cardinality metrics at city/H3-cell granularity |
 
-**Behavior**:
-- DISCO (matching service) reads from a Redis GEO + H3-based index. The index becomes stale within seconds.
-- Matching falls back to **last-known location with staleness flag**: drivers whose last update is >30 seconds ago are deprioritized but still matchable.
-- Rider experience: ETAs become less accurate (showing last-known driver position, not current); occasionally a "dispatched" driver is farther than estimated.
-- Driver app continues uploading; updates buffer locally and replay on recovery (max buffer 5 min before drop).
+---
 
-**TTR**: 30–60 seconds for service restart (stateless); 2–3 minutes for full index resync from Kafka replay.
+## 8. Operational Playbook
 
-### Failure 2: Schemaless / MySQL Shard Failure (Trip Data)
+### Multi-Region and Global Deployment
+
+#### Per-City Domain Boundary
+- Uber's elegant insight: each city is largely a self-contained system.
+- A trip in San Francisco doesn't need to know about a trip in Singapore.
+- Each city has its own DISCO instance, surge calculator, driver pool — all sharded by `city_id`.
+- This sharding made geographic expansion linear in cost rather than O(N²) coordination overhead.
+
+#### Active-Active Regional Architecture
+- 3-4 super-regions (Americas, EMEA, APAC, India).
+- Each region hosts the cities geographically near it.
+- Failover plan: if one region's DC fails, traffic re-routes to the nearest region (with latency penalty: ~100ms vs <20ms in-region).
+- Driver/rider sessions migrate to backup region; in-flight trips continue (driver app re-binds to backup gateway).
+
+#### Cross-Region Replication
+- Trip events: replicated via global Kafka (~1-5 sec lag) for analytics + fraud.
+- User profile updates: async replication via Schemaless cross-DC.
+- Payments: routed to specific payment processors per country; transaction records replicated to global ledger.
+
+#### Data Residency
+- **China (Didi era)**: Uber China was operationally separate; data in China only.
+- **EU GDPR**: Trip data of EU users stored in EU.
+- **India**: Recent regulations require local storage; Uber operates Mumbai DC.
+- **Brazil**: LGPD compliance requires local data residency for PII.
+
+#### Conflict Resolution
+- Trip state machine is single-writer (only the driver's home region writes to a trip).
+- User profiles: last-writer-wins with vector clock detection.
+- Pricing surge: computed independently per region; no conflicts.
+
+### Deployment and Alerting
+
+#### Critical Alerts
+| Metric | Threshold | Why |
+|--------|-----------|-----|
+| Match success rate | < 95% (per city) | Riders failing to find drivers; revenue + UX hit |
+| Match latency p99 | > 1s | DISCO bottleneck or driver index stale |
+| Location update lag (Kafka) | > 10s | Driver locations stale; bad matches |
+| Trip creation error rate | > 0.5% | Schemaless or payment service issue |
+| Surge calculation lag | > 2 min | Stale pricing; demand spikes uncaptured |
+| Cross-region replication lag | > 30s | Fraud detection blind spots |
+| Payment authorization failure | > 1% | Provider issue or fraud spike |
+| ETA accuracy MAPE | > 15% | ML model drift; affects trust |
+
+#### Deployment Strategy
+- **City-by-city canary**: Deploy new matching algorithm in one mid-tier city (e.g., Pittsburgh) for 1 week before global rollout.
+- **uDeploy / Spinnaker pipelines**: blue/green deployments; automatic rollback on SLO violation.
+- **Feature flags via Flipr**: enable per-city, per-user-bucket; emergency kill switches for new features.
+- **Shadow mode**: New matching algorithm runs alongside production, results compared offline before traffic shift.
+
+#### On-Call Runbook: Match Success Rate Drop in a City
+1. Check supply/demand dashboard for that city: is there a real-world event (concert, weather)?
+2. Check DISCO instance health: any pods crashing, OOM?
+3. Check driver count online: did drivers go offline en masse (app crash from bad deploy)?
+4. If algorithmic: roll back recent matching changes.
+5. If supply issue: enable "incentive" notifications to nearby drivers.
+
+#### On-Call Runbook: Location Update Lag Spike
+1. Check Kafka cluster: broker down? Disk full? Consumer lag growing?
+2. Check H3 indexer service: GC pause? CPU saturation?
+3. If single broker: rebalance partitions to healthy brokers.
+4. If global: scale out indexer fleet; auto-scaler may need manual nudge.
+
+### Evolution and Future Improvements
+
+#### At 10x Scale (50M Drivers, 250M Rides/Day)
+- Location ingestion at 12.5M updates/sec would require migrating from Kafka to a custom UDP-based fan-in (Kafka adds too much overhead per message).
+- DISCO would need to be split: a fast-path "nearby driver lookup" (sub-10ms) + slow-path "optimal assignment" (50ms with ML scoring).
+- Schemaless replacement: TiKV or FoundationDB for global ACID transactions on trip data.
+- Surge calculation moves from per-minute to per-second granularity using stream processing (Flink with incremental aggregates).
+
+#### Technical Debt
+- **Schemaless**: clever in 2014, but eventually-consistent semantics now constrain product features (e.g., showing real-time trip status across devices).
+- **Tchannel RPC** (Uber's RPC framework): being phased out in favor of gRPC, but long migration.
+- **Per-city sharding** breaks down for cross-city trips (long-distance rides, intercity routes). Hacks accumulate.
+- **Maps stack**: Uber built much of its own mapping (Movement, traffic predictions) to avoid Google Maps fees; maintaining this is expensive.
+
+#### Future Capabilities
+- **Multimodal trips**: Single booking combining ride + bike + transit. Requires unified routing across providers.
+- **Autonomous vehicles**: Robotaxi integration changes the supply model (no "driver going offline"; vehicles always available subject to range).
+- **Aerial mobility (Uber Elevate, sold to Joby)**: 3D routing, vertiport scheduling.
+- **Predictive pre-positioning**: ML predicts where demand will surge; nudges drivers toward those zones before requests arrive.
+- **Driverless matching**: Real-time bidding marketplace between rider and driver (drivers see fare + ETA + rating, choose to accept or pass).
+
+---
+
+## 9. Common Pitfalls & War Stories
+
+### Pitfall Summary
+
+| Pitfall | Impact | Fix |
+|---|---|---|
+| 375K location updates/sec hitting a single Redis node | Write hotspot, dropped location updates | Geo-partitioned Redis Cluster, partition by region/H3 cell |
+| Naive "find nearest driver" via SQL `ORDER BY distance` | Full table scan, multi-second latency | Pre-built geospatial index (H3 + Redis GEO), GEORADIUS < 1ms |
+| Two riders assigned the same driver | Driver shows up to wrong rider, trip cancellation | Atomic claim via Redis SET NX or Schemaless compare-and-swap |
+| Surge price recomputed synchronously per request | Stale or inconsistent multiplier shown to riders | Kafka Streams continuous aggregation per H3 cell, 1-minute refresh, cached |
+| Trip state updated without coordination | Inconsistent trip state across driver/rider apps | Cassandra LWT / Schemaless CAS, optimistic locking |
+| Payment captured before trip confirmed complete | Revenue loss on cancelled trips, rider disputes | Pre-authorization at trip start, capture at trip end, retry with backoff |
+| No pre-provisioned capacity for known peak events | Cascading overload on New Year's Eve / major events | Horizontal auto-scaling + pre-provisioned capacity playbooks |
+
+### War Story 1: Driver Location Service Outage
+
+**What happened**: The location-ingestion service — consuming roughly 1.25M location pings/sec via Kafka at peak — failed in a region during a high-demand window.
+
+**Impact**:
+- DISCO's Redis GEO + H3 index went stale within seconds of the outage.
+- Matching fell back to **last-known location with a staleness flag**: drivers whose last update was more than 30 seconds old were deprioritized but still matchable.
+- Riders saw less accurate ETAs — the app showed each driver's last-known position, not their current one — and a handful of "dispatched" drivers turned out to be farther away than estimated.
+- Driver apps buffered location updates locally (max 5 minutes of buffer) and replayed them once the ingestion service recovered.
+
+**Fix**: Stateless ingestion pods restarted within 30-60 seconds; a full H3 index resync from Kafka replay took 2-3 minutes to fully recover index freshness.
+
+**Lesson**: A geospatial "nearest driver" index is a derived cache, not a source of truth. Every consumer — matching, ETA display, surge calculation — needs an explicit staleness threshold and a documented degraded-mode behavior, or an index outage silently becomes a correctness bug (the wrong driver shown as "closest").
+
+### War Story 2: Schemaless / MySQL Shard Failure (Trip Data)
 **Scenario**: One of Uber's Schemaless shards (built on sharded MySQL) loses its master. Schemaless uses semi-sync replication with at least 1 replica acked.
 
 **Behavior**:
@@ -633,7 +700,7 @@ Resolution 11: ~25 m² hexagons  → precise driver positioning
 
 **TTR**: 60–90 seconds for write recovery; no data loss due to semi-sync.
 
-### Failure 3: Surge Pricing Calculation Service Down
+### War Story 3: Surge Pricing Calculation Service Down
 **Scenario**: The surge service (recomputes supply/demand ratio per H3 cell every minute) fails.
 
 **Behavior**:
@@ -644,7 +711,7 @@ Resolution 11: ~25 m² hexagons  → precise driver positioning
 
 **TTR**: 5–15 minutes for service restart + recomputation backfill.
 
-### Failure 4: Geohash Boundary Edge Case (Pre-H3 Pitfall)
+### War Story 4: Geohash Boundary Edge Case (Pre-H3 Pitfall)
 **Scenario**: A driver is 1 meter on the "wrong side" of a geohash boundary. The naive geohash lookup misses them, even though they're the closest driver.
 
 **Original problem**:
@@ -656,7 +723,7 @@ Resolution 11: ~25 m² hexagons  → precise driver positioning
 - "Overlapping rings" search: query the target hex + ring-1 (6 neighbors) + ring-2 (12 more) = 19 hexes covers ~10km radius.
 - Boundary effects nearly eliminated; uniform area per hex (resolution 9 = ~0.1 km²).
 
-### Failure 5: Cross-Region Kafka Replication Lag
+### War Story 5: Cross-Region Kafka Replication Lag
 **Scenario**: Global Kafka mirror lag spikes; trip events in one region don't appear in the data warehouse / fraud detection pipeline in another region.
 
 **Behavior**:
@@ -666,7 +733,7 @@ Resolution 11: ~25 m² hexagons  → precise driver positioning
 
 **TTR**: Depends on lag root cause (network, broker capacity). Typically 5–30 min.
 
-### Failure 6: Driver Double-Booking Race Condition
+### War Story 6: Driver Double-Booking Race Condition
 **Scenario**: Two rider requests come in simultaneously; both DISCO instances independently select the same driver.
 
 **Prevention**:
@@ -678,7 +745,7 @@ Resolution 11: ~25 m² hexagons  → precise driver positioning
 
 ---
 
-## 18. Capacity Planning Math
+## 10. Capacity Planning
 
 ### Location Updates Ingestion
 - **5M drivers globally, ~1.5M online at peak**, each pinging every 4 seconds.
@@ -715,91 +782,75 @@ Resolution 11: ~25 m² hexagons  → precise driver positioning
 
 ---
 
-## 19. Multi-Region and Global Deployment
+## 11. Interview Discussion Points
 
-### Per-City Domain Boundary
-- Uber's elegant insight: each city is largely a self-contained system.
-- A trip in San Francisco doesn't need to know about a trip in Singapore.
-- Each city has its own DISCO instance, surge calculator, driver pool — all sharded by `city_id`.
-- This sharding made geographic expansion linear in cost rather than O(N²) coordination overhead.
+### How to Structure a 45-Minute Answer
+1. **Clarify requirements** (5 min): ride request, matching, real-time tracking, payment, surge pricing.
+2. **Scale estimation** (5 min): 25M rides/day, 5M drivers globally (~1.5M online at peak), ~375K location updates/sec average.
+3. **High-level architecture** (5 min): client apps -> API gateway -> location ingestion (Kafka) -> DISCO matching -> trip service -> payment service.
+4. **Location tracking deep dive** (10 min): WebSocket ingestion, H3 geospatial index, Redis GEORADIUS — usually the most discussed component.
+5. **Matching algorithm** (5 min): H3 ring search for candidates, atomic driver claim (SET NX / CAS), fallback ring expansion.
+6. **Surge pricing** (5 min): supply/demand ratio per H3 cell, computed continuously via Kafka Streams.
+7. **Trip state machine** (5 min): explicit states and transitions, Cassandra LWT or Schemaless CAS for consistency.
+8. **Database design** (5 min): Redis (hot location index), Schemaless/Docstore (trips), PostgreSQL (profiles).
 
-### Active-Active Regional Architecture
-- 3-4 super-regions (Americas, EMEA, APAC, India).
-- Each region hosts the cities geographically near it.
-- Failover plan: if one region's DC fails, traffic re-routes to the nearest region (with latency penalty: ~100ms vs <20ms in-region).
-- Driver/rider sessions migrate to backup region; in-flight trips continue (driver app re-binds to backup gateway).
+**Q: What's the single hardest scaling problem in this system, and why?**
+A: Ingesting and indexing roughly 375K driver location updates per second (1.25M/sec at peak) while keeping "find the nearest available driver" under a few milliseconds. Every other component — matching, surge, ETA — depends on this index being both fast and fresh, so it's the load-bearing piece of the whole design.
 
-### Cross-Region Replication
-- Trip events: replicated via global Kafka (~1-5 sec lag) for analytics + fraud.
-- User profile updates: async replication via Schemaless cross-DC.
-- Payments: routed to specific payment processors per country; transaction records replicated to global ledger.
+**Q: How do you prevent two riders from being matched to the same driver?**
+A: Use an atomic claim operation — either a Redis `SET NX` on a `driver:{id}:status` key, or a compare-and-swap update in the trip-storage layer (`UPDATE drivers SET current_trip_id = X WHERE driver_id = Y AND current_trip_id IS NULL`). Whichever request wins the CAS gets the driver; the loser immediately retries with the next-best candidate from its ranked list. The key insight is that "check then assign" is a race condition — the check and the assignment must be a single atomic operation.
 
-### Data Residency
-- **China (Didi era)**: Uber China was operationally separate; data in China only.
-- **EU GDPR**: Trip data of EU users stored in EU.
-- **India**: Recent regulations require local storage; Uber operates Mumbai DC.
-- **Brazil**: LGPD compliance requires local data residency for PII.
+**Q: Why not just use a SQL database with a geospatial extension (e.g., PostGIS) for "find nearest drivers"?**
+A: PostGIS can answer the query correctly, but at 1.5M actively-moving drivers with sub-second freshness requirements, a relational database becomes a write bottleneck — every location ping is an UPDATE plus an index maintenance operation. An in-memory geospatial index (Redis GEO or an H3-keyed hash map) absorbs that write rate and answers nearest-neighbor queries in under a millisecond, with the relational/wide-column store reserved for durable trip and account records that don't change every few seconds.
 
-### Conflict Resolution
-- Trip state machine is single-writer (only the driver's home region writes to a trip).
-- User profiles: last-writer-wins with vector clock detection.
-- Pricing surge: computed independently per region; no conflicts.
+**Q: Why hexagons (H3) instead of geohash for spatial indexing?**
+A: Geohash cells are rectangular, vary in size near the poles, and have inconsistent neighbor counts at corners — a driver one meter across a cell boundary can be missed by a naive lookup. H3 hexagons have exactly six neighbors at every cell, so a "ring" search (target cell + ring-1 + ring-2, etc.) covers a roughly circular area uniformly with no special-casing for corners. The trade-off is that hexagons can't perfectly tile a sphere (12 pentagons are unavoidable), but those sit over oceans in Uber's deployment and are a non-issue in practice.
 
----
+**Q: How do you decide which parts of the system need strong consistency vs. eventual consistency?**
+A: Anchor the decision to "what happens if this is wrong for a few seconds." A stale location index means a slightly suboptimal match — annoying but recoverable, so it's eventually consistent. A trip assigned to two drivers, or a payment captured twice, is a correctness and trust failure — so trip-state transitions and payment captures use Cassandra LWT (or Schemaless CAS), accepting the ~10ms Paxos-based latency cost for that guarantee.
 
-## 20. Operational Concerns
+**Q: Walk through the trip state machine — what states exist and what guards transitions?**
+A: Typical states are `REQUESTED -> MATCHED -> DRIVER_ARRIVING -> IN_PROGRESS -> COMPLETED` (with `CANCELLED` reachable from the early states). Each transition is guarded by a conditional write (LWT/CAS) keyed on the current state, so a stale or duplicate transition request — e.g., two "trip started" events from a flaky driver app — is rejected rather than double-applied. The state machine is the single source of truth that the rider app, driver app, and payment service all converge on.
 
-### Critical Alerts
-| Metric | Threshold | Why |
-|--------|-----------|-----|
-| Match success rate | < 95% (per city) | Riders failing to find drivers; revenue + UX hit |
-| Match latency p99 | > 1s | DISCO bottleneck or driver index stale |
-| Location update lag (Kafka) | > 10s | Driver locations stale; bad matches |
-| Trip creation error rate | > 0.5% | Schemaless or payment service issue |
-| Surge calculation lag | > 2 min | Stale pricing; demand spikes uncaptured |
-| Cross-region replication lag | > 30s | Fraud detection blind spots |
-| Payment authorization failure | > 1% | Provider issue or fraud spike |
-| ETA accuracy MAPE | > 15% | ML model drift; affects trust |
+**Q: How does surge pricing actually get computed, and how often does it update?**
+A: A Kafka Streams job continuously aggregates active-driver-count and pending-request-count per H3 cell (resolution 7, ~5 km² hexagons), recomputing the supply/demand ratio roughly every 60 seconds and writing the resulting multiplier to a fast-read store (cache) that the pricing service reads on each fare quote. It's a streaming aggregation, not a per-request computation — recomputing from scratch for every ride request would be both slow and prone to showing different riders different prices for the same cell within the same second.
 
-### Deployment Strategy
-- **City-by-city canary**: Deploy new matching algorithm in one mid-tier city (e.g., Pittsburgh) for 1 week before global rollout.
-- **uDeploy / Spinnaker pipelines**: blue/green deployments; automatic rollback on SLO violation.
-- **Feature flags via Flipr**: enable per-city, per-user-bucket; emergency kill switches for new features.
-- **Shadow mode**: New matching algorithm runs alongside production, results compared offline before traffic shift.
+**Q: How do you handle a driver going offline mid-trip?**
+A: A heartbeat timeout (no location update for ~30-60 seconds) flags the trip; the system notifies the rider ("we're checking on your driver's connection") and, if the gap persists past a threshold, offers reassignment or support escalation. The driver's app buffers GPS locally and replays on reconnect, so a brief tunnel/dead-zone doesn't trigger a false alarm — the threshold is tuned to distinguish "momentary GPS gap" from "driver actually offline."
 
-### On-Call Runbook: Match Success Rate Drop in a City
-1. Check supply/demand dashboard for that city: is there a real-world event (concert, weather)?
-2. Check DISCO instance health: any pods crashing, OOM?
-3. Check driver count online: did drivers go offline en masse (app crash from bad deploy)?
-4. If algorithmic: roll back recent matching changes.
-5. If supply issue: enable "incentive" notifications to nearby drivers.
+**Q: How do you calculate ETA accurately?**
+A: Combine a routing engine (shortest/fastest path on the road graph) with an ML model trained on historical trip telemetry — actual driver GPS traces give ground-truth travel times for each road segment under different times of day, weather, and traffic conditions, which a static routing graph alone can't capture. The ML correction is what gets ETA error down from the 20%+ range of pure routing to Uber's targeted <15% MAPE.
 
-### On-Call Runbook: Location Update Lag Spike
-1. Check Kafka cluster: broker down? Disk full? Consumer lag growing?
-2. Check H3 indexer service: GC pause? CPU saturation?
-3. If single broker: rebalance partitions to healthy brokers.
-4. If global: scale out indexer fleet; auto-scaler may need manual nudge.
+**Q: How do you handle payments across countries with different payment methods and regulations?**
+A: Put a payments-abstraction service (Mezzanine, in Uber's case) between the trip/pricing logic and the actual payment rails, so the trip service always calls one internal API ("authorize", "capture", "refund") regardless of whether the underlying rail is a credit card processor in the US, a mobile wallet in Kenya, or cash settlement in markets where card penetration is low. Country-specific compliance (KYC, tax withholding, currency conversion) lives inside the abstraction layer, not scattered across trip logic.
+
+**Q: How does surge pricing defend against manipulation — e.g., drivers colluding to go offline to trigger surge?**
+A: Rate-limit and anomaly-detect on driver online/offline transition patterns per H3 cell — a coordinated mass "go offline" event in a small area produces a statistically unusual signature (many drivers, same cell, same few-minute window) that can be flagged and dampened (e.g., capping how fast the surge multiplier can rise) before it reaches riders. This is a defense-in-depth problem more than a pure algorithm problem — Uber also relies on driver-account-level fraud signals built up over time.
+
+**Q: At 10x scale (250M rides/day), what's the first thing that breaks?**
+A: Kafka-based location ingestion. At ~12.5M updates/sec, the per-message overhead of Kafka's protocol (even with batching) becomes the dominant cost, pushing toward a custom UDP-based fan-in tier in front of Kafka. The matching service (DISCO) would also need to split into a sub-10ms "candidate lookup" fast path and a separate, slightly slower "optimal assignment" path that can apply heavier ML scoring without blocking the fast path's latency budget.
+
+### Numbers to Remember
+- 25M rides/day, 5M drivers globally, ~1.5M online at peak.
+- Location update every 4 seconds -> ~375K updates/sec average, ~1.25M/sec at peak.
+- Match must complete in < 5 seconds; DISCO p99 target < 500ms.
+- H3 resolution 8-9 (~0.1-0.7 km²) for driver lookup; resolution 7 (~5 km²) for surge zones.
+- Redis GEORADIUS typical latency: < 1ms.
+- Cassandra LWT / Schemaless CAS adds ~10ms latency to trip-state transitions (Paxos-based).
+- Trip storage: ~125 GB/day raw, ~375 GB/day with RF=3, ~1 PB over 7-year regulatory retention.
+- Total core infrastructure cost: ~$50M/year (excludes maps APIs, payment processor fees, SMS).
 
 ---
 
-## 21. Evolution and Future Improvements
+## Cross-References
 
-### At 10× Scale (50M Drivers, 250M Rides/Day)
-- Location ingestion at 12.5M updates/sec would require migrating from Kafka to a custom UDP-based fan-in (Kafka adds too much overhead per message).
-- DISCO would need to be split: a fast-path "nearby driver lookup" (sub-10ms) + slow-path "optimal assignment" (50ms with ML scoring).
-- Schemaless replacement: TiKV or FoundationDB for global ACID transactions on trip data.
-- Surge calculation moves from per-minute to per-second granularity using stream processing (Flink with incremental aggregates).
-
-### Technical Debt
-- **Schemaless**: clever in 2014, but eventually-consistent semantics now constrain product features (e.g., showing real-time trip status across devices).
-- **Tchannel RPC** (Uber's RPC framework): being phased out in favor of gRPC, but long migration.
-- **Per-city sharding** breaks down for cross-city trips (long-distance rides, intercity routes). Hacks accumulate.
-- **Maps stack**: Uber built much of its own mapping (Movement, traffic predictions) to avoid Google Maps fees; maintaining this is expensive.
-
-### Future Capabilities
-- **Multimodal trips**: Single booking combining ride + bike + transit. Requires unified routing across providers.
-- **Autonomous vehicles**: Robotaxi integration changes the supply model (no "driver going offline"; vehicles always available subject to range).
-- **Aerial mobility (Uber Elevate, sold to Joby)**: 3D routing, vertiport scheduling.
-- **Predictive pre-positioning**: ML predicts where demand will surge; nudges drivers toward those zones before requests arrive.
-- **Driverless matching**: Real-time bidding marketplace between rider and driver (drivers see fare + ETA + rating, choose to accept or pass).
+- **Geospatial and consistent hashing theory** -> [`../consistent_hashing/README.md`](../consistent_hashing/README.md)
+- **Wide-column trip storage (Cassandra/Schemaless-style sharding)** -> [`../../database/wide_column_databases/README.md`](../../database/wide_column_databases/README.md)
+- **Redis internals for the hot driver-location index** -> [`../../database/key_value_stores/README.md`](../../database/key_value_stores/README.md)
+- **Sharding and resharding strategy (per-city domain boundaries)** -> [`../../database/sharding_and_partitioning/README.md`](../../database/sharding_and_partitioning/README.md)
+- **Kafka internals for the location-ingestion and event pipeline** -> [`../../backend/kafka_deep_dive/README.md`](../../backend/kafka_deep_dive/README.md)
+- **Caching strategy for the hot geospatial index** -> [`../../backend/caching_strategies_deep_dive/README.md`](../../backend/caching_strategies_deep_dive/README.md)
+- **LWT / Paxos-based consistency for trip-state transitions** -> [`../../database/consistency_models_and_consensus/README.md`](../../database/consistency_models_and_consensus/README.md)
+- **Microservices decomposition (per-city services, DISCO, payments)** -> [`../microservices/README.md`](../microservices/README.md)
+- **Multi-region failover patterns** -> [`../../backend/fault_tolerance_patterns/README.md`](../../backend/fault_tolerance_patterns/README.md)
 

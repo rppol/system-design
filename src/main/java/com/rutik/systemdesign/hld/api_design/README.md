@@ -426,6 +426,10 @@ Key tools: Datadog APM, AWS X-Ray, Prometheus + Grafana, New Relic, Jaeger (dist
 
 ---
 
+**Cross-references:** [backend/rest_api_design](../../backend/rest_api_design/) (resource modeling, HATEOAS, status codes), [backend/grpc_and_protobuf](../../backend/grpc_and_protobuf/) (binary protocols, streaming RPC), [backend/graphql](../../backend/graphql/) (schema design, N+1 resolution), [backend/api_gateway_patterns](../../backend/api_gateway_patterns/) (gateway-level versioning, auth, rate limiting).
+
+---
+
 ## 15. Case Study: Designing the Stripe Payments API
 
 **Problem:** Build a payments API that handles card charges from web and mobile clients, supports retries safely, and integrates with partner platforms.

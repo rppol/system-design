@@ -779,3 +779,4 @@ public class TempBuffer implements AutoCloseable {
 - [IoC Container](../ioc_container/README.md) — BeanFactory context and container bootstrap
 - [Spring Proxies](../spring_proxies/README.md) — BeanPostProcessor creates proxies
 - [Spring AOP](../spring_aop/README.md) — AOP lifecycle hooks
+- [LLD: Singleton Pattern](../../lld/creational/singleton/README.md) — the GoF pattern behind Spring's default singleton bean scope

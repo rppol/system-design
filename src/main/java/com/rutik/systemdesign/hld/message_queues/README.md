@@ -554,6 +554,10 @@ Tools: Kafka's `kafka-consumer-groups.sh`, Burrow, Confluent Control Center, Dat
 
 ---
 
+**Cross-references:** [backend/kafka_deep_dive](../../backend/kafka_deep_dive/) (partitions, consumer groups, ISR, exactly-once semantics), [backend/messaging_patterns](../../backend/messaging_patterns/) (competing consumers, pub/sub, saga via messaging), [backend/event_driven_fundamentals](../../backend/event_driven_fundamentals/), [spring/spring_messaging](../../spring/spring_messaging/) (`@KafkaListener`, JMS, RabbitMQ templates), [devops/event_streaming_operations](../../devops/event_streaming_operations/) (running and operating Kafka clusters), [python/fastapi/message_queues_and_event_driven](../../python/fastapi/message_queues_and_event_driven/) (Celery and FastAPI background processing).
+
+---
+
 ## Case Study: Ride-Matching Pipeline
 
 ### Context

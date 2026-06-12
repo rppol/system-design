@@ -965,3 +965,4 @@ public boolean preHandle(HttpServletRequest req, HttpServletResponse res,
 - [Request Handling](../request_handling/README.md) — @ControllerAdvice
 - [Spring Security Architecture](../spring_security_architecture/README.md) — security filter chain
 - [Case Study: Rate Limiter](../case_studies/design_distributed_rate_limiter_spring.md) — OncePerRequestFilter
+- [LLD: Chain of Responsibility](../../lld/behavioral/chain_of_responsibility/README.md) — the GoF pattern the Spring filter chain implements

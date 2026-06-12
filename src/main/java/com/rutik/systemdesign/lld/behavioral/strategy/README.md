@@ -487,6 +487,21 @@ A: Common approaches: (1) Conditional factory method — map an enum/string to a
 **Q: What design principle does Strategy embody?**
 A: "Favor composition over inheritance" (GoF principle). Instead of inheriting different behavior through subclasses, you compose behavior by injecting a strategy object. Also: Open/Closed Principle (open for extension via new strategies, closed for modification of Context).
 
+**Q: If the Context's strategy field can be swapped at runtime (`setStrategy()`), is that thread-safe?**
+A: Not by default — a plain field can be read by one thread while another thread is mid-write, leading to a torn read or a stale strategy being used after a swap. Declare the field `volatile` (so writes are visible immediately) if strategies are swapped occasionally and read often, or use `AtomicReference<Strategy>` if you need atomic compare-and-swap semantics (e.g., only replace the strategy if it's still the expected one). If the Context is per-request or per-thread (no shared mutable state), this isn't an issue at all — prefer that design when possible.
+
+**Q: Strategy vs. a Map-based dispatch table vs. if-else chains — when is each appropriate?**
+A: An if-else (or switch) chain is fine for 2-3 stable, rarely-changing options and keeps everything in one place for a quick read. A `Map<String, Strategy>` (or `Map<Enum, Strategy>`) dispatch table is the Strategy pattern made explicit — it scales to many options, supports runtime registration of new strategies (e.g., plugins), and replaces a long if-else with O(1) lookup, but adds a layer of indirection that can make tracing harder. Plain Strategy (constructor-injected single strategy per Context instance) is best when each Context instance only ever needs one fixed algorithm for its lifetime. Use the registry/map form specifically when the *same* Context needs to choose among many strategies dynamically based on runtime input.
+
+**Q: Are Strategy objects typically stateless, and can they be shared/reused?**
+A: Yes — well-designed Strategy implementations are usually stateless (no mutable instance fields), which means a single instance can be safely shared across many Context instances and threads, similar to how a `Comparator` or `Collator` instance is reused across many `sort()` calls. If a strategy needs per-invocation data, pass it as a method parameter rather than storing it on the strategy object — that keeps the strategy reusable and avoids introducing thread-safety concerns. Stateful strategies (rare) must be instantiated per-Context or per-thread.
+
+**Q: What's the performance cost of using Strategy instead of inlining the algorithm?**
+A: In practice, negligible for almost all applications — calling `strategy.execute()` is a virtual method call (interface dispatch), and the JIT can often perform devirtualization or inline the call entirely when a call site is monomorphic (only ever sees one concrete implementation at runtime), making it as fast as a direct call. The cost becomes measurable only in extremely hot loops with megamorphic call sites (many different Strategy implementations hitting the same call site), which is rare outside of interpreter/VM-style code. Don't avoid Strategy for "performance" reasons unless profiling shows the dispatch itself is the bottleneck — readability and OCP benefits far outweigh a cost you usually can't even measure.
+
+**Q: How do you unit-test a Context that depends on a Strategy?**
+A: Inject a test double — either a hand-written stub Strategy, a lambda implementing the Strategy's functional interface, or a mock from Mockito/EasyMock — so the test can assert the Context calls the strategy correctly without depending on a real algorithm's implementation. Because Strategy is composition-based (the Context holds a reference to the `Strategy` interface, typically via constructor injection), this is straightforward compared to Template Method, where you'd need to subclass the abstract class to override steps. This testability — swap in a fake without subclassing — is one of the practical reasons Effective Java favors composition over inheritance for algorithm variation.
+
 ---
 
 ## Cross-Perspective: HLD Connections

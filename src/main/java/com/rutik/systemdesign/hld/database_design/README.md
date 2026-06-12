@@ -421,6 +421,10 @@ A: OLTP (Online Transaction Processing): high-throughput short transactions, nor
 
 ---
 
+**Cross-references:** [backend/database_internals_and_indexing](../../backend/database_internals_and_indexing/) (B-tree/LSM internals behind the indexing strategies above), [backend/query_optimization](../../backend/query_optimization/), [database/README](../../database/README.md) (all 29 modules — schema design, normalization, NoSQL data modeling), [database/schema_design_and_normalization](../../database/schema_design_and_normalization/).
+
+---
+
 ## 16. Case Study: Designing a Database for an E-Commerce Platform
 
 **Requirements:** 10M products, 50M users, 100M orders/year. Reads: 100K/sec. Writes: 5K/sec. Latency: <50ms for product page, <200ms for order placement.

@@ -1,6 +1,6 @@
 # LLD Case Studies — Learning Path
 
-The seven problems in `../system_design_problems/` serve as the practical interview case studies
+The twelve problems in `../system_design_problems/` serve as the practical interview case studies
 for Low-Level Design. This README provides the learning path, pattern dependency map, and
 interview preparation shortcuts.
 
@@ -33,6 +33,7 @@ Problems grouped by the dominant engineering concern they exercise:
 | Vending Machine | FSM design — 4 states, clean transitions | [VendingMachine_README.md](../system_design_problems/VendingMachine_README.md) | State, Strategy (payment), Factory (product) |
 | ATM | FSM + transaction integrity | [ATM_README.md](../system_design_problems/ATM_README.md) | State, Template Method (transaction flow), Command |
 | Elevator System | Complex FSM + scheduling algorithm | [ElevatorSystem_README.md](../system_design_problems/ElevatorSystem_README.md) | State, Observer (floor requests), Strategy (SCAN/LOOK/FCFS) |
+| Ride Sharing | Ride lifecycle FSM with rejected-transition handling | [RideSharing_README.md](../system_design_problems/RideSharing_README.md) | State (ride lifecycle), Strategy (fare), Observer (status), Factory (vehicle) |
 
 ### Group B — Concurrency + Resource Management
 
@@ -47,6 +48,15 @@ Problems grouped by the dominant engineering concern they exercise:
 |---------|-----------------|------|--------------|
 | Library Management | Borrow/return lifecycle, overdue notifications | [LibraryManagement_README.md](../system_design_problems/LibraryManagement_README.md) | Builder (borrow record), Observer (overdue), Strategy (search) |
 | Chess Game | Move validation, undo/redo, game phases | [ChessGame_README.md](../system_design_problems/ChessGame_README.md) | Composite (board), Command (move + undo), State (game phase) |
+| Splitwise | Expense-sharing ledger, debt-graph simplification | [Splitwise_README.md](../system_design_problems/Splitwise_README.md) | Strategy (split type), Factory (split-strategy selection) |
+
+### Group D — Algorithms & Data Structures
+
+| Problem | Dominant Concern | File | Core Patterns |
+|---------|-----------------|------|--------------|
+| LRU Cache | O(1) get/put via doubly-linked list + HashMap; thread-safe wrapper | [LRUCache_README.md](../system_design_problems/LRUCache_README.md) | Decorator (thread safety), Observer (eviction listener) |
+| Rate Limiter | Per-client request throttling; 4 interchangeable algorithms | [RateLimiter_README.md](../system_design_problems/RateLimiter_README.md) | Strategy (algorithm), Factory (algorithm selection) |
+| Tic-Tac-Toe | Incremental win detection; pluggable AI move selection | [TicTacToe_README.md](../system_design_problems/TicTacToe_README.md) | Strategy (AI move), State (game state) |
 
 ---
 
@@ -55,16 +65,17 @@ Problems grouped by the dominant engineering concern they exercise:
 Which GoF patterns appear in which problems — use this to decide which problems to study
 when preparing for a specific pattern question:
 
-| Pattern | Vending | Parking | Library | Chess | Elevator | ATM | Booking |
-|---------|---------|---------|---------|-------|----------|-----|---------|
-| State | Primary | Supporting | — | Supporting | Primary | Primary | Supporting |
-| Strategy | Supporting | Primary | Supporting | — | Supporting | — | Primary |
-| Factory | Supporting | Primary | — | — | — | — | — |
-| Observer | — | — | Primary | — | Supporting | — | Supporting |
-| Command | — | — | — | Primary | — | Supporting | — |
-| Builder | — | — | Supporting | — | — | — | Supporting |
-| Template Method | — | — | — | — | — | Primary | — |
-| Composite | — | Supporting | — | Primary | — | — | — |
+| Pattern | Vending | Parking | Library | Chess | Elevator | ATM | Booking | RideSharing | LRUCache | RateLimiter | TicTacToe | Splitwise |
+|---------|---------|---------|---------|-------|----------|-----|---------|-------------|----------|-------------|-----------|-----------|
+| State | Primary | Supporting | — | Supporting | Primary | Primary | Supporting | Primary | — | — | Supporting | — |
+| Strategy | Supporting | Primary | Supporting | — | Supporting | — | Primary | Primary | — | Primary | Primary | Primary |
+| Factory | Supporting | Primary | — | — | — | — | — | Supporting | — | Supporting | — | Supporting |
+| Observer | — | — | Primary | — | Supporting | — | Supporting | Supporting | Supporting | — | — | — |
+| Command | — | — | — | Primary | — | Supporting | — | — | — | — | — | — |
+| Builder | — | — | Supporting | — | — | — | Supporting | — | — | — | — | — |
+| Template Method | — | — | — | — | — | Primary | — | — | — | — | — | — |
+| Composite | — | Supporting | — | Primary | — | — | — | — | — | — | — | — |
+| Decorator | — | — | — | — | — | — | — | — | Primary | — | — | — |
 
 **Legend**: Primary = the pattern is the main architectural decision; Supporting = the pattern
 appears as a secondary component.
@@ -93,17 +104,33 @@ Foundation (study first)
   +-- Elevator System         Online Booking System
   |   [Complex FSM +          [Concurrency + Strategy +
   |    scheduling algo]        double-booking prevention]
-  |
+  |                                |
+  |                                v
+  |                            Ride Sharing
+  |                            [State (ride lifecycle) + Strategy (fare) +
+  |                             Observer (status) + Factory (vehicle)]
   v
-Chess Game                    Library Management
-[Command undo/redo +          [Observer + Builder +
- Composite board]              borrow lifecycle]
+Chess Game     Library Management     Splitwise
+[Command       [Observer + Builder +  [Strategy (split types) +
+ undo/redo +    borrow lifecycle]      Factory + debt-graph
+ Composite                             simplification via
+ board]                                 max-heap matching]
+
+Standalone — Algorithms & Data Structures (study independently, any order)
+  |
+  +-- LRU Cache       [Doubly-linked list + HashMap, O(1) get/put; Decorator adds thread safety]
+  +-- Rate Limiter    [4 algorithms as Strategy — token bucket, fixed/sliding window]
+  +-- Tic-Tac-Toe     [Incremental win-check counters; Strategy for AI move selection]
 ```
 
 **Why this order**: Vending Machine's clean 4-state FSM is the template you'll reuse in every
 other state-machine problem. ATM adds the transaction integrity concern. Parking Lot adds Factory
-and Strategy. Elevator extends the FSM complexity. Chess and Library are standalone but assume
-you can already identify patterns quickly.
+and Strategy. Elevator extends the FSM complexity, and Ride Sharing reuses the same Strategy +
+Observer + State combination on a trip lifecycle. Chess, Library, and Splitwise are standalone
+domain-modeling problems but assume you can already identify patterns quickly. The Algorithms &
+Data Structures group (LRU Cache, Rate Limiter, Tic-Tac-Toe) is independent of the rest — these
+lean more on data-structure correctness than on OOP class design, so study them whenever a
+"design X" question turns out to really be "implement X efficiently."
 
 ---
 
@@ -120,10 +147,14 @@ you can already identify patterns quickly.
 | Design a movie / flight / hotel booking | Online Booking System | Pattern is identical |
 | Design a traffic light system | Vending Machine | Same 4-state FSM structure |
 | Design a food delivery order lifecycle | ATM + Booking | State machine + double-allocation |
-| Design a ride-sharing trip lifecycle | Parking Lot + Elevator | Resource allocation + FSM |
+| Design a ride-sharing app (Uber/Lyft) | Ride Sharing | Direct match — State, Strategy, Observer, Factory |
 | Design a bank transaction system | ATM | Transaction integrity, rollback, idempotency |
 | Design a document editor with undo | Chess Game | Command pattern undo/redo |
 | Design a notification system | Library Management | Observer pattern, overdue/event triggers |
+| Design an LRU cache (or LFU variant) | LRU Cache | Direct match — doubly-linked list + HashMap, O(1) |
+| Design a rate limiter (class-design angle) | Rate Limiter | Direct match — Strategy across 4 algorithms |
+| Design tic-tac-toe / a turn-based board game | Tic-Tac-Toe | Direct match — incremental win-check, pluggable AI |
+| Design Splitwise / a bill-splitting app | Splitwise | Direct match — Strategy splits + debt simplification |
 
 ### 30-Minute Interview Time Box
 
@@ -151,3 +182,5 @@ for the class diagram. Timebox requirements to 5 minutes maximum.
 | Factory + Strategy combo | [../creational/factory_method/](../creational/factory_method/), [../behavioral/strategy/](../behavioral/strategy/) |
 | Concurrency in Parking/Elevator | [../concurrency_patterns/README.md](../concurrency_patterns/README.md) |
 | Distributed scale of these problems | [../../hld/microservices/](../../hld/microservices/) |
+| Decorator (LRU Cache thread safety) | [../structural/decorator/](../structural/decorator/) |
+| Rate limiting at distributed scale | [../../hld/rate_limiting/](../../hld/rate_limiting/) |

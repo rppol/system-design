@@ -18,11 +18,11 @@ Key insight: the majority of ML failures are not algorithm failures — they are
 
 ## What This Section Covers
 
-Thirty-three modules organized across eight learning phases take you from linear algebra through production MLOps. Six topics contain deep-dive sub-files (26 sub-files total), and `case_studies/cross_cutting/` contains five shared-primitive files, all following the same 14-section template used throughout this repository. Twenty-two end-to-end case studies — each covering a real-world ML system — demonstrate how individual concepts combine into full system designs. A dedicated algorithm-selection module (#33) consolidates the "which algorithm, when and why" rationale referenced by every case study. The section is structured so it can be read sequentially as a learning curriculum or used as a reference when preparing for a specific interview topic.
+Thirty-six modules organized across eight learning phases take you from linear algebra through production MLOps. Six topics contain deep-dive sub-files (27 sub-files total), and `case_studies/cross_cutting/` contains five shared-primitive files, all following the same 14-section template used throughout this repository. Twenty-two end-to-end case studies — each covering a real-world ML system — demonstrate how individual concepts combine into full system designs. A dedicated algorithm-selection module (#33) consolidates the "which algorithm, when and why" rationale referenced by every case study. The section is structured so it can be read sequentially as a learning curriculum or used as a reference when preparing for a specific interview topic.
 
 ---
 
-## All Topics (33 Modules)
+## All Topics (36 Modules)
 
 | # | Topic | Key Concepts | Phase | Difficulty |
 |---|-------|-------------|-------|------------|
@@ -41,7 +41,7 @@ Thirty-three modules organized across eight learning phases take you from linear
 | 13 | [Training Deep Networks](training_deep_networks/README.md) | Regularization, dropout, gradient clipping, mixed precision, distributed training basics | 3 — Deep Learning Foundations | Intermediate |
 | 14 | [Generative Models](generative_models/README.md) | VAEs, GANs, normalizing flows, diffusion models, mode collapse, FID score | 3 — Deep Learning Foundations | Advanced |
 | 15 | [Computer Vision](computer_vision/README.md) | Object detection, segmentation, vision transformers, self-supervised vision | 4 — Domain Specializations | Intermediate |
-| 16 | [Natural Language Processing](natural_language_processing/README.md) | Text preprocessing, word2vec, GloVe, sentiment analysis, NER, classical NLP pipelines — 4 sub-files: BERT fine-tuning, attention/seq2seq, retrieval, evaluation | 4 — Domain Specializations | Intermediate |
+| 16 | [Natural Language Processing](natural_language_processing/README.md) | Text preprocessing, word2vec, GloVe, sentiment analysis, NER, classical NLP pipelines — 5 sub-files: BERT fine-tuning, attention/seq2seq, retrieval, evaluation, tokenization | 4 — Domain Specializations | Intermediate |
 | 17 | [Recommender Systems](recommender_systems/README.md) | Collaborative filtering, content-based, matrix factorization, deep recommenders, ranking | 4 — Domain Specializations | Intermediate |
 | 18 | [Time Series Forecasting](time_series_forecasting/README.md) | ARIMA, Prophet, temporal CNNs, LSTMs for time series, anomaly detection in streams | 4 — Domain Specializations | Intermediate |
 | 19 | [Reinforcement Learning](reinforcement_learning/README.md) | MDP, Q-learning, policy gradients, PPO, actor-critic, reward shaping, exploration | 4 — Domain Specializations | Advanced |
@@ -59,12 +59,15 @@ Thirty-three modules organized across eight learning phases take you from linear
 | 31 | [Causal Inference and ML](causal_inference_and_ml/README.md) | Potential outcomes, DAGs, propensity scores, uplift modeling, A/B test analysis | 7 — Advanced Topics | Advanced |
 | 32 | [ML Interview Patterns](ml_interview_patterns/README.md) | End-to-end design framework, common question archetypes, anti-patterns, cheat sheets | 8 — Interview Consolidation | Intermediate |
 | 33 | [Model Selection and Algorithm Choice](model_selection_and_algorithm_choice/README.md) | Algorithm decision matrix, problem-type → algorithm mapping, data-size vs complexity regimes, constraint-driven elimination (latency, interpretability, regulatory), baseline discipline | Cross-Cutting Reference | Advanced |
+| 34 | [Active Learning and Weak Supervision](active_learning_and_weak_supervision/README.md) | Uncertainty/diversity sampling, query-by-committee, BALD, Snorkel labeling functions, label model, weak supervision, data-centric AI | 5 — ML Systems & Infrastructure | Advanced |
+| 35 | [Adversarial ML and Robustness](adversarial_ml_and_robustness/README.md) | Evasion (FGSM/PGD/C&W), data poisoning, backdoors, model extraction, membership inference, adversarial training, randomized smoothing | 7 — Advanced Topics | Advanced |
+| 36 | [Uncertainty Quantification and Conformal Prediction](uncertainty_quantification_and_conformal_prediction/README.md) | Aleatoric vs epistemic uncertainty, MC dropout, deep ensembles, calibration (ECE), conformal prediction sets/intervals, CQR | 7 — Advanced Topics | Advanced |
 
 ---
 
 ## Sub-Files Index
 
-Twenty-two deep-dive sub-files provide topic-level detail beyond what a single README can cover. Each follows the full 14-section template with a minimum of 15 interview Q&As.
+Twenty-seven deep-dive sub-files provide topic-level detail beyond what a single README can cover. Each follows the full 14-section template with a minimum of 15 interview Q&As.
 
 ### supervised_learning/ (4 sub-files)
 
@@ -103,7 +106,7 @@ Twenty-two deep-dive sub-files provide topic-level detail beyond what a single R
 | [content_and_hybrid.md](recommender_systems/content_and_hybrid.md) | Content-Based and Hybrid | TF-IDF features, item embeddings, hybrid architectures, cold-start, exploration-exploitation |
 | [online_learning_and_bandits.md](recommender_systems/online_learning_and_bandits.md) | Online Learning and Bandits | Multi-armed bandits, epsilon-greedy, UCB, Thompson sampling, contextual bandits, LinUCB |
 
-### natural_language_processing/ (4 sub-files)
+### natural_language_processing/ (5 sub-files)
 
 | File | Topic | Key Concepts |
 |------|-------|-------------|
@@ -111,6 +114,7 @@ Twenty-two deep-dive sub-files provide topic-level detail beyond what a single R
 | [attention_and_seq2seq.md](natural_language_processing/attention_and_seq2seq.md) | Attention and Seq2Seq | Bahdanau, Luong attention, encoder-decoder transformers, beam search, nucleus sampling |
 | [text_representation_and_retrieval.md](natural_language_processing/text_representation_and_retrieval.md) | Text Representation and Retrieval | BM25 derivation, inverted index, Sentence-BERT, FAISS, ColBERT, RRF hybrid search |
 | [nlp_evaluation_and_metrics.md](natural_language_processing/nlp_evaluation_and_metrics.md) | NLP Evaluation and Metrics | BLEU, ROUGE, METEOR, BERTScore, entity-level F1, ECE, text augmentation |
+| [tokenization_deep_dive.md](natural_language_processing/tokenization_deep_dive.md) | Tokenization Deep Dive | BPE, WordPiece, Unigram LM, SentencePiece, byte-level BPE, vocabulary sizing, fertility, train/inference parity |
 
 ### ml_system_design/ (5 sub-files)
 
@@ -198,7 +202,8 @@ Phase 3 — Deep Learning Foundations
 Phase 4 — Domain Specializations
   computer_vision      -->  [sub-files: object_detection, image_segmentation, vision_transformers, self_supervised_vision]
   natural_language_processing  -->  [sub-files: bert_and_pretrained_models, attention_and_seq2seq,
-                               text_representation_and_retrieval, nlp_evaluation_and_metrics]
+                               text_representation_and_retrieval, nlp_evaluation_and_metrics,
+                               tokenization_deep_dive]
   recommender_systems  -->  [sub-files: collaborative_filtering, deep_learning_recommenders,
                              retrieval_and_ranking, content_and_hybrid, online_learning_and_bandits]
   time_series_forecasting
@@ -212,6 +217,7 @@ Phase 5 — ML Systems & Infrastructure
   distributed_training
   experiment_tracking_and_versioning
   gpu_and_hardware_optimization
+  active_learning_and_weak_supervision
         |
         v
 Phase 6 — Production ML
@@ -225,6 +231,8 @@ Phase 7 — Advanced Topics
   graph_neural_networks
   self_supervised_and_contrastive_learning
   causal_inference_and_ml
+  adversarial_ml_and_robustness
+  uncertainty_quantification_and_conformal_prediction
         |
         v
 Phase 8 — Interview Consolidation

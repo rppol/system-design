@@ -57,15 +57,22 @@ LLD describes how individual components are implemented — class relationships,
 
 ### LLD Interview Problems
 
-| Problem | Key Patterns |
-|---------|-------------|
-| Design a parking lot | Strategy, Factory, State |
-| Design an elevator | State, Observer |
-| Design a library management system | Builder, Observer, Strategy |
-| Design a chess game | Composite, Command, State |
-| Design a vending machine | State, Strategy, Factory |
-| Design a ride-sharing app | Strategy, Observer, Factory |
-| Design an ATM | State, Template Method |
+12 problems, each with a `<Name>_README.md` (problem statement, ASCII class diagram, patterns, tradeoffs) and a runnable `<Name>.java` in `system_design_problems/`:
+
+| Problem | Key Patterns | File |
+|---------|-------------|------|
+| Design a parking lot | Strategy, Factory, State | [ParkingLot](system_design_problems/ParkingLot_README.md) |
+| Design an elevator | State, Observer | [ElevatorSystem](system_design_problems/ElevatorSystem_README.md) |
+| Design a library management system | Builder, Observer, Strategy | [LibraryManagement](system_design_problems/LibraryManagement_README.md) |
+| Design a chess game | Composite, Command, State | [ChessGame](system_design_problems/ChessGame_README.md) |
+| Design a vending machine | State, Strategy, Factory | [VendingMachine](system_design_problems/VendingMachine_README.md) |
+| Design an ATM | State, Template Method | [ATM](system_design_problems/ATM_README.md) |
+| Design a movie/flight/hotel booking system | Strategy, Observer, Builder | [OnlineBookingSystem](system_design_problems/OnlineBookingSystem_README.md) |
+| Design a ride-sharing app | Strategy, Observer, Factory, State | [RideSharing](system_design_problems/RideSharing_README.md) |
+| Design an LRU cache (+ LFU variant) | Decorator (thread-safe wrapper) | [LRUCache](system_design_problems/LRUCache_README.md) |
+| Design a rate limiter (LLD angle) | Strategy, Factory | [RateLimiter](system_design_problems/RateLimiter_README.md) |
+| Design tic-tac-toe | Strategy, State | [TicTacToe](system_design_problems/TicTacToe_README.md) |
+| Design Splitwise / expense sharing | Strategy, Factory | [Splitwise](system_design_problems/Splitwise_README.md) |
 
 ---
 
@@ -83,6 +90,8 @@ LLD describes how individual components are implemented — class relationships,
 | `concurrency_patterns/` | `../../java/concurrency/` — ExecutorService internals, ThreadPoolExecutor tuning, deep Java concurrency |
 | `concurrency_patterns/` | `../../java/java_memory_model/` — happens-before, volatile semantics, DCL correctness |
 | `system_design_problems/` | `../../hld/microservices/` — Parking Lot / Elevator at distributed system scale |
+| `system_design_problems/RateLimiter_README.md` | `../../hld/rate_limiting/` — single-JVM token bucket/sliding window here vs. Redis-backed distributed rate limiting at HLD scale |
+| `system_design_problems/LRUCache_README.md` | `../../hld/caching/`, `../../database/database_caching_patterns/` — exact in-process LRU here vs. approximated/sampled LRU eviction in Redis/Memcached at scale |
 
 ---
 

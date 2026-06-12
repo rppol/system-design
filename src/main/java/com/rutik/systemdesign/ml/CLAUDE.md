@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 33 Modules
+## Module List — 36 Modules
 
 | Module Directory | Phase | Key Concepts | Sub-files |
 |-----------------|-------|-------------|-----------|
@@ -42,17 +42,20 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `causal_inference_and_ml/` | 7 | Potential outcomes, propensity scores, uplift, CausalForest | — |
 | `ml_interview_patterns/` | 8 | Design framework, debug checklist, tradeoff templates | — |
 | `model_selection_and_algorithm_choice/` | Cross-cutting | Algorithm decision matrix, problem-type → algorithm mapping, data-size vs complexity regimes | — |
+| `active_learning_and_weak_supervision/` | 5 | Uncertainty/diversity sampling, QBC, BALD, Snorkel labeling functions, label model, data-centric AI | — |
+| `adversarial_ml_and_robustness/` | 7 | FGSM/PGD/C&W evasion, poisoning, backdoors, model extraction, membership inference, adversarial training, randomized smoothing | — |
+| `uncertainty_quantification_and_conformal_prediction/` | 7 | Aleatoric vs epistemic, MC dropout, deep ensembles, ECE/temperature scaling, conformal sets/intervals, CQR | — |
 
 ---
 
-## Sub-Files — 26 Topic Sub-Files
+## Sub-Files — 27 Topic Sub-Files
 
 | Module | Sub-files |
 |--------|-----------|
 | `supervised_learning/` | linear_models, support_vector_machines, decision_trees, bayesian_methods |
 | `ensemble_methods/` | random_forests, gradient_boosting, xgboost_lightgbm, stacking_and_blending |
 | `computer_vision/` | object_detection, image_segmentation, vision_transformers, self_supervised_vision |
-| `natural_language_processing/` | bert_and_pretrained_models, attention_and_seq2seq, text_representation_and_retrieval, nlp_evaluation_and_metrics |
+| `natural_language_processing/` | bert_and_pretrained_models, attention_and_seq2seq, text_representation_and_retrieval, nlp_evaluation_and_metrics, tokenization_deep_dive |
 | `recommender_systems/` | collaborative_filtering, deep_learning_recommenders, retrieval_and_ranking, content_and_hybrid, online_learning_and_bandits |
 | `ml_system_design/` | design_framework, feature_store_design, training_pipeline_design, ab_testing_for_ml, latency_and_throughput_optimization |
 
@@ -93,6 +96,10 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `computer_vision/` | `../../llm/multimodal_models/` — VLMs, vision encoders |
 | `model_evaluation_and_selection/` | `../../llm/evaluation_and_benchmarks/` — MMLU, LLM-as-judge, RAGAs |
 | `experiment_tracking_and_versioning/` | `../../llm/llm_observability_and_monitoring/` — Langfuse, Arize Phoenix |
+| `natural_language_processing/` (tokenization, retrieval) | `../../llm/tokenization_and_embeddings/` — BPE/WordPiece/SentencePiece at LLM scale; `../../llm/rag_fundamentals/` — dense retrieval reused by RAG |
+| `adversarial_ml_and_robustness/` | `../../llm/llm_security/` — prompt injection/jailbreaks; `../../llm/guardrails_and_content_safety/` |
+| `uncertainty_quantification_and_conformal_prediction/` | `case_studies/cross_cutting/model_calibration_and_thresholding/`; `../../llm/evaluation_and_benchmarks/` — abstention/uncertainty signals |
+| `active_learning_and_weak_supervision/` | `../../llm/data_flywheels_and_continuous_learning/`; `../../llm/synthetic_data_generation/` |
 
 ---
 

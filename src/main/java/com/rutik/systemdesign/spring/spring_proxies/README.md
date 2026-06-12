@@ -675,3 +675,4 @@ session.setAttribute("orderId", order.getId());        // plain data, replicates
 - [Spring AOP](../spring_aop/README.md) — AOP uses proxies
 - [Spring Transactions](../spring_transactions/README.md) — @Transactional self-invocation
 - [Spring Caching](../spring_caching/README.md) — @Cacheable self-invocation
+- [LLD: Proxy Pattern](../../lld/structural/proxy/README.md) — virtual/protection/remote proxy theory behind JDK dynamic proxies and CGLIB

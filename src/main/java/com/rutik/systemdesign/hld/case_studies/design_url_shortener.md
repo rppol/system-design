@@ -1,24 +1,5 @@
 # System Design: URL Shortener (like bit.ly)
 
-## Table of Contents
-1. Requirements Clarification
-2. Scale Estimation
-3. High-Level Architecture
-4. URL Shortening Algorithm
-5. Redirect Mechanism
-6. Database Design
-7. Caching Strategy
-8. Consistent Hashing
-9. Analytics
-10. Custom Aliases
-11. Expiration and Cleanup
-12. Rate Limiting
-13. Bottlenecks and Solutions
-14. Trade-offs
-15. Interview Discussion Tips
-
----
-
 ## Intuition
 
 > **Design intuition**: A URL shortener is the "Hello World" of system design — it seems simple (store a mapping, redirect on lookup) but teaches all the fundamentals: hash function choice, database schema, caching strategy (reads are 100:1 over writes), and analytics pipeline. Master this and you understand distributed system basics.
@@ -127,7 +108,9 @@
 
 ---
 
-## 4. URL Shortening Algorithm
+## 4. Component Deep Dives
+
+### URL Shortening Algorithm
 
 ### The Core Problem
 Given a long URL, generate a short unique code of length 7.
@@ -208,7 +191,7 @@ Zookeeper manages range assignments:
 
 ---
 
-## 5. Redirect Mechanism
+### Redirect Mechanism
 
 ### HTTP 301 vs. 302
 | | 301 Permanent Redirect | 302 Temporary Redirect |
@@ -248,7 +231,7 @@ Client follows redirect → Original URL
 
 ---
 
-## 6. Database Design
+### Database Design
 
 ### Why Cassandra?
 - Write-heavy (1,200 new URLs/sec) + read-heavy (116K redirects/sec after cache)
@@ -306,7 +289,7 @@ CREATE TABLE url_stats_hourly (
 
 ---
 
-## 7. Caching Strategy
+### Caching Strategy
 
 ### Why Cache?
 - 116K reads/sec — even fast Cassandra can't handle this efficiently without caching
@@ -354,7 +337,7 @@ function getRedirectUrl(short_url):
 
 ---
 
-## 8. Consistent Hashing
+### Consistent Hashing
 
 ### The Problem
 Multiple Redis cache nodes. When we add or remove a node, how do we redistribute keys without invalidating most of the cache?
@@ -383,7 +366,7 @@ Multiple Redis cache nodes. When we add or remove a node, how do we redistribute
 
 ---
 
-## 9. Analytics
+### Analytics
 
 ### Requirements
 - Click count per URL (near-real-time)
@@ -434,7 +417,7 @@ Persist to Cassandra via periodic flush (every minute), not per-click.
 
 ---
 
-## 10. Custom Aliases
+### Custom Aliases
 
 ### Requirements
 - User specifies desired short code: e.g., `bit.ly/launch-event`
@@ -481,7 +464,7 @@ RESERVED_WORDS = {
 
 ---
 
-## 11. Expiration and Cleanup
+### Expiration and Cleanup
 
 ### TTL in Redis
 - Set TTL when caching: `SET url:abc1234 "..." EX {seconds_until_expiry}`
@@ -511,7 +494,7 @@ LIMIT 10000;
 
 ---
 
-## 12. Rate Limiting
+### Rate Limiting
 
 ### Why Rate Limiting?
 - Prevent abuse: bots creating millions of URLs to spam
@@ -543,21 +526,7 @@ function is_rate_limited(user_id, limit=100, window=3600):
 
 ---
 
-## 13. Bottlenecks and Solutions
-
-| Bottleneck | Impact | Solution |
-|---|---|---|
-| 116K redirect reads/sec | Cassandra overloaded | Redis cache (>95% hit rate reduces DB load by 20x) |
-| ID generator is a single point of failure | URL creation fails | Distributed counter with multiple servers + Zookeeper range assignment |
-| Write hotspot on counter | Sequential IDs go to same DB shard | Base62 encoding distributes across character space; hash short_url for sharding |
-| Cache invalidation on expiry | Expired URLs still served from cache | Set cache TTL = min(expires_at TTL, max_cache_ttl); short TTL for near-expiry URLs |
-| Analytics Kafka consumer lag | Click data delayed | Partition Kafka by short_url; multiple consumer instances; increase partitions |
-| Custom alias race condition | Two users get same alias | Cassandra INSERT IF NOT EXISTS (LWT); single-writer mutex for hot aliases |
-| Viral link (100K clicks/sec on one URL) | Cache stampede on first click | Cache warming: detect high-traffic URLs, proactively cache; mutex on cache miss |
-
----
-
-## 14. Trade-offs Made
+## 5. Design Decisions & Tradeoffs
 
 ### 302 vs. 301 Redirect
 - **Choice**: 302 for analytics, option to use 301 for users who opt out
@@ -586,69 +555,154 @@ function is_rate_limited(user_id, limit=100, window=3600):
 
 ---
 
-## 15. Interview Discussion Tips
+## 6. Real-World Implementations
 
-### Complete Interview Answer Structure (45 minutes)
-1. **Requirements** (5 min): shorten, redirect, analytics, custom alias, expiration
-2. **Scale estimation** (5 min): write out numbers explicitly — 1.2K writes/sec, 116K reads/sec, 100:1 ratio, 27TB storage
-3. **High-level architecture** (5 min): draw the diagram with write path and read path separated
-4. **URL shortening algorithm** (10 min): this is the most interview-worthy part — walk through all 3 options and justify your choice
-5. **Redirect (301 vs 302)** (3 min): explain the trade-off clearly
-6. **Caching strategy** (5 min): Redis cache-aside, LRU eviction, 80/20 rule
-7. **Database design** (5 min): Cassandra schema with partition key reasoning
-8. **Analytics pipeline** (3 min): Kafka → Flink → Cassandra
-9. **Rate limiting** (3 min): token bucket, Redis INCR
-10. **Trade-offs summary** (1 min)
+### URL Shorteners in Production
 
-### Key Things Interviewers Look For
-- Explicit discussion of **hash collision** problem with MD5 approach
-- Understanding of **Base62 encoding** (know the math: 62^7 = 3.5 trillion)
-- Clear explanation of **301 vs 302** trade-off
-- **Cache-aside pattern** for Redis (not write-through)
-- Awareness of the **cache stampede** problem for viral links
-- Correct partition key choice in Cassandra (short_url, not user_id for redirect table)
+- **Bitly**: The reference implementation for this case study. Bitly serves billions of redirects per month from a sharded MySQL backend behind a heavy Memcached/Redis caching layer, with a custom Base62 encoder over an internal sequence generator. Bitly's API exposes click analytics (geography, referrer, device) as a first-class product feature, not an afterthought.
+- **TinyURL**: One of the oldest URL shorteners (since 2002), historically built on a single large MySQL instance with an auto-increment primary key directly Base36/Base62-encoded — a textbook example of the "Option B" approach in §4, simple enough to run for two decades with minimal re-architecture because read traffic, while large, is geographically less concentrated than a viral-content platform.
+- **t.co (Twitter/X)**: Every link posted to Twitter is automatically rewritten to a `t.co/...` short link — not for brevity (the t.co link is often *longer* than the original), but for **security scanning** (malicious URL detection at click-time, not just post-time) and **click analytics**. This is the canonical example of a shortener used as a security/analytics proxy rather than a length-reduction tool.
+- **goo.gl (Google, shut down 2019)**: A cautionary tale. Google deprecated goo.gl after eight years, breaking millions of existing short links across the web (QR codes on physical signage, printed materials, embedded app links). The lesson for any shortener design: **short URLs are a long-term commitment** — the "Expiration and Cleanup" design decision (§4) has product and reputational consequences that outlive the original engineering team.
+- **Firebase Dynamic Links (Google, deprecated 2025)**: A more recent repeat of the same lesson — a "dynamic" shortener (the "Dynamic destination" future capability in §8) that resolved differently per platform (iOS deep link vs. Android vs. web) was sunset, again forcing every dependent app to migrate. Reinforces that "Custom Aliases" and "Dynamic destination" features (§4, §8) need an explicit, published deprecation policy from day one.
 
-### Common Mistakes to Avoid
-- Using MD5 without acknowledging collisions
-- Choosing 301 when analytics is required
-- Putting everything in MySQL (won't scale to 116K reads/sec)
-- Not mentioning Redis caching (the single most important optimization)
-- Forgetting the expiration mechanism
-- Not mentioning rate limiting (allows the system to be abused)
-- Using same table for both "lookup by short_url" and "lookup by user" — need separate tables in Cassandra
+### Comparable Systems for Cross-Reference
 
-### Follow-up Questions You May Get
-- "How would you handle a cache stampede when a viral link is first clicked?" — Mutex/lock on cache miss, or pre-warm cache for new URLs
-- "How would you scale the ID generator to 100K writes/sec?" — Pre-allocate larger ranges per counter server, reduce Zookeeper coordination frequency
-- "How would you implement link previews (OGP metadata)?" — Fetch and cache OGP tags from long URL when shortening; serve preview from cache
-- "How would you detect malicious URLs?" — Integrate VirusTotal API on creation, maintain blocklist, add async scanning via Kafka consumer
-
-### Numbers to Remember
-- 100M writes/day = 1,200 writes/sec
-- 10B reads/day = 116K reads/sec
-- 100:1 read-to-write ratio
-- 62^7 = 3.5 trillion possible short codes
-- 5-year storage: ~27 TB for URL data
-- 80/20 rule: 20% of URLs = 80% of traffic
-- Cache size for hot 20%: ~2 GB (fits easily in Redis)
-- Rate limit: 100 URLs/hour for free tier
+- **DNS**: Structurally the same problem one layer down the stack — a short, human-readable name (`example.com`) resolves to a long machine address (an IP), with heavy caching (resolver caches, TTLs) for the hot path and a hierarchical, eventually-consistent backing store (the global DNS system) for the cold path. The cache-aside-with-TTL pattern in §4's Caching Strategy is directly analogous to a DNS resolver cache.
+- **Pastebin / paste services**: Share the ID-generation problem (generate a short, unique, hard-to-guess identifier for a piece of content) but flip the read pattern — a paste is typically read a handful of times, not millions, so a paste service's caching tier is far smaller relative to its storage tier than a URL shortener's.
+- **CDN edge redirects**: A CDN serving a 301/302 from its edge PoPs (§8's Multi-Region section) solves the same "redirect at the edge without an origin round-trip" problem that media CDNs solve for asset URLs — the difference is that a URL shortener's "asset" is a single HTTP redirect response rather than a multi-megabyte file.
 
 ---
 
-## 18. Failure Scenarios and Recovery
+## 7. Technologies & Tools
 
-### Failure 1: Primary Database Loss
-**Scenario**: The primary MySQL/Postgres holding the URL mapping table fails (hardware, network, or accidental DROP).
+| Component | Technology | Why |
+|---|---|---|
+| ID generation | Distributed counter (Zookeeper-coordinated ranges) + Base62 | No collisions, no central bottleneck, predictable 7-character length |
+| Hot redirect cache | Redis Cluster (`allkeys-lru`) | Sub-millisecond reads for the >95% cache-hit hot path |
+| Primary URL store | Cassandra | Simple key-value access by `short_url`, write-heavy, horizontal scale, `IF NOT EXISTS` LWT for custom aliases |
+| Edge / CDN | CloudFlare / Fastly | Caches 301/302 responses at 200+ PoPs; near-zero origin latency for repeat clicks |
+| Analytics ingestion | Kafka | Decouples click recording from the redirect response; absorbs viral-link bursts |
+| Stream aggregation | Flink | Real-time per-minute click aggregation by country, device, referrer |
+| Analytics store | ClickHouse / Cassandra (time-series) | Compressed columnar storage for billions of click events |
+| Rate limiting | Redis (`INCR` + `EXPIRE`) | Atomic distributed counters shared across all API servers |
+| Malicious URL detection | Kafka consumer + Google Safe Browsing API | Async scanning that doesn't block URL creation latency |
+| Coordination | Zookeeper | Counter range allocation, leader election for counter servers |
 
-**Behavior**:
-- Read traffic continues from read replicas (10–30 of them in production).
-- Write traffic (new URL creation) pauses for 30–60s while a replica is promoted.
-- Short code generation pauses during this window (counter state lives in DB or in Zookeeper).
-- Already-generated codes still work because Redis serves 95%+ of redirect traffic.
+---
 
-**TTR**: 30–60s for write recovery via auto-failover (e.g., Orchestrator, Patroni); manual intervention can take 5–15 min if automation fails.
+## 8. Operational Playbook
 
-### Failure 2: Redis Cache Tier Wipeout (Cold Cache)
+### Multi-Region and Global Deployment
+
+#### Edge-First Architecture
+- URL shorteners are read-heavy and globally consumed → **CDN at edge is critical**.
+- 301/302 redirects cached at CloudFlare/Fastly PoPs (200+ globally).
+- **Cache hit at edge**: 0ms origin latency, ~10ms p99 globally.
+- **Cache miss**: ~15ms to origin (regional) + ~5ms DB/cache lookup = **~20ms p99**.
+
+#### Active-Active Origins
+- 3 origin regions (us-east, eu-west, ap-southeast).
+- Each region has its own Redis tier + read replicas.
+- Writes (URL creation) go to a primary region; eventually replicated to others.
+- Reads served from local region only (no cross-region read needed because edge cache handles freshness).
+
+#### Replication
+- Postgres logical replication or DB-specific (Patroni for HA, BDR for multi-master) cross-region.
+- Replication lag: typically 50–500ms; acceptable because edge cache hides this.
+- Redis cross-region: not replicated; each region builds its own cache on read.
+
+#### Conflict Resolution
+- Short codes are immutable once assigned: no conflict possible.
+- Counter ranges: Zookeeper or a global counter service allocates non-overlapping ranges to each region (e.g., us-east gets [0, 1B], eu-west gets [1B, 2B]).
+- User-supplied custom aliases (e.g., bit.ly/my-link): globally coordinated to prevent duplicates; uses a global lookup before assignment.
+
+#### Data Residency
+- GDPR: EU user click analytics (IP, geo, user agent) stored only in EU.
+- URL records themselves are not PII (just URL strings), replicated globally for low-latency lookup.
+
+### Deployment and Alerting
+
+#### Critical Alerts
+| Metric | Threshold | Why |
+|--------|-----------|-----|
+| Redirect p99 latency | > 50ms (at edge) | UX degradation; clicks abandoned |
+| Redis cache hit ratio | < 90% | DB about to be overloaded |
+| URL creation error rate | > 0.1% | DB or counter issue |
+| Counter range exhaustion warning | < 10% remaining | Run out of IDs imminent |
+| Phishing flag rate | > 1% of new URLs | Abuse campaign in progress |
+| Analytics pipeline lag | > 5 min | Stale dashboards; OK for hours, not days |
+| CDN egress cost spike | > 2× baseline | Possible attack or viral URL |
+
+#### Deployment Strategy
+- **Blue/green**: Two parallel fleets; LB cuts over after smoke tests.
+- **Canary**: 1% traffic to new build for 1 hour; auto-rollback on error rate or latency regression.
+- **Feature flags** for new URL features (custom aliases, branded short domains, expiration policies).
+- **Schema migrations**: backward-compatible only; multi-step (add column → backfill → switch reads → drop old column) to avoid downtime.
+
+#### On-Call Runbook: Redirect Latency Spike
+1. Check edge CDN dashboards: is cache hit rate dropping?
+2. If yes: check for a viral URL or attacker pattern (lots of misses for non-existent codes).
+3. If origin-side: check Redis health, then DB health.
+4. Mitigation: increase edge cache TTL temporarily (e.g., from 1 hour to 24 hours); accept some staleness.
+
+#### On-Call Runbook: Phishing Campaign Detected
+1. Identify pattern: same destination domain, same creator IP, same user account?
+2. Block at source: ban account, IP, or destination domain.
+3. Bulk-flag existing URLs from the same source.
+4. Notify abuse@ team and partners (Google Safe Browsing).
+5. Post-mortem: did our auto-detector miss the pattern? Tune classifier.
+
+### Evolution and Future Improvements
+
+#### At 10× Scale (3B URLs/month, 100B redirects/month)
+- Edge caching becomes existential: 1M redirects/sec average; without 99%+ edge cache hit, origin cost explodes.
+- Database sharding required for URL table; Cassandra or Cosmos DB candidates.
+- Counter coordination shifts to a distributed sequence service (Twitter Snowflake-style with per-DC range allocation).
+- Analytics moves from ClickHouse to a streaming-only architecture (Materialize, RisingWave) for sub-second freshness.
+
+#### Technical Debt
+- Custom short codes (vanity URLs) bypass the counter scheme — separate code path with global coordination overhead.
+- Click analytics schemas evolved organically; many legacy columns retained for backward compatibility.
+- Multi-domain support (bit.ly + custom branded domains) complicates routing logic.
+
+#### Future Capabilities
+- **Dynamic destination**: Short code resolves to different URLs based on context (geo, device, time of day, A/B test bucket). E.g., `bit.ly/promo` → mobile app store on phones, web page on desktop.
+- **Programmable redirects**: User-defined logic via WASM at the edge.
+- **Privacy-preserving analytics**: Differential privacy on aggregated click counts; no raw IP logging.
+- **Decentralized short URLs**: IPFS-based or blockchain-anchored short URLs that don't depend on a central service.
+- **AI-powered abuse detection**: LLM-based phishing detection beyond URL pattern matching; analyzes landing page content in real time.
+
+---
+
+## 9. Common Pitfalls & War Stories
+
+### Pitfall Summary
+
+| Pitfall | Impact | Fix |
+|---|---|---|
+| 116K redirect reads/sec hitting the database directly | Database overloaded, redirects time out | Redis cache-aside (>95% hit rate cuts DB load by 20x) |
+| Single ID-generator instance | URL creation is a single point of failure | Distributed counter with multiple servers + Zookeeper range assignment |
+| Sequential counter IDs encoded naively | Write hotspot on one DB shard | Base62 spreads encoded IDs across the key space; shard by hashed short_url |
+| Cache TTL not tied to expires_at | Expired URLs still served from cache | Cache TTL = min(time until expires_at, max_cache_ttl) |
+| Kafka consumer falls behind | Analytics dashboards show stale data | Partition Kafka by short_url, scale out consumer group, monitor lag |
+| Custom alias race (two users pick same alias) | One user's alias silently overwritten | Cassandra `INSERT ... IF NOT EXISTS` (LWT) |
+| Viral link with no warm cache | Cache stampede — thousands of identical DB queries simultaneously | Singleflight/request-coalescing + proactive cache warming for trending URLs |
+
+### War Story 1: Primary Database Failover Mid-Traffic
+
+**What happened**: The primary database holding the URL mapping table failed (hardware fault) during normal daytime traffic.
+
+**Impact**:
+- Redirect traffic was unaffected — Redis serves >95% of redirects, and the remaining reads fell back to read replicas.
+- New URL creation paused for 30–60 seconds while a replica was promoted to primary.
+- Short-code generation paused during the same window, since counter state lived in the database/Zookeeper.
+- Every already-issued short code kept working throughout the incident — the cache layer fully insulated the read path from the database outage.
+
+**Fix**: Automated failover (Orchestrator/Patroni) promoted a replica within 30–60 seconds; manual intervention would have taken 5–15 minutes had automation failed.
+
+**Lesson**: A read-heavy system's availability is bounded by its *cache* tier's availability, not its database's — which is exactly why Redis itself becoming a single point of failure (War Story 2) is the more dangerous failure mode of the two.
+
+### War Story 2: Redis Cache Tier Wipeout (Cold Cache)
 **Scenario**: Redis cluster restarted (config change, OOM, OS patch). All 20K reads/sec peak load now hits the database directly.
 
 **Math of the catastrophe**:
@@ -663,7 +717,7 @@ function is_rate_limited(user_id, limit=100, window=3600):
 
 **TTR**: With proper warming, <5 min. Without: 30 min of degraded service.
 
-### Failure 3: Counter Coordinator (Zookeeper) Failure
+### War Story 3: Counter Coordinator (Zookeeper) Failure
 **Scenario**: Zookeeper ensemble (managing ID ranges for short code generation) loses quorum.
 
 **Behavior**:
@@ -673,7 +727,7 @@ function is_rate_limited(user_id, limit=100, window=3600):
 
 **TTR**: Zookeeper quorum recovery typically <5 min; until then, ~1 hour of creation capacity from pre-allocated ranges.
 
-### Failure 4: Cache Stampede on Viral Link
+### War Story 4: Cache Stampede on Viral Link
 **Scenario**: A celebrity tweets a shortened URL; 100K requests/sec hit a single short code that's not yet cached.
 
 **Behavior without mitigation**:
@@ -687,7 +741,7 @@ function is_rate_limited(user_id, limit=100, window=3600):
 
 **TTR**: 100ms for first request; subsequent requests served from edge cache at 0ms latency.
 
-### Failure 5: Abuse Storm (Phishing Campaign)
+### War Story 5: Abuse Storm (Phishing Campaign)
 **Scenario**: An attacker creates 10M short URLs all pointing to phishing pages in a 1-hour burst.
 
 **Behavior**:
@@ -702,7 +756,7 @@ function is_rate_limited(user_id, limit=100, window=3600):
 
 **TTR**: 1–5 minutes to flag and block individual URLs; minutes to hours to detect campaigns.
 
-### Failure 6: Analytics Pipeline Backlog
+### War Story 6: Analytics Pipeline Backlog
 **Scenario**: Kafka → Flink → ClickHouse analytics pipeline lags due to Flink job failure.
 
 **Behavior**:
@@ -714,7 +768,7 @@ function is_rate_limited(user_id, limit=100, window=3600):
 
 ---
 
-## 19. Capacity Planning Math
+## 10. Capacity Planning
 
 ### URL Generation
 - **300M URLs/month** (Bitly public number) = 300M / 30 / 86400 = **~115 URLs/sec average**, ~1K/sec peak.
@@ -758,87 +812,76 @@ function is_rate_limited(user_id, limit=100, window=3600):
 
 ---
 
-## 20. Multi-Region and Global Deployment
+## 11. Interview Discussion Points
 
-### Edge-First Architecture
-- URL shorteners are read-heavy and globally consumed → **CDN at edge is critical**.
-- 301/302 redirects cached at CloudFlare/Fastly PoPs (200+ globally).
-- **Cache hit at edge**: 0ms origin latency, ~10ms p99 globally.
-- **Cache miss**: ~15ms to origin (regional) + ~5ms DB/cache lookup = **~20ms p99**.
+### How to Structure a 45-Minute Answer
+1. **Requirements** (5 min): shorten, redirect, analytics, custom alias, expiration.
+2. **Scale estimation** (5 min): write out the numbers explicitly — ~1,200 writes/sec, ~116K reads/sec, 100:1 ratio, ~27TB 5-year storage.
+3. **High-level architecture** (5 min): draw the diagram with write path and read path separated.
+4. **URL shortening algorithm** (10 min): the most interview-worthy part — walk through hash-based, counter-based, and pre-generated-pool options and justify your choice.
+5. **Redirect mechanism** (3 min): explain the 301 vs 302 trade-off.
+6. **Caching strategy** (5 min): Redis cache-aside, LRU eviction, the 80/20 rule.
+7. **Database design** (5 min): Cassandra schema with partition-key reasoning.
+8. **Analytics pipeline** (3 min): Kafka -> Flink -> Cassandra/ClickHouse.
+9. **Rate limiting** (3 min): token bucket / Redis INCR.
+10. **Trade-offs and wrap-up** (1 min).
 
-### Active-Active Origins
-- 3 origin regions (us-east, eu-west, ap-southeast).
-- Each region has its own Redis tier + read replicas.
-- Writes (URL creation) go to a primary region; eventually replicated to others.
-- Reads served from local region only (no cross-region read needed because edge cache handles freshness).
+**Q: Why is hashing the long URL with MD5/SHA256 and truncating it a bad approach for short-code generation?**
+A: Truncating a cryptographic hash to 7 characters throws away most of its collision resistance — with only 62^7 ~ 3.5 trillion possible 7-character codes, the birthday paradox means collisions become likely after roughly the square root of that space (~1.9 million URLs), far below the 100M URLs/day this system needs to handle. Every collision requires a database round-trip to detect and a retry with a different hash slice, adding latency and complexity exactly on the write path. A counter-based or pre-generated-pool approach (§4) avoids collisions entirely by construction.
 
-### Replication
-- Postgres logical replication or DB-specific (Patroni for HA, BDR for multi-master) cross-region.
-- Replication lag: typically 50–500ms; acceptable because edge cache hides this.
-- Redis cross-region: not replicated; each region builds its own cache on read.
+**Q: Walk through Base62 encoding — why base62 and not base64 or base36?**
+A: Base62 uses [a-z, A-Z, 0-9] — 62 characters, all URL-safe without escaping, unlike base64's `+`, `/`, and `=` characters which need percent-encoding in a URL path. Base36 (lowercase letters + digits only) would need 8 characters instead of 7 to cover a comparable ID space (36^8 ~ 2.8 trillion vs. 62^7 ~ 3.5 trillion), making URLs longer for no benefit. Base62 is the sweet spot: maximum information density per character while staying URL-safe.
 
-### Conflict Resolution
-- Short codes are immutable once assigned: no conflict possible.
-- Counter ranges: Zookeeper or a global counter service allocates non-overlapping ranges to each region (e.g., us-east gets [0, 1B], eu-west gets [1B, 2B]).
-- User-supplied custom aliases (e.g., bit.ly/my-link): globally coordinated to prevent duplicates; uses a global lookup before assignment.
+**Q: 301 vs. 302 redirect — which do you choose and why?**
+A: 302 (temporary redirect), because it forces the browser to hit your server on every click, which is required for per-click analytics — a 301 gets cached by the browser after the first visit, and subsequent clicks never reach your servers again. The trade-off is a small latency cost on every redirect (a server round-trip instead of a browser-cached jump), acceptable because the redirect itself is already optimized to ~1ms via cache. Some shorteners offer 301 as an opt-in for users who explicitly don't need analytics and want maximum redirect speed.
 
-### Data Residency
-- GDPR: EU user click analytics (IP, geo, user agent) stored only in EU.
-- URL records themselves are not PII (just URL strings), replicated globally for low-latency lookup.
+**Q: How do you prevent the ID generator from becoming a write bottleneck or single point of failure?**
+A: Run multiple counter servers, each pre-allocated a disjoint range of IDs by Zookeeper (e.g., server A gets IDs 1-1,000,000, server B gets 1,000,001-2,000,000). Each server issues IDs from its local range without coordination, only contacting Zookeeper when its range is exhausted — turning a potential per-request bottleneck into an infrequent, amortized coordination cost. If a counter server crashes mid-range, its remaining unused IDs are simply abandoned, a tiny acceptable waste given 3.5 trillion total IDs available.
 
----
+**Q: Why Cassandra over MySQL/Postgres for the URL mapping table?**
+A: The access pattern is pure key-value — look up `long_url` by `short_url`, with no joins, no complex queries, and a 100:1 read-to-write ratio dominated by simple point lookups. Cassandra's partitioned, masterless architecture scales horizontally for both the write volume (1,200+ URLs/sec) and the post-cache read volume, and its `INSERT ... IF NOT EXISTS` lightweight transaction gives just enough consistency for the one place it's needed: custom alias creation. A relational database's transactional and join capabilities would be unused overhead here.
 
-## 21. Operational Concerns
+**Q: How does the cache-aside pattern work for redirects, and what happens on a cache miss?**
+A: On a request, the read API checks Redis first (`GET url:abc1234`); a hit returns the long URL immediately (~0.1-1ms) and logs the click event asynchronously to Kafka. On a miss, the API queries Cassandra, checks the `expires_at` field, populates Redis with an appropriate TTL if the URL is still valid, and then returns the redirect — so the *next* request for that code becomes a cache hit. The cache is populated lazily and never holds data the database doesn't also have, so a cache wipe is recoverable (just slower), not a data-loss event.
 
-### Critical Alerts
-| Metric | Threshold | Why |
-|--------|-----------|-----|
-| Redirect p99 latency | > 50ms (at edge) | UX degradation; clicks abandoned |
-| Redis cache hit ratio | < 90% | DB about to be overloaded |
-| URL creation error rate | > 0.1% | DB or counter issue |
-| Counter range exhaustion warning | < 10% remaining | Run out of IDs imminent |
-| Phishing flag rate | > 1% of new URLs | Abuse campaign in progress |
-| Analytics pipeline lag | > 5 min | Stale dashboards; OK for hours, not days |
-| CDN egress cost spike | > 2× baseline | Possible attack or viral URL |
+**Q: How do you handle a cache stampede when a previously-cold link suddenly goes viral?**
+A: Use request coalescing (the "singleflight" pattern): when 100,000 concurrent requests miss the cache for the same short code, only the first request actually queries the database — the other 99,999 wait on that single in-flight query and share its result. Combine this with auto-detection of high request-rate keys so that key's cache TTL is extended preemptively, and with edge-CDN caching of the 301/302 response itself so repeat requests from the same region never reach the origin after the first one.
 
-### Deployment Strategy
-- **Blue/green**: Two parallel fleets; LB cuts over after smoke tests.
-- **Canary**: 1% traffic to new build for 1 hour; auto-rollback on error rate or latency regression.
-- **Feature flags** for new URL features (custom aliases, branded short domains, expiration policies).
-- **Schema migrations**: backward-compatible only; multi-step (add column → backfill → switch reads → drop old column) to avoid downtime.
+**Q: How do you implement custom aliases without a race condition between two users requesting the same alias?**
+A: The check ("is this alias available?") and the write ("claim this alias") must be a single atomic operation, not two separate steps — otherwise two concurrent requests can both pass the check before either writes. Cassandra's `INSERT INTO url_mapping (...) VALUES (...) IF NOT EXISTS` is a lightweight transaction (Paxos-based) that performs both atomically: it succeeds for exactly one of the two concurrent requests and fails for the other, which then returns an "alias already taken" error to its user.
 
-### On-Call Runbook: Redirect Latency Spike
-1. Check edge CDN dashboards: is cache hit rate dropping?
-2. If yes: check for a viral URL or attacker pattern (lots of misses for non-existent codes).
-3. If origin-side: check Redis health, then DB health.
-4. Mitigation: increase edge cache TTL temporarily (e.g., from 1 hour to 24 hours); accept some staleness.
+**Q: How do you handle URL expiration cleanly — both in cache and in the database?**
+A: Set the Redis TTL to match (or be shorter than) the URL's `expires_at` so the cache entry disappears on its own at the right time; on a cache miss, the database read checks `expires_at` directly and returns 410 Gone for expired URLs, marking them `is_active = false` (lazy deletion). A nightly background sweep then hard-deletes URLs inactive for 30+ days, freeing the short code for reuse — the 30-day grace period exists so a user who set the wrong expiration date can recover their link.
 
-### On-Call Runbook: Phishing Campaign Detected
-1. Identify pattern: same destination domain, same creator IP, same user account?
-2. Block at source: ban account, IP, or destination domain.
-3. Bulk-flag existing URLs from the same source.
-4. Notify abuse@ team and partners (Google Safe Browsing).
-5. Post-mortem: did our auto-detector miss the pattern? Tune classifier.
+**Q: How would you detect and block malicious or phishing URLs without slowing down legitimate URL creation?**
+A: Don't put the check on the synchronous creation path — publish every newly-created URL to a Kafka topic, and have async consumers check it against the Google Safe Browsing API and an internal phishing classifier. If a URL is flagged within the first few minutes, mark it inactive and serve a warning page on subsequent redirects instead of the destination; if a domain accumulates a high flag rate across many short URLs, blocklist the entire domain and flag the originating account for review.
+
+**Q: Why is consistent hashing needed for the Redis cache layer, and what would happen without it?**
+A: With a naive `hash(key) % N` scheme, adding or removing one Redis node changes the target node for almost every key — effectively a full cache wipe, which (per War Story 2) can multiply database load by 20x or more for the duration of the rewarm. Consistent hashing with virtual nodes (~150 per physical node) means adding or removing a node only remaps the keys in the affected arc of the hash ring — roughly 1/N of all keys — so the cache stays mostly warm through routine scaling and node failures.
+
+**Q: At 10x scale (3B URLs/month, 100B redirects/month), what's the first thing that breaks, and what changes?**
+A: Origin infrastructure cost becomes the binding constraint — at ~1M redirects/sec average, even a 99% edge-cache hit rate still sends ~10K requests/sec to origin, so edge cache hit rate has to push toward 99.9%+ via longer TTLs and smarter pre-warming of trending links. The URL table needs sharding (Cassandra handles this natively, but operational complexity grows), counter coordination moves toward a Snowflake-style per-datacenter ID allocation to avoid cross-region coordination, and the analytics pipeline likely moves from a batch-aggregated ClickHouse model to a fully streaming architecture for near-real-time dashboards.
+
+### Numbers to Remember
+- 100M URL creations/day -> ~1,200 writes/sec average, ~3,600/sec peak.
+- 10B redirects/day -> ~116K reads/sec average, ~350K/sec peak.
+- 100:1 read-to-write ratio.
+- 62^7 ~ 3.5 trillion possible 7-character short codes.
+- 5-year URL storage: ~27 TB (with RF=3).
+- 80/20 rule: 20% of URLs generate 80% of traffic; that hot set fits in ~2-10 GB of Redis.
+- Target cache hit rate: >95%; redirect latency <10ms (p99 ~20ms on cache miss).
+- Total infra cost at Bitly scale: ~$600K/year.
 
 ---
 
-## 22. Evolution and Future Improvements
+## Cross-References
 
-### At 10× Scale (3B URLs/month, 100B redirects/month)
-- Edge caching becomes existential: 1M redirects/sec average; without 99%+ edge cache hit, origin cost explodes.
-- Database sharding required for URL table; Cassandra or Cosmos DB candidates.
-- Counter coordination shifts to a distributed sequence service (Twitter Snowflake-style with per-DC range allocation).
-- Analytics moves from ClickHouse to a streaming-only architecture (Materialize, RisingWave) for sub-second freshness.
-
-### Technical Debt
-- Custom short codes (vanity URLs) bypass the counter scheme — separate code path with global coordination overhead.
-- Click analytics schemas evolved organically; many legacy columns retained for backward compatibility.
-- Multi-domain support (bit.ly + custom branded domains) complicates routing logic.
-
-### Future Capabilities
-- **Dynamic destination**: Short code resolves to different URLs based on context (geo, device, time of day, A/B test bucket). E.g., `bit.ly/promo` → mobile app store on phones, web page on desktop.
-- **Programmable redirects**: User-defined logic via WASM at the edge.
-- **Privacy-preserving analytics**: Differential privacy on aggregated click counts; no raw IP logging.
-- **Decentralized short URLs**: IPFS-based or blockchain-anchored short URLs that don't depend on a central service.
-- **AI-powered abuse detection**: LLM-based phishing detection beyond URL pattern matching; analyzes landing page content in real time.
+- **Consistent hashing for the Redis cluster (§4)** -> [`../consistent_hashing/README.md`](../consistent_hashing/README.md)
+- **Distributed rate limiting (§4)** -> [`../rate_limiting/README.md`](../rate_limiting/README.md)
+- **Cassandra / wide-column storage internals (§4 Database Design)** -> [`../../database/wide_column_databases/README.md`](../../database/wide_column_databases/README.md)
+- **Redis internals for the redirect cache** -> [`../../database/key_value_stores/README.md`](../../database/key_value_stores/README.md)
+- **Cache-aside, stampede prevention, and TTL strategy** -> [`../../backend/caching_strategies_deep_dive/README.md`](../../backend/caching_strategies_deep_dive/README.md), [`../../database/database_caching_patterns/README.md`](../../database/database_caching_patterns/README.md)
+- **Kafka internals for the analytics pipeline** -> [`../../backend/kafka_deep_dive/README.md`](../../backend/kafka_deep_dive/README.md)
+- **Distributed ID generation (counter/Snowflake-style alternatives)** -> [`../../java/case_studies/design_snowflake_id_generator_java.md`](../../java/case_studies/design_snowflake_id_generator_java.md)
+- **CDN edge caching for 301/302 responses** -> [`../../devops/cloud_networking_and_cdn/README.md`](../../devops/cloud_networking_and_cdn/README.md)
 

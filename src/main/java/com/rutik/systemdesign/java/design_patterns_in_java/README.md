@@ -707,5 +707,6 @@ for (OrderListener l : listeners) {
 - [Java Interview Patterns](../java_interview_patterns/README.md) — interview-focused subset: immutable class, Builder, enum singleton, factory method
 - [Case Study: DI Container](../case_studies/design_di_container_java.md) — IoC pattern implemented end-to-end in Java
 - [Case Study: Event Bus](../case_studies/design_event_bus.md) — Observer pattern applied to a production-grade event bus
+- [LLD Section](../../lld/README.md) — the full GoF pattern catalogue (creational/structural/behavioral, all 23 patterns) with UML diagrams and Java implementations this module draws from
 
 **How do you keep Strategy and Observer thread-safe at 50 orders/sec peak?** Strategies must be stateless (all per-request data passed as arguments), and the observer list should be a `CopyOnWriteArrayList` so concurrent fan-out reads never collide with rare subscribe/unsubscribe writes; listeners themselves must be idempotent and order-independent.

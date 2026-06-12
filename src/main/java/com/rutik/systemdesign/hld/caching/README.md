@@ -383,6 +383,10 @@ A: Hit rate, miss rate, eviction rate, memory usage, latency (p50/p99), connecti
 
 ---
 
+**Cross-references:** [backend/caching_strategies_deep_dive](../../backend/caching_strategies_deep_dive/) (cache stampede protection, multi-tier caching, write-behind implementation), [database/database_caching_patterns](../../database/database_caching_patterns/) (DB-level caching and materialized views), [database/in_memory_databases](../../database/in_memory_databases/) (Redis/Memcached internals), [spring/spring_caching](../../spring/spring_caching/) (`@Cacheable`/`@CacheEvict` and Spring's cache abstraction), [llm/llm_caching](../../llm/llm_caching/) (KV-cache and prompt caching for LLM inference).
+
+---
+
 ## 14. Case Study: Designing a Cache for a Twitter-Scale Social Feed
 
 ### Problem Statement

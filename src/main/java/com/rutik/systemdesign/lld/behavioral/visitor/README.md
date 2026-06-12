@@ -444,6 +444,21 @@ A: `java.nio.file.FileVisitor`, ANTLR's generated visitor interfaces, Eclipse JD
 **Q: How would you implement Visitor without the pattern?**
 A: You'd use `instanceof` chains or add operation methods to each element class. Both approaches lead to scattered code and force modification of existing classes for new operations.
 
+**Q: How does Visitor relate to the Interpreter pattern?**
+A: They're often used together — Interpreter defines a grammar as a class hierarchy (an Abstract Syntax Tree of expression nodes), and Visitor is the natural way to implement *operations over that AST* (evaluation, pretty-printing, type-checking, optimization) without cramming all of them into the expression node classes themselves. Each AST node class (`NumberExpr`, `AddExpr`, `MultiplyExpr`) implements `accept(Visitor)`, and separate Visitor classes implement `EvaluatorVisitor`, `PrettyPrinterVisitor`, etc. This combination is exactly how compiler/interpreter front-ends are structured: the parser builds the Interpreter's tree, and every subsequent compiler pass is a Visitor over that tree.
+
+**Q: When is Visitor overkill, and what would you use instead?**
+A: If the object structure is small and stable (rarely gains new element types) and you only have a handful of operations, adding a regular polymorphic method to each element class (`element.calculateArea()`, `element.render()`) is simpler, more discoverable, and avoids the double-dispatch boilerplate entirely. Visitor pays off specifically when operations multiply faster than element types — e.g., a shapes hierarchy with 4 shapes but 10 different export/analysis operations. Introducing Visitor for a 2-shape, 2-operation hierarchy is needless indirection; YAGNI applies.
+
+**Q: Does the Visitor pattern break encapsulation?**
+A: To some degree, yes — for a Visitor to compute something about an element (e.g., a `Circle`'s area, a `File`'s size), the element must expose enough of its internal state via public getters for the external Visitor class to read, which can leak implementation details that would otherwise stay private inside the element. This is the explicit tradeoff GoF acknowledges: Visitor centralizes related operations at the cost of widening the element's public surface. Mitigate by exposing only the minimal data needed (e.g., a `getSizeInBytes()` accessor rather than raw internal buffers) rather than generic "give me everything" getters.
+
+**Q: How would you design a Visitor interface to be extensible when new element types are rare but possible?**
+A: Provide a default/no-op `visit()` method for each element type — in Java, this means either using an abstract base `Visitor` class with concrete default implementations (subclasses override only the types they care about) or, in Java 8+, default methods on a `Visitor` interface. When a new element type is added, you add a new default method to the base/interface so existing concrete visitors compile unchanged (they simply inherit the no-op default), while visitors that *do* care about the new type override it. This doesn't eliminate the core OCP tradeoff (you still touch the Visitor interface), but it avoids a compile break across every existing visitor implementation.
+
+**Q: Walk through a concrete real-world use of Visitor.**
+A: A file-system traversal tool: `FileSystemElement` (interface with `accept(Visitor)`) is implemented by `FileNode` and `DirectoryNode`. A `SizeCalculatorVisitor` sums file sizes recursively to compute disk usage, a `SearchVisitor` collects paths matching a name pattern, and a `PermissionAuditVisitor` flags files with overly permissive ACLs — all three are separate classes that traverse the same tree without modifying `FileNode`/`DirectoryNode`. This mirrors `java.nio.file.FileVisitor`/`Files.walkFileTree()`, where you implement `visitFile`/`preVisitDirectory`/`postVisitDirectory` callbacks and the JDK handles the traversal (the "accept" side).
+
 ---
 
 ## Cross-Perspective: HLD Connections

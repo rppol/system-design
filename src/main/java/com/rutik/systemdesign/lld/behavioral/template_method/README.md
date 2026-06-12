@@ -563,6 +563,18 @@ A: `HttpServlet.service()` dispatching to `doGet()`/`doPost()` is the canonical 
 **Q: What's the Hollywood Principle and how does it relate?**
 A: "Don't call us, we'll call you." High-level base class controls the flow and calls low-level subclass methods — not the other way around. This inverts the typical dependency direction in inheritance.
 
+**Q: How do you decide whether a step should be an abstract method or a hook method?**
+A: Make a step abstract when every subclass MUST provide its own meaningful implementation and there's no sensible default — the algorithm is incomplete without it (e.g., `parseFormat()` in a data-import pipeline). Make it a hook (concrete, default no-op or default-behavior) when the step is optional and most subclasses can use the default — e.g., `beforeSave()` or `onError()` extension points that only some subclasses care about. Too many abstract methods makes every subclass verbose with boilerplate overrides; too many hooks can hide important required customization. A good template typically has 1-3 abstract "primitive operations" and any number of optional hooks.
+
+**Q: What's the classic gotcha with calling overridable methods from a constructor in a Template-Method-style base class?**
+A: If the base class constructor calls a method that a subclass overrides (an abstract or hook "step"), the overridden version runs *before* the subclass's own constructor has finished initializing its fields — so the override may see `null`/zero-valued fields it expects to be set. This is a well-known Java pitfall (Effective Java explicitly warns against it). The fix is to never invoke abstract/overridable methods from a constructor; instead, have the algorithm's entry point be an explicit method (`run()`, `process()`) called after construction is complete, which is exactly how Template Method is normally structured anyway.
+
+**Q: How does Template Method interact with the Liskov Substitution Principle?**
+A: Subclasses must implement the abstract steps in a way that preserves the invariants and overall contract of the template algorithm — a subclass that throws an unexpected exception, returns null where a value is required, or has wildly different performance/side-effect characteristics than the skeleton expects violates LSP even though it compiles fine. For example, if `AbstractReportGenerator.generate()` assumes `fetchData()` returns a non-null (possibly empty) list, a subclass returning `null` breaks every caller of `generate()`, not just that one method — document the contract of each abstract step (preconditions, postconditions, allowed exceptions) so subclasses can be substituted safely.
+
+**Q: Beyond `HttpServlet`, what other Template Method examples exist in the JDK and Spring?**
+A: JUnit's test lifecycle is a Template Method: the test runner calls `@BeforeEach` setup, then the `@Test` method, then `@AfterEach` teardown, in a fixed sequence the test class cannot reorder. `java.util.AbstractList` implements `indexOf()`, `contains()`, and iterators in terms of the abstract `get(int)` and `size()` that subclasses must provide. In Spring, `JdbcTemplate.execute()`/`query()` handle connection acquisition, exception translation, and resource cleanup (the fixed skeleton) while you supply a `RowMapper` or `PreparedStatementSetter` callback (the customizable step) — this is Template Method implemented via callback objects instead of subclassing, which is a common modern variation.
+
 ---
 
 ## Cross-Perspective: HLD Connections

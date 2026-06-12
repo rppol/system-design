@@ -82,10 +82,12 @@ Learning-path index: `case_studies/README.md` (mandatory; update with every new 
 | Java Module | See Also (other sections) |
 |-------------|--------------------------|
 | `networking_and_http_client/` | `../../backend/http_protocols/` — HTTP/1.1 vs /2 vs /3 protocol internals; `../../backend/grpc_and_protobuf/` — gRPC design patterns |
-| `concurrency/` | `../../backend/async_and_concurrency_patterns/` — production concurrency patterns; `../../hld/` — distributed consensus theory |
+| `concurrency/` | `../../backend/async_and_concurrency_patterns/` — production concurrency patterns; `../../hld/` — distributed consensus theory; `../../lld/concurrency_patterns/` — Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, Thread Pool patterns |
 | `jdbc_and_database/` | `../../database/connection_pool_management/` — PgBouncer, pool sizing math; `../../database/sql_query_optimization/` — EXPLAIN ANALYZE |
 | `jvm_internals/` | `../../backend/performance_profiling/` — async-profiler, JFR, flamegraphs |
-| `structured_concurrency_and_loom/` | `../../spring/spring_webflux/` — reactive alternative; `../../backend/async_and_concurrency_patterns/` |
+| `structured_concurrency_and_loom/` | `../../spring/spring_webflux/` — reactive alternative; `../../backend/async_and_concurrency_patterns/`; `../../lld/concurrency_patterns/` — pattern adaptation for virtual threads |
+| `design_patterns_in_java/` | `../../lld/` — full GoF pattern catalogue (all 23 patterns with UML + Java implementations) |
+| `functional_programming/` | `../../lld/behavioral/strategy/` — Strategy pattern via lambdas |
 
 ---
 

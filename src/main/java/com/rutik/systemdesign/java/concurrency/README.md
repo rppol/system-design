@@ -735,5 +735,6 @@ static Service get() {
 - [Case Study: Rate Limiter](../case_studies/design_rate_limiter_java.md) — AtomicLong CAS loop for lock-free token-bucket rate limiting
 - [Case Study: Circuit Breaker](../case_studies/design_circuit_breaker_java.md) — CAS-based state machine for fault tolerance
 - [Async & Concurrency Patterns (Backend)](../../backend/async_and_concurrency_patterns/README.md) — thread pool sizing, CompletableFuture pitfalls, bulkhead patterns in production services
+- [LLD: Concurrency Patterns](../../lld/concurrency_patterns/README.md) — Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, and Thread Pool design patterns built on these primitives
 
 **Is `computeIfAbsent` safe to call recursively or with a slow mapping function?** No — the mapping function runs while holding the bin lock, so a long-running or re-entrant `computeIfAbsent` on the same map can block other writers to that bin or deadlock. Keep the mapping function fast; here it only *creates* the future (`supplyAsync` returns immediately) rather than performing the load inline.

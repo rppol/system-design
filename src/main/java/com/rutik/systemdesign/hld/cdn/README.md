@@ -670,6 +670,10 @@ Tag related content (all pages using a specific product image, all pages in a ca
 
 ---
 
+**Cross-references:** [devops/cloud_networking_and_cdn](../../devops/cloud_networking_and_cdn/) (CloudFront/Fastly configuration, origin shield, Anycast routing).
+
+---
+
 ## Case Study: Cloudflare CDN for an Image-Heavy Media Platform
 
 ### Problem Statement

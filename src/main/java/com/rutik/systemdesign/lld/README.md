@@ -46,8 +46,8 @@ category-level Q&As. Start with the category index before diving into individual
 | Structural Patterns | [structural/README.md](structural/README.md) | Adapter, Bridge, Composite, Decorator, Facade, Flyweight, Proxy |
 | Behavioral Patterns | [behavioral/README.md](behavioral/README.md) | Chain of Responsibility, Command, Interpreter, Iterator, Mediator, Memento, Observer, State, Strategy, Template Method, Visitor |
 | Concurrency Patterns | [concurrency_patterns/README.md](concurrency_patterns/README.md) | Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, Thread Pool |
-| System Design Problems | [system_design_problems/README.md](system_design_problems/README.md) | Parking Lot, Elevator, Library, Chess, Vending Machine, ATM, Online Booking |
-| LLD Case Studies | [case_studies/README.md](case_studies/README.md) | Learning path, pattern matrix, interview shortcuts for 7 problems |
+| System Design Problems | [system_design_problems/README.md](system_design_problems/README.md) | Parking Lot, Elevator, Library, Chess, Vending Machine, ATM, Online Booking, Ride Sharing, LRU Cache, Rate Limiter, Tic-Tac-Toe, Splitwise |
+| LLD Case Studies | [case_studies/README.md](case_studies/README.md) | Learning path, pattern matrix, interview shortcuts for 12 problems |
 
 ---
 
@@ -158,6 +158,11 @@ category-level Q&As. Start with the category index before diving into individual
 | [Chess Game](system_design_problems/ChessGame_README.md) | Board modeling, piece polymorphism, move validation | Advanced |
 | [Library Management](system_design_problems/LibraryManagement_README.md) | Catalog, reservations, fine calculation | Intermediate |
 | [Online Booking System](system_design_problems/OnlineBookingSystem_README.md) | Concurrency, reservation, state transitions | Advanced |
+| [Ride Sharing](system_design_problems/RideSharing_README.md) | Strategy (fare), Observer (status), Factory (vehicle), State (ride lifecycle) | Advanced |
+| [LRU Cache](system_design_problems/LRUCache_README.md) | Doubly-linked list + HashMap, O(1) get/put, Decorator (thread safety) | Intermediate |
+| [Rate Limiter](system_design_problems/RateLimiter_README.md) | Token bucket, sliding window, Strategy + Factory | Intermediate |
+| [Tic-Tac-Toe](system_design_problems/TicTacToe_README.md) | Incremental win detection, Strategy (AI move selection) | Beginner |
+| [Splitwise](system_design_problems/Splitwise_README.md) | Expense-sharing ledger, Strategy (split types), debt-graph simplification | Advanced |
 
 ---
 
@@ -243,6 +248,11 @@ Put it all together with end-to-end LLD exercises.
 5. [Chess Game](system_design_problems/ChessGame_README.md)
 6. [Library Management](system_design_problems/LibraryManagement_README.md)
 7. [Online Booking System](system_design_problems/OnlineBookingSystem_README.md)
+8. [Ride Sharing](system_design_problems/RideSharing_README.md)
+9. [LRU Cache](system_design_problems/LRUCache_README.md)
+10. [Rate Limiter](system_design_problems/RateLimiter_README.md)
+11. [Tic-Tac-Toe](system_design_problems/TicTacToe_README.md)
+12. [Splitwise](system_design_problems/Splitwise_README.md)
 
 ---
 
@@ -273,7 +283,7 @@ Put it all together with end-to-end LLD exercises.
 LLD questions are typically asked separately from HLD but complement each other. Common formats:
 
 1. **"Design a Parking Lot"** — OOP modeling, class relationships, state
-2. **"Design a Rate Limiter"** (LLD angle) — data structures, algorithm
+2. **"Design a Rate Limiter"** (LLD angle) — data structures, algorithm; see [RateLimiter](system_design_problems/RateLimiter_README.md)
 3. **"Apply [specific pattern] to this problem"** — pattern knowledge
 4. **"How would you refactor this code?"** — anti-pattern recognition
 

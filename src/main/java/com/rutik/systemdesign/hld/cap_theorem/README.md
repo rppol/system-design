@@ -416,6 +416,10 @@ Linearizability is a consistency model for individual operations — once an ope
 
 ---
 
+**Cross-references:** [database/consistency_models_and_consensus](../../database/consistency_models_and_consensus/) (linearizability, quorum reads/writes, Raft), [database/replication_and_high_availability](../../database/replication_and_high_availability/) (sync vs async replication, failover), [database/database_fundamentals](../../database/database_fundamentals/) (ACID vs BASE), [backend/distributed_transactions_and_consistency](../../backend/distributed_transactions_and_consistency/).
+
+---
+
 ## 15. Case Study: Designing a Global Shopping Cart
 
 **Problem:** Build a shopping cart system for a global e-commerce platform. The system must handle 100,000 concurrent users across 5 continents. Cart data must never be lost, but brief inconsistency is acceptable.

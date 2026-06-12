@@ -584,3 +584,4 @@ See the Spring case study: [Design Spring Boot Event-Driven Microservice](../cas
 - [Spring Messaging](../spring_messaging/README.md) — async event vs Kafka
 - [Spring Transactions](../spring_transactions/README.md) — @TransactionalEventListener
 - [Spring Batch](../spring_batch/README.md) — scheduling batch jobs
+- [LLD: Observer Pattern](../../lld/behavioral/observer/README.md) — the GoF pattern that `ApplicationEvent`/`ApplicationListener` implements

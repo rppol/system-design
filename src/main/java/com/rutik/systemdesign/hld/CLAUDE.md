@@ -7,7 +7,7 @@ HLD is the architectural overview layer. The `backend/` section contains product
 
 ---
 
-## Module List — 14 Modules
+## Module List — 18 Modules
 
 | Module | Key Concepts |
 |--------|-------------|
@@ -25,6 +25,10 @@ HLD is the architectural overview layer. The `backend/` section contains product
 | `database_sharding/` | Horizontal partitioning, shard key selection, resharding, cross-shard queries |
 | `consensus_algorithms/` | Raft leader election + log replication, Paxos variants, PBFT, ZAB, etcd/ZooKeeper internals, quorum sizing, term numbers |
 | `event_sourcing_cqrs/` | Event sourcing (append-only log, projections, snapshots), CQRS (command/query separation), Saga pattern, eventual consistency |
+| `distributed_transactions/` | 2PC, 3PC, Saga (orchestration vs choreography), TCC, outbox pattern, idempotency keys |
+| `observability/` | Three pillars (metrics, logs, traces), RED/USE methods, SLI/SLO/error budgets, cardinality, sampling, distributed tracing |
+| `security_and_auth/` | AuthN vs AuthZ, OAuth2/OIDC, JWT vs sessions, mTLS, RBAC vs ABAC, encryption at rest/in transit, secrets management |
+| `resilience_patterns/` | Circuit breaker, bulkhead, retry with backoff + jitter, timeouts, graceful degradation, failover, load shedding |
 | `case_studies/` | HLD case study problems |
 
 ---
@@ -53,6 +57,10 @@ HLD modules intentionally stay at architectural-overview depth. For implementati
 | `consensus_algorithms/` | `../backend/kafka_deep_dive/` | `../database/consistency_models_and_consensus/` |
 | `load_balancing/` | `../backend/fault_tolerance_patterns/` | — |
 | `event_sourcing_cqrs/` | `../backend/event_sourcing_and_cqrs/` | `../database/polyglot_persistence_patterns/` |
+| `distributed_transactions/` | `../backend/distributed_transactions_and_consistency/` | `../database/distributed_transactions/` |
+| `observability/` | `../backend/observability_and_monitoring/`, `../devops/observability_tracing_and_otel/`, `../devops/observability_metrics_prometheus/`, `../devops/observability_logging/` | — |
+| `security_and_auth/` | `../backend/auth_and_authorization_systems/`, `../backend/backend_security_owasp/`, `../spring/spring_security_architecture/`, `../spring/spring_security_jwt_oauth/` | — |
+| `resilience_patterns/` | `../backend/fault_tolerance_patterns/`, `../spring/case_studies/cross_cutting/resilience4j_patterns.md` | — |
 
 ---
 

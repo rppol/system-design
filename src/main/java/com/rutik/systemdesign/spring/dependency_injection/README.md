@@ -736,3 +736,5 @@ public void record(Event e) {
 - [Spring Configuration](../spring_configuration/README.md) — @Bean methods
 - [Spring Boot Auto-Configuration](../spring_boot_autoconfiguration/README.md) — auto-wiring
 - [Case Study: DI Container (Java)](../../java/case_studies/design_di_container_java.md) — reflection-based IoC
+- [LLD: Dependency Inversion Principle](../../lld/solid_principles/DependencyInversion.md) — the SOLID principle DI frameworks exist to satisfy
+- [LLD: Factory Method Pattern](../../lld/creational/factory_method/README.md) — `BeanFactory` is a Factory Method at framework scale

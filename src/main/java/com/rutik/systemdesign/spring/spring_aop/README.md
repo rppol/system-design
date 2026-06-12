@@ -860,3 +860,4 @@ public void saveAudit(AuditEntry entry) {
 - [Spring Proxies](../spring_proxies/README.md) — JDK proxy vs CGLIB
 - [Spring Transactions](../spring_transactions/README.md) — @Transactional is AOP
 - [Filters & Interceptors](../filters_and_interceptors/README.md) — filter vs AOP
+- [LLD: Proxy Pattern](../../lld/structural/proxy/README.md) — the GoF pattern AOP proxies (JDK/CGLIB) are built on

@@ -12,6 +12,7 @@
 | [attention_and_seq2seq.md](attention_and_seq2seq.md) | Attention mechanisms, encoder-decoder transformers, beam search | 15+ |
 | [text_representation_and_retrieval.md](text_representation_and_retrieval.md) | BM25, Sentence-BERT, ColBERT, hybrid search, RRF | 15+ |
 | [nlp_evaluation_and_metrics.md](nlp_evaluation_and_metrics.md) | BLEU, ROUGE, BERTScore, entity-level F1, calibration | 15+ |
+| [tokenization_deep_dive.md](tokenization_deep_dive.md) | BPE, WordPiece, Unigram/SentencePiece, byte-level BPE, vocabulary sizing, fertility, train/inference parity | 15+ |
 
 ---
 

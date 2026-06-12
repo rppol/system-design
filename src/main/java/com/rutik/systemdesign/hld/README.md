@@ -104,6 +104,10 @@ Pick 2-3 components to go deep on (interviewer often guides):
 | [Database Sharding](database_sharding/README.md) | Shard key, range vs hash sharding, resharding | Advanced |
 | [Consensus Algorithms](consensus_algorithms/README.md) | Raft leader election + log replication, Paxos variants, PBFT, etcd/ZooKeeper, fencing tokens | Advanced |
 | [Event Sourcing & CQRS](event_sourcing_cqrs/README.md) | Event sourcing (append-only log, projections, snapshots), CQRS (command/query separation), Saga pattern, eventual consistency | Advanced |
+| [Distributed Transactions](distributed_transactions/README.md) | 2PC, 3PC, Saga (orchestration vs choreography), TCC, outbox pattern, idempotency keys | Advanced |
+| [Observability](observability/README.md) | Three pillars (metrics, logs, traces), RED/USE methods, SLI/SLO/error budgets, cardinality, distributed tracing | Intermediate |
+| [Security and Authentication/Authorization](security_and_auth/README.md) | AuthN vs AuthZ, OAuth2/OIDC, JWT vs sessions, mTLS, RBAC vs ABAC, encryption at rest/in transit | Intermediate |
+| [Resilience Patterns](resilience_patterns/README.md) | Circuit breaker, bulkhead, retry with backoff + jitter, timeouts, graceful degradation, failover | Intermediate |
 
 ---
 
@@ -126,6 +130,10 @@ Pick 2-3 components to go deep on (interviewer often guides):
 10. Consistent Hashing — elegant distributed data placement
 11. Database Sharding — scaling writes
 12. Microservices — large-scale architecture
+13. Distributed Transactions — consistency across service boundaries (2PC, Saga, TCC, outbox)
+14. Observability — instrumenting and operating what you've built (metrics, logs, traces, SLOs)
+15. Security and Authentication/Authorization — securing the system end-to-end
+16. Resilience Patterns — designing for graceful failure (circuit breakers, bulkheads, retries)
 
 **Phase 4 — Apply to Case Studies**:
 - [Design Twitter](case_studies/design_twitter.md)
@@ -133,6 +141,26 @@ Pick 2-3 components to go deep on (interviewer often guides):
 - [Design Uber](case_studies/design_uber.md)
 - [Design URL Shortener](case_studies/design_url_shortener.md)
 - [Design WhatsApp](case_studies/design_whatsapp.md)
+- [Design a Notification System](case_studies/design_notification_system.md)
+- [Design a Payment System](case_studies/design_payment_system.md)
+- [Design Google Docs](case_studies/design_google_docs.md)
+- [Design a Web Crawler](case_studies/design_web_crawler.md)
+- [Design Search Autocomplete (Typeahead)](case_studies/design_search_autocomplete.md)
+- [Design Google Maps](case_studies/design_google_maps.md)
+- [Design a Distributed Key-Value Store](case_studies/design_key_value_store.md)
+- [Design a Distributed Unique ID Generator](case_studies/design_distributed_unique_id.md)
+- [Design a Distributed Message Queue](case_studies/design_distributed_message_queue.md)
+- [Design Object Storage (S3)](case_studies/design_object_storage_s3.md)
+- [Design a Proximity Service](case_studies/design_proximity_service.md)
+- [Design an Ad Click Event Aggregation System](case_studies/design_ad_click_aggregation.md)
+- [Design a Leaderboard](case_studies/design_leaderboard.md)
+- [Design a Digital Wallet](case_studies/design_digital_wallet.md)
+- [Design a Stock Exchange](case_studies/design_stock_exchange.md)
+- [Design a Hotel Reservation System](case_studies/design_hotel_reservation.md)
+- [Design a Metrics Monitoring System](case_studies/design_metrics_monitoring.md)
+- [Design Google Drive](case_studies/design_google_drive.md)
+
+See [case_studies/README.md](case_studies/README.md) for the full learning path, cross-cutting primitives map, and "Design X" interview shortcuts across all 23 case studies.
 
 ---
 
@@ -213,5 +241,8 @@ HLD stays at architectural-overview depth. For production-grade implementation d
 | Rate Limiting | [Rate Limiting In Depth](../backend/rate_limiting_in_depth/README.md) | — |
 | API Design | [REST API Design](../backend/rest_api_design/README.md), [gRPC & Protobuf](../backend/grpc_and_protobuf/README.md), [GraphQL](../backend/graphql/README.md) | — |
 | Consistent Hashing | — | [Sharding & Partitioning](../database/sharding_and_partitioning/README.md) |
-| Distributed Transactions | [Distributed Transactions & Consistency](../backend/distributed_transactions_and_consistency/README.md) | [Distributed Transactions](../database/distributed_transactions/README.md) |
+| [Distributed Transactions](distributed_transactions/README.md) | [Distributed Transactions & Consistency](../backend/distributed_transactions_and_consistency/README.md) | [Distributed Transactions](../database/distributed_transactions/README.md) |
 | Event Sourcing / CQRS | [Event Sourcing & CQRS](../backend/event_sourcing_and_cqrs/README.md) | [Polyglot Persistence Patterns](../database/polyglot_persistence_patterns/README.md) |
+| [Observability](observability/README.md) | [Observability & Monitoring](../backend/observability_and_monitoring/README.md), [Observability: Tracing & OTel](../devops/observability_tracing_and_otel/README.md), [Observability: Metrics (Prometheus)](../devops/observability_metrics_prometheus/README.md), [Observability: Logging](../devops/observability_logging/README.md) | — |
+| [Security and Authentication/Authorization](security_and_auth/README.md) | [Auth & Authorization Systems](../backend/auth_and_authorization_systems/README.md), [Backend Security & OWASP](../backend/backend_security_owasp/README.md), [Spring Security Architecture](../spring/spring_security_architecture/README.md), [Spring Security: JWT & OAuth2](../spring/spring_security_jwt_oauth/README.md) | — |
+| [Resilience Patterns](resilience_patterns/README.md) | [Fault Tolerance Patterns](../backend/fault_tolerance_patterns/README.md), [Resilience4j Patterns](../spring/case_studies/cross_cutting/resilience4j_patterns.md) | — |

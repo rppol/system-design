@@ -96,6 +96,13 @@ Learning-path index: `case_studies/README.md` (mandatory; update with every new 
 | `spring_messaging/` | `../../backend/kafka_deep_dive/` — Kafka EOS, Schema Registry; `../../backend/event_driven_fundamentals/` — choreography vs orchestration |
 | `spring_webflux/` | `../../java/reactive_programming/` — Project Reactor internals (once created) |
 | `spring_security_jwt_oauth/` | `../../backend/auth_and_authorization_systems/` — OAuth2 flows, OIDC, token revocation |
+| `spring_events_and_scheduling/` | `../../lld/behavioral/observer/` — Observer pattern theory behind ApplicationEvent |
+| `spring_proxies/` | `../../lld/structural/proxy/` — Proxy pattern theory (virtual/protection/remote) |
+| `spring_batch/` | `../../lld/behavioral/template_method/` — Template Method pattern theory |
+| `filters_and_interceptors/` | `../../lld/behavioral/chain_of_responsibility/` — Chain of Responsibility theory |
+| `spring_aop/` | `../../lld/structural/proxy/` — AOP proxy mechanics rooted in Proxy pattern |
+| `dependency_injection/` | `../../lld/solid_principles/` — Dependency Inversion Principle; `../../lld/creational/factory_method/` — BeanFactory as Factory Method |
+| `bean_lifecycle/` | `../../lld/creational/singleton/` — Singleton scope theory |
 
 ---
 
