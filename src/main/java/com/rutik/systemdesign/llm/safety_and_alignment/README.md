@@ -1,5 +1,13 @@
 # Safety & Alignment
 
+## Deep Dive Files
+
+| File | Topic | Q&As |
+|------|-------|------|
+| [automated_jailbreak_algorithms.md](automated_jailbreak_algorithms.md) | GCG, AutoDAN/AutoDAN-Turbo, TAP, BEAST, GPTFuzzer, PAP — automated/algorithmic jailbreak generation and layered defenses (perplexity filter, SmoothLLM, RepE circuit breakers) | 16 |
+
+---
+
 ## 1. Concept Overview
 
 LLM safety encompasses the study and mitigation of risks that arise when deploying language models at scale — from immediate harms (generating dangerous content, enabling cyberattacks) to long-term existential concerns (misaligned general AI). Alignment is the technical problem of ensuring AI systems pursue goals humans actually want.
@@ -450,6 +458,10 @@ Solutions:
     Mechanistic interpretability: trace circuits responsible for specific behaviors
     Activation patching: identify where specific capabilities are encoded
 ```
+
+For the full toolkit — superposition, sparse autoencoders, activation patching, circuit
+discovery, activation steering, and model editing (ROME/MEMIT) — see
+[Mechanistic Interpretability](../mechanistic_interpretability/README.md).
 
 ---
 

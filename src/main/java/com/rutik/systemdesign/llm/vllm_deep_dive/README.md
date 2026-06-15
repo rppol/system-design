@@ -21,6 +21,7 @@
 5. [KV Cache Management](#5-kv-cache-management)
 6. [Prefix Caching (APC)](#6-prefix-caching-apc)
 7. [Chunked Prefill](#7-chunked-prefill)
+    - [Disaggregated Prefill/Decode Serving (PD Disaggregation)](#disaggregated-prefilldecode-serving-pd-disaggregation)
 8. [Speculative Decoding](#8-speculative-decoding)
 9. [Quantization](#9-quantization)
 10. [Distributed Inference](#10-distributed-inference)
@@ -335,6 +336,80 @@ With chunked prefill (chunk=512):
 | Prefill TTFT | Slightly higher | Minimal |
 | GPU utilization | More consistent | Bursty |
 | Recommended when | Mixed short/long prompts | Mostly uniform prompts |
+
+### Disaggregated Prefill/Decode Serving (PD Disaggregation)
+
+**The co-located opposite of chunked prefill.** Chunked prefill keeps prefill and decode on the SAME GPUs and interleaves them at the scheduling level — one pool, one `--max-num-batched-tokens` knob tuning both phases together. **PD disaggregation** instead runs prefill and decode on SEPARATE GPU pools entirely, each sized and scaled for its own workload, connected by a transfer of the KV cache once prefill finishes:
+
+```
+Co-located (chunked prefill, above):
+
+  ┌──────────────── ONE GPU POOL ────────────────┐
+  │ Step 1: [prefill chunk][decode][decode][..]   │
+  │ Step 2: [prefill chunk][decode][decode][..]   │
+  │ --max-num-batched-tokens tunes BOTH           │
+  │ TTFT (prefill chunks) AND TPOT (decode slots) │
+  └────────────────────────────────────────────────┘
+
+Disaggregated (PD disaggregation):
+
+  ┌──── PREFILL POOL ────┐   KV cache    ┌──── DECODE POOL ────┐
+  │ compute-optimized     │   transfer    │ bandwidth/capacity-  │
+  │ GPUs, sized for the   │ ────────────► │ optimized GPUs,      │
+  │ TTFT SLO              │  (NVLink /    │ sized for the TPOT   │
+  │                        │  RDMA/IB)     │ SLO                  │
+  └────────────────────────┘               └──────────────────────┘
+  independently scaled, independently tuned -- connected by a
+  KV-cache hand-off instead of shared GPU memory
+```
+
+**Why disaggregate.** Prefill and decode have opposite roofline profiles ([gpu_architecture_and_roofline.md §6.2](../optimization_and_quantization/gpu_architecture_and_roofline.md)): prefill's arithmetic intensity ≈ 2S (compute-bound, S = prompt length in the thousands), decode's intensity ≈ 1-2 (memory-bound). A co-located pool — even with chunked prefill smoothing the schedule — is still ONE fleet that must be provisioned for BOTH profiles, and one config knob that affects BOTH SLOs. Disaggregation lets the prefill pool be FLOPS-heavy (fewer, compute-dense GPUs) and the decode pool be bandwidth/capacity-heavy (more GPUs, or H200-class bandwidth), each scaled independently against its own metric — and critically, it **isolates TTFT from TPOT**: a burst of long prompts that would grow the prefill pool's queue no longer steals decode-step time from requests that are already generating, because they are physically different GPUs.
+
+**KV-cache transfer cost.** Once the prefill pool finishes a request's prompt, its KV cache must move to a decode-pool GPU before generation can start — over NVLink within a node (~900 GB/s, [gpu_architecture_and_roofline.md §4](../optimization_and_quantization/gpu_architecture_and_roofline.md)) or RDMA/InfiniBand across nodes (~50 GB/s per NIC). The transfer is a ONE-TIME per-request cost (added to TTFT, not per decode step), but at scale the AGGREGATE transfer bandwidth becomes its own capacity-planning line item:
+
+```python
+def kv_transfer_bandwidth_required(
+    qps: float,
+    avg_prompt_tokens: int,
+    kv_bytes_per_token: float,
+) -> float:
+    """Aggregate bytes/s the transfer fabric must sustain to move every
+    completed prefill's KV cache to the decode pool."""
+    return qps * avg_prompt_tokens * kv_bytes_per_token
+
+
+# Llama-3-70B, GQA: ~320 KB/token (gpu_architecture_and_roofline.md §6.1)
+KV_BYTES_PER_TOKEN = 320_000
+
+required_bw = kv_transfer_bandwidth_required(
+    qps=500, avg_prompt_tokens=2048, kv_bytes_per_token=KV_BYTES_PER_TOKEN
+)
+# = 500 * 2048 * 320_000 ≈ 3.28e11 B/s ≈ 328 GB/s
+
+NVLINK4 = 900e9          # bytes/s, per GPU within a node
+INFINIBAND_NIC = 50e9    # bytes/s, per NIC, cross-node
+
+# 328 GB/s < 900 GB/s  -> ONE NVLink link covers this (same-node disaggregation)
+# 328 GB/s > 50 GB/s   -> needs ~7 InfiniBand NICs IN PARALLEL for cross-node --
+# at this traffic level the transfer fabric is a real line item, not a
+# rounding error, which is why same-node (NVLink) disaggregation is the
+# easier first step and cross-node disaggregation needs a KV-centric
+# transport (Mooncake's "Mooncake Store", NVIDIA Dynamo's transfer layer).
+```
+
+**Production systems.** **DistServe** (the paper that popularized PD disaggregation for LLM serving) showed that independently choosing parallelism and batch configuration per phase — rather than one configuration serving both — improves goodput at a fixed SLO. **Mooncake** (Moonshot AI / Kimi) separates "prefill cluster" and "decode cluster," connected by a KV-cache-centric store ("Mooncake Store") over RDMA, reporting significant goodput gains under realistic, skewed request-length distributions. **Splitwise** (Microsoft) goes further and runs prefill and decode on DIFFERENT GPU SKUs — prefill on FLOPS-heavy GPUs, decode on older/cheaper bandwidth-adequate GPUs — since decode doesn't need the newest compute. **NVIDIA Dynamo** (2025) is an open-source disaggregated-serving framework with a request router and a KV-transfer layer designed for multi-node, large-MoE deployments where the "decode" pool itself may span many nodes.
+
+**vLLM support.** vLLM's disaggregated-prefill path uses a **KV connector** (`--kv-transfer-config`): one vLLM instance runs as the prefill ("producer") side and pushes computed KV blocks to a second instance running as the decode ("consumer") side, as an alternative to `--enable-chunked-prefill`'s single-pool interleaving.
+
+**Explicit contrast:**
+
+| | Chunked Prefill (§7 above) | PD Disaggregation |
+|---|---|---|
+| GPU pools | One (shared) | Two (prefill, decode) — independently scaled |
+| TTFT / TPOT coupling | Coupled — one config tunes both | Decoupled — separate pools, separate SLOs |
+| Extra cost | None — scheduling-only change | KV-cache transfer fabric (NVLink/RDMA/IB) |
+| Operational complexity | Low — one fleet | Higher — two fleets + router + KV connector |
+| Pays off when | Most workloads; default-on for mixed prompts | High QPS, skewed prompt-length mix, where transfer cost amortizes |
 
 ---
 
@@ -1350,6 +1425,10 @@ With TP=4, each GPU holds one-quarter of every weight matrix. LLaMA 70B in FP16 
 **Q15: How does PagedAttention compare to TensorRT-LLM's in-flight batching, and when would you choose one over the other?**
 
 Both PagedAttention (vLLM) and TensorRT-LLM's in-flight batching solve the same core problem: keeping the GPU busy by mixing prefill and decode steps from different requests in the same forward pass, rather than waiting for a static batch to complete. The key architectural difference is in memory management: PagedAttention uses non-contiguous paged blocks that can be allocated and freed independently, eliminating KV cache fragmentation at the cost of indirection through a block table; TensorRT-LLM uses a preallocated contiguous KV cache pool with guaranteed-contiguous allocation per sequence, which avoids the block table indirection and allows tighter kernel fusion but is more susceptible to fragmentation under variable sequence lengths. In practice, TensorRT-LLM can be 10–30% faster than vLLM on raw NVIDIA hardware throughput benchmarks for specific model/precision combinations due to more aggressive CUDA kernel fusion and NVIDIA-specific optimizations. vLLM is hardware-agnostic (AMD ROCm, AWS Inferentia, Google TPU support), more flexible for custom model architectures, and has a larger community ecosystem. Choose TensorRT-LLM when you are exclusively on NVIDIA hardware, throughput is the primary metric, and you are serving a supported standard architecture (LLaMA, Mistral, Falcon); choose vLLM when you need portability, rapid iteration on custom models, or multi-LoRA / speculative decoding features not yet available in TRT-LLM.
+
+**Q16: How does PD (prefill/decode) disaggregation differ from chunked prefill, and when would you choose one over the other?**
+
+Chunked prefill (§7) keeps prefill and decode on the SAME GPU pool and interleaves them at the scheduling level — `--max-num-batched-tokens` chunks a long prompt's prefill so it shares steps with ongoing decodes, smoothing TTFT for other requests without changing hardware allocation. PD disaggregation goes further: prefill and decode run on SEPARATE GPU pools, each independently sized for its own roofline profile (prefill is compute-bound, decode is memory-bound), connected by a KV-cache transfer (NVLink intra-node, RDMA/InfiniBand cross-node) once prefill finishes for a request. The win is decoupling TTFT (prefill pool sizing) from TPOT (decode pool sizing) — a burst of long prompts no longer steals decode-step time from in-flight generations — at the cost of the KV-transfer overhead and operating a second fleet. In practice: at LOW QPS or with short, uniform prompts, chunked prefill's single-pool simplicity wins, because the transfer fabric and second control plane are pure overhead; at HIGH QPS with a skewed mix of long and short prompts, disaggregation (as in DistServe, Mooncake, Splitwise, NVIDIA Dynamo) improves goodput because each pool can be scaled and tuned against its own SLO — the transfer cost amortizes across the larger traffic volume. vLLM supports both: `--enable-chunked-prefill` for the co-located case, and an experimental `--kv-transfer-config` KV-connector for disaggregated prefill/decode instances.
 
 ---
 

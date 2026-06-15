@@ -90,7 +90,7 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 #### Foundations
 | Topic | Key Concepts |
 |-------|-------------|
-| [Foundations & Architecture](src/main/java/com/rutik/systemdesign/llm/foundations_and_architecture/) | Transformers, self-attention, MoE, scaling laws, GPT/LLaMA/DeepSeek — with 3 deep-dive sub-files (Flash Attention, RoPE, training dynamics) |
+| [Foundations & Architecture](src/main/java/com/rutik/systemdesign/llm/foundations_and_architecture/) | Transformers, self-attention, MoE, scaling laws, GPT/LLaMA/DeepSeek — with 4 deep-dive sub-files (Flash Attention, RoPE, training dynamics, state-space/linear-attention alternatives) |
 | [Tokenization & Embeddings](src/main/java/com/rutik/systemdesign/llm/tokenization_and_embeddings/) | BPE, WordPiece, SentencePiece, tiktoken, vocabulary design |
 | [Embeddings & Similarity Search](src/main/java/com/rutik/systemdesign/llm/embeddings_and_similarity_search/) | Sentence embeddings, contrastive learning, HNSW, FAISS, Matryoshka |
 
@@ -123,7 +123,7 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 #### Production
 | Topic | Key Concepts |
 |-------|-------------|
-| [Inference & Decoding](src/main/java/com/rutik/systemdesign/llm/inference_and_decoding/) | KV cache, PagedAttention, speculative decoding, continuous batching |
+| [Inference & Decoding](src/main/java/com/rutik/systemdesign/llm/inference_and_decoding/) | KV cache, PagedAttention, speculative decoding, continuous batching — with 4 deep-dive sub-files (constrained decoding, speculative decoding, sampling & decoding strategies, KV cache optimization) |
 | [Inference Engines](src/main/java/com/rutik/systemdesign/llm/inference_engines/) | vLLM, TensorRT-LLM, llama.cpp, SGLang, Ollama, TGI |
 | [Optimization & Quantization](src/main/java/com/rutik/systemdesign/llm/optimization_and_quantization/) | GPTQ, AWQ, Flash Attention, MoE, pruning, distillation |
 | [Deployment & MLOps](src/main/java/com/rutik/systemdesign/llm/deployment_and_mlops/) | LLM gateway, model routing, semantic caching, observability |
@@ -139,6 +139,7 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 |-------|-------------|
 | [Guardrails & Content Safety](src/main/java/com/rutik/systemdesign/llm/guardrails_and_content_safety/) | NeMo Guardrails, Llama Guard, PII detection, HIPAA compliance |
 | [Safety & Alignment](src/main/java/com/rutik/systemdesign/llm/safety_and_alignment/) | Jailbreaking, hallucination, bias, prompt injection, red teaming |
+| [Mechanistic Interpretability](src/main/java/com/rutik/systemdesign/llm/mechanistic_interpretability/) | Superposition, sparse autoencoders, activation patching, circuit analysis, activation steering, model editing |
 | [LLM Security](src/main/java/com/rutik/systemdesign/llm/llm_security/) | Prompt injection, data extraction, model theft, supply chain, adversarial robustness |
 | [Evaluation & Benchmarks](src/main/java/com/rutik/systemdesign/llm/evaluation_and_benchmarks/) | MMLU, HumanEval, RAGAS, LLM-as-judge, Chatbot Arena |
 
@@ -157,6 +158,8 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 | [AI Regulations & Compliance](src/main/java/com/rutik/systemdesign/llm/ai_regulations_and_compliance/) | EU AI Act risk tiers, GDPR Art. 22, NIST AI RMF, model cards, bias auditing, DPIA |
 | [LLMOps Platforms](src/main/java/com/rutik/systemdesign/llm/llm_ops_platforms/) | MLflow, W&B, LangSmith, LangFuse, Braintrust, DeepEval — experiment tracking, observability, eval CI/CD |
 | [Vision-Language Models](src/main/java/com/rutik/systemdesign/llm/vision_language_models/) | CLIP dual encoder, LLaVA adapter, BLIP-2 Q-Former, visual grounding, Grounding DINO, VQA |
+| [VLA & Robotics Foundation Models](src/main/java/com/rutik/systemdesign/llm/vla_and_robotics_foundation_models/) | Vision-Language-Action models — RT-1/RT-2, OpenVLA, pi-0/pi-0.5, Octo, Gemini Robotics, GR00T, flow-matching action experts |
+| [Diffusion Language Models](src/main/java/com/rutik/systemdesign/llm/diffusion_language_models/) | Non-autoregressive text generation — LLaDA, Mercury, SEDD, D3PM, masked/discrete diffusion, block diffusion |
 | [Constitutional AI](src/main/java/com/rutik/systemdesign/llm/constitutional_ai/) | SL-CAI critique-revision, RL-CAI/RLAIF, constitution design, RLAIF vs RLHF tradeoffs |
 | [Agentic Workflow Patterns](src/main/java/com/rutik/systemdesign/llm/agentic_workflow_patterns/) | Anthropic taxonomy — chaining, routing, parallelization, orchestrator-workers, evaluator-optimizer |
 | [Coding Agents](src/main/java/com/rutik/systemdesign/llm/coding_agents/) | SWE-agent ACI, OpenHands, Aider, Devin, Cursor Composer, Claude Code, SWE-bench |

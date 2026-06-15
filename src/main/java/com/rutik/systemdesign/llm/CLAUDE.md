@@ -5,11 +5,11 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 49 Modules
+## Module List — 52 Modules
 
 | Module Directory | Topic | Sub-files |
 |-----------------|-------|-----------|
-| `foundations_and_architecture/` | Transformers, self-attention, scaling laws, GPT vs BERT | attention_mechanisms, positional_encoding, training_dynamics |
+| `foundations_and_architecture/` | Transformers, self-attention, scaling laws, GPT vs BERT | attention_mechanisms, positional_encoding, training_dynamics, state_space_models_and_linear_attention |
 | `tokenization_and_embeddings/` | BPE, WordPiece, SentencePiece, vocabulary design | — |
 | `embeddings_and_similarity_search/` | Sentence embeddings, HNSW, IVF, Matryoshka, FAISS | — |
 | `pre_training/` | CLM, MLM, data curation, training dynamics, compute | — |
@@ -23,18 +23,19 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `reasoning_models/` | o1/o3, test-time compute, MCTS, DeepSeek-R1, PRM/ORM | — |
 | `code_generation/` | FIM, CodeLLaMA, Copilot architecture, SWE-bench, code agents | — |
 | `agents_and_tool_use/` | Function calling, ReAct, plan-and-execute, memory, sub-agents, sandboxes, cost | function_calling_and_tool_design, react_and_reasoning_patterns, plan_and_execute, agent_memory, computer_use_and_browser_agents, agent_evaluation_and_benchmarking, agent_reliability, reflexion_and_self_correction, tree_of_thoughts_for_agents, tool_selection_at_scale, sandboxed_code_execution, subagents_and_delegation, agent_ux_patterns, durable_long_running_agents, agent_cost_and_token_budget |
-| `agentic_frameworks/` | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, SK, Haystack, DSPy, OpenAI Agents SDK, Anthropic API, PydanticAI, Smolagents, Strands, Mastra, LiteLLM | langchain_and_lcel, langgraph, llamaindex, crewai, autogen, semantic_kernel, haystack, dspy, framework_observability, structured_outputs_and_instructor, openai_agents_sdk, claude_agent_sdk, pydantic_ai, smolagents, strands_aws, mastra_typescript, litellm_routing |
-| `multi_agent_systems/` | Orchestrator, debate, ChatDev, MetaGPT, Swarm, Magentic-One, A2A | orchestrator_worker_pattern, agent_debate_and_consensus, chatdev_and_software_simulation, openai_swarm_and_handoffs, magentic_one_and_autogen_v04, agent_to_agent_protocols |
+| `agentic_frameworks/` | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, SK, Haystack, DSPy, OpenAI Agents SDK, Anthropic API, PydanticAI, Smolagents, Strands, Mastra, LiteLLM, Google ADK | langchain_and_lcel, langgraph, llamaindex, crewai, autogen, semantic_kernel, haystack, dspy, framework_observability, structured_outputs_and_instructor, openai_agents_sdk, claude_agent_sdk, pydantic_ai, smolagents, strands_aws, mastra_typescript, litellm_routing, google_adk |
+| `multi_agent_systems/` | Orchestrator, debate, ChatDev, MetaGPT, Swarm, Magentic-One, A2A | orchestrator_worker_pattern, agent_debate_and_consensus, chatdev_and_software_simulation, openai_swarm_and_handoffs, magentic_one_and_autogen_v04, agent_to_agent_protocols, agentic_commerce_and_payments, multi_agent_security |
 | `agentic_workflow_patterns/` | Anthropic taxonomy — chaining, routing, parallelization, orchestrator-workers, evaluator-optimizer | — |
 | `coding_agents/` | SWE-agent, OpenHands, Aider, Devin, Cursor, Claude Code, SWE-bench | — |
 | `voice_agents/` | Realtime API, Gemini Live, STT→LLM→TTS, VAD, barge-in, telephony | — |
 | `browser_agents_deep_dive/` | Browser Use, Stagehand, Playwright MCP, DOM vs vision, WebArena | — |
-| `inference_and_decoding/` | Sampling, KV cache, speculative decoding, continuous batching | constrained_decoding_and_structured_outputs |
+| `inference_and_decoding/` | Sampling, KV cache, speculative decoding, continuous batching | constrained_decoding_and_structured_outputs, speculative_decoding, sampling_and_decoding_strategies, kv_cache_optimization |
 | `inference_engines/` | vLLM, TensorRT-LLM, llama.cpp, SGLang, Ollama, TGI | — |
 | `optimization_and_quantization/` | GPTQ, AWQ, Flash Attention, MoE, pruning, distillation | gpu_architecture_and_roofline |
 | `deployment_and_mlops/` | Serving, GPU cost, monitoring, routing, edge deployment | — |
 | `guardrails_and_content_safety/` | NeMo Guardrails, Llama Guard, input/output filters | — |
-| `safety_and_alignment/` | Jailbreaking, prompt injection, hallucination, bias, red teaming | — |
+| `safety_and_alignment/` | Jailbreaking, prompt injection, hallucination, bias, red teaming | automated_jailbreak_algorithms |
+| `mechanistic_interpretability/` | Superposition, sparse autoencoders (SAEs), activation patching, circuit analysis, activation steering, model editing (ROME/MEMIT) | — |
 | `evaluation_and_benchmarks/` | MMLU, HumanEval, LLM-as-judge, Chatbot Arena, RAGAs | — |
 | `multimodal_models/` | VLMs, vision encoders, diffusion, speech, video | — |
 | `context_windows_and_long_context/` | RoPE, ALiBi, YaRN, long context vs RAG | — |
@@ -58,16 +59,20 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `llm_ops_platforms/` | MLflow, W&B, LangSmith, LangFuse, Braintrust, DeepEval, Ragas — experiment tracking, LLM observability, eval CI/CD | — |
 | `vision_language_models/` | CLIP dual encoder, LLaVA adapter architecture, BLIP-2 Q-Former, visual grounding, Grounding DINO, VQA benchmarks | — |
 | `constitutional_ai/` | SL-CAI critique-revision pipeline, RL-CAI/RLAIF, constitution design, RLAIF vs RLHF, Llama Guard | — |
+| `vla_and_robotics_foundation_models/` | Vision-Language-Action models — RT-1/RT-2, OpenVLA, pi-0/pi-0.5, Octo, Gemini Robotics, GR00T, action tokenization, flow-matching action experts | — |
+| `diffusion_language_models/` | Non-autoregressive text generation — LLaDA, Mercury, SEDD, D3PM, masked/discrete diffusion, block diffusion | — |
 
 ---
 
 ## Planned / Missing Topics (not yet created)
 
-The following topics are identified as gaps for senior AI engineer coverage. Add them as new modules following the adding guide below:
+The following are gaps for senior AI engineer coverage, identified by the 2026-06-14 full-section gap audit. This is a roadmap, not a queue — pursue only on explicit user request. The 2026-06-14 audit's other 9 items (2 new modules, 4 sub-file slots covering 5 sub-files, 3 content expansions) were built on 2026-06-15; this single row — explicitly out of scope for that build — is the only remaining gap.
 
-| Module Directory | Topic | Priority |
-|-----------------|-------|---------|
-| `diffusion_language_models/` | Non-autoregressive text generation — Mercury, LLaDA, discrete diffusion, parallel decoding economics | Low (emerging) |
+### New Sub-Files (within existing topics)
+
+| Parent Module | Sub-File Topic | Priority |
+|---------------|-----------------|---------|
+| `tokenization_and_embeddings/` | Byte-level / tokenizer-free models — BLT, MEGABYTE | Low |
 
 ---
 
@@ -115,7 +120,7 @@ Principal case studies must cross-reference at least 4 of these files via relati
 
 ## Adding a New LLM Module
 
-1. Create `<module_name>/README.md` — 14-section template; minimum 12 Q&As (15+ for sub-files)
+1. Create `<module_name>/README.md` — 14-section template; minimum 15 Q&As (root `CLAUDE.md` hard floor; 15+ for sub-files too)
 2. All code in Python with type hints (3.10+ style); no pseudocode — real executable-shaped code
 3. Update `README.md` (this section's master index): add row to module table, note sub-file count
 4. Update root `README.md` LLM phase table

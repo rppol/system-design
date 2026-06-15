@@ -2,7 +2,7 @@
 
 ## Deep Dive Files
 
-This directory contains a README index (this file) plus 17 deep-dive files, each covering one framework or topic with the full 14-section module template and 15+ interview Q&As.
+This directory contains a README index (this file) plus 18 deep-dive files, each covering one framework or topic with the full 14-section module template and 15+ interview Q&As.
 
 | File | Topic | Focus |
 |------|-------|-------|
@@ -23,6 +23,7 @@ This directory contains a README index (this file) plus 17 deep-dive files, each
 | [strands_aws.md](strands_aws.md) | AWS Strands | @tool decorator, Bedrock integration, agent_as_tool, OpenTelemetry |
 | [mastra_typescript.md](mastra_typescript.md) | Mastra (TS) | Workflows, agents, MCP client, evals, Vercel/CF deployment |
 | [litellm_routing.md](litellm_routing.md) | LiteLLM | Unified routing, fallback, cost tracking, semantic caching, virtual keys |
+| [google_adk.md](google_adk.md) | Google Agent Development Kit | LlmAgent, workflow agents (Sequential/Parallel/Loop), state/session/memory, A2A, Vertex AI Agent Engine |
 
 ---
 

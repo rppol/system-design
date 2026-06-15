@@ -7,6 +7,7 @@
 | [attention_mechanisms.md](attention_mechanisms.md) | Flash Attention internals, MQA/GQA/MLA, sparse/linear attention, derivations | 15+ |
 | [positional_encoding.md](positional_encoding.md) | RoPE derivation, ALiBi, YaRN, NTK scaling, context extension | 15+ |
 | [training_dynamics.md](training_dynamics.md) | Warmup theory, loss spikes, BF16/FP16, batch scaling, muP, data mixing | 15+ |
+| [state_space_models_and_linear_attention.md](state_space_models_and_linear_attention.md) | Mamba/Mamba-2 (selective SSM, SSD), RWKV, RetNet, Jamba/Zamba, GLA, Lightning Attention | 16 |
 
 ---
 

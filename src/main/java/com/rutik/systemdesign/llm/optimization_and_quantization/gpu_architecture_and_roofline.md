@@ -197,6 +197,112 @@ This three-gate order — capacity, bandwidth, compute — is the reusable inter
 
 MFU (Model FLOPS Utilization) = achieved FLOPs/s ÷ peak: healthy LLM *training* lands ~35–50%; decode-heavy inference often <5% — and that is not a bug, it is the roofline. MBU (Model Bandwidth Utilization) = achieved bytes/s ÷ peak bandwidth: well-tuned decode hits 60–80%+. Reporting decode performance in MFU is a category error candidates are expected to catch — use MBU for decode, MFU for prefill/training.
 
+### 6.7 FP8 training mechanics
+
+§6.4 covered FP8 as an *inference*-time precision: weights (and sometimes activations) are cast to FP8 after training, purely for serving. **FP8 training** is a different, harder problem — the forward AND backward GEMMs of every training step run in FP8, for potentially hundreds of thousands of steps, where small per-step numerical error compounds and a single overflowed tensor can NaN an entire run. The roofline payoff is real (FP8 GEMMs run at ~2× the FLOPS of BF16 on H100/H200, §4's table) but capturing it without divergence requires the scaling machinery below.
+
+```
+ FP8 training data flow, one linear layer, one step (Transformer Engine pattern):
+
+  master weights (FP32/BF16) ───────────────────────────────────┐
+        │ cast w/ scale (E4M3)                                   │ optimizer.step()
+        ▼                                                        │ updates MASTER
+   weight_fp8 ─────────┐                                         │ weights only --
+                        │  FP8 GEMM (FP32 accumulate)            │ FP8 never enters
+   activation_fp8 ──────┴─────────────► output (BF16/FP32)       │ the optimizer state
+        ▲                                                        │
+        │ cast w/ scale (E4M3)                                   │
+   activations (BF16) ── amax() ──► delayed-scaling history ─────┘
+                                     (predicts NEXT step's scale,
+                                      "delayed scaling" below)
+
+  backward: grad_output cast to E5M2 (wider exponent range -- gradients
+  span more orders of magnitude than activations) -> FP8 GEMM ->
+  grad accumulated in FP32 -> optimizer.step() on master weights
+```
+
+**Two formats, two jobs** (introduced in §6.4): **E4M3** (4 exponent bits, 3 mantissa bits, max magnitude 448) carries forward activations and weights, where ~12.5% per-element rounding error (2^-3 mantissa) is tolerable because normalization layers keep these tensors' magnitudes roughly stable. **E5M2** (5 exponent bits, 2 mantissa bits, max magnitude 57,344) carries gradients, which — especially early in training and in layers far from the loss — can span several orders of magnitude more dynamic range than activations; E5M2 trades mantissa precision for that range.
+
+```python
+from dataclasses import dataclass, field
+from collections import deque
+
+
+@dataclass(frozen=True)
+class Fp8Format:
+    name: str
+    max_magnitude: float       # largest finite |value| (OCP FP8 spec)
+    mantissa_bits: int
+
+
+E4M3 = Fp8Format("E4M3", max_magnitude=448.0, mantissa_bits=3)     # fwd activations, weights
+E5M2 = Fp8Format("E5M2", max_magnitude=57344.0, mantissa_bits=2)   # gradients
+```
+
+**Per-tensor scaling.** FP8's representable range (E4M3: roughly 2^-9 to 448) is far narrower than FP32's (~1e-38 to 1e38). Every tensor cast to FP8 carries a separate FP32 **scale factor** `s`, chosen so the tensor's largest element (`amax`) lands near the format's max — using the full mantissa range instead of clustering near zero (underflow) or clipping (overflow):
+
+```python
+def compute_scale(amax: float, fmt: Fp8Format, margin: float = 0.9) -> float:
+    """Choose s so amax/s sits at `margin` of fmt.max_magnitude -- the 10%
+    headroom absorbs amax growth before the next recalibration (delayed
+    scaling, below)."""
+    if amax <= 0.0:
+        return 1.0
+    return amax / (fmt.max_magnitude * margin)
+
+
+def to_fp8(values_fp32: list[float], scale: float, fmt: Fp8Format) -> list[float]:
+    """values_fp8 = round(values_fp32 / scale), clamped to +/- fmt.max_magnitude.
+    `scale` travels with the FP8 tensor for dequantization downstream."""
+    bound = fmt.max_magnitude
+    return [max(-bound, min(bound, round(v / scale))) for v in values_fp32]
+```
+
+**Delayed scaling (amax history).** Computing `amax` for the CURRENT tensor before casting it requires a full reduction over that tensor — a synchronization point inserted into every GEMM. **Delayed scaling** instead predicts this step's scale from a rolling window of *past* amax values (Transformer Engine defaults to a 1024-step history), so the cast and the GEMM proceed without waiting on the current tensor's reduction:
+
+```python
+@dataclass
+class DelayedScalingState:
+    fmt: Fp8Format
+    margin: float = 0.9
+    history: deque[float] = field(default_factory=lambda: deque(maxlen=1024))
+
+    def current_scale(self) -> float:
+        """Scale for THIS step, predicted from amax values seen so far."""
+        if not self.history:
+            return 1.0
+        return compute_scale(max(self.history), self.fmt, self.margin)
+
+    def record(self, observed_amax: float) -> None:
+        """Called AFTER this step's tensor is available -- feeds the
+        NEXT step's prediction."""
+        self.history.append(observed_amax)
+```
+
+The "one step behind" tradeoff: if a tensor's magnitude jumps sharply between steps (a loss spike, a learning-rate warmup discontinuity), the predicted scale can be too small for the new amax — `to_fp8` clamps the overflow rather than producing `inf`, but the clamped values are wrong, and enough clamped elements visibly perturbs the loss for that step. The `margin=0.9` headroom (use only 90% of the format's range) exists specifically to absorb modest step-to-step amax growth without clamping.
+
+**Microscaling / MXFP8.** A single scale factor per tensor assumes that tensor's elements share roughly one magnitude. MoE models violate this routinely: a layer's activation tensor mixes tokens routed to many experts, and different experts' activations can differ by 10-100x in magnitude. **Microscaling** (the OCP Microscaling spec; MXFP8 on Blackwell) assigns one scale factor per small block — typically 32 elements — instead of one per tensor:
+
+```python
+def per_block_scales(block_amaxes: list[float], fmt: Fp8Format, margin: float = 0.9) -> list[float]:
+    """One independent scale per block (commonly 32 elements, MXFP8) -- a
+    block with a small amax gets its own small scale, instead of being
+    forced to share a large scale dictated by some OTHER block's amax."""
+    return [compute_scale(amax, fmt, margin) for amax in block_amaxes]
+```
+
+The cost is bookkeeping: 8× more scale factors for 32-element blocks vs. one per 256-element tensor, consumed by the GEMM kernel per block. Blackwell's tensor cores natively support block-scaled FP8/FP4 operands, making the bookkeeping a hardware feature rather than a software tax.
+
+**Mixed-precision recipe.** FP8 training reuses the "master weights" idea from BF16 mixed-precision training, one level deeper: the optimizer's weights and momentum/variance state stay in FP32 or BF16 — FP8 casts of the weights are produced fresh each step for the GEMM, used, and discarded. FP8's per-element rounding error therefore never accumulates in the optimizer state across steps; only the GEMM's *inputs* are low-precision, while the GEMM's *accumulation* (the sum over the reduction dimension) happens in FP32 regardless of input precision — tensor cores accumulate in FP32 even for FP8×FP8 inputs.
+
+**Transformer Engine** (NVIDIA) is the library most teams use rather than hand-rolling the above: `te.Linear`, `te.LayerNormLinear`, etc. are drop-in replacements for their PyTorch equivalents that manage per-tensor delayed-scaling state internally, defaulting to E4M3 forward / E5M2 backward with a 1024-step amax history — the mechanics above describe what runs inside those modules.
+
+**DeepSeek-V3** (671B total / 37B active parameters) reported training with FP8 GEMMs for the large majority of compute, using **fine-grained scaling** beyond simple per-tensor: 128×128 tile-wise scales for weights and 1×128 (per-token, per-channel-group) scales for activations — a middle ground between per-tensor and full microscaling, chosen to fit H800's reduced NVLink bandwidth (connecting to §7's interconnect-constrained training framing). Reported relative loss difference versus a BF16 baseline: under 0.25% — the most-cited public evidence that careful scaling closes FP8 training's historical stability gap at frontier scale.
+
+**Divergence pitfalls** — BROKEN: a single global per-tensor scale, recalibrated only every 1024 steps with no margin (`margin=1.0`), on a model with MoE routing. For most steps this is fine; periodically, a step routes an unusually large fraction of tokens to one expert, that expert's activation amax spikes 50-100× above its recent history, `to_fp8` clamps a large fraction of that tensor's elements to `fmt.max_magnitude`, and the clamped GEMM output corrupts the loss for that step — visible as a sharp, intermittent loss spike that's hard to reproduce because it depends on the routing decisions of that specific step's batch.
+
+FIX: (1) `margin=0.9` (used throughout the code above) absorbs moderate amax growth without clamping; (2) per-block scaling (microscaling) for the MoE activation tensors specifically, so one expert's outlier amax doesn't dictate the scale for all experts' activations in the same tensor; (3) keep gradients in E5M2 (wider range) even when forward tensors use E4M3, since gradient distributions are the most prone to sudden multi-order-of-magnitude shifts. All three are defaults in Transformer Engine's MoE-aware FP8 recipes and DeepSeek-V3's fine-grained scheme — the fix is "use the finer-grained scaling the library already provides for this case," not a new algorithm.
+
 ---
 
 ## 7. Real-World Examples
@@ -250,6 +356,7 @@ MFU (Model FLOPS Utilization) = achieved FLOPs/s ÷ peak: healthy LLM *training*
 6. **Low decode MFU treated as a bug.** Teams burn weeks "optimizing" 3% MFU decode that is already at 75% MBU — i.e., near-optimal. Wrong metric, wasted sprint. Conversely, 30% MBU decode *is* a real bug (fragmentation, bad kernels, host gaps).
 7. **Ignoring power/thermals.** 700W×8 H100s per node: dense racks hit facility limits and throttle; sustained ≠ datasheet. Derate ~10–15% in plans, more in air-cooled DCs.
 8. **Assuming quantization helps everywhere equally.** INT4 weights barely move prefill (compute-bound) and can *hurt* quality-sensitive long-form tasks; the win is decode bandwidth. Eval per phase, per task — see [README](README.md) for quality methodology.
+9. **FP8 training with coarse, no-margin scaling on MoE models.** A single per-tensor scale recalibrated every 1024 steps with `margin=1.0` works fine until one step's routing sends an outsized fraction of tokens to one expert — that expert's activation amax spikes 50-100× above its history, the stale scale clamps a large fraction of the tensor, and the loss spikes that step (§6.7). The fix is finer-grained scaling (per-block/microscaling for MoE activations, §6.7), not abandoning FP8.
 
 ---
 
@@ -261,6 +368,7 @@ MFU (Model FLOPS Utilization) = achieved FLOPs/s ÷ peak: healthy LLM *training*
 | PyTorch Profiler + Holistic Trace Analysis | Framework-level kernel/host gap analysis |
 | nvidia-smi / DCGM | Fleet telemetry: SM occupancy, memory BW counters, power, thermals |
 | FlashAttention / FlashInfer | IO-aware attention kernels |
+| Transformer Engine | FP8 training: delayed-scaling state, E4M3/E5M2 management, drop-in `te.Linear` (§6.7) |
 | vLLM / SGLang / TensorRT-LLM | Serving stacks embodying these optimizations (paged KV, continuous batching, FP8) |
 | NCCL / nccl-tests | Interconnect bandwidth validation (all-reduce busbw) before blaming the model |
 | Triton / CUTLASS | Writing roofline-conscious custom kernels |
@@ -314,6 +422,12 @@ They relocate weights to the top of the memory pyramid: SRAM at tens of TB/s ins
 
 **Q15: Walk me through sizing a deployment: 50M tokens/hour generated, p50 inter-token latency <30ms, Llama-3.1-70B.**
 Gate 1 — capacity: 70B FP8 ≈ 70 GB weights; choose H200 (141 GB) → ~60 GB headroom for KV; at 320 KB/token (FP16 KV) and ~3K average context ≈ 0.96 GB/seq → ~55 concurrent sequences per replica, more with FP8 KV (~110). Gate 2 — bandwidth: single-stream ceiling 4.8 TB/s ÷ 70 GB ≈ 68 tok/s → 15ms/token at MBU≈1; at realistic 70% MBU ≈ 21ms — meets the 30ms SLO with margin even before speculation. Aggregate per replica at batch ~48: ~48 × (4.8e12/70e9) × 0.7 ≈ 2,300 tok/s ≈ 8.3M tok/hr. Gate 3 — demand: 50M/hr ÷ 8.3M ≈ 6 replicas → ~7–8 H200s with N+1 and prefill pool (sized separately against *prompt* token volume, compute-bound math). Then state what napkin math omits: traffic peaks vs averages, TTFT SLO driving the prefill pool, KV precision choice, and that the whole plan gets validated with a load test before anyone signs a PO. The structure — capacity, bandwidth, compute, then demand division — matters more than the exact constants.
+
+**Q16: FP8 *training* uses two different formats — E4M3 for activations/weights, E5M2 for gradients. Why not just pick one and use it everywhere?**
+Because activations/weights and gradients have different precision-vs-range needs, and the two FP8 formats trade one for the other (§6.7). E4M3 (3 mantissa bits, max 448) gives ~12.5% per-element precision over a narrower range — fine for activations and weights, whose magnitudes normalization layers keep roughly stable step to step. E5M2 (2 mantissa bits, max 57,344) gives a much wider range at ~25% per-element precision — needed for gradients, which routinely span several more orders of magnitude than activations, especially early in training and in layers far from the loss. Using E5M2 everywhere wastes precision on activations/weights (slower convergence for no range benefit); using E4M3 for gradients risks clamping the rare large gradient values that *also* tend to be the ones carrying the most learning signal. The split is a direct application of "use the cheapest representation that doesn't clip the tensor's actual distribution," applied per tensor role rather than globally.
+
+**Q17: What specific failure mode does "delayed scaling" introduce, and how do production FP8 training recipes mitigate it?**
+Delayed scaling predicts this step's FP8 scale factor from a window of *past* amax values (Transformer Engine: last 1024 steps) rather than the current tensor's exact amax — avoiding a synchronizing reduction before every cast (§6.7). The failure mode is a one-step lag: if a tensor's magnitude jumps sharply between steps (a loss spike, an MoE routing imbalance sending a disproportionate share of tokens to one expert), the predicted scale is too small for the new amax, `to_fp8` clamps the overflowing elements, and the corrupted GEMM output perturbs the loss for that step — intermittently and batch-dependently, which makes it hard to reproduce. Production mitigations: a `margin` (Transformer Engine defaults around 0.9, i.e., target only 90% of the format's range, leaving headroom for amax to grow one step before clamping), per-block/microscaling for tensors prone to heavy-tailed magnitude distributions across blocks (MoE activations), and E5M2 specifically for gradients, whose distributions are the most prone to sudden multi-order-of-magnitude shifts. DeepSeek-V3's 128×128/1×128 fine-grained scaling is the production-scale instance of "go finer-grained where delayed scaling's lag is most likely to bite."
 
 ---
 

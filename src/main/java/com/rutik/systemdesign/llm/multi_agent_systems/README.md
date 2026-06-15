@@ -10,6 +10,8 @@
 | [openai_swarm_and_handoffs.md](openai_swarm_and_handoffs.md) | Swarm primitives, Agents SDK, handoffs, routines, statelessness | 15+ |
 | [magentic_one_and_autogen_v04.md](magentic_one_and_autogen_v04.md) | Magentic-One orchestrator, GAIA benchmark, AutoGen v0.4 event-driven core | 15+ |
 | [agent_to_agent_protocols.md](agent_to_agent_protocols.md) | A2A protocol, ACP, ANP, agent cards, inter-agent auth | 15+ |
+| [agentic_commerce_and_payments.md](agentic_commerce_and_payments.md) | x402, AP2 mandates, ACP/Stripe checkout, Visa/Mastercard agent tokens, Skyfire KYA, spend limits | 16 |
+| [multi_agent_security.md](multi_agent_security.md) | Cross-agent prompt injection, collusion, confused-deputy, capability scoping, dual-LLM pattern | 16 |
 
 ---
 

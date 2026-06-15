@@ -26,6 +26,7 @@ Long context creates both opportunities (simpler architecture — just put every
 - **Positional encoding determines extrapolation**: Models trained on 4K context don't automatically generalize to 128K. Positional encoding design determines how well models extrapolate.
 - **"Lost in the middle"**: Models pay more attention to the beginning and end of long contexts; information in the middle receives less attention. Critical information should be at the extremes.
 - **Long context ≠ perfect recall**: Even 1M context models can miss information. Performance degrades with input length.
+- **"Context rot" (Chroma, 2025)**: Reliability degrades non-uniformly as input length grows — even on simple tasks with no "needle" to find, and even when the relevant information sits at a fixed, favorable position. This is distinct from "lost in the middle" (a *positional* effect at fixed length): context rot is a *length* effect — the same task at the same position gets less reliable purely because the surrounding context got longer.
 - **Long context vs. RAG tradeoff**: Putting everything in context is simpler but more expensive; RAG is more efficient but more complex.
 
 ---
@@ -145,6 +146,25 @@ Position 19 (end):    90%  █████████████████�
 
 → Models strongly favor beginning and end of context
 → For critical information, place at START or END
+```
+
+### Context Rot — Reliability vs. Input Length (Chroma, 2025)
+```
+Reliability on a SIMPLE task (e.g., repeat a sentence verbatim, or
+answer a question whose answer sits at a FIXED, favorable position)
+as input length grows -- position held constant, only length varies:
+
+Input length:    1K     10K    50K    100K   200K
+Reliability:    ~99%   ~97%   ~89%   ~74%   ~61%   (illustrative shape — varies by model/task)
+
+→ Degradation is NOT primarily about WHERE the answer is (previous
+  panel, "lost in the middle") — it's about HOW MUCH surrounding
+  context the model processes at all.
+→ Distractors (semantically related but irrelevant content) steepen
+  the curve; a "needle in haystack" eval with NO distractors can look
+  deceptively flat while the same task WITH distractors falls off a cliff.
+→ "Lost in the middle" and "context rot" COMPOUND: a fact in the
+  middle of a long, distractor-heavy context is hit by both effects.
 ```
 
 ### Long Context Attention Mechanisms
@@ -277,6 +297,49 @@ Method 4: LongLLaMA, MemGPT
   Not extending the context window but adding external retrieval
 ```
 
+### Context Rot — Non-Uniform Reliability Degradation
+
+Chroma's 2025 "context rot" study measured something the standard "lost in the middle" framing doesn't capture: holding the POSITION of the relevant information fixed at one of the "easy" spots from the diagram above (start or end), reliability still drops as TOTAL input length increases. The effect shows up even on tasks with no retrieval component at all — e.g., "repeat the following sentence back to me" embedded in a longer document still degrades as the document grows, purely because the model has more tokens to process and more opportunities for attention to dilute or for unrelated content to act as a distractor.
+
+Three findings worth internalizing:
+
+1. **Non-uniform, not linear.** The reliability-vs-length curve isn't a smooth line — some tasks hold a relatively flat region and then drop sharply past a length threshold ("a cliff"), and the threshold differs by task and model. A model that looks "robust to 100K tokens" on one task can fall off sharply on a structurally similar task at 50K.
+2. **Distractors accelerate the drop.** Semantically related-but-irrelevant content (other Q&A pairs about a similar topic, near-duplicate passages) degrades reliability far faster than the same length of unrelated filler — the model has to actively discriminate, not just ignore, the distractors.
+3. **Haystack structure matters, sometimes counterintuitively.** A coherent, logically-structured long document can be HARDER for a model than the same content shuffled into incoherent order, for certain tasks — coherent structure can prime the model to follow a narrative thread that leads it past an out-of-place answer, while shuffled content gives the model fewer competing "narratives" to follow.
+
+The practical consequence: **"fits in the context window" and "reliable at that length" are different claims**, and the gap between them is task-dependent — which is why a long-context deployment needs an eval run at MULTIPLE lengths, not a single smoke test at one size:
+
+```python
+from dataclasses import dataclass
+from typing import Callable
+
+
+@dataclass
+class ContextRotResult:
+    input_length_tokens: int
+    pass_rate: float          # fraction of trials the model got right
+
+
+def measure_context_rot(
+    task_fn: Callable[[int], bool],   # runs one trial at a given length, returns pass/fail
+    lengths: list[int],
+    trials_per_length: int = 50,
+) -> list[ContextRotResult]:
+    """Run the SAME task (same relative position of the relevant info,
+    same distractor density) at increasing input lengths. A flat
+    pass_rate across `lengths` means the deployment is robust to length;
+    a non-uniform drop is "context rot" for this model/task pair -- and
+    the THRESHOLD where it drops is what you need to know, not the
+    model's advertised maximum context."""
+    results = []
+    for length in lengths:
+        passes = sum(task_fn(length) for _ in range(trials_per_length))
+        results.append(ContextRotResult(length, passes / trials_per_length))
+    return results
+```
+
+`measure_context_rot(task_fn, lengths=[1_000, 10_000, 50_000, 100_000])` against a model advertised at 200K is the difference between finding a reliability cliff at 50K in a load test versus finding it in production (§10).
+
 ### When Long Context Helps vs. Fails
 
 ```
@@ -385,6 +448,7 @@ Use BOTH (hybrid approach):
 3. **Assuming linear quality vs. length**: Quality can degrade non-linearly beyond the model's "effective context window."
 4. **Not tuning for long context**: A 4K-trained model with naive position scaling may have 20% accuracy at 100K. Use proper long-context fine-tuning (YaRN, etc.).
 5. **Ignoring TTFT at long context**: 200K token prefill takes 10-30 seconds even on H100. Users notice.
+6. **Equating "fits in the context window" with "reliable at that length"** ("context rot", Chroma 2025): A feature validated at 5K tokens during development can be meaningfully less reliable at 100K — even on the SAME task with the SAME relative position of the relevant information — purely because the input got longer. Validate with a multi-length eval (`measure_context_rot`, §6), not a single context-size smoke test.
 
 ---
 
@@ -426,6 +490,9 @@ YaRN (Yet another RoPE extensioN) modifies RoPE's rotation frequencies to extend
 
 **Q: What is the "lost in the middle" problem and how do long-context models address it?**
 The "lost in the middle" problem (Liu et al., 2023) shows that LLMs retrieve information less accurately from the middle of long contexts compared to the beginning and end. For a 20-document retrieval context, information placed at positions 5-15 is recalled 10-20% less accurately than positions 1-3 or 18-20. This is a fundamental attention pattern issue — self-attention distribution tends to concentrate on initial tokens (attention sinks) and recent tokens (recency bias). Mitigations: (1) place the most important information at the beginning and end of the context; (2) reduce context size — 5 highly relevant chunks beat 20 mixed-relevance chunks; (3) models trained on long-context data (Claude 200K, Gemini 1M) show reduced but not eliminated middle-loss; (4) explicit instruction like "read all sections carefully before answering" helps marginally; (5) iterative summarization — process long documents in sections, then synthesize. For production RAG: rerank to keep only top-5 most relevant chunks rather than stuffing the context.
+
+**Q: What is "context rot" and how is it different from "lost in the middle"?**
+A: "Context rot" (Chroma, 2025) is the finding that model reliability degrades as input LENGTH increases, even holding the POSITION of the relevant information fixed — a fact placed at the very start of the context (the "easy" position in the lost-in-the-middle diagram) is still recalled less reliably at 100K total tokens than at 10K. "Lost in the middle" (Liu et al., 2023) is a POSITIONAL effect at a FIXED length: where in the context the information sits. Context rot is a LENGTH effect at a (potentially) fixed position: how much surrounding context there is at all. The two compound — a fact buried in the middle of a very long, distractor-heavy context is hit by both effects simultaneously, which is why "the model has a 1M context window" says nothing about reliability at 1M tokens on your specific task; only a multi-length eval (the same task run at several input lengths) shows where the reliability curve actually bends.
 
 **Q: When should you use long context instead of RAG, and vice versa?**
 Use long context when: (1) the entire document set fits in context (<200K tokens) and you need reasoning across all documents simultaneously; (2) the task requires understanding document structure, cross-references, or holistic summarization; (3) you need to answer arbitrary questions about a small, fixed document set (e.g., a single contract). Use RAG when: (1) the corpus is too large for any context window (millions of documents); (2) the corpus changes frequently (new documents added daily); (3) you need to scale to many users with different document access; (4) cost matters — processing 100K tokens per query is expensive ($0.50-$1.50 per query with GPT-4o). Hybrid approach: use RAG to retrieve relevant chunks, then use long context to process them together. Concrete numbers: Claude 3.5 at 200K tokens costs ~$0.60 per query; RAG with 5 chunks of 500 tokens costs ~$0.01. Long context is 60x more expensive but avoids retrieval errors.
