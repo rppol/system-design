@@ -180,12 +180,19 @@ python3 .claude/skills/visual-intuition-diagrams/diagram_tools.py preview <file.
 
 | Archetype | Use when the concept is… | Examples |
 |-----------|--------------------------|----------|
-| Constraint grid | a relationship across two axes (X×Y) | causal mask, ALiBi bias, sliding window |
-| Before/after + delta | a quantified win | KV-cache reduction, MLA compression |
-| Side-by-side / stacked flow | a placement or phase difference | Pre-LN vs Post-LN, prefill vs decode |
-| Routing / fan-out | one input selecting among many paths | MoE experts, router/cascade |
-| Bar chart | comparing magnitudes | softmax temperature, attention-sink weights |
-| Curve / vector sketch | a trend or geometric intuition | "lost in the middle", embedding arithmetic |
+| Constraint / value grid | a relationship across two axes (X×Y) | causal mask, ALiBi bias, sliding window; numeric grid + max column (ColBERT MaxSim) |
+| Before/after + delta | a quantified win | KV-cache reduction, MLA compression; score-scale mismatch (cosine vs BM25) |
+| Side-by-side / stacked flow | a placement or phase difference | Pre-LN vs Post-LN, prefill vs decode; image-index strategy (text-space vs CLIP joint space) |
+| Routing / fan-out / tree | one input selecting among paths, or a hierarchy/DAG | MoE experts, router/cascade; Leiden community levels, query-decomposition DAG (use indented `├─ └─` trees) |
+| Bar chart | comparing magnitudes (a *ratio*, not two stated numbers) | softmax temperature, attention-sink weights |
+| Curve / vector / number-line | a trend, geometry, or partitioned axis | "lost in the middle", embedding/cosine-angle sketch; threshold bands (CRAG 0.3/0.7) |
+
+**A diagram must earn its place — audit before adding.** When a module is *already*
+dense with diagrams, almost all are pipeline/data-flow pictures; do not add another.
+The real gaps are the **math and decision mechanics still trapped in formulas, prose,
+or code** — an arithmetic rule (RRF `1/(k+rank)`), a threshold (CRAG buckets), a scale
+mismatch, a hierarchy/dependency structure. Skip any diagram that merely restates a
+two-number table the sentence already gives.
 
 **Conventions (enforced by the validator):** ASCII only, fenced block with **no
 language tag**; spaces not tabs; no trailing whitespace; **no emojis** (use `✓`/`✗`,

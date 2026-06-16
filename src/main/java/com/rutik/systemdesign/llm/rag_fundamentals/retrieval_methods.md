@@ -149,6 +149,25 @@ Example:
   doc_B ranks higher despite not being #1 in either — consistently high across both
 ```
 
+### How RRF Fuses Two Rankings
+
+Each retriever contributes `1/(k+rank)` per document (k=60). The reciprocal compresses the
+gap between adjacent ranks, so a doc ranked *consistently high* across both lists beats one
+that tops a single list: `doc_B` (3rd + 2nd) edges out `doc_A` (1st + 5th).
+
+```
+  Dense ranking         BM25 ranking          Fuse: sum of 1/(k+rank), k=60
+  ┌───────────────┐     ┌───────────────┐
+  │ 1.  doc_A     │     │ 1.  ...       │     doc_A = 1/(60+1) + 1/(60+5)
+  │ 2.  ...       │     │ 2.  doc_B     │           = 0.01639 + 0.01538 = 0.03177
+  │ 3.  doc_B     │     │ ...           │
+  │ ...           │     │ 5.  doc_A     │     doc_B = 1/(60+3) + 1/(60+2)
+  └───────────────┘     └───────────────┘           = 0.01587 + 0.01613 = 0.03200  ◄ wins
+
+  doc_B is #1 in neither list yet wins: RRF rewards cross-retriever agreement, and the
+  reciprocal makes raw score magnitudes irrelevant — only ranks matter.
+```
+
 ```python
 def reciprocal_rank_fusion(
     dense_results: list[tuple],    # [(doc, score), ...]
@@ -197,6 +216,29 @@ When to use weighted combination vs. RRF:
   RRF: when you don't want to tune α; more robust to score distribution differences
   Weighted: when you have query-type-dependent weights (factual → more BM25; semantic → more dense)
 ```
+
+### Why Weighted Hybrid Scores Must Be Normalized First
+
+The two retrievers emit incompatible scales: cosine ∈ [-1, 1] (bounded), BM25 ∈ [0, ∞)
+(unbounded). Add them raw and the larger-magnitude BM25 term dominates, so the α knob stops
+doing anything. Min-max rescaling maps each onto [0, 1] before the α-weighted blend.
+
+```
+  RAW (incompatible ranges) ─────────────────────────────────────────
+  cosine   [-1 ───────────────── +1]      bounded, total width = 2
+  BM25     [ 0 ──────────────────────────────────────► ∞ ]   unbounded, can be ≫ 1
+
+      raw  α·cosine + (1-α)·BM25   →  BM25's magnitude dominates regardless of α
+
+  NORMALIZED  via  (score - min) / (max - min)  over the candidate set ─
+  cosine   [0 ───────────────── 1]
+  BM25     [0 ───────────────── 1]        same footing
+
+      hybrid = α·cosine_norm + (1-α)·bm25_norm,   α = 0.5   →  α now controls the blend
+```
+
+The fix is per-query, not global: min and max are computed over *this query's* candidate
+set, because BM25's absolute range shifts with query length and term rarity.
 
 ### 3.5 Metadata Filtering
 

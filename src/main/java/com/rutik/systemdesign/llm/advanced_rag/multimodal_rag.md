@@ -154,6 +154,27 @@ def embed_text_for_image_retrieval(text: str) -> list[float]:
 
 CLIP alignment gap: CLIP text and image embeddings are in the same vector space but not perfectly aligned — a text query about "revenue growth" may not retrieve a revenue chart as reliably as semantic text search retrieves a text passage. Solution: dual retrieval (text for text chunks, CLIP for images) with a reranker that scores across both modalities.
 
+### Two Ways to Index an Image: Text Space vs Joint Space
+
+The two strategies differ in *where the image lands* in vector space. Strategy 1 converts the
+image to a text caption first, so it lives in the ordinary text-embedding space beside normal
+chunks. Strategy 2 embeds pixels directly into CLIP's joint image-text space, a separate index.
+
+```
+  Strategy 1  (Vision LLM → text-then-embed)
+     image ─► GPT-4o caption ─► text embedder ─┐
+     text  ───────────────────► text embedder ─┴─► ONE shared text space, one reranker
+                                                   (accurate, reuses text infra; ~1 VLM call/img)
+
+  Strategy 2  (Direct image embedding)
+     image ─► CLIP image encoder ─► image vector ─┐
+     query ─► CLIP text encoder  ─► text vector  ─┴─► CLIP joint space (separate index)
+                                                      (cheap + fast; text↔image alignment gap)
+```
+
+The tradeoff is direct: Strategy 1 buys accuracy and infra reuse at the cost of a vision-LLM
+call per image; Strategy 2 buys throughput and low cost but inherits the alignment gap above.
+
 ### 3.4 Generation with Vision LLMs
 
 Retrieved context must include both text and images; the generation LLM must be vision-capable:

@@ -57,6 +57,34 @@ Training: Contrastive learning on (query, positive_doc) pairs
   Maximize: dist(embed(query), embed(random_negative))
 ```
 
+### Cosine Similarity = Angle Between Vectors
+
+After L2-normalization (`v/||v||`), every 768-dim embedding lies on the unit sphere, so
+the dot product *equals* the cosine of the angle between two vectors. Magnitude drops out
+of the comparison — only direction, i.e. meaning, is left.
+
+```
+              "heart attack"
+                   ▲
+                   │    ╱► "myocardial infarction"
+                   │   ╱     small angle θ  →  cos ≈ 0.95   (near-synonyms)
+                   │  ╱
+                   │ ╱  θ
+        ───────────┼───────────────────────────►  "stock market"
+                   │           θ ≈ 90°  →  cos ≈ 0.0    (unrelated)
+                   │
+
+   on the unit sphere ||v|| = 1, so:   cos(θ) = a · b     (dot product IS the cosine)
+
+   angle θ :   0°     45°     90°    180°
+   cos(θ) :   1.0    0.71    0.0    -1.0
+              same   related none   opposite
+```
+
+This is why "normalize embeddings" matters: without it, a longer vector could score high on
+raw dot product regardless of direction. Normalize first, and similarity collapses to one
+interpretable number — the angle.
+
 ### 3.2 Major Embedding Models Compared
 
 ```

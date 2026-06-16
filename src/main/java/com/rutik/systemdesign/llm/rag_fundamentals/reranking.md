@@ -136,6 +136,26 @@ Latency: ~5ms vs ~50ms for cross-encoder; quality between bi and cross-encoder
 Storage: large (128d per token × all document tokens stored)
 ```
 
+### MaxSim: Token-Level Matching as a Grid
+
+Every query token is scored against every document token (each a 128-d vector). For each
+query *row*, only the single best-matching doc token survives (the max); those per-row maxima
+are summed. This is the "late interaction" middle ground — finer than one pooled vector
+(bi-encoder), far cheaper than full cross-attention (cross-encoder).
+
+```
+                     doc tokens (128-d each, pre-computed at index time)
+                      d1     d2     d3     d4     row max (kept)
+   q1 "capital"      0.21   0.31   0.88   0.12      0.88  (d3)
+   q2 "of"           0.40   0.22   0.18   0.30      0.40  (d1)
+   q3 "France"       0.15   0.91   0.20   0.25      0.91  (d2)
+                                                  ────────────────
+   Score = Σ row maxima = 0.88 + 0.40 + 0.91 = 2.19
+```
+
+The max-per-row is what lets "capital" match a document's "political center" (d3): the
+query token finds its best lexical-semantic counterpart instead of being averaged away.
+
 ### 3.5 Cohere Rerank API
 
 ```python

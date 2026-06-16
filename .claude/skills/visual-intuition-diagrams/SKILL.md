@@ -42,8 +42,12 @@ Tagged blocks (```` ```python ````, ```` ```sql ````) are code and are skipped.
 ## The authoring loop
 
 1. **Pick the archetype** that matches the concept's *shape* (catalog below).
-2. **Draft** the block. Reuse numbers already in the surrounding prose — never
-   invent figures.
+2. **Draft** the block. Reuse numbers already in the surrounding prose. Don't
+   invent *factual* figures (benchmark scores, costs, sizes). The exception is a
+   purely *mechanical* illustration — e.g. a similarity matrix showing how MaxSim
+   takes a per-row max — where small clearly-illustrative cell values are fine, the
+   same way the temperature bars use example probabilities. The numbers demonstrate
+   the operation, they don't assert a fact.
 3. **`check`** the file → fix any ERROR (tabs/whitespace/emoji) and any WARN
    (width > 100; prefer vertical stacking over wide side-by-side).
 4. **`preview`** the block → confirm columns line up against the ruler.
@@ -51,6 +55,21 @@ Tagged blocks (```` ```python ````, ```` ```sql ````) are code and are skipped.
    subhead inside `## 5. Architecture Diagrams` (or `## 14. Case Study` when
    it illustrates a case-study mechanic). Add a 1–2 sentence caption tying the
    picture to the insight.
+
+## When a diagram earns its place (especially in already-dense files)
+
+Mature modules are often *already* full of diagrams — but nearly all of them are
+**pipeline / data-flow** pictures. When auditing such a file, don't add another flow
+diagram. The real gaps are the **math and decision mechanics still trapped in
+formulas, prose, or code**: an arithmetic formula (RRF `1/(k+rank)`, ColBERT
+`Σ max_j(q_i·d_j)`), a threshold rule (CRAG's 0.3/0.7 buckets), a scale mismatch
+(cosine `[-1,1]` vs unbounded BM25), or a hierarchy/dependency structure (Leiden
+levels, a decomposition DAG). Those are where a picture changes understanding.
+
+A diagram must **earn** its place. Skip it if it would merely restate a two-number
+table — a bar chart of "Full FT 56 GB vs LoRA 28 GB" is fine (it shows a magnitude
+*ratio*), but a bar of two arbitrary numbers that the sentence already states adds
+nothing. Favor concepts that are math-heavy, spatial, or branching.
 
 ## Archetype catalog — match the concept's shape
 
@@ -63,7 +82,9 @@ T2:       ✓    ✓    ✗    ✗
 T3:       ✓    ✓    ✓    ✗
 (✓ = can attend, ✗ = masked)
 ```
-Real uses: causal mask, sliding-window mask, ALiBi bias grid.
+Real uses: causal mask, sliding-window mask, ALiBi bias grid. The cells need not be
+boolean: a **value grid** holds numbers (e.g. a query-token × doc-token similarity
+matrix) and an extra "row max (kept)" column shows a reduction like ColBERT MaxSim.
 
 **2. Before / after with a concrete delta** — show the *win*, don't just state it.
 Two grids or two stat blocks side by side, ending in a quantified reduction.
@@ -89,7 +110,10 @@ Real uses: Pre-LN vs Post-LN, prefill vs decode timeline.
 token ─► [Router] ─top-K─► [E0]* [E1]* [E2] [E3] [E4] ...   (* = active)
                           total = N×FFN   active = K×FFN
 ```
-Real uses: MoE expert routing, LLM router/cascade selection.
+Real uses: MoE expert routing, LLM router/cascade selection. Two close relatives live
+here: a **hierarchy tree** (Leiden community levels L0→L1→L2) and a **dependency DAG**
+(query decomposition: parallel legs Q1‖Q2 that join at a dependent Q3). Draw both as
+indented `├─ └─` trees, not top-down trees — see Gotchas for why.
 
 **5. Bar chart** — comparing magnitudes (probabilities, weights). Reuse real numbers.
 ```
@@ -106,7 +130,11 @@ acc 100% ┤▓▓▓▓                              ▓▓▓▓
      50% ┤▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
          └start────────middle────────────end→
 ```
-Real uses: "lost in the middle" U-curve, embedding vector arithmetic.
+Real uses: "lost in the middle" U-curve, embedding vector arithmetic. Two strong
+variants: a **vector/angle sketch** (two vectors at a small vs ~90° angle to show
+cosine similarity = direction, after L2-normalization) and a **1-D threshold
+number-line** (a score axis `0 ── 0.3 ── 0.7 ── 1.0` partitioned into labeled bands,
+each routing to an action — CRAG's correct/ambiguous/incorrect buckets).
 
 ## Conventions (enforced by `check`)
 
@@ -137,6 +165,13 @@ Real uses: "lost in the middle" U-curve, embedding vector arithmetic.
   the right boxes.
 - **Em dash `—` is one column** in the validator (correct) but reads "wide".
   Don't pad around it expecting two columns.
+- **Indented trees align; top-down trees fight you.** A top-down tree (parent
+  centered over children, `▲`/`│` connectors rising to it) needs every level's
+  widths to add up perfectly or the connectors miss — painful past two levels. For a
+  hierarchy or DAG, prefer an **indented `├─ └─` tree** (root flush-left, children
+  one indent in). The Leiden community diagram was redrawn this way and aligned on
+  the first `preview`. Reserve top-down only for a shallow fan-out/join (e.g. a 2-leg
+  decomposition DAG) where one `┌──┴──┐` split is easy to keep balanced.
 
 ## Troubleshooting
 

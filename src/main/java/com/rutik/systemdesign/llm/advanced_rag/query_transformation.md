@@ -165,6 +165,32 @@ Decomposed:
   Q3: (after answering Q1, Q2) "Intersection of Q1 and Q2 results"
 ```
 
+### Decomposition Is a Dependency DAG
+
+A multi-hop question becomes a small dependency graph of sub-questions. Independent legs
+(Q1, Q2) retrieve in parallel; the dependent step (Q3) must wait for both before it can run;
+a final step synthesizes. Seeing the DAG explains why decomposition is the seed of agentic
+RAG — it is literally a plan of retrieval steps with data dependencies.
+
+```
+   "Which companies had >20% revenue growth AND decreased headcount in 2024?"
+                              │ decompose
+              ┌───────────────┴───────────────┐
+              ▼                                ▼
+     Q1: >20% revenue growth         Q2: headcount decreased      (independent →
+         in 2024                         in 2024                    retrieve in parallel)
+              └───────────────┬───────────────┘
+                              ▼
+     Q3: intersection(Q1, Q2)                                      (dependent → needs
+                              │                                     Q1 and Q2 answers)
+                              ▼
+                  synthesize final answer
+```
+
+The join at Q3 is the part single-shot retrieval cannot do: no single embedding query
+expresses "growth AND shrinking headcount," so the answer only exists after the two legs are
+computed and intersected.
+
 Decomposition is the foundation of agentic RAG (see agentic_rag.md).
 
 ---

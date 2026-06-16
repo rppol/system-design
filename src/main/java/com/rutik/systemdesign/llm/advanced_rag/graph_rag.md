@@ -77,6 +77,28 @@ Example community:
   "Robotics": Boston Dynamics, Figure AI, Tesla Bot, NVIDIA Isaac
 ```
 
+### Leiden Builds a Community Hierarchy
+
+Leiden clusters the entity graph into communities, then clusters those communities again,
+producing *levels*. Coarse levels (L2) capture corpus-wide themes; fine levels (L0) capture
+specific local detail. A query's scope picks the level: a global "what are the themes?" reads
+L2 summaries, while a local "how do X and Y relate?" drills into L0.
+
+```
+  L2 (broad themes, few)
+   ├─ Artificial Intelligence
+   │   ├─ L1: AI Infrastructure ──► L0: {OpenAI, Anthropic, NVIDIA, AWS, Azure AI}
+   │   └─ L1: AI Regulation ──────► L0: {EU AI Act, FTC, US AI Safety Institute}
+   └─ Robotics
+       └─ L1: Embodied AI ────────► L0: {Boston Dynamics, Figure AI, Tesla Bot}
+
+  resolution ↑  →  more, smaller communities   (drill toward L0, specific)
+  resolution ↓  →  fewer, larger communities   (roll up toward L2, thematic)
+```
+
+The resolution parameter slides you up and down this tree. That single knob is why Graph RAG
+can answer both pinpoint entity questions and sweeping corpus-level questions from one index.
+
 **Step 4: Community Summarization**
 ```
 For each detected community, LLM generates a structured summary:

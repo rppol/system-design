@@ -54,6 +54,29 @@ Step 3: Decision logic
   All documents Incorrect/Ambiguous → trigger web search
 ```
 
+### Three-Bucket Relevance Thresholds
+
+A single relevance score in [0, 1] is cut at 0.3 and 0.7 into three confidence bands, and
+each band routes to a different action. This threshold logic is what makes CRAG "corrective"
+rather than blindly trusting whatever the retriever returned.
+
+```
+   score:  0.0 ─────────────── 0.3 ─────────────── 0.7 ─────────────── 1.0
+           │    INCORRECT       │    AMBIGUOUS       │     CORRECT        │
+           │     (≤ 0.3)        │    (0.3–0.7]       │     (> 0.7)        │
+           ▼                    ▼                    ▼
+        web-search          refine: keep         use retrieved
+        fallback            relevant sentences,  context as-is
+                            strip the rest
+
+   Calibration knob:
+     raise 0.7  →  fewer docs trusted   →  more web search   (safer, slower, costlier)
+     lower 0.3  →  fewer web calls       →  more raw trust    (cheaper, riskier)
+```
+
+The two cut points are the main tuning surface: they trade answer safety against latency and
+web-search cost, and should be calibrated on a labeled eval set, not guessed.
+
 ### 3.2 Context Refinement
 
 When documents are partially relevant (Ambiguous), CRAG refines them rather than discarding:
