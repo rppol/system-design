@@ -151,3 +151,16 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 4. Update `README.md` module table
 5. Update `case_studies/README.md` cross-reference map if the module is a dependency for a case study
 6. Update root `README.md` Backend phase table
+
+---
+
+## Visual Intuition Diagrams
+
+Section 5 (Architecture Diagrams) and any hard-to-picture concept should use an
+**ASCII visual intuition diagram** that makes an abstract relationship visible
+(constraint grid, before/after-with-delta, stacked flow, routing fan-out, bar
+chart, or curve/sketch). Generate and validate them with the
+`/visual-intuition-diagrams` skill. The full archetype catalog, conventions
+(ASCII only, no tabs, no emojis, widest line <= 100 cols, caption every diagram),
+and the `diagram_tools.py` validator live in root `CLAUDE.md` -> "Visual Intuition
+Diagrams".

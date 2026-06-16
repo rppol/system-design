@@ -153,3 +153,42 @@ Every `case_studies/` directory MUST contain a `README.md` with these 5 sections
 - Section headers follow exact numbering: `## 1.`, `## 2.`, ... `## 14.`
 - Use `---` horizontal rules to separate major sections
 - Links between modules: use relative paths, e.g., `[Concurrency](../concurrency/README.md)`
+
+---
+
+## Visual Intuition Diagrams
+
+Section 5 of every module (Architecture Diagrams) — and any place a concept is
+hard to picture — should use a **visual intuition diagram**: ASCII art that makes
+an abstract relationship *physically visible*. The gold standard is the causal-mask
+grid and the sliding-window before/after pair in
+`llm/foundations_and_architecture/README.md`.
+
+**Skill:** run `/visual-intuition-diagrams` (at
+`.claude/skills/visual-intuition-diagrams/`) to generate or validate these. It
+ships a validator/previewer — author a diagram, then run it through the driver
+before committing:
+
+```bash
+# Lint diagram blocks (tabs, trailing whitespace, emoji, >100-col width); accepts files or dirs
+python3 .claude/skills/visual-intuition-diagrams/diagram_tools.py check <path-or-dir>
+# Print one block under a column ruler to eyeball alignment
+python3 .claude/skills/visual-intuition-diagrams/diagram_tools.py preview <file.md> <index>
+```
+
+**Pick the archetype that matches the concept's shape:**
+
+| Archetype | Use when the concept is… | Examples |
+|-----------|--------------------------|----------|
+| Constraint grid | a relationship across two axes (X×Y) | causal mask, ALiBi bias, sliding window |
+| Before/after + delta | a quantified win | KV-cache reduction, MLA compression |
+| Side-by-side / stacked flow | a placement or phase difference | Pre-LN vs Post-LN, prefill vs decode |
+| Routing / fan-out | one input selecting among many paths | MoE experts, router/cascade |
+| Bar chart | comparing magnitudes | softmax temperature, attention-sink weights |
+| Curve / vector sketch | a trend or geometric intuition | "lost in the middle", embedding arithmetic |
+
+**Conventions (enforced by the validator):** ASCII only, fenced block with **no
+language tag**; spaces not tabs; no trailing whitespace; **no emojis** (use `✓`/`✗`,
+not `✅`/`❌`); widest line ≤ 100 cols (prefer vertical stacking over wide
+side-by-side); caption every diagram with 1–2 sentences tying it to the insight and
+reuse numbers already in the surrounding text.

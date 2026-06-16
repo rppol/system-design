@@ -99,3 +99,16 @@ Format: `[3.11]` inline or `Added in Python 3.11`.
 5. Flip the module's Status from `pending` → `done` in `README.md` §8 tracker; advance "NEXT UP" pointer
 6. Update root `README.md` Phase table under the Python section
 7. Update root `CLAUDE.md` Python module table
+
+---
+
+## Visual Intuition Diagrams
+
+Section 5 (Architecture Diagrams) and any hard-to-picture concept should use an
+**ASCII visual intuition diagram** that makes an abstract relationship visible
+(constraint grid, before/after-with-delta, stacked flow, routing fan-out, bar
+chart, or curve/sketch). Generate and validate them with the
+`/visual-intuition-diagrams` skill. The full archetype catalog, conventions
+(ASCII only, no tabs, no emojis, widest line <= 100 cols, caption every diagram),
+and the `diagram_tools.py` validator live in root `CLAUDE.md` -> "Visual Intuition
+Diagrams".

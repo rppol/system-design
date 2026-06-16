@@ -207,3 +207,16 @@ On finishing a module/chunk:
 3. Update `README.md` module table AND flip the file's status in the §7 build manifest
 4. Update root `README.md` CS Fundamentals phase table
 5. Update root `CLAUDE.md` CS Fundamentals module count
+
+---
+
+## Visual Intuition Diagrams
+
+Section 5 (Architecture Diagrams) and any hard-to-picture concept should use an
+**ASCII visual intuition diagram** that makes an abstract relationship visible
+(constraint grid, before/after-with-delta, stacked flow, routing fan-out, bar
+chart, or curve/sketch). Generate and validate them with the
+`/visual-intuition-diagrams` skill. The full archetype catalog, conventions
+(ASCII only, no tabs, no emojis, widest line <= 100 cols, caption every diagram),
+and the `diagram_tools.py` validator live in root `CLAUDE.md` -> "Visual Intuition
+Diagrams".

@@ -172,18 +172,22 @@ T5:       ✓    ✓    ✓    ✓    ✓
 ### MHA vs GQA vs MQA — Head-Sharing
 
 ```
-Multi-Head Attention (MHA)         Grouped Query Attention (GQA)       Multi-Query Attention (MQA)
-H=8 Q heads, H=8 KV heads          H=8 Q heads, G=2 KV heads           H=8 Q heads, G=1 KV head
+Three ways Q (query) heads bind to K,V (key/value) heads. Fewer KV heads = smaller KV cache.
 
-[Q0][Q1][Q2][Q3][Q4][Q5][Q6][Q7]   [Q0][Q1][Q2][Q3][Q4][Q5][Q6][Q7]   [Q0][Q1][Q2][Q3][Q4][Q5][Q6][Q7]
- |   |   |   |   |   |   |   |      └─┬─┘   └─┬─┘   └─┬─┘   └─┬─┘      └────┴────┴────┴────┴────┴────┴────┘
-[K0][K1][K2][K3][K4][K5][K6][K7]    [K0]     [K1]     [K2]     [K3]                      │
-[V0][V1][V2][V3][V4][V5][V6][V7]    [V0]     [V1]     [V2]     [V3]                    [K0][V0]
+MHA — Multi-Head Attention (H=8 Q, 8 KV) — every Q head has its own K,V
+  Q0  Q1  Q2  Q3  Q4  Q5  Q6  Q7
+  │   │   │   │   │   │   │   │
+  K0  K1  K2  K3  K4  K5  K6  K7     KV cache = 8 × d_head  →  1× (baseline)
 
-KV cache = H × d_head per token     KV cache = G × d_head per token     KV cache = 1 × d_head per token
-         = 1× (baseline)                     = 0.25× MHA (4:1 sharing)           = 0.125× MHA (8:1)
+GQA — Grouped Query Attention (H=8 Q, G=2 KV) — each group of 4 Q heads shares one K,V
+  Q0 Q1 Q2 Q3   Q4 Q5 Q6 Q7
+   └────┬────┘   └────┬────┘
+       K0            K1             KV cache = 2 × d_head  →  0.25× MHA (4:1)
 
-Each Q head has its own K,V.         Every 2 Q heads share one K,V.      All 8 Q heads share one K,V.
+MQA — Multi-Query Attention (H=8 Q, G=1 KV) — all Q heads share a single K,V
+  Q0 Q1 Q2 Q3 Q4 Q5 Q6 Q7
+   └─────────┬──────────┘
+            K0                      KV cache = 1 × d_head  →  0.125× MHA (8:1)
 ```
 
 GQA is the production sweet spot: LLaMA 3 70B uses H=64, G=8 — an 8× KV cache reduction vs MHA with <1 PPL quality loss.

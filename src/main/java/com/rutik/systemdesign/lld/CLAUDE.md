@@ -111,3 +111,16 @@ LLD describes how individual components are implemented — class relationships,
 4. Update the relevant **category** `README.md` (e.g., `behavioral/README.md`) — add a row to the pattern catalogue table
 5. Update the **master** `README.md` (the LLD master index) — add a row to the appropriate section table
 6. Add to the `pattern_comparisons/` file if it overlaps with other patterns
+
+---
+
+## Visual Intuition Diagrams
+
+Section 5 (Architecture Diagrams) and any hard-to-picture concept should use an
+**ASCII visual intuition diagram** that makes an abstract relationship visible
+(constraint grid, before/after-with-delta, stacked flow, routing fan-out, bar
+chart, or curve/sketch). Generate and validate them with the
+`/visual-intuition-diagrams` skill. The full archetype catalog, conventions
+(ASCII only, no tabs, no emojis, widest line <= 100 cols, caption every diagram),
+and the `diagram_tools.py` validator live in root `CLAUDE.md` -> "Visual Intuition
+Diagrams".

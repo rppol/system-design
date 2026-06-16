@@ -115,3 +115,16 @@ When covering a feature, always include the version it was introduced and LTS st
 5. Add cross-references in the Cross-Reference Map in `README.md` if applicable
 6. Update root `README.md` Phase table under the Java section
 7. Update `java/CLAUDE.md` module table (this file)
+
+---
+
+## Visual Intuition Diagrams
+
+Section 5 (Architecture Diagrams) and any hard-to-picture concept should use an
+**ASCII visual intuition diagram** that makes an abstract relationship visible
+(constraint grid, before/after-with-delta, stacked flow, routing fan-out, bar
+chart, or curve/sketch). Generate and validate them with the
+`/visual-intuition-diagrams` skill. The full archetype catalog, conventions
+(ASCII only, no tabs, no emojis, widest line <= 100 cols, caption every diagram),
+and the `diagram_tools.py` validator live in root `CLAUDE.md` -> "Visual Intuition
+Diagrams".

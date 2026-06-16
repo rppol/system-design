@@ -153,3 +153,16 @@ Principal case studies must cross-reference at least 4 of these files via relati
 - Section 6 must name actual companies with specific technical details
 - Section 9 must have quantified impact ($ lost, users affected, SLA violated)
 - Section 11: minimum 10 Q&As (not 8)
+
+---
+
+## Visual Intuition Diagrams
+
+Section 5 (Architecture Diagrams) and any hard-to-picture concept should use an
+**ASCII visual intuition diagram** that makes an abstract relationship visible
+(constraint grid, before/after-with-delta, stacked flow, routing fan-out, bar
+chart, or curve/sketch). Generate and validate them with the
+`/visual-intuition-diagrams` skill. The full archetype catalog, conventions
+(ASCII only, no tabs, no emojis, widest line <= 100 cols, caption every diagram),
+and the `diagram_tools.py` validator live in root `CLAUDE.md` -> "Visual Intuition
+Diagrams".
