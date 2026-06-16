@@ -169,6 +169,128 @@ T5:       ✓    ✓    ✓    ✓    ✓
 (✓ = can attend, ✗ = masked out)
 ```
 
+### MHA vs GQA vs MQA — Head-Sharing
+
+```
+Multi-Head Attention (MHA)         Grouped Query Attention (GQA)       Multi-Query Attention (MQA)
+H=8 Q heads, H=8 KV heads          H=8 Q heads, G=2 KV heads           H=8 Q heads, G=1 KV head
+
+[Q0][Q1][Q2][Q3][Q4][Q5][Q6][Q7]   [Q0][Q1][Q2][Q3][Q4][Q5][Q6][Q7]   [Q0][Q1][Q2][Q3][Q4][Q5][Q6][Q7]
+ |   |   |   |   |   |   |   |      └─┬─┘   └─┬─┘   └─┬─┘   └─┬─┘      └────┴────┴────┴────┴────┴────┴────┘
+[K0][K1][K2][K3][K4][K5][K6][K7]    [K0]     [K1]     [K2]     [K3]                      │
+[V0][V1][V2][V3][V4][V5][V6][V7]    [V0]     [V1]     [V2]     [V3]                    [K0][V0]
+
+KV cache = H × d_head per token     KV cache = G × d_head per token     KV cache = 1 × d_head per token
+         = 1× (baseline)                     = 0.25× MHA (4:1 sharing)           = 0.125× MHA (8:1)
+
+Each Q head has its own K,V.         Every 2 Q heads share one K,V.      All 8 Q heads share one K,V.
+```
+
+GQA is the production sweet spot: LLaMA 3 70B uses H=64, G=8 — an 8× KV cache reduction vs MHA with <1 PPL quality loss.
+
+### Pre-LN vs Post-LN Data Flow
+
+```
+Post-LN (original Transformer)          Pre-LN (modern standard — GPT-2+, LLaMA, Mistral)
+
+x ──────────────────┐                   x ──────────────────────────────┐
+│                   │ residual           │                               │ residual
+▼                   │                   ▼                               │ (clean highway —
+[sublayer(x)]       │                   [LayerNorm]                     │  no LN on this path)
+│                   │                   │                               │
+▼                   │                   ▼                               │
+[     +      ] ←───┘                   [sublayer(LN(x))]               │
+│                                       │                               │
+▼                                       ▼                               │
+[LayerNorm]                             [     +      ] ←───────────────┘
+│                                       │
+▼                                       ▼
+output                                  output
+
+LN is on the residual path.             LN is NOT on the residual path.
+Gradients pass through LN at every      Gradients flow directly back through
+layer → can explode/vanish in           the clean residual highway to early
+early layers → requires careful         layers → stable training at depth.
+LR warmup (10K+ steps).                Nearly all models ≥7B use Pre-LN.
+```
+
+### Mixture-of-Experts (MoE) Routing
+
+```
+Input token x
+      │
+      ▼
+  [Router]  ← learned linear layer
+      │
+   softmax over N experts → select top-K scores
+      │
+      ├──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐
+      │          │          │          │          │          │          │          │
+    [E0]      [E1]      [E2]      [E3]      [E4]      [E5]      [E6]      [E7]
+   (active)  (active)  (skipped) (skipped) (skipped) (skipped) (skipped) (skipped)
+      │          │
+      └────┬─────┘
+    weighted sum (router scores × expert outputs)
+           │
+           ▼
+       output
+
+Total params  = N × FFN_size    ← all experts must reside in memory
+Active params = K × FFN_size    ← only K experts compute per token
+
+DeepSeek-V3: N=256 experts, K=8 active, total=671B params, active=37B params
+→ inference cost of a 37B dense model at the quality of a 671B model.
+```
+
+### Softmax Temperature — Distribution Shape
+
+```
+Logits: [3.0, 1.0, 0.5]    Effect of temperature T on the output probability distribution:
+
+T = 0.5  (sharp, confident — scale logits by ×2):
+  token A │████████████████████████████████████████ 0.879
+  token B │████                                     0.119
+  token C │                                         0.002
+
+T = 1.0  (standard — no scaling):
+  token A │███████████████████████████████          0.744
+  token B │████                                     0.100
+  token C │██                                       0.062
+
+T = 2.0  (flat, diverse — scale logits by ×0.5):
+  token A │████████████████████                     0.516
+  token B │██████████                               0.260
+  token C │████████                                 0.224
+
+T → 0: argmax / greedy (always picks top-1)    T → ∞: uniform (completely random)
+Factual tasks: T≈0.0–0.3.    Creative tasks: T≈0.7–1.2.    Above T=2.0: output degrades.
+```
+
+### Embedding Semantic Space
+
+```
+                    ↑ royalty
+                    │
+             queen  •─────────────→ king
+                    │               •
+                    │            ↗
+                    │ +woman  ↗  −man
+                    │      ↗
+             woman  •─────────────→ man
+                    │
+                    └──────────────────→ gender
+
+"king − man + woman" ≈ "queen"
+
+Navigate the embedding space: start at king (•), subtract the man→origin
+direction, add the woman→origin direction — arrive near queen (•).
+
+Why this works: during training, "king" and "queen" appear in similar contexts
+(royal, power, throne) → their gradient updates push their vectors close.
+"man" and "woman" are also contextually similar → their difference vector
+encodes the male↔female axis. Arithmetic in embedding space = semantic analogy.
+```
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -678,6 +800,26 @@ Post-LN (original Transformer) applies LayerNorm after the residual addition: `o
     H100 HBM3 bandwidth: 3.35 TB/s → 70 GB loads in 20.9ms
     → Decode speed ceiling: 1 / 20.9ms = 47.8 tokens/sec/GPU (single request)
     With batching 16 requests: amortize weight loads → 16×47.8 = 765 tok/s
+```
+
+### Prefill vs Decode: Phase Timeline
+
+```
+Prefill (compute-bound):                Decode (memory-bandwidth-bound):
+
+prompt tokens:                          each step generates one new token:
+T1  T2  T3  ...  T600                   step 1:  [T1..T600]  → T601
+│   │   │         │                     step 2:  [T1..T601]  → T602
+└───┴───┴── ... ──┘                     step 3:  [T1..T602]  → T603
+          │                             ...
+   [single parallel forward pass]       [one forward pass per output token]
+   processes all 600 tokens together    reads all 70B weights each step (70 GB)
+
+Arithmetic intensity HIGH:              Arithmetic intensity LOW:
+many tokens → many FLOPs per            1 token output per full weight-load cycle
+weight byte loaded.                     → 70 GB / 3.35 TB/s ≈ 21 ms/token ceiling.
+GPU compute is the bottleneck.          Memory bandwidth is the bottleneck.
+↳ Faster GPU helps prefill.            ↳ Larger batches amortize weight loads.
 ```
 
 **Key implementation — 3 Python code blocks:**

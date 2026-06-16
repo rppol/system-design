@@ -138,6 +138,53 @@ NTK-aware scaling (base scaling):
          high-frequency components less distorted than PI
 ```
 
+### ALiBi Bias — Attention Score Penalty Grid
+
+```
+ALiBi attention bias matrix (head slope m = 0.25, seq_len = 6):
+Added to raw attention scores QK^T/√d_k before softmax.
+
+         T1       T2       T3       T4       T5       T6
+T1:       0        -∞       -∞       -∞       -∞       -∞
+T2:    -0.25       0        -∞       -∞       -∞       -∞
+T3:    -0.50    -0.25       0        -∞       -∞       -∞
+T4:    -0.75    -0.50    -0.25       0        -∞       -∞
+T5:    -1.00    -0.75    -0.50    -0.25       0        -∞
+T6:    -1.25    -1.00    -0.75    -0.50    -0.25       0
+
+Penalty = m × (j − i).   Larger distance → larger negative score → less attention.
+
+Compare to causal masking: causal mask is binary (attend or -∞).
+ALiBi is graded: distant tokens are suppressed, not zeroed — the model
+can still attend to them when truly necessary, but pays a mounting cost.
+Each attention head uses a different slope m_h = 2^(−8h/H), so some heads
+"zoom out" (small m, attend far) and others "zoom in" (large m, attend near).
+```
+
+### "Lost in the Middle" — U-Curve
+
+```
+Retrieval accuracy vs. position of relevant information in context
+(Liu et al., 2023 — "Lost in the Middle"):
+
+  100% ┤ ▓▓▓▓
+   90% ┤ ▓▓▓▓▓▓                                                 ▓▓▓▓▓
+   80% ┤ ▓▓▓▓▓▓▓▓                                           ▓▓▓▓▓▓▓▓
+   70% ┤ ▓▓▓▓▓▓▓▓▓▓                                     ▓▓▓▓▓▓▓▓▓▓
+   60% ┤ ▓▓▓▓▓▓▓▓▓▓▓▓                             ▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+   50% ┤ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+       └────────────────────────────────────────────────────────→
+        start                    middle                    end
+                           context position
+
+Why the U-curve: causal attention + RoPE's positional bias favor recent tokens
+(end) and heavily attended early tokens. Middle tokens have accumulated less
+multi-layer "coverage." ALiBi's linear penalty exacerbates the dip.
+
+Practical fix: place key facts at the very beginning or very end of context;
+train with data that explicitly requires middle retrieval to flatten the curve.
+```
+
 ---
 
 ## 6. How It Works — Detailed Mechanics

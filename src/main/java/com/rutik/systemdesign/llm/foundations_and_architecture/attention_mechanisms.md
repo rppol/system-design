@@ -130,6 +130,44 @@ vs MHA: H * d_k * 2 bytes * seq_len per layer
 Savings: H/G = 8/2 = 4x KV cache reduction
 ```
 
+### MLA (Multi-Head Latent Attention) — Cache Compression
+
+```
+Standard KV Cache (MHA, H=128 heads, d_head=128):    MLA Cache (DeepSeek-V2, d_c=512):
+
+Per token per layer stored:                          Per token per layer stored:
+  K: [H × d_head] = [128 × 128] = 16,384 values       c: [d_c] = [512] values
+  V: [H × d_head] = [128 × 128] = 16,384 values         (single compressed latent)
+  Total = 32,768 values                               Total = 512 values
+
+At 128K context, 60 layers, FP16:                    At 128K context, 60 layers, FP16:
+  32,768 × 128K × 60 × 2 bytes ≈ 253 GB               512 × 128K × 60 × 2 bytes ≈ 7.9 GB
+
+                             253 GB → 7.9 GB  (~32× reduction)
+
+At attention time: decompress c → K, V via learned up-projections W_K, W_V.
+Compression is learned jointly with the model — not a post-hoc quantization.
+```
+
+### Attention Sink — Weight Distribution
+
+```
+Attention weights assigned by token T10 to all previous positions
+(empirical observation across LLMs — StreamingLLM, Xiao et al. 2023):
+
+Position:   T1     T2     T3     T4     T5     T6     T7     T8     T9    T10
+            ████   ███    ██                                              ████
+            ████   ███    ██                                              ████
+            ████   ███    ██                                              ████
+weight:    0.22   0.17   0.10   0.01   0.02   0.01   0.01   0.02   0.01  0.43
+
+First 3–4 tokens absorb disproportionate attention weight regardless of content.
+They act as "sinks" — aggregate value buffers for the model's residual state.
+
+Evict T1–T4: quality collapses.    Keep T1–T4 + sliding window: quality preserved.
+StreamingLLM fix: always maintain num_sink_tokens (4) + recent window in cache.
+```
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
