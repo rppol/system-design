@@ -174,6 +174,18 @@ GPU Memory:
   Total: ~5-6GB for 7B model QLoRA
 ```
 
+### Memory Footprint by Method
+```
+Fine-tuning a 7B model — GPU memory by method (each █ ≈ 4 GB):
+
+Full fine-tune  56 GB │██████████████   weights + grads + Adam states (2× A100 40GB)
+LoRA  r=16      28 GB │███████          frozen base + adapter grads
+QLoRA r=16       6 GB │█▌               4-bit base → fits a 16GB consumer GPU
+```
+QLoRA's 4-bit base model collapses the footprint ~9× (56 GB → 6 GB) — turning a
+two-GPU job into one that runs on a single consumer card. This is the whole reason
+fine-tuning became accessible outside research labs.
+
 ### Fine-Tuning Pipeline
 ```
 Pre-trained Base Model

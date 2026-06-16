@@ -63,6 +63,26 @@ Memory: 4 bits = 0.5 bytes per weight
   7B model: 14GB (BF16) → 3.5GB (NF4)
 ```
 
+### NF4 vs INT4 — Match the Levels to the Weights
+```
+Why NF4 beats INT4: put the 16 quantization levels where the weights actually are.
+
+LLM weights ≈ N(0,1) — most mass piled near zero, thin tails:
+            ▁▂▃▅▇█████▇▅▃▂▁
+       -1.0        0.0        +1.0
+
+INT4 — 16 evenly spaced levels (wastes resolution on the near-empty tails):
+       |   |   |   |   |   |   |   |
+       -1.0        0.0        +1.0
+
+NF4 — 16 levels at equal-probability quantiles (packed near zero):
+             | || ||||||||| || |
+       -1.0        0.0        +1.0
+
+Each NF4 level carries equal probability mass, so resolution is finest exactly where
+weights cluster → ~0.5-1% less quantization error than INT4 at the same 4 bits.
+```
+
 ### 3.2 Double Quantization
 
 NF4 quantization stores a scaling factor per block of weights (typically 64 weights per block) to normalize to the NF4 range before quantizing. These scaling factors add overhead:

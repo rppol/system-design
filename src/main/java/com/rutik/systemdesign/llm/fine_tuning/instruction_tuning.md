@@ -104,6 +104,18 @@ Implementation:
 
 The quality and diversity of training data is the primary determinant of instruction-tuning success:
 
+### Quality Beats Quantity (the LIMA finding)
+```
+Physician rating of the same model fine-tuned on two datasets (each █ ≈ 0.2 points):
+
+  4,800 curated + filtered    │██████████████████████ 4.3 / 5.0   ← winner
+ 50,000 synthetic, unfiltered │███████████████████    3.8 / 5.0
+                              └──────────────────────────────── rating →
+```
+The 10× larger dataset scored LOWER. Once ~1-5K diverse examples teach the
+instruction-following format, extra noisy examples add gradient noise rather than new
+skill — so filtering down to the best 1-5K examples beats piling on raw volume.
+
 **Diversity dimensions**:
 ```
 Task types:

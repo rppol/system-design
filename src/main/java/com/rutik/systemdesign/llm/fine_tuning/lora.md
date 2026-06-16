@@ -84,6 +84,26 @@ Memory savings:
   (Frozen weights still loaded to GPU; only adapter gradients computed)
 ```
 
+### Shape Intuition — Full Update vs Low-Rank Factorization
+```
+LoRA never trains the full ΔW. It factors that update into two thin matrices:
+
+  Full ΔW (d×k = 4096×4096)        LoRA factors it as B (4096×16) × A (16×4096)
+  ┌────────────────────┐
+  │                    │           ┌┐         ┌────────────────────┐
+  │                    │           ││    ×    └────────────────────┘
+  │  16,777,216 params │    ≈      ││         A: 16×4096 = 65,536
+  │  (every cell)      │           ││         B: 4096×16 = 65,536
+  │                    │           ││
+  └────────────────────┘           └┘         131,072 params total (B + A)
+       all cells trained        tall sliver   wide sliver
+
+  16.7M  →  131K trainable params  —  127× fewer for a single weight matrix
+```
+The two slivers only ever touch at rank r=16, so their product is forced to be
+rank ≤ 16 — that low-rank constraint is exactly what makes the parameter count
+collapse while still capturing the fine-tuning update.
+
 ### 3.3 Rank Selection
 
 ```
@@ -110,6 +130,30 @@ r=128: ~67M params; almost never justified; use full fine-tune instead
 Rule: start with r=16, alpha=32. If quality insufficient, double r.
 If r=64 still insufficient, switch to full fine-tuning.
 ```
+
+### Why Low Rank Suffices — Singular-Value Spectrum
+```
+Singular values of the fine-tuning update ΔW, sorted largest-first:
+
+ σ1  │████████████████████
+ σ2  │███████████████
+ σ3  │███████████
+ σ4  │████████
+ σ8  │█████
+ σ16 │███                  ← rank r=16 cutoff: top components capture ~90-98% of ΔW
+ σ32 │█                    ┐
+ σ64 │▏                    │ long thin tail — discarding it costs only ~2-10% quality
+ σ128│·                    ┘
+     └──────────────────────────────────────────────
+      the task-relevant change lives in the top few directions
+
+Healthy adapter: values decay steeply (like above) → r is large enough.
+Rank too low:    every σ stays near σ1 (no decay) → the update needs more than r
+                 dimensions; raise r and re-check the eval metric.
+```
+This decay is the intrinsic-rank hypothesis made visible: fine-tuning moves the
+weights mostly along a handful of directions, so a rank-16 factorization recovers
+nearly all of it.
 
 ### 3.4 Target Module Selection
 
@@ -247,6 +291,26 @@ Backward pass:
   Loss → ∂L/∂A → update A
   Loss → ∂L/∂W = 0 (W is frozen, no gradient accumulation needed)
 ```
+
+### Multi-Adapter Serving — One Base Model, Many Tasks
+```
+request (tag: sql)   ─┐
+request (tag: chat)  ─┤        ┌──────────────────┐
+request (tag: legal) ─┼──────► │  Base model       │  loaded ONCE on GPU (14GB)
+request (tag: ...)   ─┘        │  (frozen weights) │
+                               └────────┬──────────┘
+                                        │  route by adapter_id
+                    ┌───────────────────┼───────────────────┐
+                    ▼                   ▼                   ▼
+              [sql_adapter]       [chat_adapter]      [legal_adapter]   ...
+                ~130MB              ~130MB              ~130MB
+               (B,A only)          (B,A only)          (B,A only)
+
+One 14GB base + N tiny adapters (~130MB each) = 50+ specialized models on one GPU.
+```
+Because each adapter is just its B and A matrices, swapping tasks is a matrix-add
+at request time (vLLM hot-swap), not a 14GB model reload — the economic core of
+serving many fine-tunes cheaply.
 
 ---
 

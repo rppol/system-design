@@ -116,6 +116,21 @@ Mixing implementation:
   )
 ```
 
+### Choosing the Mix Ratio — the Pareto Tradeoff
+```
+General-data mix % trades off two things (legal-CPT ablation; bars NOT same scale):
+
+mix%   forgetting: MMLU drop       domain gain: LegalBench F1
+  5%   ████████ -8.1%              █████████ +18.3%
+ 10%   █████ -5.4%                 █████████ +17.1%
+ 15%   ████ -4.3%                  ████████ +16.8%
+ 20%   ██ -2.1%                    ████████ +16.2%   ◄ knee (Pareto-optimal)
+ 30%   █ -0.9%                     ███████ +13.7%
+```
+Raising the mix shrinks forgetting fast while domain gain barely moves — until 30%,
+where the gain finally drops off. 20% is the knee: near-minimal forgetting while
+keeping almost the full domain improvement. Below 10%, forgetting is unacceptable.
+
 ### 3.3 The Domain-Then-Instruct Pipeline
 
 The most effective domain adaptation approach:

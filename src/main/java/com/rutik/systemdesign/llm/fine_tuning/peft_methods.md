@@ -207,6 +207,24 @@ DoRA (r=8)       ~0.12%       Yes     0% merged   LoRA quality at lower rank
 (*QLoRA merged requires dequantize first)
 ```
 
+### Trainable-Parameter Spectrum
+```
+Trainable params as % of a 7B model (LOG scale — each step is roughly 10×):
+
+Prompt tuning  ~0.001% │█
+Prefix (l=10)   ~0.03% │███
+Adapter (r=8)    0.06% │████
+BitFit           <0.1% │████
+DoRA (r=8)      ~0.12% │█████
+LoRA (r=16)   0.2-0.5% │███████  ◄ most trainable params, highest quality
+QLoRA (r=16)  0.2-0.5% │███████    (same param count as LoRA; frozen base is 4-bit)
+                       └──────────────────────────
+                        fewer params ──► more adaptation capacity
+```
+The spread spans ~500× (0.001% to 0.5%). Prompt/prefix tuning sit at the extreme-thin
+end and only reach LoRA-level quality at very large model scales; LoRA's slightly
+higher parameter budget is what buys its reliable quality across model sizes.
+
 ---
 
 ## 4. Architecture Diagram
