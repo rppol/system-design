@@ -571,6 +571,34 @@ jobs:
 | Bias risks | Verbosity, positional, self-serving | Annotator fatigue, instruction-following | None | Embedding model bias |
 | Scales to CI/CD | Yes | No | Yes | Yes |
 
+### The Metric Cost Cascade — Run Cheap First, Escalate on Uncertainty
+
+The four tiers span five orders of magnitude in cost per example, so you never run all
+of them on every example — you cascade, resolving as many as possible at the cheap top:
+
+```
+ cost/example:  $0.00        $0.001        $0.05-0.30        $2-15
+                  |            |               |               |
+ tier:         Lexical      Semantic       LLM-Judge        Human
+ latency:      <1ms         50-200ms       2-5s             hours-days
+ vs human:     40-60%       65-80%         75-90%           ground truth
+
+   ALL examples --> [Lexical]    pass?      --> done   (free)
+                       | fail / ambiguous
+                       v
+                    [Semantic]   pass?      --> done   ($0.001)
+                       | still uncertain
+                       v
+                    [LLM-Judge]  confident? --> done   ($0.05-0.30)
+                       | judge disagrees / high-stakes sample
+                       v
+                    [Human]      final arbiter         ($2-15, only the last few %)
+
+ Each tier is ~10-300x pricier than the one above it. Resolving most examples at
+ the top keeps the BLENDED cost per example near the cheap tiers while reserving
+ expensive human review for the handful of cases that truly need it.
+```
+
 ### Offline vs Online Eval Comparison
 
 | Dimension | Offline Batch Eval | Online Shadow Eval |

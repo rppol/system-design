@@ -126,6 +126,34 @@ Approaches:
 
 ### 4.2 Model Merging
 
+Every method below operates on **task vectors** — the delta a fine-tune adds to the
+base. Seeing them as arrows in weight space (and what happens per parameter when two
+arrows disagree) is the mental model that makes the algorithms obvious:
+
+```
+ Task vector:  tau = theta_finetuned - base        (what fine-tuning changed)
+
+   base  *-----> tau_code     (delta from fine-tuning on code)
+   base  *-----> tau_math     (delta from fine-tuning on math)
+
+ Compose by ADDING vectors back onto the base point:
+   base + 0.8*tau_code + 0.5*tau_math   ->  one model good at BOTH (task arithmetic)
+   base - 0.3*tau_toxic                 ->  a skill SUBTRACTED out
+
+ Why naive averaging loses signal -- the per-parameter sign conflict (one weight i):
+   tau_A[i] = +0.30  \  opposite signs
+   tau_B[i] = -0.20  /  = a conflict
+   --------------------------------------------------------------------------
+   linear avg : (+0.30 + -0.20)/2 = +0.05    <- both signals nearly cancel
+   TIES       : elect the dominant sign (+), keep +0.30, drop the -0.20 loser
+   DARE       : randomly zero ~90% of each tau FIRST (they are sparse), so far
+                fewer conflicts even reach the merge step
+```
+
+Task vectors are sparse and approximately orthogonal across tasks, which is exactly
+why subtracting the small overlaps (TIES) or sparsifying first (DARE) recovers more of
+each skill than averaging the dense deltas.
+
 #### Linear Interpolation (Weight Averaging)
 
 Simplest approach: weighted average of two models' parameters.

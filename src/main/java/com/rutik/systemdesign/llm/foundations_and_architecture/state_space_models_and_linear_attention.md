@@ -286,6 +286,27 @@ sequence
   ~10,000x larger than the SSM's entire recurrent state.
 ```
 
+### 5.6 The Duality: Linear Attention and the SSM Recurrence Are the Same Update
+
+```
+   LINEAR ATTENTION  (drop the softmax)        SELECTIVE SSM  (Mamba)
+   ====================================        ======================
+   state:  S_t = S_{t-1} + k_t * v_t^T   <-->  h_t = A * h_{t-1} + B_t * x_t
+                  \__ rank-1 outer __/                with  A = I  (no decay),
+                      product into S                       B_t * x_t = k_t * v_t^T
+   read:   y_t = q_t^T * S_t             <-->  y_t = C_t * h_t   (C_t plays q_t^T)
+
+   Both keep ONE running state, update it with a rank-1 term, and read it out
+   with a left-multiply -- the SAME computation. Mamba-2's SSD just lets A be a
+   structured (semiseparable) matrix instead of I; that turns the recurrence
+   into "masked linear attention", runnable on the matmul kernels GPUs are
+   built for (the source of Mamba-2's 2-8x training speedup over Mamba-1).
+```
+
+The two columns are not an analogy — they are algebraically identical (§3.5). Reading
+the recurrence as an outer-product state accumulation is exactly why a "sequence model"
+can be expressed as, and accelerated like, a matrix multiply.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics

@@ -361,6 +361,35 @@ KL regularization:
   β typically 0.01-0.1; higher β = stay closer to SFT model
 ```
 
+The `min` + `clip` is hard to read off the formula. Plotting L_CLIP against the ratio
+r shows what it actually does: the objective goes FLAT (gradient -> 0) once the update
+leaves the trust region in the direction that would exploit the advantage — and the
+clipped side flips with the sign of A.
+
+```
+ A > 0  (action better than baseline -- push prob UP)
+   L                              r >= 1+e : FLAT (clipped, no extra reward)
+   |                    _________
+   |                  /
+   |                /   slope = A   (free update inside trust region)
+   |              /
+   +----+--------+--------+----> r
+       1-e       1       1+e
+
+ A < 0  (action worse than baseline -- push prob DOWN)
+   L   r <= 1-e : FLAT (clipped, no extra push)
+   |   _________
+   |             \
+   |               \   slope = A  (objective drops as r rises)
+   |                 \
+   +----+--------+--------+----> r
+       1-e       1       1+e
+
+ The flat region is on the RIGHT for A>0 and the LEFT for A<0 -- clipping only
+ bites on the side where a big step would over-commit to one noisy advantage
+ estimate. That single asymmetric clamp is what keeps PPO stable (eps = 0.2).
+```
+
 ### DPO Implicit Reward
 
 DPO implicitly learns a reward model:

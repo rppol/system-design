@@ -511,6 +511,32 @@ def replicate_lora_adapter(
 | KV cache hit rate | ~95% | ~90% (same-region) | ~95% (pre-failover) | ~95% |
 | Model version risk | Low | High (skew risk) | Low | Medium |
 
+### Strategy Tradeoff Map — Recovery Time vs Cost
+
+The comparison table lists the numbers; plotting them on cost-vs-RTO axes shows why
+active-passive is most teams' default — it sits at the elbow of the frontier:
+
+```
+ RTO
+ (recovery time)
+       ^
+ ~600s |  * Single region + CDN      cheapest (1.0x), but a full
+       |                             region outage = 10+ min down
+       |
+  120s |
+       |        * Active-Passive     <- the ELBOW: ~1.5x cost buys
+   90s |                                ~90 s recovery
+       |              * Regional   * Active-Active
+   30s |                (residency)  (RTO floor, but ~50% idle GPUs)
+       +-------+---------+---------+---------> cost multiplier
+             1.0x      1.5x      2.0x-3.0x
+
+   Better = down-and-left (fast recovery, low cost). Active-passive is the knee:
+   ~1.5x cost cuts RTO from 10 min to ~90 s. Active-active roughly doubles cost
+   and idles ~half the GPUs (~50% util) to shave the final minute -- justified
+   only when an availability SLA or data-residency rule forces it.
+```
+
 ### Conversation Stickiness vs Load Distribution
 
 | Approach | KV Cache Hit Rate | GPU Load Balance | Operational Risk |

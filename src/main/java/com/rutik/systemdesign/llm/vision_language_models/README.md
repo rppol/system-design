@@ -162,6 +162,31 @@ Architecture differs from standard VQA: the model needs a detection head (or spe
 
 ## 5. Architecture Diagrams
 
+### CLIP Contrastive Loss — the N x N Similarity Matrix
+
+The flow below ends at `sim_matrix[N,N]`, but the loss is easiest to see as the matrix
+itself. For a batch of N image-text pairs, the N diagonal cells are the true matches and
+every off-diagonal cell is a negative — so one batch yields N positives and N^2 - N
+negatives for free (cell values illustrative):
+
+```
+   S[i,j] = (img_i . txt_j) / tau          softmax over each ROW
+                                            (image I_i -> find its caption)
+                T1      T2      T3      T4
+        +--------------------------------+
+   I1   | (.90)   .10     .20     .00    |   ( ) = diagonal = the N MATCHED
+   I2   |  .10   (.80)    .00     .30    |         pairs  -> push UP
+   I3   |  .20    .10    (.90)    .10    |
+   I4   |  .00    .20     .10    (.70)   |   bare  = off-diagonal = N^2 - N
+        +--------------------------------+         MISMATCHES -> push DOWN
+          softmax over each COLUMN
+          (caption T_j -> find its image)
+
+   Loss = CE(rows, diagonal) + CE(columns, diagonal), averaged. Bigger batch =
+   bigger grid = harder negatives, which is why CLIP trains at N = 32,768
+   (each positive is contrasted against 32,767 negatives in the same step).
+```
+
 ```
 CLIP Dual Encoder (Training)
 ============================================================

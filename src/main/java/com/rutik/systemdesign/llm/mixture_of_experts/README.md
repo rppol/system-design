@@ -300,6 +300,23 @@ connection (the token's hidden state is used as-is, as if the expert
 applied an identity function).
 ```
 
+The factor is a dial between two costs — memory you reserve vs. tokens you silently
+drop. Laying the levels side by side shows why production settles near 1.25-1.5:
+
+```
+ capacity_factor   tokens dropped     expert memory    verdict
+ ---------------   ----------------   -------------    --------------------------------
+      1.0          high (imbalance)   1.00x (base)     too tight -- silent quality loss
+      1.25         low                1.25x            Mixtral default -- sweet spot
+      1.5          very low           1.50x            safe under skewed routing
+      2.0          ~none              2.00x            wasteful -- pads for worst case
+ ---------------   ----------------   -------------    --------------------------------
+ capacity = capacity_factor * (batch * seq * k / N)
+ Left of the dial you lose tokens to a no-op residual; right of it you burn HBM
+ reserving slots that mostly sit empty. The drop is SILENT (no error), which is
+ why 1.0 is dangerous and the safe band is 1.25-1.5.
+```
+
 ### 6.5 Expert Parallelism
 
 With EP=8 (8 GPUs, 8 experts), each GPU holds 1 expert. During a forward pass:

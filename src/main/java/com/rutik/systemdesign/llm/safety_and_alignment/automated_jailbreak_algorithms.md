@@ -245,6 +245,33 @@ family** — there is no single defense that covers both ends.
    Model generates response
 ```
 
+### 5.5 The Fluency x Effectiveness Map — Why No Single Defense Covers Both
+
+```
+                          high ASR (EFFECTIVE)
+                                  ^
+        GCG / BEAST               |               AutoDAN / AutoDAN-Turbo
+        gibberish suffix  [*]     |     [*]        PAP / TAP  (fluent prompts)
+                                  |
+   GIBBERISH ---------------------+--------------------- FLUENT
+   (high per-token perplexity)    |        (low perplexity, reads as legit)
+                                  |
+        random junk       [*]     |     [*]        naive role-play
+        (filtered + useless)      |                (looks fine, low ASR)
+                                  v
+                         low ASR (INEFFECTIVE)
+
+   A perplexity filter (§6.3) can only cut the LEFT column:
+        [##### caught #####]      [-------- passes straight through --------]
+   So the dangerous top-RIGHT (fluent AND effective) needs a SEMANTIC / intent
+   classifier or representation-level defense -- perplexity is blind to it.
+   This axis, not the search algorithm, is what determines which §8.3 defense works.
+```
+
+The single most important consequence: an attack's *output style* (which axis it lives
+on), not its *search method*, dictates the defense — which is why layered defenses (§5.4)
+pair a perplexity filter with an intent classifier rather than relying on either alone.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics

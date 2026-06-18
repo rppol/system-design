@@ -557,6 +557,29 @@ def sanitize_retrieved_chunks(
 | Filter recall vs no-filter | -3–8% | No difference | No difference |
 | Membership inference risk | High | Low (collection-auth) | None |
 
+### Isolation Strength vs Cost — Why the Default Is Hybrid
+
+Plotting the three strategies on a cost axis shows the jumps are not linear — each step
+up in isolation strength costs roughly an order of magnitude more per 10k tenants:
+
+```
+ isolation strength  ----------------------------------------------->
+   Low (software)        High (API boundary)        Highest (infra)
+
+   ~$50/mo               ~$50k-200k/mo               ~$2M/mo
+      |                       |                          |
+   [Metadata filter]     [Per-tenant collection]    [Dedicated cluster]
+    membership-infer       drop-collection delete     per-region residency;
+    risk; -3-8% recall     in seconds; no leakage      zero noisy-neighbor
+      |                       |                          |
+      +-------- ~1000x -------+--------- ~10-40x --------+--> cost / 10k tenants
+
+ Hybrid (recommended): metadata filter for the long tail of small tenants;
+ promote a tenant to its own collection past a size/compliance threshold;
+ reserve a dedicated cluster only for the few with a residency contract -- so
+ cluster-grade cost is paid only for the tenants that actually require it.
+```
+
 ### Pre-Retrieval Filter vs Post-Retrieval Filter
 
 | Aspect | Pre-retrieval (pushdown) | Post-retrieval (application layer) |
