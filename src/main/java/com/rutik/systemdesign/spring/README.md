@@ -56,6 +56,11 @@ This section covers:
 | 25 | [spring_events_and_scheduling](spring_events_and_scheduling/) | 7 — Cloud & Messaging | Intermediate | ApplicationEventPublisher, @EventListener, @TransactionalEventListener, @Scheduled, ShedLock |
 | 26 | [validation_and_error_handling](validation_and_error_handling/) | 4 — Spring Web | Intermediate | Bean Validation (JSR-380), @Valid/@Validated, custom ConstraintValidator, ProblemDetail (RFC 7807) |
 | 27 | [observability_and_tracing](observability_and_tracing/) | 8 — Testing & Production | Advanced | Micrometer Observation API, Micrometer Tracing + OTLP, W3C traceparent, structured logging, exemplars |
+| 28 | [spring_ai](spring_ai/) | 7 — Cloud & Messaging | Advanced | ChatClient fluent API, prompt templates, structured output, VectorStore + RAG advisors, @Tool function calling, model routing via beans |
+| 29 | [spring_native_graalvm](spring_native_graalvm/) | 8 — Testing & Production | Advanced | AOT processing, reachability metadata/hints, build-time vs runtime init, tracing agent, startup/memory vs peak-throughput tradeoff |
+| 30 | [spring_integration](spring_integration/) | 7 — Cloud & Messaging | Advanced | EIP: channels, adapters/gateways, router/splitter/aggregator/transformer, Java DSL; contrast with spring_messaging |
+| 31 | [spring_modulith](spring_modulith/) | 3 — Spring Boot | Advanced | Modular monolith: @ApplicationModule, ArchUnit verification, @ApplicationModuleListener, event publication registry, module tests, docs |
+| 32 | [spring_graphql](spring_graphql/) | 4 — Spring Web | Advanced | Schema-first @QueryMapping/@MutationMapping/@SchemaMapping, @BatchMapping/DataLoader (N+1), subscriptions, cursor pagination, error handling |
 
 ---
 
@@ -87,6 +92,7 @@ Spring Boot      Spring Web
 | config   |     | request_handling       |
 | config   |     | filters_interceptors   |
 | actuator |     | spring_webflux         |
+| modulith |     | spring_graphql         |
 +----+-----+     +----------+-------------+
      |                      |
      +----------+-----------+
@@ -114,6 +120,8 @@ Phase 7: Spring Cloud & Messaging
 | spring_messaging                 |
 | spring_batch                     |
 | spring_events_and_scheduling     |
+| spring_ai                        |
+| spring_integration               |
 +----------------+-----------------+
                  |
                  v
@@ -122,6 +130,7 @@ Phase 8: Testing & Production
 | spring_testing                   |
 | spring_performance               |
 | observability_and_tracing        |
+| spring_native_graalvm            |
 +----------------------------------+
 
 Phase 4 additions:
@@ -221,6 +230,11 @@ Dependencies to note:
 | [spring_testing](spring_testing/) | All modules — slice tests isolate specific layers |
 | [spring_performance](spring_performance/) | [spring_boot_actuator](spring_boot_actuator/), [spring_boot_autoconfiguration](spring_boot_autoconfiguration/), [spring_webflux](spring_webflux/) |
 | [spring_batch](spring_batch/) | [spring_transactions](spring_transactions/), [spring_messaging](spring_messaging/), [spring_cloud_patterns](spring_cloud_patterns/) |
+| [spring_ai](spring_ai/) | [spring_boot_autoconfiguration](spring_boot_autoconfiguration/), [spring_webflux](spring_webflux/) (streaming), [../../llm/advanced_rag/](../../llm/advanced_rag/), [../../llm/embeddings_and_similarity_search/](../../llm/embeddings_and_similarity_search/) |
+| [spring_native_graalvm](spring_native_graalvm/) | [spring_performance](spring_performance/), [spring_boot_autoconfiguration](spring_boot_autoconfiguration/), [../../java/annotation_processing/](../../java/annotation_processing/), [../../java/jvm_internals/](../../java/jvm_internals/) |
+| [spring_integration](spring_integration/) | [spring_messaging](spring_messaging/), [spring_events_and_scheduling](spring_events_and_scheduling/), [../../backend/event_driven_fundamentals/](../../backend/event_driven_fundamentals/), [../../java/microservices_patterns/](../../java/microservices_patterns/) |
+| [spring_modulith](spring_modulith/) | [spring_events_and_scheduling](spring_events_and_scheduling/), [spring_integration](spring_integration/), [../../lld/solid_principles/](../../lld/solid_principles/), [../../java/microservices_patterns/](../../java/microservices_patterns/) |
+| [spring_graphql](spring_graphql/) | [request_handling](request_handling/), [spring_data_jpa](spring_data_jpa/) (N+1), [spring_webflux](spring_webflux/), [../../backend/graphql/](../../backend/graphql/) |
 | [spring_events_and_scheduling](spring_events_and_scheduling/) | [spring_transactions](spring_transactions/), [spring_messaging](spring_messaging/), [spring_aop](spring_aop/) |
 | [validation_and_error_handling](validation_and_error_handling/) | [request_handling](request_handling/), [spring_mvc_architecture](spring_mvc_architecture/), [spring_boot_autoconfiguration](spring_boot_autoconfiguration/) |
 | [observability_and_tracing](observability_and_tracing/) | [spring_boot_actuator](spring_boot_actuator/), [spring_cloud_patterns](spring_cloud_patterns/), [spring_performance](spring_performance/) |

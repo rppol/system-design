@@ -214,6 +214,10 @@ A comprehensive, one-stop reference for mastering **pure Java** — language int
 | [Strings and Text](src/main/java/com/rutik/systemdesign/java/strings_and_text/) | String immutability, constant pool, Compact Strings (JEP 254), invokedynamic concat, text blocks |
 | [Structured Concurrency & Loom](src/main/java/com/rutik/systemdesign/java/structured_concurrency_and_loom/) | Virtual threads, carrier threads, pinning, StructuredTaskScope, ScopedValue — Java 21 GA |
 | [Foreign Function & Memory API](src/main/java/com/rutik/systemdesign/java/foreign_function_and_memory_api/) | Arena, MemorySegment, Linker downcall/upcall, jextract, replacing Unsafe/JNI — Java 22 GA |
+| [Reactive Programming](src/main/java/com/rutik/systemdesign/java/reactive_programming/) | Reactor Flux/Mono, cold vs hot, flatMap/concatMap, backpressure, Schedulers, Reactor Context, RxJava 3, StepVerifier |
+| [Microservices Patterns](src/main/java/com/rutik/systemdesign/java/microservices_patterns/) | Saga (choreography + orchestration), transactional outbox, idempotency keys, tracing context propagation, strangler fig, bulkhead |
+| [gRPC & Protocol Buffers](src/main/java/com/rutik/systemdesign/java/grpc_protobuf/) | Protobuf wire format + schema evolution, 4 RPC modes, generated stubs, interceptors, deadlines/cancellation, Status model, HTTP/2 |
+| [Annotation Processing](src/main/java/com/rutik/systemdesign/java/annotation_processing/) | JSR 269 rounds, AbstractProcessor, Filer/Messager, JavaPoet codegen, Lombok AST mutation, MapStruct, compile-time vs runtime |
 | [Generics & Type System](src/main/java/com/rutik/systemdesign/java/generics_and_type_system/) | PECS, type erasure, bridge methods, wildcards, dynamic proxies |
 | [Exceptions & I/O](src/main/java/com/rutik/systemdesign/java/exceptions_and_io/) | Checked/unchecked, try-with-resources, NIO.2, serialization security |
 
@@ -329,6 +333,11 @@ A comprehensive guide to mastering **Spring Framework internals**, Spring Boot, 
 | [Spring Events & Scheduling](src/main/java/com/rutik/systemdesign/spring/spring_events_and_scheduling/) | ApplicationEventPublisher, @EventListener, @TransactionalEventListener, @Scheduled, ShedLock |
 | [Validation & Error Handling](src/main/java/com/rutik/systemdesign/spring/validation_and_error_handling/) | Bean Validation (JSR-380), @Valid/@Validated, custom ConstraintValidator, ProblemDetail (RFC 7807) |
 | [Observability & Tracing](src/main/java/com/rutik/systemdesign/spring/observability_and_tracing/) | Micrometer Observation API, Micrometer Tracing + OTLP, W3C traceparent, structured logging |
+| [Spring AI](src/main/java/com/rutik/systemdesign/spring/spring_ai/) | ChatClient fluent API, prompt templates, structured output, VectorStore + RAG advisors, @Tool function calling, model routing via beans (Spring AI 1.0 GA) |
+| [Spring Native & GraalVM](src/main/java/com/rutik/systemdesign/spring/spring_native_graalvm/) | AOT processing, reachability metadata/hints, build-time vs runtime init, tracing agent, startup/memory vs peak-throughput tradeoff |
+| [Spring Integration](src/main/java/com/rutik/systemdesign/spring/spring_integration/) | EIP: channels, adapters/gateways, router/splitter/aggregator/transformer, Java DSL; contrast with spring_messaging |
+| [Spring Modulith](src/main/java/com/rutik/systemdesign/spring/spring_modulith/) | Modular monolith: @ApplicationModule, ArchUnit verification, @ApplicationModuleListener, event publication registry, module tests, docs |
+| [Spring for GraphQL](src/main/java/com/rutik/systemdesign/spring/spring_graphql/) | Schema-first @QueryMapping/@SchemaMapping, @BatchMapping/DataLoader (N+1), subscriptions, cursor pagination, error handling |
 
 #### Spring Case Studies
 | Case Study | Core Concepts |
@@ -884,7 +893,7 @@ See the [CS Fundamentals Master Index](src/main/java/com/rutik/systemdesign/cs_f
 | **Database/backend infra** | `database/` phases 1-3 → `backend/` phases 1-4 → respective case studies |
 | **DevOps / SRE / Platform engineer** | `devops/` phase 1-2 (Linux → containers → Kubernetes) → phase 3-4 (CI/CD, IaC) → phase 6 (Observability, SRE) → DevOps case studies |
 | **Algorithm / coding interview prep** | `cs_fundamentals/` phase 1 (Big-O) → phase 2 (data structures) → phase 3 (algorithms) → `cs_fundamentals/case_studies/` for walkthroughs |
-| **Senior AI + Java engineer** | `java/` phases 1-4 → `spring/spring_ai/` *(planned)* → `llm/foundations_and_architecture/` → `llm/agents_and_tool_use/` → `llm/` case studies; cross-reference `hld/consensus_algorithms/` + `ml/neural_network_fundamentals/` |
+| **Senior AI + Java engineer** | `java/` phases 1-4 → `spring/spring_ai/` → `llm/foundations_and_architecture/` → `llm/agents_and_tool_use/` → `llm/` case studies; cross-reference `hld/consensus_algorithms/` + `ml/neural_network_fundamentals/` |
 
 ### Navigation
 

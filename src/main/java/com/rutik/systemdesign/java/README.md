@@ -43,6 +43,10 @@ A comprehensive, one-stop reference for mastering **pure Java** — from languag
 | 18 | [Strings and Text](strings_and_text/README.md) | String immutability, constant pool, Compact Strings (JEP 254), invokedynamic concatenation, StringBuilder, text blocks, Unicode correctness | Intermediate |
 | 19 | [Structured Concurrency & Loom](structured_concurrency_and_loom/README.md) | Virtual threads, carrier threads, pinning, StructuredTaskScope, ScopedValue, Continuation internals, Java 21 GA | Advanced |
 | 20 | [Foreign Function & Memory API (Panama)](foreign_function_and_memory_api/README.md) | Arena, MemorySegment, MemoryLayout, VarHandle, Linker downcall/upcall, jextract, replacing Unsafe/JNI, Java 22 GA | Advanced |
+| 21 | [Reactive Programming](reactive_programming/README.md) | Reactor Flux/Mono, cold vs hot, flatMap/concatMap/switchMap, backpressure, Schedulers, Reactor Context, RxJava 3, StepVerifier | Advanced |
+| 22 | [Microservices Patterns](microservices_patterns/README.md) | Saga (choreography + orchestration), transactional outbox, idempotency keys, distributed tracing context propagation, strangler fig, bulkhead | Advanced |
+| 23 | [gRPC & Protocol Buffers](grpc_protobuf/README.md) | Protobuf wire format + schema evolution, 4 RPC modes, generated stubs, interceptors, deadlines/cancellation, Status error model, HTTP/2 transport | Advanced |
+| 24 | [Annotation Processing](annotation_processing/README.md) | JSR 269 rounds, AbstractProcessor, Filer/Messager, element model, JavaPoet codegen, Lombok AST mutation, MapStruct, compile-time vs runtime | Advanced |
 
 > **Note**: `java8_features` covers Streams as part of the full Java 8 overview. `java_streams` is the dedicated deep dive — all 20+ operations, `Spliterator` internals, parallel rules, `reduce` vs `collect`, and the full `Collectors` catalogue.
 
@@ -82,21 +86,22 @@ Diagnose and fix real production performance problems. The Java Memory Model mod
 
 ### Phase 6 — Interview Consolidation + Testing
 ```
-java_interview_patterns  -->  testing_junit_mockito  -->  case_studies/
+java_interview_patterns  -->  testing_junit_mockito  -->  annotation_processing  -->  case_studies/
 ```
-Lock in the patterns and recipes that appear on whiteboard interviews. Testing module teaches how to write verifiable code — also an interview topic.
+Lock in the patterns and recipes that appear on whiteboard interviews. Testing module teaches how to write verifiable code — also an interview topic. `annotation_processing` closes the phase: JSR 269 compile-time code generation (MapStruct/Dagger/Lombok) — the metaprogramming complement to runtime reflection from `generics_and_type_system`, and the build-time philosophy behind Spring AOT.
 
 ### Phase 7 — New Java (Java 21+) Deep-Dives
 ```
-structured_concurrency_and_loom  -->  foreign_function_and_memory_api
+structured_concurrency_and_loom  -->  foreign_function_and_memory_api  -->  reactive_programming
 ```
-Project Loom virtual threads and Panama FFM/Memory API — Java 21/22 GA features that change how the JVM interacts with concurrency and native memory.
+Project Loom virtual threads and Panama FFM/Memory API — Java 21/22 GA features that change how the JVM interacts with concurrency and native memory. Reactive programming (Reactor/RxJava) closes the phase: the non-blocking, backpressure-driven model that virtual threads now compete with, and the foundation under Spring WebFlux.
 
-### Phase 8 — Networking & Database (Optional Deep-Dives)
+### Phase 8 — Networking, Database & Distributed Systems (Optional Deep-Dives)
 ```
 networking_and_http_client  -->  jdbc_and_database
+grpc_protobuf  -->  microservices_patterns
 ```
-Advanced topics for senior engineers building services that talk to other services and databases directly.
+Advanced topics for senior engineers building services that talk to other services and databases directly. `grpc_protobuf` covers the typed RPC transport between services; `microservices_patterns` covers correctness across them (Saga, outbox, idempotency, tracing, bulkhead) — both pure-Java foundations under the `backend/` and `spring/` framework treatments.
 
 ---
 
@@ -123,8 +128,12 @@ Advanced topics for senior engineers building services that talk to other servic
 |---------------------|-------------|
 | core_language | generics_and_type_system (bridge methods, erasure), java_interview_patterns (equals/hashCode recipe), design_patterns_in_java (Builder, value objects), strings_and_text (immutability, hashCode benign race) |
 | strings_and_text | core_language (immutability contract), java_memory_model (hashCode benign data race), jvm_internals (object layout, byte[] vs char[]), performance_and_tuning (StringBuilder vs format, GC allocation rate) |
-| structured_concurrency_and_loom | concurrency (ReentrantLock, ThreadPoolExecutor), java9_to_21_features (virtual threads overview), jvm_internals (ForkJoinPool, continuation internals), performance_and_tuning (carrier pool sizing, async-profiler) |
+| structured_concurrency_and_loom | concurrency (ReentrantLock, ThreadPoolExecutor), java9_to_21_features (virtual threads overview), jvm_internals (ForkJoinPool, continuation internals), performance_and_tuning (carrier pool sizing, async-profiler), reactive_programming (reactive vs virtual-thread tradeoff) |
+| reactive_programming | structured_concurrency_and_loom (virtual threads as the simpler alternative), concurrency (CompletableFuture, executors), java9_to_21_features (java.util.concurrent.Flow), functional_programming (composition, laziness) |
 | foreign_function_and_memory_api | jvm_internals (native memory, GC heap boundaries), java_memory_model (VarHandle memory ordering), performance_and_tuning (JMH benchmarks, off-heap profiling) |
+| microservices_patterns | structured_concurrency_and_loom (ScopedValue for context propagation), concurrency (CompletableFuture, ThreadPoolExecutor bulkheads), `../../backend/microservices_fundamentals/`, `../../backend/event_driven_fundamentals/`, `../../backend/event_sourcing_and_cqrs/` |
+| grpc_protobuf | networking_and_http_client (HTTP/2 multiplexing), generics_and_type_system (generated stub generics), `../../backend/grpc_and_protobuf/` (architecture-level design) |
+| annotation_processing | generics_and_type_system (reflection, dynamic proxies — the runtime metaprogramming codegen replaces), design_patterns_in_java (Builder/Factory are commonly generated), `../../spring/spring_native_graalvm/` (AOT = same build-time philosophy) |
 | java8_features | java_streams (full op reference), functional_programming (Collector internals), concurrency (CompletableFuture) |
 | java_streams | functional_programming (custom Collectors, Spliterator), java8_features (lambdas, functional interfaces), collections_internals (stream sources, Spliterator characteristics) |
 | jvm_internals | concurrency (Java Memory Model, happens-before), java_memory_model (full JMM spec), performance_and_tuning (GC tuning flags) |

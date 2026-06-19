@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 20 Modules
+## Module List — 24 Modules
 
 | Module Directory | Topic |
 |-----------------|-------|
@@ -29,19 +29,16 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `strings_and_text/` | String immutability, constant pool, Compact Strings (JEP 254), invokedynamic concat (JEP 280), StringBuilder, text blocks (JEP 378), Unicode correctness |
 | `structured_concurrency_and_loom/` | Virtual threads (JEP 444), carrier threads, pinning, StructuredTaskScope (JEP 453), ScopedValue (JEP 446), Continuation internals, Java 21 GA |
 | `foreign_function_and_memory_api/` | Panama: Arena, MemorySegment, MemoryLayout, VarHandle, Linker (JEP 454), downcall/upcall handles, jextract, replacing Unsafe/JNI, Java 22 GA |
+| `reactive_programming/` | Reactor Flux/Mono, Reactive Streams/Flow, cold vs hot, flatMap/concatMap/switchMap, backpressure strategies, Schedulers (subscribeOn vs publishOn), Reactor Context, RxJava 3, StepVerifier |
+| `microservices_patterns/` | Saga (choreography + orchestration), transactional outbox, idempotency keys, distributed tracing context propagation, strangler fig, bulkhead (thread-pool vs semaphore) |
+| `grpc_protobuf/` | Protobuf wire format (varint/tag) + schema evolution + reserved, 4 RPC modes, blocking/async/future stubs, interceptors, deadlines/cancellation, Status error model, HTTP/2 transport |
+| `annotation_processing/` | JSR 269 rounds, AbstractProcessor, Filer/Messager, javax.lang.model element model, JavaPoet codegen, Lombok AST mutation, MapStruct, AutoService, compile-time vs runtime tradeoff |
 
 ---
 
 ## Planned / Missing Topics (not yet created)
 
-The following topics are identified as senior Java engineer coverage gaps. Add them as new modules following the adding guide below:
-
-| Module Directory | Topic | Priority |
-|-----------------|-------|---------|
-| `reactive_programming/` | Project Reactor, RxJava 3, backpressure, Scheduler internals, Flux/Mono operators, testing with StepVerifier | Critical — bridges to Spring WebFlux |
-| `microservices_patterns/` | Saga (choreography + orchestration), event sourcing in Java, idempotency keys, distributed tracing context propagation, strangler fig | High — bridges to backend/ |
-| `grpc_protobuf/` | Protocol buffer message format, gRPC client/server stubs, 4 RPC modes, interceptors, deadlines, error handling | High — bridges to backend/grpc_and_protobuf |
-| `annotation_processing/` | APT, AbstractProcessor, Lombok internals, MapStruct, Spring meta-annotations, compile-time code generation | Medium |
+None currently — the previously-planned gaps (`reactive_programming`, `microservices_patterns`, `grpc_protobuf`, `annotation_processing`) are all built and listed in the Module List above. Add future senior-coverage gaps here following the adding guide below.
 
 ---
 
@@ -85,7 +82,11 @@ Learning-path index: `case_studies/README.md` (mandatory; update with every new 
 | `concurrency/` | `../../backend/async_and_concurrency_patterns/` — production concurrency patterns; `../../hld/` — distributed consensus theory; `../../lld/concurrency_patterns/` — Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, Thread Pool patterns |
 | `jdbc_and_database/` | `../../database/connection_pool_management/` — PgBouncer, pool sizing math; `../../database/sql_query_optimization/` — EXPLAIN ANALYZE |
 | `jvm_internals/` | `../../backend/performance_profiling/` — async-profiler, JFR, flamegraphs |
-| `structured_concurrency_and_loom/` | `../../spring/spring_webflux/` — reactive alternative; `../../backend/async_and_concurrency_patterns/`; `../../lld/concurrency_patterns/` — pattern adaptation for virtual threads |
+| `structured_concurrency_and_loom/` | `../../spring/spring_webflux/` — reactive alternative; `../../backend/async_and_concurrency_patterns/`; `../../lld/concurrency_patterns/` — pattern adaptation for virtual threads; `reactive_programming/` — reactive vs virtual-thread decision |
+| `reactive_programming/` | `../../spring/spring_webflux/` — Reactor applied in Spring (Netty, R2DBC, WebClient); `../../backend/async_and_concurrency_patterns/` — backpressure in the broader concurrency landscape |
+| `microservices_patterns/` | `../../backend/microservices_fundamentals/` — decomposition, deployment; `../../backend/event_driven_fundamentals/` — choreography vs orchestration; `../../backend/event_sourcing_and_cqrs/` — durable event log behind sagas/outbox |
+| `grpc_protobuf/` | `../../backend/grpc_and_protobuf/` — gRPC design patterns, load balancing, mesh; `networking_and_http_client/` — HTTP/2 multiplexing |
+| `annotation_processing/` | `generics_and_type_system/` — reflection/dynamic proxies (runtime metaprogramming); `design_patterns_in_java/` — Builder/Factory codegen; `../../spring/spring_native_graalvm/` — AOT, same build-time philosophy |
 | `design_patterns_in_java/` | `../../lld/` — full GoF pattern catalogue (all 23 patterns with UML + Java implementations) |
 | `functional_programming/` | `../../lld/behavioral/strategy/` — Strategy pattern via lambdas |
 

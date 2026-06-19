@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 27 Modules
+## Module List — 32 Modules
 
 | Module Directory | Phase | Topic |
 |-----------------|-------|-------|
@@ -36,20 +36,17 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `spring_testing/` | 8 | @SpringBootTest, test slices, MockMvc, @MockBean, Testcontainers |
 | `spring_performance/` | 8 | HikariCP tuning, lazy init, GraalVM native, virtual threads |
 | `observability_and_tracing/` | 8 | Micrometer Observation API, Micrometer Tracing + OTLP, W3C traceparent, structured logging, exemplars |
+| `spring_ai/` | 7 | ChatClient fluent API, prompt templates, structured output, VectorStore + RAG advisors, @Tool function calling, model routing via beans (Spring AI 1.0 GA) |
+| `spring_native_graalvm/` | 8 | AOT processing, reachability metadata (reflection/resource/proxy hints), build-time vs runtime init, tracing agent, startup/memory vs peak-throughput tradeoff (Boot 3.0+) |
+| `spring_integration/` | 7 | EIP: message channels, channel adapters/gateways, router/splitter/aggregator/transformer/filter, Java DSL; contrast with spring_messaging (Kafka/Rabbit) |
+| `spring_modulith/` | 3 | Modular monolith: @ApplicationModule, ArchUnit verification, @ApplicationModuleListener, event publication registry, @ApplicationModuleTest, Documenter (Boot 3.1+) |
+| `spring_graphql/` | 4 | Schema-first @QueryMapping/@MutationMapping/@SubscriptionMapping/@SchemaMapping, @BatchMapping + DataLoader (N+1), subscriptions (WebSocket/SSE), cursor pagination, error handling |
 
 ---
 
 ## Planned / Missing Topics (not yet created)
 
-The following topics are identified as senior Spring engineer coverage gaps:
-
-| Module Directory | Phase | Topic | Priority |
-|-----------------|-------|-------|---------|
-| `spring_ai/` | 7 | Spring AI framework (2024+): ChatClient, RAG chains, VectorStore, prompt templates, model routing via Spring beans — bridges Java↔LLM | Critical |
-| `spring_native_graalvm/` | 8 | AOT compilation, static proxy generation, native hints, reflection config, native images for serverless (Spring Boot 3.0+) | High |
-| `spring_integration/` | 7 | Message channels, channel adapters, routers, transformers, EAI patterns — distinct from spring_messaging (Kafka/RabbitMQ) | High |
-| `spring_modulith/` | 3 | Modular monolith: @ApplicationModule, ArchUnit integration, module tests, event-based decoupling (Spring Boot 3.1+, 2023 release) | Medium |
-| `spring_graphql/` | 4 | Spring for GraphQL: @QueryMapping, DataLoader, subscriptions, schema-first vs annotation-driven | Medium |
+None currently — the previously-planned gaps (`spring_ai`, `spring_native_graalvm`, `spring_integration`, `spring_modulith`, `spring_graphql`) are all built and listed in the Module List above. Add future senior-coverage gaps here following the adding guide below.
 
 ---
 
@@ -101,6 +98,11 @@ Learning-path index: `case_studies/README.md` (mandatory; update with every new 
 | `spring_batch/` | `../../lld/behavioral/template_method/` — Template Method pattern theory |
 | `filters_and_interceptors/` | `../../lld/behavioral/chain_of_responsibility/` — Chain of Responsibility theory |
 | `spring_aop/` | `../../lld/structural/proxy/` — AOP proxy mechanics rooted in Proxy pattern |
+| `spring_ai/` | `../../llm/advanced_rag/` — RAG retrieval/rerank theory behind QuestionAnswerAdvisor; `../../llm/agentic_frameworks/` — tool/function calling and agent loops; `../../llm/embeddings_and_similarity_search/` — vector store internals |
+| `spring_native_graalvm/` | `../../java/annotation_processing/` — compile-time codegen, the same build-time philosophy as AOT; `../../java/jvm_internals/` — JIT vs AOT tradeoffs |
+| `spring_integration/` | `../../backend/event_driven_fundamentals/` — EIP and choreography vs orchestration; `../../java/microservices_patterns/` — outbox/saga durability theme shared with the aggregator |
+| `spring_modulith/` | `../../lld/solid_principles/` — dependency inversion/separation Modulith enforces mechanically; `../../java/microservices_patterns/` — transactional-outbox mirrored by the event publication registry |
+| `spring_graphql/` | `../../backend/graphql/` — GraphQL architecture (federation, schema design, query cost); `../../backend/rest_api_design/` — REST vs GraphQL tradeoffs |
 | `dependency_injection/` | `../../lld/solid_principles/` — Dependency Inversion Principle; `../../lld/creational/factory_method/` — BeanFactory as Factory Method |
 | `bean_lifecycle/` | `../../lld/creational/singleton/` — Singleton scope theory |
 

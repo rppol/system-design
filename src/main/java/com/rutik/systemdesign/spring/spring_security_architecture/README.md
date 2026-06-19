@@ -858,6 +858,15 @@ class AdminControllerTest {
 **What is the security implication of using `SessionCreationPolicy.STATELESS` and when is it safe?**
 `STATELESS` instructs Spring Security to never create or read an `HttpSession`. On each request, authentication must be re-established from the request itself (e.g., JWT Bearer token, API key). This is safe for purely machine-to-machine APIs or mobile/SPA clients that send a token on every request. It eliminates CSRF risk (no session cookie), enables horizontal scaling without session replication, but also eliminates automatic logout via session invalidation — token expiry and token blacklisting must be managed explicitly.
 
+**What is the difference between `authenticated()`, `permitAll()`, `denyAll()`, and `anonymous()` in the authorization DSL?**
+`authenticated()` requires a fully authenticated principal (anonymous tokens fail); `permitAll()` allows everyone, including unauthenticated requests, and short-circuits without running further authorization; `denyAll()` rejects everyone unconditionally (useful to lock down a path explicitly); `anonymous()` matches *only* requests carrying the anonymous authentication token, i.e. not-logged-in users, which is rarely needed directly. The subtle trap is that `permitAll()` still runs the filter chain — it does not skip authentication filters — so a JWT filter still validates a token if present; it only skips the final authorization check. Order matters: the first matching matcher wins, so place specific rules before broad ones and end with `anyRequest().authenticated()`.
+
+**Why is the order of security matchers significant, and what is the "first match wins" trap?**
+Spring Security evaluates authorization matchers top-to-bottom and applies the *first* one that matches the request, ignoring the rest. If you put `anyRequest().permitAll()` (or a broad `/**` pattern) before a specific `/admin/**` rule, every request matches the broad rule first and the admin restriction never applies — a silent privilege-escalation hole. The fix is to order from most-specific to least-specific and finish with a catch-all `anyRequest()`. This is a frequent real-world misconfiguration because the app still "works" — it just authorizes too much.
+
+**How do multiple `SecurityFilterChain` beans coexist, and how does Spring pick which one handles a request?**
+You can define several `SecurityFilterChain` beans, each with its own `securityMatcher` (e.g. one for `/api/**` that is stateless + JWT, one for everything else that is form-login + sessions). `FilterChainProxy` holds the ordered list and, per request, selects the *first* chain whose `securityMatcher` matches — only that chain's filters run. Use `@Order` to control evaluation order, and make the most specific matcher first; a chain with no `securityMatcher` matches everything and must come last. This is the modern way (Spring Security 5.7+/6.x) to apply different security models to different parts of one application after `WebSecurityConfigurerAdapter` was removed.
+
 ---
 
 ## 13. Best Practices
