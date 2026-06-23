@@ -17,6 +17,7 @@ A comprehensive system design study repository. All content is Markdown — no r
 | **LLM** | LLM engineering guide — 52 modules, 29 case studies, 82 deep-dive sub-files | [llm/CLAUDE.md](src/main/java/com/rutik/systemdesign/llm/CLAUDE.md) |
 | **DevOps** | DevOps / Cloud / Platform guide — 41 modules, 13 case studies | [devops/CLAUDE.md](src/main/java/com/rutik/systemdesign/devops/CLAUDE.md) |
 | **CS Fundamentals** | Language-agnostic CS spine — 20 modules, 6 case studies + DSA pattern playbooks sub-section (25-pattern recognition engine, interview execution playbook, Blind 75/NeetCode 150 study plans — complete) | [cs_fundamentals/CLAUDE.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/CLAUDE.md) |
+| **Book** | Chapter-by-chapter book summaries (book-faithful chapter template, not the 14-section module template) — Designing Data-Intensive Applications (Kleppmann): 12 chapters + preface | [book/CLAUDE.md](src/main/java/com/rutik/systemdesign/book/CLAUDE.md) |
 
 ---
 
@@ -34,7 +35,8 @@ src/main/java/com/rutik/systemdesign/
 ├── ml/               ← Machine Learning guide + CLAUDE.md
 ├── llm/              ← LLM engineering guide + CLAUDE.md
 ├── devops/           ← DevOps / Cloud / Platform guide + CLAUDE.md
-└── cs_fundamentals/  ← CS Fundamentals guide + CLAUDE.md
+├── cs_fundamentals/  ← CS Fundamentals guide + CLAUDE.md
+└── book/             ← Book summaries (chapter-by-chapter) + CLAUDE.md
 ```
 
 ---

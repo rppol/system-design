@@ -879,6 +879,18 @@ See the [CS Fundamentals Master Index](src/main/java/com/rutik/systemdesign/cs_f
 
 ---
 
+### Book Summaries — Read the Section, Skip the Book
+
+In-depth, chapter-by-chapter summaries of foundational engineering books, written so that reading the section is as close as possible to reading the book — then cross-linked back into the topic deep dives (`database/`, `hld/`, `backend/`). Organized by book (one folder per book; one sub-folder per chapter), using a book-faithful chapter template that mirrors each chapter's own section order so nothing is dropped.
+
+| Book | Author | Chapters | Folder |
+|------|--------|----------|--------|
+| [Designing Data-Intensive Applications](src/main/java/com/rutik/systemdesign/book/designing_data_intensive_applications/README.md) | Martin Kleppmann | 12 (+ preface) | `book/designing_data_intensive_applications/` |
+
+Each chapter covers the book's sections in depth with ASCII diagrams, a key-concept glossary, tradeoff tables, production pitfalls, and 15+ interview Q&As. See the [Book Section Index](src/main/java/com/rutik/systemdesign/book/README.md) and the [DDIA Master Index](src/main/java/com/rutik/systemdesign/book/designing_data_intensive_applications/README.md) for the part map, chapter table, and recommended reading paths.
+
+---
+
 ## How to Use This Repository
 
 ### By role
