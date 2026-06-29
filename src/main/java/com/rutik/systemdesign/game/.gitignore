@@ -1,0 +1,6 @@
+# Personal runtime state (your streak / XP / coach's daily pick) - not content.
+state/
+
+# Python bytecode
+__pycache__/
+*.pyc

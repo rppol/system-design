@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>System Design Daily — 5-min Blitz</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">SysDesign<span>Daily</span></div>
+    <div class="stats">
+      <div class="stat lvl" title="Level (from total XP)">Lv&nbsp;<b id="lvlVal">1</b></div>
+      <div class="stat" title="Day streak"><span class="flame">&#128293;</span><b id="streakVal">0</b></div>
+      <div class="stat" title="Total XP"><span class="xp">&#9889;</span><b id="xpVal">0</b></div>
+      <button id="modeBtn" class="ghost" title="Quiz vs flashcards">Quiz</button>
+      <button id="muteBtn" class="ghost icon" title="Toggle sound">&#128266;</button>
+      <button id="navProgress" class="ghost">Progress</button>
+    </div>
+  </header>
+
+  <main id="app">
+    <!-- screens injected here -->
+    <div class="loading">Loading your question bank&hellip;</div>
+  </main>
+
+  <footer class="foot">Built from your own repo &middot; <span id="bankInfo"></span></footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

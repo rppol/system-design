@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.sysdesigndaily.weekly</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/rutikp/Prism/rutik46/systemdesign/src/main/java/com/rutik/systemdesign/game/scheduling/coach.sh</string>
+    <string>weekly</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>17</integer><key>Minute</key><integer>4</integer></dict>
+  </array>
+  <key>StandardOutPath</key><string>/Users/rutikp/Prism/rutik46/systemdesign/src/main/java/com/rutik/systemdesign/game/state/coach.log</string>
+  <key>StandardErrorPath</key><string>/Users/rutikp/Prism/rutik46/systemdesign/src/main/java/com/rutik/systemdesign/game/state/coach.log</string>
+</dict>
+</plist>
