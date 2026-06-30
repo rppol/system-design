@@ -1,0 +1,45 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one deploy runs at a time; queued run cancels the in-progress one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Regenerate question bank
+        # Runs extract.py fresh so newly added modules are picked up automatically.
+        # No need to commit questions/*.json — the artifact carries them.
+        run: |
+          cd src/main/java/com/rutik/systemdesign/game
+          python3 extract.py
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          # Deploy the whole repo root so every content path resolves correctly.
+          path: .
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
