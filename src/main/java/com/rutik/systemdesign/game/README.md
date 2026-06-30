@@ -31,9 +31,18 @@ reports weekly.
   activity heatmap, mastery tiers + level, sound effects (toggle in the top bar), and
   confetti on a flawless blitz.
 - **Keyboard** — `1`–`4` to answer, `Enter` for next, `S` to skip; in Cards mode `Space`
-  reveals and `1`/`2` grade Missed/Got. `Esc` closes the reader.
-- **Dive deeper** — every revealed answer opens its source module in an in-app split-view
-  reader (rendered Markdown beside the quiz), no tab switch needed.
+  reveals and `1`/`2` grade Missed/Got. In the reader: `F` toggles fullscreen, `Esc`
+  exits fullscreen (then closes).
+- **Study mode** — a top-bar `Study` button opens a pure-reading browser: pick a section,
+  then any topic, and read it in the full reader with Previous/Next-topic navigation.
+- **Dive deeper** — every revealed answer opens its source module in the in-app reader
+  (rendered Markdown beside the quiz), no tab switch needed.
+- **The reader** — a One Dark reading surface: code blocks get IntelliJ-style syntax
+  highlighting; ASCII §5 diagrams get alignment-safe colouring (muted scaffolding, blue
+  `[labels]`, cyan flow arrows); headings/questions/answers are colour-coded. It is
+  **drag-resizable**, has a **fullscreen** mode, an **always-accessible collapsible index**
+  (sidebar built from the headings), and **working cross-links** (relative `.md` links
+  open in-reader with a Back button).
 
 > **Template note:** `game/` is an application, not study content, so it is **exempt
 > from the repo's 14-section module template** (same way `book/` declares its own
@@ -160,10 +169,24 @@ The MVP was the multiple-choice blitz. Since then the following shipped:
 - **Drill your weak spots** — a one-tap deck that pulls from your lowest-accuracy sections
   (prioritising questions you've lapsed on); surfaces on the home screen when a section
   drops below 70%.
-- **In-app split-view reader** — "Dive deeper" slides the quiz aside and renders the full
-  source module beside it (Markdown → HTML via a hand-written, dependency-free renderer;
-  `Esc` or `×` closes). Fenced blocks render verbatim in `<pre>`, so the §5 ASCII diagrams
-  keep their alignment.
+- **In-app reader (One Dark)** — "Dive deeper" slides the quiz aside and renders the full
+  source module beside it (Markdown → HTML via a hand-written, dependency-free renderer).
+  It ships:
+  - **Code syntax highlighting** — a compact hand-rolled tokenizer (java, python, sql,
+    yaml, bash, json, js, dockerfile, properties) styled with the One Dark palette.
+  - **Alignment-safe diagram colouring** — ASCII §5 diagrams are colour-coded by wrapping
+    characters only (never altering them, so columns stay aligned): muted box/connectors,
+    cyan flow arrows, blue `[labels]`, orange numbers.
+  - **Semantic Markdown colours** — module title, section headings, questions (yellow) and
+    answers each get a distinct One Dark colour.
+  - **Resizable** (drag the left edge; width persists), **fullscreen** (`F`), and an
+    **always-accessible collapsible index** (sidebar TOC from the headings; auto-shown in
+    fullscreen, toggled by the `☰` button otherwise).
+  - **Working cross-links** — relative `.md` links resolve and open in the reader with a
+    Back button; in-page anchors and the TOC scroll within the pane; external links open
+    in a new tab.
+- **Study mode** — a top-bar `Study` button: a pure-reading browser (section → topic →
+  reader) with Previous/Next-topic navigation. No quiz, no clock.
 - **Flashcard self-grade mode** — a top-bar `Quiz / Cards` toggle switches any deck to
   active recall: see the question, reveal the answer, self-rate "Got it / Missed it". It
   feeds the *same* spaced-repetition schedule as the blitz; XP is flat (no combo/boss) so
@@ -176,9 +199,8 @@ The MVP was the multiple-choice blitz. Since then the following shipped:
 
 ## Planned / to be implemented
 
-- **Deep-dive learn mode** — read a module's §1–2 concept text first, then quiz on it
-  (a "learn, then test" flow). Largely subsumed by the split-view reader + teach-mode;
-  build only if a dedicated guided flow is still wanted.
+- _(nothing queued)_ — the deep-dive "learn, then test" flow is now covered by **Study
+  mode** plus the in-app reader and teach-mode.
 
 ### Deliberately out of scope
 
