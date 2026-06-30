@@ -14,6 +14,106 @@ const SECTION_LABELS = {
   llm: "LLM Engineering", ml: "Machine Learning", python: "Python", spring: "Spring",
 };
 
+// Phase-order for the Study browser. Derived from each section's README learning path.
+// Modules not listed here sort to the end (alphabetically by JS Map insertion order).
+const STUDY_ORDER = {
+  backend: [
+    "backend/osi_model_and_networking","backend/tcp_ip_deep_dive","backend/udp_and_quic","backend/http_protocols",
+    "backend/rest_api_design","backend/grpc_and_protobuf","backend/graphql","backend/websockets_and_sse",
+    "backend/performance_profiling","backend/connection_pooling_deep_dive","backend/caching_strategies_deep_dive","backend/async_and_concurrency_patterns",
+    "backend/database_internals_and_indexing","backend/query_optimization","backend/database_migrations","backend/distributed_transactions_and_consistency","backend/database_types_deep_dive",
+    "backend/fault_tolerance_patterns","backend/rate_limiting_in_depth","backend/observability_and_monitoring",
+    "backend/backend_security_owasp","backend/auth_and_authorization_systems",
+    "backend/backend_testing_strategies","backend/load_and_performance_testing","backend/chaos_engineering",
+    "backend/event_driven_fundamentals","backend/kafka_deep_dive","backend/event_sourcing_and_cqrs","backend/messaging_patterns",
+    "backend/microservices_fundamentals","backend/api_gateway_patterns","backend/service_mesh_and_service_discovery","backend/distributed_system_operational_patterns","backend/container_and_deployment_patterns",
+  ],
+  cs_fundamentals: [
+    "cs_fundamentals/complexity_analysis_and_big_o","cs_fundamentals/number_systems_and_bit_manipulation","cs_fundamentals/recursion_and_problem_solving_patterns",
+    "cs_fundamentals/arrays_strings_and_hashing","cs_fundamentals/linked_lists_stacks_and_queues","cs_fundamentals/trees_and_binary_search_trees","cs_fundamentals/heaps_and_priority_queues","cs_fundamentals/graphs_tries_and_advanced_structures",
+    "cs_fundamentals/sorting_and_searching","cs_fundamentals/dynamic_programming","cs_fundamentals/greedy_and_divide_and_conquer","cs_fundamentals/graph_and_string_algorithms",
+    "cs_fundamentals/processes_threads_and_context_switching","cs_fundamentals/cpu_scheduling_algorithms","cs_fundamentals/memory_management_and_virtual_memory","cs_fundamentals/deadlocks_and_synchronization",
+    "cs_fundamentals/computer_architecture_and_memory_hierarchy","cs_fundamentals/networking_fundamentals","cs_fundamentals/database_and_storage_fundamentals","cs_fundamentals/cryptography_fundamentals",
+  ],
+  database: [
+    "database/database_fundamentals","database/storage_engines_internals","database/indexing_deep_dive","database/concurrency_control_and_locking",
+    "database/postgresql_internals","database/mysql_innodb_internals","database/sql_query_optimization","database/schema_design_and_normalization","database/database_migrations_zero_downtime",
+    "database/document_databases","database/key_value_stores","database/wide_column_databases","database/search_engines","database/graph_databases","database/time_series_databases",
+    "database/vector_databases","database/newsql_and_distributed_sql","database/in_memory_databases",
+    "database/replication_and_high_availability","database/sharding_and_partitioning","database/distributed_transactions","database/consistency_models_and_consensus","database/database_caching_patterns",
+    "database/connection_pool_management","database/database_performance_tuning","database/backup_recovery_and_disaster_recovery","database/database_security_and_compliance",
+    "database/database_selection_framework","database/polyglot_persistence_patterns",
+  ],
+  devops: [
+    "devops/linux_and_os_fundamentals","devops/shell_scripting_and_automation","devops/networking_for_devops","devops/version_control_and_git_workflows",
+    "devops/containers_and_docker","devops/container_runtimes_and_oci","devops/kubernetes_architecture","devops/kubernetes_workloads_and_objects","devops/kubernetes_networking","devops/kubernetes_storage_and_state","devops/kubernetes_scheduling_and_autoscaling","devops/kubernetes_security","devops/helm_and_package_management","devops/kubernetes_operators_and_crds",
+    "devops/ci_cd_fundamentals","devops/ci_cd_platforms","devops/deployment_strategies","devops/gitops_argocd_flux","devops/artifact_and_registry_management",
+    "devops/infrastructure_as_code_terraform","devops/terraform_advanced_and_alternatives","devops/configuration_management","devops/secrets_management",
+    "devops/cloud_fundamentals_and_aws","devops/gcp_and_azure_essentials","devops/serverless_and_faas","devops/cloud_networking_and_cdn","devops/cloud_cost_optimization_finops",
+    "devops/observability_metrics_prometheus","devops/observability_logging","devops/observability_tracing_and_otel","devops/visualization_and_alerting","devops/sre_principles_and_slos","devops/incident_management_and_oncall",
+    "devops/devsecops_and_supply_chain_security","devops/policy_as_code_and_compliance","devops/disaster_recovery_and_resilience","devops/platform_engineering_and_idp",
+    "devops/ml_platform_and_gpu_infrastructure","devops/event_streaming_operations","devops/performance_and_load_testing",
+  ],
+  hld: [
+    "hld/scalability","hld/load_balancing","hld/caching","hld/database_design",
+    "hld/cap_theorem","hld/api_design","hld/message_queues","hld/rate_limiting",
+    "hld/cdn","hld/consistent_hashing","hld/database_sharding","hld/microservices","hld/distributed_transactions","hld/observability","hld/security_and_auth","hld/resilience_patterns","hld/consensus_algorithms","hld/event_sourcing_cqrs",
+  ],
+  java: [
+    "java/core_language","java/strings_and_text","java/generics_and_type_system","java/exceptions_and_io",
+    "java/java8_features","java/java_streams","java/functional_programming","java/java9_to_21_features",
+    "java/jvm_internals",
+    "java/concurrency","java/collections_internals","java/design_patterns_in_java",
+    "java/performance_and_tuning","java/java_memory_model",
+    "java/java_interview_patterns","java/testing_junit_mockito","java/annotation_processing",
+    "java/structured_concurrency_and_loom","java/foreign_function_and_memory_api","java/reactive_programming",
+    "java/networking_and_http_client","java/jdbc_and_database","java/grpc_protobuf","java/microservices_patterns",
+  ],
+  lld: [
+    "lld/design_principles","lld/solid_principles",
+    "lld/creational","lld/structural","lld/behavioral",
+    "lld/pattern_comparisons","lld/anti_patterns","lld/concurrency_patterns","lld/system_design_problems",
+  ],
+  llm: [
+    "llm/foundations_and_architecture","llm/tokenization_and_embeddings","llm/embeddings_and_similarity_search",
+    "llm/pre_training","llm/training_infrastructure","llm/synthetic_data_generation","llm/fine_tuning","llm/alignment_and_rlhf","llm/constitutional_ai",
+    "llm/prompt_engineering","llm/rag_fundamentals","llm/advanced_rag","llm/context_engineering","llm/reasoning_models","llm/code_generation",
+    "llm/agents_and_tool_use","llm/agentic_workflow_patterns","llm/agentic_frameworks","llm/multi_agent_systems","llm/mcp_model_context_protocol","llm/coding_agents","llm/voice_agents","llm/browser_agents_deep_dive",
+    "llm/inference_and_decoding","llm/context_windows_and_long_context","llm/inference_engines","llm/vllm_deep_dive","llm/optimization_and_quantization","llm/knowledge_distillation_and_model_merging",
+    "llm/deployment_and_mlops","llm/llm_caching","llm/llm_observability_and_monitoring","llm/llm_ops_platforms","llm/token_economics_and_cost_optimization","llm/llm_routing_and_model_selection","llm/prompt_management_and_promptops",
+    "llm/evaluation_and_benchmarks","llm/llm_testing_strategies","llm/guardrails_and_content_safety",
+    "llm/safety_and_alignment","llm/mechanistic_interpretability","llm/llm_security","llm/ai_regulations_and_compliance","llm/multimodal_models","llm/vision_language_models","llm/vla_and_robotics_foundation_models","llm/small_language_models_and_edge_ai","llm/mixture_of_experts","llm/diffusion_language_models","llm/ai_applications","llm/llm_ecosystem_and_landscape","llm/data_flywheels_and_continuous_learning",
+  ],
+  ml: [
+    "ml/linear_algebra_and_calculus","ml/probability_and_statistics","ml/optimization_theory","ml/information_theory",
+    "ml/supervised_learning","ml/ensemble_methods","ml/unsupervised_learning","ml/feature_engineering","ml/model_evaluation_and_selection",
+    "ml/neural_network_fundamentals","ml/convolutional_neural_networks","ml/recurrent_neural_networks","ml/training_deep_networks","ml/generative_models",
+    "ml/computer_vision","ml/natural_language_processing","ml/recommender_systems","ml/time_series_forecasting","ml/reinforcement_learning",
+    "ml/ml_system_design","ml/data_pipelines_and_processing","ml/distributed_training","ml/experiment_tracking_and_versioning","ml/gpu_and_hardware_optimization","ml/active_learning_and_weak_supervision",
+    "ml/model_serving_and_inference","ml/model_compression_and_efficiency","ml/monitoring_and_drift_detection","ml/mlops_and_ci_cd",
+    "ml/graph_neural_networks","ml/self_supervised_and_contrastive_learning","ml/causal_inference_and_ml","ml/adversarial_ml_and_robustness","ml/uncertainty_quantification_and_conformal_prediction",
+    "ml/ml_interview_patterns","ml/model_selection_and_algorithm_choice",
+  ],
+  python: [
+    "python/data_model_and_objects","python/core_language_idioms","python/iterators_and_generators","python/decorators_and_closures","python/context_managers_and_exceptions","python/collections_and_data_structures","python/strings_bytes_encoding_and_regex","python/file_io_and_serialization",
+    "python/cpython_memory_model","python/the_gil_and_free_threading","python/metaclasses_and_metaprogramming","python/the_type_system_and_typing","python/performance_and_profiling","python/functional_programming",
+    "python/threading_and_multiprocessing","python/asyncio_and_event_loop","python/async_patterns_and_pitfalls","python/design_patterns_in_python","python/stdlib_datetime_and_logging","python/testing_with_pytest","python/packaging_and_project_tooling",
+    "python/fastapi_fundamentals_asgi","python/pydantic_v2_deep_dive","python/routing_and_request_handling","python/dependency_injection_in_fastapi","python/middleware_and_lifecycle","python/configuration_and_settings_management",
+    "python/async_database_sqlalchemy","python/authentication_and_security","python/error_handling_and_validation","python/websockets_sse_and_streaming","python/background_jobs_and_task_queues","python/testing_fastapi","python/http_clients_and_external_apis","python/message_queues_and_event_driven",
+    "python/production_deployment_and_scaling","python/observability_and_monitoring","python/caching_and_performance","python/api_design_and_versioning","python/security_hardening_and_owasp",
+  ],
+  spring: [
+    "spring/ioc_container","spring/bean_lifecycle","spring/dependency_injection","spring/spring_configuration",
+    "spring/spring_proxies","spring/spring_aop",
+    "spring/spring_boot_autoconfiguration","spring/spring_boot_configuration","spring/spring_boot_actuator","spring/spring_modulith",
+    "spring/spring_mvc_architecture","spring/request_handling","spring/filters_and_interceptors","spring/spring_webflux","spring/spring_graphql","spring/validation_and_error_handling",
+    "spring/spring_data_jpa","spring/spring_transactions","spring/spring_caching",
+    "spring/spring_security_architecture","spring/spring_security_jwt_oauth",
+    "spring/spring_cloud_config","spring/spring_cloud_patterns","spring/spring_messaging","spring/spring_batch","spring/spring_events_and_scheduling","spring/spring_ai","spring/spring_integration",
+    "spring/spring_testing","spring/spring_performance","spring/observability_and_tracing","spring/spring_native_graalvm",
+  ],
+};
+
 const app = document.getElementById("app");
 const state = {
   index: null, today: null, progress: null,
@@ -335,7 +435,12 @@ function modulesOf(bank) {
     const m = map.get(q.module) || { module: q.module, name: q.moduleName, count: 0 };
     m.count++; map.set(q.module, m);
   }
-  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const section = bank[0]?.section;
+  const order = STUDY_ORDER[section] || [];
+  return [...map.values()].sort((a, b) => {
+    const ai = order.indexOf(a.module), bi = order.indexOf(b.module);
+    return (ai === -1 ? 9999 : ai) - (bi === -1 ? 9999 : bi);
+  });
 }
 
 async function openTopics(section) {

@@ -102,7 +102,7 @@ This section is deliberately scoped to **not duplicate** adjacent sections. Wher
 
 ---
 
-## 4. 7-Phase Learning Path
+## 4. 8-Phase Learning Path
 
 ```
 Phase 1 — Foundations

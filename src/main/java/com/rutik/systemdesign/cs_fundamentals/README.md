@@ -80,7 +80,7 @@ This section teaches concepts at the **language-agnostic CS-theory level**. Wher
 
 ---
 
-## 4. 6-Phase Learning Path
+## 4. 5-Phase Learning Path
 
 ```
 Phase 1 — Complexity & Computation Foundations

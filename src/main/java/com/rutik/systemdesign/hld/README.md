@@ -134,6 +134,8 @@ Pick 2-3 components to go deep on (interviewer often guides):
 14. Observability — instrumenting and operating what you've built (metrics, logs, traces, SLOs)
 15. Security and Authentication/Authorization — securing the system end-to-end
 16. Resilience Patterns — designing for graceful failure (circuit breakers, bulkheads, retries)
+17. Consensus Algorithms — Raft/Paxos leader election, log replication, quorum sizing, etcd/ZooKeeper
+18. Event Sourcing & CQRS — append-only event log, projections, snapshots, command/query separation
 
 **Phase 4 — Apply to Case Studies**:
 - [Design Twitter](case_studies/design_twitter.md)

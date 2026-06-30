@@ -38,29 +38,29 @@ This section covers:
 | 7 | [spring_boot_autoconfiguration](spring_boot_autoconfiguration/) | 3 — Spring Boot | Intermediate | @EnableAutoConfiguration, spring.factories / AutoConfiguration.imports, @Conditional* |
 | 8 | [spring_boot_configuration](spring_boot_configuration/) | 3 — Spring Boot | Beginner | @ConfigurationProperties, relaxed binding, config server, secrets management |
 | 9 | [spring_boot_actuator](spring_boot_actuator/) | 3 — Spring Boot | Intermediate | Health indicators, metrics (Micrometer), custom endpoints, security, Prometheus |
-| 10 | [spring_mvc_architecture](spring_mvc_architecture/) | 4 — Spring Web | Intermediate | DispatcherServlet, HandlerMapping, HandlerAdapter, ViewResolver, message converters |
-| 11 | [request_handling](request_handling/) | 4 — Spring Web | Intermediate | @RequestMapping, argument resolvers, @ControllerAdvice, exception handling |
-| 12 | [filters_and_interceptors](filters_and_interceptors/) | 4 — Spring Web | Intermediate | Servlet Filter vs. HandlerInterceptor, Filter order, OncePerRequestFilter |
-| 13 | [spring_webflux](spring_webflux/) | 4 — Spring Web | Advanced | Reactor, Mono/Flux, Netty, RouterFunction, backpressure, WebClient |
-| 14 | [spring_data_jpa](spring_data_jpa/) | 5 — Data & Transactions | Intermediate | JpaRepository, query derivation, JPQL, native queries, projections, N+1 problem |
-| 15 | [spring_transactions](spring_transactions/) | 5 — Data & Transactions | Advanced | Propagation, isolation, @Transactional internals, proxy limits, distributed TX |
-| 16 | [spring_caching](spring_caching/) | 5 — Data & Transactions | Intermediate | @Cacheable, @CacheEvict, CacheManager, Redis integration, cache stampede |
-| 17 | [spring_security_architecture](spring_security_architecture/) | 6 — Security | Advanced | SecurityFilterChain, AuthenticationManager, SecurityContext, CSRF, CORS |
-| 18 | [spring_security_jwt_oauth](spring_security_jwt_oauth/) | 6 — Security | Advanced | JWT validation, OAuth2 resource server, PKCE, Spring Authorization Server |
-| 19 | [spring_cloud_config](spring_cloud_config/) | 7 — Cloud & Messaging | Intermediate | Config server, refresh scope, Vault integration, config encryption |
-| 20 | [spring_cloud_patterns](spring_cloud_patterns/) | 7 — Cloud & Messaging | Advanced | Eureka, Resilience4j, Spring Cloud Gateway, load balancer, circuit breaker |
-| 21 | [spring_messaging](spring_messaging/) | 7 — Cloud & Messaging | Intermediate | @KafkaListener, @RabbitListener, message converters, DLQ, idempotency |
-| 22 | [spring_testing](spring_testing/) | 8 — Testing & Production | Intermediate | @SpringBootTest, @WebMvcTest, MockMvc, WebTestClient, Testcontainers, slice tests |
-| 23 | [spring_performance](spring_performance/) | 8 — Testing & Production | Advanced | Startup time, lazy init, virtual threads (Boot 3.2), GraalVM native, connection pools |
-| 24 | [spring_batch](spring_batch/) | 7 — Cloud & Messaging | Advanced | Job/Step/chunk model, ItemReader/Processor/Writer, @StepScope, JobRepository, partitioning, skip/retry |
-| 25 | [spring_events_and_scheduling](spring_events_and_scheduling/) | 7 — Cloud & Messaging | Intermediate | ApplicationEventPublisher, @EventListener, @TransactionalEventListener, @Scheduled, ShedLock |
-| 26 | [validation_and_error_handling](validation_and_error_handling/) | 4 — Spring Web | Intermediate | Bean Validation (JSR-380), @Valid/@Validated, custom ConstraintValidator, ProblemDetail (RFC 7807) |
-| 27 | [observability_and_tracing](observability_and_tracing/) | 8 — Testing & Production | Advanced | Micrometer Observation API, Micrometer Tracing + OTLP, W3C traceparent, structured logging, exemplars |
-| 28 | [spring_ai](spring_ai/) | 7 — Cloud & Messaging | Advanced | ChatClient fluent API, prompt templates, structured output, VectorStore + RAG advisors, @Tool function calling, model routing via beans |
-| 29 | [spring_native_graalvm](spring_native_graalvm/) | 8 — Testing & Production | Advanced | AOT processing, reachability metadata/hints, build-time vs runtime init, tracing agent, startup/memory vs peak-throughput tradeoff |
-| 30 | [spring_integration](spring_integration/) | 7 — Cloud & Messaging | Advanced | EIP: channels, adapters/gateways, router/splitter/aggregator/transformer, Java DSL; contrast with spring_messaging |
-| 31 | [spring_modulith](spring_modulith/) | 3 — Spring Boot | Advanced | Modular monolith: @ApplicationModule, ArchUnit verification, @ApplicationModuleListener, event publication registry, module tests, docs |
-| 32 | [spring_graphql](spring_graphql/) | 4 — Spring Web | Advanced | Schema-first @QueryMapping/@MutationMapping/@SchemaMapping, @BatchMapping/DataLoader (N+1), subscriptions, cursor pagination, error handling |
+| 10 | [spring_modulith](spring_modulith/) | 3 — Spring Boot | Advanced | Modular monolith: @ApplicationModule, ArchUnit verification, @ApplicationModuleListener, event publication registry, module tests, docs |
+| 11 | [spring_mvc_architecture](spring_mvc_architecture/) | 4 — Spring Web | Intermediate | DispatcherServlet, HandlerMapping, HandlerAdapter, ViewResolver, message converters |
+| 12 | [request_handling](request_handling/) | 4 — Spring Web | Intermediate | @RequestMapping, argument resolvers, @ControllerAdvice, exception handling |
+| 13 | [filters_and_interceptors](filters_and_interceptors/) | 4 — Spring Web | Intermediate | Servlet Filter vs. HandlerInterceptor, Filter order, OncePerRequestFilter |
+| 14 | [spring_webflux](spring_webflux/) | 4 — Spring Web | Advanced | Reactor, Mono/Flux, Netty, RouterFunction, backpressure, WebClient |
+| 15 | [spring_graphql](spring_graphql/) | 4 — Spring Web | Advanced | Schema-first @QueryMapping/@MutationMapping/@SchemaMapping, @BatchMapping/DataLoader (N+1), subscriptions, cursor pagination, error handling |
+| 16 | [validation_and_error_handling](validation_and_error_handling/) | 4 — Spring Web | Intermediate | Bean Validation (JSR-380), @Valid/@Validated, custom ConstraintValidator, ProblemDetail (RFC 7807) |
+| 17 | [spring_data_jpa](spring_data_jpa/) | 5 — Data & Transactions | Intermediate | JpaRepository, query derivation, JPQL, native queries, projections, N+1 problem |
+| 18 | [spring_transactions](spring_transactions/) | 5 — Data & Transactions | Advanced | Propagation, isolation, @Transactional internals, proxy limits, distributed TX |
+| 19 | [spring_caching](spring_caching/) | 5 — Data & Transactions | Intermediate | @Cacheable, @CacheEvict, CacheManager, Redis integration, cache stampede |
+| 20 | [spring_security_architecture](spring_security_architecture/) | 6 — Security | Advanced | SecurityFilterChain, AuthenticationManager, SecurityContext, CSRF, CORS |
+| 21 | [spring_security_jwt_oauth](spring_security_jwt_oauth/) | 6 — Security | Advanced | JWT validation, OAuth2 resource server, PKCE, Spring Authorization Server |
+| 22 | [spring_cloud_config](spring_cloud_config/) | 7 — Cloud & Messaging | Intermediate | Config server, refresh scope, Vault integration, config encryption |
+| 23 | [spring_cloud_patterns](spring_cloud_patterns/) | 7 — Cloud & Messaging | Advanced | Eureka, Resilience4j, Spring Cloud Gateway, load balancer, circuit breaker |
+| 24 | [spring_messaging](spring_messaging/) | 7 — Cloud & Messaging | Intermediate | @KafkaListener, @RabbitListener, message converters, DLQ, idempotency |
+| 25 | [spring_batch](spring_batch/) | 7 — Cloud & Messaging | Advanced | Job/Step/chunk model, ItemReader/Processor/Writer, @StepScope, JobRepository, partitioning, skip/retry |
+| 26 | [spring_events_and_scheduling](spring_events_and_scheduling/) | 7 — Cloud & Messaging | Intermediate | ApplicationEventPublisher, @EventListener, @TransactionalEventListener, @Scheduled, ShedLock |
+| 27 | [spring_ai](spring_ai/) | 7 — Cloud & Messaging | Advanced | ChatClient fluent API, prompt templates, structured output, VectorStore + RAG advisors, @Tool function calling, model routing via beans |
+| 28 | [spring_integration](spring_integration/) | 7 — Cloud & Messaging | Advanced | EIP: channels, adapters/gateways, router/splitter/aggregator/transformer, Java DSL; contrast with spring_messaging |
+| 29 | [spring_testing](spring_testing/) | 8 — Testing & Production | Intermediate | @SpringBootTest, @WebMvcTest, MockMvc, WebTestClient, Testcontainers, slice tests |
+| 30 | [spring_performance](spring_performance/) | 8 — Testing & Production | Advanced | Startup time, lazy init, virtual threads (Boot 3.2), GraalVM native, connection pools |
+| 31 | [observability_and_tracing](observability_and_tracing/) | 8 — Testing & Production | Advanced | Micrometer Observation API, Micrometer Tracing + OTLP, W3C traceparent, structured logging, exemplars |
+| 32 | [spring_native_graalvm](spring_native_graalvm/) | 8 — Testing & Production | Advanced | AOT processing, reachability metadata/hints, build-time vs runtime init, tracing agent, startup/memory vs peak-throughput tradeoff |
 
 ---
 
