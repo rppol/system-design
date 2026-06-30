@@ -1,5 +1,10 @@
 /* System Design Daily - 5-minute blitz. Vanilla JS, no build step. */
 
+// True when served as a static site (GitHub Pages); false on local server.py.
+// On GitHub Pages there is no /api/ — progress lives in localStorage only.
+const IS_STATIC = !["localhost", "127.0.0.1", "0.0.0.0"].includes(location.hostname)
+  && !location.hostname.match(/^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[01])\./);
+
 const QUESTIONS_PER_BLITZ = 10;
 const DAILY_XP_GOAL = 100;
 const SECTION_LABELS = {
@@ -93,14 +98,17 @@ function countUp(node, to) {
 /* ---------- persistence ---------- */
 async function loadProgress() {
   const fill = (p) => { if (!p.reviews) p.reviews = {}; if (p.freezes == null) p.freezes = 2; if (!p.freezeUsedOn) p.freezeUsedOn = []; return p; };
-  const p = await apiGet("/api/progress", null);
-  if (p) return fill(p);
+  if (!IS_STATIC) {
+    const p = await apiGet("/api/progress", null);
+    if (p) return fill(p);
+  }
   const ls = localStorage.getItem("sd_progress");
   return ls ? fill(JSON.parse(ls))
     : { streak: 0, longestStreak: 0, lastPlayed: null, totalXP: 0, sections: {}, history: [], reviews: {}, freezes: 2, freezeUsedOn: [] };
 }
 
 async function saveSession(session) {
+  if (IS_STATIC) return saveSessionLocal(session);
   try {
     const r = await fetch("/api/progress", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(session),
@@ -110,22 +118,48 @@ async function saveSession(session) {
     state.progress = data.progress;
     return { xp: data.xpEarned, freezeUsed: !!data.freezeUsed };
   } catch {
-    return saveSessionLocal(session); // offline fallback (no spaced-rep persistence)
+    return saveSessionLocal(session);
   }
 }
 
-// Mirrors record_session's streak-freeze logic in server.py so the offline
-// fallback agrees with the server: a single missed day is covered by a freeze.
+// SM-2-lite: mirrors schedule_review() in server.py exactly.
+function scheduleReview(rv, status, today) {
+  if (status === "correct") {
+    rv.reps = (rv.reps || 0) + 1;
+    rv.ease = Math.min(3.0, (rv.ease || 2.5) + 0.1);
+    const r = rv.reps;
+    rv.interval = r === 1 ? 1 : r === 2 ? 3 : Math.max(1, Math.round((rv.interval || 1) * rv.ease));
+  } else {
+    rv.reps = 0;
+    rv.lapses = (rv.lapses || 0) + (status === "wrong" ? 1 : 0);
+    rv.ease = Math.max(1.3, (rv.ease || 2.5) - (status === "wrong" ? 0.2 : 0.05));
+    rv.interval = 1;
+  }
+  const due = new Date(today + "T00:00:00");
+  due.setDate(due.getDate() + rv.interval);
+  rv.due = due.toLocaleDateString("en-CA");
+  return rv;
+}
+
+// Mirrors record_session's streak-freeze + SM-2 logic in server.py.
+// Used for static hosting (GitHub Pages) and as the offline server fallback.
 function saveSessionLocal(session) {
   const p = state.progress;
   if (p.freezes == null) p.freezes = 2;
   if (!p.freezeUsedOn) p.freezeUsedOn = [];
+  const reviews = (p.reviews = p.reviews || {});
   let correct = 0;
   for (const res of session.results || []) {
     const sec = (p.sections[res.section] = p.sections[res.section] || { seen: 0, correct: 0 });
     sec.seen += 1;
     sec.lastPlayed = session.date;
     if (res.status === "correct") { sec.correct += 1; correct += 1; }
+    if (res.id) {
+      const rv = reviews[res.id] || { ease: 2.5, interval: 0, reps: 0, lapses: 0 };
+      rv.section = res.section; rv.module = res.module;
+      scheduleReview(rv, res.status, session.date);
+      reviews[res.id] = rv;
+    }
   }
   const dayMs = 86400000, atMidnight = (iso) => new Date(iso + "T00:00:00");
   let freezeUsed = false, advanced = false;
@@ -1096,7 +1130,7 @@ async function openReaderPath(path, title, navCtx, frag) {
   }
   try {
     if (readerCache[path] == null) {
-      const r = await fetch(`/content/${path}`, { cache: "no-store" });
+      const r = await fetch(IS_STATIC ? `../${path}` : `/content/${path}`, { cache: "no-store" });
       if (!r.ok) throw 0;
       readerCache[path] = await r.text();
     }
@@ -1190,7 +1224,7 @@ async function boot() {
   }
   el("#bankInfo").textContent = `${state.index.total} questions across ${Object.keys(state.index.sections).length} sections`;
   state.progress = await loadProgress();
-  state.today = await apiGet("/api/today", {});
+  state.today = IS_STATIC ? {} : await apiGet("/api/today", {});
   el("#navProgress").addEventListener("click", renderProgress);
   const studyB = el("#navStudy");
   if (studyB) studyB.addEventListener("click", renderStudy);
