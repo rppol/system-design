@@ -15,6 +15,8 @@
   --radius: 14px;
   --shadow: 0 10px 30px rgba(0,0,0,.6);
   --reader-w: min(58%, 760px);   /* reader pane width; updated live by the drag grip */
+  --modules-w: 160px;            /* left sidebar width; drag-resizable */
+  --toc-w: 190px;                /* right TOC sidebar width; drag-resizable */
 }
 
 * { box-sizing: border-box; }
@@ -273,7 +275,7 @@ main { flex: 1; width: 100%; max-width: 760px; margin: 0 auto; padding: 26px 20p
 }
 #reader {
   /* One Dark palette, scoped to the reader so the rest of the app stays "Midnight" */
-  --od-bg: #000000; --od-bg2: #080808; --od-line: #1a1a1a; --od-text: #abb2bf; --od-muted: #7f8694;
+  --od-bg: #000000; --od-bg2: #080808; --od-line: #1a1a1a; --od-text: #c5cad6; --od-muted: #7f8694;
   position: fixed; top: 0; right: 0; height: 100vh; width: var(--reader-w);
   background: var(--od-bg); border-left: 1px solid var(--od-line); box-shadow: -12px 0 40px rgba(0,0,0,.5);
   z-index: 40; display: flex; flex-direction: column; animation: slidein .2s ease; }
@@ -322,7 +324,7 @@ body.reader-full main { margin-right: 0 !important; }
 .reader-modules::-webkit-scrollbar, .reader-toc::-webkit-scrollbar { display: none; }  /* Chrome/Safari */
 
 /* left: module list */
-.reader-modules { display: none; width: 160px; padding-right: 10px; border-right: 1px solid var(--od-line); }
+.reader-modules { display: none; width: var(--modules-w); padding-right: 10px; border-right: 1px solid var(--od-line); }
 #reader.modules-open .reader-modules { display: block; }
 .mod-h { font-weight: 700; color: var(--od-text); font-size: 11px; text-transform: uppercase;
   letter-spacing: .7px; padding: 2px 0 8px; }
@@ -355,8 +357,19 @@ a.mod-file { display: block; padding: 3px 8px; color: var(--od-muted); font-size
 a.mod-file:hover { color: var(--od-text); background: rgba(110,168,254,.08); }
 a.mod-file.active { color: var(--od-text); border-right-color: var(--accent); background: rgba(110,168,254,.12); font-weight: 600; }
 
+/* sidebar drag grips */
+.modules-grip, .toc-grip {
+  display: none; flex-shrink: 0; width: 8px; cursor: col-resize; position: relative; z-index: 1; }
+#reader.modules-open .modules-grip { display: block; }
+#reader.toc-open .toc-grip { display: block; }
+.modules-grip::after, .toc-grip::after {
+  content: ""; position: absolute; top: 0; left: 3px; width: 2px; height: 100%;
+  background: var(--od-line); transition: background .15s; }
+.modules-grip:hover::after, .toc-grip:hover::after,
+body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after { background: var(--accent); }
+
 /* right: file contents (TOC) */
-.reader-toc { display: none; width: 190px; padding-left: 10px; border-left: 1px solid var(--od-line); }
+.reader-toc { display: none; width: var(--toc-w); padding-left: 10px; border-left: 1px solid var(--od-line); }
 #reader.toc-open .reader-toc { display: block; }
 .reader-toc .toc-h { font-weight: 700; color: var(--od-text); font-size: 11px; text-transform: uppercase;
   letter-spacing: .7px; padding: 2px 0 8px; }
@@ -401,8 +414,8 @@ a.mod-file.active { color: var(--od-text); border-right-color: var(--accent); ba
 .md-body .mermaid { background: var(--od-bg); border: 1px solid var(--od-line); border-radius: 10px;
   padding: 18px; margin: 14px 0; text-align: center; overflow-x: auto; }
 .md-body .mermaid svg { max-width: 100%; height: auto; }
-/* Arrow paths — bright blue, slightly thicker for visibility */
-.md-body .mermaid svg .edgePath .path { stroke: #61afef !important; stroke-width: 2px !important; }
+/* Arrow paths — bright blue, 2.5px reduces aliasing on low-res monitors */
+.md-body .mermaid svg .edgePath .path { stroke: #61afef !important; stroke-width: 2.5px !important; stroke-linecap: round !important; }
 /* Edge labels — transparent background (no black pill), gold text */
 .md-body .mermaid svg .edgeLabel .label rect { fill: transparent !important; stroke: none !important; }
 .md-body .mermaid svg .edgeLabel foreignObject > div { background: transparent !important; color: #e5c07b !important; font-size: 11px; }

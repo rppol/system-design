@@ -1169,33 +1169,60 @@ function titleFromPath(path) {
 }
 
 // Drag-to-resize: pointer-capture on the grip so move/up fire even off-element.
-function attachGrip(grip) {
+// onMove(ev) — called on every pointermove; onDone() — called once on pointerup.
+function attachGrip(grip, onMove, onDone) {
   if (!grip) return;
   grip.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     grip.setPointerCapture(e.pointerId);
     document.body.classList.add("reader-resizing");
-    const onMove = (ev) => {
-      const w = Math.min(window.innerWidth * 0.92, Math.max(360, window.innerWidth - ev.clientX));
-      document.documentElement.style.setProperty("--reader-w", Math.round(w) + "px");
-    };
-    const onUp = () => {
+    const done = () => {
       document.body.classList.remove("reader-resizing");
       grip.removeEventListener("pointermove", onMove);
-      grip.removeEventListener("pointerup", onUp);
-      const w = getComputedStyle(document.documentElement).getPropertyValue("--reader-w").trim();
-      if (w.endsWith("px")) localStorage.setItem("sd_reader_w", w);
+      grip.removeEventListener("pointerup", done);
+      onDone?.();
     };
     grip.addEventListener("pointermove", onMove);
-    grip.addEventListener("pointerup", onUp);
+    grip.addEventListener("pointerup", done);
   });
 }
 
+function wireGrips() {
+  const css = document.documentElement.style;
+  // Main reader pane grip (outer shell, wired on every openReaderPath call)
+  attachGrip(el("readerGrip"),
+    ev => css.setProperty("--reader-w", Math.round(Math.min(window.innerWidth * 0.92, Math.max(360, window.innerWidth - ev.clientX))) + "px"),
+    () => { const v = getComputedStyle(document.documentElement).getPropertyValue("--reader-w").trim(); if (v.endsWith("px")) localStorage.setItem("sd_reader_w", v); }
+  );
+}
+
+function wireSidebarGrips() {
+  const css = document.documentElement.style;
+  // Left modules sidebar grip (injected with body HTML — wired after b.innerHTML is set)
+  attachGrip(el("modulesGrip"),
+    ev => {
+      const left = el("reader").getBoundingClientRect().left;
+      css.setProperty("--modules-w", Math.round(Math.min(320, Math.max(100, ev.clientX - left))) + "px");
+    },
+    () => { const v = getComputedStyle(document.documentElement).getPropertyValue("--modules-w").trim(); if (v.endsWith("px")) localStorage.setItem("sd_modules_w", v); }
+  );
+  // Right TOC sidebar grip
+  attachGrip(el("tocGrip"),
+    ev => {
+      const right = el("reader").getBoundingClientRect().right;
+      css.setProperty("--toc-w", Math.round(Math.min(360, Math.max(120, right - ev.clientX))) + "px");
+    },
+    () => { const v = getComputedStyle(document.documentElement).getPropertyValue("--toc-w").trim(); if (v.endsWith("px")) localStorage.setItem("sd_toc_w", v); }
+  );
+}
+
 function restoreReaderWidth() {
-  const w = localStorage.getItem("sd_reader_w");
-  if (w) document.documentElement.style.setProperty("--reader-w", w);
-  reader.full = localStorage.getItem("sd_reader_full") === "1";
-  reader.toc = localStorage.getItem("sd_reader_toc") === "1";
+  const css = document.documentElement.style;
+  const rw = localStorage.getItem("sd_reader_w");   if (rw) css.setProperty("--reader-w", rw);
+  const mw = localStorage.getItem("sd_modules_w");  if (mw) css.setProperty("--modules-w", mw);
+  const tw = localStorage.getItem("sd_toc_w");      if (tw) css.setProperty("--toc-w", tw);
+  reader.full    = localStorage.getItem("sd_reader_full")    === "1";
+  reader.toc     = localStorage.getItem("sd_reader_toc")     === "1";
   reader.modules = localStorage.getItem("sd_reader_modules") === "1";
 }
 
@@ -1341,7 +1368,7 @@ async function openReaderPath(path, title, navCtx, frag) {
     <div class="reader-body" id="readerBody"><div class="loading">Loading&hellip;</div></div>`;
   document.body.classList.add("reader-open");
   applyReaderModes();
-  attachGrip(el("#readerGrip"));
+  wireGrips();
   el("#readerClose").addEventListener("click", closeReader);
   if (nav) {
     el("#readerMod").addEventListener("click", () => {
@@ -1373,7 +1400,8 @@ async function openReaderPath(path, title, navCtx, frag) {
     }
     if (reader.path !== path) return;              // user navigated away during the fetch
     const b = el("#readerBody");
-    b.innerHTML = `<nav class="reader-modules" id="readerModules"></nav><div class="md-body" id="readerMain">${mdRender(readerCache[path])}</div><nav class="reader-toc" id="readerToc"></nav>`;
+    b.innerHTML = `<nav class="reader-modules" id="readerModules"></nav><div class="modules-grip" id="modulesGrip"></div><div class="md-body" id="readerMain">${mdRender(readerCache[path])}</div><div class="toc-grip" id="tocGrip"></div><nav class="reader-toc" id="readerToc"></nav>`;
+    wireSidebarGrips();
     const main = el("#readerMain");
     buildModuleNav(el("#readerModules"), reader.nav, path);
     const headCount = buildToc(el("#readerToc"), main);
