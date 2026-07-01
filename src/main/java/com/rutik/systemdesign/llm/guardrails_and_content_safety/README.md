@@ -247,48 +247,62 @@ response, *rest = guard(
 ## 5. Architecture Diagrams
 
 ### Guardrail Placement
-```
-User Input
-     |
-     v
-[Input Guardrails]          ← Pre-LLM filters
-  ├── PII detection + redaction
-  ├── Topic classifier
-  ├── Prompt injection detection
-  ├── Length/rate limiting
-  └── Input toxicity check
-     |   [Block if fails any check]
-     v
-[LLM Inference]
-     |
-     v
-[Output Guardrails]         ← Post-LLM filters
-  ├── Output toxicity check
-  ├── PII in output detection
-  ├── Grounding/faithfulness (for RAG)
-  ├── Format validation
-  └── Custom business rules
-     |   [Replace with safe response if fails]
-     v
-User Output + Audit Log
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef warn fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    IN["User Input"]
+    IG["Input Guardrails (pre-LLM)\nPII detection + redaction\ntopic classifier\nprompt injection detection\nlength / rate limiting\ninput toxicity check"]
+    BLK["Block — return safe error"]
+    LLM["LLM Inference"]
+    OG["Output Guardrails (post-LLM)\noutput toxicity check\nPII in output detection\ngrounding / faithfulness (RAG)\nformat validation\ncustom business rules"]
+    SAFE["Replace with safe response"]
+    OUT["User Output + Audit Log"]
+
+    IN --> IG
+    IG -->|"fails any check"| BLK
+    IG -->|"passes"| LLM --> OG
+    OG -->|"fails"| SAFE
+    OG -->|"passes"| OUT
+
+    class IN io
+    class IG,OG proc
+    class LLM llm
+    class BLK,SAFE warn
+    class OUT io
 ```
 
 ### Parallel Guardrail Architecture (Low Latency)
-```
-User Input
-     |
-     +---- [LLM Inference] --------+
-     |                             |
-     +---- [Safety Classifier] ---+---> Merge
-     |     (runs in parallel)     |    (suppress LLM output if unsafe)
-     |                             |
-     +---- [PII Detector] --------+
 
-Parallel execution: total latency = max(LLM, classifier)
-  LLM: 1-3 seconds
-  Classifier: 50-200ms
-  → No added latency if classifier finishes before LLM
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef warn fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    IN["User Input"]
+    INFR["LLM Inference\n(1–3 s)"]
+    SAFE["Safety Classifier\n(50–200 ms, parallel)"]
+    PII["PII Detector\n(50–200 ms, parallel)"]
+    MERGE["Merge\n(suppress LLM output if unsafe)"]
+    OUT["Response"]
+
+    IN --> INFR & SAFE & PII
+    INFR & SAFE & PII --> MERGE --> OUT
+
+    class IN,OUT io
+    class INFR llm
+    class SAFE,PII,MERGE proc
 ```
+
+Total latency = max(LLM, classifier) — no added latency when classifiers finish before LLM.
 
 ---
 

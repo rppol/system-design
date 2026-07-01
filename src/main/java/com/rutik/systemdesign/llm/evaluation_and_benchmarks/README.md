@@ -224,37 +224,32 @@ Instruction-following bias: prefers well-formatted responses regardless of accur
 ## 5. Architecture Diagrams
 
 ### Evaluation Pipeline
-```
-New Model / Prompt Change
-         |
-         v
-[Automated Benchmark Suite]
-  ├── MMLU / domain benchmarks (knowledge)
-  ├── HumanEval / SWE-bench (code)
-  ├── RAGAS (if RAG system)
-  └── Safety benchmarks (AdvBench, WildGuard)
-         |
-         v
-[Automated Regression Check]
-  Compare vs. current production model
-  Gate: must not regress >2% on any benchmark
-         |
-         v
-[Human Evaluation Sample]
-  1000 production-representative queries
-  LLM-as-judge scoring (gpt-4o)
-  10% human review of edge cases
-         |
-         v
-[A/B Test in Production]
-  5% traffic to new model
-  Real user feedback (thumbs, ratings, edits)
-  Run for minimum 48 hours
-         |
-         v
-[Rollout Decision]
-  Pass all gates → gradual rollout
-  Fail any gate → investigate and fix
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    NEW["New Model / Prompt Change"]
+    BENCH["Automated Benchmark Suite\nMMCL / domain (knowledge)\nHumanEval / SWE-bench (code)\nRAGAs (RAG) · safety (AdvBench, WildGuard)"]
+    REG["Automated Regression Check\nvs. current production model\ngate: no regression > 2%"]
+    HUM["Human Evaluation Sample\n1 000 production-representative queries\nLLM-as-judge (gpt-4o) + 10% human review"]
+    AB["A/B Test in Production\n5% traffic · real user feedback\nrun minimum 48 hours"]
+    PASS["Gradual Rollout"]
+    FAIL["Investigate and Fix"]
+
+    NEW --> BENCH --> REG --> HUM --> AB
+    AB -->|"all gates pass"| PASS
+    AB -->|"fails any gate"| FAIL
+
+    class NEW io
+    class BENCH,REG,HUM proc
+    class AB decide
+    class PASS io
+    class FAIL warn
 ```
 
 ---

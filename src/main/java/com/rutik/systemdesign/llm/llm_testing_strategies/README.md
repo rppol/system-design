@@ -104,45 +104,33 @@ Systematically mutate prompts (change one word, reorder instructions, remove a s
 
 ### CI/CD Evaluation Pipeline
 
-```
-Code Change (PR)
-        |
-        v
-  +------------------+
-  | Static checks    |  lint prompt files, check format
-  | (fast, ~0 cost)  |
-  +------------------+
-        |
-        v
-  +------------------+
-  | Unit tests       |  mocked LLM, format/schema tests
-  | (<1min, ~$0)     |  run on every commit
-  +------------------+
-        |
-        v
-  +------------------+
-  | Regression eval  |  200-example golden dataset
-  | (5-10min, ~$2)   |  vs stored baseline scores
-  +------------------+
-        |
-      PASS?
-       / \
-      NO  YES
-      |    |
-      v    v
-  Fail PR  Continue
-  with diff  to merge
-  vs baseline
-        |
-        v (nightly)
-  +------------------+
-  | Full eval suite  |  1000 examples, all test types
-  | (30min, ~$20)    |  E2E + adversarial + flakiness
-  +------------------+
-        |
-        v
-  Dashboard update
-  Quality trends, alerts
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    PR["Code Change (PR)"]
+    STATIC["Static Checks\nlint prompt files · check format\nfast, ~$0"]
+    UNIT["Unit Tests\nmocked LLM · format/schema tests\n< 1 min, ~$0 · every commit"]
+    REG["Regression Eval\n200-example golden dataset\nvs. stored baseline · 5–10 min, ~$2"]
+    PASS{"Passes\nbaseline?"}
+    FAIL["Fail PR\nshow diff vs. baseline"]
+    MERGE["Merge to main"]
+    NIGHTLY["Full Eval Suite (nightly)\n1 000 examples · E2E + adversarial + flakiness\n30 min, ~$20"]
+    DASH["Dashboard Update\nquality trends · alerts"]
+
+    PR --> STATIC --> UNIT --> REG --> PASS
+    PASS -->|"NO"| FAIL
+    PASS -->|"YES"| MERGE --> NIGHTLY --> DASH
+
+    class PR,MERGE io
+    class STATIC,UNIT,REG,NIGHTLY proc
+    class PASS decide
+    class FAIL warn
+    class DASH io
 ```
 
 ---

@@ -170,51 +170,34 @@ MANAGE  -- Prioritize, respond to, and monitor AI risks
 
 ### EU AI Act Compliance Decision Tree
 
-```
-Is your AI system deployed to EU users?
-|
-+-- YES: EU AI Act applies (extra-territorial reach — Art. 2)
-|        GDPR applies if you process EU personal data
-|
-+-- NO: Check other jurisdictions (US, China, UK...)
-         US EO 14110 if >10^26 FLOPs training; FTC/EEOC if consumer/hiring
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
 
-EU AI Act Risk Classification:
-|
-+-- Banned use case?
-|   (social scoring by govt, real-time biometrics in public,
-|    subliminal manipulation, exploitation of vulnerabilities)
-|   -> STOP. Cannot deploy under any conditions.
-|
-+-- High-Risk category? (Annex III: employment, credit, education,
-|   law enforcement, biometric ID, critical infra, border control, justice)
-|   |
-|   +-- Conformity assessment (internal or third-party)
-|   +-- Quality Management System (QMS) documentation
-|   +-- Training data governance (source, labels, bias audit)
-|   +-- Logging: tamper-resistant, min 6 months, all inputs/outputs/decisions
-|   +-- Accuracy + robustness metrics documented
-|   +-- Human oversight interface (override, pause, correct)
-|   +-- Register in EU AI Act database (from August 2026)
-|   +-- CE marking (for products entering EU market)
-|   +-- Post-market monitoring: report serious incidents within 15 days
-|
-+-- GPAI model? (GPT-class, general purpose, >10^25 FLOPs training)
-|   |
-|   +-- Training data transparency report (summary of sources)
-|   +-- Copyright policy documented
-|   +-- Systemic risk GPAI (>10^26 FLOPs)?
-|       |
-|       +-- Adversarial testing before deployment
-|       +-- Incident reporting to EU AI Office
-|       +-- Cybersecurity measures for model weights
-|
-+-- Limited risk? (chatbot, deepfake, emotion recognition)
-|   +-- Disclose AI nature to users at first interaction
-|   +-- Label AI-generated content
-|
-+-- Minimal risk?
-    -> No specific EU AI Act obligations. Deploy.
+    EU{"Deployed to\nEU users?"}
+    OTHER["Other jurisdictions\nUS EO 14110 · FTC/EEOC"]
+    RISK{"EU AI Act\nrisk tier?"}
+    BANNED["BANNED\nStop — cannot deploy\n(social scoring, real-time biometrics,\nsubliminal manipulation)"]
+    HIGH["High Risk (Annex III)\nconformity assessment · QMS docs\ndata governance · 6-month logging\nhuman oversight · CE marking\nregister in EU AI Act database by Aug 2026"]
+    GPAI["GPAI Model (> 10^25 FLOPs)\ntransparency report · copyright policy\nSystemic risk (> 10^26 FLOPs):\nadversarial testing · EU AI Office reporting\ncybersecurity for weights"]
+    LTD["Limited Risk\n(chatbot, deepfake, emotion recognition)\ndisclose AI nature at first interaction\nlabel AI-generated content"]
+    MIN["Minimal Risk\nno specific obligations — deploy"]
+
+    EU -->|"NO"| OTHER
+    EU -->|"YES"| RISK
+    RISK -->|"banned use case"| BANNED
+    RISK -->|"high-risk"| HIGH
+    RISK -->|"GPAI"| GPAI
+    RISK -->|"limited risk"| LTD
+    RISK -->|"minimal risk"| MIN
+
+    class EU,RISK decide
+    class HIGH,GPAI,LTD,MIN,OTHER proc
+    class BANNED warn
 ```
 
 ### GDPR Art. 22 Compliance Path for Automated Decisions

@@ -139,33 +139,30 @@ Typically used as the data-collection phase for training classifier-based router
 
 ### Cascade Pattern with Confidence Check
 
-```
-  Query
-    |
-    v
-+----------+      +-------------------+
-| Cheap    | ---> | Confidence Check  |
-| Model    |      | (logprob / format)|
-+----------+      +-------------------+
-                         |         |
-                      PASS        FAIL
-                         |         |
-                         |         v
-                         |   +----------+      +-------------------+
-                         |   | Mid-Tier | ---> | Confidence Check  |
-                         |   | Model    |      +-------------------+
-                         |   +----------+             |         |
-                         |                          PASS       FAIL
-                         |                            |         |
-                         |                            |         v
-                         |                            |   +----------+
-                         |                            |   | Frontier |
-                         |                            |   | Model    |
-                         |                            |   +----------+
-                         |                            |         |
-                         +----------------------------+---------+
-                                                      |
-                                                 Final Response
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    Q["Query"]
+    CHEAP["Cheap Model\n(fast, low-cost)"]
+    C1{"Confidence Check\n(logprob / format)"}
+    MID["Mid-Tier Model"]
+    C2{"Confidence Check"}
+    FRONT["Frontier Model\n(last resort)"]
+    OUT["Final Response"]
+
+    Q --> CHEAP --> C1
+    C1 -->|"PASS"| OUT
+    C1 -->|"FAIL"| MID --> C2
+    C2 -->|"PASS"| OUT
+    C2 -->|"FAIL"| FRONT --> OUT
+
+    class Q,OUT io
+    class CHEAP,MID,FRONT llm
+    class C1,C2 decide
 ```
 
 ### Quality Feedback Loop (Router Improvement)
