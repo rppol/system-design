@@ -83,40 +83,65 @@ PPO (4 networks resident)                GRPO (2 networks + frozen ref)
 
 GRPO data flow for one prompt:
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm   fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    Q["Prompt q"]
+    POL["Policy π_θ\nsamples G=16 outputs"]
+    OUTS["o_1, o_2, …, o_16"]
+    VER["Verifier R(q, o_i)\nr = [1,0,0,1,1,…] binary correctness"]
+    ADV["Group-Relative Advantage\nA_i = (r_i − mean(r)) / std(r)"]
+    LOSS["PPO-clip loss + β·KL(π_θ ‖ π_ref)"]
+    UPD["Policy update"]
+
+    Q --> POL --> OUTS --> VER --> ADV --> LOSS --> UPD
+
+    class Q io
+    class POL,OUTS llm
+    class VER proc
+    class ADV,LOSS store
+    class UPD llm
 ```
-prompt q ──> policy π_θ ──samples G=16──> o_1, o_2, ..., o_16
-                                            │
-                                            v
-                                   verifier R(q, o_i)
-                                   r = [1,0,0,1,1,0,...]      (binary correctness)
-                                            │
-                                            v
-                          A_i = (r_i − mean(r)) / std(r)      (group-relative advantage)
-                                            │
-                                            v
-        L = −Σ_i Σ_t min(ρ_t A_i, clip(ρ_t, 1±ε) A_i) + β·KL(π_θ ‖ π_ref)
-            where ρ_t = π_θ(o_i,t|·) / π_old(o_i,t|·)
-```
+
+No critic network: the group mean reward replaces the value-function baseline, halving memory vs PPO. G=16–64 samples per prompt give a stable advantage signal even for binary (pass/fail) rewards.
 
 DeepSeek-R1 full pipeline:
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm   fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef warn  fill:#1e2127,stroke:#e06c75,color:#abb2bf
+    classDef store fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    BASE["V3-Base\n671B MoE, 37B active"]
+    RZERO["R1-Zero branch\npure GRPO + rule rewards\n→ emergent CoT, but unreadable output"]
+    S1["Stage 1: Cold-start SFT\n~1000s curated long-CoT examples"]
+    S2["Stage 2: Reasoning RL\nGRPO + accuracy / format / language rewards"]
+    S3["Stage 3: Rejection sampling\n600K reasoning + 200K general = 800K SFT samples"]
+    S4["Stage 4: SFT on 800K (2 epochs)"]
+    S5["Stage 5: All-scenario RL\nreasoning + helpfulness + harmlessness rewards"]
+    R1["DeepSeek-R1"]
+    DIST["Distillation\nSFT Qwen2.5 / Llama on 800K samples\n1.5B · 7B · 8B · 14B · 32B · 70B  (no RL on small models)"]
+
+    BASE --> RZERO
+    BASE --> S1 --> S2 --> S3 --> S4 --> S5 --> R1 --> DIST
+
+    class BASE io
+    class RZERO warn
+    class S1,S2,S3,S4,S5 proc
+    class R1 llm
+    class DIST store
 ```
-V3-Base (671B MoE, 37B active)
-   │
-   ├── [R1-Zero branch] pure GRPO + rule rewards ──> emergent CoT, but unreadable
-   │
-   └── [R1 branch]
-        Stage 1: Cold-start SFT (~thousands of curated long-CoT examples)
-        Stage 2: Reasoning RL (GRPO; accuracy + format + language-consistency rewards)
-        Stage 3: Rejection sampling from Stage-2 checkpoint
-                 ──> 600K reasoning + 200K general = 800K SFT samples
-        Stage 4: SFT on 800K (2 epochs)
-        Stage 5: All-scenario RL (reasoning rewards + helpfulness/harmlessness RM)
-        ──> DeepSeek-R1
-                 │
-                 └── Distillation: SFT Qwen2.5 / Llama on the same 800K samples
-                     (1.5B, 7B, 8B, 14B, 32B, 70B) — no RL on the small models
-```
+
+The cold-start SFT (Stage 1) prevents the readability collapse seen in R1-Zero; distillation (no RL) transfers strong reasoning to small models at 1/100th the training cost.
 
 ---
 

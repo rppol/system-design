@@ -203,62 +203,65 @@ Effective when you have high-quality outputs (expert documentation, verified cod
 ## 5. Architecture Diagrams
 
 ### Self-Instruct Pipeline
-```
-Seed Instructions (175 human-written)
-          |
-          v
-    [Sample 6 seeds]
-          |
-          v
-    [LLM Generation]
-    "Generate 4 new diverse instructions"
-          |
-          v
-    [Similarity Filter] --> discard if ROUGE > 0.7
-          |
-          v
-    [Response Generation]
-    LLM generates response for each new instruction
-          |
-          v
-    [Quality Filters]
-    - Length check
-    - Safety check
-    - Format check
-          |
-          v
-    [Add to Pool]
-          |
-          v  (iterate until target size)
-    Final Dataset (10K-100K examples)
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    SEED["Seed Instructions\n175 human-written examples"]
+    SAMPLE["Sample 6 seeds"]
+    GEN["LLM Generation\n\"Generate 4 new diverse instructions\""]
+    SIM{"Similarity filter\nROUGE > 0.7?"}
+    DISCARD["Discard (too similar)"]
+    RESP["Response Generation\nLLM generates response per instruction"]
+    QUAL{"Quality filters\nlength · safety · format"}
+    ADD["Add to Instruction Pool"]
+    LOOP{"Target size\nreached?"}
+    FINAL["Final Dataset\n10K–100K examples"]
+
+    SEED --> SAMPLE --> GEN --> SIM
+    SIM -->|"yes"| DISCARD
+    SIM -->|"no"| RESP --> QUAL
+    QUAL -->|"fail"| DISCARD
+    QUAL -->|"pass"| ADD --> LOOP
+    LOOP -->|"no"| SAMPLE
+    LOOP -->|"yes"| FINAL
+
+    class SEED,FINAL io
+    class SAMPLE,GEN,RESP proc
+    class SIM,QUAL,LOOP decide
+    class DISCARD warn
+    class ADD store
 ```
 
+The feedback loop from pool back to sample is what makes Self-Instruct self-reinforcing: as the pool grows, the 6 sampled seeds become increasingly diverse, steering generation away from already-covered topics.
+
 ### Quality Filtering Pipeline
-```
-Raw Generated Data (1M examples)
-          |
-          v
-[Deduplication]
-  MinHash near-dedup, exact dedup
-  Remove: 40% of raw data
-          |
-          v
-[Reward Model Scoring]
-  Score quality: relevance, accuracy, format
-  Keep top 50% by score
-          |
-          v
-[Diversity Sampling]
-  Cluster by topic/format
-  Ensure even coverage across clusters
-          |
-          v
-[Human Review Sample]
-  Spot-check 5% manually
-  Adjust filters if needed
-          |
-          v
-Final High-Quality Dataset (~300K examples)
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef store fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    RAW["Raw Generated Data\n1M examples"]
+    DEDUP["Deduplication\nMinHash near-dedup + exact dedup\n→ removes ~40 %"]
+    SCORE["Reward Model Scoring\nrelevance · accuracy · format\n→ keep top 50 %"]
+    DIV["Diversity Sampling\ncluster by topic / format\nensure even coverage across clusters"]
+    HUMAN["Human Review Sample\nspot-check 5 %\nadjust filters if needed"]
+    FINAL["Final High-Quality Dataset\n~300K examples"]
+
+    RAW --> DEDUP --> SCORE --> DIV --> HUMAN --> FINAL
+
+    class RAW io
+    class DEDUP,SCORE,DIV,HUMAN proc
+    class FINAL store
 ```
 
 ---

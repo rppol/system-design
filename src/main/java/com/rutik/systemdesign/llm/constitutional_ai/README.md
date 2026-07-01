@@ -152,140 +152,100 @@ IAA = inter-annotator agreement.
 
 ### SL-CAI Pipeline
 
-```
-  Red-team prompts (designed to elicit harmful responses)
-          |
-          v
-  +-------------------+
-  |  Base SL Model    |  <-- pre-trained, helpful but not safe
-  +-------------------+
-          |
-          v
-  Harmful / problematic response
-          |
-          v
-  +============================================+
-  |            Critique-Revision Loop          |
-  |                                            |
-  |  [Critique Prompt]                         |
-  |  "Given principle [P], identify specific   |
-  |   ways this response is harmful..."        |
-  |          |                                 |
-  |          v                                 |
-  |  Chain-of-thought critique:                |
-  |  "This response is harmful because [X].    |
-  |   It also risks [Y] by doing [Z]..."       |
-  |          |                                 |
-  |          v                                 |
-  |  [Revision Prompt]                         |
-  |  "Revise the response to address all       |
-  |   concerns in the critique above..."       |
-  |          |                                 |
-  |          v                                 |
-  |  Revised response                          |
-  |          |                                 |
-  |          +-- (optional: loop again) -------+
-  +============================================+
-          |
-          v
-  (prompt, revised_response) training pairs
-          |
-          v
-  Supervised fine-tuning
-          |
-          v
-  +-------------------+
-  |   SL-CAI Model    |  <-- helpful and harmless from the start
-  +-------------------+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm   fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef warn  fill:#1e2127,stroke:#e06c75,color:#abb2bf
+    classDef store fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    PROMPTS["Red-team prompts\n(designed to elicit harmful responses)"]
+    BASE["Base SL Model\n(helpful but not safe)"]
+    HARM["Initial harmful / problematic response"]
+    CRIT["Critique Prompt\n\"Given principle P, identify specific harms…\""]
+    COT["Chain-of-thought critique\n\"This response is harmful because X…\""]
+    REV["Revision Prompt\n\"Revise to address all concerns in the critique…\""]
+    REVISED["Revised response"]
+    LOOP{"Principle\ncoverage\ncomplete?"}
+    PAIRS["(prompt, revised_response) training pairs"]
+    SFT["Supervised fine-tuning"]
+    SLCAI["SL-CAI Model\n(helpful and harmless from the start)"]
+
+    PROMPTS --> BASE --> HARM --> CRIT --> COT --> REV --> REVISED --> LOOP
+    LOOP -->|"no — apply next principle"| CRIT
+    LOOP -->|"yes"| PAIRS --> SFT --> SLCAI
+
+    class PROMPTS,BASE io
+    class HARM warn
+    class CRIT,COT,REV proc
+    class REVISED,LOOP llm
+    class PAIRS,SFT store
+    class SLCAI llm
 ```
 
 ### RL-CAI / RLAIF Pipeline
 
-```
-  Diverse prompts
-       |
-       +---------------------------+
-       |                           |
-       v                           v
-  Response A                  Response B
-  (SL-CAI model, seed=1)      (SL-CAI model, seed=2)
-       |                           |
-       +-----------+---------------+
-                   |
-                   v
-       +------------------------------+
-       |  AI Evaluator                |
-       |                              |
-       |  "Given principle [P]:       |
-       |   Which response is more     |
-       |   compliant -- A or B?       |
-       |   Briefly explain."          |
-       +------------------------------+
-                   |
-                   v
-       Preference label: A > B (or B > A)
-       + brief explanation
-                   |
-                   v  (millions of labels at compute scale)
-       +------------------------------+
-       |   Reward Model Training      |
-       |   Architecture: LM + linear  |
-       |   Loss: binary CE on         |
-       |   (preferred, rejected)      |
-       +------------------------------+
-                   |
-                   v
-       Trained Reward Model (RM)
-                   |
-                   v
-       +------------------------------+
-       |   PPO Training               |
-       |   Policy:  SL-CAI model      |
-       |   Reward:  RM score          |
-       |   KL constraint from         |
-       |   SL-CAI reference model     |
-       +------------------------------+
-                   |
-                   v
-       +-------------------+
-       |   RL-CAI Model    |  <-- constitutionally-aligned final model
-       +-------------------+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm   fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    PROMPTS["Diverse prompts"]
+    A["Response A\nSL-CAI model, seed 1"]
+    B["Response B\nSL-CAI model, seed 2"]
+    EVAL["AI Evaluator\n\"Given principle P:\nwhich response is more compliant?\""]
+    PREF["Preference label A>B or B>A\n+ brief explanation  (millions of labels)"]
+    RM_T["Reward Model Training\nLM + linear head\nbinary CE on (preferred, rejected)"]
+    RM["Trained Reward Model"]
+    PPO["PPO Training\npolicy: SL-CAI model  ·  reward: RM score\nKL constraint from SL-CAI reference"]
+    RLCAI["RL-CAI Model\n(constitutionally aligned)"]
+
+    PROMPTS --> A & B --> EVAL --> PREF --> RM_T --> RM --> PPO --> RLCAI
+
+    class PROMPTS,A,B io
+    class EVAL llm
+    class PREF,RM_T proc
+    class RM store
+    class PPO,RLCAI llm
 ```
 
 ### Constitution Priority Resolution
 
-```
-  User request
-       |
-       v
-  +-----------------------------------------+
-  |  1. Safety check (highest priority)      |
-  |     Bioweapons, CSAM, mass harm?         |
-  |     YES -> Refuse or heavily constrain   |
-  +-----------------------------------------+
-       | (no safety violation)
-       v
-  +-----------------------------------------+
-  |  2. Ethics check                         |
-  |     Deception, manipulation, dignity?    |
-  |     YES -> Decline or reframe            |
-  +-----------------------------------------+
-       | (no ethics violation)
-       v
-  +-----------------------------------------+
-  |  3. Organizational guidelines            |
-  |     Domain-specific rules?               |
-  |     YES -> Apply domain constraints      |
-  +-----------------------------------------+
-       | (no guideline violation)
-       v
-  +-----------------------------------------+
-  |  4. Helpfulness (lowest priority)        |
-  |     Maximize value to the user           |
-  +-----------------------------------------+
-       |
-       v
-  Response
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+
+    REQ["User request"]
+    S1{"1. Safety check (highest priority)\nbioweapons · CSAM · mass harm?"}
+    R1["Refuse or heavily constrain"]
+    S2{"2. Ethics check\ndeception · manipulation · dignity?"}
+    R2["Decline or reframe"]
+    S3{"3. Organisational guidelines\ndomain-specific rules?"}
+    R3["Apply domain constraints"]
+    HELP["4. Helpfulness (lowest priority)\nmaximise value to user"]
+    RESP["Response"]
+
+    REQ --> S1
+    S1 -->|"YES"| R1
+    S1 -->|"no violation"| S2
+    S2 -->|"YES"| R2
+    S2 -->|"no violation"| S3
+    S3 -->|"YES"| R3
+    S3 -->|"no violation"| HELP --> RESP
+
+    class REQ,RESP io
+    class S1,S2,S3 decide
+    class R1,R2 warn
+    class R3,HELP proc
 ```
 
 ---

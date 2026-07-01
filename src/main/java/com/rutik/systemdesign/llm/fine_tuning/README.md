@@ -141,20 +141,33 @@ PEFT Methods:
 ## 5. Architecture Diagrams
 
 ### LoRA Applied to a Transformer
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    X["Input x\n(d_model)"]
+    W["Frozen W\ngradient = 0\npre-trained weights"]
+    A["Adapter A\nd×r  down-project\n(initialised ~ N(0,σ))"]
+    B["Adapter B\nr×d  up-project\n(initialised = 0)"]
+    SCALE["Scale by α / r"]
+    SUM["Σ  merge\nWx + BA·x·(α/r)"]
+    OUT["Projection output"]
+
+    X --> W --> SUM
+    X --> A --> B --> SCALE --> SUM
+    SUM --> OUT
+
+    class X,OUT io
+    class W proc
+    class A,B,SCALE llm
+    class SUM proc
 ```
-Pre-trained Transformer Block
-     |
-     +---> Self-Attention
-     |       Q_proj: W_q (frozen) + B_q × A_q (trainable, rank r)
-     |       K_proj: W_k (frozen) + B_k × A_k (trainable, rank r)
-     |       V_proj: W_v (frozen) + B_v × A_v (trainable, rank r)
-     |       O_proj: W_o (frozen) + B_o × A_o (trainable, rank r)
-     |
-     +---> FFN
-             gate_proj: W_gate (frozen)  [LoRA optional here]
-             up_proj:   W_up (frozen)
-             down_proj: W_down (frozen)
-```
+
+Two parallel paths per projection: the frozen base weight (no gradient) plus the low-rank adapter pair BA (α/r). At inference, W + B·A·(α/r) is pre-merged back into a single matrix — zero additional latency.
 
 ### QLoRA Memory Layout
 ```

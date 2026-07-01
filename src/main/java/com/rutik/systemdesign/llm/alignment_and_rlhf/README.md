@@ -250,32 +250,36 @@ Used in combination with RL (PPO or GRPO):
 ## 5. Architecture Diagrams
 
 ### RLHF Full Pipeline
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm   fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    BASE["Pre-trained LLM"]
+    SFT_D["Demonstration dataset\n(prompt, ideal_response)"]
+    SFT["Stage 1: SFT\nSupervised fine-tuning"]
+    SFT_M["SFT Model"]
+    RM_D["Human comparisons\n(prompt, chosen, rejected)"]
+    RM_T["Stage 2: Reward Model\nBradley-Terry: P(A>B) = σ(r_A − r_B)"]
+    RM["Reward Model\nRM(prompt, response) → scalar"]
+    PPO["Stage 3: PPO\npolicy generates response\nRM scores · KL penalty −β·KL(policy ‖ SFT)\nPPO update to maximise reward"]
+    OUT["RLHF Aligned Model"]
+
+    BASE --> SFT_D --> SFT --> SFT_M
+    SFT_M --> RM_D --> RM_T --> RM
+    SFT_M & RM --> PPO --> OUT
+
+    class BASE,SFT_D,RM_D io
+    class SFT,RM_T proc
+    class SFT_M,RM store
+    class PPO,OUT llm
 ```
-Pre-trained LLM
-     |
-     v
-[Stage 1: SFT]
-  Demonstration dataset (prompt, ideal_response)
-  Supervised fine-tuning → SFT Model
-     |
-     v
-[Stage 2: Reward Model]
-  Human comparison data (prompt, chosen, rejected)
-  Bradley-Terry model: P(A > B) = σ(r(A) - r(B))
-  → Reward Model RM(prompt, response) → scalar
-     |
-     v
-[Stage 3: PPO]
-  ┌─────────────────────────────────────────┐
-  │  Prompt from prompt dataset             │
-  │  → Policy (SFT model being trained)     │
-  │  → Generated response                   │
-  │  → RM scores response                   │
-  │  → KL penalty: -β KL(policy || SFT)     │
-  │  → PPO update to maximize total reward  │
-  └─────────────────────────────────────────┘
-  → RLHF Aligned Model
-```
+
+Three distinct training stages; PPO requires four models in VRAM simultaneously (actor, critic, reward model, reference), which is why DPO/SimPO are preferred when memory is constrained.
 
 ### DPO vs RLHF vs SimPO vs GRPO
 ```
@@ -682,70 +686,34 @@ Verifiable rewards use objective, execution-based signals as the reward in RL tr
 
 **Architecture:**
 
-```
-  Base Model: LLaMA-3-8B (instruct)
-       |
-       v Phase 1: SFT (500 examples, 2h on 1×A100)
-  ┌───────────────────────────────────────────┐
-  │  SFT Dataset                              │
-  │  300 × ideal responses (compliance-       │
-  │       reviewed human agent transcripts)   │
-  │  200 × refusal examples (investment       │
-  │       advice, insider trading queries)    │
-  │  Format: professional, concise, empathetic│
-  └──────────────────────┬────────────────────┘
-                         │
-                         v Phase 2: Preference Data (2000 pairs)
-  ┌───────────────────────────────────────────┐
-  │  Preference Collection                    │
-  │  - Generate 4 responses per prompt        │
-  │    from SFT model                         │
-  │  - Compliance team annotates: chosen vs   │
-  │    rejected (helpfulness + compliance +   │
-  │    tone scored 1-5, worst-of-4 = rejected)│
-  │  - 2000 (prompt, chosen, rejected) pairs  │
-  └──────────────────────┬────────────────────┘
-                         │
-                         v Phase 3: Reward Model Training
-  ┌───────────────────────────────────────────┐
-  │  Reward Model (LLaMA-3-8B fine-tuned)     │
-  │  - Bradley-Terry classification head      │
-  │  - Input: (prompt + response) → scalar r  │
-  │  - 80/20 train/val split of 2000 pairs    │
-  │  - Train 3 epochs, lr=1e-5               │
-  │  - Validation accuracy: 82% (chosen > rej)│
-  └──────────────────────┬────────────────────┘
-                         │
-                         v Phase 4a: PPO (optional)
-  ┌───────────────────────────────────────────┐
-  │  PPO (TRL library)                        │
-  │  - Policy: SFT model                     │
-  │  - Reference: SFT model (frozen)         │
-  │  - KL penalty β=0.05                     │
-  │  - PPO clip ε=0.2                        │
-  │  - Train 10k steps, batch=128            │
-  │  - 4× A100 for 6 hours                   │
-  └──────────────────────┬────────────────────┘
-                         │ OR
-                         v Phase 4b: DPO (preferred path)
-  ┌───────────────────────────────────────────┐
-  │  DPO (simpler, no reward model needed)    │
-  │  - β=0.1, lr=5e-7                        │
-  │  - 2 epochs on 2000 preference pairs     │
-  │  - 45 min on 1×A100                      │
-  │  - No separate RM training required      │
-  └──────────────────────┬────────────────────┘
-                         │
-                         v Evaluation
-  ┌───────────────────────────────────────────┐
-  │  Eval Suite                               │
-  │  - 500 held-out prompts (100 refusal,     │
-  │    200 account Q&A, 100 edge cases,       │
-  │    100 adversarial)                       │
-  │  - Automated: refusal rate, tone score    │
-  │  - Human: 50-prompt customer satisfaction │
-  │  - Regression: general QA capability      │
-  └───────────────────────────────────────────┘
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    BASE["LLaMA-3-8B Instruct (base)"]
+    SFT["Phase 1: SFT\n500 examples (300 ideal responses + 200 refusals)\n2 h on 1×A100"]
+    SFT_M["SFT Model"]
+    PREF["Phase 2: Preference Data\n4 responses/prompt → compliance team annotates\n2,000 (prompt, chosen, rejected) pairs"]
+    RM["Phase 3: Reward Model\nLLaMA-3-8B + Bradley-Terry head\n82% validation accuracy"]
+    CHOICE{"Phase 4\nalignment method"}
+    PPO["PPO\nKL β=0.05  clip ε=0.2\n4×A100, 6 h"]
+    DPO["DPO (preferred path)\nβ=0.1  lr=5e-7  2 epochs\n1×A100, 45 min"]
+    EVAL["Evaluation\n500 held-out prompts\nauto refusal/tone + human satisfaction"]
+
+    BASE --> SFT --> SFT_M --> PREF --> RM --> CHOICE
+    CHOICE -->|"optional"| PPO --> EVAL
+    CHOICE -->|"simpler"| DPO --> EVAL
+
+    class BASE io
+    class SFT,PREF proc
+    class SFT_M,RM store
+    class CHOICE decide
+    class PPO,DPO,EVAL llm
 ```
 
 **Key implementation — 3 Python code blocks:**
