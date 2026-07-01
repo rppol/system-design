@@ -1177,12 +1177,18 @@ function mdRender(src) {
     }
     // A fully-bold paragraph is an interview question (CLAUDE.md §12 format); the
     // paragraph right after it is its answer. Colour them distinctly.
-    const p = para.join(" ").trim();
+    let p = para.join(" ").trim();
     const isQ = /^\*\*[\s\S]+\*\*$/.test(p) && (p.match(/\*\*/g) || []).length === 2;
     let pcls = "";
-    if (isQ) { pcls = ' class="md-q"'; qaPending = true; }       // bold question on its own line
-    else if (qaPending) { pcls = ' class="md-a"'; qaPending = false; }  // its answer (blank-separated)
-    else if (/^\*\*[^*]+?\*\*[^*]/.test(p)) { pcls = ' class="md-qa"'; }  // inline "**Question?** Answer." on one line
+    if (isQ) { pcls = ' class="md-q"'; qaPending = true; }
+    else if (qaPending) {
+      pcls = ' class="md-a"'; qaPending = false;
+      p = p.replace(/^:\s*/, "");   // strip markdown definition-list ": answer" prefix
+    }
+    else if (/^\*\*[^*]+?\*\*[^*]/.test(p)) {
+      pcls = ' class="md-qa"';
+      p = p.replace(/^(\*\*[^*]+?\*\*):/, "$1");  // strip ": " label separator — display:block already gives the line break
+    }
     out.push(`<p${pcls}>${mdInline(p)}</p>`);
   }
   return out.join("\n");
