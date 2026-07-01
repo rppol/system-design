@@ -1095,7 +1095,8 @@ function mdRender(src) {
 }
 
 const readerCache = {};                            // content path -> raw markdown
-const reader = { path: null, titleText: "", back: [], nav: null, full: false, toc: false };
+const reader = { path: null, titleText: "", back: [], nav: null, full: false, toc: false, modules: false };
+const readerExpanded = new Set();   // module keys expanded in the left sidebar (session-persistent)
 
 // Normalise a relative link (../x/y.md) against the directory of the current file.
 function resolvePath(baseFile, rel) {
@@ -1145,6 +1146,7 @@ function restoreReaderWidth() {
   if (w) document.documentElement.style.setProperty("--reader-w", w);
   reader.full = localStorage.getItem("sd_reader_full") === "1";
   reader.toc = localStorage.getItem("sd_reader_toc") === "1";
+  reader.modules = localStorage.getItem("sd_reader_modules") === "1";
 }
 
 // Populate the always-accessible sidebar index from the rendered headings (ids
@@ -1164,14 +1166,85 @@ function buildToc(tocEl, main) {
   return heads.length;
 }
 
+// Populate the left module-list sidebar from the current navCtx.
+// Renders a VS Code-style file tree: single-file modules are plain links;
+// multi-file modules show a collapsible folder with each file listed beneath.
+function buildModuleNav(modEl, navCtx, currentPath) {
+  if (!navCtx || !navCtx.list.length) { modEl.innerHTML = ""; return; }
+  const files = (state.index && state.index.files) || {};
+
+  // Auto-expand any folder that contains the current path.
+  navCtx.list.forEach((m) => {
+    const mKey = m.path.replace("/README.md", "");
+    const mFiles = files[mKey] || [];
+    if (mFiles.length > 1 && mFiles.some((fn) => `${mKey}/${fn}` === currentPath))
+      readerExpanded.add(mKey);
+  });
+
+  const items = navCtx.list.map((m, i) => {
+    const mKey = m.path.replace("/README.md", "");
+    const mFiles = files[mKey] || ["README.md"];
+
+    if (mFiles.length <= 1) {
+      const isActive = m.path === currentPath;
+      return `<li><a href="#" class="mod-item${isActive ? " active" : ""}" data-midx="${i}">${esc(m.title)}</a></li>`;
+    }
+
+    // Multi-file module: collapsible folder
+    const isOpen = readerExpanded.has(mKey);
+    const subItems = mFiles.map((fn) => {
+      const filePath = `${mKey}/${fn}`;
+      const isFileCurrent = filePath === currentPath;
+      const label = fn === "README.md" ? "readme" : fn.replace(".md", "").replace(/_/g, " ");
+      return `<li><a href="#" class="mod-file${isFileCurrent ? " active" : ""}" data-path="${esc(filePath)}">${esc(label)}</a></li>`;
+    }).join("");
+
+    return `<li class="mod-group${isOpen ? " open" : ""}">
+      <div class="mod-folder" data-midx="${i}"><span class="mod-arrow">&#9654;</span><span class="mod-fname">${esc(m.title)}</span></div>
+      <ul class="mod-subfiles">${subItems}</ul>
+    </li>`;
+  }).join("");
+
+  modEl.innerHTML = `<div class="mod-h">Modules</div><ul>${items}</ul>`;
+
+  modEl.querySelectorAll("a.mod-item").forEach((a) => a.addEventListener("click", (e) => {
+    e.preventDefault();
+    const i = +a.dataset.midx;
+    openReaderPath(navCtx.list[i].path, navCtx.list[i].title, { list: navCtx.list, idx: i });
+  }));
+
+  modEl.querySelectorAll(".mod-folder").forEach((folder) => {
+    folder.addEventListener("click", () => {
+      const li = folder.closest(".mod-group");
+      const mKey = navCtx.list[+folder.dataset.midx].path.replace("/README.md", "");
+      const willOpen = !li.classList.contains("open");
+      li.classList.toggle("open", willOpen);
+      if (willOpen) readerExpanded.add(mKey); else readerExpanded.delete(mKey);
+    });
+  });
+
+  modEl.querySelectorAll("a.mod-file").forEach((a) => a.addEventListener("click", (e) => {
+    e.preventDefault();
+    const pathParts = a.dataset.path.split("/");
+    const mKey = pathParts.slice(0, 2).join("/");
+    const midx = navCtx.list.findIndex((m) => m.path.replace("/README.md", "") === mKey);
+    openReaderPath(a.dataset.path, null, midx >= 0 ? { list: navCtx.list, idx: midx } : reader.nav);
+  }));
+
+  const active = modEl.querySelector(".active");
+  if (active) active.scrollIntoView({ block: "nearest" });
+}
+
 // Reflect fullscreen / index-open state onto the DOM.
 function applyReaderModes() {
   const p = el("#reader"); if (!p) return;
   p.classList.toggle("full", reader.full);
   p.classList.toggle("toc-open", reader.toc);
+  p.classList.toggle("modules-open", reader.modules);
   document.body.classList.toggle("reader-full", reader.full);
   const fb = el("#readerFull"); if (fb) fb.classList.toggle("on", reader.full);
   const ib = el("#readerIdx"); if (ib) ib.classList.toggle("on", reader.toc);
+  const mb = el("#readerMod"); if (mb) mb.classList.toggle("on", reader.modules);
 }
 
 // Wire in-body links: relative repo links open in the reader (with back-stack);
@@ -1201,15 +1274,17 @@ async function openReaderPath(path, title, navCtx, frag) {
   const nav = reader.nav;
   const backBtn = reader.back.length
     ? `<button class="reader-nav" id="readerBack" title="Back">&lsaquo; Back</button>` : "";
+  const modBtn = nav
+    ? `<button class="reader-nav reader-icon" id="readerMod" title="Module list">&#9776;</button>` : "";
   const navBtns = nav
     ? `<button class="reader-nav" id="readerPrev" title="Previous topic" ${nav.idx <= 0 ? "disabled" : ""}>&lsaquo; Prev</button>
        <button class="reader-nav" id="readerNext" title="Next topic" ${nav.idx >= nav.list.length - 1 ? "disabled" : ""}>Next &rsaquo;</button>` : "";
   panel.innerHTML = `<div class="reader-grip" id="readerGrip"></div>
     <div class="reader-head">
-      ${backBtn}
-      <button class="reader-nav reader-icon" id="readerIdx" title="Toggle index">&#9776;</button>
+      ${backBtn}${modBtn}
       <span class="reader-title">${esc(reader.titleText)}</span>
       ${navBtns}
+      <button class="reader-nav reader-icon" id="readerIdx" title="Contents">&#8801;</button>
       <button class="reader-nav reader-icon" id="readerFull" title="Fullscreen (F)">&#11036;</button>
       <button class="reader-close" id="readerClose" title="Close (Esc)">&times;</button>
     </div>
@@ -1218,6 +1293,13 @@ async function openReaderPath(path, title, navCtx, frag) {
   applyReaderModes();
   attachGrip(el("#readerGrip"));
   el("#readerClose").addEventListener("click", closeReader);
+  if (nav) {
+    el("#readerMod").addEventListener("click", () => {
+      reader.modules = !reader.modules;
+      localStorage.setItem("sd_reader_modules", reader.modules ? "1" : "0");
+      applyReaderModes();
+    });
+  }
   el("#readerIdx").addEventListener("click", () => {
     reader.toc = !reader.toc; localStorage.setItem("sd_reader_toc", reader.toc ? "1" : "0"); applyReaderModes();
   });
@@ -1241,8 +1323,9 @@ async function openReaderPath(path, title, navCtx, frag) {
     }
     if (reader.path !== path) return;              // user navigated away during the fetch
     const b = el("#readerBody");
-    b.innerHTML = `<nav class="reader-toc" id="readerToc"></nav><div class="md-body" id="readerMain">${mdRender(readerCache[path])}</div>`;
+    b.innerHTML = `<nav class="reader-modules" id="readerModules"></nav><div class="md-body" id="readerMain">${mdRender(readerCache[path])}</div><nav class="reader-toc" id="readerToc"></nav>`;
     const main = el("#readerMain");
+    buildModuleNav(el("#readerModules"), reader.nav, path);
     const headCount = buildToc(el("#readerToc"), main);
     el("#readerIdx").style.display = headCount >= 3 ? "" : "none";   // nothing to index -> hide toggle
     wireReaderBody(main);

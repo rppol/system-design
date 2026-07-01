@@ -219,6 +219,7 @@ def difficulty(q_index):
 def main():
     rng = random.Random(42)  # reproducible distractor choices
     raw = []
+    file_tree = {}   # "section/module" -> sorted list of .md filenames (for the sidebar tree)
     for root, _dirs, files in os.walk(BASE_DIR):
         rel = os.path.relpath(root, BASE_DIR)
         if rel == ".":
@@ -230,9 +231,10 @@ def main():
         if SKIP_PATH_PARTS.intersection(parts):
             continue  # exclude case studies etc.
         module = rel.replace(os.sep, "/")  # parent dir -> README + its deep-dive sub-files share a module
-        for fn in sorted(files):
-            if not fn.endswith(".md") or fn == "CLAUDE.md":
-                continue
+        md_files = sorted(fn for fn in files if fn.endswith(".md") and fn != "CLAUDE.md")
+        if md_files and len(parts) >= 2:      # skip section root dirs (depth==1)
+            file_tree[module] = md_files
+        for fn in md_files:
             raw.extend(parse_md(os.path.join(root, fn), section, module))
 
     if not raw:
@@ -340,6 +342,7 @@ def main():
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "total": len(questions),
         "sections": {s: len(per_section[s]) for s in sorted(per_section)},
+        "files": file_tree,
     }
     with open(os.path.join(OUT_DIR, "index.json"), "w", encoding="utf-8") as fh:
         json.dump(index, fh, ensure_ascii=False, indent=2)
