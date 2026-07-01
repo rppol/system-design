@@ -170,10 +170,10 @@ flowchart TD
     classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
     classDef search fill:#56b6c2,stroke:#1a8fa0,color:#1a1a1a
 
-    Q([Query]) --> DEC{[Retrieve] token\ngenerated?}
-    DEC -->|"[No Retrieve]"| DG["Direct Generation\nno retrieval needed\n[Utility: 5]"]
-    DEC -->|"[Retrieve]"| RET["Retriever\npassage_1, passage_2, passage_3"]
-    RET --> EVAL["Evaluate each passage\n[Relevant] or [Irrelevant]"]
+    Q([Query]) --> DEC{"Retrieve token\ngenerated?"}
+    DEC -->|"No Retrieve"| DG["Direct Generation\nno retrieval needed\nUtility: 5"]
+    DEC -->|"Retrieve"| RET["Retriever\npassage_1, passage_2, passage_3"]
+    RET --> EVAL["Evaluate each passage\nRelevant or Irrelevant"]
     EVAL --> GEN["Generate response\nper relevant passage"]
     GEN --> SUP["Score support level\n[Supported] / [Partially Supported]"]
     SUP --> SEL["Select best response\nhighest support score"]

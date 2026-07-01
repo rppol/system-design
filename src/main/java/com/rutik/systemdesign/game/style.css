@@ -412,8 +412,27 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .md-body hr { border: none; border-top: 1px solid var(--od-line); margin: 16px 0; }
 /* Mermaid diagrams: dark background matching the reader, SVGs scale to column width */
 .md-body .mermaid { background: var(--od-bg); border: 1px solid var(--od-line); border-radius: 10px;
-  padding: 18px; margin: 14px 0; text-align: center; overflow-x: auto; }
+  padding: 18px; margin: 14px 0; text-align: center; overflow-x: auto;
+  cursor: zoom-in; position: relative; }
+.md-body .mermaid::after { content: "⤢ zoom"; position: absolute; top: 6px; right: 10px;
+  font-size: 10px; color: var(--od-muted); opacity: 0; transition: opacity .15s; pointer-events: none; }
+.md-body .mermaid:hover::after { opacity: 1; }
 .md-body .mermaid svg { max-width: 100%; height: auto; }
+
+/* Mermaid zoom overlay */
+.mermaid-overlay { position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,.88);
+  display: flex; flex-direction: column; }
+.mermaid-zoom-ctrl { flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+  padding: 8px 14px; background: #0d0d0d; border-bottom: 1px solid #1f1f1f; }
+.mermaid-zoom-ctrl button { background: #1a1a1a; color: #c5cad6; border: 1px solid #333;
+  border-radius: 6px; padding: 3px 12px; cursor: pointer; font-size: 15px; line-height: 1.6; }
+.mermaid-zoom-ctrl button:hover { background: #282828; color: #fff; border-color: var(--accent); }
+.mermaid-zoom-ctrl .mz-pct { color: var(--od-muted); min-width: 46px; text-align: center; font-size: 12px; }
+.mermaid-zoom-ctrl .mz-close { margin-left: auto; }
+.mermaid-zoom-box { flex: 1 1 auto; overflow: auto; display: flex;
+  align-items: flex-start; justify-content: center; padding: 28px; }
+.mermaid-zoom-inner { transform-origin: top center; transition: transform .12s; }
+.mermaid-zoom-inner svg { display: block; }
 /* Arrow paths — bright blue, 2.5px reduces aliasing on low-res monitors */
 .md-body .mermaid svg .edgePath .path { stroke: #61afef !important; stroke-width: 3px !important; stroke-linecap: round !important; stroke-linejoin: round !important; }
 /* Edge labels — transparent background (no black pill), gold text */

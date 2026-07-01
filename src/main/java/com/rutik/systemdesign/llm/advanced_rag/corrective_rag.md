@@ -195,7 +195,7 @@ flowchart TD
     classDef search fill:#56b6c2,stroke:#1a8fa0,color:#1a1a1a
 
     Q([User Query]) --> KBR["Knowledge Base Retrieval"]
-    KBR --> RE{Relevance Evaluator\nscore each doc [0.0–1.0]}
+    KBR --> RE{"Relevance Evaluator\nscore each doc (0.0–1.0)"}
     RE -->|"All CORRECT\n(scores > 0.7)"| GEN1["Generation"]
     RE -->|"MIXED\n(some ambiguous)"| CR["Context Refinement\nextract relevant sentences"]
     CR --> GEN2["Generation\nwith refined context"]

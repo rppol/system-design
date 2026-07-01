@@ -1061,11 +1061,55 @@ async function renderMermaid(root) {
       n.querySelectorAll(".node rect").forEach(r => { r.setAttribute("rx", "8"); r.setAttribute("ry", "8"); });
       n.querySelectorAll(".cluster rect").forEach(r => { r.setAttribute("rx", "12"); r.setAttribute("ry", "12"); });
       n.querySelectorAll("marker path, marker polygon").forEach(m => { m.setAttribute("fill", "#61afef"); m.removeAttribute("stroke"); });
+      n.addEventListener("click", () => openMermaidZoom(n));
     });
   } catch (err) {
     // CDN unavailable or offline — raw source stays visible as text, nothing crashes.
     console.warn("Mermaid render failed:", err);
   }
+}
+
+function openMermaidZoom(node) {
+  const svg = node.querySelector("svg");
+  if (!svg) return;
+  const clone = svg.cloneNode(true);
+  clone.removeAttribute("width");
+  clone.removeAttribute("height");
+  clone.style.cssText = "display:block;min-width:320px;";
+
+  let scale = 1;
+  const inner = document.createElement("div");
+  inner.className = "mermaid-zoom-inner";
+  inner.appendChild(clone);
+
+  const box = document.createElement("div");
+  box.className = "mermaid-zoom-box";
+  box.appendChild(inner);
+
+  const ctrl = document.createElement("div");
+  ctrl.className = "mermaid-zoom-ctrl";
+  ctrl.innerHTML = `<button class="mz-out">−</button><span class="mz-pct">100%</span><button class="mz-in">+</button><button class="mz-reset" title="Reset zoom">↺</button><button class="mz-close">✕</button>`;
+
+  const overlay = document.createElement("div");
+  overlay.className = "mermaid-overlay";
+  overlay.appendChild(ctrl);
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+
+  const setScale = s => {
+    scale = Math.min(4, Math.max(0.2, s));
+    inner.style.transform = `scale(${scale})`;
+    ctrl.querySelector(".mz-pct").textContent = Math.round(scale * 100) + "%";
+  };
+
+  ctrl.querySelector(".mz-in").addEventListener("click", e => { e.stopPropagation(); setScale(scale + 0.25); });
+  ctrl.querySelector(".mz-out").addEventListener("click", e => { e.stopPropagation(); setScale(scale - 0.25); });
+  ctrl.querySelector(".mz-reset").addEventListener("click", e => { e.stopPropagation(); setScale(1); });
+  ctrl.querySelector(".mz-close").addEventListener("click", () => overlay.remove());
+  box.addEventListener("wheel", e => { e.preventDefault(); setScale(scale + (e.deltaY < 0 ? 0.1 : -0.1)); }, { passive: false });
+  overlay.addEventListener("click", e => { if (e.target === overlay || e.target === box) overlay.remove(); });
+  const onEsc = e => { if (e.key === "Escape") { overlay.remove(); document.removeEventListener("keydown", onEsc); } };
+  document.addEventListener("keydown", onEsc);
 }
 
 function mdRender(src) {
