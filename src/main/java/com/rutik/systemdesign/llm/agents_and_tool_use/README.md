@@ -204,50 +204,56 @@ Key framework references for agent patterns:
 ## 5. Architecture Diagrams
 
 ### Agent Loop
-```
-Goal / Task
-     |
-     v
-[Plan] ← Plan step(s) to take
-     |
-     v
-[Act] → Tool Call (e.g., search, code execution)
-     |
-     v
-[Observe] → Tool Result injected into context
-     |
-     v
-[Reflect] ← Is the task complete?
-     |
-     +-- YES → Return final answer
-     |
-     +-- NO  → [Plan] next step (loop)
 
-Max iterations safety: stop after N steps to prevent infinite loops
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    TASK["Goal / task"]
+    PLAN["Plan\nReason about next step(s)"]
+    ACT["Act\ntool call (search, code execution, API)"]
+    OBS["Observe\ntool result injected into context"]
+    DONE{"Task complete?"}
+    FINAL["Return final answer"]
+
+    TASK --> PLAN --> ACT --> OBS --> DONE
+    DONE -->|"YES"| FINAL
+    DONE -->|"NO (loop)"| PLAN
+
+    class TASK io
+    class PLAN,ACT,OBS proc
+    class DONE decide
+    class FINAL io
 ```
+
+Max iterations safety: stop after N steps to prevent infinite loops.
 
 ### Function Calling Flow
-```
-User Message
-     |
-     v
-[LLM Reasoning]
-  "I need to call get_weather to answer this"
-     |
-     v
-Tool Call: { "function": "get_weather", "args": {"location": "Paris"} }
-     |
-     v
-[Your Code Executes the Function]
-  weather_api.get("Paris") → {"temp": 18, "condition": "cloudy"}
-     |
-     v
-[Inject Result into Messages]
-  { "role": "tool", "content": '{"temp": 18, "condition": "cloudy"}' }
-     |
-     v
-[LLM Generates Final Response]
-  "The weather in Paris is currently 18°C and cloudy."
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm   fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
+
+    MSG["User message"]
+    LLM1["LLM reasoning\n'I need to call get_weather'"]
+    CALL["Tool call output\n{name: get_weather, args: {location: Paris}}"]
+    EXEC["Application code executes\nweather_api.get('Paris') → {temp: 18, condition: cloudy}"]
+    INJ["Inject tool result\n{role: tool, content: '{temp: 18, condition: cloudy}'}"]
+    LLM2["LLM second call\nsees original messages + tool call + result"]
+    RESP["'The weather in Paris is 18°C and cloudy.'"]
+
+    MSG --> LLM1 --> CALL --> EXEC --> INJ --> LLM2 --> RESP
+
+    class MSG,RESP io
+    class LLM1,LLM2 llm
+    class CALL,EXEC,INJ proc
 ```
 
 ### Agent Memory Architecture

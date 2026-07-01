@@ -403,144 +403,172 @@ def evaluator_optimizer_pipeline(
 
 ### Prompt Chaining
 
-```
-Input
-  |
-  v
-+----------+    gate    +----------+    gate    +----------+
-|  Step 1  |--[check]-->|  Step 2  |--[check]-->|  Step 3  |
-|   LLM    |            |   LLM    |            |   LLM    |
-+----------+            +----------+            +----------+
-                                                      |
-                                                      v
-                                                   Output
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
 
-Gate failure path:
-  [check] -- FAIL --> Error / Retry / Fallback
+    IN["Input"]
+    S1["Step 1\nLLM"]
+    G1{"Gate\ncheck"}
+    S2["Step 2\nLLM"]
+    G2{"Gate\ncheck"}
+    S3["Step 3\nLLM"]
+    OUT["Output"]
+    ERR["Error / retry / fallback"]
+
+    IN --> S1 --> G1
+    G1 -->|"pass"| S2 --> G2
+    G2 -->|"pass"| S3 --> OUT
+    G1 -->|"fail"| ERR
+    G2 -->|"fail"| ERR
+
+    class IN,OUT io
+    class S1,S2,S3 llm
+    class G1,G2 decide
+    class ERR warn
 ```
 
 ---
 
 ### Routing
 
-```
-Input
-  |
-  v
-+-------------+
-|  Classifier |  (cheap model: claude-haiku, gpt-4o-mini)
-+-------------+
-  |       |       |
-  v       v       v
-Route A Route B Route C
-(cheap) (mid)  (expensive)
-  |       |       |
-  v       v       v
-Output  Output  Output
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm   fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    IN["Input"]
+    CLS["Classifier\n(claude-haiku / gpt-4o-mini)"]
+    RA["Route A\ncheap model"]
+    RB["Route B\nmid model"]
+    RC["Route C\nexpensive model"]
+    OUT["Output"]
+
+    IN --> CLS
+    CLS -->|"simple"| RA
+    CLS -->|"moderate"| RB
+    CLS -->|"complex"| RC
+    RA & RB & RC --> OUT
+
+    class IN,OUT io
+    class CLS proc
+    class RA,RB,RC llm
 ```
 
 ---
 
 ### Parallelization — Sectioning
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+
+    DOC["Document"]
+    C1["Chunk 1"] & C2["Chunk 2"] & C3["Chunk 3"] & C4["Chunk 4"]
+    L1["LLM"] & L2["LLM"] & L3["LLM"] & L4["LLM"]
+    MERGE["Merge LLM"]
+    OUT["Output"]
+
+    DOC --> C1 & C2 & C3 & C4
+    C1 --> L1
+    C2 --> L2
+    C3 --> L3
+    C4 --> L4
+    L1 & L2 & L3 & L4 --> MERGE --> OUT
+
+    class DOC,OUT io
+    class C1,C2,C3,C4 proc
+    class L1,L2,L3,L4,MERGE llm
 ```
-Document
-  |
-  +-------+-------+-------+
-  v       v       v       v
-Chunk1  Chunk2  Chunk3  Chunk4
-  |       |       |       |
-  v       v       v       v
- LLM     LLM     LLM     LLM   (parallel, same wall-clock time)
-  |       |       |       |
-  +-------+-------+-------+
-              |
-              v
-         Merge LLM
-              |
-              v
-           Output
-```
+
+Chunks run in parallel with the same wall-clock time; chunk count is a parameter, not a fixed 4.
 
 ---
 
 ### Parallelization — Voting
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+
+    IN["Input"]
+    L1["LLM (temp > 0)"] & L2["LLM (temp > 0)"] & L3["LLM (temp > 0)"] & L4["LLM (temp > 0)"] & L5["LLM (temp > 0)"]
+    VOTE["Majority vote"]
+    OUT["Output: A (3/5)"]
+
+    IN --> L1 & L2 & L3 & L4 & L5
+    L1 & L2 & L3 & L4 & L5 --> VOTE --> OUT
+
+    class IN,OUT io
+    class L1,L2,L3,L4,L5 llm
+    class VOTE proc
 ```
-         Input
-           |
-     +-----+-----+-----+
-     v     v     v     v     v
-    LLM   LLM   LLM   LLM   LLM   (same prompt, temperature > 0)
-     |     |     |     |     |
-     v     v     v     v     v
-    A      B     A     C     A
-           |
-           v
-     Majority Vote
-           |
-           v
-         Output: A
-```
+
+Improves accuracy by 5–15% on reasoning tasks; cost = N × tokens per call.
 
 ---
 
 ### Orchestrator-Workers
 
-```
-     Objective
-         |
-         v
-  +-------------+
-  | Orchestrator|  (decomposes dynamically)
-  |     LLM     |
-  +-------------+
-    |    |    |
-    v    v    v
-Worker Worker Worker   (specialized; can run in parallel)
-  LLM   LLM   LLM
-    |    |    |
-    v    v    v
-  Out1 Out2 Out3
-    |    |    |
-    +----+----+
-         |
-         v
-  +-------------+
-  | Synthesizer |  (orchestrator reassembles)
-  |     LLM     |
-  +-------------+
-         |
-         v
-      Final Output
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+
+    OBJ["Objective"]
+    ORCH["Orchestrator LLM\n(decomposes dynamically)"]
+    W1["Worker LLM\n(specialised)"] & W2["Worker LLM\n(specialised)"] & W3["Worker LLM\n(specialised)"]
+    SYNTH["Synthesizer LLM\n(reassembles)"]
+    FINAL["Final output"]
+
+    OBJ --> ORCH
+    ORCH --> W1 & W2 & W3
+    W1 & W2 & W3 --> SYNTH --> FINAL
+
+    class OBJ,FINAL io
+    class ORCH,SYNTH,W1,W2,W3 llm
 ```
 
 ---
 
 ### Evaluator-Optimizer
 
-```
-   Task
-    |
-    v
-+----------+
-| Generator|<---------+
-|   LLM    |          |
-+----------+          |
-    |                 |
-    v                 |
- Candidate         Feedback
-    |                 |
-    v                 |
-+----------+          |
-| Evaluator|          |
-|   LLM    |--FAIL----+
-+----------+
-    |
-  PASS
-    |
-    v
- Final Output
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    TASK["Task"]
+    GEN["Generator LLM"]
+    CAND["Candidate output"]
+    EVAL["Evaluator LLM"]
+    DONE{"Pass?"}
+    FINAL["Final output"]
+
+    TASK --> GEN --> CAND --> EVAL --> DONE
+    DONE -->|"PASS"| FINAL
+    DONE -->|"FAIL\n(+ feedback)"| GEN
+
+    class TASK,FINAL io
+    class GEN,EVAL llm
+    class CAND proc
+    class DONE decide
 ```
 
 ---

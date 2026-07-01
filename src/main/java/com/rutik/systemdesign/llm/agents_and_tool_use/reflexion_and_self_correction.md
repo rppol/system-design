@@ -74,48 +74,57 @@ A sycophantic failure mode: the model is told "your answer was wrong" without sp
 
 ### Reflexion Loop
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    TASK["Task"]
+    ACTOR["Actor\ngenerates attempt (code / answer / plan)"]
+    EVAL["Evaluator\ntests pass? score? binary result"]
+    DONE{"Result?"}
+    OUT["Final output"]
+    REFLECT["Self-Reflector\nverbal critique: 'missed edge case X'"]
+    MEM["Episodic Memory\nappend reflection"]
+
+    TASK --> ACTOR --> EVAL --> DONE
+    DONE -->|"PASS"| OUT
+    DONE -->|"FAIL"| REFLECT --> MEM --> ACTOR
+
+    class TASK,OUT io
+    class ACTOR,REFLECT llm
+    class EVAL proc
+    class DONE decide
+    class MEM store
 ```
-Task
-  |
-  v
-[Actor] -- generates attempt (code / answer / plan)
-  |
-  v
-[Evaluator] -- tests pass? score? binary result
-  |
-  +-- PASS --> return final output
-  |
-  +-- FAIL --> [Self-Reflector]
-                  |
-                  v
-               verbal critique: "missed edge case X"
-                  |
-                  v
-               [Episodic Memory] <-- append reflection
-                  |
-                  v
-               [Actor] -- retry with memory in context
-                  |
-               (loop max 3 times)
-```
+
+Loop max 3 times; after N failures the actor returns best attempt with caveats.
 
 ### Self-Refine Loop
 
-```
-[LLM] -- GENERATE(task) --> draft_0
-  |
-  v
-[LLM] -- FEEDBACK(task, draft_0) --> critique_0
-  |
-  +-- "no improvements needed" --> return draft_0
-  |
-  v
-[LLM] -- REFINE(task, draft_0, critique_0) --> draft_1
-  |
-  v
-[LLM] -- FEEDBACK(task, draft_1) --> critique_1
-  |
-  (iterate up to N times)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    TASK["Task"]
+    GEN["LLM GENERATE(task)\n→ draft_0"]
+    FB{"LLM FEEDBACK\n'Improvements needed?'"}
+    RET["Return draft (no improvements)"]
+    REF["LLM REFINE(task, draft, critique)\n→ next draft"]
+
+    TASK --> GEN --> FB
+    FB -->|"none needed"| RET
+    FB -->|"critique → iterate"| REF --> FB
+
+    class TASK,RET io
+    class GEN,REF llm
+    class FB decide
 ```
 
 ### CRITIC Loop (Code Task)

@@ -262,61 +262,52 @@ tools_v2 = [
 
 ### Function Calling Flow
 
-```
-User: "What's the weather in Paris?"
-        |
-        v
-  [LLM with tool specs]
-  Reasoning: "User wants weather. I have get_weather tool.
-              Location: Paris, FR. Units: celsius (default)."
-        |
-        v
-  Tool Call Output:
-  {
-    "tool_calls": [{
-      "id": "call_001",
-      "type": "function",
-      "function": {
-        "name": "get_weather",
-        "arguments": "{\"location\": \"Paris, FR\", \"units\": \"celsius\"}"
-      }
-    }]
-  }
-        |
-        v
-  [Application Code]
-  Parses arguments → calls weather API → gets result
-        |
-        v
-  Tool Result Message:
-  {"role": "tool", "tool_call_id": "call_001",
-   "content": "{\"temp\": 18, \"condition\": \"cloudy\"}"}
-        |
-        v
-  [LLM Second Call] — sees original messages + tool call + tool result
-        |
-        v
-  "The current weather in Paris is 18°C and cloudy."
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+
+    Q["User: 'What's the weather in Paris?'"]
+    LLM1["LLM with tool specs\nreasoning: I have get_weather; location=Paris,FR"]
+    CALL["Tool call output\n{name: get_weather, args: {location: Paris,FR}}"]
+    APP["Application code\nparses args → calls weather API → gets result"]
+    INJ["Tool result message\n{role: tool, content: {temp: 18, condition: cloudy}}"]
+    LLM2["LLM second call\nsees messages + tool call + result"]
+    RESP["'The current weather in Paris is 18°C and cloudy.'"]
+
+    Q --> LLM1 --> CALL --> APP --> INJ --> LLM2 --> RESP
+
+    class Q,RESP io
+    class LLM1,LLM2 llm
+    class CALL,APP,INJ proc
 ```
 
 ### Parallel Tool Call Flow
 
-```
-User: "Compare weather in Paris and Tokyo"
-        |
-        v
-  [LLM] → Two tool calls in ONE response:
-        |
-        +-- call_001: get_weather("Paris, FR") ──> executed in parallel
-        |
-        +-- call_002: get_weather("Tokyo, JP") ──> executed in parallel
-        |
-        v (both results collected)
-  [Inject both tool results into messages]
-        |
-        v
-  [LLM Second Call]
-  "Paris is 18°C cloudy. Tokyo is 22°C sunny. Tokyo is warmer by 4°C."
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+
+    Q["User: 'Compare weather in Paris and Tokyo'"]
+    LLM1["LLM → two tool calls in ONE response"]
+    P1["call_001\nget_weather('Paris, FR')"]
+    P2["call_002\nget_weather('Tokyo, JP')"]
+    MERGE["Both results injected into messages"]
+    LLM2["LLM second call"]
+    RESP["'Paris 18°C cloudy. Tokyo 22°C sunny. Tokyo warmer by 4°C.'"]
+
+    Q --> LLM1
+    LLM1 --> P1 & P2
+    P1 & P2 --> MERGE --> LLM2 --> RESP
+
+    class Q,RESP io
+    class LLM1,LLM2 llm
+    class P1,P2,MERGE proc
 ```
 
 ### Tool Chaining

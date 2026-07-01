@@ -245,26 +245,33 @@ response = client.messages.create(
 
 ### ReAct Loop
 
-```
-Task Input
-    |
-    v
-[Thought] ← LLM reasons about current state and next action
-    |
-    v
-[Action] → tool call (search, code execution, API call)
-    |
-    v
-[Observation] → tool result injected into context
-    |
-    v
-[Is task complete?]
-    |
-    +-- YES → Final Answer
-    |
-    +-- NO  → back to [Thought]
-    |
-    +-- STUCK (same action 2× or N steps exceeded) → abort / partial answer
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    TASK["Task input"]
+    THT["Thought\nLLM reasons about state and next action"]
+    ACT["Action\ntool call (search, code execution, API)"]
+    OBS["Observation\ntool result injected into context"]
+    DONE{"Task complete?"}
+    ANS["Final answer"]
+    ABORT["Abort / partial answer\n(same action 2× or N steps exceeded)"]
+
+    TASK --> THT --> ACT --> OBS --> DONE
+    DONE -->|"YES"| ANS
+    DONE -->|"NO"| THT
+    DONE -->|"STUCK"| ABORT
+
+    class TASK io
+    class THT,ACT,OBS proc
+    class DONE decide
+    class ANS io
+    class ABORT warn
 ```
 
 ### Reflexion Architecture

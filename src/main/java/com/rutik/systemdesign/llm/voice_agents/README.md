@@ -54,83 +54,76 @@ Twilio, Vonage, LiveKit Cloud, Pipecat for routing phone calls through voice age
 
 ## 5. Architecture Diagrams
 
+### Pipeline Architecture (STT → LLM → TTS)
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    MIC["Microphone\n(16 kHz PCM audio chunks)"]
+    VAD["VAD\n(Voice Activity Detection)"]
+    STT["STT\n(streaming transcript)"]
+    LLM["LLM (streaming tokens)"]
+    TTS["TTS\n(audio chunks)"]
+    SPK["Speaker"]
+
+    MIC --> VAD -->|"speech detected"| STT --> LLM --> TTS --> SPK
+
+    class MIC,SPK io
+    class VAD,STT,TTS proc
+    class LLM llm
 ```
-Pipeline Architecture
-======================
 
-  Microphone
-       |
-       v
-  +---------+   audio chunks (16kHz PCM)
-  | VAD     |
-  +---------+
-       |
-       v (when speech detected)
-  +---------+   streaming transcript
-  | STT     |---+
-  +---------+   |
-                |  partial text
-                v
-  +-----------------+   tokens
-  | LLM (streaming) |---+
-  +-----------------+   |
-                        |
-                        v
-  +---------+   audio chunks
-  | TTS     |---+
-  +---------+   |
-                v
-              Speaker
-  
-  Total latency (good case): 800-1500ms
-  Total latency (bad case): 2500ms+
+Total latency: 800–1500 ms (good case); 2500 ms+ (bad case).
 
+### End-to-End Audio Model
 
-End-to-End Audio Model
-=======================
+```
+Microphone --audio--> [GPT-4o Realtime / Gemini Live] --audio--> Speaker
+                               |
+                               +-- tool_calls for function execution
 
-  Microphone --audio--> [GPT-4o Realtime / Gemini Live] --audio--> Speaker
-                                |
-                                +-- tool_calls for function execution
-  
-  Total latency: 200-800ms (native model)
-  Native: prosody, emotion, laughter, interruption
+Total latency: 200-800ms (native model)
+Native: prosody, emotion, laughter, interruption
+```
 
+### Barge-In Flow
 
-Barge-In Flow
-==============
+```
+Agent: "The total order amount is..."
+      | (TTS streaming chunks 1, 2, 3)
+      |
+      v
+User: "Wait, I have a..."  <-- audio detected via VAD
+      |
+      v
+System detects barge-in:
+  1. Stop TTS immediately (within 100ms)
+  2. Cancel LLM generation (if streaming)
+  3. Discard any uncommitted audio in playback buffer
+  4. Start STT on user's new utterance
+  5. Inform LLM that user interrupted (so context is accurate)
+```
 
-  Agent: "The total order amount is..."
-        | (TTS streaming chunks 1, 2, 3)
-        |
-        v
-  User: "Wait, I have a..."  <-- audio detected via VAD
-        |
-        v
-  System detects barge-in:
-    1. Stop TTS immediately (within 100ms)
-    2. Cancel LLM generation (if streaming)
-    3. Discard any uncommitted audio in playback buffer
-    4. Start STT on user's new utterance
-    5. Inform LLM that user interrupted (so context is accurate)
+### Turn Detection
 
+```
+User stops speaking (silence detected at 200ms)
+     |
+     v
+Possible turn end candidates:
+  A) Silence threshold (e.g., 500ms) → assume turn end
+  B) End-of-sentence prosody (rising/falling pitch detected)
+  C) Semantic completeness (LLM judges if utterance is complete)
 
-Turn Detection
-===============
+Pure silence threshold:
+  - Too short (300ms) → cuts off thinking pauses
+  - Too long (1500ms) → conversation feels sluggish
 
-  User stops speaking (silence detected at 200ms)
-       |
-       v
-  Possible turn end candidates:
-    A) Silence threshold (e.g., 500ms) → assume turn end
-    B) End-of-sentence prosody (rising/falling pitch detected)
-    C) Semantic completeness (LLM judges if utterance is complete)
-  
-  Pure silence threshold:
-    - Too short (300ms) → cuts off thinking pauses
-    - Too long (1500ms) → conversation feels sluggish
-  
-  Best practice: 700-900ms + prosody analysis
+Best practice: 700-900ms + prosody analysis
 ```
 
 ---

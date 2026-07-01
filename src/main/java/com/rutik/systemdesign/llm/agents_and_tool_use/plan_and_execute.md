@@ -237,52 +237,31 @@ When Plan-and-Execute wins:
 
 ### Two-Phase Architecture
 
-```
-INPUT: Task
-    |
-    v
-┌──────────────────────────────┐
-│  PHASE 1: PLANNER            │
-│  Model: GPT-4o / Claude Opus │
-│  Prompt: Strategic planning  │
-│                              │
-│  Output:                     │
-│    Step 1: [...]             │
-│    Step 2: [...]             │
-│    Step N: [synthesize]      │
-└──────────────────────────────┘
-    |
-    v
-┌──────────────────────────────┐
-│  PHASE 2: EXECUTION LOOP     │
-│                              │
-│  for step in plan:           │
-│    ┌─────────────────────┐   │
-│    │ EXECUTOR            │   │
-│    │ Model: GPT-4o-mini  │   │
-│    │ Prompt: Execute     │   │
-│    │        this step    │   │
-│    │ Tools available     │   │
-│    └─────────────────────┘   │
-│         |                    │
-│    [Validate step output]    │
-│         |                    │
-│    [Should replan?] ─YES──► [REPLAN]
-│         |                    │
-│         NO                   │
-│         ↓                    │
-│    [next step]               │
-└──────────────────────────────┘
-    |
-    v
-┌──────────────────────────────┐
-│  PHASE 3: SYNTHESIS          │
-│  Combine all step outputs    │
-│  Produce final deliverable   │
-└──────────────────────────────┘
-    |
-    v
-OUTPUT: Final answer
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    TASK["Input: Task"]
+    PLAN["Phase 1 — Planner\nGPT-4o / Claude Opus\nstrategic planning\n→ Step 1…Step N"]
+    EXEC["Phase 2 — Executor\nGPT-4o-mini (per step)\nexecute with tools available"]
+    VAL{"Validate step output\nShould replan?"}
+    REPLAN["Replan\n(revise remaining steps)"]
+    SYNTH["Phase 3 — Synthesis\ncombine all step outputs\n→ final deliverable"]
+    OUT["Output: Final answer"]
+
+    TASK --> PLAN --> EXEC --> VAL
+    VAL -->|"NO"| EXEC
+    VAL -->|"YES"| REPLAN --> EXEC
+    EXEC -->|"all steps done"| SYNTH --> OUT
+
+    class TASK,OUT io
+    class PLAN,EXEC,SYNTH llm
+    class VAL decide
+    class REPLAN proc
 ```
 
 ### LangGraph Plan-and-Execute Pattern

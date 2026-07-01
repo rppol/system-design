@@ -62,77 +62,68 @@ Open-source autonomous coding agent. Plan-first architecture: agent produces det
 
 ## 5. Architecture Diagrams
 
+### SWE-agent ACI Loop
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    ISSUE["Issue: 'Tests for foo are failing'"]
+    LLM["LLM (GPT-4 / Claude)\nthinks about problem\ndecides next ACI command"]
+    ACI["ACI commands\nfind_file foo · goto 142\nedit 142:145 · run_tests · submit"]
+    SBX["Sandbox runtime executes"]
+    OBS["Observation back to LLM"]
+    DONE{"submit or\nmax iterations?"}
+    OUT["Done"]
+
+    ISSUE --> LLM --> ACI --> SBX --> OBS --> DONE
+    DONE -->|"NO"| LLM
+    DONE -->|"YES"| OUT
+
+    class ISSUE,OUT io
+    class LLM llm
+    class ACI,SBX,OBS proc
+    class DONE decide
 ```
-SWE-agent ACI Loop
-===================
 
-  Issue: "Tests for foo are failing"
-       |
-       v
-  +-----------------+
-  | LLM (GPT-4/    |  thinks about problem
-  | Claude)        |  decides next ACI command
-  +-----------------+
-       |
-       v
-  +-----------------+
-  | ACI commands:  |
-  | find_file foo  |
-  | goto 142       |
-  | edit 142:145   |
-  | run_tests      |
-  | submit         |
-  +-----------------+
-       |
-       v
-  Sandbox runtime executes
-       |
-       v
-  Observation back to LLM
-       |
-       v
-  Loop until submit or max iterations
+### Claude Code Subagent Pattern
 
+```
+Parent CLI agent
+     |
+     +-- Explore subagent (read-only)
+     |     - file_search, grep, glob
+     |     - returns: "relevant files: x.py, y.py"
+     |
+     +-- Code subagent (write)
+     |     - read_file, edit_file, bash
+     |     - returns: "made edit; tests pass"
+     |
+     +-- Review subagent
+           - read_file, git diff
+           - returns: "looks good / issues found"
+```
 
-Claude Code Subagent Pattern
-=============================
+### Cursor Composer Multi-File Edit
 
-  Parent CLI agent
-       |
-       +-- Explore subagent (read-only)
-       |     - file_search, grep, glob
-       |     - returns: "relevant files: x.py, y.py"
-       |
-       +-- Code subagent (write)
-       |     - read_file, edit_file, bash
-       |     - returns: "made edit; tests pass"
-       |
-       +-- Review subagent
-             - read_file, git diff
-             - returns: "looks good / issues found"
-
-
-Cursor Composer Multi-File Edit
-================================
-
-  User: "Refactor auth to use JWT"
-       |
-       v
-  Model identifies 8 files needing changes
-       |
-       v
-  +--+--+--+--+--+--+--+--+
-  |  parallel file editors |
-  +-----------+------------+
-              |
-              v
-  Diff preview UI for each file
-              |
-              v
-  User accepts/rejects per hunk
-              |
-              v
-  All changes applied; tests run
+```
+User: "Refactor auth to use JWT"
+     |
+     v
+Model identifies N files needing changes
+     |
+     v (parallel file editors)
+Diff preview UI for each file
+     |
+     v
+User accepts/rejects per hunk
+     |
+     v
+All changes applied; tests run
 ```
 
 ---
