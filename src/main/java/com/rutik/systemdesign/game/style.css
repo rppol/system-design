@@ -394,9 +394,9 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .md-body em { color: var(--od-text); }
 .md-body p.md-q { color: #e5c07b; font-weight: 700; margin-top: 14px; }   /* interview question (yellow) */
 .md-body p.md-q strong { color: inherit; }
-.md-body p.md-a { color: var(--od-text); }                                /* its answer */
+.md-body p.md-a { color: var(--od-text); margin-top: 2px; }               /* its answer — tight under the question */
 .md-body p.md-qa { color: var(--od-text); margin-top: 14px; }             /* inline "**Q?** A." */
-.md-body p.md-qa > strong:first-child { color: #e5c07b; font-weight: 700; }
+.md-body p.md-qa > strong:first-child { color: #e5c07b; font-weight: 700; display: block; margin-bottom: 2px; }
 .md-body ul, .md-body ol { margin: 8px 0; padding-left: 22px; }
 .md-body li { margin: 3px 0; }
 .md-body li::marker { color: var(--od-muted); }
@@ -415,7 +415,7 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   padding: 18px; margin: 14px 0; text-align: center; overflow-x: auto; }
 .md-body .mermaid svg { max-width: 100%; height: auto; }
 /* Arrow paths — bright blue, 2.5px reduces aliasing on low-res monitors */
-.md-body .mermaid svg .edgePath .path { stroke: #61afef !important; stroke-width: 2.5px !important; stroke-linecap: round !important; }
+.md-body .mermaid svg .edgePath .path { stroke: #61afef !important; stroke-width: 3px !important; stroke-linecap: round !important; stroke-linejoin: round !important; }
 /* Edge labels — transparent background (no black pill), gold text */
 .md-body .mermaid svg .edgeLabel .label rect { fill: transparent !important; stroke: none !important; }
 .md-body .mermaid svg .edgeLabel foreignObject > div { background: transparent !important; color: #e5c07b !important; font-size: 11px; }

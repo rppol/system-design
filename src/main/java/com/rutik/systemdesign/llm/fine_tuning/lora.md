@@ -257,6 +257,7 @@ print(f"Trainable: {trainable_params:,} / {all_params:,} = {100*trainable_params
 ### LoRA Applied to Transformer Attention
 
 ```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
 flowchart LR
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
     classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
@@ -290,6 +291,7 @@ overhead, which is why LoRA merged models run at full base-model speed.
 ### LoRA Parameter Flow During Training
 
 ```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
 flowchart LR
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
     classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
@@ -323,6 +325,7 @@ memory cost relative to full fine-tuning.
 ### Multi-Adapter Serving — One Base Model, Many Tasks
 
 ```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 60}}}%%
 flowchart LR
     classDef request fill:#56b6c2,stroke:#1a8fa0,color:#1a1a1a
     classDef baseM   fill:#e5c07b,stroke:#d4a017,color:#1a1a1a,font-weight:bold
@@ -514,6 +517,7 @@ A: LoRA's frozen base weights are the primary defense against forgetting — gen
 **Architecture Overview**:
 
 ```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 65}}}%%
 flowchart TD
     classDef dataC   fill:#56b6c2,stroke:#1a8fa0,color:#1a1a1a
     classDef modelC  fill:#e5c07b,stroke:#d4a017,color:#1a1a1a,font-weight:bold
