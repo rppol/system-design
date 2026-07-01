@@ -151,7 +151,7 @@ Every `case_studies/` directory MUST contain a `README.md` with these 5 sections
 
 ## Formatting Rules
 
-- All diagrams use **ASCII art only** — no Mermaid, no image files
+- All diagrams use **ASCII art only** — no image files. **Exception:** directed flowcharts in study section files may use Mermaid when the ASCII equivalent would be unreadable (too many branches, crossing arrows). Use `/mermaid-diagrams` skill to decide; see "Mermaid Diagrams" section below.
 - Tables use standard Markdown pipe syntax
 - Code blocks use triple backticks with language tag (` ```java `, ` ```sql `, ` ```yaml `, etc.)
 - Section headers follow exact numbering: `## 1.`, `## 2.`, ... `## 14.`
@@ -203,3 +203,29 @@ language tag**; spaces not tabs; no trailing whitespace; **no emojis** (use `✓
 not `✅`/`❌`); widest line ≤ 100 cols (prefer vertical stacking over wide
 side-by-side); caption every diagram with 1–2 sentences tying it to the insight and
 reuse numbers already in the surrounding text.
+
+---
+
+## Mermaid Diagrams
+
+**ASCII is the default** for all diagrams. Mermaid is a deliberate exception for
+directed flowcharts that would produce unreadable ASCII art — concepts with many
+branches, crossing arrows, or forward+backward pass semantics that need dotted edges.
+
+**Skill:** run `/mermaid-diagrams` (at `.claude/skills/mermaid-diagrams/`) before
+authoring or converting any diagram. The skill contains the full decision checklist
+(Mermaid vs ASCII), the One-Dark color palette and `classDef` block, diagram type
+selection (`flowchart LR` / `TD` / `sequenceDiagram`), the ASCII→Mermaid conversion
+guide, and gotchas (stale `readerCache`, `classDef` ordering, `data-processed`).
+
+**When to invoke `/mermaid-diagrams` automatically:**
+- Asked to "convert this ASCII to Mermaid" or "make this diagram colorful"
+- About to write a ```` ```mermaid ```` fence in any study file
+- Unsure whether a concept's diagram should be Mermaid or ASCII
+
+**Scope:** Mermaid fences are valid only in study section files (under
+`src/main/java/com/rutik/systemdesign/<section>/`). Do not add mermaid fences to
+CLAUDE.md files, skill files, or the `game/` tooling directory.
+
+**The game reader renders Mermaid** (`game/app.js` → `renderMermaid()` → CDN lazy
+import). GitHub renders mermaid fences natively. Both surfaces work without a build step.
