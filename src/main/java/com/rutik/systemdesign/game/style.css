@@ -397,6 +397,10 @@ a.mod-file.active { color: var(--od-text); border-right-color: var(--accent); ba
 .md-body pre code { background: none; border: none; padding: 0; font-size: 12.5px; line-height: 1.5;
   white-space: pre; color: var(--od-text); }
 .md-body hr { border: none; border-top: 1px solid var(--od-line); margin: 16px 0; }
+/* Mermaid diagrams: dark background matching the reader, SVGs scale to column width */
+.md-body .mermaid { background: var(--od-bg); border: 1px solid var(--od-line); border-radius: 10px;
+  padding: 18px; margin: 14px 0; text-align: center; overflow-x: auto; }
+.md-body .mermaid svg { max-width: 100%; height: auto; }
 .md-body blockquote { border-left: 3px solid #c678dd; margin: 10px 0; padding: 4px 14px; color: var(--od-muted); }
 .md-body table { border-collapse: collapse; margin: 12px 0; font-size: 13px; display: block; overflow-x: auto; }
 .md-body th, .md-body td { border: 1px solid var(--od-line); padding: 6px 10px; text-align: left; vertical-align: top; }

@@ -255,62 +255,105 @@ print(f"Trainable: {trainable_params:,} / {all_params:,} = {100*trainable_params
 ## 4. Architecture Diagram
 
 ### LoRA Applied to Transformer Attention
-```
-Input x
-   |
-   v
-Pre-trained W (frozen) ─────────────────┐
-   "no gradient flows through W"        │
-                                         ├─> + ─> h (output)
-LoRA adapter:                            │
-   x ──[A: r×k, trainable]──> low-rank  │
-         ──[B: d×r, trainable]──> ΔW×x  │
-   scale by (alpha / r) ────────────────┘
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
 
-At inference after merge:
-Input x
-   |
-   v
-W_merged = W + B×A×(alpha/r)  ← single matrix, no branching
-   |
-   v
-h (output)
+    subgraph tr["During Training"]
+        x1([x]) --> W["W\nfrozen — no gradient"]
+        x1 --> A["A · r×k\ntrainable"]
+        A --> B["B · d×r\ntrainable"]
+        B -->|"× alpha/r"| plus((" + "))
+        W --> plus
+        plus --> h1([h])
+    end
+    subgraph inf["After Merge — zero inference overhead"]
+        x2([x]) --> Wm["W_merged = W + B×A·(alpha/r)\nsingle matrix, no branching"]
+        Wm --> h2([h])
+    end
+
+    class x1,x2,h1,h2 io
+    class W,Wm frozen
+    class A,B train
+    class plus mathOp
 ```
+
+The left subgraph shows the adapter bypass: W·x and B·A·x·(alpha/r) are summed at
+every forward pass during training. The right subgraph shows that after merging, the
+addition disappears — the fused W_merged is a single weight matrix with no runtime
+overhead, which is why LoRA merged models run at full base-model speed.
 
 ### LoRA Parameter Flow During Training
-```
-Forward pass:
-  x → W×x → + → h
-               ^
-  x → A → B ──┘
-  (gradients flow through A and B only)
 
-Backward pass:
-  Loss → ∂L/∂B → update B
-  Loss → ∂L/∂A → update A
-  Loss → ∂L/∂W = 0 (W is frozen, no gradient accumulation needed)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+
+    x([x]) --> Wx["W·x\nfrozen"]
+    x --> A["A matrix\ntrainable"]
+    A --> B["B matrix\ntrainable"]
+    Wx --> plus((" + "))
+    B --> plus
+    plus --> h([h])
+    h --> loss([Loss])
+    loss -.->|"∂L/∂B → updates B"| B
+    loss -.->|"∂L/∂A → updates A"| A
+    loss -. "∂L/∂W = 0  frozen" .-> Wx
+
+    class x,h io
+    class Wx frozen
+    class A,B train
+    class plus mathOp
+    class loss lossN
 ```
+
+Solid arrows are the forward pass; dotted arrows are the backward pass (gradient
+signals). The dotted edge to W carries zero gradient — the optimizer never touches W,
+so no gradient memory is allocated for the frozen weights, halving the per-weight
+memory cost relative to full fine-tuning.
 
 ### Multi-Adapter Serving — One Base Model, Many Tasks
-```
-request (tag: sql)   ─┐
-request (tag: chat)  ─┤        ┌──────────────────┐
-request (tag: legal) ─┼──────► │  Base model       │  loaded ONCE on GPU (14GB)
-request (tag: ...)   ─┘        │  (frozen weights) │
-                               └────────┬──────────┘
-                                        │  route by adapter_id
-                    ┌───────────────────┼───────────────────┐
-                    ▼                   ▼                   ▼
-              [sql_adapter]       [chat_adapter]      [legal_adapter]   ...
-                ~130MB              ~130MB              ~130MB
-               (B,A only)          (B,A only)          (B,A only)
 
-One 14GB base + N tiny adapters (~130MB each) = 50+ specialized models on one GPU.
+```mermaid
+flowchart LR
+    classDef request fill:#56b6c2,stroke:#1a8fa0,color:#1a1a1a
+    classDef baseM   fill:#e5c07b,stroke:#d4a017,color:#1a1a1a,font-weight:bold
+    classDef adapter fill:#98c379,stroke:#27ae60,color:#1a1a1a
+
+    r1["request  tag: sql"]
+    r2["request  tag: chat"]
+    r3["request  tag: legal"]
+    r4["request  tag: ..."]
+    base["Base Model\n14 GB · frozen\nloaded once on GPU"]
+    a1["sql_adapter\n~130 MB\nB, A only"]
+    a2["chat_adapter\n~130 MB\nB, A only"]
+    a3["legal_adapter\n~130 MB\nB, A only"]
+    a4["...more adapters\n~130 MB each"]
+    r1 --> base
+    r2 --> base
+    r3 --> base
+    r4 --> base
+    base -->|"route by adapter_id"| a1
+    base --> a2
+    base --> a3
+    base --> a4
+
+    class r1,r2,r3,r4 request
+    class base baseM
+    class a1,a2,a3,a4 adapter
 ```
-Because each adapter is just its B and A matrices, swapping tasks is a matrix-add
-at request time (vLLM hot-swap), not a 14GB model reload — the economic core of
-serving many fine-tunes cheaply.
+
+The 14 GB base model loads once; each adapter is just its B and A matrices (~130 MB).
+Swapping tasks is a matrix-add at request time (vLLM hot-swap), not a 14 GB model
+reload — the economic core of serving 50+ specialized models on one GPU.
 
 ---
 
@@ -469,26 +512,41 @@ A: LoRA's frozen base weights are the primary defense against forgetting — gen
 **Problem Statement**: A SaaS company needs to fine-tune LLaMA 3 8B Instruct to handle customer support tickets. The base model responds well to general questions but fails on three key requirements: (1) always structuring responses in a specific JSON format with fields for `issue_category`, `resolution_steps`, and `escalation_required`; (2) using company-specific product terminology correctly (product names, internal codes); (3) keeping responses under 200 words. The previous prompt-engineering approach required 800-token system prompts that ate into the context window and added latency.
 
 **Architecture Overview**:
-```
-Training Data Pipeline:
-  5,000 historical tickets ──> format as instruction pairs ──> jsonl dataset
-  (input: raw ticket text) ──> (output: structured JSON response)
 
-Fine-tuning Setup:
-  Base: meta-llama/Meta-Llama-3-8B-Instruct
-  Hardware: 1x A100 40GB
-  Method: LoRA (r=16, alpha=32)
-  Target: q_proj, k_proj, v_proj, o_proj (attention only; no FFN needed)
+```mermaid
+flowchart TD
+    classDef dataC   fill:#56b6c2,stroke:#1a8fa0,color:#1a1a1a
+    classDef modelC  fill:#e5c07b,stroke:#d4a017,color:#1a1a1a,font-weight:bold
+    classDef adapterC fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef servingC fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef metricC  fill:#d19a66,stroke:#e67e22,color:#1a1a1a
 
-Serving:
-  vLLM ──> adapter hot-swapping ──> support_v1 adapter
-         ──> other adapters for future tasks (shared base)
+    subgraph dp["  Data Pipeline  "]
+        t["5,000 support tickets"] --> ip["instruction pairs\ninput: ticket text  →  output: JSON response"]
+        ip --> ds["jsonl dataset"]
+    end
+    subgraph ft["  Fine-tuning  ·  1× A100 40 GB  "]
+        bm["meta-llama/Meta-Llama-3-8B-Instruct"] -->|"LoRA r=16, alpha=32\nq/k/v/o_proj · 0.42% trainable"| ad["support_v1 adapter\n2h 40min · ~$12"]
+    end
+    subgraph sv["  Serving  ·  vLLM  "]
+        sh["shared base model  14 GB"] -->|"hot-swap adapter_id"| sa["support_v1"]
+        sh --> oa["billing / tech-docs / returns adapters"]
+    end
+    subgraph ev["  Evaluation  "]
+        e1["JSON format adherence  91%  ←  61%"]
+        e2["Terminology accuracy   88%  ←  72%"]
+        e3["Response ≤200 words    94%  ←  78%"]
+        e4["System prompt tokens   120  ←  800"]
+    end
+    dp --> ft
+    ft --> sv
+    sv --> ev
 
-Evaluation:
-  Format adherence (JSON parse success rate)
-  Terminology accuracy (keyword match against product glossary)
-  Response length compliance (<200 words)
-  CSAT score delta (compared to prompt-only baseline)
+    class t,ip,ds dataC
+    class bm modelC
+    class ad,sa,oa adapterC
+    class sh servingC
+    class e1,e2,e3,e4 metricC
 ```
 
 **Key Design Decisions**:

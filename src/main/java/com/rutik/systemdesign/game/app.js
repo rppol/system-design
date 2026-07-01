@@ -1020,6 +1020,46 @@ function mdInline(t) {
     });
 }
 
+// Lazy Mermaid renderer. Only fetches mermaid.js the first time a page with a
+// .mermaid div is opened; all other pages incur zero network cost.
+let _mermaidReady = null;   // module-scoped promise; null = not started
+async function renderMermaid(root) {
+  const nodes = [...root.querySelectorAll(".mermaid")];
+  if (!nodes.length) return;                       // no mermaid on this page — skip
+  try {
+    if (!_mermaidReady) {
+      _mermaidReady = import("https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs")
+        .then(m => {
+          m.default.initialize({
+            startOnLoad: false,
+            theme: "dark",
+            themeVariables: {
+              background:          "#000000",
+              mainBkg:             "#1a1a1a",
+              nodeBorder:          "#4b5263",
+              lineColor:           "#61afef",   // bright blue edges — visible on black
+              textColor:           "#abb2bf",
+              edgeLabelBackground: "#000000",
+              clusterBkg:          "#0d0d0d",   // subgraph fill (very dark)
+              clusterBorder:       "#3b4048",
+              titleColor:          "#e5c07b",   // subgraph titles gold
+              labelBackground:     "#000000",
+              fontFamily:          "ui-monospace, SFMono-Regular, Menlo, monospace",
+            },
+          });
+          return m.default;
+        });
+    }
+    const mermaid = await _mermaidReady;
+    // Un-mark any nodes already rendered so mermaid re-processes them on navigation.
+    nodes.forEach(n => n.removeAttribute("data-processed"));
+    await mermaid.run({ nodes });
+  } catch (err) {
+    // CDN unavailable or offline — raw source stays visible as text, nothing crashes.
+    console.warn("Mermaid render failed:", err);
+  }
+}
+
 function mdRender(src) {
   const lines = src.replace(/\r\n/g, "\n").split("\n");
   const out = [];
@@ -1037,6 +1077,8 @@ function mdRender(src) {
       while (i < lines.length && !/^```/.test(lines[i])) { body.push(lines[i]); i++; }
       i++;                                         // skip closing fence
       const raw = body.join("\n");
+      // Mermaid fences: wrap in a div that mermaid.js will render after page load.
+      if (lang === "mermaid") { out.push(`<div class="mermaid">${esc(raw)}</div>`); qaPending = false; continue; }
       // Known languages -> code highlighter; otherwise diagram highlighter when it
       // looks like a diagram (colour only, alignment preserved); else verbatim.
       let inner, cls;
@@ -1329,6 +1371,7 @@ async function openReaderPath(path, title, navCtx, frag) {
     const headCount = buildToc(el("#readerToc"), main);
     el("#readerIdx").style.display = headCount >= 3 ? "" : "none";   // nothing to index -> hide toggle
     wireReaderBody(main);
+    renderMermaid(main);                           // no-op when page has no mermaid fences
     b.scrollTop = 0;
     if (frag) { const t = main.querySelector("#" + CSS.escape(frag)); if (t) t.scrollIntoView({ block: "start" }); }
   } catch {
