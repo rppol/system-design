@@ -134,27 +134,23 @@ Sampling inverts the normal flow. A server can ask the client to run an LLM comp
 
 ### 5.2 JSON-RPC Message Flow — Connection and Tool Call
 
-```
-Client                                          Server
-  |                                               |
-  |-- initialize {protocolVersion, capabilities} -->|
-  |<-- initialized {capabilities, serverInfo} ------|
-  |                                               |
-  |-- tools/list {} --------------------------->  |
-  |<-- {tools: [{name, description, inputSchema}]} |
-  |                                               |
-  |-- resources/list {} -----------------------> |
-  |<-- {resources: [{uri, name, mimeType}]} ----- |
-  |                                               |
-  |  [Model selects tool based on descriptions]  |
-  |                                               |
-  |-- tools/call {name: "read_file",             |
-  |               arguments: {path: "/a.py"}} --> |
-  |<-- {content: [{type: "text", text: "..."}]} - |
-  |                                               |
-  |-- shutdown {} ----------------------------->  |
-  |<-- {} --------------------------------------- |
-  |                                               |
+```mermaid
+%%{init: {'theme': 'dark'}}%%
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    C->>S: initialize {protocolVersion, capabilities}
+    S-->>C: initialized {capabilities, serverInfo}
+    C->>S: tools/list {}
+    S-->>C: [{name, description, inputSchema}, ...]
+    C->>S: resources/list {}
+    S-->>C: [{uri, name, mimeType}, ...]
+    Note over C: Model selects tool
+    C->>S: tools/call {name: "read_file", arguments: {path: "/a.py"}}
+    S-->>C: {content: [{type: "text", text: "..."}]}
+    C->>S: shutdown {}
+    S-->>C: {}
 ```
 
 ### 5.3 Request/Response Message Anatomy
@@ -201,16 +197,18 @@ JSON-RPC Response (error):
 
 ### 5.4 Sampling Flow (Server-Initiated LLM Call)
 
-```
-Server                         Client                    LLM
-  |                               |                       |
-  |-- sampling/createMessage  --> |                       |
-  |   {messages, maxTokens}       |                       |
-  |                               |-- [user consent] --> |
-  |                               |-- completion req --> |
-  |                               |<-- completion resp --|
-  |<-- {role, content} ---------- |                       |
-  |                               |                       |
+```mermaid
+%%{init: {'theme': 'dark'}}%%
+sequenceDiagram
+    participant S as Server
+    participant C as Client
+    participant L as LLM
+
+    S->>C: sampling/createMessage {messages, maxTokens}
+    Note over C: user consent check
+    C->>L: completion request
+    L-->>C: completion response
+    C-->>S: {role, content}
 ```
 
 ---

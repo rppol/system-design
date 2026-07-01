@@ -107,26 +107,29 @@ QUERY PIPELINE (online):
 
 ### Hybrid Retrieval Pipeline
 
-```
-Query
-  |
-  +---> [BM25Retriever] -------> List[Document]
-  |                                     |
-  +---> [EmbeddingRetriever] -> List[Document]
-                                        |
-                               [DocumentJoiner (concatenate, dedup)]
-                                        |
-                               List[Document] (merged + deduped)
-                                        |
-                               [TransformersSimilarityRanker]
-                                        |
-                               top-3 List[Document]
-                                        |
-                               [PromptBuilder]
-                                        |
-                               [Generator]
-                                        |
-                               Answer
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef store fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef llm   fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    Q["Query"]
+    BM25["BM25Retriever\n(keyword)"]
+    EMBD["EmbeddingRetriever\n(dense)"]
+    JOIN["DocumentJoiner\n(concatenate + dedup)"]
+    RANK["TransformersSimilarityRanker\n→ top-3 docs"]
+    PB["PromptBuilder"]
+    GEN["Generator (LLM)"]
+    ANS["Answer"]
+
+    Q --> BM25 & EMBD
+    BM25 & EMBD --> JOIN --> RANK --> PB --> GEN --> ANS
+
+    class Q,ANS io
+    class BM25,EMBD,JOIN,RANK,PB proc
+    class GEN llm
 ```
 
 ### Component Protocol

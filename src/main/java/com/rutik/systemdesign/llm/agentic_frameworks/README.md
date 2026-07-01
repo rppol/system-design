@@ -322,20 +322,29 @@ Haystack:      [Component1] → [Component2] → [Output] → pipeline architect
 ```
 
 ### LangGraph Stateful Agent Flow
-```
-START
-  |
-  v
-[agent_node]
-  Calls LLM with messages
-  LLM outputs: tool_call | final_answer
-  |
-  +-- tool_call ------> [tool_node]
-  |                       Execute tool
-  |                       Add result to messages
-  |                       Loop back to agent_node
-  |
-  +-- final_answer --> END
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    S["START"]
+    AGENT["agent_node\ncalls LLM with messages"]
+    DEC{"LLM output?"}
+    TOOL["tool_node\nexecute tool\nadd result to messages"]
+    END["END"]
+
+    S --> AGENT --> DEC
+    DEC -->|"tool_call"| TOOL --> AGENT
+    DEC -->|"final_answer"| END
+
+    class S,END io
+    class AGENT llm
+    class TOOL proc
+    class DEC decide
 ```
 
 ---

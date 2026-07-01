@@ -142,19 +142,28 @@ No centralized orchestrator needed
 
 Agents communicate via explicit message channels:
 
-```
-User Request
-     |
-     v
-Coordinator Agent
-     |-- message --> Research Agent
-     |                    |-- result --> Coordinator
-     |
-     |-- message --> Coding Agent (after research)
-                          |-- code --> Coordinator
-                                  |-- message --> Test Agent
-                                                   |-- results --> Coordinator
-                                                             |-- Final answer
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+
+    U["User request"]
+    COORD["Coordinator Agent"]
+    RES["Research Agent"]
+    CODE["Coding Agent"]
+    TEST["Test Agent"]
+    OUT["Final answer"]
+
+    U --> COORD
+    COORD -->|"message"| RES -->|"result"| COORD
+    COORD -->|"message (after research)"| CODE -->|"code"| COORD
+    COORD -->|"message"| TEST -->|"results"| COORD
+    COORD --> OUT
+
+    class U,OUT io
+    class COORD,RES,CODE,TEST llm
 ```
 
 Clean separation; easy to add/remove agents by changing message routing.

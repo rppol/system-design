@@ -60,63 +60,59 @@ Embed prompts; if new prompt cosine similarity > threshold to cached, return cac
 
 ## 5. Architecture Diagrams
 
+### LiteLLM Proxy Topology
+
 ```
-LiteLLM Proxy Topology
-=======================
+Team A app ----+
+Team B app ----+----> LiteLLM Proxy (HTTP) ---+---> Anthropic API
+Team C app ----+         |                    +---> OpenAI API
+                         |                    +---> Bedrock API
+                         +- Redis (cache,     +---> Azure OpenAI
+                            budgets, rate limits)
+                         +- Postgres (audit log, spend)
+```
 
-  Team A app ----+
-  Team B app ----+----> LiteLLM Proxy (HTTP) ---+---> Anthropic API
-  Team C app ----+         |                    |
-                           |                    +---> OpenAI API
-                           |                    |
-                           |                    +---> Bedrock API
-                           |                    |
-                           +- Redis (cache,     +---> Azure OpenAI
-                              budgets,
-                              rate limits)
-                           |
-                           +- Postgres (audit
-                              log, spend)
+### Routing with Fallback
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef warn fill:#1e2127,stroke:#e06c75,color:#abb2bf
 
-Routing with Fallback
-======================
+    REQ["Request\nmodel='claude-sonnet-4-6'"]
+    RTR["Router\nprimary = anthropic-direct"]
+    A1["Attempt 1\nanthropic-direct"]
+    A2["Attempt 2\nbedrock-claude (same model)"]
+    A3["Attempt 3\nazure-gpt-4o (last resort)"]
+    OK["Return response"]
+    ERR["Return 503 to client"]
 
-  Request: model="claude-sonnet-4-6"
-       |
-       v
-  Router: primary deployment = anthropic-direct
-       |
-       v
-  Attempt 1: anthropic-direct
-       |
-       +-- 200 OK -> return
-       +-- 5xx or rate_limit -> fallback
-       
-       Attempt 2: bedrock-claude (same model via Bedrock)
-       |
-       +-- 200 OK -> return
-       +-- error -> fallback
-       
-       Attempt 3: azure-gpt-4o (different model, last resort)
-       |
-       +-- 200 OK (with degraded quality flag)
-       +-- error -> return 503 to client
+    REQ --> RTR --> A1
+    A1 -->|"200 OK"| OK
+    A1 -->|"5xx / rate_limit"| A2
+    A2 -->|"200 OK"| OK
+    A2 -->|"error"| A3
+    A3 -->|"200 OK (degraded)"| OK
+    A3 -->|"error"| ERR
 
+    class REQ,OK io
+    class RTR,A1,A2,A3 proc
+    class ERR warn
+```
 
-Virtual Key Budgets
-====================
+### Virtual Key Budgets
 
-  Virtual key sk-team-billing-abc123:
-    - max_budget: $500/month
-    - models: [claude-sonnet-4-6, gpt-4o]
-    - tpm: 100,000
-    - rpm: 1,000
-    - team_id: billing
-    - expires: 2025-12-31
-  
-  Every call: deduct cost from running tally
-  If budget exceeded → 429 returned to client
+```
+Virtual key sk-team-billing-abc123:
+  - max_budget: $500/month
+  - models: [claude-sonnet-4-6, gpt-4o]
+  - tpm: 100,000 | rpm: 1,000
+  - team_id: billing | expires: 2025-12-31
+
+Every call: deduct cost from running tally
+If budget exceeded → 429 returned to client
 ```
 
 ---
