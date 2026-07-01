@@ -280,36 +280,29 @@ Metadata filtering is often more impactful than retrieval algorithm choice for p
 ## 4. Architecture Diagram
 
 ### Hybrid Retrieval Pipeline
-```
-User Query
-    |
-    +-----------> [Text Embedding]      → Dense Vector
-    |                    |
-    |             [ANN Search]          → Top-100 dense candidates
-    |             (HNSW, cosine sim)
-    |
-    +-----------> [BM25 Tokenization]   → Token list
-                         |
-                  [BM25 Scoring]        → Top-100 sparse candidates
-    |
-    v
-[RRF Fusion]
-  For each document in either result set:
-    score = Σ 1/(60 + rank_dense) + Σ 1/(60 + rank_sparse)
-    |
-    v
-[Merged top-100 by RRF score]
-    |
-    v
-[Metadata Filter]   ← applied pre- or post-ANN
-  Filter by date, source, category
-    |
-    v
-[Reranker]          ← see reranking.md
-  Cross-encoder on top-100 → top-5
-    |
-    v
-Final Context → LLM Generation
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef math   fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
+
+    Q([User Query]) --> TE["Text Embedding\n→ dense vector"]
+    Q --> BM["BM25 Tokenization\n→ token list + scoring"]
+    TE --> ANN["ANN Search (HNSW)\ntop-100 dense candidates"]
+    BM --> BSC["BM25 Scoring\ntop-100 sparse candidates"]
+    ANN --> RRF["RRF Fusion\nscore = Σ 1/(60+rank_dense)\n      + Σ 1/(60+rank_sparse)"]
+    BSC --> RRF
+    RRF --> MF["Metadata Filter\ndate · source · category"]
+    MF --> RNK["Reranker\ncross-encoder: top-100 → top-5"]
+    RNK --> GEN["LLM Generation"]
+    GEN --> ANS([Final Answer])
+
+    class Q,ANS io
+    class TE,BM,ANN,BSC,MF proc
+    class RRF math
+    class RNK,GEN llm
 ```
 
 ### HNSW Graph Structure

@@ -185,37 +185,33 @@ def crag_pipeline(
 ## 4. Architecture Diagram
 
 ### CRAG Decision Flow
-```
-User Query
-    |
-    v
-[Knowledge Base Retrieval]
-    |
-    v
-[Relevance Evaluator]  ← fast cross-encoder or LLM classifier
-  Score each retrieved document [0.0 - 1.0]
-    |
-    +-- All CORRECT (scores > 0.7) ---------> [Generation] → Answer
-    |
-    +-- MIXED (some correct, some ambiguous)
-    |        |
-    |        v
-    |   [Context Refinement]
-    |   Extract relevant sentences from ambiguous docs
-    |        |
-    |        v
-    |   [Generation with refined context] → Answer
-    |
-    +-- All INCORRECT (scores < 0.3)
-             |
-             v
-        [Web Search Fallback]
-             |
-        [Parse + Filter web results]
-             |
-        [Combine with any relevant KB content]
-             |
-        [Generation] → Answer with web citations
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef decide fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef search fill:#56b6c2,stroke:#1a8fa0,color:#1a1a1a
+
+    Q([User Query]) --> KBR["Knowledge Base Retrieval"]
+    KBR --> RE{Relevance Evaluator\nscore each doc [0.0–1.0]}
+    RE -->|"All CORRECT\n(scores > 0.7)"| GEN1["Generation"]
+    RE -->|"MIXED\n(some ambiguous)"| CR["Context Refinement\nextract relevant sentences"]
+    CR --> GEN2["Generation\nwith refined context"]
+    RE -->|"All INCORRECT\n(scores < 0.3)"| WS["Web Search Fallback"]
+    WS --> PF["Parse + Filter web results"]
+    PF --> CB["Combine with relevant KB content"]
+    CB --> GEN3["Generation\nwith web citations"]
+    GEN1 --> ANS([Answer])
+    GEN2 --> ANS
+    GEN3 --> ANS
+
+    class Q,ANS io
+    class KBR,CR,PF,CB proc
+    class RE decide
+    class GEN1,GEN2,GEN3 llm
+    class WS search
 ```
 
 ### CRAG vs. Standard RAG

@@ -176,65 +176,51 @@ For a corpus of 1M tokens (approximately 750 pages):
 ## 4. Architecture Diagram
 
 ### Graph RAG Indexing Pipeline
-```
-Documents
-    |
-    v
-[Text Chunking]
-  1000-token chunks with overlap
-    |
-    v
-[Entity/Relation Extraction] (LLM call per chunk)
-  Input:  text chunk
-  Output: entities[], relationships[]
-    |
-    v
-[Graph Construction]
-  Deduplicate entities, merge edges
-  Build NetworkX/Neo4j graph
-    |
-    v
-[Community Detection]
-  Leiden algorithm
-  Hierarchical communities C0, C1, C2...
-    |
-    v
-[Community Summarization] (LLM call per community)
-  Input:  community entities + relationships
-  Output: structured community summary
-    |
-    v
-[Storage]
-  Graph DB:    Neo4j / NetworkX (relationships)
-  Vector DB:   community summaries + entity descriptions embedded
-  Document DB: original chunks with entity references
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io    fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef proc  fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef llm   fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef store fill:#e5c07b,stroke:#d4a017,color:#1a1a1a
+
+    DOCS(["Documents"]) --> CHUNK["Text Chunking\n1000-token chunks with overlap"]
+    CHUNK --> ERX["Entity/Relation Extraction\n(LLM call per chunk)\nentities[] + relationships[]"]
+    ERX --> GC["Graph Construction\ndeduplicate entities, merge edges\nNetworkX / Neo4j"]
+    GC --> CD["Community Detection\nLeiden algorithm\nhierarchical C0, C1, C2"]
+    CD --> CS["Community Summarization\n(LLM call per community)\nstructured summary per cluster"]
+    CS --> ST[("Storage\nGraph DB: relationships\nVector DB: summaries + entity embeddings\nDocument DB: original chunks")]
+
+    class DOCS io
+    class CHUNK,GC,CD proc
+    class ERX,CS llm
+    class ST store
 ```
 
 ### Graph RAG Query Pipeline
-```
-User Query
-    |
-    v
-[Query Type Classification]
-  "Is this global (thematic) or local (entity-specific)?"
-    |
-    +-- GLOBAL -------> [Community Summary Retrieval]
-    |                        |
-    |                    [Map: partial answers per community]
-    |                        |
-    |                    [Reduce: LLM synthesizes]
-    |                        |
-    |                    Global Answer
-    |
-    +-- LOCAL --------> [Entity Identification]
-                             |
-                         [Subgraph Extraction]
-                             |
-                         [Source Chunk Retrieval]
-                             |
-                         [LLM Generation from subgraph]
-                             |
-                         Local Answer with entity references
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef decide fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
+
+    Q([User Query]) --> QTC{Query Type\n'global or local?'}
+    QTC -->|"GLOBAL (thematic)"| CSR["Community Summary Retrieval"]
+    CSR --> MAP["Map: partial answer\nper community (parallel)"]
+    MAP --> RED["Reduce: LLM synthesizes\nall partial answers"]
+    RED --> GANS([Global Answer])
+    QTC -->|"LOCAL (entity-specific)"| EI["Entity Identification"]
+    EI --> SGE["Subgraph Extraction"]
+    SGE --> SCR["Source Chunk Retrieval"]
+    SCR --> LGEN["LLM Generation\nfrom subgraph context"]
+    LGEN --> LANS(["Local Answer + entity refs"])
+
+    class Q,GANS,LANS io
+    class QTC decide
+    class CSR,MAP,SGE,SCR,EI proc
+    class RED,LGEN llm
 ```
 
 ---

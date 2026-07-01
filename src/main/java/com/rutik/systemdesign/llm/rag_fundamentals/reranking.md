@@ -185,26 +185,23 @@ Cohere Rerank 3 properties:
 ## 4. Architecture Diagram
 
 ### Two-Stage Retrieval Pipeline
-```
-User Query
-    |
-    v
-[Stage 1: Bi-Encoder Retrieval]
-  Query → embedding → ANN search
-  Returns: top-100 candidates (high recall, moderate precision)
-  Latency: ~20-50ms
-    |
-    v
-[Stage 2: Cross-Encoder Reranking]
-  For each of 100 candidates:
-    [CLS] query [SEP] document [SEP] → relevance score
-  Returns: top-5 reranked candidates (high precision)
-  Latency: ~50-100ms
-    |
-    v
-[LLM Generation]
-  Uses only top-5 documents
-  Total retrieval latency: ~150ms (stage 1 + stage 2)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef rerank fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
+
+    Q([User Query]) --> S1["Stage 1: Bi-Encoder Retrieval\nQuery → embedding → ANN search\nReturns: top-100 candidates\nLatency: ~20–50ms"]
+    S1 --> S2["Stage 2: Cross-Encoder Reranking\n[CLS] query [SEP] document [SEP] → score\nReturns: top-5 reranked\nLatency: ~50–100ms"]
+    S2 --> GEN["LLM Generation\nuses only top-5 documents\ntotal retrieval: ~150ms"]
+    GEN --> ANS([Answer])
+
+    class Q,ANS io
+    class S1 proc
+    class S2 rerank
+    class GEN llm
 ```
 
 ### Bi-Encoder vs. Cross-Encoder Comparison

@@ -154,73 +154,62 @@ Assistant: Based on the provided context, Paris is the capital of France.
 ## 5. Architecture Diagrams
 
 ### Standard RAG Pipeline
-```
-User Query
-     |
-     v
-[Query Processing]
-  Optional: query rewriting, expansion, decomposition
-     |
-     v
-[Retrieval]
-  ┌─────────────────────────────────────────┐
-  │  Dense: embed query → ANN search        │
-  │  Sparse: BM25 keyword matching          │
-  │  → Merge via RRF → top-100 candidates  │
-  └─────────────────────────────────────────┘
-     |
-     v
-[Reranking]
-  Cross-encoder scores top-100 → top-5 final
-     |
-     v
-[Context Assembly]
-  Format retrieved chunks with metadata
-  Respect context window limit
-     |
-     v
-[LLM Generation]
-  Generate answer grounded in context
-     |
-     v
-Response + [Source Citations]
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
+
+    Q([User Query]) --> QP["Query Processing\nrewrite · expand · decompose"]
+    QP --> RET["Retrieval\nDense: embed → ANN\nSparse: BM25\nMerge via RRF → top-100"]
+    RET --> RNK["Reranking\nCross-encoder → top-5"]
+    RNK --> CA["Context Assembly\nformat chunks + metadata\nrespect context window"]
+    CA --> GEN["LLM Generation\nanswer grounded in context"]
+    GEN --> ANS(["Response + Source Citations"])
+
+    class Q,ANS io
+    class QP,RET,RNK,CA proc
+    class GEN llm
 ```
 
 ### Indexing Pipeline
-```
-Documents (PDFs, HTML, Docs, DBs)
-     |
-     v
-[Parsing & Extraction]
-  PDF → text (pdfminer, PyMuPDF)
-  HTML → text (BeautifulSoup)
-  Handle tables, figures separately
-     |
-     v
-[Chunking]
-  Strategy: semantic / paragraph / hierarchical
-  Add metadata: source URL, page, section title
-     |
-     v
-[Embedding Generation]
-  Batch embed chunks (GPU-accelerated)
-     |
-     v
-[Vector DB Upsert]
-  Store: {chunk_id, embedding, metadata, text}
-  Index: HNSW for fast ANN search
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io    fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef proc  fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef store fill:#e5c07b,stroke:#d4a017,color:#1a1a1a
+
+    DOCS(["Documents\nPDFs · HTML · Docs · DBs"]) --> PARSE["Parsing & Extraction\npdfminer · BeautifulSoup\nhandle tables + figures"]
+    PARSE --> CHUNK["Chunking\nsemantic / paragraph / hierarchical\nadd metadata: source, page, section"]
+    CHUNK --> EMBED["Embedding Generation\nbatch embed chunks (GPU-accelerated)"]
+    EMBED --> VDB[("Vector DB Upsert\n{chunk_id, embedding, metadata, text}\nHNSW index for fast ANN search")]
+
+    class DOCS io
+    class PARSE,CHUNK,EMBED proc
+    class VDB store
 ```
 
 ### Query Routing (Multi-Source)
-```
-User Query
-     |
-     v
-[Query Router]
-  ↓ "What is X?" (factual)  → Knowledge Base RAG
-  ↓ "Find order #12345"      → SQL Database
-  ↓ "Current stock price?"   → Web Search API
-  ↓ "Summarize last meeting"  → Meeting Notes RAG
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 50}}}%%
+flowchart TD
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef decide fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef search fill:#56b6c2,stroke:#1a8fa0,color:#1a1a1a
+
+    Q([User Query]) --> R{Query Router}
+    R -->|"'What is X?' (factual)"| KB["Knowledge Base RAG"]
+    R -->|"'Find order #12345'"| SQL["SQL Database"]
+    R -->|"'Current stock price?'"| WEB["Web Search API"]
+    R -->|"'Summarize last meeting'"| MN["Meeting Notes RAG"]
+
+    class Q io
+    class R decide
+    class KB,MN proc
+    class SQL,WEB search
 ```
 
 ---

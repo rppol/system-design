@@ -198,41 +198,32 @@ Decomposition is the foundation of agentic RAG (see agentic_rag.md).
 ## 4. Architecture Diagram
 
 ### Query Transformation Pipeline
-```
-User Query
-    |
-    v
-[Query Analysis]
-  "Is this query ambiguous? Too terse? Multi-hop?"
-    |
-    +-- Ambiguous/pronoun-heavy --> [Query Rewriting]
-    |                                    |
-    |                                    v
-    +-- Knowledge gap likely    --> [HyDE Generation]
-    |                                    |
-    |                                    v
-    +-- Broad topic coverage    --> [Multi-Query Expansion]
-    |                                    |
-    |                                    v
-    +-- Complex/multi-hop       --> [Decomposition]
-    |
-    v
-[Transformed Query/Queries]
-    |
-    v
-[Retrieval System]
-  Dense + Sparse search for each query
-    |
-    v
-[Merge + Deduplicate]
-  Combine all retrieved candidates
-    |
-    v
-[Reranker]
-  Score all candidates against original query
-    |
-    v
-Top-K Final Candidates → LLM Generation
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef decide fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
+
+    Q([User Query]) --> QA{Query Analysis\n'Ambiguous? Multi-hop? Broad?'}
+    QA -->|"Ambiguous / pronoun-heavy"| RW["Query Rewriting"]
+    QA -->|"Knowledge gap likely"| HY["HyDE Generation\nhypothetical doc embedding"]
+    QA -->|"Broad topic coverage"| MQ["Multi-Query Expansion\n4 alternative phrasings"]
+    QA -->|"Complex / multi-hop"| DQ["Decomposition\nsub-question DAG"]
+    RW --> TQ["Transformed Query / Queries"]
+    HY --> TQ
+    MQ --> TQ
+    DQ --> TQ
+    TQ --> RET["Retrieval System\nDense + Sparse per query"]
+    RET --> MRG["Merge + Deduplicate\nall retrieved candidates"]
+    MRG --> RNK["Reranker\nscore against original query"]
+    RNK --> ANS(["Top-K Candidates → LLM Generation"])
+
+    class Q,ANS io
+    class QA decide
+    class RET,MRG,RNK,TQ proc
+    class RW,HY,MQ,DQ llm
 ```
 
 ### HyDE vs. Direct Embedding Space

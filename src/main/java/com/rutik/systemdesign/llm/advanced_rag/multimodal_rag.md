@@ -219,55 +219,57 @@ def generate_multimodal_answer(
 ## 4. Architecture Diagram
 
 ### Multimodal Indexing Pipeline
-```
-Source Documents (PDF, PPTX, HTML)
-    |
-    v
-[Document Parser]  (Unstructured.io, PyMuPDF, python-pptx)
-    |
-    +-----------> Text blocks
-    |                 |
-    |                 v
-    |            [Text chunking → Text embeddings → Vector DB]
-    |
-    +-----------> Tables
-    |                 |
-    |                 v
-    |            [Markdown conversion → Text embeddings → Vector DB]
-    |
-    +-----------> Figures/Charts/Diagrams
-                      |
-                      +----> [Vision LLM description] → Text embeddings → Vector DB
-                      |
-                      +----> [CLIP image embeddings]  → Image Vector DB
-                      |
-                      +----> [Original image stored]  → Blob Storage (S3/GCS)
-                                                          (for retrieval + generation)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io    fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef proc  fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef llm   fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef store fill:#e5c07b,stroke:#d4a017,color:#1a1a1a
+
+    DOCS(["Source Documents\nPDF · PPTX · HTML"]) --> DP["Document Parser\nUnstructured.io · PyMuPDF · python-pptx"]
+    DP --> TB["Text blocks"]
+    DP --> TAB["Tables"]
+    DP --> FIG["Figures / Charts / Diagrams"]
+    TB --> TE["Text chunking\n→ Text embeddings"]
+    TAB --> MD["Markdown conversion\n→ Text embeddings"]
+    TE --> VDB[("Vector DB")]
+    MD --> VDB
+    FIG --> VLM["Vision LLM description\n→ Text embeddings"]
+    FIG --> CLIP["CLIP image embeddings"]
+    FIG --> BLOB[("Blob Storage\nS3 / GCS")]
+    VLM --> VDB
+    CLIP --> IDB[("Image Vector DB")]
+
+    class DOCS io
+    class DP,TB,TAB,FIG,TE,MD proc
+    class VLM llm
+    class VDB,IDB,BLOB store
 ```
 
 ### Multimodal Query Pipeline
-```
-User Query (text)
-    |
-    +----> [Text embedding]  ---> Text Vector DB  ---> top-K text/table chunks
-    |
-    +----> [CLIP text embed] ---> Image Vector DB ---> top-K relevant images
-    |                                 (image descriptions also in text DB)
-    v
-[Merge + Rerank]
-    Combine text chunks + image results
-    Cross-encoder reranker (text-only; scores image descriptions)
-    |
-    v
-[Context Assembly]
-    Text chunks + retrieved original images (from blob storage)
-    |
-    v
-[Vision-LLM Generation]  (GPT-4o / Claude 3.5 Sonnet / Gemini 1.5 Pro)
-    Sees both text context AND images
-    |
-    v
-Answer with source citations (document, page, figure number)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io    fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef proc  fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef store fill:#e5c07b,stroke:#d4a017,color:#1a1a1a
+    classDef llm   fill:#c678dd,stroke:#9b59b6,color:#fff
+
+    Q([User Query]) --> TE["Text embedding"]
+    Q --> CE["CLIP text embed"]
+    TE --> VDB[("Text Vector DB")] --> TK["top-K text + table chunks"]
+    CE --> IDB[("Image Vector DB")] --> IK["top-K relevant images"]
+    TK --> MRG["Merge + Rerank\ncross-encoder (text-only scorer)"]
+    IK --> MRG
+    MRG --> CA["Context Assembly\ntext chunks + images from blob"]
+    CA --> GEN["Vision-LLM Generation\nGPT-4o · Claude 3.5 · Gemini 1.5"]
+    GEN --> ANS(["Answer + source citations\n(doc, page, figure number)"])
+
+    class Q,ANS io
+    class TE,CE,TK,IK,MRG,CA proc
+    class VDB,IDB store
+    class GEN llm
 ```
 
 ---

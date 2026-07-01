@@ -184,58 +184,56 @@ Prevents using low-quality retrieved context as grounding
 ## 5. Architecture Diagrams
 
 ### Agentic RAG with Reflection
-```
-Query
-  |
-  v
-[Query Analysis]
-  "What sub-questions do I need to answer?"
-  |
-  v
-[Retrieval Step 1] → Context 1
-  |
-  v
-[Sufficiency Check]
-  "Do I have enough information?"
-  |
-  +-- YES --> [Generation] --> Answer
-  |
-  +-- NO --> [Gap Analysis]
-               "What am I still missing?"
-               |
-               v
-             [Retrieval Step 2] → Context 2
-               |
-               v
-             (loop, max N times)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef decide fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
+
+    Q([Query]) --> QA["Query Analysis\n'What sub-questions do I need?'"]
+    QA --> RET["Retrieval Step\nDense + sparse → context"]
+    RET --> CHK{Sufficiency Check\n'Do I have enough info?'}
+    CHK -->|YES| GEN["Generation"]
+    GEN --> ANS([Answer])
+    CHK -->|NO| GAP["Gap Analysis\n'What am I still missing?'"]
+    GAP --> RET
+
+    class Q,ANS io
+    class QA,RET,GEN proc
+    class CHK decide
+    class GAP llm
 ```
 
 ### Graph RAG Architecture
-```
-Documents
-  |
-  v
-[Entity/Relation Extraction] (LLM-based)
-  |
-  v
-[Knowledge Graph]
-  Nodes: entities (people, orgs, concepts)
-  Edges: relationships with properties
-  |
-  +-----> [Community Detection] (Leiden algorithm)
-  |         |
-  |         v
-  |       [Community Summaries] (LLM-generated)
-  |
-  v
-Query
-  |
-  +-- Global query --> search community summaries
-  |
-  +-- Local query  --> entity search → subgraph extraction → context
-  |
-  v
-[LLM Synthesis]
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef store  fill:#e5c07b,stroke:#d4a017,color:#1a1a1a
+    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef decide fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+
+    DOCS(["Documents"]) --> ERX["Entity/Relation Extraction\n(LLM-based)"]
+    ERX --> KG["Knowledge Graph\nnodes: entities · edges: relationships"]
+    KG --> CD["Community Detection\n(Leiden algorithm)"]
+    CD --> CS["Community Summaries\n(LLM-generated)"]
+    Q([User Query]) --> QR{Query Type?}
+    KG --> QR
+    CS --> QR
+    QR -->|"Global (thematic)"| GSR["Community Summary Retrieval"]
+    QR -->|"Local (entity-specific)"| ES["Entity Search\n→ subgraph extraction"]
+    GSR --> SYNTH["LLM Synthesis"]
+    ES --> SYNTH
+    SYNTH --> ANS([Answer])
+
+    class DOCS,Q,ANS io
+    class ERX,CD,CS,GSR,ES proc
+    class KG store
+    class SYNTH llm
+    class QR decide
 ```
 
 ### RAG Evaluation Dimensions

@@ -166,35 +166,32 @@ Tool-calling agentic RAG is cleaner than orchestrated loops: the LLM decides whe
 ## 4. Architecture Diagram
 
 ### Agentic RAG Control Flow
-```
-User Query
-    |
-    v
-[Initial Query Analysis]
-  "What sub-questions must I answer?"
-    |
-    v
-[Retrieval Step N]
-  LLM generates retrieval query
-  → Dense + sparse retrieval → rerank → inject context
-    |
-    v
-[Sufficiency Check]
-  LLM evaluates: "Can I answer the original query with current context?"
-    |
-    +-- SUFFICIENT ---> [Final Generation] --> Answer
-    |
-    +-- INSUFFICIENT --> [Gap Analysis]
-    |                     "What am I still missing?"
-    |                         |
-    |                         v
-    |                    [Next Retrieval Query]
-    |                         |
-    |                         v
-    +<----(N < max_iter)-- [Retrieval Step N+1]
-    |
-    +-- MAX ITER REACHED --> [Best-effort Generation]
-                              "Based on available context..."
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef decide fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef warn   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+
+    Q([User Query]) --> QA["Initial Query Analysis\n'What sub-questions must I answer?'"]
+    QA --> RETN["Retrieval Step N\nLLM generates retrieval query\nDense + sparse → rerank → inject"]
+    RETN --> CHK{Sufficiency Check}
+    CHK -->|SUFFICIENT| FG["Final Generation"]
+    FG --> ANS([Answer])
+    CHK -->|INSUFFICIENT| GAP["Gap Analysis\n'What am I still missing?'"]
+    GAP --> NRQ["Next Retrieval Query"]
+    NRQ --> ITER{N < max_iter?}
+    ITER -->|YES| RETN
+    ITER -->|NO| BEG["Best-effort Generation\n'Based on available context...'"]
+    BEG --> ANS
+
+    class Q,ANS io
+    class QA,RETN,FG proc
+    class CHK,ITER decide
+    class GAP,NRQ llm
+    class BEG warn
 ```
 
 ### FLARE Mid-Generation Retrieval

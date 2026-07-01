@@ -161,32 +161,30 @@ def self_rag_generate(query: str, model, retriever, beam_width: int = 4):
 ## 4. Architecture Diagram
 
 ### Self-RAG Token Generation Flow
-```
-Query: "What is the capital of France?"
-  |
-  v
-[Model generates: [No Retrieve]]
-  "Paris is the capital of France."   ← direct generation, no retrieval
-  [Utility: 5]
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef decide fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef search fill:#56b6c2,stroke:#1a8fa0,color:#1a1a1a
 
+    Q([Query]) --> DEC{[Retrieve] token\ngenerated?}
+    DEC -->|"[No Retrieve]"| DG["Direct Generation\nno retrieval needed\n[Utility: 5]"]
+    DEC -->|"[Retrieve]"| RET["Retriever\npassage_1, passage_2, passage_3"]
+    RET --> EVAL["Evaluate each passage\n[Relevant] or [Irrelevant]"]
+    EVAL --> GEN["Generate response\nper relevant passage"]
+    GEN --> SUP["Score support level\n[Supported] / [Partially Supported]"]
+    SUP --> SEL["Select best response\nhighest support score"]
+    DG --> ANS([Output])
+    SEL --> ANS
 
-Query: "What were Apple's Q3 2024 earnings?"
-  |
-  v
-[Model generates: [Retrieve]]
-  |
-  v
-[Retriever] → passage_1, passage_2, passage_3
-  |
-  v
-[Model evaluates each passage:]
-  passage_1: [Relevant]   → generate response_1 → [Supported]
-  passage_2: [Irrelevant] → skip
-  passage_3: [Relevant]   → generate response_2 → [Partially Supported]
-  |
-  v
-[Select best: response_1 has higher support score]
-  Output: response_1 with [Supported] statements
+    class Q,ANS io
+    class DEC decide
+    class RET,EVAL proc
+    class DG,GEN,SEL llm
+    class SUP search
 ```
 
 ### Self-RAG vs. Standard RAG Comparison
