@@ -39,11 +39,25 @@ Modern training infrastructure centers on three forms of parallelism: splitting 
 
 Each GPU holds a full copy of the model; each processes a different batch. Gradients are averaged across GPUs at the end of each step.
 
-```
-GPU 0: model copy + batch_0 --> grad_0 ]
-GPU 1: model copy + batch_1 --> grad_1 ]--> AllReduce(grads) --> update all models
-GPU 2: model copy + batch_2 --> grad_2 ]
-GPU 3: model copy + batch_3 --> grad_3 ]
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+
+    G0["GPU 0\nmodel copy\nbatch_0 → grad_0"]
+    G1["GPU 1\nmodel copy\nbatch_1 → grad_1"]
+    G2["GPU 2\nmodel copy\nbatch_2 → grad_2"]
+    G3["GPU 3\nmodel copy\nbatch_3 → grad_3"]
+    AR["AllReduce\naverage gradients\nacross all GPUs"]
+    UP["Update all model copies\nwith averaged gradient"]
+
+    G0 & G1 & G2 & G3 --> AR --> UP
+
+    class G0,G1,G2,G3 proc
+    class AR decide
+    class UP io
 ```
 
 **Problem**: For a 70B model in BF16, each GPU needs ~140GB just for model weights. No single GPU has that much memory.

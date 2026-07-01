@@ -142,21 +142,32 @@ Next Token Probabilities
 ```
 
 ### Multi-Head Attention Detail
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    IN["Input x\nseq_len × d_model"]
+    QW["Q = x · W_Q\nseq_len × d_k"]
+    KW["K = x · W_K\nseq_len × d_k"]
+    VW["V = x · W_V\nseq_len × d_v"]
+    ATT["Attn = softmax(QKᵀ / √d_k) · V\ncomputed independently per head"]
+    CAT["Concat h heads → project\nd_model → d_model"]
+    OUT["Output\nseq_len × d_model"]
+
+    IN --> QW & KW & VW
+    QW & KW & VW --> ATT
+    ATT --> CAT --> OUT
+
+    class IN,OUT io
+    class QW,KW,VW,CAT proc
+    class ATT llm
 ```
-Input x (seq_len × d_model)
-     |
-     +-----> Q = x * W_Q  (seq_len × d_k)
-     +-----> K = x * W_K  (seq_len × d_k)
-     +-----> V = x * W_V  (seq_len × d_v)
-                   |
-                   v
-         Attention(Q,K,V) = softmax(QKᵀ / √d_k) * V
-                   |
-     [Repeat for h heads, concatenate, project]
-                   |
-                   v
-             Output (seq_len × d_model)
-```
+
+Three projections fan out from the same input; all heads compute attention in parallel, then their outputs are concatenated and projected back to `d_model`.
 
 ### Decoder-Only Causal Mask
 ```
@@ -220,31 +231,35 @@ LR warmup (10K+ steps).                Nearly all models ≥7B use Pre-LN.
 
 ### Mixture-of-Experts (MoE) Routing
 
-```
-Input token x
-      │
-      ▼
-  [Router]  ← learned linear layer
-      │
-   softmax over N experts → select top-K scores
-      │
-      ├──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐
-      │          │          │          │          │          │          │          │
-    [E0]      [E1]      [E2]      [E3]      [E4]      [E5]      [E6]      [E7]
-   (active)  (active)  (skipped) (skipped) (skipped) (skipped) (skipped) (skipped)
-      │          │
-      └────┬─────┘
-    weighted sum (router scores × expert outputs)
-           │
-           ▼
-       output
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
 
-Total params  = N × FFN_size    ← all experts must reside in memory
-Active params = K × FFN_size    ← only K experts compute per token
+    TOK["Input token x"]
+    RTR["Router\nlearned linear layer"]
+    SOFT{"softmax over N experts\nselect top-K"}
+    E0["Expert 0\n(active)"]
+    E1["Expert 1\n(active)"]
+    SKIP["Experts 2 … N-1\n(skipped — no compute)"]
+    WS["Weighted sum\nrouter scores × expert outputs"]
+    OUT["Output"]
 
-DeepSeek-V3: N=256 experts, K=8 active, total=671B params, active=37B params
-→ inference cost of a 37B dense model at the quality of a 671B model.
+    TOK --> RTR --> SOFT
+    SOFT -->|"top-K selected"| E0 & E1
+    SOFT -.->|"rank > K"| SKIP
+    E0 & E1 --> WS --> OUT
+
+    class TOK,OUT io
+    class RTR,E0,E1,WS proc
+    class SOFT decide
+    class SKIP warn
 ```
+
+Total params = N × FFN\_size (all experts in memory); active params = K × FFN\_size per token. DeepSeek-V3: N=256 experts, K=8 active, total=671B params, active=37B — inference cost of a 37B dense model at the quality of a 671B model.
 
 ### Softmax Temperature — Distribution Shape
 

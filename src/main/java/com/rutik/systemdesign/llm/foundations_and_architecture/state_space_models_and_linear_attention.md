@@ -194,30 +194,36 @@ are time-invariant (S4; NOT Mamba-1, whose A,B,C vary per step):
 
 ### 5.2 Selective SSM Block (Mamba)
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    XT["x_t — current token hidden vector"]
+    D["Linear → delta_t\nhow much to update the state"]
+    B["Linear → B_t\nwhat to write into state"]
+    C["Linear → C_t\nwhat to read out of state"]
+    AB["A_bar_t = exp(delta_t · A)\ndiscretised transition matrix"]
+    H["h_t = A_bar_t · h_{t-1} + B_t · x_t\nselective state update"]
+    Y["y_t = C_t · h_t"]
+    OUT["Output (+ residual / gated MLP, SiLU)"]
+
+    XT --> D & B & C
+    D --> AB
+    AB --> H
+    B --> H
+    H --> Y
+    C --> Y
+    Y --> OUT
+
+    class XT,OUT io
+    class D,B,C,AB proc
+    class H,Y llm
 ```
-   x_t (current token's hidden vector)
-     |
-     +------------------+------------------+
-     |                  |                  |
-     v                  v                  v
-  Linear->delta_t   Linear->B_t        Linear->C_t       <- INPUT-DEPENDENT
-  (how much to        (what to            (what to           (the "selection"
-   update)             write in)           read out)           mechanism, §3.3)
-     |                  |                  |
-     v                  v                  |
-  A_bar_t = exp(delta_t * A)               |
-     |                  |                  |
-     +--------+---------+                  |
-              v                            |
-  h_t = A_bar_t * h_{t-1} + B_t * x_t       |
-              |                            |
-              +-------------+--------------+
-                             v
-                       y_t = C_t * h_t
-                             |
-                             v
-                   (+ residual / gated MLP, SiLU)
-```
+
+All three projections (delta\_t, B\_t, C\_t) are input-dependent — this is the "selection mechanism" that lets Mamba selectively remember or forget, unlike fixed-A classic SSMs.
 
 ### 5.3 Parallel (Associative) Scan
 

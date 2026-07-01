@@ -128,44 +128,35 @@ Properties:
 ## 5. Architecture Diagrams
 
 ### Pre-Training Data Pipeline
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef store fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    WEB["Web Crawls\n(Common Crawl)"]
+    BOOKS["Books\n(Books3, Project Gutenberg)"]
+    CODE["Code\n(GitHub, The Stack)"]
+    SCI["Scientific Papers\n(arXiv, PubMed)"]
+    WIKI["Wikipedia + Wikidata\n+ curated datasets"]
+
+    DEDUP["Collection & Deduplication\nURL dedup · MinHash · exact substring dedup"]
+    FILTER["Quality Filtering\nlang-ID · perplexity · classifier · heuristics · PII removal"]
+    MIX["Data Mixing & Sampling\nweb 50% · code 20% · books 15% · oversample high-quality"]
+    PACK["Tokenization & Packing\n4096-token fixed-length sequences, shuffled across docs"]
+    TRAIN["Pre-Training"]
+
+    WEB & BOOKS & CODE & SCI & WIKI --> DEDUP
+    DEDUP --> FILTER --> MIX --> PACK --> TRAIN
+
+    class WEB,BOOKS,CODE,SCI,WIKI io
+    class DEDUP,FILTER,MIX,PACK proc
+    class TRAIN store
 ```
-Raw Data Sources:
-  Web crawls (Common Crawl)
-  Books (Books3, Project Gutenberg)
-  Code (GitHub, The Stack)
-  Scientific papers (arXiv, PubMed)
-  Wikipedia, Wikidata
-  Curated datasets
-          |
-          v
-[Data Collection & Deduplication]
-  - URL-level dedup (remove exact URL duplicates)
-  - MinHash document dedup (near-duplicate removal)
-  - Exact substring dedup
-          |
-          v
-[Quality Filtering]
-  - Language identification (keep target language(s))
-  - Perplexity filtering (remove gibberish / low-quality)
-  - Classifier-based filtering (hate speech, adult content)
-  - Heuristic filtering (too short, too repetitive)
-  - Removal of PII (emails, phone numbers)
-          |
-          v
-[Data Mixing & Sampling]
-  - Set mixing ratios (web: 50%, code: 20%, books: 15%, etc.)
-  - Oversample high-quality sources
-  - Upsample underrepresented languages
-          |
-          v
-[Tokenization & Packing]
-  - Tokenize all documents
-  - Pack tokens into fixed-length sequences (e.g., 4096 tokens)
-  - Shuffle across documents
-          |
-          v
-[Training]
-```
+
+~3–5 % of raw Common Crawl survives quality filtering; high-quality sources (Wikipedia, curated books) are oversampled to compensate for their small volume.
 
 ### Learning Rate Schedule
 ```

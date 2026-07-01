@@ -112,33 +112,35 @@ Doc    → Encoder → d_vec  ]
 ## 5. Architecture Diagrams
 
 ### Embedding Retrieval Pipeline
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    Q["Query\n\"How does attention work?\""]
+    ENC["Query Encoder\nbi-encoder (BGE-base)"]
+    VEC["Query Vector\n768 dim"]
+    ANN["ANN Index\nHNSW via Qdrant / Weaviate"]
+    CANDS["Top-100 candidate doc IDs + scores"]
+    FETCH["Fetch document texts\nfrom document store"]
+    RERANK["Cross-Encoder Reranker\nBGE-reranker-large"]
+    TOP10["Top-10 reranked results"]
+    LLM["LLM generation with context"]
+
+    Q --> ENC --> VEC --> ANN --> CANDS --> FETCH --> RERANK --> TOP10 --> LLM
+
+    class Q,LLM io
+    class ENC,VEC,CANDS proc
+    class ANN,FETCH store
+    class RERANK llm
+    class TOP10 proc
 ```
-Query: "How does attention work?"
-     |
-     v
-[Query Encoder]  (bi-encoder, e.g., BGE-base)
-     |
-     v
-Query Vector: [0.12, -0.34, ..., 0.89]  (768 dim)
-     |
-     v
-[ANN Index]  (HNSW in Qdrant/Weaviate)
-     |
-     v
-Top-100 candidate document IDs + scores
-     |
-     v
-[Fetch document texts from store]
-     |
-     v
-[Cross-Encoder Reranker]  (BGE-reranker-large)
-     |
-     v
-Top-10 reranked results
-     |
-     v
-[LLM generation with context]
-```
+
+The bi-encoder runs at query time (fast ANN lookup over pre-indexed vectors); the cross-encoder runs only on the top-100 shortlist — avoiding the O(n) full-corpus cross-encoder cost.
 
 ### HNSW Index Structure
 ```
