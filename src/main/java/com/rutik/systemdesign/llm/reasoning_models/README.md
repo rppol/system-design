@@ -309,30 +309,29 @@ Key insight: accuracy scales log-linearly with test-time compute
 ```
 
 ### GRPO Training Loop (DeepSeek-R1 style)
-```
-Prompt (math/code problem)
-     |
-     v
-[Policy LLM] generates G responses (group)
-     |
-     v
-[Reward Function]
-  For each response i:
-    r_i = 1 if final_answer == ground_truth else 0
-    r_i += format_bonus if <think>...</think> used
-     |
-     v
-[Advantage Computation]
-  A_i = (r_i - mean(r)) / std(r)  (within group)
-  -- no value function needed (advantage relative to group)
-     |
-     v
-[GRPO Loss]
-  Maximize: Σ_i A_i × log π_θ(response_i)
-  Constrained by KL(π_θ || π_ref) < ε
-     |
-     v
-[Updated Policy]
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm   fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    PROMPT["Prompt (math / code problem)"]
+    GEN["Policy LLM\ngenerate G responses (group)"]
+    REW["Reward Function\nr_i = 1 if answer == ground truth, else 0\n+ format bonus if think…/think used"]
+    ADV["Advantage Computation\nA_i = (r_i − mean(r)) / std(r)\n(no value function needed)"]
+    LOSS["GRPO Loss\nmaximise Σ_i A_i × log π_θ(response_i)\nKL(π_θ ‖ π_ref) < ε"]
+    UPD["Updated Policy"]
+
+    PROMPT --> GEN --> REW --> ADV --> LOSS --> UPD
+
+    class PROMPT io
+    class GEN llm
+    class REW,ADV proc
+    class LOSS store
+    class UPD llm
 ```
 
 ---

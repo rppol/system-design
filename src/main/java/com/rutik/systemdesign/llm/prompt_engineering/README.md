@@ -203,29 +203,28 @@ Best practices for system prompts:
 ## 5. Architecture Diagrams
 
 ### Prompt Construction Pipeline
-```
-User Query
-     |
-     v
-[Context Retrieval] -- RAG: fetch relevant docs
-     |
-     v
-[Prompt Template]
-  ┌─────────────────────────────────┐
-  │ System: [role + instructions]   │
-  │                                 │
-  │ [Few-shot examples if needed]   │
-  │                                 │
-  │ Context: [retrieved docs]       │
-  │                                 │
-  │ User: [actual query]            │
-  │                                 │
-  │ Assistant: [partial answer      │
-  │            to guide format]     │
-  └─────────────────────────────────┘
-     |
-     v
-[LLM] → Response
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef store fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef llm   fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    Q["User query"]
+    RAG["Context retrieval\n(RAG: fetch relevant docs)"]
+    TPL["Prompt template assembly\nsystem role + instructions\nfew-shot examples\nretrieved context\nuser query\nassistant prefix for format guidance"]
+    LLM["LLM"]
+    RESP["Response"]
+
+    Q --> RAG --> TPL --> LLM --> RESP
+
+    class Q io
+    class RAG store
+    class TPL proc
+    class LLM llm
+    class RESP io
 ```
 
 ### Chain-of-Thought Effect on Accuracy (Math Tasks)

@@ -258,43 +258,42 @@ trainer.train()
 ## 4. Architecture Diagram
 
 ### Embedding Model in RAG Pipeline
-```
-INDEX TIME:
-Document Chunks
-    |
-    v
-[Embedding Model]
-  BAAI/bge-base-en-v1.5 (self-hosted)
-  OR text-embedding-3-small (API)
-    |
-    v
-Dense Vectors [768-dim or 1536-dim, L2-normalized]
-    |
-    v
-[Vector Database]
-  HNSW index for ANN search
-  Stored with metadata
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef store fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef llm   fill:#1e2127,stroke:#c678dd,color:#abb2bf
 
-QUERY TIME:
-User Query
-    |
-    v
-[Same Embedding Model]
-  CRITICAL: use IDENTICAL model at query time
-    |
-    v
-Query Vector [same dimensionality]
-    |
-    v
-[ANN Search] → Top-100 candidate chunks
-    |
-    v
-[Reranker] → Top-5 final chunks
-    |
-    v
-[LLM Generation]
+    subgraph IDX ["Index Time"]
+        CHUNKS["Document chunks"]
+        EMB_I["Embedding model\nBAAI/bge-base or text-embedding-3-small"]
+        VECS["Dense vectors\n768-dim or 1536-dim, L2-normalised"]
+        VDB["Vector Database\nHNSW index + metadata"]
+        CHUNKS --> EMB_I --> VECS --> VDB
+    end
+
+    subgraph QRY ["Query Time"]
+        Q["User query"]
+        EMB_Q["Same embedding model\n(CRITICAL: identical model at query time)"]
+        QVEC["Query vector\n(same dimensionality)"]
+        ANN["ANN search\n→ top-100 candidate chunks"]
+        RERANK["Reranker\n→ top-5 final chunks"]
+        LLM["LLM generation"]
+        Q --> EMB_Q --> QVEC --> ANN --> RERANK --> LLM
+    end
+
+    VDB --> ANN
+
+    class CHUNKS,Q io
+    class EMB_I,EMB_Q,VECS,QVEC,ANN,RERANK proc
+    class VDB store
+    class LLM llm
 ```
+
+Using a different embedding model at query time than at index time is the most common RAG production bug — vectors live in incompatible spaces and similarity scores are meaningless.
 
 ### Matryoshka Representation Learning (MRL)
 ```

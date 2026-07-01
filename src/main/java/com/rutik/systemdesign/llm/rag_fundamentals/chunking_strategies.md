@@ -219,23 +219,29 @@ Rule of thumb: overlap = 10-15% of chunk size
 ## 4. Architecture Diagram
 
 ### Chunking Strategy Selection
-```
-Document Type?
-    |
-    +-- Code ---------> AST-aware chunking (function/class level)
-    |
-    +-- Structured -----> Section/heading-based chunking
-    |   (legal, API docs)    + metadata for section title
-    |
-    +-- Mixed content --> Hierarchical chunking
-    |   (research papers,    parent: paragraph (600 tokens)
-    |    reports)            child: sentence (150 tokens)
-    |
-    +-- Conversational --> Turn-based chunking
-    |   (chat logs)          5-10 turns per chunk
-    |
-    +-- General prose ---> Sentence-boundary chunking
-                           300-500 tokens + 50 token overlap
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+
+    DOC{"Document type?"}
+    CODE["Code\nAST-aware chunking\n(function / class level)"]
+    STRUCT["Structured (legal, API docs)\nSection / heading-based\n+ metadata for section title"]
+    MIXED["Mixed content (research, reports)\nHierarchical chunking\nparent: 600 tokens · child: 150 tokens"]
+    CONV["Conversational (chat logs)\nTurn-based chunking\n5–10 turns per chunk"]
+    PROSE["General prose\nSentence-boundary chunking\n300–500 tokens + 50-token overlap"]
+
+    DOC -->|"code"| CODE
+    DOC -->|"structured"| STRUCT
+    DOC -->|"mixed"| MIXED
+    DOC -->|"conversational"| CONV
+    DOC -->|"general prose"| PROSE
+
+    class DOC decide
+    class CODE,STRUCT,MIXED,CONV,PROSE proc
 ```
 
 ### Hierarchical Chunk Architecture
