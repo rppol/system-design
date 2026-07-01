@@ -278,3 +278,17 @@ above adds belt-and-suspenders to also nullify the SVG rect fill.
   attribute first: `node.removeAttribute("data-processed")`.
 - **Em dash `—` in labels** is one Mermaid "character" and renders fine in SVG.
   Middle dot `·` and times `×` also render fine.
+- **`[ ]` square brackets in node labels cause syntax errors** — Mermaid's lexer
+  treats `[text]` as a rectangle-node shape token anywhere in the source, even
+  inside `{...}` diamond or `([...])` stadium labels. Symptoms: "Syntax error in
+  text" bomb icon in the reader. Two safe fixes:
+  1. Quote the whole node label: `RE{"score each doc (0.0–1.0)"}` (preferred)
+  2. Replace `[x]` with `(x)` or omit the brackets entirely
+  This applies to edge labels too — `|"[Retrieve]"|` works because it is
+  inside a quoted string, but `{[Retrieve] token\ngenerated?}` fails. Confirmed
+  in Mermaid v11.16.0 (the CDN version the reader loads).
+- **Click-to-zoom is wired globally** — `renderMermaid()` adds a click listener to
+  every rendered `.mermaid` div. Clicking opens a full-screen dark overlay with the
+  cloned SVG; `−`/`+` buttons and mouse-wheel adjust zoom (25% and 10% steps
+  respectively); Escape/background-click/`✕` closes. No per-diagram work required;
+  all diagrams get this automatically.
