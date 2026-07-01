@@ -401,6 +401,13 @@ a.mod-file.active { color: var(--od-text); border-right-color: var(--accent); ba
 .md-body .mermaid { background: var(--od-bg); border: 1px solid var(--od-line); border-radius: 10px;
   padding: 18px; margin: 14px 0; text-align: center; overflow-x: auto; }
 .md-body .mermaid svg { max-width: 100%; height: auto; }
+/* Arrow paths — bright blue, slightly thicker for visibility */
+.md-body .mermaid svg .edgePath .path { stroke: #61afef !important; stroke-width: 2px !important; }
+/* Edge labels — transparent background (no black pill), gold text */
+.md-body .mermaid svg .edgeLabel .label rect { fill: transparent !important; stroke: none !important; }
+.md-body .mermaid svg .edgeLabel foreignObject > div { background: transparent !important; color: #e5c07b !important; font-size: 11px; }
+/* Cluster (subgraph) borders — dashed blue outline, very subtle fill */
+.md-body .mermaid svg .cluster rect { stroke-dasharray: 5 3 !important; stroke-width: 1.5px !important; }
 .md-body blockquote { border-left: 3px solid #c678dd; margin: 10px 0; padding: 4px 14px; color: var(--od-muted); }
 .md-body table { border-collapse: collapse; margin: 12px 0; font-size: 13px; display: block; overflow-x: auto; }
 .md-body th, .md-body td { border: 1px solid var(--od-line); padding: 6px 10px; text-align: left; vertical-align: top; }

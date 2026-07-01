@@ -1036,16 +1036,17 @@ async function renderMermaid(root) {
             themeVariables: {
               background:          "#000000",
               mainBkg:             "#1a1a1a",
-              nodeBorder:          "#4b5263",
-              lineColor:           "#61afef",   // bright blue edges — visible on black
+              nodeBorder:          "#3b4048",
+              lineColor:           "#61afef",
               textColor:           "#abb2bf",
-              edgeLabelBackground: "#000000",
-              clusterBkg:          "#0d0d0d",   // subgraph fill (very dark)
-              clusterBorder:       "#3b4048",
-              titleColor:          "#e5c07b",   // subgraph titles gold
+              edgeLabelBackground: "transparent",  // no black pill around edge labels
+              clusterBkg:          "rgba(97,175,239,0.05)",
+              clusterBorder:       "rgba(97,175,239,0.35)",
+              titleColor:          "#e5c07b",
               labelBackground:     "#000000",
               fontFamily:          "ui-monospace, SFMono-Regular, Menlo, monospace",
             },
+            flowchart: { curve: "basis", padding: 20, nodeSpacing: 45, rankSpacing: 55 },
           });
           return m.default;
         });
@@ -1054,6 +1055,13 @@ async function renderMermaid(root) {
     // Un-mark any nodes already rendered so mermaid re-processes them on navigation.
     nodes.forEach(n => n.removeAttribute("data-processed"));
     await mermaid.run({ nodes });
+    // Post-process SVG: round node corners + color arrowhead markers
+    // (Mermaid sets marker fill independently of lineColor themeVariable)
+    nodes.forEach(n => {
+      n.querySelectorAll(".node rect").forEach(r => { r.setAttribute("rx", "8"); r.setAttribute("ry", "8"); });
+      n.querySelectorAll(".cluster rect").forEach(r => { r.setAttribute("rx", "12"); r.setAttribute("ry", "12"); });
+      n.querySelectorAll("marker path, marker polygon").forEach(m => { m.setAttribute("fill", "#61afef"); m.removeAttribute("stroke"); });
+    });
   } catch (err) {
     // CDN unavailable or offline — raw source stays visible as text, nothing crashes.
     console.warn("Mermaid render failed:", err);
