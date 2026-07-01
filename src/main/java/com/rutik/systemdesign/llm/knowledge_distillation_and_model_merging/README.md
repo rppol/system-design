@@ -354,59 +354,70 @@ N:M sparsity is the only pruning scheme that delivers guaranteed wall-clock spee
 
 ### Knowledge Distillation Pipeline
 
-```
-                    Training Data
-                         |
-              +----------+----------+
-              |                     |
-              v                     v
-    +------------------+   +------------------+
-    | Teacher Model    |   | Student Model    |
-    | (70B, frozen)    |   | (7B, trainable)  |
-    +--------+---------+   +--------+---------+
-             |                      |
-             v                      v
-    [Teacher Logits / T]   [Student Logits / T]
-             |                      |
-             +--------+    +--------+
-                      |    |
-                      v    v
-              [KL Divergence Loss]  <-- Soft label loss (dark knowledge)
-                      |
-                      + alpha weighting
-                      |
-              [Cross-Entropy Loss]  <-- Hard label loss (ground truth)
-                      |
-                      v
-              [Combined Loss]
-                      |
-                      v
-              [Update Student Weights via Backprop]
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm   fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef store fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    DATA["Training Data"]
+    TCH["Teacher Model\n(70B, frozen)"]
+    STU["Student Model\n(7B, trainable)"]
+    TL["Teacher logits / T\n(soft labels — dark knowledge)"]
+    SL["Student logits / T"]
+    KL["KL Divergence Loss\n(soft label loss)"]
+    CE["Cross-Entropy Loss\n(hard label / ground truth)"]
+    COMB["Combined Loss\nα × KL + (1−α) × CE"]
+    UPD["Update Student Weights\n(backprop)"]
+
+    DATA --> TCH & STU
+    TCH --> TL
+    STU --> SL
+    TL & SL --> KL
+    STU --> CE
+    KL & CE --> COMB --> UPD --> STU
+
+    class DATA io
+    class TCH,STU llm
+    class TL,SL,KL,CE proc
+    class COMB,UPD store
 ```
 
 ### Model Merging Decision Tree
 
-```
-How many models to merge?
-  |
-  +-- Exactly 2 models
-  |     |
-  |     +-- Same base model? --> SLERP (best for 2-model merges)
-  |     +-- Different bases? --> Not recommended (weight spaces misaligned)
-  |
-  +-- 3+ models
-  |     |
-  |     +-- Same base model?
-  |           |
-  |           +-- Yes --> TIES (handles sign conflicts well)
-  |           |          DARE + TIES (even better with sparsification)
-  |           +-- No  --> Not recommended
-  |
-  +-- Same model, different runs/hyperparameters --> Model Soups (simple averaging)
-  |
-  +-- Want to create a LARGER model --> FrankenMerge (layer stacking)
-  |
-  +-- Want to add/remove specific capabilities --> Task Arithmetic (add/subtract vectors)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    HOW{"How many models\nto merge?"}
+    TWO{"Exactly 2 —\nsame base model?"}
+    SLERP["SLERP\n(best for 2-model merges)"]
+    NOBASE["Not recommended\n(weight spaces misaligned)"]
+    THREE{"3+ models —\nsame base model?"}
+    TIES["TIES or DARE+TIES\n(handles sign conflicts)"]
+    NOR3["Not recommended"]
+    SOUP["Model Soups\n(simple averaging)"]
+    FRANK["FrankenMerge\n(layer stacking → larger model)"]
+    TA["Task Arithmetic\n(add/subtract capability vectors)"]
+
+    HOW -->|"2 models"| TWO
+    HOW -->|"3+ models"| THREE
+    HOW -->|"same model, diff runs"| SOUP
+    HOW -->|"create larger model"| FRANK
+    HOW -->|"add/remove capability"| TA
+    TWO -->|"same base"| SLERP
+    TWO -->|"different bases"| NOBASE
+    THREE -->|"same base"| TIES
+    THREE -->|"different bases"| NOR3
+
+    class HOW,TWO,THREE decide
+    class SLERP,TIES,SOUP,FRANK,TA proc
+    class NOBASE,NOR3 warn
 ```
 
 ### Pruning Pipeline

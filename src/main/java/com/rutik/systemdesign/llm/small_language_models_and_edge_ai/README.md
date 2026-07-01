@@ -199,32 +199,24 @@ Hard label: "sat"                   Soft knowledge transfer:
 
 ### Quantization Flow for Edge Deployment
 
-```
-ORIGINAL MODEL (FP32/FP16)
-   Weights: 7.2 GB (Phi-3 3.8B, FP16)
-         |
-         v
-+---------------------------+
-| Quantization Step         |
-|  GPTQ / AWQ / GGUF       |
-|  Calibration dataset      |
-|  Group-wise scaling       |
-|  (Q4_K_M: groups of 32)  |
-+---------------------------+
-         |
-         v
-QUANTIZED MODEL (INT4)
-   Weights: 2.4 GB
-   +-------------------+
-   | Weight packing    |  2 INT4 weights per byte
-   | Scale factors     |  FP16 per group of 32
-   | Zero points       |  Offset for asymmetric quant
-   +-------------------+
-         |
-         v
-RUNTIME DEQUANTIZATION (on-the-fly)
-   During inference: INT4 -> FP16 per matrix multiply
-   Compute: XNNPACK / Metal / Vulkan / Qualcomm HTP
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    OG["Original Model (FP32/FP16)\nweights: 7.2 GB (Phi-3 3.8B, FP16)"]
+    QUANT["Quantization Step\nGPTQ / AWQ / GGUF\ncalibration dataset\ngroup-wise scaling (Q4_K_M: groups of 32)"]
+    INT4["Quantized Model (INT4)\nweights: 2.4 GB\n2 INT4 per byte · FP16 scale per 32 · zero points"]
+    DEQU["Runtime Dequantisation (on-the-fly)\nINT4 → FP16 per matmul\nXNNPACK / Metal / Vulkan / Qualcomm HTP"]
+
+    OG --> QUANT --> INT4 --> DEQU
+
+    class OG io
+    class QUANT proc
+    class INT4 store
+    class DEQU llm
 ```
 
 ### On-Device Inference Hardware Stack

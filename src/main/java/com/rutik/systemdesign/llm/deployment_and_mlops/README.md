@@ -175,74 +175,59 @@ Key principle: Prompt changes go through PR review just like code. A one-word ch
 ## 5. Architecture Diagrams
 
 ### Full LLM Production Stack
-```
-                    Client Applications
-                    (Web, Mobile, API)
-                           |
-                           v
-                    [Load Balancer]
-                    (Nginx / AWS ALB)
-                           |
-                           v
-                    [LLM Gateway Cluster]
-                    Auth | Rate Limit | Cache
-                    Route | Log | Cost Track
-                           |
-              +------------+------------+
-              |            |            |
-              v            v            v
-       [vLLM Cluster] [OpenAI API] [Embedding]
-       Self-hosted     (overflow)   (Dedicated)
-       models                       Servers
-              |
-       [GPU Pool]
-       A100/H100
-       Auto-scaling
-              |
-              v
-     [Monitoring Stack]
-     Latency | Cost | Quality
-     Drift | Error rates
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm   fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    CLI["Client Applications\n(web, mobile, API)"]
+    LB["Load Balancer\n(Nginx / AWS ALB)"]
+    GW["LLM Gateway Cluster\nauth · rate limit · cache · route · log · cost track"]
+    VLLM["vLLM Cluster\nself-hosted models"]
+    OAI["OpenAI API\n(overflow)"]
+    EMB["Embedding Servers\n(dedicated)"]
+    GPU["GPU Pool\nA100/H100 auto-scaling"]
+    MON["Monitoring Stack\nlatency · cost · quality · drift · error rates"]
+
+    CLI --> LB --> GW
+    GW --> VLLM & OAI & EMB
+    VLLM --> GPU --> MON
+
+    class CLI io
+    class LB,GW proc
+    class VLLM,OAI,EMB,GPU llm
+    class MON store
 ```
 
 ### Deployment Pipeline with Canary Strategy
-```
-Development
-  └── Prompt iteration (LangSmith / PromptLayer)
-      Prompt changes go through PR review
-      |
-      v
-Staging
-  └── Automated evaluation suite
-      |── MMLU / domain benchmarks
-      |── Safety tests
-      |── Regression tests vs. current production
-      Pass threshold (e.g., no regression > 2%)
-      |
-      v
-Shadow Mode (optional)
-  └── New model runs in parallel, results NOT served
-      Compare outputs offline against production model
-      Catch catastrophic regressions before any user sees them
-      |
-      v
-Production Canary (1-5% traffic)
-  └── Traffic split via consistent hashing on user_id
-      Monitor for 24-48 hours:
-      |── Latency P99 > 2x baseline? → auto rollback
-      |── Quality score drop > 5%?   → auto rollback
-      |── Error rate > 1%?           → auto rollback
-      |── Safety violations?          → immediate rollback
-      |
-      v
-Gradual Ramp (5% → 25% → 50% → 100%)
-  └── Each step: 12-24 hours observation
-      Automated metric comparison at each gate
-      |
-      v
-Full Rollout
-  └── Old model kept warm for 24 hours (instant rollback)
-      Old prompt version preserved in registry
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    DEV["Development\nprompt iteration (LangSmith) · PR review"]
+    STG["Staging\nMMCL/domain benchmarks · safety · regression tests\npass threshold: no regression > 2%"]
+    SHADOW["Shadow Mode (optional)\nnew model runs in parallel, results NOT served\ncompare offline vs. production"]
+    CAN["Production Canary (1–5% traffic)\n24–48h monitoring: P99 latency · quality score · error rate · safety"]
+    ROLLBACK["Auto rollback\n(P99 > 2×, quality −5%, error > 1%, safety violation)"]
+    RAMP["Gradual Ramp  5% → 25% → 50% → 100%\n12–24h observation per gate"]
+    FULL["Full Rollout\nold model warm 24h for instant rollback"]
+
+    DEV --> STG --> SHADOW --> CAN
+    CAN -->|"metrics breach"| ROLLBACK
+    CAN -->|"gates pass"| RAMP --> FULL
+
+    class DEV,STG,SHADOW,RAMP,FULL proc
+    class CAN decide
+    class ROLLBACK warn
 ```
 
 ### Blue-Green for Model Serving

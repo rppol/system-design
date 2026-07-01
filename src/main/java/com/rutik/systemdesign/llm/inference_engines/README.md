@@ -243,31 +243,37 @@ docker run --gpus all \
 ```
 
 ### Engine Selection Decision Tree
-```
-What hardware do you have?
-  |
-  +-- Apple Silicon (M-series) → Ollama or llama.cpp (Metal backend)
-  |
-  +-- Consumer NVIDIA GPU (4080, 4090) → Ollama or vLLM (small models)
-  |
-  +-- Data center NVIDIA (A100, H100):
-  |     |
-  |     +-- Need max throughput?  → TensorRT-LLM
-  |     |
-  |     +-- Need flexibility?     → vLLM
-  |     |
-  |     +-- Multi-turn / shared prefix? → SGLang
-  |
-  +-- CPU only → llama.cpp
-  |
-  +-- Want HuggingFace Hub integration? → TGI
 
-What's your use case?
-  Development / testing → Ollama
-  Production cloud      → vLLM or TensorRT-LLM
-  Edge / privacy        → llama.cpp
-  Structured outputs    → SGLang
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+
+    HW{"What hardware?"}
+    MAC["Ollama / llama.cpp\n(Metal backend)"]
+    CONS["Ollama / vLLM\n(small models)"]
+    DC{"Data centre\nNVIDIA A100/H100?"}
+    TRT["TensorRT-LLM\n(max throughput)"]
+    VLM["vLLM\n(flexibility)"]
+    SGL["SGLang\n(multi-turn / shared prefix)"]
+    CPU["llama.cpp\n(CPU only)"]
+    TGI["TGI\n(HuggingFace Hub integration)"]
+
+    HW -->|"Apple Silicon"| MAC
+    HW -->|"Consumer NVIDIA"| CONS
+    HW -->|"Data centre NVIDIA"| DC
+    HW -->|"CPU only"| CPU
+    HW -->|"HuggingFace focus"| TGI
+    DC -->|"max throughput"| TRT
+    DC -->|"flexibility"| VLM
+    DC -->|"shared prefix"| SGL
+
+    class HW,DC decide
+    class MAC,CONS,TRT,VLM,SGL,CPU,TGI proc
 ```
+
+Use-case shortcuts: development/testing → Ollama; production cloud → vLLM or TensorRT-LLM; edge/privacy → llama.cpp; structured outputs → SGLang.
 
 ---
 
