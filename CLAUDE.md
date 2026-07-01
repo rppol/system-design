@@ -229,3 +229,9 @@ CLAUDE.md files, skill files, or the `game/` tooling directory.
 
 **The game reader renders Mermaid** (`game/app.js` → `renderMermaid()` → CDN lazy
 import). GitHub renders mermaid fences natively. Both surfaces work without a build step.
+
+**Reader post-processing is already wired** — `renderMermaid()` rounds node corners
+(`rx=8` via JS after render, because Mermaid has no border-radius themeVariable),
+colors `<marker>` arrowheads blue (they ignore `lineColor` themeVariable — SVG `<defs>`
+elements must be patched via `setAttribute`), and makes edge label backgrounds
+transparent. Do not add per-diagram workarounds; these are handled globally.

@@ -201,8 +201,64 @@ and before/after pairs untouched even if they are in the same section.
 
 ---
 
+## Reader Rendering Architecture
+
+The game reader's `renderMermaid()` in `game/app.js` does three things:
+
+1. **Lazy CDN import** — `import("mermaid@11/dist/mermaid.esm.min.mjs")` is only
+   fetched when a page has `.mermaid` divs; zero cost for non-mermaid pages.
+2. **`mermaid.initialize()`** — called once with `theme:"dark"` and `themeVariables`
+   plus `flowchart: { curve:"basis", padding:20, nodeSpacing:45, rankSpacing:55 }`.
+3. **SVG post-processing after `mermaid.run()`** — required for three things that
+   Mermaid's themeVariables cannot reach:
+
+```js
+nodes.forEach(n => {
+  // Round node corners — no themeVariable exposes border-radius
+  n.querySelectorAll(".node rect").forEach(r => {
+    r.setAttribute("rx", "8"); r.setAttribute("ry", "8");
+  });
+  // Round subgraph cluster corners
+  n.querySelectorAll(".cluster rect").forEach(r => {
+    r.setAttribute("rx", "12"); r.setAttribute("ry", "12");
+  });
+  // Color arrowhead markers — <marker> elements in SVG <defs> are separate
+  // from the edge path and ignore lineColor themeVariable entirely; only
+  // setAttribute("fill") after render reaches them
+  n.querySelectorAll("marker path, marker polygon").forEach(m => {
+    m.setAttribute("fill", "#61afef"); m.removeAttribute("stroke");
+  });
+});
+```
+
+CSS in `game/style.css` adds the remaining polish:
+```css
+.md-body .mermaid svg .edgePath .path { stroke: #61afef !important; stroke-width: 2px !important; }
+.md-body .mermaid svg .edgeLabel .label rect { fill: transparent !important; stroke: none !important; }
+.md-body .mermaid svg .edgeLabel foreignObject > div { background: transparent !important; color: #e5c07b !important; }
+.md-body .mermaid svg .cluster rect { stroke-dasharray: 5 3 !important; stroke-width: 1.5px !important; }
+```
+
+**Why `themeVariables.edgeLabelBackground:"transparent"`** — the default `"#000000"`
+paints a black rect behind every edge label, visible as an ugly pill on the dark
+diagram background. Setting it to `"transparent"` removes the rect; the CSS rule
+above adds belt-and-suspenders to also nullify the SVG rect fill.
+
+---
+
 ## Gotchas
 
+- **Grey arrowheads even with `lineColor` set** — `lineColor` only colors the edge
+  path stroke; arrowhead `<marker>` elements in SVG `<defs>` are separate and get
+  their fill from SVG attributes, not CSS or themeVariables. Fix: the JS
+  post-processing block above (already wired in `renderMermaid()`).
+- **Black pill around edge labels** — caused by `edgeLabelBackground:"#000000"` in
+  themeVariables. Already fixed to `"transparent"` in the reader. If you see it
+  reappear, check that `_mermaidReady` was reset (stale init from a previous page
+  load may have the old value cached).
+- **Square boxy nodes** — Mermaid has no corner-radius themeVariable; JS
+  post-processing sets `rx=8` on `.node rect` after every `mermaid.run()` call.
+  Already in `renderMermaid()`; does not need to be added per-diagram.
 - **`classDef` must come before the first node definition** in the block. Mermaid
   parses classDef declarations top-down; placing them after node definitions causes
   silent failures where nodes get no class.
@@ -215,8 +271,7 @@ and before/after pairs untouched even if they are in the same section.
   as a small circle. The space padding is intentional for readability.
 - **Subgraph title quotes** — `subgraph tr["During Training"]` — the title must be
   double-quoted if it contains spaces. After `esc()` in the reader, `"` becomes
-  `&quot;`; the browser decodes this back before Mermaid reads `textContent`. This
-  round-trip is safe.
+  `&quot;`; the browser decodes this back before Mermaid reads `textContent`. Safe.
 - **`data-processed` attribute** — Mermaid sets this after rendering. The reader's
   `renderMermaid()` removes it before re-calling `mermaid.run()` on nav. If you
   call `mermaid.run()` from the console on an already-rendered node, remove the
