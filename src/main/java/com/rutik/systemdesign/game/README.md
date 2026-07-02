@@ -33,6 +33,14 @@ reports weekly.
 - **Keyboard** — `1`–`4` to answer, `Enter` for next, `S` to skip; in Cards mode `Space`
   reveals and `1`/`2` grade Missed/Got. In the reader: `F` toggles fullscreen, `Esc`
   exits fullscreen (then closes). In the diagram lightbox: `+`/`−`/`0` zoom, arrows pan.
+  `?` opens a shortcuts overlay anywhere. **Mouse back/forward buttons** navigate the
+  reader (back-stack → prev/next topic → close) and return to the previous screen.
+- **Post-round review** — the results screen lists every miss (and teach-mode learn)
+  with the correct answer and a dive-deeper link, under an animated score ring.
+- **Find fast** — type-to-filter inputs on the sub-topic picker and Study topic lists;
+  Study also shows a "Continue reading" card for the last-opened page.
+- **Reader comfort** — reading-progress bar, `A−`/`A+` font-size controls (persisted),
+  back-to-top button, and full-name hover tooltips on truncated sidebar/TOC entries.
 - **Themes** — a top-bar picker with four glass themes (Midnight, Aurora, Ember,
   Daylight), each driving every color token plus the animated aurora-mesh backdrop.
   Persisted to `localStorage`; `?theme=<id>` in the URL previews one without saving.
@@ -49,9 +57,9 @@ reports weekly.
   open in-reader with a Back button). **Diagrams are interactive**: Mermaid *and* ASCII
   diagrams open in a lightbox with drag-to-pan, zoom-toward-cursor (wheel, buttons,
   double-click, keyboard), and fit-to-viewport; Mermaid nodes glow on hover; every code
-  fence gets a hover copy button. On the light theme, prose goes light while code,
-  ASCII diagrams, and Mermaid canvases stay dark islands (so the One Dark tokenizer
-  palette is correct in every theme).
+  fence gets a hover copy button. **Hard limit (see CLAUDE.md): the reader surface is
+  pitch-black `#000000` with `#e6e6e6` prose in every theme** — only the app chrome
+  re-themes; code, ASCII diagrams, and Mermaid stay One Dark.
 
 > **Template note:** `game/` is an application, not study content, so it is **exempt
 > from the repo's 14-section module template** (same way `book/` declares its own
@@ -222,6 +230,14 @@ The MVP was the multiple-choice blitz. Since then the following shipped:
   question ids + review-state migration, offline-session replay queue, key-repeat and
   double-click guards, DST-safe heatmap, Mermaid CDN retry, server write-lock, and
   bank revalidation caching (`no-cache` + 304s instead of `no-store` re-downloads).
+- **Round 2 (same day)** — graphics/usability layer: pointer-spotlight on glass cards,
+  scroll-driven reveals (`.rise`), aurora-mesh pointer parallax, gradient shimmer,
+  staggered option dealing, floating `+XP` particles, combo shockwaves, boss-banner
+  pulse, animated results score ring, View-Transitions cross-fades, date eyebrow, tile
+  mini mastery bars, difficulty chips, `n/N` counter, post-round miss review,
+  type-to-filter, `?` shortcuts overlay, mouse back/forward navigation, reader
+  progress bar + font controls + back-to-top + sidebar tooltips. Reader hard limits
+  locked in `CLAUDE.md`: pitch-black `#000` surface, `#e6e6e6` prose, every theme.
 
 ## Planned / to be implemented
 

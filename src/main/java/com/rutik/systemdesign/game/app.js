@@ -196,6 +196,124 @@ const ICON = (name, cls = "") => {
 
 // Screen-reader announcements (aria-live region in index.html).
 const announce = (msg) => { const n = el("#live"); if (n) n.textContent = msg; };
+
+const REDUCED = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// Cross-fade between screens via the View Transitions API where available.
+function vt(fn) {
+  if (document.startViewTransition && !REDUCED()) document.startViewTransition(fn);
+  else fn();
+}
+
+/* ---------- ambient graphics: spotlight, parallax, scroll reveals ---------- */
+// Pointer spotlight: glass cards get a specular highlight that follows the
+// cursor (CSS paints a radial gradient at --mx/--my; see style.css §16).
+const SPOT_SEL = ".tile,.topic-card,.review-card,.badge,.opt,.studyrow,.modrow,.sectiontile,.miss-item";
+let _spotEv = null, _spotRaf = 0;
+document.addEventListener("pointermove", (e) => {
+  _spotEv = e;
+  if (_spotRaf) return;
+  _spotRaf = requestAnimationFrame(() => {
+    _spotRaf = 0;
+    const t = _spotEv.target.closest?.(SPOT_SEL);
+    if (!t) return;
+    const r = t.getBoundingClientRect();
+    t.style.setProperty("--mx", (((_spotEv.clientX - r.left) / r.width) * 100).toFixed(1) + "%");
+    t.style.setProperty("--my", (((_spotEv.clientY - r.top) / r.height) * 100).toFixed(1) + "%");
+  });
+});
+
+// Aurora-mesh pointer parallax (fine pointers only; keyframes consume --par-*).
+if (window.matchMedia("(pointer: fine)").matches) {
+  let _parEv = null, _parRaf = 0;
+  document.addEventListener("pointermove", (e) => {
+    _parEv = e;
+    if (_parRaf || REDUCED()) return;
+    _parRaf = requestAnimationFrame(() => {
+      _parRaf = 0;
+      const s = document.documentElement.style;
+      s.setProperty("--par-x", ((_parEv.clientX / innerWidth - 0.5) * 14).toFixed(1) + "px");
+      s.setProperty("--par-y", ((_parEv.clientY / innerHeight - 0.5) * 10).toFixed(1) + "px");
+    });
+  });
+}
+
+// Scroll-driven reveals: list items rise in as they enter the viewport.
+const _revealObs = "IntersectionObserver" in window
+  ? new IntersectionObserver((entries) => entries.forEach((x) => {
+      if (x.isIntersecting) { x.target.classList.add("in"); _revealObs.unobserve(x.target); }
+    }), { threshold: 0.12 })
+  : null;
+
+function wireReveals() {
+  if (!_revealObs || REDUCED()) return;
+  // NOTE: utility class is "rise", NOT "reveal" — .reveal is the quiz answer panel.
+  document.querySelectorAll(".grid .tile, .sectiontile, .studyrow, .modrow, .miss-item").forEach((n, i) => {
+    n.classList.add("rise");
+    n.style.transitionDelay = (i % 8) * 30 + "ms";
+    _revealObs.observe(n);
+  });
+}
+
+// Floating "+N XP" particle at the answered option.
+function floatXP(amount, anchor) {
+  if (REDUCED() || !anchor) return;
+  const f = document.createElement("span");
+  f.className = "xp-float";
+  f.textContent = "+" + amount + " XP";
+  const r = anchor.getBoundingClientRect();
+  f.style.left = Math.max(12, r.right - 86) + "px";
+  f.style.top = (r.top - 4) + "px";
+  document.body.appendChild(f);
+  setTimeout(() => f.remove(), 1000);
+}
+
+/* ---------- keyboard-shortcuts overlay ---------- */
+function toggleHelp() {
+  const ex = el("#helpOverlay");
+  if (ex) { ex.remove(); return; }
+  const row = (k, d) => `<div class="hk"><span>${d}</span><span class="keys">${k.split(" ").map((x) => `<kbd>${x}</kbd>`).join("")}</span></div>`;
+  const o = document.createElement("div");
+  o.className = "help-overlay"; o.id = "helpOverlay";
+  o.setAttribute("role", "dialog"); o.setAttribute("aria-label", "Keyboard shortcuts");
+  o.innerHTML = `<div class="help-card">
+    <h2>Keyboard shortcuts</h2>
+    <div class="help-cols">
+      <div><h3>Quiz</h3>${row("1 2 3 4", "Answer")}${row("↵", "Next")}${row("S", "Skip for now")}</div>
+      <div><h3>Cards</h3>${row("Space", "Reveal")}${row("1", "Missed it")}${row("2", "Got it")}</div>
+      <div><h3>Reader</h3>${row("F", "Fullscreen")}${row("Esc", "Exit / close")}</div>
+      <div><h3>Diagram zoom</h3>${row("+ −", "Zoom")}${row("0", "Fit")}${row("← →", "Pan")}</div>
+    </div>
+    <p class="help-hint">Press <kbd>?</kbd> anytime &middot; mouse back/forward buttons navigate too</p>
+    <button class="ghost" id="helpClose">Close (Esc)</button>
+  </div>`;
+  document.body.appendChild(o);
+  el("#helpClose").addEventListener("click", () => o.remove());
+  o.addEventListener("click", (e) => { if (e.target === o) o.remove(); });
+}
+
+/* ---------- mouse back/forward buttons ---------- */
+// Back (button 3) / forward (button 4): navigate the reader's history and
+// topic list when it's open; otherwise back returns to the previous screen.
+document.addEventListener("mouseup", (e) => {
+  if (e.button !== 3 && e.button !== 4) return;
+  e.preventDefault();
+  const nav = reader.nav;
+  if (document.body.classList.contains("reader-open")) {
+    if (e.button === 3) {
+      if (reader.back.length) { const p = reader.back.pop(); openReaderPath(p.path, p.title, p.nav); }
+      else if (nav && nav.idx > 0) openReaderPath(nav.list[nav.idx - 1].path, nav.list[nav.idx - 1].title, { list: nav.list, idx: nav.idx - 1 });
+      else closeReader();
+    } else if (nav && nav.idx < nav.list.length - 1) {
+      openReaderPath(nav.list[nav.idx + 1].path, nav.list[nav.idx + 1].title, { list: nav.list, idx: nav.idx + 1 });
+    }
+    return;
+  }
+  if (e.button === 3 && typeof state.screenBack === "function") vt(state.screenBack);
+});
+document.addEventListener("mousedown", (e) => {   // suppress browser history nav
+  if (e.button === 3 || e.button === 4) e.preventDefault();
+});
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const label = (s) => SECTION_LABELS[s] || s;
 
@@ -241,22 +359,39 @@ const sfx = (() => {
 })();
 
 function confetti() {
-  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  if (REDUCED()) return;
   const cs = getComputedStyle(document.documentElement);
   const colors = ["--accent", "--accent-2", "--good", "--warn", "--bad"]
     .map((v) => cs.getPropertyValue(v).trim() || "#6ea8fe");
   const c = document.createElement("div");
   c.className = "confetti";
-  for (let i = 0; i < 90; i++) {
+  for (let i = 0; i < 110; i++) {
     const p = document.createElement("i");
+    const s = 5 + Math.random() * 7;                       // mixed sizes
+    p.style.width = s + "px"; p.style.height = s + "px";
+    if (i % 3 === 0) p.style.borderRadius = "50%";         // mixed shapes
     p.style.left = Math.random() * 100 + "vw";
     p.style.background = colors[i % colors.length];
-    p.style.animationDelay = (Math.random() * 0.4).toFixed(2) + "s";
+    p.style.animationDelay = (Math.random() * 0.5).toFixed(2) + "s";
+    p.style.animationDuration = (1.8 + Math.random() * 1.2).toFixed(2) + "s";
     p.style.setProperty("--rot", (Math.random() * 720 - 360) + "deg");
+    p.style.setProperty("--dx", (Math.random() * 160 - 80).toFixed(0) + "px");  // sideways drift
     c.appendChild(p);
   }
   document.body.appendChild(c);
-  setTimeout(() => c.remove(), 2400);
+  setTimeout(() => c.remove(), 3400);
+}
+
+// Radial shockwave at combo milestones.
+function ripple(anchor) {
+  if (REDUCED() || !anchor) return;
+  const r = anchor.getBoundingClientRect();
+  const w = document.createElement("span");
+  w.className = "combo-ripple";
+  w.style.left = (r.left + r.width / 2) + "px";
+  w.style.top = (r.top + r.height / 2) + "px";
+  document.body.appendChild(w);
+  setTimeout(() => w.remove(), 700);
 }
 
 function countUp(node, to) {
@@ -437,10 +572,19 @@ function rustiestSection() {
 }
 
 function refreshStats() {
-  el("#streakVal").textContent = state.progress.streak || 0;
-  el("#xpVal").textContent = state.progress.totalXP || 0;
-  const lv = el("#lvlVal");
-  if (lv) lv.textContent = levelFromXP(state.progress.totalXP);
+  // Pop-animate a stat when its value actually changes.
+  const set = (sel, val) => {
+    const n = el(sel);
+    if (!n) return;
+    const s = String(val);
+    if (n.textContent === s) return;
+    n.textContent = s;
+    n.classList.remove("pop"); void n.offsetWidth;   // restart the animation
+    n.classList.add("pop");
+  };
+  set("#streakVal", state.progress.streak || 0);
+  set("#xpVal", state.progress.totalXP || 0);
+  set("#lvlVal", levelFromXP(state.progress.totalXP));
 }
 
 /* ---------- home ---------- */
@@ -500,14 +644,20 @@ function renderHome() {
   const tiles = Object.keys(secs).sort().map((s) => {
     const st = (p.sections && p.sections[s]) || { seen: 0, correct: 0 };
     const acc = st.seen ? Math.round((st.correct / st.seen) * 100) : null;
+    const bar = acc === null ? "" : `<span class="tbar"><i style="width:${acc}%"></i></span>`;
     return `<button class="tile ${s === section ? "suggested" : ""}" data-section="${s}">
         <span class="tname">${esc(label(s))}</span>
         <span class="tmeta">${secs[s]} Qs &middot; ${acc === null ? "new" : acc + "% mastery"}</span>
+        ${bar}
       </button>`;
   }).join("");
+  const dateLine = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+  state.screenBack = null;
   app.innerHTML = `
     <div class="hero">
-      <div class="hero-row">${goalRing()}<div><h1>Today's 5-minute blitz</h1><p>${streakLine}</p></div></div>
+      <div class="hero-row">${goalRing()}<div>
+        <div class="eyebrow date-eyebrow">${esc(dateLine)}</div>
+        <h1>Today's 5-minute blitz</h1><p>${streakLine}</p></div></div>
     </div>
     <div class="topic-card">
       <div class="eyebrow">Suggested for today</div>
@@ -526,6 +676,7 @@ function renderHome() {
   if (rusty) el("#rustyBtn").addEventListener("click", () => startBlitz(rusty.s));
   document.querySelectorAll(".tile").forEach((b) =>
     b.addEventListener("click", () => openTopics(b.dataset.section)));
+  wireReveals();
 }
 
 /* ---------- bank loading / sub-topic picker ---------- */
@@ -559,6 +710,7 @@ async function openTopics(section) {
     return;
   }
   const mods = modulesOf(bank);
+  state.screenBack = renderHome;
   const rows = mods.map((m) =>
     `<label class="modrow"><input type="checkbox" class="modcheck" value="${esc(m.module)}" checked />
        <span class="mname">${esc(m.name)}</span><span class="mcount">${m.count}</span></label>`).join("");
@@ -567,6 +719,7 @@ async function openTopics(section) {
     <div class="topicbar">
       <button class="ghost" id="allBtn">Select all</button>
       <button class="ghost" id="noneBtn">Clear</button>
+      <input type="search" class="filter" id="modFilter" placeholder="Filter topics" aria-label="Filter topics" />
       <span class="selcount" id="selCount"></span>
     </div>
     <div class="modlist">${rows}</div>
@@ -585,9 +738,15 @@ async function openTopics(section) {
   checks().forEach((c) => c.addEventListener("change", updateCount));
   el("#allBtn").addEventListener("click", () => { checks().forEach((c) => (c.checked = true)); updateCount(); });
   el("#noneBtn").addEventListener("click", () => { checks().forEach((c) => (c.checked = false)); updateCount(); });
-  el("#backBtn").addEventListener("click", renderHome);
+  el("#modFilter").addEventListener("input", () => {
+    const f = el("#modFilter").value.trim().toLowerCase();
+    document.querySelectorAll(".modrow").forEach((r) =>
+      (r.style.display = r.querySelector(".mname").textContent.toLowerCase().includes(f) ? "" : "none"));
+  });
+  el("#backBtn").addEventListener("click", () => vt(renderHome));
   el("#startSel").addEventListener("click", () => startBlitz(section, selected()));
   updateCount();
+  wireReveals();
 }
 
 /* ---------- deck building ---------- */
@@ -703,6 +862,7 @@ function renderQuestion() {
   const { q, opts } = item;
   const teach = item.status === "skipped";
   state.inQuiz = true; state.answered = false; state.curOptsLen = opts.length;
+  state.screenBack = null;                         // mouse-back never aborts a live deck
   const DONE = ["correct", "wrong", "learned"];
   const dots = state.deck.map((it, i) =>
     `<span class="dot ${DONE.includes(it.status) ? "done" : ""} ${it.boss ? "boss" : ""} ${i === idx ? "cur" : ""}"></span>`).join("");
@@ -716,8 +876,8 @@ function renderQuestion() {
   const comboChip = state.combo >= 2 ? `<span class="combo">${ICON("flame", "i-flame")} ${state.combo} combo &middot; ${nextMult}&times; XP</span>` : "";
   app.innerHTML = `
     <div class="qhead">
-      <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)}</span>
-      <span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dots}</span>
+      <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)} <span class="diff d-${esc(q.difficulty)}">${esc(q.difficulty)}</span></span>
+      <span class="qright"><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dots}</span><span class="qnum">${state.cursor + 1}/${state.queue.length}</span></span>
     </div>
     ${bossBanner}${teachBlock}
     <div class="qtext">${esc(q.question)} ${comboChip}</div>
@@ -742,7 +902,8 @@ function answer(i) {
   const item = state.deck[state.queue[state.cursor]];
   const { q, opts } = item;
   const teach = item.status === "skipped";
-  document.querySelectorAll(".opt").forEach((b, k) => {
+  const optBtns = document.querySelectorAll(".opt");
+  optBtns.forEach((b, k) => {
     b.disabled = true;
     if (opts[k].ok) { b.classList.add("correct"); b.querySelector(".mark").textContent = "✓"; }
     if (k === i && !opts[k].ok) { b.classList.add("wrong"); b.querySelector(".mark").textContent = "✗"; }
@@ -758,7 +919,9 @@ function answer(i) {
     state.combo += 1; state.maxCombo = Math.max(state.maxCombo, state.combo);
     const gain = 10 * comboMult() * (item.boss ? 2 : 1);
     state.sessionXp += gain;
-    if (state.combo === 3 || state.combo === 5 || state.combo >= 7) sfx.combo(); else sfx.correct();
+    floatXP(gain, optBtns[i]);
+    if (state.combo === 3 || state.combo === 5 || state.combo >= 7) { sfx.combo(); ripple(optBtns[i]); }
+    else sfx.correct();
   } else {
     item.status = "wrong";
     state.combo = 0;
@@ -795,13 +958,14 @@ function renderCard() {
   const item = state.deck[idx];
   const { q } = item;
   state.inQuiz = true; state.answered = false; state.curOptsLen = 0;
+  state.screenBack = null;
   const DONE = ["correct", "wrong", "learned"];
   const dots = state.deck.map((it, i) =>
     `<span class="dot ${DONE.includes(it.status) ? "done" : ""} ${i === idx ? "cur" : ""}"></span>`).join("");
   app.innerHTML = `
     <div class="qhead">
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)}</span>
-      <span class="dots" role="img" aria-label="Card ${state.cursor + 1} of ${state.queue.length}">${dots}</span>
+      <span class="qright"><span class="dots" role="img" aria-label="Card ${state.cursor + 1} of ${state.queue.length}">${dots}</span><span class="qnum">${state.cursor + 1}/${state.queue.length}</span></span>
     </div>
     <div class="flash-label">Flashcard &middot; recall it, then grade yourself</div>
     <div class="qtext">${esc(q.question)}</div>
@@ -837,7 +1001,7 @@ function revealCard() {
 function gradeCard(got) {
   if (!state.answered) return;
   const item = state.deck[state.queue[state.cursor]];
-  if (got) { item.status = "correct"; state.sessionXp += 10; sfx.correct(); }
+  if (got) { item.status = "correct"; state.sessionXp += 10; sfx.correct(); floatXP(10, el("#gotBtn")); }
   else { item.status = "wrong"; sfx.wrong(); }
   state.cursor++;
   if (state.cursor < state.queue.length) renderCard();
@@ -864,9 +1028,32 @@ async function finish() {
   const extraBadges =
     (learned ? `<div class="badge"><div class="n">${learned}</div><div class="l">Learned</div></div>` : "") +
     (state.maxCombo >= 2 ? `<div class="badge"><div class="n">${state.maxCombo}&times;</div><div class="l">Best combo</div></div>` : "");
+  // Post-round review: every miss (and teach-mode learn) with its correct answer.
+  const misses = state.deck.filter((d) => d.status === "wrong" || d.status === "learned");
+  const missList = misses.length ? `
+    <div class="miss-wrap">
+      <h2 class="section-h">Review this round</h2>
+      ${misses.map((m, k) => `<div class="miss-item ${m.status}">
+        <div class="miss-q">${esc(m.q.question)}</div>
+        <div class="miss-a">${esc(m.q.correct)}</div>
+        <button class="deeper miss-deeper" data-k="${k}">Dive deeper into ${esc(m.q.moduleName)} &rarr;</button>
+      </div>`).join("")}
+    </div>` : "";
+  const R = 56, CIRC = +(2 * Math.PI * R).toFixed(1);
+  state.screenBack = renderHome;
   app.innerHTML = `
     <div class="result">
-      <div class="scorering">${correct}<small>/${total}</small></div>
+      <div class="score-wrap">
+        <svg class="score-ring" viewBox="0 0 128 128" aria-hidden="true">
+          <defs><linearGradient id="scoreGrad" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" style="stop-color:var(--accent)"/>
+            <stop offset="1" style="stop-color:var(--accent-2)"/>
+          </linearGradient></defs>
+          <circle class="sr-bg" cx="64" cy="64" r="${R}"/>
+          <circle class="sr-fg" cx="64" cy="64" r="${R}" stroke-dasharray="${CIRC}" stroke-dashoffset="${CIRC}"/>
+        </svg>
+        <div class="scorering">${correct}<small>/${total}</small></div>
+      </div>
       <p class="sub">${cheer}${pct}% known${learned ? ` &middot; ${learned} learned` : ""}</p>
       ${freezeNote}
       <div class="badges">
@@ -880,11 +1067,19 @@ async function finish() {
         <button class="ghost" id="homeBtn">Home</button>
         <button class="ghost" id="progBtn">View progress</button>
       </div>
+      ${missList}
     </div>`;
   countUp(el("#xpCount"), xp);
+  requestAnimationFrame(() => {                    // animate the score arc in
+    const f = el(".sr-fg");
+    if (f) f.style.strokeDashoffset = (CIRC * (1 - correct / Math.max(1, total))).toFixed(1);
+  });
   el("#againBtn").addEventListener("click", () => (state.replayFn ? state.replayFn() : renderHome()));
-  el("#homeBtn").addEventListener("click", renderHome);
-  el("#progBtn").addEventListener("click", renderProgress);
+  el("#homeBtn").addEventListener("click", () => vt(renderHome));
+  el("#progBtn").addEventListener("click", () => vt(renderProgress));
+  document.querySelectorAll(".miss-deeper").forEach((b) =>
+    b.addEventListener("click", () => { const m = misses[+b.dataset.k]; openReader(m.q.module, m.q.moduleName); }));
+  wireReveals();
   app.focus({ preventScroll: true });
 }
 
@@ -905,7 +1100,7 @@ function heatmapHTML(history) {
     const xp = xpByDay.get(iso) || 0;
     if (d > today) { cells += `<span class="hmcell hm-future"></span>`; continue; }
     const lvl = xp === 0 ? 0 : xp < 30 ? 1 : xp < 70 ? 2 : xp < 120 ? 3 : 4;
-    cells += `<span class="hmcell hm-l${lvl}" title="${iso}: ${xp} XP"></span>`;
+    cells += `<span class="hmcell hm-l${lvl}" style="animation-delay:${i * 3}ms" title="${iso}: ${xp} XP"></span>`;
   }
   const empty = !(history || []).length
     ? `<p class="hm-empty">No activity yet &mdash; your first blitz lights up this grid.</p>` : "";
@@ -918,6 +1113,7 @@ function heatmapHTML(history) {
 
 function renderProgress() {
   state.inQuiz = false;
+  state.screenBack = renderHome;
   refreshStats();
   const p = state.progress, secs = state.index.sections;
   const tiles = Object.keys(secs).sort().map((s) => {
@@ -945,14 +1141,23 @@ function renderProgress() {
     <h2 class="section-h">Mastery by section</h2>
     ${tiles}
     <div class="row" style="margin-top:18px"><button class="primary" id="backHome">Back to today</button></div>`;
-  el("#backHome").addEventListener("click", renderHome);
+  el("#backHome").addEventListener("click", () => vt(renderHome));
+  wireReveals();
 }
 
 /* ---------- study mode (pure reading) ---------- */
 function renderStudy() {
   state.inQuiz = false;
+  state.screenBack = renderHome;
   refreshStats();
   const secs = state.index.sections;
+  let lastRead = null;
+  try { lastRead = JSON.parse(localStorage.getItem("sd_last_read")); } catch { }
+  const contCard = lastRead && lastRead.path
+    ? `<button class="review-card" id="contBtn">
+         <div><div class="eyebrow">Continue reading</div><h2>${esc(lastRead.title || lastRead.path)}</h2></div>
+         <span class="review-go">Open &rarr;</span>
+       </button>` : "";
   const tiles = Object.keys(secs).sort().map((s) =>
     `<button class="tile" data-section="${s}">
        <span class="tname">${esc(label(s))}</span>
@@ -960,11 +1165,14 @@ function renderStudy() {
      </button>`).join("");
   app.innerHTML = `
     <div class="hero"><h1>Study</h1><p>Read your notes in a focused reader &mdash; no quiz, no clock.</p></div>
+    ${contCard}
     <h2 class="section-h">Pick a section to browse its topics</h2>
     <div class="grid">${tiles}</div>
     <div class="row" style="margin-top:18px"><button class="ghost" id="studyHome">&larr; Home</button></div>`;
   document.querySelectorAll(".tile").forEach((b) => b.addEventListener("click", () => openStudySection(b.dataset.section)));
-  el("#studyHome").addEventListener("click", renderHome);
+  if (contCard) el("#contBtn").addEventListener("click", () => { reader.back = []; openReaderPath(lastRead.path, lastRead.title, null); });
+  el("#studyHome").addEventListener("click", () => vt(renderHome));
+  wireReveals();
 }
 
 async function openStudySection(section) {
@@ -975,11 +1183,13 @@ async function openStudySection(section) {
     return;
   }
   const mods = modulesOf(bank);
+  state.screenBack = renderStudy;
   const list = mods.map((m) => ({ path: `${m.module}/README.md`, title: m.name }));
   const rows = mods.map((m, idx) =>
     `<button class="studyrow" data-idx="${idx}"><span class="mname">${esc(m.name)}</span><span class="mcount">${m.count} Qs</span></button>`).join("");
   app.innerHTML = `
     <div class="hero"><h1>${esc(label(section))}</h1><p>${mods.length} topics &mdash; open one to read it. Prev/Next walks the list.</p></div>
+    <div class="topicbar"><input type="search" class="filter" id="studyFilter" placeholder="Filter topics" aria-label="Filter topics" /></div>
     <div class="modlist">${rows}</div>
     <div class="row" style="margin-top:18px"><button class="ghost" id="studyBack">&larr; Sections</button></div>`;
   document.querySelectorAll(".studyrow").forEach((b) => b.addEventListener("click", () => {
@@ -987,7 +1197,13 @@ async function openStudySection(section) {
     reader.back = [];                              // a fresh reading session
     openReaderPath(list[idx].path, list[idx].title, { list, idx });
   }));
-  el("#studyBack").addEventListener("click", renderStudy);
+  el("#studyFilter").addEventListener("input", () => {
+    const f = el("#studyFilter").value.trim().toLowerCase();
+    document.querySelectorAll(".studyrow").forEach((r) =>
+      (r.style.display = r.querySelector(".mname").textContent.toLowerCase().includes(f) ? "" : "none"));
+  });
+  el("#studyBack").addEventListener("click", () => vt(renderStudy));
+  wireReveals();
 }
 
 /* ---------- code syntax highlighting (hand-rolled, One Dark) ---------- */
@@ -1503,6 +1719,15 @@ function restoreReaderWidth() {
   reader.full    = localStorage.getItem("sd_reader_full")    === "1";
   reader.toc     = localStorage.getItem("sd_reader_toc")     === "1";
   reader.modules = localStorage.getItem("sd_reader_modules") === "1";
+  applyReaderFont();
+}
+
+// Reader font size: A− / A+ in the reader head, persisted, clamped 12–19px.
+function applyReaderFont(delta = 0) {
+  let fs = +(localStorage.getItem("sd_reader_fs") || 14.5) + delta;
+  fs = Math.min(19, Math.max(12, fs));
+  localStorage.setItem("sd_reader_fs", fs);
+  document.documentElement.style.setProperty("--rd-fs", fs + "px");
 }
 
 // Populate the always-accessible sidebar index from the rendered headings (ids
@@ -1512,7 +1737,7 @@ function buildToc(tocEl, main) {
   const heads = [...main.querySelectorAll("h2[id], h3[id]")];
   if (!heads.length) { tocEl.innerHTML = ""; return 0; }
   const items = heads.map((h) =>
-    `<li class="${h.tagName === "H3" ? "lvl3" : ""}"><a href="#" data-tid="${esc(h.id)}">${esc(h.textContent)}</a></li>`).join("");
+    `<li class="${h.tagName === "H3" ? "lvl3" : ""}"><a href="#" data-tid="${esc(h.id)}" title="${esc(h.textContent)}">${esc(h.textContent)}</a></li>`).join("");
   tocEl.innerHTML = `<div class="toc-h">Contents</div><ul>${items}</ul>`;
   tocEl.querySelectorAll("a[data-tid]").forEach((a) => a.addEventListener("click", (e) => {
     e.preventDefault();
@@ -1543,7 +1768,7 @@ function buildModuleNav(modEl, navCtx, currentPath) {
 
     if (mFiles.length <= 1) {
       const isActive = m.path === currentPath;
-      return `<li><a href="#" class="mod-item${isActive ? " active" : ""}" data-midx="${i}">${esc(m.title)}</a></li>`;
+      return `<li><a href="#" class="mod-item${isActive ? " active" : ""}" data-midx="${i}" title="${esc(m.title)}">${esc(m.title)}</a></li>`;
     }
 
     // Multi-file module: collapsible folder
@@ -1552,11 +1777,11 @@ function buildModuleNav(modEl, navCtx, currentPath) {
       const filePath = `${mKey}/${fn}`;
       const isFileCurrent = filePath === currentPath;
       const label = fn === "README.md" ? "readme" : fn.replace(".md", "").replace(/_/g, " ");
-      return `<li><a href="#" class="mod-file${isFileCurrent ? " active" : ""}" data-path="${esc(filePath)}">${esc(label)}</a></li>`;
+      return `<li><a href="#" class="mod-file${isFileCurrent ? " active" : ""}" data-path="${esc(filePath)}" title="${esc(label)}">${esc(label)}</a></li>`;
     }).join("");
 
     return `<li class="mod-group${isOpen ? " open" : ""}">
-      <div class="mod-folder" data-midx="${i}"><span class="mod-arrow">&#9654;</span><span class="mod-fname">${esc(m.title)}</span></div>
+      <div class="mod-folder" data-midx="${i}" title="${esc(m.title)}"><span class="mod-arrow">&#9654;</span><span class="mod-fname">${esc(m.title)}</span></div>
       <ul class="mod-subfiles">${subItems}</ul>
     </li>`;
   }).join("");
@@ -1640,15 +1865,31 @@ async function openReaderPath(path, title, navCtx, frag) {
       ${backBtn}${modBtn}
       <span class="reader-title">${esc(reader.titleText)}</span>
       ${navBtns}
+      <button class="reader-nav reader-icon rfs" id="readerFsDn" title="Smaller text">A&#8722;</button>
+      <button class="reader-nav reader-icon rfs" id="readerFsUp" title="Larger text">A+</button>
       <button class="reader-nav reader-icon" id="readerIdx" title="Contents">&#8801;</button>
       <button class="reader-nav reader-icon" id="readerFull" title="Fullscreen (F)">&#11036;</button>
       <button class="reader-close" id="readerClose" title="Close (Esc)">&times;</button>
     </div>
-    <div class="reader-body" id="readerBody"><div class="loading">Loading&hellip;</div></div>`;
+    <div class="reader-progress" aria-hidden="true"><i id="readerProg"></i></div>
+    <div class="reader-body" id="readerBody"><div class="loading">Loading&hellip;</div></div>
+    <button class="reader-top" id="readerTop" title="Back to top" aria-label="Back to top">&uarr;</button>`;
   document.body.classList.add("reader-open");
   applyReaderModes();
   wireGrips();
   el("#readerClose").addEventListener("click", closeReader);
+  el("#readerFsDn").addEventListener("click", () => applyReaderFont(-1));
+  el("#readerFsUp").addEventListener("click", () => applyReaderFont(1));
+  // Reading progress bar + back-to-top, driven by the body's scroll position.
+  {
+    const body = el("#readerBody"), prog = el("#readerProg"), top = el("#readerTop");
+    body.addEventListener("scroll", () => {
+      const max = body.scrollHeight - body.clientHeight;
+      prog.style.width = max > 0 ? (body.scrollTop / max) * 100 + "%" : "0";
+      top.classList.toggle("show", body.scrollTop > 600);
+    }, { passive: true });
+    top.addEventListener("click", () => body.scrollTo({ top: 0, behavior: REDUCED() ? "auto" : "smooth" }));
+  }
   if (nav) {
     el("#readerMod").addEventListener("click", () => {
       reader.modules = !reader.modules;
@@ -1690,6 +1931,7 @@ async function openReaderPath(path, title, navCtx, frag) {
     renderMermaid(main);                           // no-op when page has no mermaid fences
     b.scrollTop = 0;
     if (frag) { const t = main.querySelector("#" + CSS.escape(frag)); if (t) t.scrollIntoView({ block: "start" }); }
+    localStorage.setItem("sd_last_read", JSON.stringify({ path, title: reader.titleText }));   // Study's "Continue reading"
   } catch {
     const b = el("#readerBody"); if (b) b.innerHTML = `<div class="error">Couldn't load this page &mdash; is <code>server.py</code> running?</div>`;
   }
@@ -1709,6 +1951,9 @@ function closeReader() {
 
 /* ---------- keyboard ---------- */
 document.addEventListener("keydown", (e) => {
+  const typing = (e.target.tagName || "").toLowerCase() === "input";
+  if (e.key === "Escape" && el("#helpOverlay")) { el("#helpOverlay").remove(); return; }
+  if (e.key === "?" && !typing) { e.preventDefault(); toggleHelp(); return; }
   if (document.body.classList.contains("reader-open")) {
     if (e.key === "Escape") {                       // exit fullscreen first, then close
       e.preventDefault();
@@ -1779,9 +2024,11 @@ async function boot() {
   el("#bankInfo").textContent = `${state.index.total} questions across ${Object.keys(state.index.sections).length} sections`;
   state.progress = await loadProgress();
   state.today = IS_STATIC ? {} : await apiGet("/api/today", {});
-  el("#navProgress").addEventListener("click", renderProgress);
+  el("#navProgress").addEventListener("click", () => vt(renderProgress));
   const studyB = el("#navStudy");
-  if (studyB) studyB.addEventListener("click", renderStudy);
+  if (studyB) studyB.addEventListener("click", () => vt(renderStudy));
+  const helpB = el("#helpBtn");
+  if (helpB) helpB.addEventListener("click", toggleHelp);
   restoreReaderWidth();
   applyTheme(curTheme(), false);   // don't persist a ?theme= URL override
   const tb = el("#themeBtn");
