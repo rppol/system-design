@@ -1179,10 +1179,38 @@ function renderStudy() {
 }
 
 /* ---------- learning path (Study section graph) ---------- */
-// Serpentine skill-tree replacing the flat Study topic list. The order IS
-// modulesOf() (STUDY_ORDER + appended unlisted modules) — nothing is invented.
-// Glass node chips are absolutely-positioned buttons over a single SVG spine of
-// cubic beziers; vertical scroll is the navigation (no pan/zoom machinery).
+// Width-adaptive serpentine (boustrophedon) skill-tree replacing the flat Study
+// topic list. The order IS modulesOf() (STUDY_ORDER + appended unlisted
+// modules) — nothing is invented. Glass node chips are absolutely-positioned
+// buttons over an SVG underlay: N columns adapt to the container width, the
+// path snakes row 1 left->right, row 2 right->left, and prerequisite chords are
+// routed orthogonally through the chip-free row gutters and column gaps.
+
+// Orthogonal polyline -> SVG path with rounded corners (subway-map routing for
+// the prerequisite chords). Collapses duplicate/collinear points first.
+function orthPath(raw, r = 10) {
+  const pts = [];
+  for (const q of raw) {
+    const b = pts[pts.length - 1], a = pts[pts.length - 2];
+    if (b && Math.abs(b.x - q.x) < 0.5 && Math.abs(b.y - q.y) < 0.5) continue;
+    if (a && b && ((Math.abs(a.x - b.x) < 0.5 && Math.abs(b.x - q.x) < 0.5) ||
+      (Math.abs(a.y - b.y) < 0.5 && Math.abs(b.y - q.y) < 0.5))) pts.pop();
+    pts.push(q);
+  }
+  if (pts.length < 2) return "";
+  const f = (v) => Math.round(v * 10) / 10;
+  let d = `M ${f(pts[0].x)} ${f(pts[0].y)}`;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const p = pts[i], prev = pts[i - 1], next = pts[i + 1];
+    const rr = Math.min(r, Math.hypot(p.x - prev.x, p.y - prev.y) / 2, Math.hypot(next.x - p.x, next.y - p.y) / 2);
+    const u1x = Math.sign(p.x - prev.x), u1y = Math.sign(p.y - prev.y);
+    const u2x = Math.sign(next.x - p.x), u2y = Math.sign(next.y - p.y);
+    d += ` L ${f(p.x - u1x * rr)} ${f(p.y - u1y * rr)} Q ${f(p.x)} ${f(p.y)} ${f(p.x + u2x * rr)} ${f(p.y + u2y * rr)}`;
+  }
+  d += ` L ${f(pts[pts.length - 1].x)} ${f(pts[pts.length - 1].y)}`;
+  return d;
+}
+
 async function openStudySection(section) {
   app.innerHTML = `<div class="loading">Loading ${esc(label(section))}&hellip;</div>`;
   const bank = await loadBank(section);
@@ -1251,12 +1279,16 @@ async function openStudySection(section) {
   }).join("");
 
   app.innerHTML = `
+    <div class="path-screen">
     <div class="hero"><h1>${esc(label(section))}</h1>
-      <p>${mods.length} topics &middot; start at 01 &mdash; the path follows the section's learning order.</p>
+      <p>${mods.length} topics &middot; start at 01 &mdash; the path snakes across each row in the section's learning order.</p>
       ${graph ? `<p class="path-legend">${crossLinks
-        ? `thick edge = strong prerequisite link &middot; hover a topic to see its connections &middot; ${crossLinks} cross-links mapped`
+        ? `strongest prerequisite links drawn &middot; hover a topic to see all its connections &middot; ${crossLinks} cross-links mapped`
         : "no cross-link data yet &mdash; path order shown"}</p>` : ""}</div>
-    <div class="topicbar"><input type="search" class="filter" id="studyFilter" placeholder="Filter topics" aria-label="Filter topics" /></div>
+    <div class="topicbar">
+      <input type="search" class="filter" id="studyFilter" placeholder="Filter topics" aria-label="Filter topics" />
+      <span class="selcount" id="pathCount" role="status"></span>
+    </div>
     <div class="path-wrap" id="pathWrap">
       <svg class="path-svg" id="pathSvg" aria-hidden="true">
         <defs><linearGradient id="lpGrad" x1="0" y1="0" x2="0" y2="1">
@@ -1269,12 +1301,16 @@ async function openStudySection(section) {
       </svg>
       ${steps}
     </div>
-    <div class="row" style="margin-top:18px"><button class="ghost" id="studyBack">&larr; Sections</button></div>`;
+    <div class="row" style="margin-top:18px"><button class="ghost" id="studyBack">&larr; Sections</button></div>
+    </div>`;
 
   const wrap = el("#pathWrap"), svg = el("#pathSvg");
   const stepEls = [...wrap.querySelectorAll(".pathstep")];
   // One <path> per chord, created once; layoutPath() only rewrites the d attr.
   // Weight -> stroke width via a --sw custom prop so CSS can thicken on highlight.
+  // Link-backed chords that stay local (route within one gutter) draw by
+  // default; long-haul ones get .wk in layoutPath() and appear on hover/focus —
+  // drawing every multi-row staircase would wallpaper a dense section.
   const chordG = el("#lpChords");
   chords.forEach((c) => {
     c.el = document.createElementNS("http://www.w3.org/2000/svg", "path");
@@ -1283,44 +1319,69 @@ async function openStudySection(section) {
     chordG.appendChild(c.el);
   });
 
-  // Measure-and-place: two columns on wide screens, one centered column below.
-  // Positions in px; container height set to fit; SVG underlay redrawn to match.
+  // Ordered global indices of the steps currently visible (filter hides some).
+  let visIdx = mods.map((_, i) => i);
+
+  // Measure-and-place: width-adaptive boustrophedon grid. Column count adapts
+  // to the container (~330px per column, 1 on mobile, up to 4 on wide laptops);
+  // the path snakes row 1 left->right, row 2 right->left, so step numbers keep
+  // the learning order obvious. Positions in px; SVG underlay redrawn to match.
   function layoutPath() {
     const W = wrap.clientWidth;
     if (!W || !stepEls.length) return;
-    const two = W >= 700;
-    // Chord lane: outer margins reserved beside the columns so prerequisite
-    // arcs never pass under chip text (zero when the section has no edges).
-    const lane = two && chords.length ? Math.min(64, Math.round(W * 0.08)) : 0;
-    const nodeW = two ? Math.min(330, Math.round((W - 2 * lane) * 0.46)) : Math.min(440, W);
-    const gap = two ? 52 : 40;
-    let y = 6;
-    const pts = [];
-    stepEls.forEach((s, i) => {
-      s.style.width = nodeW + "px";
-      const left = two ? (i % 2 === 0 ? lane : W - nodeW - lane) : Math.round((W - nodeW) / 2);
-      s.style.left = left + "px";
-      s.style.top = y + "px";
-      const h = s.offsetHeight;                    // includes an open leaf fan
-      pts.push({ left, top: y, w: nodeW, h, chipH: s.firstElementChild.offsetHeight, s });
-      y += h + gap;
+    const vis = visIdx;
+    const hasEdges = chords.length > 0;
+    const cols = W < 520 ? 1 : Math.min(4, Math.max(2, Math.floor(W / 330)));
+    const sideM = cols === 1 ? (hasEdges ? 42 : 4) : 8;
+    const colGap = cols === 1 ? 0 : (hasEdges ? 48 : 28);
+    const rowGap = hasEdges ? 62 : 46;
+    const colW = Math.floor((W - 2 * sideM - (cols - 1) * colGap) / cols);
+    const rows = Math.ceil(vis.length / cols);
+
+    stepEls.forEach((s) => { s.style.width = colW + "px"; });
+    const pts = new Array(stepEls.length).fill(null);
+    const rowH = new Array(rows).fill(0);
+    const meta = vis.map((gi, vi) => {
+      const s = stepEls[gi];
+      const r = (vi / cols) | 0, k = vi % cols;
+      return { gi, s, r, c: r % 2 === 0 ? k : cols - 1 - k, h: s.offsetHeight, chipH: s.firstElementChild.offsetHeight };
     });
-    const H = y - gap + 10;
+    meta.forEach((m) => { rowH[m.r] = Math.max(rowH[m.r], m.h); });
+    const rowTop = [6];
+    for (let r = 1; r < rows; r++) rowTop[r] = rowTop[r - 1] + rowH[r - 1] + rowGap;
+    meta.forEach((m) => {
+      const left = sideM + m.c * (colW + colGap);
+      m.s.style.left = left + "px";
+      m.s.style.top = rowTop[m.r] + "px";
+      pts[m.gi] = { left, top: rowTop[m.r], w: colW, h: m.h, chipH: m.chipH, r: m.r, s: m.s };
+    });
+    const H = rows ? rowTop[rows - 1] + rowH[rows - 1] + (hasEdges ? rowGap : 12) : 24;
     wrap.style.height = H + "px";
     svg.setAttribute("width", W);
     svg.setAttribute("height", H);
     svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-    let d = "";                                    // spine: bottom of step i -> top of chip i+1
-    for (let i = 0; i < pts.length - 1; i++) {
-      const a = pts[i], b = pts[i + 1];
-      const x1 = a.left + a.w / 2, y1 = a.top + a.h + 1;
-      const x2 = b.left + b.w / 2, y2 = b.top - 1;
-      const dy = Math.max(18, (y2 - y1) * 0.55);
-      d += `M ${x1} ${y1} C ${x1} ${y1 + dy}, ${x2} ${y2 - dy}, ${x2} ${y2} `;
+
+    let d = "";                                    // spine: adjacent-slot connectors
+    for (let v = 0; v < vis.length - 1; v++) {
+      const a = pts[vis[v]], b = pts[vis[v + 1]];
+      if (a.r === b.r) {                           // along the row, through the column gap
+        const y1 = a.top + a.chipH / 2, y2 = b.top + b.chipH / 2;
+        const right = b.left > a.left;
+        const x1 = right ? a.left + a.w + 1 : a.left - 1;
+        const x2 = right ? b.left - 1 : b.left + b.w + 1;
+        const dx = Math.max(8, Math.abs(x2 - x1) * 0.5) * (right ? 1 : -1);
+        d += `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2} `;
+      } else {                                     // serpentine turn: drop to the row below
+        const x1 = a.left + a.w / 2, y1 = a.top + a.h + 1;
+        const x2 = b.left + b.w / 2, y2 = b.top - 1;
+        const dy = Math.max(14, (y2 - y1) * 0.5);
+        d += `M ${x1} ${y1} C ${x1} ${y1 + dy}, ${x2} ${y2 - dy}, ${x2} ${y2} `;
+      }
     }
     el("#lpSpine").setAttribute("d", d.trim());
     let ld = "";                                   // leaf connectors: rail + rounded elbows
-    pts.forEach((p) => {
+    meta.forEach((m) => {
+      const p = pts[m.gi];
       if (!p.s.classList.contains("open")) return;
       const railX = p.left + 20;
       p.s.querySelectorAll(".pathleaf").forEach((leaf) => {
@@ -1329,26 +1390,103 @@ async function openStudySection(section) {
       });
     });
     el("#lpLeaves").setAttribute("d", ld.trim());
-    // Prerequisite chords: same-column pairs bracket out through their outer
-    // lane; cross-column pairs take a gentle arc through the chip-free middle
-    // gap (mid-x jittered so stacked centre arcs don't collapse into one line).
+
+    // Prerequisite chords: orthogonal subway routing. Every run travels inside
+    // a horizontal row gutter or a vertical column gap, so no chord ever
+    // crosses chip text. Runs sharing a gutter/gap are interval-colored into
+    // parallel lanes (link-backed and lexical-only families kept separate so
+    // the always-visible linked edges get generous spacing).
+    const gutY = [];                               // gutter r = below row r
+    for (let r = 0; r < rows; r++) gutY[r] = rowTop[r] + rowH[r] + rowGap / 2;
+    const gapX = [];                               // gap g = between col g and g+1
+    for (let g = 0; g < cols - 1; g++) gapX[g] = sideM + (g + 1) * colW + (g + 0.5) * colGap;
+    if (!gapX.length) gapX.push(Math.max(16, sideM * 0.45)); // single column: left margin lane
+
+    const live = [];
     chords.forEach((c) => {
-      const a = pts[c.from], b = pts[c.to];
-      const ay = a.top + a.chipH / 2, by = b.top + b.chipH / 2;
-      if (two && a.left !== b.left) {
-        const ax = a.left < b.left ? a.left + a.w : a.left;
-        const bx = a.left < b.left ? b.left : b.left + b.w;
-        const spread = Math.max(6, (W - 2 * lane - 2 * nodeW) / 2 - 10);
-        const mx = W / 2 + ((c.from + c.to) % 7 - 3) / 3 * spread;
-        c.el.setAttribute("d", `M ${ax} ${ay} C ${mx} ${ay}, ${mx} ${by}, ${bx} ${by}`);
-      } else {
-        const leftSide = two ? a.left < W / 2 : c.from % 2 === 0;
-        const ax = leftSide ? a.left : a.left + a.w;
-        const bx = leftSide ? b.left : b.left + b.w;
-        const room = leftSide ? Math.min(ax, bx) : W - Math.max(ax, bx);
-        const bow = Math.max(10, Math.min(room - 6, 18 + (by - ay) * 0.05)) * (leftSide ? -1 : 1);
-        c.el.setAttribute("d", `M ${ax} ${ay} C ${ax + bow} ${ay}, ${bx + bow} ${by}, ${bx} ${by}`);
+      const ok = !!(pts[c.from] && pts[c.to]);     // path order => pts[from].r <= pts[to].r
+      c.el.classList.toggle("off", !ok);
+      // local hop (one gutter) draws by default; multi-row staircases are hover-only
+      if (ok && !c.lex) c.el.classList.toggle("wk", pts[c.to].r - pts[c.from].r > 1);
+      if (ok) live.push(c);
+    });
+    // 1. spread chord mouths across each chip edge so lines never stack there
+    const mouths = new Map();                      // "chipIdx:side" -> endpoint list
+    live.forEach((c) => {
+      const A = pts[c.from], B = pts[c.to];
+      const add = (gi, side, key, other) => {
+        const k = gi + ":" + side;
+        if (!mouths.has(k)) mouths.set(k, []);
+        mouths.get(k).push({ c, key, other });
+      };
+      add(c.from, "b", "_ax", B.left + B.w / 2);
+      add(c.to, A.r === B.r ? "b" : "t", "_bx", A.left + A.w / 2);
+    });
+    mouths.forEach((list, k) => {
+      const p = pts[+k.split(":")[0]];
+      list.sort((m, n) => m.other - n.other);
+      const span = Math.min(p.w * 0.55, 26 * (list.length - 1));
+      list.forEach((m, i) => {
+        m.c[m.key] = p.left + p.w / 2 + (list.length > 1 ? (i / (list.length - 1) - 0.5) * span : 0);
+      });
+    });
+    // 2. plan runs: which gutters/gap each chord occupies
+    const hseg = gutY.map(() => []), vseg = gapX.map(() => []);
+    live.forEach((c) => {
+      const A = pts[c.from], B = pts[c.to];
+      if (B.r <= A.r + 1) {                        // same row or adjacent rows: one gutter
+        hseg[A.r].push({ c, part: "a", lo: Math.min(c._ax, c._bx), hi: Math.max(c._ax, c._bx), lex: c.lex });
+      } else {                                     // distant rows: gutter -> gap lane -> gutter
+        let g = 0, best = Infinity;
+        const target = (c._ax + c._bx) / 2;
+        gapX.forEach((x, i) => { const dd = Math.abs(x - target); if (dd < best) { best = dd; g = i; } });
+        c._g = g;
+        hseg[A.r].push({ c, part: "a", lo: Math.min(c._ax, gapX[g]), hi: Math.max(c._ax, gapX[g]), lex: c.lex });
+        hseg[B.r - 1].push({ c, part: "b", lo: Math.min(gapX[g], c._bx), hi: Math.max(gapX[g], c._bx), lex: c.lex });
+        vseg[g].push({ c, lo: A.r, hi: B.r - 1, lex: c.lex });
       }
+    });
+    // 3. greedy interval coloring -> parallel lanes inside each gutter/gap
+    const color = (items, pad) => {
+      items.sort((m, n) => m.lo - n.lo || m.hi - n.hi);
+      const ends = [];
+      items.forEach((it) => {
+        let l = ends.findIndex((e) => e < it.lo - pad);
+        if (l < 0) { l = ends.length; ends.push(-Infinity); }
+        ends[l] = it.hi;
+        it.lane = l;
+      });
+      return ends.length;
+    };
+    hseg.forEach((list, r) => {
+      [0, 1].forEach((isLex) => {
+        const items = list.filter((s) => +s.lex === isLex);
+        const n = color(items, 12);
+        const spread = n > 1 ? Math.min(8, (rowGap - 26) / (n - 1)) : 0;
+        items.forEach((s) => { s.c["_gy" + s.part] = gutY[r] + (s.lane - (n - 1) / 2) * spread + (isLex ? 3 : 0); });
+      });
+    });
+    vseg.forEach((list, g) => {
+      const room = (cols > 1 ? colGap : sideM) - 14;
+      [0, 1].forEach((isLex) => {
+        const items = list.filter((s) => +s.lex === isLex);
+        const n = color(items, 0.5);
+        const spread = n > 1 ? Math.min(8, room / (n - 1)) : 0;
+        items.forEach((s) => { s.c._lx = gapX[g] + (s.lane - (n - 1) / 2) * spread + (isLex ? 3 : 0); });
+      });
+    });
+    // 4. emit rounded orthogonal paths
+    live.forEach((c) => {
+      const A = pts[c.from], B = pts[c.to];
+      const p = [{ x: c._ax, y: A.top + A.h }, { x: c._ax, y: c._gya }];
+      if (A.r === B.r) {                           // U through the gutter below the row
+        p.push({ x: c._bx, y: c._gya }, { x: c._bx, y: B.top + B.h });
+      } else if (B.r === A.r + 1) {                // S through the shared gutter
+        p.push({ x: c._bx, y: c._gya }, { x: c._bx, y: B.top });
+      } else {                                     // down a column-gap lane between gutters
+        p.push({ x: c._lx, y: c._gya }, { x: c._lx, y: c._gyb }, { x: c._bx, y: c._gyb }, { x: c._bx, y: B.top });
+      }
+      c.el.setAttribute("d", orthPath(p));
     });
   }
 
@@ -1407,10 +1545,29 @@ async function openStudySection(section) {
   wrap.addEventListener("focusout", (e) => {
     if (!e.relatedTarget || !wrap.contains(e.relatedTarget)) clearHL();
   });
-  // Filter dims non-matching nodes (path shape stays intact).
-  el("#studyFilter").addEventListener("input", () => {
-    const f = el("#studyFilter").value.trim().toLowerCase();
-    stepEls.forEach((s, i) => s.classList.toggle("dim", !!f && !mods[i].name.toLowerCase().includes(f)));
+  // Filter hides non-matching nodes and re-flows the grid so matches gather
+  // compactly at the top; Enter opens the first match; clearing restores.
+  const filterIn = el("#studyFilter"), countEl = el("#pathCount");
+  const applyFilter = () => {
+    const f = filterIn.value.trim().toLowerCase();
+    visIdx = [];
+    stepEls.forEach((s, i) => {
+      const hit = !f || mods[i].name.toLowerCase().includes(f);
+      s.classList.toggle("fhide", !hit);
+      if (hit) visIdx.push(i);
+    });
+    wrap.classList.toggle("filtering", !!f);
+    countEl.textContent = f ? `${visIdx.length} of ${mods.length} topics` : "";
+    if (f) announce(`${visIdx.length} of ${mods.length} topics match`);
+    layoutPath();
+  };
+  filterIn.addEventListener("input", applyFilter);
+  filterIn.addEventListener("search", applyFilter);   // native x button / Esc clear
+  filterIn.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || !filterIn.value.trim() || !visIdx.length) return;
+    const idx = visIdx[0];
+    reader.back = [];
+    openReaderPath(list[idx].path, list[idx].title, { list, idx });
   });
   el("#studyBack").addEventListener("click", () => vt(renderStudy));
   let rzT = 0;

@@ -38,7 +38,9 @@ reports weekly.
 - **Post-round review** — the results screen lists every miss (and teach-mode learn)
   with the correct answer and a dive-deeper link, under an animated score ring.
 - **Find fast** — type-to-filter inputs on the sub-topic picker and Study topic lists;
-  Study also shows a "Continue reading" card for the last-opened page.
+  on a Learning Path the filter collapses the grid to just the matches (with an
+  "N of M topics" count; Enter opens the first match's reader). Study also shows a
+  "Continue reading" card for the last-opened page.
 - **Reader comfort** — reading-progress bar, `A−`/`A+` font-size controls (persisted),
   back-to-top button, and full-name hover tooltips on truncated sidebar/TOC entries.
 - **Themes** — a top-bar picker with four glass themes (Midnight blue/violet,
@@ -47,11 +49,12 @@ reports weekly.
   Persisted to `localStorage`; `?theme=<id>` in the URL previews one without saving.
   All surfaces are translucent glass (`backdrop-filter`) over the mesh + blueprint grid.
 - **Study mode** — a top-bar `Study` button opens a pure-reading browser: pick a section,
-  then follow its **Learning Path** — a serpentine skill-tree of the section's modules in
-  learning order, drawn as glass node chips over a flowing gradient spine. Nodes show step
-  number and question count, a ✓ once a module has review history, a pulsing "you are here"
-  ring on the last page you read, and expandable fans of deep-dive sub-files; clicking any
-  node opens the full reader with Previous/Next walking the path.
+  then follow its **Learning Path** — a width-adaptive serpentine skill-tree of the
+  section's modules in learning order (up to 4 columns on a landscape laptop, snaking
+  row by row), drawn as glass node chips over a gradient spine. Nodes show step number
+  and question count, a ✓ once a module has review history, a pulsing "you are here"
+  ring on the last page you read, and expandable fans of deep-dive sub-files; clicking
+  any node opens the full reader with Previous/Next walking the path.
 - **Dive deeper** — every revealed answer opens its source module in the in-app reader
   (rendered Markdown beside the quiz), no tab switch needed.
 - **The reader** — a One Dark reading surface: code blocks get IntelliJ-style syntax
@@ -219,17 +222,26 @@ The MVP was the multiple-choice blitz. Since then the following shipped:
     in a new tab.
 - **Study mode** — a top-bar `Study` button: a pure-reading browser (section → topic →
   reader) with Previous/Next-topic navigation. No quiz, no clock.
-- **Learning Path graph** — the Study topic list is a serpentine skill-tree: glass node
-  chips (step number, Q count, practiced ✓ from review history, "you are here" ring from
-  the last-read page) positioned over a gradient SVG bezier spine, with expandable leaf
-  fans for modules that have deep-dive sub-files and a filter that dims non-matching
-  nodes so the path shape stays. Order comes straight from `STUDY_ORDER` via
-  `modulesOf()`; sub-files from `index.json`'s files map — nothing fabricated.
-  Weighted prerequisite edges overlay the path from `graph/<section>.json` (built by
-  `build_graph.py` from real repo cross-links + lexical Q&A overlap): solid accent
-  chords arc through the outer margins with stroke width 1–5px by weight; hovering or
-  focusing a chip spotlights its edges (lexical-only ones appear faint dashed) and dims
-  everything unconnected. Sections with no cross-link data fall back to the plain path.
+- **Learning Path graph** — the Study topic list is a width-adaptive serpentine
+  (boustrophedon) skill-tree that escapes the app's 780px column: chips-per-row adapts
+  to the viewport (1 column on mobile, 2 at ~900px, up to 4 on a landscape laptop), and
+  the path snakes row 1 left→right, row 2 right→left, so a 52-topic section fits in a
+  couple of screenfuls. Glass node chips (step number, Q count, practiced ✓ from review
+  history, "you are here" ring from the last-read page) sit over a gradient SVG spine of
+  adjacent-slot connectors, with expandable leaf fans for modules that have deep-dive
+  sub-files (the row grows; rows below shift). Typing in the filter hides non-matches
+  and re-flows the grid so matches gather compactly at the top with an "N of M topics"
+  count; Enter opens the first match, clearing restores the full path. Order comes
+  straight from `STUDY_ORDER` via `modulesOf()`; sub-files from `index.json`'s files
+  map — nothing fabricated. Weighted prerequisite edges overlay the path from
+  `graph/<section>.json` (built by `build_graph.py` from real repo cross-links +
+  lexical Q&A overlap): chords are routed orthogonally through the chip-free row
+  gutters and column gaps (greedy interval-coloring assigns parallel lanes, so runs
+  never overlap or cross chip text), stroke width 1–5px by weight. Local hops (within
+  one gutter) draw by default; multi-row staircases and lexical-only pairs (faint
+  dashed) appear when a chip is hovered or keyboard-focused, which spotlights all its
+  edges and dims everything unconnected. Layout and routing recompute on debounced
+  resize. Sections with no cross-link data fall back to the plain path.
 - **Flashcard self-grade mode** — a top-bar `Quiz / Cards` toggle switches any deck to
   active recall: see the question, reveal the answer, self-rate "Got it / Missed it". It
   feeds the *same* spaced-repetition schedule as the blitz; XP is flat (no combo/boss) so
