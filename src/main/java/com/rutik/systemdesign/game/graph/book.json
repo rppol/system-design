@@ -1,0 +1,117 @@
+{
+ "section": "book",
+ "pairs": [
+  {
+   "a": "book/designing_data_intensive_applications/05_replication",
+   "b": "book/designing_data_intensive_applications/08_trouble_with_distributed_systems",
+   "w": 0.3,
+   "links": 0,
+   "lex": 0.1805
+  },
+  {
+   "a": "book/designing_data_intensive_applications/00_preface_and_book_map",
+   "b": "book/designing_data_intensive_applications/01_reliable_scalable_maintainable",
+   "w": 0.2887,
+   "links": 0,
+   "lex": 0.1737
+  },
+  {
+   "a": "book/designing_data_intensive_applications/00_preface_and_book_map",
+   "b": "book/designing_data_intensive_applications/10_batch_processing",
+   "w": 0.2294,
+   "links": 0,
+   "lex": 0.138
+  },
+  {
+   "a": "book/designing_data_intensive_applications/05_replication",
+   "b": "book/designing_data_intensive_applications/07_transactions",
+   "w": 0.2152,
+   "links": 0,
+   "lex": 0.1295
+  },
+  {
+   "a": "book/designing_data_intensive_applications/02_data_models_and_query_languages",
+   "b": "book/designing_data_intensive_applications/03_storage_and_retrieval",
+   "w": 0.2127,
+   "links": 0,
+   "lex": 0.128
+  },
+  {
+   "a": "book/designing_data_intensive_applications/03_storage_and_retrieval",
+   "b": "book/designing_data_intensive_applications/11_stream_processing",
+   "w": 0.2059,
+   "links": 0,
+   "lex": 0.1239
+  },
+  {
+   "a": "book/designing_data_intensive_applications/00_preface_and_book_map",
+   "b": "book/designing_data_intensive_applications/03_storage_and_retrieval",
+   "w": 0.2056,
+   "links": 0,
+   "lex": 0.1237
+  },
+  {
+   "a": "book/designing_data_intensive_applications/00_preface_and_book_map",
+   "b": "book/designing_data_intensive_applications/12_future_of_data_systems",
+   "w": 0.2029,
+   "links": 0,
+   "lex": 0.1221
+  },
+  {
+   "a": "book/designing_data_intensive_applications/07_transactions",
+   "b": "book/designing_data_intensive_applications/08_trouble_with_distributed_systems",
+   "w": 0.2013,
+   "links": 0,
+   "lex": 0.1211
+  },
+  {
+   "a": "book/designing_data_intensive_applications/04_encoding_and_evolution",
+   "b": "book/designing_data_intensive_applications/07_transactions",
+   "w": 0.2008,
+   "links": 0,
+   "lex": 0.1208
+  },
+  {
+   "a": "book/designing_data_intensive_applications/02_data_models_and_query_languages",
+   "b": "book/designing_data_intensive_applications/10_batch_processing",
+   "w": 0.1904,
+   "links": 0,
+   "lex": 0.1146
+  },
+  {
+   "a": "book/designing_data_intensive_applications/04_encoding_and_evolution",
+   "b": "book/designing_data_intensive_applications/05_replication",
+   "w": 0.1889,
+   "links": 0,
+   "lex": 0.1136
+  },
+  {
+   "a": "book/designing_data_intensive_applications/03_storage_and_retrieval",
+   "b": "book/designing_data_intensive_applications/07_transactions",
+   "w": 0.1849,
+   "links": 0,
+   "lex": 0.1113
+  },
+  {
+   "a": "book/designing_data_intensive_applications/01_reliable_scalable_maintainable",
+   "b": "book/designing_data_intensive_applications/06_partitioning",
+   "w": 0.179,
+   "links": 0,
+   "lex": 0.1077
+  },
+  {
+   "a": "book/designing_data_intensive_applications/00_preface_and_book_map",
+   "b": "book/designing_data_intensive_applications/11_stream_processing",
+   "w": 0.175,
+   "links": 0,
+   "lex": 0.1053
+  },
+  {
+   "a": "book/designing_data_intensive_applications/07_transactions",
+   "b": "book/designing_data_intensive_applications/10_batch_processing",
+   "w": 0.1731,
+   "links": 0,
+   "lex": 0.1041
+  }
+ ]
+}

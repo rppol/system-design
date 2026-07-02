@@ -1,0 +1,530 @@
+{
+ "section": "spring",
+ "pairs": [
+  {
+   "a": "spring/request_handling",
+   "b": "spring/validation_and_error_handling",
+   "w": 0.9751,
+   "links": 3,
+   "lex": 0.2523
+  },
+  {
+   "a": "spring/spring_events_and_scheduling",
+   "b": "spring/spring_messaging",
+   "w": 0.8706,
+   "links": 3,
+   "lex": 0.1564
+  },
+  {
+   "a": "spring/observability_and_tracing",
+   "b": "spring/spring_boot_actuator",
+   "w": 0.8308,
+   "links": 3,
+   "lex": 0.1199
+  },
+  {
+   "a": "spring/spring_batch",
+   "b": "spring/spring_events_and_scheduling",
+   "w": 0.8263,
+   "links": 3,
+   "lex": 0.1158
+  },
+  {
+   "a": "spring/spring_ai",
+   "b": "spring/spring_boot_autoconfiguration",
+   "w": 0.7955,
+   "links": 3,
+   "lex": 0.0876
+  },
+  {
+   "a": "spring/request_handling",
+   "b": "spring/spring_mvc_architecture",
+   "w": 0.7667,
+   "links": 2,
+   "lex": 0.2751
+  },
+  {
+   "a": "spring/bean_lifecycle",
+   "b": "spring/ioc_container",
+   "w": 0.7598,
+   "links": 2,
+   "lex": 0.2688
+  },
+  {
+   "a": "spring/spring_boot_configuration",
+   "b": "spring/spring_cloud_config",
+   "w": 0.6795,
+   "links": 2,
+   "lex": 0.1952
+  },
+  {
+   "a": "spring/spring_events_and_scheduling",
+   "b": "spring/spring_transactions",
+   "w": 0.6763,
+   "links": 2,
+   "lex": 0.1922
+  },
+  {
+   "a": "spring/spring_proxies",
+   "b": "spring/spring_transactions",
+   "w": 0.6584,
+   "links": 2,
+   "lex": 0.1758
+  },
+  {
+   "a": "spring/spring_aop",
+   "b": "spring/spring_proxies",
+   "w": 0.6539,
+   "links": 2,
+   "lex": 0.1717
+  },
+  {
+   "a": "spring/filters_and_interceptors",
+   "b": "spring/spring_security_architecture",
+   "w": 0.6516,
+   "links": 2,
+   "lex": 0.1696
+  },
+  {
+   "a": "spring/spring_boot_configuration",
+   "b": "spring/spring_configuration",
+   "w": 0.6492,
+   "links": 2,
+   "lex": 0.1674
+  },
+  {
+   "a": "spring/spring_mvc_architecture",
+   "b": "spring/validation_and_error_handling",
+   "w": 0.6467,
+   "links": 2,
+   "lex": 0.1651
+  },
+  {
+   "a": "spring/spring_boot_autoconfiguration",
+   "b": "spring/spring_boot_configuration",
+   "w": 0.6371,
+   "links": 2,
+   "lex": 0.1563
+  },
+  {
+   "a": "spring/spring_data_jpa",
+   "b": "spring/spring_transactions",
+   "w": 0.6334,
+   "links": 2,
+   "lex": 0.1529
+  },
+  {
+   "a": "spring/filters_and_interceptors",
+   "b": "spring/request_handling",
+   "w": 0.6329,
+   "links": 2,
+   "lex": 0.1525
+  },
+  {
+   "a": "spring/observability_and_tracing",
+   "b": "spring/spring_cloud_patterns",
+   "w": 0.6296,
+   "links": 2,
+   "lex": 0.1494
+  },
+  {
+   "a": "spring/spring_caching",
+   "b": "spring/spring_proxies",
+   "w": 0.6256,
+   "links": 2,
+   "lex": 0.1458
+  },
+  {
+   "a": "spring/spring_security_architecture",
+   "b": "spring/spring_security_jwt_oauth",
+   "w": 0.6145,
+   "links": 2,
+   "lex": 0.1356
+  },
+  {
+   "a": "spring/spring_caching",
+   "b": "spring/spring_data_jpa",
+   "w": 0.6068,
+   "links": 2,
+   "lex": 0.1285
+  },
+  {
+   "a": "spring/spring_batch",
+   "b": "spring/spring_transactions",
+   "w": 0.6053,
+   "links": 2,
+   "lex": 0.1272
+  },
+  {
+   "a": "spring/dependency_injection",
+   "b": "spring/ioc_container",
+   "w": 0.5974,
+   "links": 2,
+   "lex": 0.1199
+  },
+  {
+   "a": "spring/dependency_injection",
+   "b": "spring/spring_configuration",
+   "w": 0.5732,
+   "links": 2,
+   "lex": 0.0977
+  },
+  {
+   "a": "spring/spring_batch",
+   "b": "spring/spring_messaging",
+   "w": 0.5697,
+   "links": 2,
+   "lex": 0.0945
+  },
+  {
+   "a": "spring/spring_boot_actuator",
+   "b": "spring/spring_boot_autoconfiguration",
+   "w": 0.5668,
+   "links": 2,
+   "lex": 0.0918
+  },
+  {
+   "a": "spring/spring_mvc_architecture",
+   "b": "spring/spring_webflux",
+   "w": 0.5637,
+   "links": 2,
+   "lex": 0.089
+  },
+  {
+   "a": "spring/observability_and_tracing",
+   "b": "spring/spring_performance",
+   "w": 0.5542,
+   "links": 2,
+   "lex": 0.0802
+  },
+  {
+   "a": "spring/dependency_injection",
+   "b": "spring/spring_boot_autoconfiguration",
+   "w": 0.5465,
+   "links": 2,
+   "lex": 0.0732
+  },
+  {
+   "a": "spring/spring_aop",
+   "b": "spring/spring_transactions",
+   "w": 0.468,
+   "links": 1,
+   "lex": 0.2152
+  },
+  {
+   "a": "spring/filters_and_interceptors",
+   "b": "spring/spring_mvc_architecture",
+   "w": 0.4433,
+   "links": 1,
+   "lex": 0.1926
+  },
+  {
+   "a": "spring/spring_native_graalvm",
+   "b": "spring/spring_performance",
+   "w": 0.4269,
+   "links": 1,
+   "lex": 0.1776
+  },
+  {
+   "a": "spring/spring_boot_autoconfiguration",
+   "b": "spring/spring_configuration",
+   "w": 0.4169,
+   "links": 1,
+   "lex": 0.1683
+  },
+  {
+   "a": "spring/bean_lifecycle",
+   "b": "spring/spring_aop",
+   "w": 0.4082,
+   "links": 1,
+   "lex": 0.1604
+  },
+  {
+   "a": "spring/bean_lifecycle",
+   "b": "spring/spring_proxies",
+   "w": 0.3952,
+   "links": 1,
+   "lex": 0.1484
+  },
+  {
+   "a": "spring/filters_and_interceptors",
+   "b": "spring/spring_aop",
+   "w": 0.3859,
+   "links": 1,
+   "lex": 0.1399
+  },
+  {
+   "a": "spring/spring_boot_autoconfiguration",
+   "b": "spring/spring_native_graalvm",
+   "w": 0.3651,
+   "links": 1,
+   "lex": 0.1208
+  },
+  {
+   "a": "spring/spring_boot_actuator",
+   "b": "spring/spring_performance",
+   "w": 0.3593,
+   "links": 1,
+   "lex": 0.1155
+  },
+  {
+   "a": "spring/spring_data_jpa",
+   "b": "spring/spring_graphql",
+   "w": 0.3552,
+   "links": 1,
+   "lex": 0.1117
+  },
+  {
+   "a": "spring/spring_messaging",
+   "b": "spring/spring_webflux",
+   "w": 0.3516,
+   "links": 1,
+   "lex": 0.1084
+  },
+  {
+   "a": "spring/spring_cloud_patterns",
+   "b": "spring/spring_messaging",
+   "w": 0.3466,
+   "links": 1,
+   "lex": 0.1039
+  },
+  {
+   "a": "spring/spring_boot_autoconfiguration",
+   "b": "spring/validation_and_error_handling",
+   "w": 0.345,
+   "links": 1,
+   "lex": 0.1024
+  },
+  {
+   "a": "spring/ioc_container",
+   "b": "spring/spring_configuration",
+   "w": 0.3397,
+   "links": 1,
+   "lex": 0.0975
+  },
+  {
+   "a": "spring/spring_integration",
+   "b": "spring/spring_messaging",
+   "w": 0.3368,
+   "links": 1,
+   "lex": 0.0949
+  },
+  {
+   "a": "spring/spring_boot_autoconfiguration",
+   "b": "spring/spring_testing",
+   "w": 0.333,
+   "links": 1,
+   "lex": 0.0914
+  },
+  {
+   "a": "spring/spring_events_and_scheduling",
+   "b": "spring/spring_integration",
+   "w": 0.3294,
+   "links": 1,
+   "lex": 0.0881
+  },
+  {
+   "a": "spring/request_handling",
+   "b": "spring/spring_graphql",
+   "w": 0.3291,
+   "links": 1,
+   "lex": 0.0879
+  },
+  {
+   "a": "spring/spring_graphql",
+   "b": "spring/spring_webflux",
+   "w": 0.3284,
+   "links": 1,
+   "lex": 0.0872
+  },
+  {
+   "a": "spring/spring_events_and_scheduling",
+   "b": "spring/spring_modulith",
+   "w": 0.3072,
+   "links": 1,
+   "lex": 0.0678
+  },
+  {
+   "a": "spring/spring_ai",
+   "b": "spring/spring_aop",
+   "w": 0.3023,
+   "links": 1,
+   "lex": 0.0633
+  },
+  {
+   "a": "spring/spring_batch",
+   "b": "spring/spring_cloud_patterns",
+   "w": 0.2786,
+   "links": 1,
+   "lex": 0.0415
+  },
+  {
+   "a": "spring/bean_lifecycle",
+   "b": "spring/dependency_injection",
+   "w": 0.2635,
+   "links": 0,
+   "lex": 0.2416
+  },
+  {
+   "a": "spring/spring_integration",
+   "b": "spring/spring_modulith",
+   "w": 0.2571,
+   "links": 1,
+   "lex": 0.0218
+  },
+  {
+   "a": "spring/spring_testing",
+   "b": "spring/spring_transactions",
+   "w": 0.1961,
+   "links": 0,
+   "lex": 0.1799
+  },
+  {
+   "a": "spring/spring_boot_autoconfiguration",
+   "b": "spring/spring_performance",
+   "w": 0.1861,
+   "links": 0,
+   "lex": 0.1707
+  },
+  {
+   "a": "spring/filters_and_interceptors",
+   "b": "spring/validation_and_error_handling",
+   "w": 0.178,
+   "links": 0,
+   "lex": 0.1632
+  },
+  {
+   "a": "spring/ioc_container",
+   "b": "spring/spring_boot_autoconfiguration",
+   "w": 0.1564,
+   "links": 0,
+   "lex": 0.1435
+  },
+  {
+   "a": "spring/spring_security_architecture",
+   "b": "spring/spring_testing",
+   "w": 0.1541,
+   "links": 0,
+   "lex": 0.1414
+  },
+  {
+   "a": "spring/bean_lifecycle",
+   "b": "spring/spring_boot_configuration",
+   "w": 0.1533,
+   "links": 0,
+   "lex": 0.1406
+  },
+  {
+   "a": "spring/bean_lifecycle",
+   "b": "spring/spring_testing",
+   "w": 0.1513,
+   "links": 0,
+   "lex": 0.1388
+  },
+  {
+   "a": "spring/spring_native_graalvm",
+   "b": "spring/spring_proxies",
+   "w": 0.1511,
+   "links": 0,
+   "lex": 0.1386
+  },
+  {
+   "a": "spring/spring_mvc_architecture",
+   "b": "spring/spring_security_architecture",
+   "w": 0.147,
+   "links": 0,
+   "lex": 0.1348
+  },
+  {
+   "a": "spring/spring_data_jpa",
+   "b": "spring/spring_messaging",
+   "w": 0.1447,
+   "links": 0,
+   "lex": 0.1327
+  },
+  {
+   "a": "spring/observability_and_tracing",
+   "b": "spring/spring_ai",
+   "w": 0.1438,
+   "links": 0,
+   "lex": 0.1319
+  },
+  {
+   "a": "spring/spring_caching",
+   "b": "spring/spring_transactions",
+   "w": 0.1379,
+   "links": 0,
+   "lex": 0.1265
+  },
+  {
+   "a": "spring/spring_boot_actuator",
+   "b": "spring/spring_testing",
+   "w": 0.1371,
+   "links": 0,
+   "lex": 0.1257
+  },
+  {
+   "a": "spring/spring_cloud_config",
+   "b": "spring/spring_configuration",
+   "w": 0.1363,
+   "links": 0,
+   "lex": 0.125
+  },
+  {
+   "a": "spring/spring_cloud_config",
+   "b": "spring/spring_transactions",
+   "w": 0.1346,
+   "links": 0,
+   "lex": 0.1234
+  },
+  {
+   "a": "spring/spring_cloud_config",
+   "b": "spring/spring_performance",
+   "w": 0.1318,
+   "links": 0,
+   "lex": 0.1209
+  },
+  {
+   "a": "spring/spring_cloud_patterns",
+   "b": "spring/spring_transactions",
+   "w": 0.1316,
+   "links": 0,
+   "lex": 0.1207
+  },
+  {
+   "a": "spring/spring_transactions",
+   "b": "spring/spring_webflux",
+   "w": 0.1299,
+   "links": 0,
+   "lex": 0.1192
+  },
+  {
+   "a": "spring/spring_native_graalvm",
+   "b": "spring/spring_transactions",
+   "w": 0.1282,
+   "links": 0,
+   "lex": 0.1176
+  },
+  {
+   "a": "spring/spring_caching",
+   "b": "spring/spring_performance",
+   "w": 0.1257,
+   "links": 0,
+   "lex": 0.1153
+  },
+  {
+   "a": "spring/spring_graphql",
+   "b": "spring/spring_mvc_architecture",
+   "w": 0.1244,
+   "links": 0,
+   "lex": 0.1141
+  },
+  {
+   "a": "spring/spring_ai",
+   "b": "spring/spring_proxies",
+   "w": 0.1243,
+   "links": 0,
+   "lex": 0.114
+  }
+ ]
+}

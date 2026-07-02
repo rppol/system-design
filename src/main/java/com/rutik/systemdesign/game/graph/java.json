@@ -1,0 +1,439 @@
+{
+ "section": "java",
+ "pairs": [
+  {
+   "a": "java/concurrency",
+   "b": "java/structured_concurrency_and_loom",
+   "w": 0.9007,
+   "links": 3,
+   "lex": 0.1555
+  },
+  {
+   "a": "java/reactive_programming",
+   "b": "java/structured_concurrency_and_loom",
+   "w": 0.8732,
+   "links": 3,
+   "lex": 0.1341
+  },
+  {
+   "a": "java/java9_to_21_features",
+   "b": "java/structured_concurrency_and_loom",
+   "w": 0.8469,
+   "links": 3,
+   "lex": 0.1138
+  },
+  {
+   "a": "java/foreign_function_and_memory_api",
+   "b": "java/jvm_internals",
+   "w": 0.8109,
+   "links": 3,
+   "lex": 0.0859
+  },
+  {
+   "a": "java/java8_features",
+   "b": "java/java_streams",
+   "w": 0.7667,
+   "links": 2,
+   "lex": 0.2324
+  },
+  {
+   "a": "java/functional_programming",
+   "b": "java/java8_features",
+   "w": 0.7573,
+   "links": 2,
+   "lex": 0.2252
+  },
+  {
+   "a": "java/java_memory_model",
+   "b": "java/jvm_internals",
+   "w": 0.7351,
+   "links": 2,
+   "lex": 0.2079
+  },
+  {
+   "a": "java/functional_programming",
+   "b": "java/java_streams",
+   "w": 0.7147,
+   "links": 2,
+   "lex": 0.1921
+  },
+  {
+   "a": "java/design_patterns_in_java",
+   "b": "java/java_interview_patterns",
+   "w": 0.7103,
+   "links": 2,
+   "lex": 0.1888
+  },
+  {
+   "a": "java/core_language",
+   "b": "java/java_interview_patterns",
+   "w": 0.7015,
+   "links": 2,
+   "lex": 0.1819
+  },
+  {
+   "a": "java/concurrency",
+   "b": "java/java_memory_model",
+   "w": 0.6954,
+   "links": 2,
+   "lex": 0.1772
+  },
+  {
+   "a": "java/performance_and_tuning",
+   "b": "java/strings_and_text",
+   "w": 0.6905,
+   "links": 2,
+   "lex": 0.1734
+  },
+  {
+   "a": "java/core_language",
+   "b": "java/generics_and_type_system",
+   "w": 0.6776,
+   "links": 2,
+   "lex": 0.1634
+  },
+  {
+   "a": "java/jdbc_and_database",
+   "b": "java/networking_and_http_client",
+   "w": 0.6115,
+   "links": 2,
+   "lex": 0.1122
+  },
+  {
+   "a": "java/jvm_internals",
+   "b": "java/performance_and_tuning",
+   "w": 0.6083,
+   "links": 2,
+   "lex": 0.1097
+  },
+  {
+   "a": "java/java_memory_model",
+   "b": "java/structured_concurrency_and_loom",
+   "w": 0.5836,
+   "links": 2,
+   "lex": 0.0906
+  },
+  {
+   "a": "java/concurrency",
+   "b": "java/reactive_programming",
+   "w": 0.5827,
+   "links": 2,
+   "lex": 0.0899
+  },
+  {
+   "a": "java/java8_features",
+   "b": "java/java9_to_21_features",
+   "w": 0.5799,
+   "links": 2,
+   "lex": 0.0877
+  },
+  {
+   "a": "java/foreign_function_and_memory_api",
+   "b": "java/java_memory_model",
+   "w": 0.5769,
+   "links": 2,
+   "lex": 0.0854
+  },
+  {
+   "a": "java/microservices_patterns",
+   "b": "java/structured_concurrency_and_loom",
+   "w": 0.5684,
+   "links": 2,
+   "lex": 0.0788
+  },
+  {
+   "a": "java/functional_programming",
+   "b": "java/generics_and_type_system",
+   "w": 0.565,
+   "links": 2,
+   "lex": 0.0761
+  },
+  {
+   "a": "java/collections_internals",
+   "b": "java/generics_and_type_system",
+   "w": 0.5175,
+   "links": 2,
+   "lex": 0.0394
+  },
+  {
+   "a": "java/core_language",
+   "b": "java/strings_and_text",
+   "w": 0.4282,
+   "links": 1,
+   "lex": 0.151
+  },
+  {
+   "a": "java/concurrency",
+   "b": "java/testing_junit_mockito",
+   "w": 0.393,
+   "links": 1,
+   "lex": 0.1237
+  },
+  {
+   "a": "java/exceptions_and_io",
+   "b": "java/networking_and_http_client",
+   "w": 0.3871,
+   "links": 1,
+   "lex": 0.1191
+  },
+  {
+   "a": "java/concurrency",
+   "b": "java/java_interview_patterns",
+   "w": 0.387,
+   "links": 1,
+   "lex": 0.119
+  },
+  {
+   "a": "java/concurrency",
+   "b": "java/microservices_patterns",
+   "w": 0.3853,
+   "links": 1,
+   "lex": 0.1177
+  },
+  {
+   "a": "java/concurrency",
+   "b": "java/networking_and_http_client",
+   "w": 0.3842,
+   "links": 1,
+   "lex": 0.1168
+  },
+  {
+   "a": "java/performance_and_tuning",
+   "b": "java/structured_concurrency_and_loom",
+   "w": 0.3833,
+   "links": 1,
+   "lex": 0.1161
+  },
+  {
+   "a": "java/java9_to_21_features",
+   "b": "java/strings_and_text",
+   "w": 0.3773,
+   "links": 1,
+   "lex": 0.1115
+  },
+  {
+   "a": "java/java9_to_21_features",
+   "b": "java/jvm_internals",
+   "w": 0.374,
+   "links": 1,
+   "lex": 0.109
+  },
+  {
+   "a": "java/functional_programming",
+   "b": "java/reactive_programming",
+   "w": 0.3724,
+   "links": 1,
+   "lex": 0.1077
+  },
+  {
+   "a": "java/jvm_internals",
+   "b": "java/strings_and_text",
+   "w": 0.3712,
+   "links": 1,
+   "lex": 0.1068
+  },
+  {
+   "a": "java/collections_internals",
+   "b": "java/java_memory_model",
+   "w": 0.3706,
+   "links": 1,
+   "lex": 0.1063
+  },
+  {
+   "a": "java/annotation_processing",
+   "b": "java/design_patterns_in_java",
+   "w": 0.3665,
+   "links": 1,
+   "lex": 0.1031
+  },
+  {
+   "a": "java/core_language",
+   "b": "java/java_memory_model",
+   "w": 0.3641,
+   "links": 1,
+   "lex": 0.1013
+  },
+  {
+   "a": "java/java_streams",
+   "b": "java/performance_and_tuning",
+   "w": 0.3608,
+   "links": 1,
+   "lex": 0.0988
+  },
+  {
+   "a": "java/annotation_processing",
+   "b": "java/generics_and_type_system",
+   "w": 0.3567,
+   "links": 1,
+   "lex": 0.0956
+  },
+  {
+   "a": "java/java_memory_model",
+   "b": "java/performance_and_tuning",
+   "w": 0.3489,
+   "links": 1,
+   "lex": 0.0895
+  },
+  {
+   "a": "java/jvm_internals",
+   "b": "java/structured_concurrency_and_loom",
+   "w": 0.3485,
+   "links": 1,
+   "lex": 0.0892
+  },
+  {
+   "a": "java/jdbc_and_database",
+   "b": "java/performance_and_tuning",
+   "w": 0.3463,
+   "links": 1,
+   "lex": 0.0875
+  },
+  {
+   "a": "java/exceptions_and_io",
+   "b": "java/jdbc_and_database",
+   "w": 0.3409,
+   "links": 1,
+   "lex": 0.0833
+  },
+  {
+   "a": "java/grpc_protobuf",
+   "b": "java/networking_and_http_client",
+   "w": 0.3364,
+   "links": 1,
+   "lex": 0.0798
+  },
+  {
+   "a": "java/foreign_function_and_memory_api",
+   "b": "java/performance_and_tuning",
+   "w": 0.3362,
+   "links": 1,
+   "lex": 0.0797
+  },
+  {
+   "a": "java/java_memory_model",
+   "b": "java/strings_and_text",
+   "w": 0.3351,
+   "links": 1,
+   "lex": 0.0788
+  },
+  {
+   "a": "java/grpc_protobuf",
+   "b": "java/microservices_patterns",
+   "w": 0.3343,
+   "links": 1,
+   "lex": 0.0782
+  },
+  {
+   "a": "java/foreign_function_and_memory_api",
+   "b": "java/java9_to_21_features",
+   "w": 0.3148,
+   "links": 1,
+   "lex": 0.0631
+  },
+  {
+   "a": "java/jdbc_and_database",
+   "b": "java/testing_junit_mockito",
+   "w": 0.306,
+   "links": 1,
+   "lex": 0.0563
+  },
+  {
+   "a": "java/generics_and_type_system",
+   "b": "java/grpc_protobuf",
+   "w": 0.3044,
+   "links": 1,
+   "lex": 0.0551
+  },
+  {
+   "a": "java/java9_to_21_features",
+   "b": "java/reactive_programming",
+   "w": 0.2953,
+   "links": 1,
+   "lex": 0.048
+  },
+  {
+   "a": "java/exceptions_and_io",
+   "b": "java/testing_junit_mockito",
+   "w": 0.2438,
+   "links": 0,
+   "lex": 0.1888
+  },
+  {
+   "a": "java/core_language",
+   "b": "java/design_patterns_in_java",
+   "w": 0.2173,
+   "links": 0,
+   "lex": 0.1683
+  },
+  {
+   "a": "java/collections_internals",
+   "b": "java/java8_features",
+   "w": 0.1916,
+   "links": 0,
+   "lex": 0.1484
+  },
+  {
+   "a": "java/design_patterns_in_java",
+   "b": "java/java8_features",
+   "w": 0.1805,
+   "links": 0,
+   "lex": 0.1398
+  },
+  {
+   "a": "java/collections_internals",
+   "b": "java/performance_and_tuning",
+   "w": 0.1795,
+   "links": 0,
+   "lex": 0.1391
+  },
+  {
+   "a": "java/reactive_programming",
+   "b": "java/testing_junit_mockito",
+   "w": 0.1697,
+   "links": 0,
+   "lex": 0.1314
+  },
+  {
+   "a": "java/exceptions_and_io",
+   "b": "java/java_interview_patterns",
+   "w": 0.1679,
+   "links": 0,
+   "lex": 0.1301
+  },
+  {
+   "a": "java/java_streams",
+   "b": "java/reactive_programming",
+   "w": 0.1585,
+   "links": 0,
+   "lex": 0.1228
+  },
+  {
+   "a": "java/annotation_processing",
+   "b": "java/java_memory_model",
+   "w": 0.1584,
+   "links": 0,
+   "lex": 0.1227
+  },
+  {
+   "a": "java/jdbc_and_database",
+   "b": "java/microservices_patterns",
+   "w": 0.1563,
+   "links": 0,
+   "lex": 0.1211
+  },
+  {
+   "a": "java/annotation_processing",
+   "b": "java/strings_and_text",
+   "w": 0.1546,
+   "links": 0,
+   "lex": 0.1197
+  },
+  {
+   "a": "java/grpc_protobuf",
+   "b": "java/structured_concurrency_and_loom",
+   "w": 0.146,
+   "links": 0,
+   "lex": 0.1131
+  }
+ ]
+}

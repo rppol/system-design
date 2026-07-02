@@ -1,0 +1,40 @@
+{
+ "section": "lld",
+ "pairs": [
+  {
+   "a": "lld/concurrency_patterns",
+   "b": "lld/creational",
+   "w": 0.3,
+   "links": 0,
+   "lex": 0.1753
+  },
+  {
+   "a": "lld/design_principles",
+   "b": "lld/solid_principles",
+   "w": 0.2937,
+   "links": 0,
+   "lex": 0.1716
+  },
+  {
+   "a": "lld/behavioral",
+   "b": "lld/creational",
+   "w": 0.2692,
+   "links": 0,
+   "lex": 0.1573
+  },
+  {
+   "a": "lld/solid_principles",
+   "b": "lld/structural",
+   "w": 0.2252,
+   "links": 0,
+   "lex": 0.1316
+  },
+  {
+   "a": "lld/creational",
+   "b": "lld/solid_principles",
+   "w": 0.2092,
+   "links": 0,
+   "lex": 0.1222
+  }
+ ]
+}

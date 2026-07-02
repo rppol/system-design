@@ -1,0 +1,663 @@
+{
+ "section": "ml",
+ "pairs": [
+  {
+   "a": "ml/active_learning_and_weak_supervision",
+   "b": "ml/uncertainty_quantification_and_conformal_prediction",
+   "w": 0.892,
+   "links": 2,
+   "lex": 0.1793
+  },
+  {
+   "a": "ml/active_learning_and_weak_supervision",
+   "b": "ml/natural_language_processing",
+   "w": 0.8307,
+   "links": 2,
+   "lex": 0.1221
+  },
+  {
+   "a": "ml/active_learning_and_weak_supervision",
+   "b": "ml/data_pipelines_and_processing",
+   "w": 0.7428,
+   "links": 2,
+   "lex": 0.04
+  },
+  {
+   "a": "ml/model_evaluation_and_selection",
+   "b": "ml/uncertainty_quantification_and_conformal_prediction",
+   "w": 0.4739,
+   "links": 1,
+   "lex": 0.1158
+  },
+  {
+   "a": "ml/adversarial_ml_and_robustness",
+   "b": "ml/monitoring_and_drift_detection",
+   "w": 0.4576,
+   "links": 1,
+   "lex": 0.1005
+  },
+  {
+   "a": "ml/probability_and_statistics",
+   "b": "ml/uncertainty_quantification_and_conformal_prediction",
+   "w": 0.4468,
+   "links": 1,
+   "lex": 0.0904
+  },
+  {
+   "a": "ml/adversarial_ml_and_robustness",
+   "b": "ml/convolutional_neural_networks",
+   "w": 0.4294,
+   "links": 1,
+   "lex": 0.0742
+  },
+  {
+   "a": "ml/adversarial_ml_and_robustness",
+   "b": "ml/model_evaluation_and_selection",
+   "w": 0.4194,
+   "links": 1,
+   "lex": 0.0649
+  },
+  {
+   "a": "ml/ensemble_methods",
+   "b": "ml/supervised_learning",
+   "w": 0.3,
+   "links": 0,
+   "lex": 0.2802
+  },
+  {
+   "a": "ml/natural_language_processing",
+   "b": "ml/recommender_systems",
+   "w": 0.2875,
+   "links": 0,
+   "lex": 0.2686
+  },
+  {
+   "a": "ml/optimization_theory",
+   "b": "ml/training_deep_networks",
+   "w": 0.2786,
+   "links": 0,
+   "lex": 0.2603
+  },
+  {
+   "a": "ml/ml_system_design",
+   "b": "ml/recommender_systems",
+   "w": 0.2666,
+   "links": 0,
+   "lex": 0.249
+  },
+  {
+   "a": "ml/computer_vision",
+   "b": "ml/natural_language_processing",
+   "w": 0.258,
+   "links": 0,
+   "lex": 0.241
+  },
+  {
+   "a": "ml/recommender_systems",
+   "b": "ml/supervised_learning",
+   "w": 0.2514,
+   "links": 0,
+   "lex": 0.2348
+  },
+  {
+   "a": "ml/computer_vision",
+   "b": "ml/convolutional_neural_networks",
+   "w": 0.2404,
+   "links": 0,
+   "lex": 0.2246
+  },
+  {
+   "a": "ml/natural_language_processing",
+   "b": "ml/supervised_learning",
+   "w": 0.2358,
+   "links": 0,
+   "lex": 0.2203
+  },
+  {
+   "a": "ml/ensemble_methods",
+   "b": "ml/model_selection_and_algorithm_choice",
+   "w": 0.2328,
+   "links": 0,
+   "lex": 0.2175
+  },
+  {
+   "a": "ml/computer_vision",
+   "b": "ml/recommender_systems",
+   "w": 0.2326,
+   "links": 0,
+   "lex": 0.2173
+  },
+  {
+   "a": "ml/ml_system_design",
+   "b": "ml/monitoring_and_drift_detection",
+   "w": 0.232,
+   "links": 0,
+   "lex": 0.2167
+  },
+  {
+   "a": "ml/ensemble_methods",
+   "b": "ml/recommender_systems",
+   "w": 0.2266,
+   "links": 0,
+   "lex": 0.2116
+  },
+  {
+   "a": "ml/ml_system_design",
+   "b": "ml/natural_language_processing",
+   "w": 0.2185,
+   "links": 0,
+   "lex": 0.2041
+  },
+  {
+   "a": "ml/computer_vision",
+   "b": "ml/self_supervised_and_contrastive_learning",
+   "w": 0.2183,
+   "links": 0,
+   "lex": 0.2039
+  },
+  {
+   "a": "ml/ml_interview_patterns",
+   "b": "ml/ml_system_design",
+   "w": 0.2179,
+   "links": 0,
+   "lex": 0.2035
+  },
+  {
+   "a": "ml/ml_system_design",
+   "b": "ml/mlops_and_ci_cd",
+   "w": 0.2145,
+   "links": 0,
+   "lex": 0.2004
+  },
+  {
+   "a": "ml/distributed_training",
+   "b": "ml/gpu_and_hardware_optimization",
+   "w": 0.2133,
+   "links": 0,
+   "lex": 0.1993
+  },
+  {
+   "a": "ml/information_theory",
+   "b": "ml/probability_and_statistics",
+   "w": 0.2066,
+   "links": 0,
+   "lex": 0.193
+  },
+  {
+   "a": "ml/data_pipelines_and_processing",
+   "b": "ml/mlops_and_ci_cd",
+   "w": 0.2063,
+   "links": 0,
+   "lex": 0.1927
+  },
+  {
+   "a": "ml/ensemble_methods",
+   "b": "ml/model_evaluation_and_selection",
+   "w": 0.2062,
+   "links": 0,
+   "lex": 0.1926
+  },
+  {
+   "a": "ml/distributed_training",
+   "b": "ml/training_deep_networks",
+   "w": 0.2019,
+   "links": 0,
+   "lex": 0.1886
+  },
+  {
+   "a": "ml/ml_system_design",
+   "b": "ml/supervised_learning",
+   "w": 0.1976,
+   "links": 0,
+   "lex": 0.1845
+  },
+  {
+   "a": "ml/probability_and_statistics",
+   "b": "ml/supervised_learning",
+   "w": 0.1904,
+   "links": 0,
+   "lex": 0.1779
+  },
+  {
+   "a": "ml/information_theory",
+   "b": "ml/supervised_learning",
+   "w": 0.1895,
+   "links": 0,
+   "lex": 0.177
+  },
+  {
+   "a": "ml/model_evaluation_and_selection",
+   "b": "ml/supervised_learning",
+   "w": 0.1868,
+   "links": 0,
+   "lex": 0.1745
+  },
+  {
+   "a": "ml/ml_interview_patterns",
+   "b": "ml/monitoring_and_drift_detection",
+   "w": 0.1838,
+   "links": 0,
+   "lex": 0.1717
+  },
+  {
+   "a": "ml/mlops_and_ci_cd",
+   "b": "ml/monitoring_and_drift_detection",
+   "w": 0.1811,
+   "links": 0,
+   "lex": 0.1691
+  },
+  {
+   "a": "ml/model_selection_and_algorithm_choice",
+   "b": "ml/supervised_learning",
+   "w": 0.1799,
+   "links": 0,
+   "lex": 0.168
+  },
+  {
+   "a": "ml/ml_interview_patterns",
+   "b": "ml/recommender_systems",
+   "w": 0.1742,
+   "links": 0,
+   "lex": 0.1627
+  },
+  {
+   "a": "ml/graph_neural_networks",
+   "b": "ml/recommender_systems",
+   "w": 0.1681,
+   "links": 0,
+   "lex": 0.157
+  },
+  {
+   "a": "ml/data_pipelines_and_processing",
+   "b": "ml/ml_system_design",
+   "w": 0.1677,
+   "links": 0,
+   "lex": 0.1567
+  },
+  {
+   "a": "ml/gpu_and_hardware_optimization",
+   "b": "ml/training_deep_networks",
+   "w": 0.1668,
+   "links": 0,
+   "lex": 0.1558
+  },
+  {
+   "a": "ml/computer_vision",
+   "b": "ml/neural_network_fundamentals",
+   "w": 0.162,
+   "links": 0,
+   "lex": 0.1513
+  },
+  {
+   "a": "ml/ensemble_methods",
+   "b": "ml/neural_network_fundamentals",
+   "w": 0.1617,
+   "links": 0,
+   "lex": 0.151
+  },
+  {
+   "a": "ml/ml_system_design",
+   "b": "ml/model_selection_and_algorithm_choice",
+   "w": 0.1611,
+   "links": 0,
+   "lex": 0.1505
+  },
+  {
+   "a": "ml/ml_system_design",
+   "b": "ml/model_compression_and_efficiency",
+   "w": 0.1599,
+   "links": 0,
+   "lex": 0.1494
+  },
+  {
+   "a": "ml/feature_engineering",
+   "b": "ml/supervised_learning",
+   "w": 0.1599,
+   "links": 0,
+   "lex": 0.1494
+  },
+  {
+   "a": "ml/ml_system_design",
+   "b": "ml/model_serving_and_inference",
+   "w": 0.1588,
+   "links": 0,
+   "lex": 0.1484
+  },
+  {
+   "a": "ml/neural_network_fundamentals",
+   "b": "ml/supervised_learning",
+   "w": 0.1572,
+   "links": 0,
+   "lex": 0.1468
+  },
+  {
+   "a": "ml/active_learning_and_weak_supervision",
+   "b": "ml/supervised_learning",
+   "w": 0.1562,
+   "links": 0,
+   "lex": 0.1459
+  },
+  {
+   "a": "ml/natural_language_processing",
+   "b": "ml/recurrent_neural_networks",
+   "w": 0.1558,
+   "links": 0,
+   "lex": 0.1456
+  },
+  {
+   "a": "ml/computer_vision",
+   "b": "ml/optimization_theory",
+   "w": 0.1558,
+   "links": 0,
+   "lex": 0.1455
+  },
+  {
+   "a": "ml/monitoring_and_drift_detection",
+   "b": "ml/time_series_forecasting",
+   "w": 0.1553,
+   "links": 0,
+   "lex": 0.145
+  },
+  {
+   "a": "ml/natural_language_processing",
+   "b": "ml/neural_network_fundamentals",
+   "w": 0.1548,
+   "links": 0,
+   "lex": 0.1446
+  },
+  {
+   "a": "ml/self_supervised_and_contrastive_learning",
+   "b": "ml/supervised_learning",
+   "w": 0.1545,
+   "links": 0,
+   "lex": 0.1443
+  },
+  {
+   "a": "ml/ensemble_methods",
+   "b": "ml/feature_engineering",
+   "w": 0.1539,
+   "links": 0,
+   "lex": 0.1437
+  },
+  {
+   "a": "ml/neural_network_fundamentals",
+   "b": "ml/time_series_forecasting",
+   "w": 0.153,
+   "links": 0,
+   "lex": 0.1429
+  },
+  {
+   "a": "ml/supervised_learning",
+   "b": "ml/uncertainty_quantification_and_conformal_prediction",
+   "w": 0.1492,
+   "links": 0,
+   "lex": 0.1394
+  },
+  {
+   "a": "ml/model_compression_and_efficiency",
+   "b": "ml/natural_language_processing",
+   "w": 0.1486,
+   "links": 0,
+   "lex": 0.1388
+  },
+  {
+   "a": "ml/generative_models",
+   "b": "ml/self_supervised_and_contrastive_learning",
+   "w": 0.1478,
+   "links": 0,
+   "lex": 0.138
+  },
+  {
+   "a": "ml/data_pipelines_and_processing",
+   "b": "ml/monitoring_and_drift_detection",
+   "w": 0.1478,
+   "links": 0,
+   "lex": 0.1381
+  },
+  {
+   "a": "ml/linear_algebra_and_calculus",
+   "b": "ml/supervised_learning",
+   "w": 0.1477,
+   "links": 0,
+   "lex": 0.138
+  },
+  {
+   "a": "ml/generative_models",
+   "b": "ml/supervised_learning",
+   "w": 0.1464,
+   "links": 0,
+   "lex": 0.1367
+  },
+  {
+   "a": "ml/natural_language_processing",
+   "b": "ml/self_supervised_and_contrastive_learning",
+   "w": 0.1454,
+   "links": 0,
+   "lex": 0.1358
+  },
+  {
+   "a": "ml/recommender_systems",
+   "b": "ml/reinforcement_learning",
+   "w": 0.1447,
+   "links": 0,
+   "lex": 0.1352
+  },
+  {
+   "a": "ml/generative_models",
+   "b": "ml/recommender_systems",
+   "w": 0.1445,
+   "links": 0,
+   "lex": 0.1349
+  },
+  {
+   "a": "ml/ensemble_methods",
+   "b": "ml/training_deep_networks",
+   "w": 0.1437,
+   "links": 0,
+   "lex": 0.1343
+  },
+  {
+   "a": "ml/convolutional_neural_networks",
+   "b": "ml/natural_language_processing",
+   "w": 0.1433,
+   "links": 0,
+   "lex": 0.1338
+  },
+  {
+   "a": "ml/model_compression_and_efficiency",
+   "b": "ml/supervised_learning",
+   "w": 0.1427,
+   "links": 0,
+   "lex": 0.1333
+  },
+  {
+   "a": "ml/ensemble_methods",
+   "b": "ml/information_theory",
+   "w": 0.1413,
+   "links": 0,
+   "lex": 0.132
+  },
+  {
+   "a": "ml/convolutional_neural_networks",
+   "b": "ml/ensemble_methods",
+   "w": 0.141,
+   "links": 0,
+   "lex": 0.1317
+  },
+  {
+   "a": "ml/recurrent_neural_networks",
+   "b": "ml/training_deep_networks",
+   "w": 0.1407,
+   "links": 0,
+   "lex": 0.1314
+  },
+  {
+   "a": "ml/reinforcement_learning",
+   "b": "ml/supervised_learning",
+   "w": 0.1405,
+   "links": 0,
+   "lex": 0.1312
+  },
+  {
+   "a": "ml/model_evaluation_and_selection",
+   "b": "ml/probability_and_statistics",
+   "w": 0.1386,
+   "links": 0,
+   "lex": 0.1295
+  },
+  {
+   "a": "ml/ml_interview_patterns",
+   "b": "ml/supervised_learning",
+   "w": 0.1375,
+   "links": 0,
+   "lex": 0.1284
+  },
+  {
+   "a": "ml/recommender_systems",
+   "b": "ml/unsupervised_learning",
+   "w": 0.1367,
+   "links": 0,
+   "lex": 0.1277
+  },
+  {
+   "a": "ml/experiment_tracking_and_versioning",
+   "b": "ml/ml_system_design",
+   "w": 0.1353,
+   "links": 0,
+   "lex": 0.1264
+  },
+  {
+   "a": "ml/experiment_tracking_and_versioning",
+   "b": "ml/model_serving_and_inference",
+   "w": 0.1344,
+   "links": 0,
+   "lex": 0.1255
+  },
+  {
+   "a": "ml/ensemble_methods",
+   "b": "ml/graph_neural_networks",
+   "w": 0.1339,
+   "links": 0,
+   "lex": 0.1251
+  },
+  {
+   "a": "ml/computer_vision",
+   "b": "ml/recurrent_neural_networks",
+   "w": 0.1326,
+   "links": 0,
+   "lex": 0.1239
+  },
+  {
+   "a": "ml/causal_inference_and_ml",
+   "b": "ml/ml_system_design",
+   "w": 0.1322,
+   "links": 0,
+   "lex": 0.1235
+  },
+  {
+   "a": "ml/ml_interview_patterns",
+   "b": "ml/model_selection_and_algorithm_choice",
+   "w": 0.132,
+   "links": 0,
+   "lex": 0.1233
+  },
+  {
+   "a": "ml/supervised_learning",
+   "b": "ml/time_series_forecasting",
+   "w": 0.1314,
+   "links": 0,
+   "lex": 0.1227
+  },
+  {
+   "a": "ml/feature_engineering",
+   "b": "ml/recommender_systems",
+   "w": 0.1314,
+   "links": 0,
+   "lex": 0.1228
+  },
+  {
+   "a": "ml/ensemble_methods",
+   "b": "ml/optimization_theory",
+   "w": 0.1312,
+   "links": 0,
+   "lex": 0.1225
+  },
+  {
+   "a": "ml/ensemble_methods",
+   "b": "ml/recurrent_neural_networks",
+   "w": 0.1304,
+   "links": 0,
+   "lex": 0.1218
+  },
+  {
+   "a": "ml/neural_network_fundamentals",
+   "b": "ml/optimization_theory",
+   "w": 0.1287,
+   "links": 0,
+   "lex": 0.1202
+  },
+  {
+   "a": "ml/model_serving_and_inference",
+   "b": "ml/recommender_systems",
+   "w": 0.1281,
+   "links": 0,
+   "lex": 0.1196
+  },
+  {
+   "a": "ml/linear_algebra_and_calculus",
+   "b": "ml/unsupervised_learning",
+   "w": 0.1278,
+   "links": 0,
+   "lex": 0.1193
+  },
+  {
+   "a": "ml/distributed_training",
+   "b": "ml/optimization_theory",
+   "w": 0.1277,
+   "links": 0,
+   "lex": 0.1192
+  },
+  {
+   "a": "ml/computer_vision",
+   "b": "ml/generative_models",
+   "w": 0.1277,
+   "links": 0,
+   "lex": 0.1193
+  },
+  {
+   "a": "ml/supervised_learning",
+   "b": "ml/unsupervised_learning",
+   "w": 0.1275,
+   "links": 0,
+   "lex": 0.1191
+  },
+  {
+   "a": "ml/adversarial_ml_and_robustness",
+   "b": "ml/neural_network_fundamentals",
+   "w": 0.1271,
+   "links": 0,
+   "lex": 0.1187
+  },
+  {
+   "a": "ml/graph_neural_networks",
+   "b": "ml/ml_system_design",
+   "w": 0.1264,
+   "links": 0,
+   "lex": 0.118
+  },
+  {
+   "a": "ml/model_compression_and_efficiency",
+   "b": "ml/recommender_systems",
+   "w": 0.1254,
+   "links": 0,
+   "lex": 0.1172
+  },
+  {
+   "a": "ml/feature_engineering",
+   "b": "ml/natural_language_processing",
+   "w": 0.1246,
+   "links": 0,
+   "lex": 0.1164
+  }
+ ]
+}

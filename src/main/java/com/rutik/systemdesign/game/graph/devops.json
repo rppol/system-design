@@ -1,0 +1,747 @@
+{
+ "section": "devops",
+ "pairs": [
+  {
+   "a": "devops/devsecops_and_supply_chain_security",
+   "b": "devops/kubernetes_security",
+   "w": 0.8766,
+   "links": 3,
+   "lex": 0.1396
+  },
+  {
+   "a": "devops/infrastructure_as_code_terraform",
+   "b": "devops/policy_as_code_and_compliance",
+   "w": 0.8059,
+   "links": 3,
+   "lex": 0.0837
+  },
+  {
+   "a": "devops/kubernetes_security",
+   "b": "devops/policy_as_code_and_compliance",
+   "w": 0.8025,
+   "links": 3,
+   "lex": 0.081
+  },
+  {
+   "a": "devops/devsecops_and_supply_chain_security",
+   "b": "devops/secrets_management",
+   "w": 0.7712,
+   "links": 3,
+   "lex": 0.0562
+  },
+  {
+   "a": "devops/gitops_argocd_flux",
+   "b": "devops/platform_engineering_and_idp",
+   "w": 0.7447,
+   "links": 3,
+   "lex": 0.0354
+  },
+  {
+   "a": "devops/infrastructure_as_code_terraform",
+   "b": "devops/platform_engineering_and_idp",
+   "w": 0.3029,
+   "links": 1,
+   "lex": 0.055
+  },
+  {
+   "a": "devops/infrastructure_as_code_terraform",
+   "b": "devops/terraform_advanced_and_alternatives",
+   "w": 0.3,
+   "links": 0,
+   "lex": 0.2371
+  },
+  {
+   "a": "devops/kubernetes_networking",
+   "b": "devops/kubernetes_workloads_and_objects",
+   "w": 0.2813,
+   "links": 0,
+   "lex": 0.2224
+  },
+  {
+   "a": "devops/cloud_networking_and_cdn",
+   "b": "devops/disaster_recovery_and_resilience",
+   "w": 0.2775,
+   "links": 1,
+   "lex": 0.0349
+  },
+  {
+   "a": "devops/kubernetes_security",
+   "b": "devops/secrets_management",
+   "w": 0.2738,
+   "links": 0,
+   "lex": 0.2164
+  },
+  {
+   "a": "devops/cloud_fundamentals_and_aws",
+   "b": "devops/networking_for_devops",
+   "w": 0.2437,
+   "links": 0,
+   "lex": 0.1927
+  },
+  {
+   "a": "devops/deployment_strategies",
+   "b": "devops/gitops_argocd_flux",
+   "w": 0.2316,
+   "links": 0,
+   "lex": 0.1831
+  },
+  {
+   "a": "devops/kubernetes_networking",
+   "b": "devops/networking_for_devops",
+   "w": 0.2203,
+   "links": 0,
+   "lex": 0.1741
+  },
+  {
+   "a": "devops/kubernetes_architecture",
+   "b": "devops/kubernetes_operators_and_crds",
+   "w": 0.1997,
+   "links": 0,
+   "lex": 0.1579
+  },
+  {
+   "a": "devops/container_runtimes_and_oci",
+   "b": "devops/containers_and_docker",
+   "w": 0.1979,
+   "links": 0,
+   "lex": 0.1564
+  },
+  {
+   "a": "devops/artifact_and_registry_management",
+   "b": "devops/ci_cd_fundamentals",
+   "w": 0.1921,
+   "links": 0,
+   "lex": 0.1518
+  },
+  {
+   "a": "devops/kubernetes_architecture",
+   "b": "devops/kubernetes_security",
+   "w": 0.1915,
+   "links": 0,
+   "lex": 0.1513
+  },
+  {
+   "a": "devops/ci_cd_fundamentals",
+   "b": "devops/platform_engineering_and_idp",
+   "w": 0.1905,
+   "links": 0,
+   "lex": 0.1506
+  },
+  {
+   "a": "devops/observability_metrics_prometheus",
+   "b": "devops/visualization_and_alerting",
+   "w": 0.1888,
+   "links": 0,
+   "lex": 0.1492
+  },
+  {
+   "a": "devops/ci_cd_fundamentals",
+   "b": "devops/containers_and_docker",
+   "w": 0.1849,
+   "links": 0,
+   "lex": 0.1461
+  },
+  {
+   "a": "devops/incident_management_and_oncall",
+   "b": "devops/visualization_and_alerting",
+   "w": 0.1842,
+   "links": 0,
+   "lex": 0.1456
+  },
+  {
+   "a": "devops/cloud_fundamentals_and_aws",
+   "b": "devops/gcp_and_azure_essentials",
+   "w": 0.1824,
+   "links": 0,
+   "lex": 0.1442
+  },
+  {
+   "a": "devops/kubernetes_workloads_and_objects",
+   "b": "devops/secrets_management",
+   "w": 0.1809,
+   "links": 0,
+   "lex": 0.1429
+  },
+  {
+   "a": "devops/kubernetes_architecture",
+   "b": "devops/kubernetes_networking",
+   "w": 0.177,
+   "links": 0,
+   "lex": 0.1399
+  },
+  {
+   "a": "devops/kubernetes_scheduling_and_autoscaling",
+   "b": "devops/serverless_and_faas",
+   "w": 0.1756,
+   "links": 0,
+   "lex": 0.1388
+  },
+  {
+   "a": "devops/artifact_and_registry_management",
+   "b": "devops/containers_and_docker",
+   "w": 0.1732,
+   "links": 0,
+   "lex": 0.1369
+  },
+  {
+   "a": "devops/performance_and_load_testing",
+   "b": "devops/visualization_and_alerting",
+   "w": 0.1729,
+   "links": 0,
+   "lex": 0.1367
+  },
+  {
+   "a": "devops/observability_logging",
+   "b": "devops/observability_tracing_and_otel",
+   "w": 0.1721,
+   "links": 0,
+   "lex": 0.1361
+  },
+  {
+   "a": "devops/devsecops_and_supply_chain_security",
+   "b": "devops/policy_as_code_and_compliance",
+   "w": 0.1703,
+   "links": 0,
+   "lex": 0.1346
+  },
+  {
+   "a": "devops/incident_management_and_oncall",
+   "b": "devops/sre_principles_and_slos",
+   "w": 0.1701,
+   "links": 0,
+   "lex": 0.1345
+  },
+  {
+   "a": "devops/kubernetes_networking",
+   "b": "devops/kubernetes_storage_and_state",
+   "w": 0.1692,
+   "links": 0,
+   "lex": 0.1337
+  },
+  {
+   "a": "devops/ci_cd_fundamentals",
+   "b": "devops/deployment_strategies",
+   "w": 0.1691,
+   "links": 0,
+   "lex": 0.1337
+  },
+  {
+   "a": "devops/kubernetes_security",
+   "b": "devops/kubernetes_workloads_and_objects",
+   "w": 0.1687,
+   "links": 0,
+   "lex": 0.1334
+  },
+  {
+   "a": "devops/configuration_management",
+   "b": "devops/containers_and_docker",
+   "w": 0.1681,
+   "links": 0,
+   "lex": 0.1328
+  },
+  {
+   "a": "devops/gitops_argocd_flux",
+   "b": "devops/version_control_and_git_workflows",
+   "w": 0.1657,
+   "links": 0,
+   "lex": 0.1309
+  },
+  {
+   "a": "devops/observability_metrics_prometheus",
+   "b": "devops/sre_principles_and_slos",
+   "w": 0.165,
+   "links": 0,
+   "lex": 0.1304
+  },
+  {
+   "a": "devops/ci_cd_fundamentals",
+   "b": "devops/observability_logging",
+   "w": 0.1647,
+   "links": 0,
+   "lex": 0.1302
+  },
+  {
+   "a": "devops/infrastructure_as_code_terraform",
+   "b": "devops/secrets_management",
+   "w": 0.1631,
+   "links": 0,
+   "lex": 0.1289
+  },
+  {
+   "a": "devops/observability_metrics_prometheus",
+   "b": "devops/observability_tracing_and_otel",
+   "w": 0.1631,
+   "links": 0,
+   "lex": 0.1289
+  },
+  {
+   "a": "devops/cloud_fundamentals_and_aws",
+   "b": "devops/kubernetes_security",
+   "w": 0.1629,
+   "links": 0,
+   "lex": 0.1288
+  },
+  {
+   "a": "devops/gitops_argocd_flux",
+   "b": "devops/helm_and_package_management",
+   "w": 0.1612,
+   "links": 0,
+   "lex": 0.1274
+  },
+  {
+   "a": "devops/gcp_and_azure_essentials",
+   "b": "devops/serverless_and_faas",
+   "w": 0.1602,
+   "links": 0,
+   "lex": 0.1266
+  },
+  {
+   "a": "devops/ci_cd_fundamentals",
+   "b": "devops/configuration_management",
+   "w": 0.1586,
+   "links": 0,
+   "lex": 0.1254
+  },
+  {
+   "a": "devops/deployment_strategies",
+   "b": "devops/kubernetes_workloads_and_objects",
+   "w": 0.1549,
+   "links": 0,
+   "lex": 0.1225
+  },
+  {
+   "a": "devops/disaster_recovery_and_resilience",
+   "b": "devops/observability_metrics_prometheus",
+   "w": 0.1544,
+   "links": 0,
+   "lex": 0.122
+  },
+  {
+   "a": "devops/artifact_and_registry_management",
+   "b": "devops/configuration_management",
+   "w": 0.1535,
+   "links": 0,
+   "lex": 0.1213
+  },
+  {
+   "a": "devops/helm_and_package_management",
+   "b": "devops/kubernetes_operators_and_crds",
+   "w": 0.1531,
+   "links": 0,
+   "lex": 0.121
+  },
+  {
+   "a": "devops/cloud_networking_and_cdn",
+   "b": "devops/networking_for_devops",
+   "w": 0.153,
+   "links": 0,
+   "lex": 0.1209
+  },
+  {
+   "a": "devops/observability_metrics_prometheus",
+   "b": "devops/performance_and_load_testing",
+   "w": 0.1519,
+   "links": 0,
+   "lex": 0.1201
+  },
+  {
+   "a": "devops/ci_cd_fundamentals",
+   "b": "devops/devsecops_and_supply_chain_security",
+   "w": 0.1504,
+   "links": 0,
+   "lex": 0.1188
+  },
+  {
+   "a": "devops/cloud_fundamentals_and_aws",
+   "b": "devops/kubernetes_architecture",
+   "w": 0.1491,
+   "links": 0,
+   "lex": 0.1179
+  },
+  {
+   "a": "devops/policy_as_code_and_compliance",
+   "b": "devops/terraform_advanced_and_alternatives",
+   "w": 0.1473,
+   "links": 0,
+   "lex": 0.1164
+  },
+  {
+   "a": "devops/artifact_and_registry_management",
+   "b": "devops/devsecops_and_supply_chain_security",
+   "w": 0.1469,
+   "links": 0,
+   "lex": 0.1161
+  },
+  {
+   "a": "devops/kubernetes_scheduling_and_autoscaling",
+   "b": "devops/linux_and_os_fundamentals",
+   "w": 0.1456,
+   "links": 0,
+   "lex": 0.1151
+  },
+  {
+   "a": "devops/observability_logging",
+   "b": "devops/observability_metrics_prometheus",
+   "w": 0.145,
+   "links": 0,
+   "lex": 0.1146
+  },
+  {
+   "a": "devops/ci_cd_fundamentals",
+   "b": "devops/ci_cd_platforms",
+   "w": 0.1426,
+   "links": 0,
+   "lex": 0.1127
+  },
+  {
+   "a": "devops/container_runtimes_and_oci",
+   "b": "devops/kubernetes_architecture",
+   "w": 0.1424,
+   "links": 0,
+   "lex": 0.1125
+  },
+  {
+   "a": "devops/containers_and_docker",
+   "b": "devops/linux_and_os_fundamentals",
+   "w": 0.1417,
+   "links": 0,
+   "lex": 0.112
+  },
+  {
+   "a": "devops/ci_cd_platforms",
+   "b": "devops/gitops_argocd_flux",
+   "w": 0.139,
+   "links": 0,
+   "lex": 0.1099
+  },
+  {
+   "a": "devops/kubernetes_scheduling_and_autoscaling",
+   "b": "devops/observability_metrics_prometheus",
+   "w": 0.1372,
+   "links": 0,
+   "lex": 0.1084
+  },
+  {
+   "a": "devops/kubernetes_storage_and_state",
+   "b": "devops/kubernetes_workloads_and_objects",
+   "w": 0.136,
+   "links": 0,
+   "lex": 0.1075
+  },
+  {
+   "a": "devops/ci_cd_fundamentals",
+   "b": "devops/disaster_recovery_and_resilience",
+   "w": 0.1358,
+   "links": 0,
+   "lex": 0.1074
+  },
+  {
+   "a": "devops/ml_platform_and_gpu_infrastructure",
+   "b": "devops/serverless_and_faas",
+   "w": 0.1356,
+   "links": 0,
+   "lex": 0.1072
+  },
+  {
+   "a": "devops/kubernetes_scheduling_and_autoscaling",
+   "b": "devops/kubernetes_workloads_and_objects",
+   "w": 0.1356,
+   "links": 0,
+   "lex": 0.1072
+  },
+  {
+   "a": "devops/kubernetes_operators_and_crds",
+   "b": "devops/policy_as_code_and_compliance",
+   "w": 0.1352,
+   "links": 0,
+   "lex": 0.1069
+  },
+  {
+   "a": "devops/helm_and_package_management",
+   "b": "devops/terraform_advanced_and_alternatives",
+   "w": 0.1331,
+   "links": 0,
+   "lex": 0.1052
+  },
+  {
+   "a": "devops/cloud_networking_and_cdn",
+   "b": "devops/deployment_strategies",
+   "w": 0.1328,
+   "links": 0,
+   "lex": 0.105
+  },
+  {
+   "a": "devops/artifact_and_registry_management",
+   "b": "devops/helm_and_package_management",
+   "w": 0.1306,
+   "links": 0,
+   "lex": 0.1032
+  },
+  {
+   "a": "devops/kubernetes_scheduling_and_autoscaling",
+   "b": "devops/ml_platform_and_gpu_infrastructure",
+   "w": 0.1303,
+   "links": 0,
+   "lex": 0.103
+  },
+  {
+   "a": "devops/gcp_and_azure_essentials",
+   "b": "devops/kubernetes_security",
+   "w": 0.1293,
+   "links": 0,
+   "lex": 0.1022
+  },
+  {
+   "a": "devops/observability_tracing_and_otel",
+   "b": "devops/visualization_and_alerting",
+   "w": 0.1283,
+   "links": 0,
+   "lex": 0.1014
+  },
+  {
+   "a": "devops/helm_and_package_management",
+   "b": "devops/version_control_and_git_workflows",
+   "w": 0.1271,
+   "links": 0,
+   "lex": 0.1005
+  },
+  {
+   "a": "devops/ci_cd_fundamentals",
+   "b": "devops/shell_scripting_and_automation",
+   "w": 0.127,
+   "links": 0,
+   "lex": 0.1004
+  },
+  {
+   "a": "devops/event_streaming_operations",
+   "b": "devops/kubernetes_scheduling_and_autoscaling",
+   "w": 0.1267,
+   "links": 0,
+   "lex": 0.1001
+  },
+  {
+   "a": "devops/devsecops_and_supply_chain_security",
+   "b": "devops/terraform_advanced_and_alternatives",
+   "w": 0.1259,
+   "links": 0,
+   "lex": 0.0995
+  },
+  {
+   "a": "devops/linux_and_os_fundamentals",
+   "b": "devops/serverless_and_faas",
+   "w": 0.1253,
+   "links": 0,
+   "lex": 0.0991
+  },
+  {
+   "a": "devops/sre_principles_and_slos",
+   "b": "devops/visualization_and_alerting",
+   "w": 0.1251,
+   "links": 0,
+   "lex": 0.0988
+  },
+  {
+   "a": "devops/container_runtimes_and_oci",
+   "b": "devops/secrets_management",
+   "w": 0.1244,
+   "links": 0,
+   "lex": 0.0983
+  },
+  {
+   "a": "devops/deployment_strategies",
+   "b": "devops/disaster_recovery_and_resilience",
+   "w": 0.1242,
+   "links": 0,
+   "lex": 0.0982
+  },
+  {
+   "a": "devops/container_runtimes_and_oci",
+   "b": "devops/policy_as_code_and_compliance",
+   "w": 0.1235,
+   "links": 0,
+   "lex": 0.0976
+  },
+  {
+   "a": "devops/container_runtimes_and_oci",
+   "b": "devops/linux_and_os_fundamentals",
+   "w": 0.1223,
+   "links": 0,
+   "lex": 0.0967
+  },
+  {
+   "a": "devops/ci_cd_platforms",
+   "b": "devops/secrets_management",
+   "w": 0.1208,
+   "links": 0,
+   "lex": 0.0955
+  },
+  {
+   "a": "devops/gitops_argocd_flux",
+   "b": "devops/kubernetes_operators_and_crds",
+   "w": 0.1201,
+   "links": 0,
+   "lex": 0.0949
+  },
+  {
+   "a": "devops/linux_and_os_fundamentals",
+   "b": "devops/shell_scripting_and_automation",
+   "w": 0.1172,
+   "links": 0,
+   "lex": 0.0927
+  },
+  {
+   "a": "devops/deployment_strategies",
+   "b": "devops/version_control_and_git_workflows",
+   "w": 0.1171,
+   "links": 0,
+   "lex": 0.0926
+  },
+  {
+   "a": "devops/kubernetes_security",
+   "b": "devops/kubernetes_storage_and_state",
+   "w": 0.1161,
+   "links": 0,
+   "lex": 0.0917
+  },
+  {
+   "a": "devops/kubernetes_storage_and_state",
+   "b": "devops/serverless_and_faas",
+   "w": 0.1158,
+   "links": 0,
+   "lex": 0.0915
+  },
+  {
+   "a": "devops/ci_cd_platforms",
+   "b": "devops/policy_as_code_and_compliance",
+   "w": 0.115,
+   "links": 0,
+   "lex": 0.0909
+  },
+  {
+   "a": "devops/event_streaming_operations",
+   "b": "devops/observability_metrics_prometheus",
+   "w": 0.1148,
+   "links": 0,
+   "lex": 0.0907
+  },
+  {
+   "a": "devops/deployment_strategies",
+   "b": "devops/observability_logging",
+   "w": 0.1146,
+   "links": 0,
+   "lex": 0.0906
+  },
+  {
+   "a": "devops/deployment_strategies",
+   "b": "devops/shell_scripting_and_automation",
+   "w": 0.1142,
+   "links": 0,
+   "lex": 0.0902
+  },
+  {
+   "a": "devops/cloud_fundamentals_and_aws",
+   "b": "devops/event_streaming_operations",
+   "w": 0.1135,
+   "links": 0,
+   "lex": 0.0897
+  },
+  {
+   "a": "devops/disaster_recovery_and_resilience",
+   "b": "devops/performance_and_load_testing",
+   "w": 0.1127,
+   "links": 0,
+   "lex": 0.0891
+  },
+  {
+   "a": "devops/container_runtimes_and_oci",
+   "b": "devops/observability_tracing_and_otel",
+   "w": 0.1127,
+   "links": 0,
+   "lex": 0.0891
+  },
+  {
+   "a": "devops/gcp_and_azure_essentials",
+   "b": "devops/kubernetes_architecture",
+   "w": 0.1124,
+   "links": 0,
+   "lex": 0.0888
+  },
+  {
+   "a": "devops/cloud_fundamentals_and_aws",
+   "b": "devops/cloud_networking_and_cdn",
+   "w": 0.1108,
+   "links": 0,
+   "lex": 0.0876
+  },
+  {
+   "a": "devops/observability_tracing_and_otel",
+   "b": "devops/performance_and_load_testing",
+   "w": 0.1105,
+   "links": 0,
+   "lex": 0.0873
+  },
+  {
+   "a": "devops/networking_for_devops",
+   "b": "devops/performance_and_load_testing",
+   "w": 0.1105,
+   "links": 0,
+   "lex": 0.0874
+  },
+  {
+   "a": "devops/ml_platform_and_gpu_infrastructure",
+   "b": "devops/performance_and_load_testing",
+   "w": 0.1105,
+   "links": 0,
+   "lex": 0.0873
+  },
+  {
+   "a": "devops/linux_and_os_fundamentals",
+   "b": "devops/ml_platform_and_gpu_infrastructure",
+   "w": 0.1097,
+   "links": 0,
+   "lex": 0.0867
+  },
+  {
+   "a": "devops/deployment_strategies",
+   "b": "devops/event_streaming_operations",
+   "w": 0.1096,
+   "links": 0,
+   "lex": 0.0867
+  },
+  {
+   "a": "devops/ci_cd_fundamentals",
+   "b": "devops/version_control_and_git_workflows",
+   "w": 0.1096,
+   "links": 0,
+   "lex": 0.0866
+  },
+  {
+   "a": "devops/container_runtimes_and_oci",
+   "b": "devops/shell_scripting_and_automation",
+   "w": 0.1085,
+   "links": 0,
+   "lex": 0.0858
+  },
+  {
+   "a": "devops/configuration_management",
+   "b": "devops/devsecops_and_supply_chain_security",
+   "w": 0.1084,
+   "links": 0,
+   "lex": 0.0857
+  },
+  {
+   "a": "devops/observability_logging",
+   "b": "devops/sre_principles_and_slos",
+   "w": 0.1074,
+   "links": 0,
+   "lex": 0.0849
+  },
+  {
+   "a": "devops/platform_engineering_and_idp",
+   "b": "devops/terraform_advanced_and_alternatives",
+   "w": 0.105,
+   "links": 0,
+   "lex": 0.083
+  }
+ ]
+}

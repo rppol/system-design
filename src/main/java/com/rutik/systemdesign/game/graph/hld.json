@@ -1,0 +1,292 @@
+{
+ "section": "hld",
+ "pairs": [
+  {
+   "a": "hld/distributed_transactions",
+   "b": "hld/resilience_patterns",
+   "w": 0.7712,
+   "links": 6,
+   "lex": 0.0389
+  },
+  {
+   "a": "hld/rate_limiting",
+   "b": "hld/resilience_patterns",
+   "w": 0.5832,
+   "links": 4,
+   "lex": 0.0636
+  },
+  {
+   "a": "hld/event_sourcing_cqrs",
+   "b": "hld/microservices",
+   "w": 0.5067,
+   "links": 3,
+   "lex": 0.0855
+  },
+  {
+   "a": "hld/distributed_transactions",
+   "b": "hld/microservices",
+   "w": 0.5005,
+   "links": 3,
+   "lex": 0.0821
+  },
+  {
+   "a": "hld/microservices",
+   "b": "hld/resilience_patterns",
+   "w": 0.4743,
+   "links": 3,
+   "lex": 0.0678
+  },
+  {
+   "a": "hld/distributed_transactions",
+   "b": "hld/event_sourcing_cqrs",
+   "w": 0.4627,
+   "links": 2,
+   "lex": 0.1251
+  },
+  {
+   "a": "hld/microservices",
+   "b": "hld/security_and_auth",
+   "w": 0.4265,
+   "links": 2,
+   "lex": 0.1053
+  },
+  {
+   "a": "hld/microservices",
+   "b": "hld/observability",
+   "w": 0.4069,
+   "links": 2,
+   "lex": 0.0947
+  },
+  {
+   "a": "hld/load_balancing",
+   "b": "hld/resilience_patterns",
+   "w": 0.3871,
+   "links": 3,
+   "lex": 0.0203
+  },
+  {
+   "a": "hld/resilience_patterns",
+   "b": "hld/scalability",
+   "w": 0.3117,
+   "links": 2,
+   "lex": 0.0427
+  },
+  {
+   "a": "hld/consistent_hashing",
+   "b": "hld/database_sharding",
+   "w": 0.3,
+   "links": 0,
+   "lex": 0.1636
+  },
+  {
+   "a": "hld/caching",
+   "b": "hld/database_design",
+   "w": 0.289,
+   "links": 0,
+   "lex": 0.1576
+  },
+  {
+   "a": "hld/caching",
+   "b": "hld/scalability",
+   "w": 0.2853,
+   "links": 0,
+   "lex": 0.1556
+  },
+  {
+   "a": "hld/cap_theorem",
+   "b": "hld/consensus_algorithms",
+   "w": 0.2762,
+   "links": 0,
+   "lex": 0.1507
+  },
+  {
+   "a": "hld/caching",
+   "b": "hld/rate_limiting",
+   "w": 0.276,
+   "links": 0,
+   "lex": 0.1506
+  },
+  {
+   "a": "hld/cap_theorem",
+   "b": "hld/scalability",
+   "w": 0.2758,
+   "links": 0,
+   "lex": 0.1505
+  },
+  {
+   "a": "hld/api_design",
+   "b": "hld/microservices",
+   "w": 0.2747,
+   "links": 0,
+   "lex": 0.1498
+  },
+  {
+   "a": "hld/api_design",
+   "b": "hld/security_and_auth",
+   "w": 0.2677,
+   "links": 0,
+   "lex": 0.146
+  },
+  {
+   "a": "hld/api_design",
+   "b": "hld/rate_limiting",
+   "w": 0.2674,
+   "links": 0,
+   "lex": 0.1458
+  },
+  {
+   "a": "hld/caching",
+   "b": "hld/cdn",
+   "w": 0.2573,
+   "links": 0,
+   "lex": 0.1403
+  },
+  {
+   "a": "hld/database_design",
+   "b": "hld/database_sharding",
+   "w": 0.2453,
+   "links": 0,
+   "lex": 0.1338
+  },
+  {
+   "a": "hld/database_design",
+   "b": "hld/scalability",
+   "w": 0.2416,
+   "links": 0,
+   "lex": 0.1318
+  },
+  {
+   "a": "hld/microservices",
+   "b": "hld/rate_limiting",
+   "w": 0.2411,
+   "links": 0,
+   "lex": 0.1315
+  },
+  {
+   "a": "hld/distributed_transactions",
+   "b": "hld/message_queues",
+   "w": 0.2353,
+   "links": 0,
+   "lex": 0.1283
+  },
+  {
+   "a": "hld/database_sharding",
+   "b": "hld/scalability",
+   "w": 0.2345,
+   "links": 0,
+   "lex": 0.1279
+  },
+  {
+   "a": "hld/cdn",
+   "b": "hld/scalability",
+   "w": 0.2339,
+   "links": 0,
+   "lex": 0.1276
+  },
+  {
+   "a": "hld/caching",
+   "b": "hld/cap_theorem",
+   "w": 0.2302,
+   "links": 0,
+   "lex": 0.1256
+  },
+  {
+   "a": "hld/cdn",
+   "b": "hld/load_balancing",
+   "w": 0.2275,
+   "links": 0,
+   "lex": 0.1241
+  },
+  {
+   "a": "hld/cap_theorem",
+   "b": "hld/database_design",
+   "w": 0.2273,
+   "links": 0,
+   "lex": 0.124
+  },
+  {
+   "a": "hld/database_sharding",
+   "b": "hld/rate_limiting",
+   "w": 0.2253,
+   "links": 0,
+   "lex": 0.1229
+  },
+  {
+   "a": "hld/consensus_algorithms",
+   "b": "hld/event_sourcing_cqrs",
+   "w": 0.2226,
+   "links": 0,
+   "lex": 0.1215
+  },
+  {
+   "a": "hld/observability",
+   "b": "hld/resilience_patterns",
+   "w": 0.2187,
+   "links": 1,
+   "lex": 0.0556
+  },
+  {
+   "a": "hld/message_queues",
+   "b": "hld/scalability",
+   "w": 0.2155,
+   "links": 0,
+   "lex": 0.1175
+  },
+  {
+   "a": "hld/consensus_algorithms",
+   "b": "hld/scalability",
+   "w": 0.2104,
+   "links": 0,
+   "lex": 0.1147
+  },
+  {
+   "a": "hld/caching",
+   "b": "hld/consistent_hashing",
+   "w": 0.2074,
+   "links": 0,
+   "lex": 0.1131
+  },
+  {
+   "a": "hld/resilience_patterns",
+   "b": "hld/security_and_auth",
+   "w": 0.2002,
+   "links": 1,
+   "lex": 0.0456
+  },
+  {
+   "a": "hld/load_balancing",
+   "b": "hld/security_and_auth",
+   "w": 0.2001,
+   "links": 0,
+   "lex": 0.1092
+  },
+  {
+   "a": "hld/distributed_transactions",
+   "b": "hld/load_balancing",
+   "w": 0.1999,
+   "links": 0,
+   "lex": 0.1091
+  },
+  {
+   "a": "hld/api_design",
+   "b": "hld/database_sharding",
+   "w": 0.1993,
+   "links": 0,
+   "lex": 0.1087
+  },
+  {
+   "a": "hld/consistent_hashing",
+   "b": "hld/database_design",
+   "w": 0.1947,
+   "links": 0,
+   "lex": 0.1062
+  },
+  {
+   "a": "hld/consensus_algorithms",
+   "b": "hld/distributed_transactions",
+   "w": 0.1942,
+   "links": 0,
+   "lex": 0.1059
+  }
+ ]
+}

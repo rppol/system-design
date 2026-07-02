@@ -1,0 +1,726 @@
+{
+ "section": "python",
+ "pairs": [
+  {
+   "a": "python/async_patterns_and_pitfalls",
+   "b": "python/fastapi",
+   "w": 0.8361,
+   "links": 2,
+   "lex": 0.1303
+  },
+  {
+   "a": "python/asyncio_and_event_loop",
+   "b": "python/the_gil_and_free_threading",
+   "w": 0.5189,
+   "links": 1,
+   "lex": 0.1617
+  },
+  {
+   "a": "python/asyncio_and_event_loop",
+   "b": "python/fastapi",
+   "w": 0.5186,
+   "links": 1,
+   "lex": 0.1614
+  },
+  {
+   "a": "python/fastapi",
+   "b": "python/the_type_system_and_typing",
+   "w": 0.4933,
+   "links": 1,
+   "lex": 0.1372
+  },
+  {
+   "a": "python/data_model_and_objects",
+   "b": "python/metaclasses_and_metaprogramming",
+   "w": 0.3,
+   "links": 0,
+   "lex": 0.2872
+  },
+  {
+   "a": "python/fastapi",
+   "b": "python/fastapi/middleware_and_lifecycle",
+   "w": 0.2655,
+   "links": 0,
+   "lex": 0.2542
+  },
+  {
+   "a": "python/the_gil_and_free_threading",
+   "b": "python/threading_and_multiprocessing",
+   "w": 0.2652,
+   "links": 0,
+   "lex": 0.2539
+  },
+  {
+   "a": "python/fastapi/background_jobs_and_task_queues",
+   "b": "python/fastapi/message_queues_and_event_driven",
+   "w": 0.2642,
+   "links": 0,
+   "lex": 0.253
+  },
+  {
+   "a": "python/async_patterns_and_pitfalls",
+   "b": "python/fastapi/http_clients_and_external_apis",
+   "w": 0.2628,
+   "links": 0,
+   "lex": 0.2516
+  },
+  {
+   "a": "python/fastapi",
+   "b": "python/fastapi/testing_fastapi",
+   "w": 0.2595,
+   "links": 0,
+   "lex": 0.2485
+  },
+  {
+   "a": "python/fastapi/fastapi_fundamentals_asgi",
+   "b": "python/fastapi/middleware_and_lifecycle",
+   "w": 0.2589,
+   "links": 0,
+   "lex": 0.2479
+  },
+  {
+   "a": "python/async_patterns_and_pitfalls",
+   "b": "python/asyncio_and_event_loop",
+   "w": 0.2576,
+   "links": 0,
+   "lex": 0.2467
+  },
+  {
+   "a": "python/fastapi/testing_fastapi",
+   "b": "python/testing_with_pytest",
+   "w": 0.2548,
+   "links": 0,
+   "lex": 0.244
+  },
+  {
+   "a": "python/fastapi",
+   "b": "python/fastapi/fastapi_fundamentals_asgi",
+   "w": 0.2541,
+   "links": 0,
+   "lex": 0.2433
+  },
+  {
+   "a": "python/fastapi",
+   "b": "python/fastapi/dependency_injection_in_fastapi",
+   "w": 0.2438,
+   "links": 0,
+   "lex": 0.2334
+  },
+  {
+   "a": "python/fastapi/fastapi_fundamentals_asgi",
+   "b": "python/fastapi/routing_and_request_handling",
+   "w": 0.2309,
+   "links": 0,
+   "lex": 0.2211
+  },
+  {
+   "a": "python/context_managers_and_exceptions",
+   "b": "python/fastapi/dependency_injection_in_fastapi",
+   "w": 0.23,
+   "links": 0,
+   "lex": 0.2202
+  },
+  {
+   "a": "python/fastapi",
+   "b": "python/fastapi/error_handling_and_validation",
+   "w": 0.2274,
+   "links": 0,
+   "lex": 0.2177
+  },
+  {
+   "a": "python/metaclasses_and_metaprogramming",
+   "b": "python/the_type_system_and_typing",
+   "w": 0.2264,
+   "links": 0,
+   "lex": 0.2168
+  },
+  {
+   "a": "python/asyncio_and_event_loop",
+   "b": "python/context_managers_and_exceptions",
+   "w": 0.2225,
+   "links": 0,
+   "lex": 0.213
+  },
+  {
+   "a": "python/fastapi/dependency_injection_in_fastapi",
+   "b": "python/fastapi/testing_fastapi",
+   "w": 0.2195,
+   "links": 0,
+   "lex": 0.2101
+  },
+  {
+   "a": "python/fastapi/dependency_injection_in_fastapi",
+   "b": "python/fastapi/routing_and_request_handling",
+   "w": 0.2182,
+   "links": 0,
+   "lex": 0.2089
+  },
+  {
+   "a": "python/fastapi/fastapi_fundamentals_asgi",
+   "b": "python/fastapi/testing_fastapi",
+   "w": 0.2175,
+   "links": 0,
+   "lex": 0.2082
+  },
+  {
+   "a": "python/fastapi/middleware_and_lifecycle",
+   "b": "python/fastapi/testing_fastapi",
+   "w": 0.2122,
+   "links": 0,
+   "lex": 0.2031
+  },
+  {
+   "a": "python/fastapi/async_database_sqlalchemy",
+   "b": "python/fastapi/testing_fastapi",
+   "w": 0.2071,
+   "links": 0,
+   "lex": 0.1983
+  },
+  {
+   "a": "python/fastapi/dependency_injection_in_fastapi",
+   "b": "python/fastapi/middleware_and_lifecycle",
+   "w": 0.2016,
+   "links": 0,
+   "lex": 0.193
+  },
+  {
+   "a": "python/design_patterns_in_python",
+   "b": "python/metaclasses_and_metaprogramming",
+   "w": 0.2007,
+   "links": 0,
+   "lex": 0.1922
+  },
+  {
+   "a": "python/fastapi/error_handling_and_validation",
+   "b": "python/fastapi/fastapi_fundamentals_asgi",
+   "w": 0.198,
+   "links": 0,
+   "lex": 0.1896
+  },
+  {
+   "a": "python/fastapi/configuration_and_settings_management",
+   "b": "python/fastapi/pydantic_v2_deep_dive",
+   "w": 0.193,
+   "links": 0,
+   "lex": 0.1848
+  },
+  {
+   "a": "python/fastapi",
+   "b": "python/fastapi/routing_and_request_handling",
+   "w": 0.1924,
+   "links": 0,
+   "lex": 0.1842
+  },
+  {
+   "a": "python/fastapi/dependency_injection_in_fastapi",
+   "b": "python/the_type_system_and_typing",
+   "w": 0.1921,
+   "links": 0,
+   "lex": 0.1839
+  },
+  {
+   "a": "python/data_model_and_objects",
+   "b": "python/the_type_system_and_typing",
+   "w": 0.1921,
+   "links": 0,
+   "lex": 0.1839
+  },
+  {
+   "a": "python/fastapi/http_clients_and_external_apis",
+   "b": "python/fastapi/middleware_and_lifecycle",
+   "w": 0.1886,
+   "links": 0,
+   "lex": 0.1806
+  },
+  {
+   "a": "python/design_patterns_in_python",
+   "b": "python/the_type_system_and_typing",
+   "w": 0.1879,
+   "links": 0,
+   "lex": 0.1799
+  },
+  {
+   "a": "python/fastapi",
+   "b": "python/fastapi/security_hardening_and_owasp",
+   "w": 0.1869,
+   "links": 0,
+   "lex": 0.179
+  },
+  {
+   "a": "python/asyncio_and_event_loop",
+   "b": "python/threading_and_multiprocessing",
+   "w": 0.1852,
+   "links": 0,
+   "lex": 0.1773
+  },
+  {
+   "a": "python/fastapi",
+   "b": "python/fastapi/async_database_sqlalchemy",
+   "w": 0.1803,
+   "links": 0,
+   "lex": 0.1726
+  },
+  {
+   "a": "python/core_language_idioms",
+   "b": "python/data_model_and_objects",
+   "w": 0.1793,
+   "links": 0,
+   "lex": 0.1716
+  },
+  {
+   "a": "python/fastapi/error_handling_and_validation",
+   "b": "python/fastapi/middleware_and_lifecycle",
+   "w": 0.1771,
+   "links": 0,
+   "lex": 0.1696
+  },
+  {
+   "a": "python/fastapi/http_clients_and_external_apis",
+   "b": "python/fastapi/testing_fastapi",
+   "w": 0.1765,
+   "links": 0,
+   "lex": 0.169
+  },
+  {
+   "a": "python/fastapi/authentication_and_security",
+   "b": "python/fastapi/security_hardening_and_owasp",
+   "w": 0.1753,
+   "links": 0,
+   "lex": 0.1678
+  },
+  {
+   "a": "python/collections_and_data_structures",
+   "b": "python/data_model_and_objects",
+   "w": 0.1749,
+   "links": 0,
+   "lex": 0.1674
+  },
+  {
+   "a": "python/fastapi/pydantic_v2_deep_dive",
+   "b": "python/the_type_system_and_typing",
+   "w": 0.174,
+   "links": 0,
+   "lex": 0.1665
+  },
+  {
+   "a": "python/fastapi/pydantic_v2_deep_dive",
+   "b": "python/functional_programming",
+   "w": 0.1719,
+   "links": 0,
+   "lex": 0.1646
+  },
+  {
+   "a": "python/async_patterns_and_pitfalls",
+   "b": "python/fastapi/dependency_injection_in_fastapi",
+   "w": 0.17,
+   "links": 0,
+   "lex": 0.1628
+  },
+  {
+   "a": "python/fastapi/dependency_injection_in_fastapi",
+   "b": "python/iterators_and_generators",
+   "w": 0.1685,
+   "links": 0,
+   "lex": 0.1613
+  },
+  {
+   "a": "python/fastapi/middleware_and_lifecycle",
+   "b": "python/fastapi/routing_and_request_handling",
+   "w": 0.1683,
+   "links": 0,
+   "lex": 0.1611
+  },
+  {
+   "a": "python/fastapi/configuration_and_settings_management",
+   "b": "python/fastapi/routing_and_request_handling",
+   "w": 0.168,
+   "links": 0,
+   "lex": 0.1608
+  },
+  {
+   "a": "python/asyncio_and_event_loop",
+   "b": "python/iterators_and_generators",
+   "w": 0.1667,
+   "links": 0,
+   "lex": 0.1596
+  },
+  {
+   "a": "python/fastapi/caching_and_performance",
+   "b": "python/fastapi/websockets_sse_and_streaming",
+   "w": 0.1666,
+   "links": 0,
+   "lex": 0.1595
+  },
+  {
+   "a": "python/data_model_and_objects",
+   "b": "python/fastapi/pydantic_v2_deep_dive",
+   "w": 0.1661,
+   "links": 0,
+   "lex": 0.1591
+  },
+  {
+   "a": "python/cpython_memory_model",
+   "b": "python/data_model_and_objects",
+   "w": 0.1651,
+   "links": 0,
+   "lex": 0.158
+  },
+  {
+   "a": "python/data_model_and_objects",
+   "b": "python/functional_programming",
+   "w": 0.1647,
+   "links": 0,
+   "lex": 0.1577
+  },
+  {
+   "a": "python/fastapi/fastapi_fundamentals_asgi",
+   "b": "python/fastapi/http_clients_and_external_apis",
+   "w": 0.1646,
+   "links": 0,
+   "lex": 0.1575
+  },
+  {
+   "a": "python/context_managers_and_exceptions",
+   "b": "python/data_model_and_objects",
+   "w": 0.1641,
+   "links": 0,
+   "lex": 0.1571
+  },
+  {
+   "a": "python/core_language_idioms",
+   "b": "python/iterators_and_generators",
+   "w": 0.1627,
+   "links": 0,
+   "lex": 0.1557
+  },
+  {
+   "a": "python/context_managers_and_exceptions",
+   "b": "python/iterators_and_generators",
+   "w": 0.1621,
+   "links": 0,
+   "lex": 0.1552
+  },
+  {
+   "a": "python/fastapi/fastapi_fundamentals_asgi",
+   "b": "python/fastapi/websockets_sse_and_streaming",
+   "w": 0.1618,
+   "links": 0,
+   "lex": 0.1549
+  },
+  {
+   "a": "python/fastapi/api_design_and_versioning",
+   "b": "python/fastapi/routing_and_request_handling",
+   "w": 0.1613,
+   "links": 0,
+   "lex": 0.1544
+  },
+  {
+   "a": "python/fastapi/dependency_injection_in_fastapi",
+   "b": "python/functional_programming",
+   "w": 0.1605,
+   "links": 0,
+   "lex": 0.1536
+  },
+  {
+   "a": "python/data_model_and_objects",
+   "b": "python/decorators_and_closures",
+   "w": 0.1598,
+   "links": 0,
+   "lex": 0.153
+  },
+  {
+   "a": "python/decorators_and_closures",
+   "b": "python/design_patterns_in_python",
+   "w": 0.1573,
+   "links": 0,
+   "lex": 0.1506
+  },
+  {
+   "a": "python/fastapi/dependency_injection_in_fastapi",
+   "b": "python/fastapi/error_handling_and_validation",
+   "w": 0.1569,
+   "links": 0,
+   "lex": 0.1502
+  },
+  {
+   "a": "python/functional_programming",
+   "b": "python/iterators_and_generators",
+   "w": 0.1554,
+   "links": 0,
+   "lex": 0.1488
+  },
+  {
+   "a": "python/fastapi/routing_and_request_handling",
+   "b": "python/fastapi/security_hardening_and_owasp",
+   "w": 0.1547,
+   "links": 0,
+   "lex": 0.1481
+  },
+  {
+   "a": "python/collections_and_data_structures",
+   "b": "python/functional_programming",
+   "w": 0.1546,
+   "links": 0,
+   "lex": 0.148
+  },
+  {
+   "a": "python/functional_programming",
+   "b": "python/performance_and_profiling",
+   "w": 0.1535,
+   "links": 0,
+   "lex": 0.1469
+  },
+  {
+   "a": "python/fastapi/pydantic_v2_deep_dive",
+   "b": "python/metaclasses_and_metaprogramming",
+   "w": 0.1529,
+   "links": 0,
+   "lex": 0.1464
+  },
+  {
+   "a": "python/fastapi/configuration_and_settings_management",
+   "b": "python/fastapi/error_handling_and_validation",
+   "w": 0.1527,
+   "links": 0,
+   "lex": 0.1462
+  },
+  {
+   "a": "python/fastapi/middleware_and_lifecycle",
+   "b": "python/fastapi/security_hardening_and_owasp",
+   "w": 0.1517,
+   "links": 0,
+   "lex": 0.1452
+  },
+  {
+   "a": "python/fastapi/routing_and_request_handling",
+   "b": "python/fastapi/websockets_sse_and_streaming",
+   "w": 0.1517,
+   "links": 0,
+   "lex": 0.1453
+  },
+  {
+   "a": "python/asyncio_and_event_loop",
+   "b": "python/stdlib_datetime_and_logging",
+   "w": 0.1516,
+   "links": 0,
+   "lex": 0.1452
+  },
+  {
+   "a": "python/data_model_and_objects",
+   "b": "python/testing_with_pytest",
+   "w": 0.1494,
+   "links": 0,
+   "lex": 0.143
+  },
+  {
+   "a": "python/fastapi/async_database_sqlalchemy",
+   "b": "python/fastapi/caching_and_performance",
+   "w": 0.149,
+   "links": 0,
+   "lex": 0.1427
+  },
+  {
+   "a": "python/fastapi/configuration_and_settings_management",
+   "b": "python/testing_with_pytest",
+   "w": 0.1484,
+   "links": 0,
+   "lex": 0.1421
+  },
+  {
+   "a": "python/fastapi/async_database_sqlalchemy",
+   "b": "python/fastapi/http_clients_and_external_apis",
+   "w": 0.1465,
+   "links": 0,
+   "lex": 0.1403
+  },
+  {
+   "a": "python/data_model_and_objects",
+   "b": "python/strings_bytes_encoding_and_regex",
+   "w": 0.1464,
+   "links": 0,
+   "lex": 0.1402
+  },
+  {
+   "a": "python/fastapi/middleware_and_lifecycle",
+   "b": "python/fastapi/websockets_sse_and_streaming",
+   "w": 0.1462,
+   "links": 0,
+   "lex": 0.1399
+  },
+  {
+   "a": "python/design_patterns_in_python",
+   "b": "python/testing_with_pytest",
+   "w": 0.1449,
+   "links": 0,
+   "lex": 0.1387
+  },
+  {
+   "a": "python/collections_and_data_structures",
+   "b": "python/strings_bytes_encoding_and_regex",
+   "w": 0.1439,
+   "links": 0,
+   "lex": 0.1377
+  },
+  {
+   "a": "python/asyncio_and_event_loop",
+   "b": "python/fastapi/background_jobs_and_task_queues",
+   "w": 0.1433,
+   "links": 0,
+   "lex": 0.1372
+  },
+  {
+   "a": "python/fastapi/async_database_sqlalchemy",
+   "b": "python/fastapi/background_jobs_and_task_queues",
+   "w": 0.1429,
+   "links": 0,
+   "lex": 0.1369
+  },
+  {
+   "a": "python/strings_bytes_encoding_and_regex",
+   "b": "python/threading_and_multiprocessing",
+   "w": 0.1429,
+   "links": 0,
+   "lex": 0.1368
+  },
+  {
+   "a": "python/fastapi",
+   "b": "python/fastapi/background_jobs_and_task_queues",
+   "w": 0.1402,
+   "links": 0,
+   "lex": 0.1343
+  },
+  {
+   "a": "python/fastapi/pydantic_v2_deep_dive",
+   "b": "python/the_gil_and_free_threading",
+   "w": 0.1399,
+   "links": 0,
+   "lex": 0.1339
+  },
+  {
+   "a": "python/fastapi",
+   "b": "python/fastapi/caching_and_performance",
+   "w": 0.1394,
+   "links": 0,
+   "lex": 0.1335
+  },
+  {
+   "a": "python/cpython_memory_model",
+   "b": "python/threading_and_multiprocessing",
+   "w": 0.1387,
+   "links": 0,
+   "lex": 0.1328
+  },
+  {
+   "a": "python/fastapi/api_design_and_versioning",
+   "b": "python/fastapi/error_handling_and_validation",
+   "w": 0.138,
+   "links": 0,
+   "lex": 0.1321
+  },
+  {
+   "a": "python/async_patterns_and_pitfalls",
+   "b": "python/stdlib_datetime_and_logging",
+   "w": 0.1377,
+   "links": 0,
+   "lex": 0.1319
+  },
+  {
+   "a": "python/fastapi/caching_and_performance",
+   "b": "python/functional_programming",
+   "w": 0.1363,
+   "links": 0,
+   "lex": 0.1305
+  },
+  {
+   "a": "python/decorators_and_closures",
+   "b": "python/metaclasses_and_metaprogramming",
+   "w": 0.1344,
+   "links": 0,
+   "lex": 0.1287
+  },
+  {
+   "a": "python/file_io_and_serialization",
+   "b": "python/the_type_system_and_typing",
+   "w": 0.1328,
+   "links": 0,
+   "lex": 0.1272
+  },
+  {
+   "a": "python/fastapi/authentication_and_security",
+   "b": "python/fastapi/dependency_injection_in_fastapi",
+   "w": 0.1318,
+   "links": 0,
+   "lex": 0.1262
+  },
+  {
+   "a": "python/data_model_and_objects",
+   "b": "python/stdlib_datetime_and_logging",
+   "w": 0.1306,
+   "links": 0,
+   "lex": 0.125
+  },
+  {
+   "a": "python/fastapi/api_design_and_versioning",
+   "b": "python/fastapi/authentication_and_security",
+   "w": 0.1305,
+   "links": 0,
+   "lex": 0.1249
+  },
+  {
+   "a": "python/fastapi/caching_and_performance",
+   "b": "python/the_gil_and_free_threading",
+   "w": 0.1304,
+   "links": 0,
+   "lex": 0.1248
+  },
+  {
+   "a": "python/packaging_and_project_tooling",
+   "b": "python/the_type_system_and_typing",
+   "w": 0.1302,
+   "links": 0,
+   "lex": 0.1246
+  },
+  {
+   "a": "python/fastapi/pydantic_v2_deep_dive",
+   "b": "python/performance_and_profiling",
+   "w": 0.1302,
+   "links": 0,
+   "lex": 0.1247
+  },
+  {
+   "a": "python/fastapi/api_design_and_versioning",
+   "b": "python/fastapi/security_hardening_and_owasp",
+   "w": 0.128,
+   "links": 0,
+   "lex": 0.1226
+  },
+  {
+   "a": "python/asyncio_and_event_loop",
+   "b": "python/cpython_memory_model",
+   "w": 0.1276,
+   "links": 0,
+   "lex": 0.1222
+  },
+  {
+   "a": "python/fastapi/authentication_and_security",
+   "b": "python/fastapi/websockets_sse_and_streaming",
+   "w": 0.1272,
+   "links": 0,
+   "lex": 0.1217
+  },
+  {
+   "a": "python/cpython_memory_model",
+   "b": "python/fastapi/pydantic_v2_deep_dive",
+   "w": 0.1267,
+   "links": 0,
+   "lex": 0.1213
+  },
+  {
+   "a": "python/core_language_idioms",
+   "b": "python/decorators_and_closures",
+   "w": 0.1253,
+   "links": 0,
+   "lex": 0.1199
+  }
+ ]
+}
