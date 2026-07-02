@@ -13,7 +13,7 @@
 /* ---------- 1. Tokens & themes ------------------------------------------ */
 
 :root {
-  /* Midnight (default) — deep blue-black, blue/violet aurora */
+  /* Midnight (default) — deep blue-black, pure blue/violet spectrum */
   color-scheme: dark;
   --bg: #06070d;
   --bg-2: #0b0d15;
@@ -29,7 +29,7 @@
 
   --mesh-1: #2f5cff;
   --mesh-2: #7a3cff;
-  --mesh-3: #00b3d4;
+  --mesh-3: #4b3aff;
   --mesh-o: 0.30;
   --grid-line: rgba(255, 255, 255, 0.032);
 
@@ -68,34 +68,36 @@
   --toc-w: 190px;                /* right TOC sidebar width; drag-resizable */
 }
 
-[data-theme="aurora"] {
-  --bg: #050e0c;
-  --bg-2: #091512;
-  --text: #ecf6f2;
-  --muted: #9db8ae;
-  --faint: #64827a;
-  --accent: #36d9a0;
-  --accent-2: #2dd4bf;
-  --accent-ink: #04120c;
-  --mesh-1: #0e8f6f;
-  --mesh-2: #0a7f8f;
-  --mesh-3: #3f8cff;
-  --mesh-o: 0.28;
+[data-theme="orchid"] {
+  /* Orchid — deep purple-black, purple/pink spectrum */
+  --bg: #0c0611;
+  --bg-2: #150b1d;
+  --text: #f5edfa;
+  --muted: #bfa9d4;
+  --faint: #82709a;
+  --accent: #c084fc;
+  --accent-2: #f472b6;
+  --accent-ink: #190627;
+  --mesh-1: #8b2fff;
+  --mesh-2: #ff3cb8;
+  --mesh-3: #5b2bff;
+  --mesh-o: 0.26;
   --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
 
 [data-theme="ember"] {
+  /* Ember — warm near-black, red/orange spectrum */
   --bg: #0e0709;
   --bg-2: #170c0f;
   --text: #f7efe9;
   --muted: #bda9a1;
   --faint: #82706a;
   --accent: #fb923c;
-  --accent-2: #f472b6;
+  --accent-2: #ef4444;
   --accent-ink: #1d0c02;
-  --mesh-1: #ff5470;
+  --mesh-1: #ff3d2e;
   --mesh-2: #ff9f1c;
-  --mesh-3: #b23cff;
+  --mesh-3: #e11d48;
   --mesh-o: 0.24;
   --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
@@ -799,7 +801,24 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   opacity: 0; transition: opacity 0.15s; pointer-events: none;
 }
 .md-body .mermaid:hover::after { opacity: 1; }
-.md-body .mermaid svg { max-width: 100%; height: auto; }
+.md-body .mermaid svg { height: auto; }   /* width set in px by renderMermaid (drag-resizable) */
+
+/* drag-resize grip — bottom-right corner, fades in on hover */
+.mm-grip {
+  position: absolute; right: 3px; bottom: 3px; width: 20px; height: 20px;
+  padding: 0; border: none; cursor: nwse-resize; background: transparent;
+  opacity: 0; transition: opacity 0.15s ease;
+}
+.mm-grip::before {
+  content: ""; position: absolute; inset: 4px;
+  background:
+    linear-gradient(135deg, transparent 0 46%, #61afef 46% 54%, transparent 54% 66%,
+                    #61afef 66% 74%, transparent 74% 86%, #61afef 86% 94%, transparent 94%);
+  border-radius: 2px; opacity: 0.75;
+}
+.md-body .mermaid:hover .mm-grip, .mm-grip:focus-visible { opacity: 1; }
+.md-body .mermaid.resizing { cursor: nwse-resize; }
+.md-body .mermaid.resizing::after { opacity: 0; }
 
 /* inline node hover glow (interactive affordance) */
 .mermaid svg .node rect, .mermaid svg .node circle, .mermaid svg .node polygon, .mermaid svg .node path { transition: filter 0.15s ease, stroke 0.15s ease; }
@@ -897,8 +916,8 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .theme-opt[aria-checked="true"] .tcheck { visibility: visible; }
 .swatch { width: 22px; height: 22px; border-radius: 50%; flex: 0 0 auto; border: 1px solid rgba(255, 255, 255, 0.25); }
 .swatch.sw-midnight { background: linear-gradient(135deg, #2f5cff, #7a3cff 55%, #06070d); }
-.swatch.sw-aurora { background: linear-gradient(135deg, #0e8f6f, #0a7f8f 55%, #050e0c); }
-.swatch.sw-ember { background: linear-gradient(135deg, #ff5470, #ff9f1c 55%, #0e0709); }
+.swatch.sw-orchid { background: linear-gradient(135deg, #c084fc, #f472b6 55%, #0c0611); }
+.swatch.sw-ember { background: linear-gradient(135deg, #ff3d2e, #ff9f1c 55%, #0e0709); }
 .swatch.sw-daylight { background: linear-gradient(135deg, #7cb1ff, #f7a8d8 55%, #eef1f7); border-color: rgba(13, 23, 44, 0.18); }
 
 /* ---------- 15. Confetti, motion & a11y ------------------------------------ */

@@ -7,9 +7,10 @@
   <script>
     // Apply the saved theme before first paint so there is no color flash.
     // ?theme=<id> overrides for quick previews/sharing without touching the saved pick.
-    document.documentElement.dataset.theme =
-      new URLSearchParams(location.search).get("theme") ||
+    var _t = new URLSearchParams(location.search).get("theme") ||
       localStorage.getItem("sd_theme") || "midnight";
+    if (!/^(midnight|orchid|ember|daylight)$/.test(_t)) _t = "midnight";  // retired ids fall back
+    document.documentElement.dataset.theme = _t;
   </script>
   <link rel="stylesheet" href="style.css" />
 </head>

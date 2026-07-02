@@ -41,8 +41,9 @@ reports weekly.
   Study also shows a "Continue reading" card for the last-opened page.
 - **Reader comfort** — reading-progress bar, `A−`/`A+` font-size controls (persisted),
   back-to-top button, and full-name hover tooltips on truncated sidebar/TOC entries.
-- **Themes** — a top-bar picker with four glass themes (Midnight, Aurora, Ember,
-  Daylight), each driving every color token plus the animated aurora-mesh backdrop.
+- **Themes** — a top-bar picker with four glass themes (Midnight blue/violet,
+  Orchid purple/pink, Ember red/orange, Daylight light), each driving every color
+  token plus the animated aurora-mesh backdrop.
   Persisted to `localStorage`; `?theme=<id>` in the URL previews one without saving.
   All surfaces are translucent glass (`backdrop-filter`) over the mesh + blueprint grid.
 - **Study mode** — a top-bar `Study` button opens a pure-reading browser: pick a section,
@@ -61,7 +62,10 @@ reports weekly.
   open in-reader with a Back button). **Diagrams are interactive**: Mermaid *and* ASCII
   diagrams open in a lightbox with drag-to-pan, zoom-toward-cursor (wheel, buttons,
   double-click, keyboard), and fit-to-viewport; Mermaid nodes glow on hover; every code
-  fence gets a hover copy button. **Hard limit (see CLAUDE.md): the reader surface is
+  fence gets a hover copy button. **Diagrams are widescreen-aware**: each directional
+  Mermaid diagram is rendered in both orientations and the reader keeps the one that
+  reads better on a landscape screen (source files untouched), and every diagram has a
+  corner drag-grip for freeform resizing (double-click resets, no upper size cap). **Hard limit (see CLAUDE.md): the reader surface is
   pitch-black `#000000` with `#e6e6e6` prose in every theme** — only the app chrome
   re-themes; code, ASCII diagrams, and Mermaid stay One Dark.
 

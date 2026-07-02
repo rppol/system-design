@@ -119,14 +119,17 @@ const STUDY_ORDER = {
 // in index.html applies the saved theme before first paint (no flash).
 const THEMES = [
   { id: "midnight", name: "Midnight" },
-  { id: "aurora", name: "Aurora" },
+  { id: "orchid", name: "Orchid" },
   { id: "ember", name: "Ember" },
   { id: "daylight", name: "Daylight" },
 ];
 // A ?theme= URL override wins for this session; picking from the popover saves.
-const curTheme = () =>
-  new URLSearchParams(location.search).get("theme") ||
-  localStorage.getItem("sd_theme") || "midnight";
+// Unknown/retired ids (e.g. a saved "aurora") fall back to midnight.
+const curTheme = () => {
+  const t = new URLSearchParams(location.search).get("theme") ||
+    localStorage.getItem("sd_theme") || "midnight";
+  return THEMES.some((x) => x.id === t) ? t : "midnight";
+};
 
 function applyTheme(id, save = true) {
   document.documentElement.dataset.theme = id;
@@ -1583,9 +1586,201 @@ function mdInline(t) {
 // Lazy Mermaid renderer. Only fetches mermaid.js the first time a page with a
 // .mermaid div is opened; all other pages incur zero network cost.
 let _mermaidReady = null;   // module-scoped promise; null = not started
+let _mmSeq = 0;             // unique ids for manual mermaid.render() calls
+
+// Laptop screens are landscape while most authored diagrams grow downward (TD
+// flowcharts, stateDiagram lifecycles). Each directional diagram is rendered
+// in BOTH orientations off-screen and the reader keeps whichever reads better
+// on a wide screen. Render-time choice only — source files stay untouched, so
+// GitHub still shows the authored orientation.
+const MM_DIR_RE = /^([ \t]*(?:flowchart|graph)\s+)(TB|TD|LR|RL)\b/m;   // m: header may follow %%{init}%% lines
+const MM_FLIP = { TB: "LR", TD: "LR", LR: "TD", RL: "TD" };
+
+function mmAltOrientation(src) {
+  if (MM_DIR_RE.test(src)) return src.replace(MM_DIR_RE, (_, pre, dir) => pre + MM_FLIP[dir]);
+  const lines = src.split("\n");
+  const sd = lines.findIndex((l) => /^\s*stateDiagram(?:-v2)?\s*$/.test(l));
+  if (sd >= 0) {
+    if (/^\s*direction\s+(?:LR|RL)[ \t]*$/m.test(src)) return null;          // author chose horizontal
+    if (/^\s*direction\s+(?:TB|TD)[ \t]*$/m.test(src))
+      return src.replace(/^(\s*direction\s+)(?:TB|TD)([ \t]*)$/m, "$1LR$2");
+    lines.splice(sd + 1, 0, "  direction LR");                               // default is TB — try LR
+    return lines.join("\n");
+  }
+  return null;
+}
+
+function mmDims(svgText) {
+  const m = svgText.match(/viewBox="[-\d.]+ [-\d.]+ ([\d.]+) ([\d.]+)"/);
+  return m ? { w: +m[1] || 1, h: +m[2] || 1 } : null;
+}
+
+// One number controls display size: svg width in px, height follows the
+// aspect ratio. max-width stays unset so a user can drag wider than the
+// column (the .mermaid container scrolls horizontally past that point).
+function mmApplyWidth(sv, w) {
+  sv.style.width = Math.round(w) + "px";
+  sv.style.maxWidth = "none";
+  sv.style.height = "auto";
+}
+
+// Column width measured on the PARENT (.md-body) so a breakout margin on the
+// container never feeds back into its own measurement.
+function mmAvail(n) {
+  const col = n.parentElement || n;
+  const cs = getComputedStyle(n);
+  return Math.max(260, col.clientWidth - parseFloat(cs.paddingLeft || 0) - parseFloat(cs.paddingRight || 0) - 2);
+}
+
+// Extra symmetric room in the side gutters: fullscreen caps the prose column
+// at 860px for readability, but diagrams may spill past it toward the
+// sidebars — that unused space is exactly what a widescreen laptop has.
+function mmExtra(n) {
+  const main = n.closest("#readerMain");
+  const body = n.closest(".reader-body");
+  if (!main || !body) return 0;
+  const mr = main.getBoundingClientRect(), br = body.getBoundingClientRect();
+  const cs = getComputedStyle(body);
+  let leftEdge = br.left + parseFloat(cs.paddingLeft || 0);
+  let rightEdge = br.right - parseFloat(cs.paddingRight || 0) - (body.offsetWidth - body.clientWidth);
+  const mods = body.querySelector(".reader-modules");
+  const toc = body.querySelector(".reader-toc");
+  if (mods && mods.offsetWidth) leftEdge = Math.max(leftEdge, mods.getBoundingClientRect().right + 20);
+  if (toc && toc.offsetWidth) rightEdge = Math.min(rightEdge, toc.getBoundingClientRect().left - 20);
+  return Math.max(0, Math.floor(Math.min(mr.left - leftEdge, rightEdge - mr.right))) * 2;
+}
+
+function mmAvailWide(n) { return mmAvail(n) + mmExtra(n); }
+
+// Set svg width and center-breakout the container into the gutters when the
+// diagram wants more than the prose column; past the gutters it h-scrolls.
+function mmLayout(n, sv, w) {
+  mmApplyWidth(sv, w);
+  const spill = Math.min(Math.max(0, w - mmAvail(n)), mmExtra(n));
+  n.style.marginLeft = n.style.marginRight = spill > 8 ? `${-spill / 2}px` : "";
+}
+
+// Bottom-right drag grip: resize the diagram freely (no upper cap — beyond
+// the column width the container scrolls). Double-click resets to auto fit.
+function mmAddGrip(n, sv) {
+  const grip = document.createElement("button");
+  grip.className = "mm-grip";
+  grip.title = "Drag to resize · double-click resets";
+  grip.setAttribute("aria-label", "Resize diagram");
+  n.appendChild(grip);
+  let start = null;
+  grip.addEventListener("pointerdown", (e) => {
+    e.preventDefault(); e.stopPropagation();
+    start = { x: e.clientX, w: sv.getBoundingClientRect().width };
+    try { grip.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+    n.classList.add("resizing");
+  });
+  grip.addEventListener("pointermove", (e) => {
+    if (!start) return;
+    sv.dataset.custom = "1";
+    mmLayout(n, sv, Math.max(240, start.w + (e.clientX - start.x)));
+  });
+  const end = () => { start = null; n.classList.remove("resizing"); };
+  grip.addEventListener("pointerup", end);
+  grip.addEventListener("pointercancel", end);
+  grip.addEventListener("click", (e) => e.stopPropagation());
+  grip.addEventListener("dblclick", (e) => {
+    e.stopPropagation();
+    delete sv.dataset.custom;
+    const avail = mmAvailWide(n);
+    mmLayout(n, sv, Math.min(+sv.dataset.natw || avail, Math.max(avail, +sv.dataset.minw || 0)));
+  });
+}
+
+// The orientation choice depends on the column width, so it is re-evaluated
+// live: widen the reader (drag grip / fullscreen) and tall TD diagrams flip
+// to LR the moment the horizontal room makes that the better read. Small
+// width changes just re-clamp; >15% changes re-render and re-choose.
+// Diagrams the user resized by hand are left alone entirely.
+const _mmSrc = new WeakMap();     // .mermaid container -> raw diagram source
+let _mmRO = null;
+let _mmROTimer = null;
+function mmObserve(n) {
+  if (!_mmRO) {
+    _mmRO = new ResizeObserver(() => {
+      clearTimeout(_mmROTimer);
+      _mmROTimer = setTimeout(() => {
+        document.querySelectorAll(".md-body .mermaid").forEach((el) => {
+          const src = _mmSrc.get(el);
+          const sv = el.querySelector("svg");
+          if (!src || !sv || sv.dataset.custom) return;
+          const avail = mmAvailWide(el);
+          const was = +el.dataset.mmAvail || avail;
+          if (Math.abs(avail - was) / was > 0.15) mmRenderNode(el, src);       // re-choose orientation
+          else mmLayout(el, sv, Math.min(+sv.dataset.natw || avail,
+                                         Math.max(avail, +sv.dataset.minw || 0)));  // re-clamp, honor floor
+        });
+      }, 250);
+    });
+  }
+  _mmRO.observe(n);
+}
+
+// Render one diagram into its container: pick the orientation that reads best
+// at the container's current width, size it, and wire grip + zoom.
+async function mmRenderNode(n, src) {
+  const mermaid = await _mermaidReady;
+  const avail = mmAvailWide(n);
+  n.dataset.mmAvail = avail;
+  const dispH = (d) => d.h * Math.min(1, avail / d.w);   // on-screen height at column width
+  let svg, flipScale = 0;
+  try {
+    svg = (await mermaid.render("mm" + (++_mmSeq), src)).svg;
+    const alt = mmAltOrientation(src);
+    const d0 = mmDims(svg);
+    if (alt && d0) {
+      try {
+        const altSvg = (await mermaid.render("mm" + (++_mmSeq), alt)).svg;
+        const d1 = mmDims(altSvg);
+        if (d1) {
+          // Flipped text never drops below 0.7x (stays readable); past the
+          // column width the container scrolls horizontally instead of
+          // shrinking further. Flip when that cuts the on-screen height by
+          // ≥30% and at least ~55% of the flipped diagram is visible at once.
+          const s1 = Math.min(1, Math.max(avail / d1.w, 0.7));
+          const visible = Math.min(1, avail / (d1.w * s1));
+          if (d1.h * s1 < dispH(d0) * 0.7 && visible >= 0.55) { svg = altSvg; flipScale = s1; }
+        }
+      } catch { /* flipped source failed to parse — keep the original */ }
+    }
+  } catch (err) {
+    document.getElementById("dmm" + _mmSeq)?.remove();   // mermaid's temp scratch div
+    console.warn("Mermaid render failed:", err);         // raw source stays visible
+    return;
+  }
+  n.innerHTML = svg;                                     // replaces old svg + grip
+  const sv = n.querySelector("svg");
+  const d = mmDims(svg);
+  if (sv && d) {
+    sv.dataset.natw = Math.round(d.w);
+    if (flipScale) {
+      sv.dataset.minw = Math.round(d.w * 0.7);           // readability floor for re-clamps
+      mmLayout(n, sv, Math.round(d.w * flipScale));      // may exceed the column -> gutters, then h-scroll
+    } else {
+      mmLayout(n, sv, Math.min(d.w, avail));
+    }
+    mmAddGrip(n, sv);
+  }
+  // Post-process SVG: round node corners + color arrowhead markers
+  // (Mermaid sets marker fill independently of lineColor themeVariable)
+  n.querySelectorAll(".node rect").forEach(r => { r.setAttribute("rx", "8"); r.setAttribute("ry", "8"); });
+  n.querySelectorAll(".cluster rect").forEach(r => { r.setAttribute("rx", "12"); r.setAttribute("ry", "12"); });
+  n.querySelectorAll("marker path, marker polygon").forEach(m => { m.setAttribute("fill", "#61afef"); m.removeAttribute("stroke"); });
+  if (!n.dataset.mmWired) {                              // once per container, not per render
+    n.dataset.mmWired = "1";
+    n.addEventListener("click", () => openMermaidZoom(n));
+  }
+}
+
 async function renderMermaid(root) {
   const nodes = [...root.querySelectorAll(".mermaid")];
   if (!nodes.length) return;                       // no mermaid on this page — skip
+  let mermaid;
   try {
     if (!_mermaidReady) {
       _mermaidReady = import("https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs")
@@ -1611,24 +1806,24 @@ async function renderMermaid(root) {
           return m.default;
         });
     }
-    const mermaid = await _mermaidReady;
-    // Un-mark any nodes already rendered so mermaid re-processes them on navigation.
-    nodes.forEach(n => n.removeAttribute("data-processed"));
-    await mermaid.run({ nodes });
-    // Post-process SVG: round node corners + color arrowhead markers
-    // (Mermaid sets marker fill independently of lineColor themeVariable)
-    nodes.forEach(n => {
-      n.querySelectorAll(".node rect").forEach(r => { r.setAttribute("rx", "8"); r.setAttribute("ry", "8"); });
-      n.querySelectorAll(".cluster rect").forEach(r => { r.setAttribute("rx", "12"); r.setAttribute("ry", "12"); });
-      n.querySelectorAll("marker path, marker polygon").forEach(m => { m.setAttribute("fill", "#61afef"); m.removeAttribute("stroke"); });
-      n.addEventListener("click", () => openMermaidZoom(n));
-    });
+    mermaid = await _mermaidReady;
   } catch (err) {
     // CDN unavailable or offline — raw source stays visible as text, nothing
     // crashes, and the import is retried on the next page open (a cached
     // rejected promise would otherwise disable diagrams for the whole session).
     _mermaidReady = null;
-    console.warn("Mermaid render failed:", err);
+    console.warn("Mermaid load failed:", err);
+    return;
+  }
+  if (_mmRO) _mmRO.disconnect();                   // observe only the live page's diagrams
+  for (const n of nodes) {
+    if (!n.querySelector("svg")) {                 // not yet rendered this visit
+      const src = n.textContent.trim();
+      if (!src) continue;
+      _mmSrc.set(n, src);
+      await mmRenderNode(n, src);
+    }
+    mmObserve(n);
   }
 }
 
