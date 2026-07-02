@@ -151,7 +151,7 @@ Every `case_studies/` directory MUST contain a `README.md` with these 5 sections
 
 ## Formatting Rules
 
-- All diagrams use **ASCII art only** — no image files. **Exception:** directed flowcharts in study section files may use Mermaid when the ASCII equivalent would be unreadable (too many branches, crossing arrows). Use `/mermaid-diagrams` skill to decide; see "Mermaid Diagrams" section below.
+- Diagrams are **appeal-first** (owner policy, 2026-07-02): use the most visually appealing renderable form that conveys the information accurately. In study section files that means the **Mermaid diagram family is preferred** (flowchart, sequenceDiagram, stateDiagram-v2, xychart-beta, pie, quadrantChart, timeline, sankey-beta — all render on GitHub and in the game reader). ASCII remains for shapes Mermaid cannot draw (constraint grids/masks, alignment-critical layout maps, vector geometry). No image files. Use `/mermaid-diagrams` skill to decide; see "Mermaid Diagrams" section below.
 - Tables use standard Markdown pipe syntax
 - Code blocks use triple backticks with language tag (` ```java `, ` ```sql `, ` ```yaml `, etc.)
 - Section headers follow exact numbering: `## 1.`, `## 2.`, ... `## 14.`
@@ -191,6 +191,11 @@ python3 .claude/skills/visual-intuition-diagrams/diagram_tools.py preview <file.
 | Bar chart | comparing magnitudes (a *ratio*, not two stated numbers) | softmax temperature, attention-sink weights |
 | Curve / vector / number-line | a trend, geometry, or partitioned axis | "lost in the middle", embedding/cosine-angle sketch; threshold bands (CRAG 0.3/0.7) |
 
+**Appeal-first note (2026-07-02):** the *Bar chart* and *Curve / number-line*
+archetypes should now normally be authored as Mermaid `xychart-beta` (see the
+Mermaid section); the ASCII forms here remain for the grid, before/after,
+side-by-side, and tree archetypes where character alignment carries the meaning.
+
 **A diagram must earn its place — audit before adding.** When a module is *already*
 dense with diagrams, almost all are pipeline/data-flow pictures; do not add another.
 The real gaps are the **math and decision mechanics still trapped in formulas, prose,
@@ -208,15 +213,19 @@ reuse numbers already in the surrounding text.
 
 ## Mermaid Diagrams
 
-**ASCII is the default** for all diagrams. Mermaid is a deliberate exception for
-directed flowcharts that would produce unreadable ASCII art — concepts with many
-branches, crossing arrows, or forward+backward pass semantics that need dotted edges.
+**Appeal-first policy (owner-set 2026-07-02, supersedes the old ASCII-first rule):**
+pick the diagram type whose *topology* matches the concept — flowchart for directed
+flows, sequenceDiagram for actor chains, stateDiagram-v2 for lifecycles,
+xychart-beta for magnitude comparisons and trends, pie for proportions,
+quadrantChart for two-axis tradeoffs, timeline for evolution, sankey-beta for flow
+volumes. Keep ASCII only for constraint grids/masks, alignment-critical layout
+maps, and vector geometry, which Mermaid cannot draw.
 
 **Skill:** run `/mermaid-diagrams` (at `.claude/skills/mermaid-diagrams/`) before
-authoring or converting any diagram. The skill contains the full decision checklist
-(Mermaid vs ASCII), the One-Dark color palette and `classDef` block, diagram type
-selection (`flowchart LR` / `TD` / `sequenceDiagram`), the ASCII→Mermaid conversion
-guide, and gotchas (stale `readerCache`, `classDef` ordering, `data-processed`).
+authoring or converting any diagram. The skill contains the full decision table
+(which form for which shape), the One-Dark color palette and `classDef` block, the
+ASCII→Mermaid conversion guide, and gotchas (stale `readerCache`, `classDef`
+ordering, `data-processed`, square brackets inside labels).
 
 **When to invoke `/mermaid-diagrams` automatically:**
 - Asked to "convert this ASCII to Mermaid" or "make this diagram colorful"

@@ -1,41 +1,49 @@
 ---
 name: mermaid-diagrams
-description: Create, convert, or validate Mermaid flowchart diagrams in this study repo. Use when a concept is a directed process, pipeline, or architecture with branching flows that would be unreadable as ASCII. Also use when asked to "convert this ASCII to Mermaid", "make this diagram colorful", or "add a Mermaid diagram". Invoke BEFORE writing any mermaid fences.
+description: Create, convert, or validate Mermaid diagrams (flowchart, sequence, state, xychart, pie, quadrant, timeline, sankey) in this study repo. Use when adding or converting ANY diagram in a study file — the goal is the most visually appealing form that conveys the info accurately. Also use when asked to "convert this ASCII to Mermaid", "make this diagram colorful", or "add a diagram". Invoke BEFORE writing any mermaid fences.
 ---
 
 # Mermaid Diagrams
 
-This repo is ASCII-first by default (root `CLAUDE.md`: "ASCII only — no Mermaid,
-no image files"). Mermaid is a **deliberate exception** for diagrams whose shape
-is a directed flowchart with many branches or crossing arrows — the type that
-produces unreadable ASCII art. The first exception was `llm/fine_tuning/lora.md`.
+**Policy (owner-set, 2026-07-02): appeal-first.** The old "ASCII only" default is
+retired for study files. Pick whichever renderable form conveys the information
+most accurately AND most appealingly. In practice that means the **Mermaid
+diagram family is preferred** wherever it expresses the concept; ASCII remains
+only for shapes Mermaid genuinely cannot draw (see below). The first Mermaid
+file was `llm/fine_tuning/lora.md`.
 
-The game reader (`game/app.js`) already renders Mermaid via lazy CDN import.
-GitHub renders mermaid fences natively. Both surfaces work; no build step needed.
+The game reader (`game/app.js`) already renders Mermaid via lazy CDN import
+(v11). GitHub renders mermaid fences natively — including xychart-beta, pie,
+quadrantChart, timeline, stateDiagram-v2, and sankey-beta. Both surfaces work;
+no build step needed.
 
 ---
 
-## Decision: Mermaid vs ASCII
+## Decision: which form?
 
-Run this check before touching any diagram.
+Match the concept's *topology* to a diagram type. Run this before touching any
+diagram.
 
-### Use Mermaid when ALL of the following are true:
-1. The concept is a **directed flow** (process steps, branching pipelines, forward/backward passes)
-2. The diagram would require **crossing arrows** or **>3 fan-out branches** in ASCII
-3. The nodes carry **distinct semantic roles** that color-coding would clarify
-4. The diagram is inside a study section file (not CLAUDE.md, skill files, or tooling docs)
+| Concept shape | Best form |
+|---------------|-----------|
+| Directed flow, branching pipeline, forward/backward pass | `flowchart LR` / `TD` (One-Dark classDefs below) |
+| Actor-based request/response chain | `sequenceDiagram` |
+| Lifecycle / mode transitions | `stateDiagram-v2` |
+| Comparing magnitudes (was: ASCII bar chart) | `xychart-beta` bar; line for trends/curves |
+| Proportions of a whole | `pie` |
+| Two-axis positioning / tradeoff space | `quadrantChart` |
+| Evolution over time, version history | `timeline` |
+| Flow volumes splitting/merging | `sankey-beta` |
 
-### Keep ASCII when ANY of the following is true:
-- The diagram is a **constraint grid** (matrix, token×token mask, value table) — Mermaid cannot do grids
-- The diagram is a **bar chart** (comparing magnitudes) — Mermaid's gantt/xychart are too heavy
-- The diagram is a **before/after delta** (two stat blocks side by side) — a table or stacked pair works
-- The diagram is a **number-line / threshold axis** (e.g. CRAG 0.3/0.7 bands) — a simple axis sketch
-- The diagram is a **vector/angle sketch** — geometry, not flowcharts
-- The file already has many diagrams and the new one would merely restate a sentence
+### Keep ASCII only when ANY of these hold (Mermaid cannot draw it):
+- **Constraint grid / matrix / token×token mask / value table** — no Mermaid grid primitive
+- **Column-aligned memory/layout maps** where character alignment IS the information
+- **Vector/angle geometry sketches**
+- The diagram would merely restate a sentence the text already gives — then use no diagram at all
 
-In the `lora.md` experiment, the §3 matrix-sliver and singular-value bar chart
-were left as ASCII; only the 4 true flowcharts were converted. That line is the
-right call to repeat.
+Before/after deltas and threshold axes, formerly kept ASCII, should now become
+grouped `xychart-beta` bars or a labeled `quadrantChart`/`xychart-beta` band when
+that reads better; keep the ASCII version only if the chart form loses information.
 
 ---
 
