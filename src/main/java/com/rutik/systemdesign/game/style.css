@@ -801,6 +801,19 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   opacity: 0; transition: opacity 0.15s; pointer-events: none;
 }
 .md-body .mermaid:hover::after { opacity: 1; }
+
+/* Horizontally scrollable diagram: pinned edge glows fade out as you reach
+   each end (cover layers scroll with the content), plus an explicit hint. */
+.md-body .mermaid.h-scroll {
+  background:
+    linear-gradient(to right, #0a0d13 30%, transparent) left / 48px 100% no-repeat,
+    linear-gradient(to left, #0a0d13 30%, transparent) right / 48px 100% no-repeat,
+    radial-gradient(farthest-side at 0 50%, rgba(97, 175, 239, 0.30), transparent) left / 16px 100% no-repeat,
+    radial-gradient(farthest-side at 100% 50%, rgba(97, 175, 239, 0.30), transparent) right / 16px 100% no-repeat
+    #0a0d13;
+  background-attachment: local, local, scroll, scroll;
+}
+.md-body .mermaid.h-scroll::after { content: "⇢ scroll · ⤢ zoom"; opacity: 0.75; }
 .md-body .mermaid svg { height: auto; }   /* width set in px by renderMermaid (drag-resizable) */
 
 /* drag-resize grip — bottom-right corner, fades in on hover */

@@ -1811,10 +1811,13 @@ function mmAvailWide(n) { return mmAvail(n) + mmExtra(n); }
 
 // Set svg width and center-breakout the container into the gutters when the
 // diagram wants more than the prose column; past the gutters it h-scrolls.
+// Scrollable diagrams get an .h-scroll class -> edge glow + "⇢ scroll" hint,
+// so the hidden part reads as scrollable instead of clipped.
 function mmLayout(n, sv, w) {
   mmApplyWidth(sv, w);
   const spill = Math.min(Math.max(0, w - mmAvail(n)), mmExtra(n));
   n.style.marginLeft = n.style.marginRight = spill > 8 ? `${-spill / 2}px` : "";
+  requestAnimationFrame(() => n.classList.toggle("h-scroll", n.scrollWidth > n.clientWidth + 4));
 }
 
 // Bottom-right drag grip: resize the diagram freely (no upper cap — beyond
@@ -1912,7 +1915,8 @@ async function mmRenderNode(n, src) {
   }
   n.innerHTML = svg;                                     // replaces old svg + grip
   const sv = n.querySelector("svg");
-  const d = mmDims(svg);
+  let d = mmDims(svg);
+  if (sv) { const fixed = mmFixViewBox(sv); if (fixed) d = fixed; }
   if (sv && d) {
     sv.dataset.natw = Math.round(d.w);
     if (flipScale) {
@@ -1928,10 +1932,61 @@ async function mmRenderNode(n, src) {
   n.querySelectorAll(".node rect").forEach(r => { r.setAttribute("rx", "8"); r.setAttribute("ry", "8"); });
   n.querySelectorAll(".cluster rect").forEach(r => { r.setAttribute("rx", "12"); r.setAttribute("ry", "12"); });
   n.querySelectorAll("marker path, marker polygon").forEach(m => { m.setAttribute("fill", "#61afef"); m.removeAttribute("stroke"); });
+  mmTintPlain(n);
   if (!n.dataset.mmWired) {                              // once per container, not per render
     n.dataset.mmWired = "1";
     n.addEventListener("click", () => openMermaidZoom(n));
   }
+}
+
+// Consistency fallback: stateDiagrams (and any flowchart authored without the
+// classDef palette) render every node in flat mainBkg gray, which reads
+// broken next to fully-colored diagrams. When a rendered diagram has nodes
+// and NONE carries a color, tint them from the One Dark palette in definition
+// order. Diagrams with even one authored color are left untouched.
+const MM_TINTS = [
+  { f: "#61afef", s: "#2e86c1", t: "#1a1a1a" },   // blue
+  { f: "#98c379", s: "#27ae60", t: "#1a1a1a" },   // green
+  { f: "#e5c07b", s: "#f39c12", t: "#1a1a1a" },   // gold
+  { f: "#c678dd", s: "#9b59b6", t: "#ffffff" },   // purple
+  { f: "#56b6c2", s: "#0097a7", t: "#1a1a1a" },   // teal
+  { f: "#d19a66", s: "#e67e22", t: "#1a1a1a" },   // orange
+  { f: "#e06c75", s: "#c0392b", t: "#ffffff" },   // red
+];
+function mmTintPlain(n) {
+  let i = 0;
+  n.querySelectorAll("svg .node").forEach((g) => {
+    if (g.classList.contains("statediagram-note")) return;   // notes are gold-themed already
+    const shape = g.querySelector("rect, polygon, circle, path");
+    if (!shape || getComputedStyle(shape).fill !== "rgb(26, 26, 26)") return;   // mainBkg #1a1a1a = unstyled
+    const c = MM_TINTS[i++ % MM_TINTS.length];
+    g.querySelectorAll("rect, polygon, circle, path").forEach((s) => {
+      s.style.fill = c.f; s.style.stroke = c.s;
+    });
+    g.querySelectorAll("foreignObject div").forEach((d) => { d.style.color = c.t; });
+    g.querySelectorAll("text").forEach((t) => { t.style.fill = c.t; });
+  });
+}
+
+// Mermaid under-measures long monospace lines in some layouts (state-diagram
+// notes especially), computing a viewBox smaller than the drawn content — the
+// overflow is then clipped at the canvas edge. Expand the viewBox to the true
+// bounding box after render; returns corrected dims when a fix was needed.
+function mmFixViewBox(sv) {
+  try {
+    const bb = sv.getBBox();
+    const vb = sv.viewBox.baseVal;
+    const over = bb.x < vb.x - 2 || bb.y < vb.y - 2 ||
+                 bb.x + bb.width > vb.x + vb.width + 2 ||
+                 bb.y + bb.height > vb.y + vb.height + 2;
+    if (!over) return null;
+    const x = Math.floor(Math.min(bb.x, vb.x)) - 8;
+    const y = Math.floor(Math.min(bb.y, vb.y)) - 8;
+    const w = Math.ceil(Math.max(bb.x + bb.width, vb.x + vb.width)) - x + 8;
+    const h = Math.ceil(Math.max(bb.y + bb.height, vb.y + vb.height)) - y + 8;
+    sv.setAttribute("viewBox", `${x} ${y} ${w} ${h}`);
+    return { w, h };
+  } catch { return null; }
 }
 
 async function renderMermaid(root) {
@@ -1957,8 +2012,33 @@ async function renderMermaid(root) {
               titleColor:          "#e5c07b",
               labelBackground:     "#000000",
               fontFamily:          "ui-monospace, SFMono-Regular, Menlo, monospace",
+              // Sequence diagrams can't use flowchart classDefs, so they sat
+              // flat gray next to fully-colored flowcharts. Theme them from
+              // the same One Dark palette: blue actors, gold notes/labels.
+              actorBkg:              "#61afef",
+              actorBorder:           "#2e86c1",
+              actorTextColor:        "#1a1a1a",
+              actorLineColor:        "#4b5263",
+              signalColor:           "#61afef",
+              signalTextColor:       "#e5c07b",
+              noteBkgColor:          "#e5c07b",
+              noteBorderColor:       "#f39c12",
+              noteTextColor:         "#1a1a1a",
+              activationBkgColor:    "#3b4048",
+              activationBorderColor: "#61afef",
+              labelBoxBkgColor:      "rgba(198,120,221,0.12)",
+              labelBoxBorderColor:   "#c678dd",
+              labelTextColor:        "#c678dd",
+              loopTextColor:         "#c678dd",
             },
             flowchart: { curve: "basis", padding: 20, nodeSpacing: 45, rankSpacing: 55 },
+            // Sequence text rendered oversized relative to prose and long
+            // notes overflowed their boxes; wrap + smaller fonts fix both.
+            sequence: {
+              wrap: true,
+              actorFontSize: 14, messageFontSize: 13, noteFontSize: 13,
+              actorMargin: 60, noteMargin: 12, boxMargin: 8,
+            },
           });
           return m.default;
         });
