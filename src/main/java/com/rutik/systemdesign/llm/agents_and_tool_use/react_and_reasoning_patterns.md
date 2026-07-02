@@ -248,18 +248,20 @@ response = client.messages.create(
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
-    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    TASK["Task input"]
+    TASK(["Task input"])
     THT["Thought\nLLM reasons about state and next action"]
     ACT["Action\ntool call (search, code execution, API)"]
     OBS["Observation\ntool result injected into context"]
     DONE{"Task complete?"}
-    ANS["Final answer"]
+    ANS(["Final answer"])
     ABORT["Abort / partial answer\n(same action 2× or N steps exceeded)"]
 
     TASK --> THT --> ACT --> OBS --> DONE
@@ -267,33 +269,47 @@ flowchart TD
     DONE -->|"NO"| THT
     DONE -->|"STUCK"| ABORT
 
-    class TASK io
-    class THT,ACT,OBS proc
-    class DONE decide
-    class ANS io
-    class ABORT warn
+    class TASK,ANS io
+    class THT base
+    class ACT frozen
+    class OBS req
+    class DONE mathOp
+    class ABORT lossN
 ```
 
 ### Reflexion Architecture
 
-```
-Episode N                    Memory Buffer
-┌──────────────────┐         ┌─────────────────────────────────┐
-│ ReAct loop       │         │ Reflection 1: "search broader"  │
-│ (uses memory)    │         │ Reflection 2: "verify dates"    │
-│       ↓          │         │ Reflection N-1: "..."           │
-│ Outcome: FAIL    │         └─────────────────────────────────┘
-└──────────────────┘                       ↑
-         ↓                                 │
-    [Evaluator]                            │
-    "What went wrong?"                     │
-         ↓                                 │
-    [Reflection]  ─────────────────────────┘
-    "Next time try X"
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Episode N+1 (with memory injected in context):
-[ReAct loop] → improved strategy → PASS
+    EPN["Episode N\nReAct loop (uses memory)"]
+    FAILN["Outcome: FAIL"]
+    EVAL["Evaluator\n'What went wrong?'"]
+    REFL["Reflection\n'Next time try X'"]
+    MEM["Memory Buffer\nReflection 1: 'search broader'\nReflection 2: 'verify dates'\nReflection N-1: '...'"]
+    EPN1["Episode N+1\nReAct loop — improved strategy"]
+    PASS(["PASS"])
+
+    EPN --> FAILN --> EVAL --> REFL --> MEM
+    MEM -.->|"memory in context"| EPN
+    MEM -.->|"memory injected in context"| EPN1
+    EPN1 --> PASS
+
+    class EPN,EPN1 base
+    class FAILN lossN
+    class EVAL frozen
+    class REFL,MEM train
+    class PASS io
 ```
+
+Each failed episode ends with a verbal reflection appended to the episodic memory buffer (typically the last 5-10 reflections); the buffer is injected into the next episode's context, which is how Episode N+1 turns the same task into a PASS.
 
 ### Tree of Thoughts
 

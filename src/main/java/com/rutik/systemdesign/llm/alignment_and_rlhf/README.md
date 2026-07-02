@@ -254,10 +254,13 @@ Used in combination with RL (PPO or GRPO):
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm   fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef store fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     BASE["Pre-trained LLM"]
     SFT_D["Demonstration dataset\n(prompt, ideal_response)"]
@@ -273,10 +276,10 @@ flowchart TD
     SFT_M --> RM_D --> RM_T --> RM
     SFT_M & RM --> PPO --> OUT
 
-    class BASE,SFT_D,RM_D io
-    class SFT,RM_T proc
-    class SFT_M,RM store
-    class PPO,OUT llm
+    class SFT_D,RM_D,OUT io
+    class BASE base
+    class SFT,RM_T,PPO train
+    class SFT_M,RM frozen
 ```
 
 Three distinct training stages; PPO requires four models in VRAM simultaneously (actor, critic, reward model, reference), which is why DPO/SimPO are preferred when memory is constrained.
@@ -309,20 +312,23 @@ GRPO (Online, Critic-Free):
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Dataset(["Prompt Dataset\n(math / code problems)"]) --> Policy
     Policy["Policy generates response\n(or G responses for GRPO)"] --> Oracle
     Oracle["Verification Oracle\nCode: execute test cases\nMath: symbolic / numeric check\n→ Binary reward 0 or 1\n→ Or partial credit 0–1"] --> Update
     Update["RL Update (PPO or GRPO)\n– No reward model needed\n– No human preference data needed\n– Ground truth IS the reward"] --> Policy
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
-
     class Dataset io
-    class Policy llm
-    class Oracle store
-    class Update proc
+    class Policy train
+    class Oracle frozen
+    class Update mathOp
 ```
 
 Verifiable rewards eliminate the reward model entirely — the oracle is deterministic (test suite pass/fail or symbolic math checker), so there is no reward hacking from a learned scorer.
@@ -689,11 +695,13 @@ Verifiable rewards use objective, execution-based signals as the reward in RL tr
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     BASE["LLaMA-3-8B Instruct (base)"]
     SFT["Phase 1: SFT\n500 examples (300 ideal responses + 200 refusals)\n2 h on 1×A100"]
@@ -709,11 +717,11 @@ flowchart TD
     CHOICE -->|"optional"| PPO --> EVAL
     CHOICE -->|"simpler"| DPO --> EVAL
 
-    class BASE io
-    class SFT,PREF proc
-    class SFT_M,RM store
-    class CHOICE decide
-    class PPO,DPO,EVAL llm
+    class BASE base
+    class PREF io
+    class SFT,PPO,DPO train
+    class SFT_M,RM frozen
+    class CHOICE,EVAL mathOp
 ```
 
 **Key implementation — 3 Python code blocks:**

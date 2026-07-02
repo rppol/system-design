@@ -62,24 +62,44 @@ Embed prompts; if new prompt cosine similarity > threshold to cached, return cac
 
 ### LiteLLM Proxy Topology
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    TA([Team A app]) --> PXY["LiteLLM Proxy (HTTP)"]
+    TB([Team B app]) --> PXY
+    TC([Team C app]) --> PXY
+    PXY --> ANT[["Anthropic API"]]
+    PXY --> OAI[["OpenAI API"]]
+    PXY --> BED[["Bedrock API"]]
+    PXY --> AZ[["Azure OpenAI"]]
+    PXY -.-> RD[["Redis\ncache, budgets, rate limits"]]
+    PXY -.-> PG[["Postgres\naudit log, spend"]]
+
+    class TA,TB,TC req
+    class PXY base
+    class ANT,OAI,BED,AZ,RD,PG frozen
 ```
-Team A app ----+
-Team B app ----+----> LiteLLM Proxy (HTTP) ---+---> Anthropic API
-Team C app ----+         |                    +---> OpenAI API
-                         |                    +---> Bedrock API
-                         +- Redis (cache,     +---> Azure OpenAI
-                            budgets, rate limits)
-                         +- Postgres (audit log, spend)
-```
+
+All team apps hit the single proxy endpoint with their virtual keys; the proxy fans requests out across four provider backends and keeps shared state (budgets, cache, rate limits) in Redis with spend and audit records in Postgres.
 
 ### Routing with Fallback
 
 ```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef warn fill:#1e2127,stroke:#e06c75,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     REQ["Request\nmodel='claude-sonnet-4-6'"]
     RTR["Router\nprimary = anthropic-direct"]
@@ -98,8 +118,9 @@ flowchart TD
     A3 -->|"error"| ERR
 
     class REQ,OK io
-    class RTR,A1,A2,A3 proc
-    class ERR warn
+    class RTR req
+    class A1,A2,A3 frozen
+    class ERR lossN
 ```
 
 ### Virtual Key Budgets

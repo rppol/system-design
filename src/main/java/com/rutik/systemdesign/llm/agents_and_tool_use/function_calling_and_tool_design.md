@@ -265,9 +265,13 @@ tools_v2 = [
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Q["User: 'What's the weather in Paris?'"]
     LLM1["LLM with tool specs\nreasoning: I have get_weather; location=Paris,FR"]
@@ -280,8 +284,9 @@ flowchart TD
     Q --> LLM1 --> CALL --> APP --> INJ --> LLM2 --> RESP
 
     class Q,RESP io
-    class LLM1,LLM2 llm
-    class CALL,APP,INJ proc
+    class LLM1,LLM2 base
+    class CALL,INJ req
+    class APP frozen
 ```
 
 ### Parallel Tool Call Flow
@@ -289,9 +294,13 @@ flowchart TD
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Q["User: 'Compare weather in Paris and Tokyo'"]
     LLM1["LLM → two tool calls in ONE response"]
@@ -306,8 +315,9 @@ flowchart TD
     P1 & P2 --> MERGE --> LLM2 --> RESP
 
     class Q,RESP io
-    class LLM1,LLM2 llm
-    class P1,P2,MERGE proc
+    class LLM1,LLM2 base
+    class P1,P2 req
+    class MERGE mathOp
 ```
 
 ### Tool Chaining
@@ -514,30 +524,48 @@ A: Version by appending `_v2`, `_v3` to the tool name when making breaking chang
 
 **Architecture Overview**:
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    USER(["User Request"])
+    LLM["Travel Assistant LLM (GPT-4o, strict mode)\ntool selection based on descriptions + context"]
+    SF["search_flights\n(read-only)"]
+    SH["search_hotels\n(read-only)"]
+    GW["get_weather\n(read-only)"]
+    GI["get_itinerary\n(read-only)"]
+    CF["confirm_flight\n(write — HITL)"]
+    CH["confirm_hotel\n(write — HITL)"]
+    GATE["User approval gate\n(required before execution)"]
+    API[["booking_api"]]
+    RCPT(["Confirmation number + receipt"])
+
+    USER --> LLM
+    LLM -->|"tool calls (parallel where safe)"| SF
+    LLM --> SH
+    LLM --> GW
+    LLM --> GI
+    SF --> CF
+    SH --> CH
+    CF --> GATE
+    CH --> GATE
+    GATE --> API --> RCPT
+
+    class USER,RCPT io
+    class LLM base
+    class SF,SH,GW,GI req
+    class CF,CH lossN
+    class GATE mathOp
+    class API frozen
 ```
-User Request
-      |
-      v
-┌─────────────────────────────────────────────────────┐
-│  TRAVEL ASSISTANT LLM (GPT-4o, strict mode)         │
-│  Tool selection based on descriptions + context     │
-└───────────────────────┬─────────────────────────────┘
-                        │  tool calls (parallel where safe)
-          ┌─────────────┼──────────────┬──────────────┐
-          v             v              v              v
-  [search_flights] [search_hotels] [get_weather] [get_itinerary]
-     (read-only)    (read-only)    (read-only)   (read-only)
-          |              |
-          v              v
-  [confirm_flight]  [confirm_hotel]
-   (write — HITL)   (write — HITL)
-          |              |
-          v              v
-    User approval gate (required before execution)
-          |
-          v
-  [booking_api] → confirmation number + receipt
-```
+
+The read-only search tools run in parallel (cutting response latency from ~6 s sequential to ~3 s) while the irreversible write tools are structurally gated behind explicit user approval — the partitioning that keeps the booking error rate at 0.02%.
 
 **Key Design Decisions**:
 

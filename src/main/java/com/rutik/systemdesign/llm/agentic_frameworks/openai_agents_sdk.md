@@ -62,52 +62,40 @@ Input guardrails (run before LLM) reject inappropriate inputs. Output guardrails
 
 ## 5. Architecture Diagrams
 
+### Runner Execution Loop
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    RUN(["Runner.run(agent, input, context)"]) --> IG["Input guardrails"]
+    IG -->|"TripwireTriggered?"| TRIP(["raise GuardrailTripwireTriggered"])
+    IG --> MODEL["Call active model\n(agent.model with agent.instructions)"]
+    MODEL -->|"tool calls"| EXEC["Execute tools\nparallel"]
+    MODEL -->|"handoff()"| SWITCH["Switch active agent to target\nCarry context"]
+    EXEC --> HIST["Append to history"]
+    SWITCH --> HIST
+    HIST --> FINAL{"final output?"}
+    FINAL -->|"else loop (subject to max_turns)"| MODEL
+    FINAL -->|"final output"| OG["Output guardrails\nruns on final output"]
+    OG --> RES(["RunResult"])
+
+    class RUN req
+    class IG,OG,TRIP lossN
+    class MODEL base
+    class EXEC,SWITCH,HIST,FINAL mathOp
+    class RES io
 ```
-Runner Execution Loop
-======================
 
-  Runner.run(agent, input, context)
-            |
-            v
-  +-------------------+
-  | Input guardrails  |  -- TripwireTriggered? -> raise GuardrailTripwireTriggered
-  +-------------------+
-            |
-            v
-  +-------------------+
-  | Call active model |  (agent.model with agent.instructions)
-  +-------------------+
-            |
-       +----+----+
-       |         |
-   tool calls  handoff()
-       |         |
-       v         v
-  +--------+  +-----------------+
-  | Execute|  | Switch active   |
-  | tools  |  | agent to target |
-  | parallel  | Carry context   |
-  +--------+  +-----------------+
-       |         |
-       +----+----+
-            |
-            v
-  +-------------------+
-  | Append to history |
-  +-------------------+
-            |
-            +-----> If final output: return RunResult
-            +-----> Else loop (subject to max_turns)
-            
-            v
-  +-------------------+
-  | Output guardrails |  -- runs on final output
-  +-------------------+
-            |
-            v
-        RunResult
+The runner loops model call → tool execution / handoff → append to history until the active agent emits a final output or `max_turns` is exceeded; input guardrails can abort the run before the first model call, and output guardrails validate only the final output.
 
-
+```
 Handoff vs Tool Call
 =====================
 
@@ -529,29 +517,37 @@ The underlying OpenAI Python SDK auto-retries on 429 with exponential backoff (d
 
 **Architecture using Agents SDK**:
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    USER(["User submits ticket\n(web form / Slack)"]) --> TRIAGE["TriageAgent (gpt-4o-mini)\n+ input_guardrail (block PII)"]
+    TRIAGE --> PW["Password Agent\n(mini)"]
+    TRIAGE --> SW["Software Install Agent\n(4o)"]
+    TRIAGE --> HW["Hardware Request Agent\n(4o)"]
+    TRIAGE --> NET["Network Issue Agent\n(4o)"]
+    TRIAGE --> SEC["Security Incident Agent\n(o1)"]
+    TRIAGE --> ACC["Access Request Agent\n(mini)"]
+
+    class USER io
+    class TRIAGE req
+    class PW,SW,HW,NET,ACC base
+    class SEC lossN
 ```
-              User submits ticket (web form / Slack)
-                            |
-                            v
-                +-----------+-----------+
-                |  TriageAgent          |
-                |  (gpt-4o-mini)        |
-                |  + input_guardrail    |
-                |    (block PII)        |
-                +-----------+-----------+
-                            |
-        +------+------+------+------+------+------+
-        |      |      |      |      |      |
-        v      v      v      v      v      v
-   Password Software Hardware Network Security Access
-   Agent    Install  Request  Issue   Incident Request
-   Agent    Agent    Agent    Agent   Agent    Agent
-   (mini)   (4o)     (4o)     (4o)    (o1)     (mini)
-   
-   Tools per agent vary:
-   - Password Agent: reset_via_ldap, check_lockout
-   - Software Install: lookup_catalog, check_license, create_install_ticket
-   - Security Incident: ESCALATE_TO_HUMAN (no auto-resolution)
+
+One cheap gpt-4o-mini triage agent fans tickets out to six specialists (the security path always escalates to a human, never auto-resolves); this routing cut misrouting from 22% to 4%.
+
+```
+Tools per agent vary:
+- Password Agent: reset_via_ldap, check_lockout
+- Software Install: lookup_catalog, check_license, create_install_ticket
+- Security Incident: ESCALATE_TO_HUMAN (no auto-resolution)
 ```
 
 **Implementation highlights**:

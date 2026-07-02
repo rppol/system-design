@@ -127,31 +127,28 @@ Agent issues write tool call with idempotency_key:
 
 ### Temporal Workflow for Durable Agent Execution
 
-```
-  Client                  Temporal Server             Worker Process
-  ------                  ---------------             --------------
-  StartWorkflow --------> Persist WorkflowStarted
-                          event to history
-                                  |
-                                  v
-                          Schedule Activity --------> Execute tool call
-                          (tool_call_activity)        (actual side effect)
-                                  |
-                          Persist ActivityCompleted
-                          event to history
-                                  |
-                          Signal: "interrupt" -------> Worker sees signal
-                                  |                    sets interrupt_requested
-                          Persist SignalReceived        = True; agent loop
-                                  |                    halts cleanly
-                                  |
-                          WorkflowQuery: status -----> Return "interrupted"
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant T as Temporal Server
+    participant W as Worker Process
 
-  CRASH RECOVERY:
-  Worker restarts ------> Temporal replays event history
-                          deterministically at ~1000 steps/sec
-                          Worker resumes at next pending activity
+    C->>T: StartWorkflow
+    T->>T: Persist WorkflowStarted event to history
+    T->>W: Schedule Activity (tool_call_activity)
+    W->>W: Execute tool call (actual side effect)
+    W-->>T: Activity completed
+    T->>T: Persist ActivityCompleted event to history
+    T->>W: Signal: "interrupt"
+    W->>W: sets interrupt_requested = True — agent loop halts cleanly
+    T->>T: Persist SignalReceived
+    T->>W: WorkflowQuery: status
+    W-->>T: Return "interrupted"
+
+    Note over C,W: CRASH RECOVERY — Worker restarts — Temporal replays event history<br/>deterministically at ~1000 steps/sec — Worker resumes at next pending activity
 ```
+
+Every state transition — workflow start, activity completion, signal receipt — is persisted to the immutable event history before execution proceeds, which is what makes deterministic replay at ~1000 steps/sec possible after a worker crash.
 
 ---
 

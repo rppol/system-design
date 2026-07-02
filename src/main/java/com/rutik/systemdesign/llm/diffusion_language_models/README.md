@@ -235,6 +235,14 @@ t=1.0 (noise):    [MASK][MASK] [MASK] [MASK] [MASK] [MASK]
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Init(["x_t = all MASK  (t = 1.0)"]) --> Fwd
     Fwd["Transformer forward pass\nBidirectional attention over x_t\nPredict logits for EVERY masked position"] --> Conf
     Conf["For each masked position:\nconfidence = max softmax prob"] --> Select
@@ -243,15 +251,10 @@ flowchart TD
     Done -- NO --> Fwd
     Done -- YES --> Final(["Final x_0 — complete generated sequence"])
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
-
     class Init,Final io
-    class Fwd llm
-    class Conf,Select,Update proc
-    class Done decide
+    class Fwd frozen
+    class Conf,Select,Update train
+    class Done mathOp
 ```
 
 Unlike autoregressive decoding (one token at a time, left-to-right), discrete diffusion generates all positions in parallel and iteratively denoises — each pass unmasks the most confident subset, creating global coherence before committing to low-confidence tokens.

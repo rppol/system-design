@@ -137,26 +137,50 @@ Query: "What color was the mat?"
 
 ### Sub-Question Decomposition
 
-```
-Question: "Compare the revenue growth and employee count of Apple and Microsoft in 2023"
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-[SubQuestionQueryEngine]
-       |
-  [Question Generator LLM]
-       |
-  Sub-questions:
-    Q1: "What was Apple's revenue growth in 2023?" → routes to Apple_index
-    Q2: "What was Microsoft's revenue growth in 2023?" → routes to Microsoft_index
-    Q3: "What was Apple's employee count in 2023?" → routes to Apple_index
-    Q4: "What was Microsoft's employee count in 2023?" → routes to Microsoft_index
-       |
-  [all 4 queries run, answers collected]
-       |
-  [Synthesis LLM]
-  "Based on the answers to the sub-questions, here is the comparison..."
-       |
-  Final answer with full comparison
+    Q(["Question: Compare the revenue growth and employee count\nof Apple and Microsoft in 2023"])
+    SQE["SubQuestionQueryEngine"]
+    QG["Question Generator LLM"]
+    Q1["Q1: What was Apple's revenue growth in 2023?"]
+    Q2["Q2: What was Microsoft's revenue growth in 2023?"]
+    Q3["Q3: What was Apple's employee count in 2023?"]
+    Q4["Q4: What was Microsoft's employee count in 2023?"]
+    AI[["Apple_index"]]
+    MI[["Microsoft_index"]]
+    COL["All 4 queries run, answers collected"]
+    SYN["Synthesis LLM\n'Based on the answers to the sub-questions,\nhere is the comparison...'"]
+    ANS([Final answer with full comparison])
+
+    Q --> SQE --> QG
+    QG --> Q1
+    QG --> Q2
+    QG --> Q3
+    QG --> Q4
+    Q1 --> AI
+    Q3 --> AI
+    Q2 --> MI
+    Q4 --> MI
+    AI --> COL
+    MI --> COL
+    COL --> SYN --> ANS
+
+    class Q,ANS io
+    class SQE,AI,MI base
+    class QG,SYN frozen
+    class Q1,Q2,Q3,Q4 req
+    class COL mathOp
 ```
+
+The question generator fans one complex question out into four sub-questions, each routed to the index that owns the data (Q1/Q3 → Apple_index, Q2/Q4 → Microsoft_index); the four answers are collected and a synthesis LLM merges them into a single comparison.
 
 ---
 

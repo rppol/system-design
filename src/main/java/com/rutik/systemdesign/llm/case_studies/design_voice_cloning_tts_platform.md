@@ -97,59 +97,38 @@ Gross margin: ($75,000 - $432) / $75,000 = 99.4% (GPU-dominant; real margin afte
 ## 3. High-Level Architecture
 
 ### Primary System Diagram
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    IN(["Text + voice_id\n(or audio sample)"]) --> GW["API Gateway\nmTLS termination · API key auth\nrate limiting (chars/min) · SSML preprocessing"]
+    GW --> VR["Voice Router\nresolve voice_id · consent check (clones)\nlanguage detection · route to TTS cluster"]
+    VR --> CV["Consent Verifier\n(clone requests only)"]
+    VR --> VE["Voice Embedding Store\n(Redis + S3 backup)"]
+    VR --> TTS["TTS Inference Engine\n(Cartesia Sonic / XTTS v2 / custom)\nA10G GPU cluster · sentence chunker"]
+    CV --> BUF["Audio Stream Buffer\nchunk accumulator\nformat transcoding (PCM → MP3/Opus/WAV)"]
+    VE --> BUF
+    TTS --> BUF
+    BUF --> WM["Audio Watermarker\n(spread-spectrum)"]
+    BUF --> C2PA["C2PA Metadata\nEmbedder (container)"]
+    BUF --> CDN[["CDN Edge (CloudFront)\nfor presigned download links"]]
+    WM --> CL(["Client (WebSocket /\nSSE audio stream)"])
+    C2PA --> CL
+
+    class IN,CL io
+    class GW,CV req
+    class VR,BUF,WM,C2PA mathOp
+    class VE,CDN frozen
+    class TTS base
 ```
-                         ┌──────────────────────────────┐
-  Text + voice_id        │         API Gateway           │
-─────────────────────>   │  - mTLS termination           │
-  (or audio sample)      │  - API key auth               │
-                         │  - Rate limiting (chars/min)  │
-                         │  - SSML preprocessing         │
-                         └──────────────┬───────────────┘
-                                        │
-                         ┌──────────────▼───────────────┐
-                         │         Voice Router          │
-                         │  - Resolve voice_id           │
-                         │  - Consent check (clones)     │
-                         │  - Language detection         │
-                         │  - Route to TTS cluster       │
-                         └──┬───────────────────────────┘
-                            │
-           ┌────────────────┼────────────────────┐
-           │                │                    │
-           ▼                ▼                    ▼
-  ┌──────────────┐  ┌──────────────┐   ┌──────────────────────┐
-  │ Consent      │  │ Voice        │   │ TTS Inference Engine  │
-  │ Verifier     │  │ Embedding    │   │ (Cartesia Sonic /     │
-  │ (clone       │  │ Store        │   │  XTTS v2 / custom)   │
-  │  requests    │  │ (Redis +     │   │ A10G GPU cluster      │
-  │  only)       │  │  S3 backup)  │   │ sentence chunker      │
-  └──────┬───────┘  └──────┬───────┘   └──────────┬───────────┘
-         │                 │                       │
-         └─────────────────┴───────────────────────┘
-                                        │
-                         ┌──────────────▼───────────────┐
-                         │      Audio Stream Buffer      │
-                         │  - Chunk accumulator          │
-                         │  - Format transcoding         │
-                         │    (PCM → MP3/Opus/WAV)       │
-                         └──────────────┬───────────────┘
-                                        │
-                    ┌───────────────────┼──────────────────┐
-                    │                   │                   │
-                    ▼                   ▼                   ▼
-           ┌──────────────┐   ┌──────────────┐   ┌──────────────────┐
-           │  Audio       │   │  C2PA        │   │  CDN Edge        │
-           │  Watermarker │   │  Metadata    │   │  (CloudFront)    │
-           │  (spread-    │   │  Embedder    │   │  for presigned   │
-           │   spectrum)  │   │  (container) │   │  download links  │
-           └──────┬───────┘   └──────┬───────┘   └──────────────────┘
-                  └─────────────────┬┘
-                                    │
-                         ┌──────────▼───────────┐
-                         │  Client (WebSocket /  │
-                         │  SSE audio stream)    │
-                         └──────────────────────┘
-```
+
+The synthesis path fans out at the Voice Router (consent check for clones, embedding lookup, GPU synthesis) and reconverges at the Audio Stream Buffer; watermarking and C2PA embedding run inline before audio reaches the client, so every hop must fit inside the 200 ms TTFB budget.
 
 ### Voice Cloning Enrollment Flow
 ```

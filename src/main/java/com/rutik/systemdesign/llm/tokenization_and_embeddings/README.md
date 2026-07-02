@@ -99,21 +99,27 @@ Key vocabularies:
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    RAW["Raw Text\n\"The quick brown fox\""]
+    RAW["Raw Text\n'The quick brown fox'"]
     NORM["Normalization\nUnicode normalization · optional lowercasing"]
     PRE["Pre-tokenization\nsplit on whitespace / punctuation"]
-    ENC["BPE / WordPiece / Unigram Encoding\nsubword merge rules → \"The\", \"quick\", \"brown\", \"fox\""]
-    ID["ID Lookup\ntoken strings → integer IDs  [464, 2068, 7586, 21831]"]
-    EMB["Embedding Lookup\nIDs → dense vectors  shape: [4, d_model]"]
+    ENC["BPE / WordPiece / Unigram Encoding\nsubword merge rules → 'The', 'quick', 'brown', 'fox'"]
+    ID["ID Lookup\ntoken strings → integer IDs  (464, 2068, 7586, 21831)"]
+    EMB["Embedding Lookup\nIDs → dense vectors  shape: (4, d_model)"]
     TFM["Transformer Input"]
 
     RAW --> NORM --> PRE --> ENC --> ID --> EMB --> TFM
 
     class RAW,TFM io
-    class NORM,PRE,ENC,ID,EMB proc
+    class NORM,PRE,ID mathOp
+    class ENC,EMB train
 ```
 
 Each stage is deterministic and stateless; the learned parameters live only in the BPE merge table and the embedding matrix.

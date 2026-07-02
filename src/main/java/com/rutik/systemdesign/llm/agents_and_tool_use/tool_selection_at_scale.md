@@ -81,19 +81,21 @@ Route with classifier to narrow from 500 to 50 tools in a category, then apply R
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Query([User Query]) --> Prompt
     Prompt["System Prompt\n100 tool schemas × 300 tokens\n= 30,000 tokens / call"] --> LLM
     LLM["LLM\n(full context, degraded attention)"] --> Call["Tool call\n(accuracy ~70% with 100 tools)"]
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
-
-    class Query io
-    class Prompt warn
-    class LLM llm
-    class Call proc
+    class Query,Call io
+    class Prompt lossN
+    class LLM base
 ```
 
 ### RAG-over-tools
@@ -101,6 +103,14 @@ flowchart TD
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     subgraph OFFLINE["OFFLINE — build index once"]
         Catalog["Tool Catalogue\n(N=500)"] --> EmbedOff["Embedding Model\ntext-embedding-3-small"]
         EmbedOff --> Index["FAISS Index\n500 vectors × 1536 dims"]
@@ -114,16 +124,10 @@ flowchart TD
         LLM --> Call["Tool call\n(accuracy ~92% with k=10)"]
     end
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
-
-    class Query io
-    class Catalog,EmbedOff,EmbedQ,Search,Schemas,Prompt proc
-    class Index store
-    class LLM llm
-    class Call proc
+    class Query,Call io
+    class EmbedOff,EmbedQ,Search mathOp
+    class Schemas,Prompt req
+    class Catalog,Index,LLM base
 ```
 
 ### Hierarchical menus
@@ -131,19 +135,23 @@ flowchart TD
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Query([User Query]) --> L1
     L1["L1 Category Menu\ndata | comms | analysis | devops | payments"] --> LLM1["LLM call 1\nselects 'devops'"]
     LLM1 --> L2["L2 Tool Menu — devops\ngithub_create_pr | github_merge_pr\njenkins_trigger_build | k8s_scale_deployment"]
     L2 --> LLM2["LLM call 2\nselects 'github_create_pr'"]
     LLM2 --> Execute([Execute tool])
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-
     class Query,Execute io
-    class L1,L2 proc
-    class LLM1,LLM2 llm
+    class L1,L2 req
+    class LLM1,LLM2 base
 ```
 
 ### Routing classifier + RAG (hybrid)
@@ -151,6 +159,14 @@ flowchart TD
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Query([User Query]) --> Classifier
     Classifier["DistilBERT Classifier\n50 ms"] --> Categories["Category: devops + code\n(top-2)"]
     Categories --> Filter["Filter Tool Catalogue\ndevops+code subset: N=80"]
@@ -158,13 +174,10 @@ flowchart TD
     Search --> LLM["LLM with 8 relevant tools"]
     LLM --> Call([Tool call])
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-
     class Query,Call io
-    class Classifier,Categories,Filter,Search proc
-    class LLM llm
+    class Classifier train
+    class Categories,Filter,Search mathOp
+    class LLM base
 ```
 
 ---

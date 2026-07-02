@@ -95,7 +95,7 @@ flowchart TD
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    App([Application\n(any framework)]) --> SDK
+    App(["Application\n(any framework)"]) --> SDK
     SDK["Langfuse SDK\n(langfuse.observe decorator / manual)\nin-process async queue"] -- "batch HTTP (non-blocking, retries)" --> Server
     Server["Langfuse Server\n(self-hosted or cloud.langfuse.com)"] --> PG & CH
     PG["PostgreSQL\n(metadata)"]

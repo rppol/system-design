@@ -146,37 +146,34 @@ Code push / model weight change / system prompt change
 
 ### Judge Pipeline — Per-Example Scoring
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    AP([Adversarial prompt]) --> TL["Target LLM"]
+    TL --> MR([Model response])
+    MR --> LG["Llama Guard 2/3\nsafe / unsafe\nP50: 80ms, $0.0002"]
+    MR --> J["LLM Judge GPT-4o\n0.0-1.0 rubric\nP50: 1200ms, $0.01"]
+    LG --> D{"Llama Guard 'unsafe'\nOR severity >= 4?"}
+    J --> D
+    D -->|"yes → use LLM judge score"| ER["ExampleResult\n(passed/failed, category,\nseverity, latency)"]
+    D -->|"no → trust Llama Guard"| ER
+    ER --> RPT(["RedTeamReport\nper-category pass rates,\nbaseline delta, model card"])
+
+    class AP req
+    class TL base
+    class LG,J frozen
+    class D mathOp
+    class MR,ER,RPT io
 ```
-Adversarial prompt
-      |
-      v
-  [Target LLM]
-      |
-      v
-  Model response
-      |
-      +----------------------------+
-      |                            |
-      v                            v
-[Llama Guard 2/3]          [LLM Judge GPT-4o]
-  safe / unsafe              0.0-1.0 rubric
-  P50: 80ms, $0.0002         P50: 1200ms, $0.01
-      |                            |
-      +----------------------------+
-                  |
-     if Llama Guard "unsafe" OR severity >= 4
-          -> use LLM judge score
-          else -> trust Llama Guard
-                  |
-                  v
-        ExampleResult (passed/failed,
-         category, severity, latency)
-                  |
-                  v
-         RedTeamReport
-         (per-category pass rates,
-          baseline delta, model card)
-```
+
+The scoring cascade keeps cost bounded: Llama Guard (P50 80ms, $0.0002) screens every example, and the expensive GPT-4o judge (P50 1200ms, $0.01) decides only "unsafe" hits and severity >= 4 cases before results roll up into the per-category report.
 
 ---
 

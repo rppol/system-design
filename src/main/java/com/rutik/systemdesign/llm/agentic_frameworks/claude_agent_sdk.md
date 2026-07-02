@@ -66,42 +66,34 @@ The `computer` tool gives Claude `screenshot`, `mouse_move`, `left_click`, `type
 
 ## 5. Architecture Diagrams
 
+**Native Tool Use Loop**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    U([User message]) --> S["Send messages\nto Claude"]
+    S --> R["Claude response"]
+    R -->|"text only"| Done([Return to user])
+    R -->|"tool_use blocks"| E["Execute tools in parallel\n(asyncio.gather)"]
+    E --> A["Append tool_results\nto messages"]
+    A -->|"loop"| S
+
+    class U,Done io
+    class S,A req
+    class R base
+    class E frozen
 ```
-Native Tool Use Loop
-=====================
 
-  +----------------+
-  | User message   |
-  +-------+--------+
-          |
-          v
-  +-------+--------+
-  | Send messages  |
-  | to Claude      |
-  +-------+--------+
-          |
-          v
-  +-------+--------+        text only
-  | Claude response+-------------------> Return to user
-  +-------+--------+
-          |
-          | tool_use blocks
-          v
-  +-------+--------+
-  | Execute tools  |  <-- asyncio.gather() for parallel
-  | in parallel    |
-  +-------+--------+
-          |
-          v
-  +-------+--------+
-  | Append         |
-  | tool_results   |
-  | to messages    |
-  +-------+--------+
-          |
-          +--------> Loop back to "Send messages"
+The loop repeats — send, execute tool_use blocks, append tool_results — until Claude returns only text (stop_reason="end_turn"). Executing the tool_use blocks in parallel with `asyncio.gather()` is what cuts multi-tool latency 50-70%.
 
-
+```
 Parallel Tool Execution
 ========================
 
@@ -526,28 +518,35 @@ Tools spend most of their time waiting on I/O (HTTP requests, database queries, 
 
 **Architecture**:
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    P["Parent Agent (Opus 4.7,\nextended thinking enabled)"] --> D["dispatch_subagent\n(parallel for each competitor)"]
+    D --> SA["Sub A — Sonnet 4.6\nTools: web_search,\nread_url, read_rss"]
+    D --> SB["Sub B — Sonnet 4.6\nTools: web_search,\nread_url, read_rss"]
+    D --> SC["Sub C — Sonnet 4.6\nTools: web_search,\nread_url, read_rss"]
+    D --> SN["... (20 subagents)"]
+    SA --> R(["Returns (competitor, summary,\nkey_changes, sources)"])
+    SB --> R
+    SC --> R
+    SN --> R
+    R --> SY["Parent synthesizes\ninto single report"]
+
+    class P base
+    class D req
+    class SA,SB,SC,SN frozen
+    class R io
+    class SY mathOp
 ```
-            Parent Agent (Opus 4.7, extended thinking enabled)
-                  |
-                  v
-            dispatch_subagent (parallel for each competitor)
-                  |
-   +--------------+--------------+
-   |              |              |
-   v              v              v
- Sub A          Sub B          Sub C  ... (20 subagents)
- Sonnet 4.6    Sonnet 4.6    Sonnet 4.6
- Tools:         Tools:         Tools:
- - web_search   - web_search   - web_search
- - read_url     - read_url     - read_url
- - read_rss     - read_rss     - read_rss
-                  |
-                  v
-        Returns {competitor, summary, key_changes, sources}
-                  |
-                  v
-        Parent synthesizes into single report
-```
+
+All 20 Sonnet subagents are dispatched in parallel via `asyncio.gather()`, each returning a structured result that the Opus parent synthesizes — total runtime ~90 seconds instead of a sequential 30+ minutes.
 
 **Key implementation details**:
 - System prompt (1800 tokens) + tools (1200 tokens) cached on every API call — 70% input cost savings.

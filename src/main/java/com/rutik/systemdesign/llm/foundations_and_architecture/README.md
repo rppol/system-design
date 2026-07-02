@@ -98,57 +98,48 @@ Standard self-attention computes O(n^2) interactions — every token attends to 
 ## 5. Architecture Diagrams
 
 ### Single Transformer Block
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    IN([Input Tokens]) --> EMB["Token Embeddings + Positional Encoding"]
+    subgraph blk["Transformer Block (× N)"]
+        LN1["Layer Norm (pre)"] --> MHA["Multi-Head Self-Attention\nQ=K=V=x·W\nAttn = softmax(QKᵀ/√d) · V"]
+        MHA --> ADD1((" + "))
+        ADD1 --> LN2["Layer Norm (pre)"] --> FFN["Feed-Forward Layer\nFFN(x) = GELU(xW1)W2"]
+        FFN --> ADD2((" + "))
+    end
+    EMB --> LN1
+    EMB -->|"residual"| ADD1
+    ADD1 -->|"residual"| ADD2
+    ADD2 --> HEAD["LM Head: Linear + Softmax over vocab"]
+    HEAD --> OUT([Next Token Probabilities])
+
+    class IN,OUT io
+    class EMB,MHA,FFN,HEAD train
+    class LN1,LN2,ADD1,ADD2 mathOp
 ```
-Input Tokens
-     |
-     v
-[Token Embeddings + Positional Encoding]
-     |
-     v
-+-----------------------------+
-|  Transformer Block (x N)   |
-|                             |
-|  +---------------------+   |
-|  | Layer Norm (pre)    |   |
-|  +---------------------+   |
-|           |                 |
-|  +---------------------+   |
-|  | Multi-Head Self-    |   |
-|  | Attention           |   |
-|  | Q=K=V=x*W           |   |
-|  | Attn = softmax(QKᵀ  |   |
-|  |         /√d) * V    |   |
-|  +---------------------+   |
-|           |                 |
-|  +-- Residual Connection -- |
-|           |                 |
-|  +---------------------+   |
-|  | Layer Norm (pre)    |   |
-|  +---------------------+   |
-|           |                 |
-|  +---------------------+   |
-|  | Feed-Forward Layer  |   |
-|  | FFN(x) = GELU(xW1)W2|  |
-|  +---------------------+   |
-|           |                 |
-|  +-- Residual Connection -- |
-+-----------------------------+
-     |
-     v
-[LM Head: Linear + Softmax over vocab]
-     |
-     v
-Next Token Probabilities
-```
+
+The two residual edges bypass the sublayers and feed the `+` nodes directly — the gradient highway that lets this block stack 32–96 layers deep without vanishing gradients.
 
 ### Multi-Head Attention Detail
 
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     IN["Input x\nseq_len × d_model"]
     QW["Q = x · W_Q\nseq_len × d_k"]
@@ -163,8 +154,8 @@ flowchart TD
     ATT --> CAT --> OUT
 
     class IN,OUT io
-    class QW,KW,VW,CAT proc
-    class ATT llm
+    class QW,KW,VW,CAT train
+    class ATT mathOp
 ```
 
 Three projections fan out from the same input; all heads compute attention in parallel, then their outputs are concatenated and projected back to `d_model`.
@@ -234,10 +225,13 @@ LR warmup (10K+ steps).                Nearly all models ≥7B use Pre-LN.
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
-    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     TOK["Input token x"]
     RTR["Router\nlearned linear layer"]
@@ -254,9 +248,9 @@ flowchart TD
     E0 & E1 --> WS --> OUT
 
     class TOK,OUT io
-    class RTR,E0,E1,WS proc
-    class SOFT decide
-    class SKIP warn
+    class RTR,E0,E1 train
+    class WS,SOFT mathOp
+    class SKIP frozen
 ```
 
 Total params = N × FFN\_size (all experts in memory); active params = K × FFN\_size per token. DeepSeek-V3: N=256 experts, K=8 active, total=671B params, active=37B — inference cost of a 37B dense model at the quality of a 671B model.

@@ -100,60 +100,75 @@ Action cycle (target 1,000ms, SLA 2,000ms):
 
 ## 3. High-Level Architecture
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    USER(["User"]) -->|"POST /tasks"| TAPI["Task API"]
+    TAPI -->|"create_session()"| SM["Session Manager"]
+    SM --> VMO["VM Orchestrator\n(Firecracker VMs)"]
+    SM --> ACG["Action Confirmation Gate\n(for write/irreversible actions)"]
+    VMO --> SC["Screenshot Capturer\n(X11/CDP)"]
+    VMO --> CKPT["State Checkpoint\n(S3 + Redis)"]
+    SC --> VLMR["VLM Router\n(claude-haiku-4-5 / claude-opus-4-7)"]
+    VLMR --> GE["Grounding Engine\n(AXTree + visual fallback)"]
+    GE --> AE["Action Executor\n(xdotool / Playwright CDP)"]
+    AE --> RV["Result Verifier\n(screenshot diff hash)"]
+    ACG --> HAW["Human Approval Webhook"]
+    HAW --> NS["Notification Service\n(email/webhook/SSE)"]
+    NS --> AL["Audit Logger\n(S3 WORM + ClickHouse)"]
+
+    class USER,HAW,NS req
+    class TAPI io
+    class SM,VMO,CKPT,AL base
+    class SC,GE,AE,RV mathOp
+    class VLMR frozen
+    class ACG lossN
 ```
-User                Task API             Session Manager
- |                      |                      |
- |  POST /tasks         |                      |
- +--------------------> |                      |
-                        |  create_session()    |
-                        +--------------------> |
-                                               |
-                        +----------------------+------------------+
-                        |                                         |
-               VM Orchestrator                          Action Confirmation Gate
-               (Firecracker VMs)                        (for write/irreversible actions)
-                        |                                         |
-               +--------+--------+                      Human Approval Webhook
-               |                 |                               |
-     Screenshot Capturer   State Checkpoint               Notification Service
-          (X11/CDP)          (S3 + Redis)                (email/webhook/SSE)
-               |                                               |
-          VLM Router                                    Audit Logger
-    (claude-haiku-4-5 / claude-opus-4-7)                 (S3 WORM + ClickHouse)
-               |
-        Grounding Engine
-      (AXTree + visual fallback)
-               |
-       Action Executor
-     (xdotool / Playwright CDP)
-               |
-        Result Verifier
-     (screenshot diff hash)
-```
+
+The action loop (left branch) runs the 385ms haiku fast path per screenshot, while the
+confirmation branch (right) gates write/irreversible actions through human approval and the
+immutable S3 WORM + ClickHouse audit trail.
 
 ### Action Confirmation Sub-Flow
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PROP(["Agent proposes action"]) --> CLSF{"ActionClassifier.classify(action)"}
+    CLSF -->|"READ (auto)"| EXR["execute()"]
+    CLSF -->|"WRITE (5s undo window)"| EXW["execute()\n+ start_undo timer"]
+    CLSF -->|"IRREVERSIBLE (explicit approval)"| NU["notify_user()\nwait(30s)"]
+    NU -->|"approved"| EXI["execute()"]
+    NU -->|"rejected / timeout"| CAN["cancel()"]
+    EXI --> LOG["log(AuditEvent)"]
+
+    class PROP io
+    class CLSF mathOp
+    class EXR,EXW,EXI mathOp
+    class NU req
+    class CAN lossN
+    class LOG base
 ```
-Agent proposes action
-         |
-         v
-  ActionClassifier.classify(action)
-         |
-   +-----+------------+------------------+
-   |                  |                  |
-  READ              WRITE           IRREVERSIBLE
-  (auto)         (5s undo             (explicit
-                  window)              approval)
-   |                  |                  |
-execute()        execute()         notify_user()
-                + start_undo         wait(30s)
-                  timer              /        \
-                                  approved  rejected/
-                                    |        timeout
-                                execute()  cancel()
-                                    |
-                                log(AuditEvent)
-```
+
+READ actions auto-execute, WRITE actions execute with a 5-second undo window, and
+IRREVERSIBLE actions block on human approval with a 30-second timeout that auto-cancels —
+only the approved irreversible path emits the audit event shown here.
 
 See also: [Agent Durability Patterns](./cross_cutting/agent_durability_patterns.md) for session checkpoint and resume sequencing.
 

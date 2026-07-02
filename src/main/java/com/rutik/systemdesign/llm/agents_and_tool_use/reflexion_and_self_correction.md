@@ -77,16 +77,19 @@ A sycophantic failure mode: the model is told "your answer was wrong" without sp
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    TASK["Task"]
+    TASK(["Task"])
     ACTOR["Actor\ngenerates attempt (code / answer / plan)"]
     EVAL["Evaluator\ntests pass? score? binary result"]
     DONE{"Result?"}
-    OUT["Final output"]
+    OUT(["Final output"])
     REFLECT["Self-Reflector\nverbal critique: 'missed edge case X'"]
     MEM["Episodic Memory\nappend reflection"]
 
@@ -95,10 +98,10 @@ flowchart TD
     DONE -->|"FAIL"| REFLECT --> MEM --> ACTOR
 
     class TASK,OUT io
-    class ACTOR,REFLECT llm
-    class EVAL proc
-    class DONE decide
-    class MEM store
+    class ACTOR,REFLECT base
+    class EVAL frozen
+    class DONE mathOp
+    class MEM train
 ```
 
 Loop max 3 times; after N failures the actor returns best attempt with caveats.
@@ -108,14 +111,18 @@ Loop max 3 times; after N failures the actor returns best attempt with caveats.
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    TASK["Task"]
+    TASK(["Task"])
     GEN["LLM GENERATE(task)\n→ draft_0"]
     FB{"LLM FEEDBACK\n'Improvements needed?'"}
-    RET["Return draft (no improvements)"]
+    RET(["Return draft (no improvements)"])
     REF["LLM REFINE(task, draft, critique)\n→ next draft"]
 
     TASK --> GEN --> FB
@@ -123,32 +130,39 @@ flowchart TD
     FB -->|"critique → iterate"| REF --> FB
 
     class TASK,RET io
-    class GEN,REF llm
-    class FB decide
+    class GEN,REF base
+    class FB mathOp
 ```
 
 ### CRITIC Loop (Code Task)
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    TASK(["Task: 'Write a function that reverses a linked list'"])
+    GEN["LLM\ngenerates code"]
+    EXEC["Code Executor\nruns unit tests"]
+    RET(["Return code"])
+    FIX["LLM\nreads test failure, generates fix"]
+
+    TASK --> GEN --> EXEC
+    EXEC -->|"ALL PASS"| RET
+    EXEC -->|"FAIL (test 3: NullPointerError on empty list)"| FIX
+    FIX -->|"run tests again (loop)"| EXEC
+
+    class TASK,RET io
+    class GEN,FIX base
+    class EXEC frozen
 ```
-Task: "Write a function that reverses a linked list"
-  |
-  v
-[LLM] -- generates code
-  |
-  v
-[Code Executor] -- runs unit tests
-  |
-  +-- ALL PASS --> return code
-  |
-  +-- FAIL (test 3: NullPointerError on empty list)
-  |       |
-  |       v
-  |  [LLM] -- reads test failure, generates fix
-  |       |
-  |       v
-  |  [Code Executor] -- run tests again
-  |       (loop)
-```
+
+The critique signal comes from the external code executor, not another LLM's opinion — grounding in real test failures is what eliminates the sycophancy risk for verifiable tasks.
 
 ---
 
@@ -464,33 +478,39 @@ A fintech company uses an LLM agent to generate Python data transformation scrip
 
 ### Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    REQ(["Analyst Request"])
+    ACTOR["Actor: Claude Sonnet\ngenerates transformation script"]
+    EVAL["Evaluator: pytest runner\nruns 5-10 acceptance tests against sample data"]
+    DELIVER(["Deliver to analyst"])
+    REFL["Reflector: Claude Haiku — cheaper model\n'You read column date as string but the test expects\na datetime object. Use pd.to_datetime() in next attempt.'"]
+    MEM["Episodic Memory\nappend reflection"]
+    HUMAN["Flag for human review"]
+
+    REQ --> ACTOR --> EVAL
+    EVAL -->|"ALL PASS"| DELIVER
+    EVAL -->|"FAIL (specific test failures reported)"| REFL
+    REFL --> MEM
+    MEM -->|"retry with memory (max 3 retries)"| ACTOR
+    EVAL -->|"still failing after 3 retries"| HUMAN
+
+    class REQ,DELIVER io
+    class ACTOR,REFL base
+    class EVAL frozen
+    class MEM train
+    class HUMAN lossN
 ```
-Analyst Request
-  |
-  v
-[Actor: Claude Sonnet] -- generates transformation script
-  |
-  v
-[Evaluator: pytest runner] -- runs 5-10 acceptance tests against sample data
-  |
-  +-- ALL PASS --> deliver to analyst
-  |
-  +-- FAIL (specific test failures reported)
-         |
-         v
-  [Reflector: Claude Haiku] -- cheaper model for reflection
-         |  "You read column 'date' as string but the test expects a
-         |   datetime object. Use pd.to_datetime() in next attempt."
-         |
-         v
-  [Episodic Memory] -- append reflection
-         |
-         v
-  [Actor: Claude Sonnet] -- retry with memory
-  (max 3 retries)
-         |
-  [If still failing] --> flag for human review
-```
+
+Grounded pytest failures drive the retry loop: pass rate rises from 68% at first attempt to 91% with a 3-retry budget, and using Haiku for the reflector cuts reflection cost by 80% with no measurable quality loss.
 
 ### Results
 

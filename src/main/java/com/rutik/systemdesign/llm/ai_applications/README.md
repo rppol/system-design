@@ -297,6 +297,14 @@ Email and communication:
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Encounter([Patient Encounter]) --> Transcribe
     Transcribe["Audio Transcription\n(Whisper, Nuance)"] --> PHI["PHI Detection + Redaction"]
     PHI --> ClinLLM["Clinical LLM\n(Med-PaLM, fine-tuned GPT-4)\nContext: specialty, patient demographics, prior notes"]
@@ -304,15 +312,11 @@ flowchart TD
     Draft --> Physician["Physician Review + Correction\n(mandatory human-in-the-loop)"]
     Physician --> EHR([EHR Submission])
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
-
     class Encounter,EHR io
-    class Transcribe,PHI,Draft proc
-    class ClinLLM llm
-    class Physician store
+    class Transcribe,Draft mathOp
+    class PHI lossN
+    class ClinLLM base
+    class Physician req
 ```
 
 ### Customer Support Multi-Tier Architecture
@@ -320,24 +324,27 @@ flowchart TD
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Msg([Customer Message]) --> Classify
-    Classify["Intent Classifier\nbilling | technical | general | escalation_needed"] --> Human & RAG
+    Classify["Intent Classifier\nbilling | technical | general | escalation_needed"] --> RAG
     Classify -- "high urgency / angry" --> Human([Route to Human Agent])
     RAG["RAG + LLM Response\nRetrieve: help articles, customer history,\nresolved tickets\nGenerate: answer + next steps"] --> Guard
     Guard["Guardrail Check\nSafety | factuality | tone | completeness"] --> Escalate
     Escalate{"LLM not confident\nor customer requests human?"} -- YES --> Human
     Escalate -- NO --> Response([Customer Response + Follow-up survey])
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
-
-    class Msg,Human,Response io
-    class Classify proc
-    class RAG llm
-    class Guard proc
-    class Escalate decide
+    class Msg,Response io
+    class Classify,Escalate mathOp
+    class Human req
+    class RAG base
+    class Guard lossN
 ```
 
 ### Socratic Tutoring Pipeline
@@ -345,20 +352,24 @@ flowchart TD
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Student([Student Question]) --> StudentModel
     StudentModel["Student Model\nWhat topics mastered?\nCommon misconceptions?"] --> Prompt
     Prompt["LLM System Prompt\n'Student is in 8th grade, mastered variables/loops.\nUse Socratic method. Never give the answer.\nAsk guiding questions.'"] --> TutorLLM
     TutorLLM["Tutor LLM Response\nGuiding questions toward understanding"] --> Update
     Update["Update Student Model\nbased on conversation"] --> Student
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
-
     class Student io
-    class StudentModel,Prompt,Update proc
-    class TutorLLM llm
+    class StudentModel train
+    class Prompt,Update mathOp
+    class TutorLLM base
 ```
 
 The student model loop persists knowledge state across sessions; the Socratic method constraint lives in the system prompt, which is re-injected on every turn.
@@ -394,6 +405,14 @@ Healthcare    Legal       Finance     Education    Customer Support
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     PDF([Contract PDF]) --> DocAI
     DocAI["DocAI\nLayout-preserving extraction"] --> Segment
     Segment["Clause Segmentation\n(fine-tuned LegalBERT)"] --> Risk
@@ -401,15 +420,10 @@ flowchart TD
     Report["Structured Report\nhighlights + attorney review interface"] --> Attorney
     Attorney["Attorney Review\nConfirm/reject flags, add notes"] --> Final([Final Annotated Document])
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
-
     class PDF,Final io
-    class DocAI,Segment,Report proc
-    class Risk llm
-    class Attorney store
+    class DocAI,Segment,Report mathOp
+    class Risk base
+    class Attorney req
 ```
 
 ### ROI Frameworks for LLM Adoption

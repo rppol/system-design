@@ -96,8 +96,15 @@ The registry is the integration point between experiment tracking (where models 
 ### 4.5 Eval-Gated CI/CD Pattern
 
 ```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     PR([Developer opens PR\nwith prompt change]) --> CI["CI triggers eval pipeline"]
     CI --> Golden["Run golden dataset (200 examples)\nthrough new prompt"]
     Golden --> Compare["Compare scores vs baseline\n(production prompt)"]
@@ -105,16 +112,11 @@ flowchart TD
     Verdict -- "Pass (delta < −2%)" --> Deploy([Deploy])
     Verdict -- "Fail (quality drop > 2%\non primary metric)" --> Block(["Block PR\nPost score diff as comment"])
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
-    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
-
     class PR,Deploy io
-    class CI,Golden,Compare proc
-    class Verdict decide
-    class Block warn
+    class CI req
+    class Golden base
+    class Compare,Verdict mathOp
+    class Block lossN
 ```
 
 ---
@@ -919,8 +921,15 @@ Each enterprise customer is billed for their API consumption based on this daily
 Golden dataset: 300 support queries with human-labeled acceptable responses and the source document that should have been retrieved. Split into: 200 for CI evaluation, 100 held out for monthly distribution-drift audits.
 
 ```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     PR(["GitHub PR: change to\nprompts/support_agent_v1.4.0.yaml"]) --> Detect["CI: detect prompt file change"]
     Detect --> Eval["Launch eval job (GitHub Actions, 8-min timeout)\n1. Load new prompt version from PR branch\n2. Run 200 golden examples through full RAG pipeline\n3. Score: faithfulness (LLM judge)\n   answer_relevancy (LLM judge)\n   retrieval_hit_rate | format_validity (rule-based)"]
     Eval --> Compare{"Compare vs baseline\n(current production prompt)"}
@@ -928,16 +937,13 @@ flowchart TD
     Compare -- "any metric drops > threshold" --> FailCheck([Block PR + post score diff])
     PassCheck --> Merge["PR approved + CI green\n→ merge → deploy via standard pipeline"]
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
-    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
-
     class PR io
-    class Detect,Eval,PassCheck,Merge proc
-    class FailCheck warn
-    class Compare decide
+    class Detect req
+    class Eval base
+    class Compare mathOp
+    class PassCheck train
+    class Merge io
+    class FailCheck lossN
 ```
 
 A failure example (prompt change that breaks format):

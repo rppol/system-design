@@ -59,9 +59,13 @@ Twilio, Vonage, LiveKit Cloud, Pipecat for routing phone calls through voice age
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     MIC["Microphone\n(16 kHz PCM audio chunks)"]
     VAD["VAD\n(Voice Activity Detection)"]
@@ -73,8 +77,8 @@ flowchart TD
     MIC --> VAD -->|"speech detected"| STT --> LLM --> TTS --> SPK
 
     class MIC,SPK io
-    class VAD,STT,TTS proc
-    class LLM llm
+    class VAD,STT,TTS train
+    class LLM frozen
 ```
 
 Total latency: 800–1500 ms (good case); 2500 ms+ (bad case).
@@ -439,56 +443,35 @@ VAD models are trained for varied noise; modern VAD handles typical environments
 
 **Architecture:**
 
-```
-  Caller (PSTN)
-       |
-       v
-  ┌────────────────────────────────────────────────────────────┐
-  │  Twilio (PSTN/SIP termination)                             │
-  │  - Incoming call → webhook                                 │
-  │  - Bidirectional audio stream (mulaw 8kHz over WebSocket)  │
-  └─────────────────────────┬──────────────────────────────────┘
-                            │  raw audio stream
-                            v
-  ┌────────────────────────────────────────────────────────────┐
-  │  Pipecat (Python orchestration layer)                      │
-  │  - Audio framing and buffering                             │
-  │  - VAD: Silero (90ms response) — detects barge-in          │
-  │  - Barge-in handler: interrupts TTS when user speaks       │
-  │  - Turn detection: 900ms silence + semantic check          │
-  └───────────┬────────────────────┬───────────────────────────┘
-              │                    │
-              v                    v
-  ┌───────────────────┐  ┌────────────────────────────────────┐
-  │  Deepgram Nova-2  │  │  ElevenLabs Flash                  │
-  │  STT streaming    │  │  TTS streaming (75ms first chunk)  │
-  │  <50ms partials   │  │  Voice cloned: "Alex" (company     │
-  └─────────┬─────────┘  │  brand voice)                      │
-            │            └────────────────────────────────────┘
-            │  transcript                      ^
-            v                                  │ text chunks
-  ┌────────────────────────────────────────────┴─────────────┐
-  │  LLM Layer — Claude Sonnet 4.6 (streaming)               │
-  │  System prompt: insurance agent persona + policy rules   │
-  │  Tools: lookup_claim(), check_billing(), escalate_human()│
-  │  Context window: full call transcript + customer profile  │
-  └────────────────┬─────────────────────────────────────────┘
-                   │  tool calls
-                   v
-  ┌────────────────────────────────────────────────────────────┐
-  │  Internal APIs (sub-100ms SLA)                             │
-  │  - Claims API (policy DB)                                  │
-  │  - Billing API (payment processor)                         │
-  │  - CRM (customer history, notes)                           │
-  └────────────────────────────────────────────────────────────┘
-                   │
-                   v (escalation path)
-  ┌────────────────────────────────────────────────────────────┐
-  │  Human Agent Handoff (Twilio Transfer)                     │
-  │  - Summary sent to agent screen before transfer            │
-  │  - Transfer completes in <5 seconds                        │
-  └────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    CALLER([Caller — PSTN]) --> TWILIO[["Twilio (PSTN/SIP termination)\nIncoming call → webhook\nBidirectional audio stream (mulaw 8kHz over WebSocket)"]]
+    TWILIO -->|"raw audio stream"| PIPECAT["Pipecat (Python orchestration layer)\nAudio framing and buffering\nVAD: Silero (90ms response) — detects barge-in\nBarge-in handler: interrupts TTS when user speaks\nTurn detection: 900ms silence + semantic check"]
+    PIPECAT --> STT[["Deepgram Nova-2\nSTT streaming\nsub-50ms partials"]]
+    PIPECAT --> TTS[["ElevenLabs Flash\nTTS streaming (75ms first chunk)\nVoice cloned: Alex (company brand voice)"]]
+    STT -->|"transcript"| LLM["LLM Layer — Claude Sonnet 4.6 (streaming)\nSystem prompt: insurance agent persona + policy rules\nTools: lookup_claim(), check_billing(), escalate_human()\nContext window: full call transcript + customer profile"]
+    LLM -->|"text chunks"| TTS
+    LLM -->|"tool calls"| APIS[["Internal APIs (sub-100ms SLA)\nClaims API (policy DB)\nBilling API (payment processor)\nCRM (customer history, notes)"]]
+    APIS -->|"escalation path"| HUMAN["Human Agent Handoff (Twilio Transfer)\nSummary sent to agent screen before transfer\nTransfer completes in under 5 seconds"]
+
+    class CALLER io
+    class TWILIO,STT,TTS,APIS frozen
+    class PIPECAT train
+    class LLM base
+    class HUMAN req
+```
+
+Pipecat fans the call out to streaming STT while the LLM's text chunks flow back into streaming TTS — this crossing STT → LLM → TTS path is what holds p50 first-audio-byte at 425 ms against the sub-500 ms target, with barge-in interruption handled at the orchestration layer.
+
+```
 Latency Budget (pipeline, target p50 < 450ms):
   STT streaming (Deepgram partial ready): 50ms
   LLM first token (Sonnet 4.6 streaming): 180ms

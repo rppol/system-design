@@ -64,40 +64,40 @@ All four primitives. Examples: AWS MCP server with EC2 resources + actions + set
 
 ## 5. Architecture Diagrams
 
+### MCP Server Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    C->>S: initialize(protocolVersion, ...)
+    S-->>C: initialize result (capabilities)
+    C->>S: initialized notification
+
+    Note over C,S: normal operation phase
+    C->>S: list_tools
+    S-->>C: tools list
+    C->>S: call_tool(name, args)
+    S-->>C: tool_result or tool_error
+    C->>S: list_resources
+    S-->>C: resources list
+    C->>S: read_resource(uri)
+    S-->>C: resource content
+
+    Note over C,S: server may emit notifications
+    S-->>C: notifications/tools/list_changed
+
+    C->>S: shutdown
+    S-->>C: shutdown ack
+    Note over C,S: connection close
 ```
-MCP Server Lifecycle
-=====================
 
-  Client                                    Server
-    |                                          |
-    |---initialize(protocolVersion, ...)------>|
-    |<--initialize result(capabilities)--------|
-    |                                          |
-    |---initialized notification--------------->|
-    |                                          |
-    |     [normal operation phase]              |
-    |---list_tools-->                          |
-    |<--tools list--|                          |
-    |---call_tool(name, args)----->            |
-    |<--tool_result | tool_error--|            |
-    |                                          |
-    |---list_resources-->                      |
-    |<--resources list--|                      |
-    |---read_resource(uri)-->                  |
-    |<--resource content--|                    |
-    |                                          |
-    |     [server may emit notifications]       |
-    |<--notifications/tools/list_changed-------|
-    |                                          |
-    |---shutdown------>                        |
-    |<--shutdown ack--|                        |
-    |                                          |
-    +---connection close----+
+The lifecycle is initialize (capability negotiation) → operate (list/call tools, read resources, server-emitted notifications) → shutdown; every message on the wire is JSON-RPC 2.0.
 
+### Server Composition
 
-Server Composition
-===================
-
+```
   +-------------+
   |  MCP Server |
   +------+------+

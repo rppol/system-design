@@ -72,76 +72,49 @@ Per query resource:
 
 ## 3. High-Level Architecture
 
-```
-                        User Query
-                             |
-                             v
-                    [API Gateway + Auth]
-                             |
-                             v
-              ┌──────────────────────────────┐
-              │        Query Service         │
-              │  - Query preprocessing       │
-              │  - Multi-query expansion     │
-              │  - Tenant context injection  │
-              └──────────────────────────────┘
-                             |
-              ┌──────────────┼──────────────┐
-              │              │              │
-              v              v              v
-       [Embedding      [Keyword         [Metadata
-        Service]        Service]         Filter]
-       Dense search    BM25/Sparse      Date, type,
-       (semantic)      (lexical)        author filters
-              │              │              │
-              └──────────────┼──────────────┘
-                             │ Hybrid results (RRF fusion)
-                             v
-                    [Reranking Service]
-                    Cross-encoder reranker
-                    Top-50 → Top-5
-                             │
-                             v
-                  [Context Assembly Service]
-                  - Fetch full chunk text
-                  - Add surrounding context
-                  - Format with citations
-                             │
-                             v
-                    [LLM Generation Service]
-                    GPT-4o / Claude 3.5
-                    Grounded response generation
-                             │
-                             v
-                  [Response Post-processing]
-                  - Citation formatting
-                  - Factuality check
-                  - Source verification
-                             │
-                             v
-                         User Response
-                         (answer + citations)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-───────────────────────────────────────────────────────
-                   INDEXING PIPELINE
-───────────────────────────────────────────────────────
+    subgraph qp["Query Pipeline"]
+        UQ([User Query]) --> GW["API Gateway + Auth"]
+        GW --> QS["Query Service\nquery preprocessing · multi-query expansion\ntenant context injection"]
+        QS --> EMB["Embedding Service\ndense search (semantic)"]
+        QS --> KW["Keyword Service\nBM25/sparse (lexical)"]
+        QS --> MF["Metadata Filter\ndate, type, author filters"]
+        EMB --> FUSE["Hybrid results\n(RRF fusion)"]
+        KW --> FUSE
+        MF --> FUSE
+        FUSE --> RR["Reranking Service\ncross-encoder reranker\ntop-50 → top-5"]
+        RR --> CA["Context Assembly Service\nfetch full chunk text · add surrounding context\nformat with citations"]
+        CA --> GEN["LLM Generation Service\nGPT-4o / Claude 3.5\ngrounded response generation"]
+        GEN --> PP["Response Post-processing\ncitation formatting · factuality check\nsource verification"]
+        PP --> UR(["User Response\nanswer + citations"])
+    end
 
-New Document → [Document Ingestion Queue (Kafka)]
-                    │
-                    v
-             [Document Parser]
-             PDF/Word/HTML → clean text
-                    │
-                    v
-             [Chunking Service]
-             Semantic/hierarchical chunking
-                    │
-                    ├──→ [Embedding Service] → Vector DB (Weaviate/Qdrant)
-                    │
-                    ├──→ [BM25 Indexer] → Elasticsearch
-                    │
-                    └──→ [Metadata Indexer] → PostgreSQL
+    subgraph ip["Indexing Pipeline"]
+        ND([New Document]) --> IQ[["Document Ingestion Queue (Kafka)"]]
+        IQ --> DP["Document Parser\nPDF/Word/HTML → clean text"]
+        DP --> CS["Chunking Service\nsemantic/hierarchical chunking"]
+        CS --> IEMB["Embedding Service"] --> VDB[["Vector DB (Weaviate/Qdrant)"]]
+        CS --> BM["BM25 Indexer"] --> ESX[["Elasticsearch"]]
+        CS --> MI["Metadata Indexer"] --> PG[["PostgreSQL"]]
+    end
+
+    class UQ,UR,ND io
+    class GW,QS,CA,PP req
+    class EMB,KW,MF,FUSE,DP,CS,IEMB,BM,MI mathOp
+    class RR,GEN base
+    class IQ,VDB,ESX,PG frozen
 ```
+
+The query pipeline is a fork-join: the Query Service fans out to three parallel retrieval paths (dense semantic, BM25 lexical, metadata filters) whose results reconverge via RRF fusion before the cross-encoder narrows top-50 to top-5. The indexing pipeline fans each chunk out to three independent stores — vector DB, Elasticsearch, and PostgreSQL — which is what makes hybrid retrieval possible at query time.
 
 ---
 

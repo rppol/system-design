@@ -201,12 +201,15 @@ Decomposition is the foundation of agentic RAG (see agentic_rag.md).
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
 flowchart TD
-    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef decide fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Q([User Query]) --> QA{Query Analysis\n'Ambiguous? Multi-hop? Broad?'}
+    Q([User Query]) --> QA{"Query Analysis\nAmbiguous? Multi-hop? Broad?"}
     QA -->|"Ambiguous / pronoun-heavy"| RW["Query Rewriting"]
     QA -->|"Knowledge gap likely"| HY["HyDE Generation\nhypothetical doc embedding"]
     QA -->|"Broad topic coverage"| MQ["Multi-Query Expansion\n4 alternative phrasings"]
@@ -221,9 +224,9 @@ flowchart TD
     RNK --> ANS(["Top-K Candidates → LLM Generation"])
 
     class Q,ANS io
-    class QA decide
-    class RET,MRG,RNK,TQ proc
-    class RW,HY,MQ,DQ llm
+    class QA mathOp
+    class RET,MRG,RNK,TQ train
+    class RW,HY,MQ,DQ frozen
 ```
 
 ### HyDE vs. Direct Embedding Space
@@ -409,57 +412,39 @@ A: Query transformation degrades performance in four scenarios. First, over-tran
 **Problem Statement**: A SaaS company operates a technical support system serving 45,000 enterprise customers. The knowledge base contains 28,000 support articles, API documentation, release notes, and internal troubleshooting runbooks. Customers open support tickets ranging from precise technical questions ("Error code E_AUTH_403 when calling /v2/tokens endpoint") to vague problem descriptions ("My integration stopped working after the update"). The baseline RAG system had a first-response resolution rate of 31% — 69% of auto-generated responses required human agent follow-up, a significant cost driver. The core problem was vocabulary mismatch: customer language ("integration stopped working") vs. documentation language ("OAuth token refresh failure after API version migration").
 
 **Architecture Overview**:
-```
-Customer Support Ticket (raw text)
-    |
-    v
-[Query Classifier]
-  Features: query length, presence of error codes, product-specific terms
-  Output: {type: "precise_technical" | "vague_symptom" | "how_to" | "multi_issue"}
-    |
-    +-- precise_technical -------> [Direct Retrieval]
-    |   (error codes, exact       No transformation needed; query is already
-    |    API method names)        in document vocabulary
-    |                              → top-5 → Rerank → Generate
-    |
-    +-- vague_symptom -----------> [Query Rewriting + HyDE Cascade]
-    |   ("my integration          Step 1: Rewrite to technical language
-    |    stopped working")        "Customer reports authentication failure
-    |                              after API version migration; OAuth token
-    |                              refresh returning 403 error"
-    |                             Step 2: HyDE generation
-    |                              "When OAuth token refresh fails with 403
-    |                               after a version migration, common causes
-    |                               include: expired client credentials,
-    |                               deprecated grant types, missing scope
-    |                               parameters..."
-    |                             Step 3: Embed HyDE text → retrieve
-    |                              → top-10 → Rerank → Generate
-    |
-    +-- how_to ------------------> [Multi-Query Expansion]
-    |   ("How do I configure      Generate 4 variants:
-    |    SSO with SAML?")         1. "SAML SSO configuration guide"
-    |                             2. "Single Sign-On SAML setup steps"
-    |                             3. "SAML assertion configuration parameters"
-    |                             4. "SSO integration SAML metadata"
-    |                             Retrieve 20 per variant → merge → dedup
-    |                              → top-10 → Rerank → Generate
-    |
-    +-- multi_issue -------------> [Query Decomposition]
-        ("I can't log in AND       Sub-Q1: "Login authentication failure"
-         my API calls are slow")   Sub-Q2: "API response time degradation"
-                                   Answer each independently
-                                    → Synthesize combined response
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    [All paths] → Reranker (Cohere Rerank API) → Top-5 → GPT-4o → Response
-                                                             |
-                                                   [Resolution Classifier]
-                                                   "Is this response likely to
-                                                    resolve the issue? YES/NO"
-                                                             |
-                                               +-- YES --> Send to customer
-                                               +-- NO  --> Escalate to human agent
+    ticket([Customer Support Ticket — raw text]) --> qc["Query Classifier\nfeatures: query length, error codes, product-specific terms"]
+    qc -->|"precise_technical\nerror codes, exact API method names"| direct["Direct Retrieval\nno transformation — query already in\ndocument vocabulary · top-5"]
+    qc -->|"vague_symptom\n'my integration stopped working'"| cascade["Query Rewriting + HyDE Cascade\n1. rewrite to technical language\n2. HyDE generation\n3. embed HyDE text → retrieve top-10"]
+    qc -->|"how_to\n'How do I configure SSO with SAML?'"| mq["Multi-Query Expansion\ngenerate 4 variants · retrieve 20 per variant\nmerge → dedup → top-10"]
+    qc -->|"multi_issue\n'cannot log in AND API calls are slow'"| dq["Query Decomposition\nanswer each sub-question independently\nsynthesize combined response"]
+    direct --> rr["Reranker (Cohere Rerank API) → Top-5"]
+    cascade --> rr
+    mq --> rr
+    dq --> rr
+    rr --> gen["GPT-4o → Response"]
+    gen --> rc{"Resolution Classifier\nlikely to resolve\nthe issue?"}
+    rc -->|"YES"| send([Send to customer])
+    rc -->|"NO"| esc([Escalate to human agent])
+
+    class ticket,send io
+    class qc,rc mathOp
+    class direct,rr train
+    class cascade,mq,dq frozen
+    class gen base
+    class esc lossN
 ```
+
+The query-type classifier routes each ticket to its optimal transformation — this routing is what lifted first-response resolution from 31% to 54%, because applying HyDE uniformly to precise error-code queries had degraded their recall by 8%.
 
 **Key Design Decisions**:
 1. Query type classifier drives transformation strategy — applying HyDE to a precise error-code query degrades retrieval (the hypothetical answer may introduce unrelated terminology); the classifier routes each query type to its optimal transformation.

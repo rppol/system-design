@@ -213,21 +213,20 @@ sequenceDiagram
 
 ### 5.5 ANP Decentralized Discovery
 
+```mermaid
+%%{init: {'theme': 'dark'}}%%
+sequenceDiagram
+    participant A as Agent A
+    participant R as DID Resolver
+    participant B as Agent B
+    A->>R: resolve(did:web:b.example)
+    R-->>A: DID Document {endpoint, pubkey}
+    A->>B: POST b.example/tasks (signed with A's privkey)
+    Note over B: B verifies A's signature using A's DID pubkey
+    B-->>A: 202 Accepted
 ```
-Agent A                    DID Resolver              Agent B
-   |                            |                       |
-   | resolve(did:web:b.example) |                       |
-   |--------------------------->|                       |
-   |  <-- DID Document          |                       |
-   |      {endpoint, pubkey}    |                       |
-   |                            |                       |
-   | POST b.example/tasks       |                       |
-   | [signed with A's privkey]  |                       |
-   |----------------------------------------------->   |
-   |                                                    |
-   |  [B verifies A's signature using A's DID pubkey]  |
-   |  <-- 202 Accepted                                  |
-```
+
+No central registry is involved: resolving the DID over DNS + HTTPS (500ms–2s) yields Agent B's endpoint and public key, and B verifies the request purely against A's DID-linked signature.
 
 ### 5.6 Trust Boundary Model
 
@@ -1003,32 +1002,44 @@ Implement retry with exponential backoff on the caller side: attempt submission 
 
 **Architecture Overview**
 
-```
-+------------------------+
-|   Report Orchestrator  |   (A2A client + task coordinator)
-|   Agent                |
-+----------+-------------+
-           |
-     A2A (parallel tasks)
-     |        |        |        |         |
-     v        v        v        v         v
-+-------+ +-------+ +-------+ +-------+ +--------+
-|Market | |Posit. | |Credit | |Cpty   | |Reg.    |
-|Data   | |Agent  | |Exp.   | |Risk   | |Limits  |
-|Agent  | |       | |Agent  | |Agent  | |Agent   |
-+---+---+ +---+---+ +---+---+ +---+---+ +---+----+
-    |          |         |         |          |
-    MCP        MCP       MCP       MCP        MCP
-    |          |         |         |          |
-+-------+  +-------+  +-------+ +-------+ +-------+
-|Market |  |Posit. |  |Credit |  |Cpty   | |Regul. |
-|DB     |  |DB     |  |DB     |  |DB     | |Rules  |
-|Tool   |  |Tool   |  |Tool   |  |Tool   | |Tool   |
-+-------+  +-------+  +-------+ +-------+ +-------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-                Report Aggregator
-          (receives all A2A results, formats report)
+    ORCH["Report Orchestrator Agent\n(A2A client + task coordinator)"]
+    MKT["Market Data\nAgent"]
+    POS["Positions\nAgent"]
+    CRD["Credit Exposure\nAgent"]
+    CPT["Counterparty Risk\nAgent"]
+    REG["Regulatory Limits\nAgent"]
+    MKTDB[["Market DB\nTool"]]
+    POSDB[["Positions DB\nTool"]]
+    CRDDB[["Credit DB\nTool"]]
+    CPTDB[["Counterparty DB\nTool"]]
+    REGDB[["Regulatory Rules\nTool"]]
+    AGG["Report Aggregator\n(receives all A2A results, formats report)"]
+
+    ORCH -->|"A2A"| MKT & POS & CRD & CPT & REG
+    MKT -->|"MCP"| MKTDB
+    POS -->|"MCP"| POSDB
+    CRD -->|"MCP"| CRDDB
+    CPT -->|"MCP"| CPTDB
+    REG -->|"MCP"| REGDB
+    MKT & POS & CRD & CPT & REG -.->|"results"| AGG
+
+    class ORCH req
+    class MKT,POS,CRD,CPT,REG train
+    class MKTDB,POSDB,CRDDB,CPTDB,REGDB frozen
+    class AGG io
 ```
+
+The orchestrator fans out five A2A tasks in parallel — each specialist fetches its data through its own MCP tool — so elapsed time is bounded by the slowest agent (~8 minutes) instead of sequential execution (~40 minutes).
 
 **Key Design Decisions**
 

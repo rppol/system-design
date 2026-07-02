@@ -125,6 +125,14 @@ Agent loop:
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     IDE([IDE — VSCode, JetBrains]) --> CtxExtract
     CtxExtract["Local Context Extractor\n– Current file (cursor position)\n– Open tabs (prioritized by relevance)\n– Language Server: imports, symbols"] --> PromptBuild
     PromptBuild["Prompt Constructor\n– file header + imports + nearby code\n– neighbor file snippets (embedding similarity)\n– FIM format: prefix + suffix markers"] --> Backend
@@ -132,13 +140,9 @@ flowchart TD
     Rank["Ranking + Filtering\n– Filter: syntax validity, security patterns\n– Rank: by model confidence"] --> Display
     Display["IDE Display\nGhost text for top suggestion\nCmd+→ to cycle alternatives"]
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-
-    class IDE io
-    class CtxExtract,PromptBuild,Rank,Display proc
-    class Backend llm
+    class IDE,Display io
+    class CtxExtract,PromptBuild,Rank train
+    class Backend frozen
 ```
 
 ### Copilot Code Retrieval
@@ -146,19 +150,22 @@ flowchart TD
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Cursor([Current cursor context]) --> Embed["Embedding of surrounding code"]
     Embed --> Retrieve["Retrieve similar code snippets\n– Open tabs: similar patterns\n– Recently viewed files: temporal relevance\n– Indexed repo (Copilot Enterprise)"]
-    Retrieve --> Inject["Inject as few-shot examples in prompt\n'Here are similar patterns:'\n[snippet_1] [snippet_2]\n'Complete the following:'\n[current_code_with_cursor]"]
+    Retrieve --> Inject["Inject as few-shot examples in prompt\n'Here are similar patterns:'\n(snippet_1) (snippet_2)\n'Complete the following:'\n(current_code_with_cursor)"]
     Inject --> LLM["Copilot Backend LLM\n→ completion"]
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
-
     class Cursor io
-    class Embed,Retrieve,Inject proc
-    class LLM llm
+    class Embed,Retrieve,Inject train
+    class LLM frozen
 ```
 
 ---

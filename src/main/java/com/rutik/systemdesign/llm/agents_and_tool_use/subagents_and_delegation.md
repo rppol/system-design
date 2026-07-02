@@ -54,28 +54,39 @@ Parent dispatches the same task to N subagents at different temperatures or with
 
 ## 5. Architecture Diagrams
 
+**Parallel Subagent Dispatch**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    P["Parent Agent (Claude Opus)"] -->|"asyncio.gather()"| S1["Sub 1"]
+    P --> S2["Sub 2"]
+    P --> S3["Sub 3"]
+    P --> S4["Sub 4"]
+    P --> S5["Sub 5"]
+    P --> S6["Sub 6"]
+    S1 --> SY["Parent synthesizes results"]
+    S2 --> SY
+    S3 --> SY
+    S4 --> SY
+    S5 --> SY
+    S6 --> SY
+
+    class P base
+    class S1,S2,S3,S4,S5,S6 frozen
+    class SY mathOp
 ```
-Parallel Subagent Dispatch
-===========================
 
-  Parent Agent (Claude Opus)
-       |
-       v
-  +----+----+----+----+----+
-  |    |    |    |    |    |
-  v    v    v    v    v    v
- Sub  Sub  Sub  Sub  Sub  Sub
-  1    2    3    4    5    6       <-- asyncio.gather()
-  |    |    |    |    |    |
-  +----+----+----+----+----+
-       |
-       v
-  Parent synthesizes results
+All six subagents run concurrently via `asyncio.gather()` — wall-clock is max(sub_1..6) ≈ 30s instead of the 180s sequential equivalent.
 
-  Wall-clock: max(sub_1..6) ~= 30s
-  Sequential equivalent:     180s
-
-
+```
 Context Comparison
 ===================
 

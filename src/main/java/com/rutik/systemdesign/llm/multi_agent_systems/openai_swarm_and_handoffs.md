@@ -114,20 +114,25 @@ Instructions for Sales Agent:
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Caller(["Caller\nmessages + context_variables"]) --> RunCall["Client.run(triage_agent, messages, ctx)"]
     RunCall --> Triage["Triage Agent LLM call"]
     Triage -- "tool call: transfer_to_billing_agent()" --> Detect["Runner detects Handoff(agent=billing_agent)"]
     Detect --> Billing["Billing Agent LLM call\nnew system prompt, same messages"]
-    Billing -- "'Your refund is $45.'" --> Response["Response(messages=[...], context_variables={...})"]
+    Billing -- "'Your refund is $45.'" --> Response["Response(messages=(...), context_variables={...})"]
     Response --> Caller2(["Caller appends messages\ncalls Client.run again for next turn"])
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-
-    class Caller,Caller2 io
-    class RunCall,Detect,Response proc
-    class Triage,Billing llm
+    class Caller,Caller2,Response io
+    class RunCall req
+    class Detect mathOp
+    class Triage,Billing base
 ```
 
 ### 5.2 Agents SDK Run Lifecycle
@@ -135,6 +140,14 @@ flowchart TD
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Input([User Input]) --> RunnerRun["Runner.run(triage_agent, input)"]
     RunnerRun --> Guard{"input_guardrail"}
     Guard -- "GuardrailTripwireTriggered" --> Blocked([Blocked])
@@ -144,16 +157,11 @@ flowchart TD
     ToolCalls -- handoff --> Switch["switch active_agent\ncarry context_variables"] --> LLMCall
     ToolCalls -- "final text" --> OutGuard["output_guardrail"] --> Result["RunResult\n.final_output | .messages | .last_agent | .trace_url"]
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
-    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
-
-    class Input,Blocked io
-    class RunnerRun,ExecTools,Switch,OutGuard,Result proc
-    class LLMCall llm
-    class Guard,ToolCalls decide
+    class Input,Result io
+    class RunnerRun req
+    class Guard,OutGuard,Blocked lossN
+    class LLMCall base
+    class ToolCalls,ExecTools,Switch mathOp
 ```
 
 ### 5.3 Context Variable Flow

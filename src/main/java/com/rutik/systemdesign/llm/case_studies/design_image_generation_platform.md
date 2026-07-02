@@ -123,103 +123,87 @@ LoRA adapter storage:
 
 ### Primary System Diagram
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    U(["User (web / mobile / API)"])
+    GW["API Gateway\nTLS termination · API key / JWT auth\nper-user rate limits · tier enforcement"]
+    GR["Generation Router\nasync job enqueue · resolution routing\nLoRA availability check · priority queue select"]
+    SAFE["Safety Pre-Filter\n(25ms)"]
+    LC["LoRA Adapter Cache\n(NVMe / S3)"]
+    MF["Model Fleet\n(H100 + A10G)"]
+    DP["Diffusion Pipeline\n(DiT / UNet + VAE)"]
+    PS["Post-Safety Classifier\n(NSFW + CSAM check)"]
+    WM["C2PA Watermarker\n(invisible perceptual + metadata manifest)"]
+    ST["Object Storage (S3) + CDN (CloudFront)\npresigned URL → user"]
+
+    U --> GW --> GR
+    GR --> SAFE
+    GR --> LC
+    GR --> MF
+    SAFE --> DP
+    LC --> DP
+    MF --> DP
+    DP --> PS
+    PS --> WM
+    WM --> ST
+
+    class U io
+    class GW req
+    class GR,WM mathOp
+    class SAFE,PS lossN
+    class LC train
+    class MF,DP base
+    class ST frozen
 ```
-User (web / mobile / API)
-         |
-         v
-+---------------------------+
-|   API Gateway             |
-|  - TLS termination        |
-|  - API key / JWT auth     |
-|  - Per-user rate limits   |
-|  - Tier enforcement       |
-+---------------------------+
-         |
-         v
-+---------------------------+
-|   Generation Router       |
-|  - Async job enqueue      |
-|  - Resolution routing     |
-|  - LoRA availability check|
-|  - Priority queue select  |
-+---------------------------+
-         |
-    _____|______________________
-   |            |               |
-   v            v               v
-+--------+  +--------+   +----------+
-| Safety |  | LoRA   |   | Model    |
-| Pre-   |  | Adapter|   | Fleet    |
-| Filter |  | Cache  |   | (H100 +  |
-| (25ms) |  | (NVMe/ |   |  A10G)   |
-|        |  |  S3)   |   |          |
-+--------+  +--------+   +----------+
-   |            |               |
-   +------------+---------------+
-                |
-     +----------+----------+
-     |                     |
-     v                     v
-+----------+        +------------+
-| Diffusion|        | Post-Safety|
-| Pipeline |        | Classifier |
-| (DiT/    |        | (NSFW +    |
-|  UNet +  |        |  CSAM      |
-|  VAE)    |        |  check)    |
-+----------+        +------------+
-     |
-     v
-+---------------------------+
-|  C2PA Watermarker         |
-|  (invisible perceptual +  |
-|   metadata manifest)      |
-+---------------------------+
-     |
-     v
-+---------------------------+
-|  Object Storage (S3)      |
-|  + CDN (CloudFront)       |
-|  presigned URL → user     |
-+---------------------------+
-```
+
+The router fans out to the pre-generation safety filter (25 ms, blocks before any GPU spend), the LoRA adapter cache, and the GPU fleet; every generated image then passes the post-generation NSFW/CSAM classifier and the C2PA watermarker before landing in S3/CDN for presigned-URL delivery.
 
 ### LoRA Hot-Swap Flow
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    REQ(["Request with lora_id='user_abc_portrait_v2'"])
+    HBM{"LoRA Adapter Cache\nGPU HBM slot hit?"}
+    SLOT["Return slot index\n(80ms)"]
+    NVME{"NVMe cache hit?"}
+    NLOAD["Load from NVMe\n(180ms)"]
+    S3F["Fetch from S3\n(2.1s, 200MB)"]
+    NW["Write to NVMe"]
+    GLOAD["Load NVMe → GPU HBM slot\n(80ms VRAM load)"]
+    APPLY["Apply LoRA delta weights\n(additive merge, no base model reload)"]
+    DIFF["Diffusion pipeline\n(28 steps, ~3s)"]
+
+    REQ --> HBM
+    HBM -->|"hit"| SLOT --> DIFF
+    HBM -->|"miss"| NVME
+    NVME -->|"hit"| NLOAD --> GLOAD
+    NVME -->|"miss"| S3F --> NW --> GLOAD
+    GLOAD --> APPLY --> DIFF
+
+    class REQ io
+    class HBM,NVME mathOp
+    class SLOT,NLOAD,NW,GLOAD,APPLY train
+    class S3F frozen
+    class DIFF base
 ```
-Request with lora_id="user_abc_portrait_v2"
-         |
-         v
-+-----------------------------+
-|  LoRA Adapter Cache         |
-|  Check GPU HBM slots        |
-+-----------------------------+
-    hit |          miss |
-        v               v
-  Return slot      Check NVMe cache
-  index (80ms)          |
-                   hit  |  miss
-                        v    v
-                   Load from  Fetch from S3
-                   NVMe       (2.1s, 200MB)
-                   (180ms)         |
-                                   v
-                              Write to NVMe
-                                   |
-                        +----------+
-                        |
-                        v
-                   Load NVMe → GPU HBM slot
-                   (80ms VRAM load)
-                        |
-                        v
-               Apply LoRA delta weights
-               (additive merge, no base
-                model reload)
-                        |
-                        v
-                   Diffusion pipeline
-                   (28 steps, ~3s)
-```
+
+The three cache tiers set the latency profile: an HBM hit costs 80 ms, an NVMe hit 260 ms (180 ms read + 80 ms VRAM load), and an S3 cold miss ~2.2 s — the base model itself is never reloaded, only the 200 MB delta weights move.
 
 See also: [GPU Pool Economics](./cross_cutting/gpu_pool_economics.md) for fleet cost modeling and spot-vs-on-demand blending analysis.
 

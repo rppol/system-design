@@ -70,23 +70,31 @@ Senior interviews increasingly probe both: "can you delete a user from a trained
 
 PII boundaries in a production LLM system — each numbered point needs an explicit control:
 
-```
-            (1) ingestion scrub                 (2) dedup + canaries
- raw corpora ────────────────> curated corpus ────────────────> pre-train / fine-tune
-                                                                       │ weights
- user request                                                          v
-   │ (3) input PII detection                                   ┌──────────────┐
-   v     (redact / pseudonymize / block)                       │    Model     │
- gateway ────────────────────────────────────────────────────> │              │
-   │                                                           └──────┬───────┘
-   │ (4) retrieval w/ ACL pushdown        ┌────────────┐              │
-   ├────────────────────────────────────> │ Vector DB  │ (5) embeddings = PII store:
-   │                                      └────────────┘     encryption, ACLs, deletion index
-   v                                                                  │
- response <── (6) output filter (regurgitation / identifier scan) <───┘
-   │
-   └──> (7) logs & traces: scrubbed, hashed user IDs, TTL'd retention
-              (observability is the most-forgotten PII sink)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    RAW(["raw corpora"]) -->|"(1) ingestion scrub"| CUR["curated corpus"]
+    CUR -->|"(2) dedup + canaries"| PT["pre-train / fine-tune"]
+    PT -->|"weights"| MODEL["Model"]
+    UREQ(["user request"]) -->|"(3) input PII detection\n(redact / pseudonymize / block)"| GW["gateway"]
+    GW --> MODEL
+    GW -->|"(4) retrieval w/ ACL pushdown"| VDB[("Vector DB\n(5) embeddings = PII store:\nencryption, ACLs, deletion index")]
+    MODEL -->|"(6) output filter\n(regurgitation / identifier scan)"| RESP(["response"])
+    RESP -->|"(7)"| LOGS[("logs and traces: scrubbed,\nhashed user IDs, TTL'd retention\n— observability is the\nmost-forgotten PII sink")]
+
+    class RAW,UREQ,RESP io
+    class CUR,VDB,LOGS base
+    class PT train
+    class MODEL frozen
+    class GW req
 ```
 
 Deletion-request fan-out — what "erase user X" actually touches:

@@ -201,25 +201,36 @@ MFU (Model FLOPS Utilization) = achieved FLOPs/s ÷ peak: healthy LLM *training*
 
 §6.4 covered FP8 as an *inference*-time precision: weights (and sometimes activations) are cast to FP8 after training, purely for serving. **FP8 training** is a different, harder problem — the forward AND backward GEMMs of every training step run in FP8, for potentially hundreds of thousands of steps, where small per-step numerical error compounds and a single overflowed tensor can NaN an entire run. The roofline payoff is real (FP8 GEMMs run at ~2× the FLOPS of BF16 on H100/H200, §4's table) but capturing it without divergence requires the scaling machinery below.
 
-```
- FP8 training data flow, one linear layer, one step (Transformer Engine pattern):
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  master weights (FP32/BF16) ───────────────────────────────────┐
-        │ cast w/ scale (E4M3)                                   │ optimizer.step()
-        ▼                                                        │ updates MASTER
-   weight_fp8 ─────────┐                                         │ weights only --
-                        │  FP8 GEMM (FP32 accumulate)            │ FP8 never enters
-   activation_fp8 ──────┴─────────────► output (BF16/FP32)       │ the optimizer state
-        ▲                                                        │
-        │ cast w/ scale (E4M3)                                   │
-   activations (BF16) ── amax() ──► delayed-scaling history ─────┘
-                                     (predicts NEXT step's scale,
-                                      "delayed scaling" below)
+    MW["master weights\n(FP32/BF16)"] -->|"cast w/ scale (E4M3)"| WF8(["weight_fp8"])
+    ACT(["activations (BF16)"]) -->|"cast w/ scale (E4M3)"| AF8(["activation_fp8"])
+    WF8 --> GEMM["FP8 GEMM\n(FP32 accumulate)"]
+    AF8 --> GEMM
+    GEMM --> OUT(["output\n(BF16/FP32)"])
+    ACT -->|"amax()"| HIST["delayed-scaling history\npredicts NEXT step's scale"]
+    HIST -.->|"scale"| WF8
+    HIST -.->|"scale"| AF8
+    GO["grad_output\ncast to E5M2"] -.-> BGEMM["FP8 GEMM\n(backward)"]
+    BGEMM -.-> GFP32["grad accumulated\nin FP32"]
+    GFP32 -.-> OPT["optimizer.step()\nupdates MASTER weights only —\nFP8 never enters optimizer state"]
+    OPT -.-> MW
 
-  backward: grad_output cast to E5M2 (wider exponent range -- gradients
-  span more orders of magnitude than activations) -> FP8 GEMM ->
-  grad accumulated in FP32 -> optimizer.step() on master weights
+    class ACT,WF8,AF8,OUT io
+    class MW train
+    class GEMM,BGEMM,HIST,OPT mathOp
+    class GO,GFP32 lossN
 ```
+
+FP8 training data flow for one linear layer, one step (Transformer Engine pattern): E4M3 casts feed the forward GEMM (FP32 accumulate), gradients flow back in E5M2 (wider exponent range — gradients span more orders of magnitude than activations), and `optimizer.step()` touches only the FP32/BF16 master weights. The delayed-scaling history predicts the NEXT step's cast scale ("delayed scaling" below).
 
 **Two formats, two jobs** (introduced in §6.4): **E4M3** (4 exponent bits, 3 mantissa bits, max magnitude 448) carries forward activations and weights, where ~12.5% per-element rounding error (2^-3 mantissa) is tolerable because normalization layers keep these tensors' magnitudes roughly stable. **E5M2** (5 exponent bits, 2 mantissa bits, max magnitude 57,344) carries gradients, which — especially early in training and in layers far from the loss — can span several orders of magnitude more dynamic range than activations; E5M2 trades mantissa precision for that range.
 

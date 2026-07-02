@@ -169,29 +169,31 @@ Tool-calling agentic RAG is cleaner than orchestrated loops: the LLM decides whe
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
 flowchart TD
-    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef decide fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef warn   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Q([User Query]) --> QA["Initial Query Analysis\n'What sub-questions must I answer?'"]
     QA --> RETN["Retrieval Step N\nLLM generates retrieval query\nDense + sparse → rerank → inject"]
-    RETN --> CHK{Sufficiency Check}
+    RETN --> CHK{"Sufficiency Check"}
     CHK -->|SUFFICIENT| FG["Final Generation"]
     FG --> ANS([Answer])
     CHK -->|INSUFFICIENT| GAP["Gap Analysis\n'What am I still missing?'"]
     GAP --> NRQ["Next Retrieval Query"]
-    NRQ --> ITER{N < max_iter?}
+    NRQ --> ITER{"N < max_iter?"}
     ITER -->|YES| RETN
     ITER -->|NO| BEG["Best-effort Generation\n'Based on available context...'"]
     BEG --> ANS
 
     class Q,ANS io
-    class QA,RETN,FG proc
-    class CHK,ITER decide
-    class GAP,NRQ llm
-    class BEG warn
+    class QA,RETN,FG train
+    class CHK,ITER mathOp
+    class GAP,NRQ frozen
+    class BEG lossN
 ```
 
 ### FLARE Mid-Generation Retrieval
@@ -383,49 +385,54 @@ A: Beyond standard answer accuracy, track agentic-specific metrics. Iteration ef
 **Problem Statement**: A financial data firm serves 500 buy-side analysts who research investment opportunities. Analysts ask multi-hop questions across three distinct sources: SEC EDGAR filings (10-K, 10-Q, 8-K), earnings call transcripts, and real-time financial news. A typical question is: "Compare the gross margin trajectory of Company A and Company B over the last 3 quarters, and identify what each management team cited as the primary driver of margin changes." Standard RAG answered only one part of these questions; analysts were spending 2+ hours per research brief manually cross-referencing sources.
 
 **Architecture Overview**:
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    AQ([Analyst Query])
+    QR{"Query Router\n'Is this multi-hop? Does it span multiple sources?'"}
+    SR["Standard RAG"]
+    FAST([Answer in under 2s])
+    IT1["Iteration 1: Decompose\nLLM identifies sub-questions:\nQ1: Company A gross margin Q1-Q3\nQ2: Company B gross margin Q1-Q3\nQ3: Company A mgmt margin commentary\nQ4: Company B mgmt margin commentary"]
+    TS["Tool Selection per Sub-Query\nQ1, Q2 → search_sec_filings (10-Q)\nQ3, Q4 → search_earnings_transcripts\nmarket context → search_financial_news"]
+    SC["Sufficiency Check + Gap Analysis\n'Missing: Q2 10-Q for Company B not found'"]
+    IT2["Iteration 2: Targeted Retrieval\nsearch_sec_filings('Company B 10-Q Q2 2024 gross margin')"]
+    CALC["Calculation Tool\ncompute_margin_delta(q1_margin, q2_margin, q3_margin)"]
+    FG["Final Generation\nLLM synthesizes across all retrieved context\nwith inline citations (filing date, page, transcript timestamp)"]
+    RB([Research Brief with Sources])
+
+    AQ --> QR
+    QR -->|"Simple (30%)"| SR --> FAST
+    QR -->|"Multi-hop (70%)"| IT1 --> TS
+
+    subgraph par["Parallel Retrieval: 3 tools simultaneously"]
+        SEC[["SEC EDGAR Vector DB\nmargin data chunks"]]
+        TRX[["Transcript Vector DB\nmgmt commentary"]]
+        NEWS[["News Vector DB\nanalyst context"]]
+    end
+
+    TS --> SEC
+    TS --> TRX
+    TS --> NEWS
+    SEC --> SC
+    TRX --> SC
+    NEWS --> SC
+    SC --> IT2 --> CALC --> FG --> RB
+
+    class AQ,FAST,RB io
+    class QR,TS,SC,CALC mathOp
+    class SR,IT2,FG train
+    class IT1 frozen
+    class SEC,TRX,NEWS base
 ```
-Analyst Query
-    |
-    v
-[Query Router]
-  "Is this multi-hop? Does it span multiple sources?"
-    |
-    +-- Simple (30%) -----> [Standard RAG] → Answer in <2s
-    |
-    +-- Multi-hop (70%) --> [Agentic RAG Loop]
-                                |
-                        [Iteration 1: Decompose]
-                          LLM identifies sub-questions:
-                          Q1: "Company A gross margin Q1-Q3"
-                          Q2: "Company B gross margin Q1-Q3"
-                          Q3: "Company A mgmt margin commentary"
-                          Q4: "Company B mgmt margin commentary"
-                                |
-                        [Tool Selection per Sub-Query]
-                          Q1, Q2 → search_sec_filings (10-Q)
-                          Q3, Q4 → search_earnings_transcripts
-                          Market context → search_financial_news
-                                |
-                        [Parallel Retrieval: 3 tools simultaneously]
-                          SEC EDGAR Vector DB  → margin data chunks
-                          Transcript Vector DB → mgmt commentary
-                          News Vector DB       → analyst context
-                                |
-                        [Sufficiency Check + Gap Analysis]
-                          "Missing: Q2 10-Q for Company B not found"
-                                |
-                        [Iteration 2: Targeted Retrieval]
-                          search_sec_filings("Company B 10-Q Q2 2024 gross margin")
-                                |
-                        [Calculation Tool]
-                          compute_margin_delta(q1_margin, q2_margin, q3_margin)
-                                |
-                        [Final Generation]
-                          LLM synthesizes across all retrieved context
-                          with inline citations (filing date, page, transcript timestamp)
-                                |
-                        Research Brief with Sources
-```
+
+The router sends the simple 30% of queries down the fast standard-RAG path; multi-hop queries (70%) are decomposed into four sub-questions, routed to source-typed tools that retrieve from three vector DBs in parallel, with a second targeted iteration filling the gap the sufficiency check identified.
 
 **Key Design Decisions**:
 1. Parallel tool execution within each iteration — Q1/Q2 SEC queries and Q3/Q4 transcript queries run concurrently, reducing average iteration time from 8s to 3s.

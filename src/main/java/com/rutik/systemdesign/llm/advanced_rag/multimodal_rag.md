@@ -222,10 +222,13 @@ def generate_multimodal_answer(
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
 flowchart TD
-    classDef io    fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef proc  fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef llm   fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef store fill:#e5c07b,stroke:#d4a017,color:#1a1a1a
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     DOCS(["Source Documents\nPDF · PPTX · HTML"]) --> DP["Document Parser\nUnstructured.io · PyMuPDF · python-pptx"]
     DP --> TB["Text blocks"]
@@ -242,19 +245,23 @@ flowchart TD
     CLIP --> IDB[("Image Vector DB")]
 
     class DOCS io
-    class DP,TB,TAB,FIG,TE,MD proc
-    class VLM llm
-    class VDB,IDB,BLOB store
+    class DP,TE,MD mathOp
+    class TB,TAB,FIG req
+    class VLM,CLIP base
+    class VDB,IDB,BLOB frozen
 ```
 
 ### Multimodal Query Pipeline
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
 flowchart TD
-    classDef io    fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef proc  fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef store fill:#e5c07b,stroke:#d4a017,color:#1a1a1a
-    classDef llm   fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Q([User Query]) --> TE["Text embedding"]
     Q --> CE["CLIP text embed"]
@@ -267,9 +274,10 @@ flowchart TD
     GEN --> ANS(["Answer + source citations\n(doc, page, figure number)"])
 
     class Q,ANS io
-    class TE,CE,TK,IK,MRG,CA proc
-    class VDB,IDB store
-    class GEN llm
+    class TE,CE,MRG,CA mathOp
+    class TK,IK req
+    class VDB,IDB frozen
+    class GEN base
 ```
 
 ---
@@ -438,85 +446,72 @@ A: Standard token-based chunking destroys the semantic coherence of mixed-conten
 **Problem Statement**: A heavy equipment manufacturer with 1,200 field technicians maintains a knowledge base of 4,500 technical manuals covering 380 equipment models. These manuals are 45% text, 30% engineering diagrams (exploded views, wiring schematics, hydraulic circuits), 15% annotated photographs of equipment assemblies, and 10% troubleshooting flowcharts. The company also has a library of 120K equipment failure photographs tagged by model and component, plus 800 video tutorials with transcripts. The existing text-only RAG system indexed prose sections only, losing all visual context. When a technician queried "hydraulic pump seal replacement procedure for Model HX-450," the system returned text steps but missed the critical exploded-view diagram showing seal orientation and the torque specification table embedded in Figure 12. Field surveys revealed that 40% of maintenance queries required visual context that text-only RAG could not provide, resulting in unnecessary escalations to senior technicians (averaging 2.5 hours per escalation) and extended mean-time-to-repair (MTTR) of 4.2 hours per incident.
 
 **Architecture Overview**:
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph ing["Indexing Pipeline"]
+        MAN(["Technical manuals\n4,500 PDFs · avg 180 pages"])
+        PHO(["Equipment failure photos\n120K images · tagged by model/component"])
+        VID(["Video tutorials\n800 videos → keyframes + transcripts"])
+        DP["Document Parser: Unstructured.io hi_res\n300 DPI render · detectron2 layout analysis"]
+        TXT["Text blocks\nsection-aware chunking · 800 tokens\nrespect section boundaries"]
+        TAB["Tables\nmarkdown conversion\npreserve headers, units, torque spec values"]
+        FIG["Figures / Diagrams\nelement classifier — CLIP zero-shot:\nexploded-view, wiring schematic, flowchart,\nphotograph, data chart"]
+        VLM["Vision LLM Description\nGPT-4o detail=high for schematics\nGPT-4o-mini for simple photos"]
+        CE["CLIP ViT-L/14 Image Embedding\n768-dim vectors"]
+        TEMB["Text Embed\ntext-embedding-3-large"]
+        PC["Pinecone: Text Index"]
+        WV["Weaviate: Image Vector DB\nmulti2vec"]
+        S3["S3 Blob Storage\noriginal images with metadata\n(manual_id, page, figure_num, model)"]
+
+        MAN --> DP
+        PHO --> DP
+        VID --> DP
+        DP --> TXT
+        DP --> TAB
+        DP --> FIG
+        FIG --> VLM
+        FIG --> CE
+        FIG --> S3
+        TXT --> TEMB
+        TAB --> TEMB
+        VLM --> TEMB
+        TEMB --> PC
+        CE --> WV
+    end
+
+    subgraph qt["Query Time"]
+        EMD["Equipment Model Detection\nextract model number from query\nfor metadata filtering"]
+        DR["Dual Retrieval\ntext query → text embed → Pinecone (top-10)\ntext query → CLIP text embed → Weaviate (top-5)"]
+        MR["Merge + Rerank\ncross-encoder reranks text · CLIP scores rank images\nweighted merge: text 0.6, image 0.4"]
+        FRL["Figure-Reference Linking\nif text chunk references 'See Figure 12',\nauto-include Figure 12 from S3"]
+        CTX["Context Assembly\ntop-5 text chunks + top-2 images\n(originals fetched from S3)"]
+        GEN["VLM Generation: GPT-4o\nsees text + original diagrams/photos"]
+        ANS(["Answer with visual citations\n'See attached Figure 12 for seal orientation.\nTorque to 45 Nm per specification table.'"])
+
+        EMD --> DR --> MR --> FRL --> CTX --> GEN --> ANS
+    end
+
+    PC --> DR
+    WV --> DR
+    S3 -.-> FRL
+    S3 -.-> CTX
+
+    class MAN,PHO,VID,ANS io
+    class DP,TEMB,EMD,DR,MR,FRL,CTX mathOp
+    class TXT,TAB,FIG req
+    class VLM,CE,GEN base
+    class PC,WV,S3 frozen
 ```
-Document Sources
-    |
-    +-- Technical manuals (4,500 PDFs, avg 180 pages each)
-    +-- Equipment failure photos (120K images, tagged by model/component)
-    +-- Video tutorials (800 videos → keyframe extraction + transcripts)
-                                        |
-                                        v
-                              [Document Parser: Unstructured.io hi_res mode]
-                                Render at 300 DPI for diagram clarity
-                                Layout analysis: detectron2 model
-                                        |
-                    +-------------------+-------------------+
-                    |                   |                   |
-              [Text blocks]      [Tables]           [Figures/Diagrams]
-                    |                   |                   |
-                    v                   v                   v
-          [Section-aware          [Markdown             [Element classifier]
-           chunking]               conversion]           CLIP zero-shot:
-          800 tokens,             Preserve headers,      exploded-view, wiring
-          respect section         units, torque          schematic, flowchart,
-          boundaries              spec values            photograph, data chart
-                    |                   |                   |
-                    |                   |         +--------+--------+
-                    |                   |         |                 |
-                    |                   |   [Vision LLM            [CLIP ViT-L/14
-                    |                   |    Description]           Image Embedding]
-                    |                   |    GPT-4o detail=high     768-dim vectors
-                    |                   |    for schematics;              |
-                    |                   |    GPT-4o-mini for              |
-                    |                   |    simple photos                |
-                    |                   |         |                       |
-                    v                   v         v                       v
-              [Text Embed]     [Text Embed]   [Text Embed]        [Image Vector DB]
-              text-embed-3     text-embed-3   text-embed-3        Weaviate multi2vec
-              -large           -large         -large
-                    |                 |              |                    |
-                    +-----------------+--------------+                   |
-                                     |                                  |
-                              [Pinecone: Text Index]             [Weaviate: Image]
-                                     |                                  |
-                                     +----------------------------------+
-                                                    |
-                                          [S3 Blob Storage]
-                                    Original images with metadata
-                                    (manual_id, page, figure_num, model)
-                                                    |
-                                              Query Time
-                                                    |
-                                     [Equipment Model Detection]
-                                     Extract model number from query
-                                     for metadata filtering
-                                                    |
-                                          [Dual Retrieval]
-                                Text query -> text embed -> Pinecone (top-10)
-                                Text query -> CLIP text embed -> Weaviate (top-5)
-                                                    |
-                                          [Merge + Rerank]
-                                Cross-encoder reranks text candidates
-                                CLIP scores rank image candidates
-                                Weighted merge: text 0.6, image 0.4
-                                                    |
-                                          [Figure-Reference Linking]
-                                If text chunk references "See Figure 12",
-                                auto-include Figure 12 from S3
-                                                    |
-                                          [Context Assembly]
-                                Top-5 text chunks + top-2 images
-                                (originals fetched from S3)
-                                                    |
-                                          [VLM Generation: GPT-4o]
-                                Sees text + original diagrams/photos
-                                Generates step-by-step answer with
-                                figure references and spec callouts
-                                                    |
-                                          Answer with visual citations
-                                "See attached Figure 12 for seal orientation.
-                                 Torque to 45 Nm per specification table."
-```
+
+The element classifier routes schematics to GPT-4o detail="high" and simple photos to GPT-4o-mini, cutting vision indexing cost 65%; at query time the weighted dual-retrieval merge (text 0.6, image 0.4) plus figure-reference linking lifts image recall to 87% vs 52% for CLIP alone.
 
 **Key Design Decisions**:
 1. Element classification before vision LLM processing — not all images need the same treatment. Exploded-view diagrams and wiring schematics require GPT-4o with detail="high" (2048 tokens per image, ~$0.01 each) for accurate part number and torque specification extraction. Simple equipment photographs use GPT-4o-mini at detail="low" (~$0.001 each). CLIP zero-shot classification routes images to the appropriate model. This classification reduced vision LLM indexing cost by 65% compared to uniform GPT-4o high-detail processing.

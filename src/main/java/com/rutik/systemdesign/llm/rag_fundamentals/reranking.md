@@ -188,20 +188,23 @@ Cohere Rerank 3 properties:
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 55}}}%%
 flowchart TD
-    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef rerank fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Q([User Query]) --> S1["Stage 1: Bi-Encoder Retrieval\nQuery → embedding → ANN search\nReturns: top-100 candidates\nLatency: ~20–50ms"]
-    S1 --> S2["Stage 2: Cross-Encoder Reranking\n[CLS] query [SEP] document [SEP] → score\nReturns: top-5 reranked\nLatency: ~50–100ms"]
+    S1 --> S2["Stage 2: Cross-Encoder Reranking\n(CLS) query (SEP) document (SEP) → score\nReturns: top-5 reranked\nLatency: ~50–100ms"]
     S2 --> GEN["LLM Generation\nuses only top-5 documents\ntotal retrieval: ~150ms"]
     GEN --> ANS([Answer])
 
     class Q,ANS io
-    class S1 proc
-    class S2 rerank
-    class GEN llm
+    class S1 train
+    class S2 frozen
+    class GEN base
 ```
 
 ### Bi-Encoder vs. Cross-Encoder Comparison

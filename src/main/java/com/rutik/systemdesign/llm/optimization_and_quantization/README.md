@@ -353,32 +353,37 @@ Quality
 ```
 
 ### MoE Architecture Per Layer
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x(["Input x\nseq_len × hidden_dim"]) --> R["Router: Linear\nd_model → N_experts"]
+    R --> TK{"Top-K selection\npick k=2 experts"}
+    TK -->|"Token 1"| E3["Expert 3\nW1_3, W2_3"]
+    TK -->|"Token 1"| E7["Expert 7\nW1_7, W2_7"]
+    TK -->|"Token 2"| E1["Expert 1\nW1_1, W2_1"]
+    TK -->|"Token 2"| E5["Expert 5\nW1_5, W2_5"]
+    TK -->|"Token 3"| E2["Expert 2\nW1_2, W2_2"]
+    TK -->|"Token 3"| E3
+    E1 --> WS["Weighted sum\ngate_score × expert_output"]
+    E2 --> WS
+    E3 --> WS
+    E5 --> WS
+    E7 --> WS
+    WS --> out(["Output\nseq_len × hidden_dim"])
+
+    class x,out io
+    class R,TK,WS mathOp
+    class E1,E2,E3,E5,E7 train
 ```
-Input x (seq_len × hidden_dim)
-     |
-     v
-[Router: Linear(d_model → N_experts)]
-     |
-     v
-[Top-K selection: pick k=2 experts]
-     |
-     +--- Token 1 → Expert 3, Expert 7
-     +--- Token 2 → Expert 1, Expert 5
-     +--- Token 3 → Expert 2, Expert 3
-     |
-     v
-[Expert FFNs] (each is a standard FFN, but only 2 active per token)
-Expert 1: W1_1, W2_1
-Expert 2: W1_2, W2_2
-...
-Expert N: W1_N, W2_N
-     |
-     v
-[Weighted sum: gate_score × expert_output]
-     |
-     v
-Output (seq_len × hidden_dim)
-```
+
+Each token routes independently to its top-2 of N expert FFNs (Token 1 and Token 3 both select Expert 3), so only 2 experts run per token — which is why Mixtral 8x7B computes only ~12.9B of its 46.7B total params per token.
 
 ---
 

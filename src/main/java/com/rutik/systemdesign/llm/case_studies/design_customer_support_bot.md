@@ -73,73 +73,44 @@ Customer data cache (session):
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CUST(["Customer\nWeb Chat / Mobile / Email"])
+    CA["Channel Adapter Layer\nchat widget: WebSocket / SSE\nemail webhook · SMS/WhatsApp via Twilio"]
+    SM["Session Manager\ncreate/retrieve session (Redis)\nauth link to account · history tracking"]
+    IR["Intent & Routing Engine\nfast classifier (BERT-small, 10ms)\nintent · urgency · sentiment · language"]
+    ESC["Immediate Escalation\nthreats, self-harm, legal threats"]
+    BOT["Bot Handler\nfull RAG + LLM pipeline"]
+    HQ["Human Queue\nangry / fraud / legal /\nexplicit escalation request"]
+    CB["Context Builder\ncustomer data · KB retrieval (RAG)\nconversation history"]
+    GEN["LLM Response Generator\nGPT-4o / Claude 3.5 · tool use\nmulti-language generation"]
+    VAL["Response Validation\nfactual check · confidence score\nsafety filter · escalation trigger"]
+    DEL["Response Delivery\nsend · update log · CSAT survey"]
+    AN["Analytics & Learning\nlog outcome · CSAT scores\nfeed back low-confidence cases"]
+
+    CUST --> CA --> SM --> IR
+    IR --> ESC
+    IR --> BOT
+    IR --> HQ
+    BOT --> CB --> GEN --> VAL --> DEL --> AN
+
+    class CUST,DEL io
+    class CA,SM,HQ req
+    class IR,CB,VAL mathOp
+    class ESC lossN
+    class BOT,GEN base
+    class AN train
 ```
-Customer
-  |
-  | (Web Chat / Mobile / Email)
-  v
-[Channel Adapter Layer]
-  - Chat widget: WebSocket / SSE
-  - Email: Gmail/Outlook webhook → normalize to conversation format
-  - SMS/WhatsApp: Twilio webhook → normalize
-  |
-  v
-[Session Manager]
-  - Create/retrieve session (Redis)
-  - Authentication: link to customer account
-  - Conversation history tracking
-  |
-  v
-[Intent & Routing Engine]
-  ┌──────────────────────────────────────────┐
-  │  Fast classifier (BERT-small, 10ms):     │
-  │  - Intent: billing | order | technical   │
-  │            account | complaint | other   │
-  │  - Urgency: low | medium | high          │
-  │  - Sentiment: positive | neutral | angry │
-  │  - Language detection                    │
-  └──────────────────────────────────────────┘
-          |
-    ┌─────┴──────────────────────────────────────────┐
-    │                    │                            │
-    ▼                    ▼                            ▼
-[Immediate          [Bot Handler]             [Human Queue]
- Escalation]         Full RAG + LLM           (angry/fraud/
-  (threats,          pipeline                  legal/explicit
-   self-harm,                                  escalation request)
-   legal threats)
-    |
-    v
-[Context Builder]
-  - Fetch customer data (orders, account history, prior tickets)
-  - Retrieve KB articles (RAG over knowledge base)
-  - Format conversation history
-    |
-    v
-[LLM Response Generator]
-  - GPT-4o / Claude 3.5 with system prompt
-  - Tool use: CRM lookups, policy checks, refund processing
-  - Multi-language response generation
-    |
-    v
-[Response Validation]
-  - Factual check: does answer match KB?
-  - Confidence score: is bot sure enough to respond autonomously?
-  - Safety filter: no inappropriate content
-  - Escalation trigger: if low confidence → offer human agent
-    |
-    v
-[Response Delivery]
-  - Send to customer
-  - Update conversation log
-  - Trigger CSAT survey at session end
-    |
-    v
-[Analytics & Learning]
-  - Log outcome: resolved/escalated/abandoned
-  - Update CSAT scores
-  - Feed back low-confidence cases for KB improvement
-```
+
+The Intent & Routing Engine is the branch point: safety-critical messages (threats, self-harm, legal) bypass the bot entirely via immediate escalation, angry/fraud/explicit-request cases route to the human queue, and everything else flows through the RAG + LLM bot pipeline with validation before delivery.
 
 ---
 
@@ -754,35 +725,43 @@ Escalation from bot to human agent is the highest-stakes transition in a custome
 
 **Escalation decision tree:**
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    U([User message received])
+    IC{"Intent Classification"}
+    PC{"Policy Check\nrefunds >$500, legal threats,\naccount compromise"}
+    SD{"Sentiment Detection"}
+    AC{"Attempt Counter"}
+    E1["Escalate (uncertain intent)"]
+    E2["Escalate (policy requires human)"]
+    E3["Escalate (customer very angry)"]
+    E4["Escalate (bot failing to resolve)"]
+    CONT([Bot continues])
+
+    U --> IC
+    IC -->|"intent confidence < 0.6"| E1
+    IC -->|"high confidence intent"| PC
+    PC -->|"intent in escalation_list: 'cancel account', 'I'm a lawyer', 'I'll sue'"| E2
+    PC -->|"bot can handle"| SD
+    SD -->|"sentiment score < -0.7"| E3
+    SD -->|"neutral/positive"| AC
+    AC -->|"resolution_attempts >= 3"| E4
+    AC --> CONT
+
+    class U,CONT io
+    class IC,PC,SD,AC mathOp
+    class E1,E2,E3,E4 lossN
 ```
-User message received
-        │
-        ▼
-┌───────────────────────┐   intent confidence < 0.6
-│  Intent Classification│──────────────────────────► Escalate (uncertain intent)
-└───────────┬───────────┘
-            │ high confidence intent
-            ▼
-┌───────────────────────┐   intent in escalation_list
-│  Policy Check         │──────────────────────────► Escalate (policy requires human)
-│  (refunds >$500,      │   (e.g., "cancel account",
-│   legal threats,      │    "I'm a lawyer", "I'll sue")
-│   account compromise) │
-└───────────┬───────────┘
-            │ bot can handle
-            ▼
-┌───────────────────────┐   sentiment score < -0.7
-│  Sentiment Detection  │──────────────────────────► Escalate (customer very angry)
-└───────────┬───────────┘
-            │ neutral/positive
-            ▼
-┌───────────────────────┐   resolution_attempts >= 3
-│  Attempt Counter      │──────────────────────────► Escalate (bot failing to resolve)
-└───────────┬───────────┘
-            │
-            ▼
-      Bot continues
-```
+
+Each gate is evaluated in order — intent confidence, policy, sentiment, then attempt count — and any single trigger exits to escalation; only messages passing all four checks stay with the bot.
 
 **Context handoff to human agent:**
 

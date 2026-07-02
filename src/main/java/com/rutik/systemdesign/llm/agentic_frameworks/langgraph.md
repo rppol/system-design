@@ -46,18 +46,22 @@ Released by LangChain, Inc. in January 2024, LangGraph became the recommended wa
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     S([START]) --> AgentNode["agent_node\n(LLM)"]
     AgentNode -- tool call --> ToolNode["tool_node\n(execute)"]
     ToolNode --> AgentNode
     AgentNode -- final answer --> E([END])
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-
     class S,E io
-    class AgentNode llm
-    class ToolNode proc
+    class AgentNode base
+    class ToolNode mathOp
 ```
 
 The agent node calls the LLM; if the LLM requests a tool, the tool node executes it; the result goes back to the agent node.
@@ -67,6 +71,14 @@ The agent node calls the LLM; if the LLM requests a tool, the tool node executes
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     S([START]) --> Orch["orchestrator\n(routes by query type)"]
     Orch --> SpA["specialist_a"]
     Orch --> SpB["specialist_b"]
@@ -76,13 +88,10 @@ flowchart LR
     SpC --> Agg
     Agg --> E([END])
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-
     class S,E io
-    class Orch llm
-    class SpA,SpB,SpC,Agg proc
+    class Orch base
+    class SpA,SpB,SpC train
+    class Agg mathOp
 ```
 
 Specialized agents run in parallel or sequentially, each with different tools and prompts. The orchestrator routes based on query type.
@@ -92,21 +101,24 @@ Specialized agents run in parallel or sequentially, each with different tools an
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     S([START]) --> AgentNode["agent_node"]
     AgentNode --> Interrupt[/"interrupt_before\nhuman_review"/]
     Interrupt --> Human["human_review\n(approve / modify state)"]
     Human --> AgentNode2["agent_node\n(resume)"]
     AgentNode2 --> E([END])
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
-
     class S,E io
-    class AgentNode,AgentNode2 llm
-    class Interrupt store
-    class Human proc
+    class AgentNode,AgentNode2 base
+    class Interrupt frozen
+    class Human req
 ```
 
 `interrupt_before=["human_review"]` pauses the graph; a human approves/modifies state; the graph resumes.
@@ -141,6 +153,14 @@ Each sub-agent is itself a LangGraph graph. The supervisor orchestrates by passi
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Compile["compile()"] --> CG["CompiledGraph\ngraph.invoke(state)"]
     CG --> START([START])
     START --> NodeA["Node A\nreceives full state dict\nreturns partial update dict\nstate = merge(state, update)"]
@@ -150,13 +170,9 @@ flowchart TD
     NodeB --> END([END])
     NodeC --> END
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-
     class START,END io
-    class Compile,CG proc
-    class NodeA,NodeB,NodeC llm
+    class Compile,CG mathOp
+    class NodeA,NodeB,NodeC base
 ```
 
 ### State Reducer Flow
@@ -182,6 +198,14 @@ After Node 2: {"messages": [HumanMessage("hi"), AIMessage("hello"), ToolMessage(
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Invoke1["graph.invoke(state)\nthread_id: run-42"] --> AgentRun["agent_node runs"]
     AgentRun --> Interrupt["interrupt_before: human_review"]
     Interrupt --> Save["State saved to checkpointer DB"]
@@ -192,15 +216,11 @@ flowchart TD
     Load --> HumanNode["human_review node runs"]
     HumanNode --> Continue["continues to completion"]
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
-
     class Invoke1,Invoke2 io
-    class AgentRun,HumanNode llm
-    class Interrupt,Return,Human proc
-    class Save,Load store
+    class AgentRun,HumanNode base
+    class Interrupt,Return,Continue mathOp
+    class Human req
+    class Save,Load frozen
 ```
 
 The `thread_id` ties both invocations together; the checkpointer stores the full state so the graph resumes exactly where it paused.
@@ -812,30 +832,35 @@ class CodeReviewState(TypedDict):
 
 ### Graph Structure
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    S([START]) --> FETCH["fetch_pr_diff\ncalls GitHub API, populates diff"]
+    FETCH --> SEC["security_scan_node\nLLM + security tools\npopulates security_findings"]
+    FETCH --> STYLE["style_check_node\nLLM + linter tools\npopulates style_findings"]
+    SEC --> SYN["synthesize_review\ncombines findings into review_comments\nsets has_critical_issues"]
+    STYLE --> SYN
+    SYN --> ROUTE{"route_review"}
+    ROUTE -->|"has_critical_issues=True"| HUM["interrupt: human_approval\n(human approves/edits)"]
+    HUM --> POST[["post_to_github"]]
+    ROUTE -->|"has_critical_issues=False"| POST
+    POST --> E([END])
+
+    class S,E io
+    class FETCH,SYN,ROUTE mathOp
+    class SEC,STYLE train
+    class HUM req
+    class POST frozen
 ```
-START
-  |
-  v
-[fetch_pr_diff]         -- calls GitHub API, populates diff
-  |
-  v
-RunnableParallel:
-  [security_scan_node]  -- LLM + security tools, populates security_findings
-  [style_check_node]    -- LLM + linter tools, populates style_findings
-  |
-  v
-[synthesize_review]     -- combines findings into review_comments, sets has_critical_issues
-  |
-  v
-[route_review]
-  |-- has_critical_issues=True --> [interrupt: human_approval]
-  |                                      |
-  |                                [human approves/edits]
-  |                                      |
-  +-- has_critical_issues=False -------> [post_to_github]
-                                         |
-                                        END
-```
+
+`security_scan_node` and `style_check_node` fan out in parallel after `fetch_pr_diff` (saving 30s vs sequential); only the 12% of PRs with critical findings detour through the human-approval interrupt before posting.
 
 ### Key Code
 

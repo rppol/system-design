@@ -245,20 +245,24 @@ Caution: packing combines multiple examples in one sequence
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    Raw(["Raw instruction-response pairs\n[(instruction_1, response_1), …]"]) --> Template
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Raw(["Raw instruction-response pairs\n(instruction_1, response_1), …"]) --> Template
     Template["Template Application\nWrap with model-specific chat template\ne.g., LLaMA-3: user…eot_id…assistant"] --> Tokenize
     Tokenize["Tokenization\nConvert to token IDs\nRecord instruction vs. response boundaries"] --> Labels
-    Labels["Label Creation\nlabels = input_ids.copy()\nlabels[:instruction_end] = -100 (mask instruction)"] --> Train
+    Labels["Label Creation\nlabels = input_ids.copy()\nlabels(:instruction_end) = -100 (mask instruction)"] --> Train
     Train["Training\nCross-entropy loss ONLY on response tokens\nGradient update via Adam"] --> Eval
     Eval["Evaluation\nGenerate completions for held-out instructions\nMeasure: task accuracy, format compliance, refusal rate"]
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-
     class Raw io
-    class Template,Tokenize,Labels proc
-    class Train,Eval llm
+    class Template,Tokenize,Labels train
+    class Train,Eval frozen
 ```
 
 Label masking (-100 in PyTorch) tells the loss function to skip instruction tokens — the model is trained only to generate the response given the instruction, not to predict the instruction itself.

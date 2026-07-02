@@ -101,62 +101,55 @@ Revenue target: charge 2-3x infrastructure cost
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    USER(["User (Dashboard / CLI / API)"])
+    GW["API Gateway + Auth\nrate limit, tenant ID"]
+    DS["Data Service"]
+    TS["Training Service"]
+    MR["Model Registry"]
+    DPIPE["Upload Handler\nFormat Validator\nPII Scanner\nQuality Scorer\nDeduplicator\nTokenizer"]
+    TBOX["Job Scheduler\nGPU Allocator\nCheckpoint Mgr\nMetrics Collector\nCost Tracker"]
+    RBOX["Artifact Store (S3 + metadata)\nVersion Control\nPromotion Gates\nLineage Tracker"]
+    GPU["GPU Cluster\nNode 1 … Node 200: 8x A100 80GB\n(1,600 GPUs total)\nOrchestrator: Kubernetes + SLURM"]
+    OBJ[["Object Store (S3)\nraw datasets · tokenized data\nLoRA adapters · full model weights\ncheckpoints"]]
+    MET[["Metrics Store\ntraining loss · eval metrics\nGPU utilization · cost per job"]]
+    EVAL["Evaluation Service\ngolden dataset comparison\nLLM-as-judge scoring\nregression detection\nbefore/after reports"]
+    DEP["Deployment Service\nprovision inference endpoint\nload LoRA adapter onto base model\nhealth check + smoke test\ntraffic shifting (canary)"]
+
+    USER --> GW
+    GW --> DS
+    GW --> TS
+    GW --> MR
+    DS --> DPIPE
+    TS --> TBOX
+    MR --> RBOX
+    TBOX --> GPU
+    DPIPE --> OBJ
+    GPU --> MET
+    OBJ --> EVAL
+    MET --> EVAL
+    EVAL --> DEP
+
+    class USER io
+    class GW,DEP req
+    class DS,TS,MR base
+    class DPIPE,TBOX mathOp
+    class RBOX frozen
+    class GPU train
+    class OBJ,MET io
+    class EVAL lossN
 ```
-                            User (Dashboard / CLI / API)
-                                       |
-                                       v
-                              [API Gateway + Auth]
-                              (rate limit, tenant ID)
-                                       |
-                    +------------------+-------------------+
-                    |                  |                   |
-                    v                  v                   v
-           [Data Service]     [Training Service]   [Model Registry]
-                    |                  |                   |
-                    v                  v                   v
-         +-------------------+  +-------------------+  +------------------+
-         | Upload Handler    |  | Job Scheduler     |  | Artifact Store   |
-         | Format Validator  |  | GPU Allocator     |  | (S3 + metadata)  |
-         | PII Scanner       |  | Checkpoint Mgr    |  | Version Control  |
-         | Quality Scorer    |  | Metrics Collector  |  | Promotion Gates  |
-         | Deduplicator      |  | Cost Tracker      |  | Lineage Tracker  |
-         | Tokenizer         |  +-------------------+  +------------------+
-         +-------------------+         |
-                    |                  v
-                    |         [GPU Cluster]
-                    |         +---------------------------------+
-                    |         | Node 1: 8x A100 80GB            |
-                    |         | Node 2: 8x A100 80GB            |
-                    |         | ...                             |
-                    |         | Node 200: 8x A100 80GB          |
-                    |         | (1,600 GPUs total)              |
-                    |         | Orchestrator: Kubernetes + SLURM|
-                    |         +---------------------------------+
-                    |                  |
-                    v                  v
-            [Object Store (S3)]   [Metrics Store]
-            - Raw datasets        - Training loss
-            - Tokenized data      - Eval metrics
-            - LoRA adapters       - GPU utilization
-            - Full model weights  - Cost per job
-            - Checkpoints
-                    |                  |
-                    +--------+---------+
-                             |
-                             v
-                    [Evaluation Service]
-                    - Golden dataset comparison
-                    - LLM-as-judge scoring
-                    - Regression detection
-                    - Before/after reports
-                             |
-                             v
-                    [Deployment Service]
-                    - Provision inference endpoint
-                    - Load LoRA adapter onto base model
-                    - Health check + smoke test
-                    - Traffic shifting (canary)
-```
+
+The gateway fans out to the three core services; training jobs flow through the scheduler onto the 1,600-GPU A100 cluster, and the data pipeline (S3) plus training metrics converge on the evaluation service that gates promotion into the deployment service.
 
 ---
 

@@ -102,88 +102,48 @@ Model artifacts:
 
 ## 3. High-Level Architecture
 
-```
-User Post
-  |
-  v
-[API Gateway / CDN Edge]
-  |
-  v
-[Pre-Processing Layer]
-  - Text normalization (unicode, leetspeak decoding, URL expansion)
-  - Language detection (fastText, < 1ms)
-  - PII detection and redaction for logging
-  |
-  v
-[Tier 1: Fast Classifier] ─────── < 10ms, handles 80% of decisions
-  |  DistilBERT / BERT-base fine-tuned
-  |  Multi-label: toxicity, hate, harassment, NSFW, spam, self-harm
-  |  Output: {category: score} + confidence
-  |
-  ├── High confidence SAFE (score < 0.05 all categories, conf > 0.95)
-  |     → PUBLISH immediately (65% of content)
-  |     → Log decision, async Tier 2 spot-check (1% sample)
-  |
-  ├── High confidence VIOLATION (score > 0.95 any category, conf > 0.95)
-  |     → ACTION immediately: remove / warn / restrict (15% of content)
-  |     → Log decision + reasoning
-  |     → User notified with violation category + appeal link
-  |
-  └── Borderline (confidence 0.4–0.95, or multi-category ambiguity)
-        → Queue for Tier 2 (15% of content)
-        → Content published with "under review" flag (or held, configurable)
-        |
-        v
-[Tier 2: LLM Judge] ─────── 500ms–2s, nuanced analysis
-  |  GPT-4o / Claude 3.5 Sonnet with policy prompt
-  |  Input: post + parent context + user history summary + community rules
-  |  Output: {verdict, category, severity, reasoning, confidence}
-  |
-  ├── LLM confident (confidence > 0.85)
-  |     → Execute decision (publish / remove / warn)
-  |     → Log with full reasoning chain
-  |
-  └── LLM uncertain OR high-severity category (CSAM, credible threats)
-        → Queue for Tier 3 (5% of content)
-        |
-        v
-[Tier 3: Human Review Queue] ─────── minutes to hours
-  |  Professional content moderators
-  |  AI-assisted: pre-populated context, suggested verdict, similar past decisions
-  |  Decision: approve / remove / escalate to Trust & Safety
-  |
-  v
-[Decision Execution Layer]
-  - Remove content / apply warning label / restrict account
-  - Notify user (with explanation + appeal link)
-  - Update user trust score
-  - Log to audit trail (immutable)
-  |
-  v
-[Feedback & Retraining Pipeline]
-  ┌─────────────────────────────────────────────────────────────┐
-  │  Human decisions → labeled training data                    │
-  │  Appeals outcomes → correction signal                       │
-  │  Tier 2 LLM verdicts (high confidence) → distillation data │
-  │  Weekly: retrain Tier 1 classifier on new labeled data      │
-  │  Monthly: evaluate Tier 2 prompt against new edge cases     │
-  │  Quarterly: full model retrain + A/B test rollout           │
-  └─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-[Appeals Workflow] (parallel path)
-  User contests decision
-    → Original post + AI explanation + community context
-    → Routed to human reviewer (different reviewer than original)
-    → Verdict: uphold / overturn
-    → If overturned: content restored, user trust score adjusted upward
-    → Appeals outcome feeds back into training data (high-value signal)
+    post([User Post]) --> gw[["API Gateway / CDN Edge"]]
+    gw --> pre["Pre-Processing Layer\ntext normalization · language detection (fastText, < 1ms) · PII redaction"]
+    pre --> t1["Tier 1: Fast Classifier\nDistilBERT multi-label · < 10ms · handles 80% of decisions"]
+    t1 --> conf{"Tier 1\nconfidence?"}
+    conf -->|"high-confidence SAFE\nscore < 0.05, conf > 0.95 (65%)"| pub(["PUBLISH immediately\nlog decision"])
+    conf -->|"high-confidence VIOLATION\nscore > 0.95, conf > 0.95 (15%)"| act["ACTION immediately: remove / warn / restrict\nuser notified + appeal link"]
+    conf -->|"borderline 0.4–0.95 (15%)\npublished with under-review flag"| t2["Tier 2: LLM Judge\nGPT-4o / Claude 3.5 Sonnet + policy prompt · 500ms–2s"]
+    pub -.->|"async spot-check (1% sample)"| t2
+    t2 --> t2conf{"LLM\nconfidence?"}
+    t2conf -->|"confident (> 0.85)\nexecute decision"| exec["Decision Execution Layer\nremove / warn / restrict · notify user\nupdate trust score · immutable audit trail"]
+    t2conf -->|"uncertain OR high-severity\n(CSAM, credible threats) (5%)"| t3["Tier 3: Human Review Queue\nAI-assisted moderators · minutes to hours"]
+    t3 --> exec
+    act --> exec
+    exec --> fb["Feedback & Retraining Pipeline\nhuman decisions + appeals outcomes + Tier 2 distillation\nweekly Tier 1 retrain · monthly Tier 2 prompt eval · quarterly A/B rollout"]
+    fb -.->|"retrained classifier"| t1
+    fb -.->|"updated policy prompt"| t2
 
-[Retroactive Scanning] (batch)
-  - Nightly: re-scan last 7 days of content with latest model version
-  - Catch: content that passed old model but fails new model
-  - Catch: evolving threats (new slurs, coded language, coordinated campaigns)
-  - Scale: 700M posts per nightly scan (parallelized across GPU cluster)
+    appeal([User contests decision]) --> arev["Appeals: independent human reviewer\nverdict: uphold / overturn (restore + trust score up)"]
+    arev -->|"high-value training signal"| fb
+
+    scan["Retroactive Scanning (nightly batch)\nre-scan last 7 days · 700M posts · latest model version"] -.-> t1
+
+    class post,pub io
+    class gw,appeal req
+    class pre,conf,t2conf mathOp
+    class t1,fb train
+    class t2 frozen
+    class t3,arev,scan base
+    class act,exec lossN
 ```
+
+The three-tier cascade fans out at each confidence gate: Tier 1 clears 80% of the 100M posts/day in < 10ms, Tier 2 reasons over the 15% borderline slice, and only 5% reaches human review. The dotted edges are the feedback loops — human decisions and appeals outcomes retrain Tier 1 weekly, which is what lets the classifier absorb more volume over time.
 
 ---
 

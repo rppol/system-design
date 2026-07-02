@@ -76,29 +76,30 @@ Related modules: [Inference and Decoding](../../inference_and_decoding/README.md
 
 ### SSE Fan-Out at Scale
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    vllm["vLLM Inference Cluster (GPUs)"] -->|"token queue\n30-100 tokens/sec"| gw["Streaming Gateway\n(FastAPI + asyncio)\nabort() on disconnect"]
+    gw -->|"SSE text/event-stream"| edge[["CDN Edge PoPs\n(Cloudflare / CF Workers)\nbuffer: 1000 tok · HWM backpressure"]]
+    edge --> c1(["Client 1 (broadband)\ndrain: fast"])
+    edge --> c2(["Client 2 (LTE, slow)\ndrain: slow"])
+    edge --> c3(["Client 3 (WiFi, fast)\ndrain: medium"])
+    edge --> cN(["... 10M clients"])
+
+    class vllm base
+    class gw train
+    class edge frozen
+    class c1,c2,c3,cN req
 ```
-  +-------------------+     token queue      +---------------------+
-  |  vLLM Inference   |  =================>  |  Streaming Gateway  |
-  |  Cluster (GPUs)   |  30-100 tokens/sec   |  (FastAPI + asyncio)|
-  |                   |                      |  abort() on discon. |
-  +-------------------+                      +----------+----------+
-                                                         |
-                                              SSE text/event-stream
-                                                         |
-                                              +----------v----------+
-                                              |  CDN Edge PoPs      |
-                                              |  (Cloudflare / CF   |
-                                              |  Workers)           |
-                                              |  Buffer: 1000 tok   |
-                                              |  HWM backpressure   |
-                                              +----------+----------+
-                                                         |
-                              +------------------+-------+--------+------------------+
-                              |                  |                |                  |
-                        Client 1           Client 2         Client 3          10M clients
-                        (broadband)        (LTE, slow)      (WiFi, fast)      (...)
-                        drain: fast        drain: slow       drain: medium
-```
+
+One GPU cluster produces tokens at 30-100/sec; the edge PoP layer absorbs each client's drain-rate variability behind a 1,000-token high-water-mark buffer, so a slow LTE client never stalls the GPU that 10M other clients share.
 
 ### Backpressure Flow
 
@@ -132,29 +133,25 @@ Related modules: [Inference and Decoding](../../inference_and_decoding/README.md
 
 ### Half-Open Connection Detection
 
+```mermaid
+sequenceDiagram
+    participant G as Gateway
+    participant C as Client (mobile, switched WiFi->LTE)
+
+    C->>G: SSE connection established
+    G->>C: data: token_1
+    G->>C: data: token_2
+    Note over C: network switch — TCP RST lost
+    G--xC: data: PING (t=0s) — delivered to dead socket
+    Note over G: no ACK from companion endpoint
+    G--xC: data: PING (t=15s)
+    Note over G: no ACK for 45s — half-open confirmed
+    G->>G: engine.abort(request_id)<br/>release GPU slot<br/>close asyncio generator
+    C->>G: reconnect from new IP with Last-Event-ID: 42
+    G->>C: resume from token 43 (replay window: Redis, 60s TTL)
 ```
-  Gateway                                    Client (mobile, switched WiFi->LTE)
-      |                                             |
-      |<----- SSE connection established ----------|
-      |                                             |
-      |--- data: token_1\n\n -------------------->|
-      |--- data: token_2\n\n -------------------->|
-      |                                             X (network switch, TCP RST lost)
-      |--- data: [PING]\n\n (t=0s) ------------>  X (delivered to dead socket)
-      |                                             |
-      |  [no ACK from companion endpoint]           |
-      |--- data: [PING]\n\n (t=15s) ----------->  X
-      |                                             |
-      |  [no ACK for 45s] — half-open confirmed    |
-      v
-  call engine.abort(request_id)
-  release GPU slot
-  close asyncio generator
-      |
-      | (client reconnects from new IP with Last-Event-ID: 42)
-      v
-  resume from token 43 (replay window: Redis, 60s TTL)
-```
+
+The heartbeat ACK loop is the only signal that survives a lost TCP RST: three missed pings (45s) bound the zombie stream's GPU cost, and the Redis replay window turns the client's eventual reconnect into a seamless resume instead of a double-billed regeneration.
 
 ---
 

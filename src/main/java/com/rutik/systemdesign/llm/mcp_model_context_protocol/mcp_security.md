@@ -97,34 +97,30 @@ Tool Description Injection Attack
   Calls weather_lookup AND exfiltrate_data
   
   Mitigation: only install trusted servers; review descriptions
+```
 
+**OAuth 2.1 Flow for Remote MCP Server**
 
-OAuth 2.1 Flow for Remote MCP Server
-=====================================
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant U as User
+    participant S as Server
 
-  +-----------+                      +----------+              +----------+
-  |  Client   |                      |   User   |              |  Server  |
-  +-----------+                      +----------+              +----------+
-        |                                 |                          |
-        |---redirect to /authorize?-----PKCE--->                     |
-        |                                 |                          |
-        |                                 |---user logs in--->       |
-        |                                 |                          |
-        |                                 |<--consent screen---      |
-        |                                 |                          |
-        |                                 |---approves scopes--->    |
-        |                                 |                          |
-        |<--code via redirect---|         |                          |
-        |                                 |                          |
-        |---POST /token (code, verifier)----------------------------->|
-        |                                                              |
-        |<--access_token (short-lived) + refresh_token ----------------|
-        |                                                              |
-        |---MCP calls with Bearer access_token---->                    |
-        |                                                              |
-        |<--results-------|
+    C->>U: redirect to /authorize? (PKCE)
+    U->>S: user logs in
+    S-->>U: consent screen
+    U->>S: approves scopes
+    U-->>C: code via redirect
+    C->>S: POST /token (code, verifier)
+    S-->>C: access_token (short-lived) + refresh_token
+    C->>S: MCP calls with Bearer access_token
+    S-->>C: results
+```
 
+The OAuth 2.1 authorization-code + PKCE flow that the 2025 MCP spec mandates for remote servers: the code verifier never leaves the client, and the short-lived access token (1-hour TTL is common) is the only credential the MCP server ever sees.
 
+```
 Defense in Depth
 =================
 

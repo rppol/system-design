@@ -72,62 +72,55 @@ Strategy by codebase size:
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    IDE(["Developer IDE (VS Code / JetBrains)\nExtension: file watcher · context collector\nlocal cache · WebSocket connection"])
+    EDGE["Edge Server (per-region, low latency)\nconnection management (WebSocket)\nauth token validation\npriority queue: completions > chat > agent"]
+
+    subgraph CORE["Core Services"]
+        COMP["Completion\nService"]
+        CHAT["Chat\nService"]
+        CTX["Context Assembly Service\ncodebase RAG (repo index)\nfile dependency graph\nopen tabs + recent edits\nLSP symbols (types, imports)"]
+        ORCH["Model Orchestrator\nInline: fast model (< 300ms)\nChat: quality model (GPT-4o)\nAgent: reasoning model (o3)"]
+        AGENT["Agent Engine\ntool execution (code runner)\nmulti-step planning\nerror recovery loop"]
+    end
+
+    RUNNER[["Code Runner\n(Docker sandboxes)"]]
+    WEB[["Web Search\n(docs, Stack Overflow)"]]
+    GIT[["Git Client\n(branch/commit operations)"]]
+    LINT[["Linter/Type Checker\n(ESLint, mypy)"]]
+    TEST[["Test Runner"]]
+
+    IDE --> EDGE
+    EDGE --> COMP
+    EDGE --> CHAT
+    COMP --> CTX
+    CHAT --> CTX
+    CTX --> ORCH
+    ORCH --> AGENT
+    AGENT --> RUNNER
+    AGENT --> WEB
+    AGENT --> GIT
+    AGENT --> LINT
+    AGENT --> TEST
+
+    class IDE io
+    class EDGE,COMP,CHAT req
+    class CTX mathOp
+    class ORCH base
+    class AGENT train
+    class RUNNER,WEB,GIT,LINT,TEST frozen
 ```
-Developer IDE (VS Code / JetBrains)
-  [Extension]
-    - File watcher (detect changes)
-    - Context collector (open files, cursor, git status)
-    - Local cache (recent completions, codebase index)
-    - WebSocket connection to backend
-         |
-         v
-[Edge Server] (per-region, low latency)
-  - Connection management (WebSocket)
-  - Auth token validation
-  - Request priority queue (completions > chat > agent)
-         |
-         v
-[Core Services]
-  ┌─────────────────────────────────────────────────┐
-  │                                                  │
-  │  ┌──────────────┐  ┌─────────────┐              │
-  │  │  Completion  │  │    Chat     │              │
-  │  │  Service     │  │  Service    │              │
-  │  └──────────────┘  └─────────────┘              │
-  │         |                 |                      │
-  │         v                 v                      │
-  │  ┌──────────────────────────────────┐            │
-  │  │       Context Assembly Service   │            │
-  │  │  - Codebase RAG (repo index)     │            │
-  │  │  - File dependency graph         │            │
-  │  │  - Open tabs + recent edits      │            │
-  │  │  - LSP symbols (types, imports)  │            │
-  │  └──────────────────────────────────┘            │
-  │                    |                              │
-  │                    v                              │
-  │  ┌──────────────────────────────────┐            │
-  │  │         Model Orchestrator       │            │
-  │  │  - Inline: fast model (< 300ms)  │            │
-  │  │  - Chat: quality model (GPT-4o)  │            │
-  │  │  - Agent: reasoning model (o3)   │            │
-  │  └──────────────────────────────────┘            │
-  │                    |                              │
-  │                    v                              │
-  │  ┌──────────────────────────────────┐            │
-  │  │         Agent Engine             │            │
-  │  │  - Tool execution (code runner)  │            │
-  │  │  - Multi-step planning           │            │
-  │  │  - Error recovery loop           │            │
-  │  └──────────────────────────────────┘            │
-  └─────────────────────────────────────────────────┘
-         |
-    [Tool Services]
-    - Code Runner (Docker sandboxes)
-    - Web Search (docs, Stack Overflow)
-    - Git Client (branch/commit operations)
-    - Linter/Type Checker (ESLint, mypy)
-    - Test Runner
-```
+
+Requests flow from the IDE extension through a per-region edge server whose priority queue orders completions (< 300ms budget) ahead of chat and agent traffic; both interactive services share one context assembly layer, and the agent engine fans out to five sandboxed tool services.
 
 ---
 

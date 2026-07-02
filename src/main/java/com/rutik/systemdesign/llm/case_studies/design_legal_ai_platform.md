@@ -116,90 +116,46 @@ Qdrant node capacity: ~10,000 QPS for HNSW search on 512-dim vectors
 
 ## 3. High-Level Architecture
 
-```
-Lawyer Browser / Word Add-in / REST API Client
-                    |
-                    v
-       +---------------------------+
-       |   API Gateway (mTLS)      |
-       |  - Firm API key auth      |
-       |  - JWT validation         |
-       |  - Per-firm rate limits   |
-       |  - TLS 1.3 termination    |
-       +---------------------------+
-                    |
-                    v
-       +---------------------------+
-       | Matter Context Enforcer   |
-       |  - injects firm_id        |
-       |  - injects matter_id      |
-       |  - validates JWT claims   |
-       |  - logs every request to  |
-       |    audit trail (Kafka)    |
-       +---------------------------+
-                    |
-       +------------+------------------+------------------+
-       |            |                  |                  |
-       v            v                  v                  v
-+----------+  +-----------+   +---------------+  +---------------+
-| Document |  |  Legal    |   |  Contract     |  |   Conflict    |
-|  Review  |  | Research  |   |  Redlining    |  |   Checker     |
-|  Engine  |  |  Engine   |   |  Engine       |  |               |
-+----------+  +-----------+   +---------------+  +---------------+
-       |            |                  |
-       +------------+------------------+
-                    |
-                    v
-       +---------------------------+
-       | Per-Matter Vector Store   |
-       |  (Qdrant, collection per  |
-       |   matter — no shared DB)  |
-       +---------------------------+
-                    |
-                    v
-       +---------------------------+
-       | Citation Verifier         |
-       |  - NLI entailment check   |
-       |  - LexisNexis/Westlaw API |
-       |  - Statute existence check|
-       +---------------------------+
-                    |
-                    v
-       +---------------------------+
-       | Response Assembler        |
-       |  - flags low-confidence   |
-       |  - formats citations      |
-       |  - attaches source links  |
-       +---------------------------+
-                    |
-                    v
-       +---------------------------+
-       | Audit Logger              |
-       |  (immutable Kafka → S3)   |
-       |  7-year retention         |
-       +---------------------------+
-                    |
-                    v
-             Lawyer Response
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Supporting systems (async, off critical path):
-  +-------------------+    +----------------------+
-  | Document Ingestion |    | Privilege Classifier |
-  | (PDF/Word → OCR → |    | (dual-model, human   |
-  |  chunk → embed →  |    |  review for changes) |
-  |  Qdrant)          |    +----------------------+
-  +-------------------+
-  +--------------------------------------+
-  | Legal Corpus Sync                    |
-  | LexisNexis / CourtListener updates  |
-  | nightly sync to internal corpus     |
-  +--------------------------------------+
-  +--------------------------------------+
-  | Eval Pipeline                        |
-  | weekly citation accuracy check      |
-  | hallucination rate monitoring       |
-  +--------------------------------------+
+    CLIENT([Lawyer Browser / Word Add-in / REST API Client]) --> GW["API Gateway (mTLS)\nFirm API key auth\nJWT validation\nPer-firm rate limits\nTLS 1.3 termination"]
+    GW --> MCE["Matter Context Enforcer\ninjects firm_id + matter_id\nvalidates JWT claims\nlogs every request to audit trail (Kafka)"]
+    MCE --> DR["Document Review\nEngine"]
+    MCE --> LR["Legal Research\nEngine"]
+    MCE --> CR["Contract Redlining\nEngine"]
+    MCE --> CC["Conflict Checker"]
+    DR --> VS["Per-Matter Vector Store\n(Qdrant, collection per matter — no shared DB)"]
+    LR --> VS
+    CR --> VS
+    VS --> CV["Citation Verifier\nNLI entailment check\nLexisNexis/Westlaw API\nStatute existence check"]
+    CV --> RA["Response Assembler\nflags low-confidence\nformats citations\nattaches source links"]
+    RA --> AL["Audit Logger\n(immutable Kafka → S3)\n7-year retention"]
+    AL --> RESP([Lawyer Response])
+
+    subgraph async["Supporting systems (async, off critical path)"]
+        ING["Document Ingestion\nPDF/Word → OCR → chunk → embed → Qdrant"]
+        PC["Privilege Classifier\ndual-model, human review for changes"]
+        LCS["Legal Corpus Sync\nLexisNexis / CourtListener updates\nnightly sync to internal corpus"]
+        EP["Eval Pipeline\nweekly citation accuracy check\nhallucination rate monitoring"]
+    end
+
+    class CLIENT,RESP io
+    class GW,MCE req
+    class DR,LR,CR,CC,RA train
+    class VS base
+    class CV mathOp
+    class AL,ING,PC,LCS,EP frozen
 ```
+
+Every request passes the Matter Context Enforcer before fanning out to the four engines; the three generation paths re-converge on the per-matter vector store and must clear the synchronous Citation Verifier (~280 ms overhead) before the Audit Logger emits the immutable 7-year record.
 
 ### Multi-Region Topology
 

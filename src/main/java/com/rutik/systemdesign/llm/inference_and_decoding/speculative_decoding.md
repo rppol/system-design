@@ -61,12 +61,12 @@ Spectrum of engineering cost vs. acceptance: prompt-lookup (zero cost, narrow ap
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    Prefix([Prefix: "The capital"]) --> Draft
+    Prefix(["Prefix: 'The capital'"]) --> Draft
     Draft["Draft model (1B, fast)\nGenerates K=5 tokens autoregressively\n5 sequential forward passes, each tiny\nCandidate: 'of France is Paris .'"] --> Target
     Target["Target model (70B)\nVerifies ALL 5 tokens in ONE pass\n(prefill-shaped: parallel positions)\ncompare p_target vs q_draft per position"] --> Verdict{"accept or\nreject?"}
     Verdict -- "Accept 4/5: 'of France is Paris'" --> Accept["Advance 4 tokens"]
     Verdict -- "Reject '.'" --> Resample["Resample from residual\ntarget emits corrected token"]
-    Accept --> Net([Net: 5 tokens for cost of\n1 target pass + 5 cheap draft passes])
+    Accept --> Net(["Net: 5 tokens for cost of\n1 target pass + 5 cheap draft passes"])
     Resample --> Net
 
     classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf

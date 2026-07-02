@@ -157,9 +157,13 @@ Assistant: Based on the provided context, Paris is the capital of France.
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 55}}}%%
 flowchart TD
-    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Q([User Query]) --> QP["Query Processing\nrewrite · expand · decompose"]
     QP --> RET["Retrieval\nDense: embed → ANN\nSparse: BM25\nMerge via RRF → top-100"]
@@ -169,17 +173,21 @@ flowchart TD
     GEN --> ANS(["Response + Source Citations"])
 
     class Q,ANS io
-    class QP,RET,RNK,CA proc
-    class GEN llm
+    class QP,RET,RNK,CA train
+    class GEN frozen
 ```
 
 ### Indexing Pipeline
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 55}}}%%
 flowchart TD
-    classDef io    fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef proc  fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef store fill:#e5c07b,stroke:#d4a017,color:#1a1a1a
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     DOCS(["Documents\nPDFs · HTML · Docs · DBs"]) --> PARSE["Parsing & Extraction\npdfminer · BeautifulSoup\nhandle tables + figures"]
     PARSE --> CHUNK["Chunking\nsemantic / paragraph / hierarchical\nadd metadata: source, page, section"]
@@ -187,29 +195,32 @@ flowchart TD
     EMBED --> VDB[("Vector DB Upsert\n{chunk_id, embedding, metadata, text}\nHNSW index for fast ANN search")]
 
     class DOCS io
-    class PARSE,CHUNK,EMBED proc
-    class VDB store
+    class PARSE,CHUNK,EMBED train
+    class VDB base
 ```
 
 ### Query Routing (Multi-Source)
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 50}}}%%
 flowchart TD
-    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef decide fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef search fill:#56b6c2,stroke:#1a8fa0,color:#1a1a1a
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Q([User Query]) --> R{Query Router}
+    Q([User Query]) --> R{"Query Router"}
     R -->|"'What is X?' (factual)"| KB["Knowledge Base RAG"]
     R -->|"'Find order #12345'"| SQL["SQL Database"]
     R -->|"'Current stock price?'"| WEB["Web Search API"]
     R -->|"'Summarize last meeting'"| MN["Meeting Notes RAG"]
 
     class Q io
-    class R decide
-    class KB,MN proc
-    class SQL,WEB search
+    class R mathOp
+    class KB,MN train
+    class SQL,WEB req
 ```
 
 ---

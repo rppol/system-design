@@ -100,43 +100,42 @@ Unit economics:
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CL(["Client (Web/API)"])
+    GW["API Gateway\nauth, rate-limit, plan enforcement"]
+    JS["Job Scheduler\nRedis-backed priority queue,\njob state machine, ETA estimation"]
+    TTS["TTS Service\n(A10G fleet)"]
+    LIP["Lip-sync Renderer\n(A10G)"]
+    COMP["Compositor\n(FFmpeg GPU)"]
+    S3[["Asset Store (S3)\naudio/, base_video/, rendered/,\nfinal/, avatar_profiles/"]]
+    CDN[["CDN\n(CloudFront / Fastly)"]]
+    PLAYER([Client Player])
+
+    CL --> GW --> JS
+    JS --> TTS
+    JS --> LIP
+    JS --> COMP
+    TTS --> S3
+    LIP --> S3
+    COMP --> S3
+    S3 --> CDN --> PLAYER
+
+    class CL,PLAYER io
+    class GW,JS req
+    class TTS,LIP,COMP base
+    class S3,CDN frozen
 ```
-                          +-------------------+
-                          |   Client (Web/API) |
-                          +--------+----------+
-                                   |
-                          +--------v----------+
-                          |    API Gateway     |  auth, rate-limit, plan enforcement
-                          +--------+----------+
-                                   |
-                +------------------v--------------------+
-                |           Job Scheduler               |
-                |  (Redis-backed priority queue,        |
-                |   job state machine, ETA estimation)  |
-                +----+----------+-----------+-----------+
-                     |          |           |
-           +---------v---+ +----v----+ +----v---------+
-           | TTS Service | | Lip-sync | | Compositor   |
-           | (A10G fleet)| | Renderer | | (FFmpeg GPU) |
-           +------+------+ | (A10G)   | +------+-------+
-                  |        +----+-----+        |
-                  |             |              |
-                  +------+------+              |
-                         |                    |
-               +---------v--------------------v-+
-               |        Asset Store (S3)         |
-               |  audio/, base_video/, rendered/, |
-               |  final/, avatar_profiles/        |
-               +------------------+--------------+
-                                  |
-                         +--------v--------+
-                         |      CDN         |  (CloudFront / Fastly)
-                         +--------+--------+
-                                  |
-                         +--------v--------+
-                         |  Client Player   |
-                         +-----------------+
-```
+
+The Job Scheduler fans each job out across the three GPU stages (TTS, lip-sync, compositing); all three stages read and write the shared S3 asset store, and the finished MP4 is delivered to the client player through the CDN.
 
 ### Pipeline Stage Dependency Diagram
 ```

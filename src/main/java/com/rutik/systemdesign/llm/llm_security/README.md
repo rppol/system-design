@@ -219,6 +219,14 @@ Human-readable as the original text, but string matching for "Ignore previous in
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Input([User Input]) --> L1
     L1["Layer 1: Input Gateway\n– Rate limiting\n– Unicode normalization\n– Invisible char removal\n– Known attack pattern detection (regex + ML)\n– Input length validation"] --> L2
     L2["Layer 2: Prompt Construction\n– System prompt with security instructions\n– User input delimited: user…/user\n– Canary tokens injected\n– Context window managed"] --> L3
@@ -226,57 +234,52 @@ flowchart TD
     L4["Layer 4: Output Filter\n– PII detection (regex + NER)\n– System prompt leak detection\n– Canary token monitoring\n– Schema validation\n– Toxicity/harm filter"] --> L5
     L5["Layer 5: Monitoring & Audit\n– Log all inputs/outputs\n– Anomaly detection\n– Abuse pattern alerting\n– Compliance audit trail"] --> Out([Sanitized Response to User])
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
-    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
-
     class Input,Out io
-    class L1,L2,L4 warn
-    class L3 llm
-    class L5 store
+    class L1,L2,L4 mathOp
+    class L3 base
+    class L5 req
 ```
 
 No single layer stops all attack classes — GCG bypasses input filters (gibberish), AutoDAN bypasses perplexity filters (fluent), and indirect injection bypasses everything above Layer 2 entirely.
 
 ### Attack Surface Map of a Typical LLM Application
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    USER([User\ndirect prompt inject])
+    EXT([External Sources\nweb, docs, email, PDFs, APIs])
+    HUB([Model Hub\nsupply chain])
+    TRAIN([Training Data\npoison])
+    RAG["RAG / Retrieval Layer\n– Vector DB\n– Document store\n– Search index"]
+    LOAD["Model Loading\n– Weights (pickle risk)\n– Tokenizer\n– Config files"]
+    FT["Fine-tuning Pipeline\n– Data loaders\n– Dependencies"]
+    LLM["LLM\n(model theft,\ndata extraction)"]
+    TOOLS[["Tools & Actions\n– DB ops\n– APIs\n– File system"]]
+    ESC(["Privilege escalation,\nunauthorized actions"])
+
+    USER --> RAG
+    EXT -->|"Indirect Prompt Injection"| RAG
+    RAG --> LLM
+    HUB --> LOAD --> LLM
+    TRAIN --> FT --> LLM
+    LLM --> TOOLS --> ESC
+
+    class USER,EXT,HUB,TRAIN req
+    class RAG,LOAD,FT mathOp
+    class LLM base
+    class TOOLS frozen
+    class ESC lossN
 ```
-                    +---------------------+
-                    |   External Sources  |
-                    | (web, docs, email,  |
-                    |  PDFs, APIs)        |
-                    +----------+----------+
-                               |
-                    Indirect Prompt Injection
-                               |
-                               v
-+----------+        +----------+----------+        +-----------+
-|   User   | -----> | RAG / Retrieval     | -----> |           |
-| (Direct  |        | Layer               |        |           |
-|  Prompt  |        | - Vector DB         |        |   LLM     |
-|  Inject) |        | - Document store    |        |  (model   |
-+----------+        | - Search index      |        |   theft,  |
-                    +---------------------+        |   data    |
-                                                   |   extrac- |
-+----------+        +---------------------+        |   tion)   |
-| Model    | -----> | Model Loading       |        |           |
-| Hub      |        | - Weights (pickle   |        +-----------+
-| (supply  |        |   risk)             |              |
-|  chain)  |        | - Tokenizer         |              v
-+----------+        | - Config files      |        +-----------+
-                    +---------------------+        |  Tools &  |
-                                                   |  Actions  |
-+----------+        +---------------------+        | - DB ops  |
-| Training | -----> | Fine-tuning         |        | - APIs    |
-| Data     |        | Pipeline            |        | - File    |
-| (poison) |        | - Data loaders      |        |   system  |
-+----------+        | - Dependencies      |        +-----------+
-                    +---------------------+              |
-                                                  Privilege escalation,
-                                                  unauthorized actions
-```
+
+Four independent entry paths — user input, retrieved content, model weights, and training data — all converge on the same LLM, and the blast radius extends through every tool the model can call.
 
 ---
 

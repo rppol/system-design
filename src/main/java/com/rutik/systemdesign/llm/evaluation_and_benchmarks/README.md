@@ -228,10 +228,13 @@ Instruction-following bias: prefers well-formatted responses regardless of accur
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
-    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     NEW["New Model / Prompt Change"]
     BENCH["Automated Benchmark Suite\nMMCL / domain (knowledge)\nHumanEval / SWE-bench (code)\nRAGAs (RAG) · safety (AdvBench, WildGuard)"]
@@ -245,11 +248,9 @@ flowchart TD
     AB -->|"all gates pass"| PASS
     AB -->|"fails any gate"| FAIL
 
-    class NEW io
-    class BENCH,REG,HUM proc
-    class AB decide
-    class PASS io
-    class FAIL warn
+    class NEW,PASS io
+    class BENCH,REG,HUM,AB mathOp
+    class FAIL lossN
 ```
 
 ---

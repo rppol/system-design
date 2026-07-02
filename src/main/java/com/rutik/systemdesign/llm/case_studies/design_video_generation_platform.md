@@ -121,89 +121,63 @@ GPU pod fleet at peak:
 ## 3. High-Level Architecture
 
 ### Primary System Diagram
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    USER(["User (browser / API client)"])
+    GW["API Gateway\nmTLS / API key auth\nrate limiting (tier)\nrequest normalization"]
+    MOD["Content Moderator (pre-gen)\nNSFW text check"]
+    QUEUE["Job Queue Service\nRedis sorted set\nper priority tier"]
+    SCHED["Job Scheduler\nassigns GPU pods\ntier SLA enforcement"]
+    PREM["PREMIUM GPU pool\n8x H100 · 50 pods\nSLA 5m"]
+    STD["STANDARD GPU pool\n8x H100 · 200 pods\nSLA 15m"]
+    FREE["FREE GPU pool\n4x H100 4-bit\nSLA 60m"]
+    DIT["DiT Inference Pod\n1. T5 text encode\n2. DiT denoise (50 steps, TP=8)\n3. VAE decode\n4. H.264 encode"]
+    SSIM["Temporal Consistency Checker\nSSIM per frame"]
+    C2PA["C2PA Watermarker\ninvisible embed + metadata sign"]
+    S3[["Object Store (S3)\nmp4 + thumb"]]
+    CDN[["CDN (CloudFront)"]]
+    NOTIF["Webhook / SSE Notifier"]
+    PULL(["User pulls pre-signed URL\n(24h TTL)"])
+    EVENT(["User receives completion event\n+ pre-signed URL"])
+
+    USER --> GW
+    GW --> MOD
+    GW --> QUEUE
+    MOD -->|"PASS"| SCHED
+    QUEUE --> SCHED
+    SCHED --> PREM
+    SCHED --> STD
+    SCHED --> FREE
+    PREM --> DIT
+    STD --> DIT
+    FREE --> DIT
+    DIT --> SSIM
+    DIT --> C2PA
+    SSIM --> S3
+    C2PA --> S3
+    S3 --> CDN
+    S3 --> NOTIF
+    CDN --> PULL
+    NOTIF --> EVENT
+
+    class USER,PULL,EVENT io
+    class GW,QUEUE,NOTIF req
+    class MOD lossN
+    class SCHED,SSIM,C2PA mathOp
+    class PREM,STD,FREE base
+    class DIT train
+    class S3,CDN frozen
 ```
-User (browser / API client)
-           |
-           v
-+---------------------------+
-|      API Gateway          |
-|  - mTLS / API key auth    |
-|  - rate limiting (tier)   |
-|  - request normalization  |
-+---------------------------+
-           |
-    +------+------+
-    |              |
-    v              v
-+----------+  +-------------------+
-| Content  |  |  Job Queue Service|
-| Moderator|  |  (Redis sorted set|
-| (pre-gen)|  |   per priority    |
-| NSFW text|  |   tier)           |
-| check    |  +-------------------+
-+----------+          |
-    |                 v
-    | PASS    +---------------+
-    +-------->| Job Scheduler |
-              | - assigns GPU |
-              |   pods        |
-              | - tier SLA    |
-              |   enforcement |
-              +---------------+
-                      |
-          +-----------+-----------+
-          |           |           |
-          v           v           v
-   +----------+ +----------+ +----------+
-   | PREMIUM  | | STANDARD | | FREE     |
-   | GPU pool | | GPU pool | | GPU pool |
-   | (8xH100) | | (8xH100) | | (4xH100  |
-   |  50 pods | | 200 pods | |  4-bit)  |
-   |  SLA 5m  | | SLA 15m  | | SLA 60m  |
-   +----------+ +----------+ +----------+
-          |           |           |
-          +-----------+-----------+
-                      |
-                      v
-          +----------------------+
-          |  DiT Inference Pod   |
-          |  1. T5 text encode   |
-          |  2. DiT denoise      |
-          |     (50 steps, TP=8) |
-          |  3. VAE decode       |
-          |  4. H.264 encode     |
-          +----------------------+
-                      |
-           +----------+----------+
-           |                     |
-           v                     v
-  +------------------+  +-------------------+
-  | Temporal         |  | C2PA Watermarker  |
-  | Consistency      |  | (invisible embed  |
-  | Checker          |  |  + metadata sign) |
-  | (SSIM per frame) |  +-------------------+
-  +------------------+          |
-           |                    |
-           +----------+---------+
-                      |
-                      v
-               +-------------+
-               | Object Store|
-               | (S3)        |
-               | mp4 + thumb |
-               +-------------+
-                      |
-               +------+------+
-               |             |
-               v             v
-            CDN          Webhook /
-         (CloudFront)    SSE Notifier
-               |             |
-               v             v
-           User pulls    User receives
-           pre-signed    completion event
-           URL (24h TTL) + pre-signed URL
-```
+
+The gateway fans each submission into a pre-generation moderation check and a per-tier Redis priority queue; only PASS jobs reach the scheduler, which dispatches to dedicated PREMIUM/STANDARD/FREE pod pools (SLA 5m/15m/60m) before the DiT pipeline, consistency and watermark stages, and S3 → CDN/webhook delivery.
 
 ### Video Generation Pipeline Diagram
 ```

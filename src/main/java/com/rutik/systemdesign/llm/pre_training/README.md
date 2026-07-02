@@ -132,9 +132,13 @@ Properties:
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef store fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     WEB["Web Crawls\n(Common Crawl)"]
     BOOKS["Books\n(Books3, Project Gutenberg)"]
@@ -152,8 +156,8 @@ flowchart TD
     DEDUP --> FILTER --> MIX --> PACK --> TRAIN
 
     class WEB,BOOKS,CODE,SCI,WIKI io
-    class DEDUP,FILTER,MIX,PACK proc
-    class TRAIN store
+    class DEDUP,FILTER,MIX,PACK mathOp
+    class TRAIN train
 ```
 
 ~3–5 % of raw Common Crawl survives quality filtering; high-quality sources (Wikipedia, curated books) are oversampled to compensate for their small volume.
@@ -862,36 +866,31 @@ A software tooling company wants to pre-train a 7B parameter code-specialized LL
 
 **Data Curation Pipeline**
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    GH(["GitHub\n(500B tokens)"]) --> LIC["License Filter\nRemove GPL/AGPL\nKeep MIT/Apache/BSD"]
+    SE(["Stack Exchange\n(40B)"]) --> SCORE["Score Filter\nKeep score >= 3\nRemove non-code Q&A"]
+    IC(["Internal Codebase\n(8B)"]) --> DEDUP["Deduplication\nMinHash LSH\nJaccard >= 0.85 → drop"]
+    LIC --> LANG
+    SCORE --> LANG
+    DEDUP --> LANG["Language Detection\nlangdetect, pycld3\nKeep: Python, Java, Go, SQL, Bash, JS, TS"]
+    LANG --> QUAL["Quality Scoring\nline length (under 1000) · comment ratio (0.05–0.5)\nfunction density · perplexity filter · AST parse success"]
+    QUAL --> DEDUP2["Near-Dedup Pass 2\nBM25 + SimHash\nfile-level + chunk-level, removes copy-paste code"]
+    DEDUP2 --> CORPUS(["Final Corpus: 400B tokens\nPython 38%, Java 22%,\nGo 14%, SQL 9%, other 17%"])
+
+    class GH,SE,IC,CORPUS io
+    class LIC,SCORE,DEDUP,LANG,QUAL,DEDUP2 mathOp
 ```
-Raw Data Sources
-  GitHub (500B tokens)     Stack Exchange (40B)     Internal Codebase (8B)
-         |                        |                         |
-         v                        v                         v
-  [License Filter]         [Score Filter]           [Deduplication]
-  Remove GPL/AGPL          Keep score >= 3          MinHash LSH
-  Keep MIT/Apache/BSD      Remove non-code Q&A      Jaccard >= 0.85 → drop
-         |                        |                         |
-         └──────────────┬─────────────────────────────────-┘
-                        v
-               [Language Detection]      ─── langdetect, pycld3
-               Keep: Python, Java,
-               Go, SQL, Bash, JS, TS
-                        |
-                        v
-               [Quality Scoring]         ─── heuristics:
-               - line length (< 1000)         perplexity filter
-               - comment ratio (0.05–0.5)     code:comment balance
-               - function density             AST parse success
-                        |
-                        v
-               [Near-Dedup Pass 2]       ─── BM25 + SimHash
-               File-level + chunk-level  removes copy-paste code
-                        |
-                        v
-               [Final Corpus: 400B tokens]
-               Python 38%, Java 22%,
-               Go 14%, SQL 9%, other 17%
-```
+
+Each raw source passes its own source-specific filter (license, score, or dedup) before the merged stream goes through language detection, quality scoring, and a second near-dedup pass — reducing ~548B raw tokens to the final 400B-token corpus.
 
 **Architecture Overview**
 

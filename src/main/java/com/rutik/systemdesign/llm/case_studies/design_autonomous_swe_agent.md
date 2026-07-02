@@ -151,32 +151,35 @@ Fleet at 70% utilization target:
 ```
 
 ### Self-Correction Sub-Loop
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    GEN["generate patch"] --> APPLY["apply to sandbox"]
+    APPLY --> RUN["run test suite"]
+    RUN --> PASS{"all pass?"}
+    PASS -->|"Yes"| PR([open PR])
+    PASS -->|"No"| PARSE["parse failures\n(failing test names + error messages)"]
+    PARSE --> FIX["ask LLM to fix specific failures\n(inject error into context)"]
+    FIX --> INC["iter_count++"]
+    INC --> ITER{"iter_count > 5?"}
+    ITER -->|"Yes"| FAILED([mark FAILED])
+    ITER -.->|"No — loop back"| APPLY
+
+    class GEN,FIX base
+    class APPLY,RUN,PARSE,INC mathOp
+    class PASS,ITER mathOp
+    class PR io
+    class FAILED lossN
 ```
-  generate patch
-        |
-        v
-  apply to sandbox
-        |
-        v
-  run test suite ──→ all pass? ──→ Yes ──→ open PR
-        |
-       No
-        |
-        v
-  parse failures
-  (failing test names + error messages)
-        |
-        v
-  ask LLM to fix specific failures
-  (inject error into context)
-        |
-        v
-  iter_count++ ──→ iter_count > 5? ──→ Yes ──→ mark FAILED
-        |
-       No
-        |
-        └──→ apply patch → run tests (loop back)
-```
+
+Each No-branch loops back through apply → test with the specific failure messages injected into context; the loop is bounded at 5 iterations (and a $5 correction-spend bail) before the task is marked FAILED.
 
 See also: [Agent Durability Patterns](./cross_cutting/agent_durability_patterns.md) for checkpoint-per-tool-call design.
 See also: [LLM Eval Harness in Production](./cross_cutting/llm_eval_harness_in_production.md) for SWE-bench integration.

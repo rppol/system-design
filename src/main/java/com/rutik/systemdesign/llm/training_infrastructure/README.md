@@ -42,9 +42,13 @@ Each GPU holds a full copy of the model; each processes a different batch. Gradi
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart LR
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     G0["GPU 0\nmodel copy\nbatch_0 → grad_0"]
     G1["GPU 1\nmodel copy\nbatch_1 → grad_1"]
@@ -55,9 +59,8 @@ flowchart LR
 
     G0 & G1 & G2 & G3 --> AR --> UP
 
-    class G0,G1,G2,G3 proc
-    class AR decide
-    class UP io
+    class G0,G1,G2,G3 train
+    class AR,UP mathOp
 ```
 
 **Problem**: For a 70B model in BF16, each GPU needs ~140GB just for model weights. No single GPU has that much memory.

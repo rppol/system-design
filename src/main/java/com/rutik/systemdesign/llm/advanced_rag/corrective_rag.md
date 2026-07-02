@@ -188,11 +188,13 @@ def crag_pipeline(
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
 flowchart TD
-    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef decide fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef search fill:#56b6c2,stroke:#1a8fa0,color:#1a1a1a
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Q([User Query]) --> KBR["Knowledge Base Retrieval"]
     KBR --> RE{"Relevance Evaluator\nscore each doc (0.0–1.0)"}
@@ -208,10 +210,10 @@ flowchart TD
     GEN3 --> ANS
 
     class Q,ANS io
-    class KBR,CR,PF,CB proc
-    class RE decide
-    class GEN1,GEN2,GEN3 llm
-    class WS search
+    class KBR,CR,PF,CB train
+    class RE mathOp
+    class GEN1,GEN2,GEN3 frozen
+    class WS req
 ```
 
 ### CRAG vs. Standard RAG

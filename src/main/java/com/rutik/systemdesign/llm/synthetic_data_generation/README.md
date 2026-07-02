@@ -205,13 +205,14 @@ Effective when you have high-quality outputs (expert documentation, verified cod
 ### Self-Instruct Pipeline
 
 ```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
-    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
-    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     SEED["Seed Instructions\n175 human-written examples"]
     SAMPLE["Sample 6 seeds"]
@@ -232,11 +233,10 @@ flowchart TD
     LOOP -->|"no"| SAMPLE
     LOOP -->|"yes"| FINAL
 
-    class SEED,FINAL io
-    class SAMPLE,GEN,RESP proc
-    class SIM,QUAL,LOOP decide
-    class DISCARD warn
-    class ADD store
+    class SEED,ADD,FINAL io
+    class SAMPLE,SIM,QUAL,LOOP mathOp
+    class GEN,RESP base
+    class DISCARD lossN
 ```
 
 The feedback loop from pool back to sample is what makes Self-Instruct self-reinforcing: as the pool grows, the 6 sampled seeds become increasingly diverse, steering generation away from already-covered topics.
@@ -244,11 +244,14 @@ The feedback loop from pool back to sample is what makes Self-Instruct self-rein
 ### Quality Filtering Pipeline
 
 ```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef store fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     RAW["Raw Generated Data\n1M examples"]
     DEDUP["Deduplication\nMinHash near-dedup + exact dedup\n→ removes ~40 %"]
@@ -259,9 +262,9 @@ flowchart TD
 
     RAW --> DEDUP --> SCORE --> DIV --> HUMAN --> FINAL
 
-    class RAW io
-    class DEDUP,SCORE,DIV,HUMAN proc
-    class FINAL store
+    class RAW,FINAL io
+    class DEDUP,SCORE,DIV mathOp
+    class HUMAN req
 ```
 
 ---

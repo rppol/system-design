@@ -262,10 +262,13 @@ trainer.train()
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef store fill:#1e2127,stroke:#56b6c2,color:#abb2bf
-    classDef llm   fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph IDX ["Index Time"]
         CHUNKS["Document chunks"]
@@ -287,10 +290,11 @@ flowchart TD
 
     VDB --> ANN
 
-    class CHUNKS,Q io
-    class EMB_I,EMB_Q,VECS,QVEC,ANN,RERANK proc
-    class VDB store
-    class LLM llm
+    class CHUNKS,VECS,QVEC io
+    class Q req
+    class EMB_I,EMB_Q,LLM base
+    class ANN,RERANK mathOp
+    class VDB frozen
 ```
 
 Using a different embedding model at query time than at index time is the most common RAG production bug — vectors live in incompatible spaces and similarity scores are meaningless.

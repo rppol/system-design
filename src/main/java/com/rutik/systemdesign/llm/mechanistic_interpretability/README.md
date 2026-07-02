@@ -165,8 +165,15 @@ These methods use interpretability findings to *change* model behavior at infere
 ### 5.2 Sparse Autoencoder (SAE) Architecture
 
 ```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Input(["Layer L activations\nx ∈ R^d_model"]) --> Enc
     Enc["W_enc (d_sae × d_model)\n+ b_enc\nz = W_enc · x + b_enc"] --> Sparse
     Sparse["Sparsity-inducing nonlinearity\n– ReLU + L1 penalty\n– TopK (keep top k)\n– JumpReLU (per-feature threshold)\n– Gated (separate gate/magnitude)"] --> Codes
@@ -174,15 +181,10 @@ flowchart TD
     Dec["W_dec (d_model × d_sae)\n+ b_dec"] --> Output(["Reconstruction x_hat ∈ R^d_model"])
     Codes & Output --> Loss["Loss = ||x – x_hat||² + sparsity_term(f(x))"]
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
-
-    class Input,Output io
-    class Enc,Dec proc
-    class Sparse,Loss store
-    class Codes llm
+    class Input,Output,Codes io
+    class Enc,Dec train
+    class Sparse mathOp
+    class Loss lossN
 ```
 
 Each nonzero entry i in f(x) means "feature i (column i of W_dec) is active with that strength" — the dictionary columns are interpretable concepts like "token follows a colon" or "emotional content: fear".
@@ -190,8 +192,15 @@ Each nonzero entry i in f(x) means "feature i (column i of W_dec) is active with
 ### 5.3 Activation Patching Workflow
 
 ```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Clean(["CLEAN run\n'The Eiffel Tower is in the city of'"]) --> CleanRun["Run all layers\nL0→L1→L2→…\nCache activations at every (layer, pos)"]
     Corrupt(["CORRUPTED run\n'The Colosseum is in the city of'"]) --> CorruptRun["Run normally\nCollect logits → 'Rome'"]
     CleanRun -- "activation at (L2, pos=subject)" --> Patch
@@ -201,16 +210,9 @@ flowchart TD
     Judge -- YES --> Causal(["(L2, pos=subject) causally encodes\n'city associated with subject'"])
     Judge -- NO --> Skip(["Layer / position not causal for this task"])
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
-
-    class Clean,Corrupt,Causal,Skip io
-    class CleanRun,CorruptRun proc
-    class Patch llm
-    class NewLogits proc
-    class Judge decide
+    class Clean,Corrupt,NewLogits,Causal,Skip io
+    class CleanRun,CorruptRun frozen
+    class Patch,Judge mathOp
 ```
 
 Patching every (layer, position) pair and plotting the logit-diff shift produces a "patching heatmap" that localizes the relevant computation in the network.
@@ -992,37 +994,32 @@ handle = production_model.model.layers[41].register_forward_hook(
 
 ### Production Architecture with Interpretability Monitor
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q(["User query (long-tail SKU)"]) --> M["Llama-3-70B\n(vLLM serving)"]
+    M --> Gen(["generation continues"])
+    M -.->|"layer 41 forward hook"| Mon["Feature-18331 monitor\n(proj onto SAE decoder dir)"]
+    Mon --> D{"activation > 3.0 AND\norder_count < 50 ?"}
+    D -->|"yes"| RAG[["RAG fallback:\nretrieve actual policy record"]]
+    D -->|"no — return generation as-is"| Gen
+    Gen --> R([Final response to user])
+    RAG --> R
+
+    class Q,Gen,R io
+    class M base
+    class Mon,D mathOp
+    class RAG frozen
 ```
-   User query (long-tail SKU)
-        |
-        v
-  +------------------+
-  |  Llama-3-70B      |  layer 41 forward hook
-  |  (vLLM serving)   |--------+
-  +------------------+         |
-        |                       v
-        |              +-------------------+
-        |              | Feature-18331      |
-        |              | monitor (proj onto |
-        |              | SAE decoder dir)   |
-        |              +-------------------+
-        |                       |
-        |               activation > 3.0 AND
-        |               order_count < 50 ?
-        |                  |          |
-        |                 yes         no
-        v                  |          |
-  (generation continues)   v          v
-        |          +---------------+  (return
-        |          | RAG fallback:  |   generation
-        |          | retrieve actual|   as-is)
-        |          | policy record  |
-        |          +---------------+
-        |                  |
-        +<-----------------+
-        v
-  Final response to user
-```
+
+When the feature-18331 projection exceeds 3.0 on a long-tail SKU (order_count < 50), the pipeline suppresses the model's confident generation and answers from the actual policy database instead — the +4ms hook cost that cuts fabrication from 18% to 2.1% in the results below.
 
 ### Results
 

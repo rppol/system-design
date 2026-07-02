@@ -263,6 +263,9 @@ flowchart LR
     classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
     classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
     classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph tr["During Training"]
         x1([x]) --> W["W\nfrozen — no gradient"]
@@ -298,6 +301,8 @@ flowchart LR
     classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
     classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
     classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     x([x]) --> Wx["W·x\nfrozen"]
     x --> A["A matrix\ntrainable"]
@@ -327,9 +332,13 @@ memory cost relative to full fine-tuning.
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 60}}}%%
 flowchart LR
-    classDef request fill:#56b6c2,stroke:#1a8fa0,color:#1a1a1a
-    classDef baseM   fill:#e5c07b,stroke:#d4a017,color:#1a1a1a,font-weight:bold
-    classDef adapter fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     r1["request  tag: sql"]
     r2["request  tag: chat"]
@@ -349,9 +358,9 @@ flowchart LR
     base --> a3
     base --> a4
 
-    class r1,r2,r3,r4 request
-    class base baseM
-    class a1,a2,a3,a4 adapter
+    class r1,r2,r3,r4 req
+    class base base
+    class a1,a2,a3,a4 train
 ```
 
 The 14 GB base model loads once; each adapter is just its B and A matrices (~130 MB).
@@ -519,11 +528,13 @@ A: LoRA's frozen base weights are the primary defense against forgetting — gen
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 65}}}%%
 flowchart TD
-    classDef dataC   fill:#56b6c2,stroke:#1a8fa0,color:#1a1a1a
-    classDef modelC  fill:#e5c07b,stroke:#d4a017,color:#1a1a1a,font-weight:bold
-    classDef adapterC fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef servingC fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef metricC  fill:#d19a66,stroke:#e67e22,color:#1a1a1a
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph dp["  Data Pipeline  "]
         t["5,000 support tickets"] --> ip["instruction pairs\ninput: ticket text  →  output: JSON response"]
@@ -546,11 +557,11 @@ flowchart TD
     ft --> sv
     sv --> ev
 
-    class t,ip,ds dataC
-    class bm modelC
-    class ad,sa,oa adapterC
-    class sh servingC
-    class e1,e2,e3,e4 metricC
+    class t,ip,ds req
+    class bm base
+    class ad,sa,oa train
+    class sh frozen
+    class e1,e2,e3,e4 mathOp
 ```
 
 **Key Design Decisions**:

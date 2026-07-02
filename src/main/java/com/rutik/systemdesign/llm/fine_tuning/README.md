@@ -143,11 +143,14 @@ PEFT Methods:
 ### LoRA Applied to a Transformer
 
 ```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart LR
-    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     X["Input x\n(d_model)"]
     W["Frozen W\ngradient = 0\npre-trained weights"]
@@ -162,9 +165,9 @@ flowchart LR
     SUM --> OUT
 
     class X,OUT io
-    class W proc
-    class A,B,SCALE llm
-    class SUM proc
+    class W frozen
+    class A,B train
+    class SCALE,SUM mathOp
 ```
 
 Two parallel paths per projection: the frozen base weight (no gradient) plus the low-rank adapter pair BA (α/r). At inference, W + B·A·(α/r) is pre-merged back into a single matrix — zero additional latency.

@@ -77,42 +77,49 @@ EU users are permanently assigned to EU regions; US users to US regions. This is
 
 ### Diagram 1 — Global Anycast Topology (3 Regions)
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    EU([EU User]) --> LB["Anycast / Cloudflare LB\nSelects nearest healthy region\nhonors X-Session-ID"]
+    US([US User]) --> LB
+    AP([APAC User]) --> LB
+
+    subgraph reu["eu-west-1"]
+        E1["Envoy Proxy\nsession hash"] --> P1a["pod0\nGPU · KV cache"]
+        E1 --> P1b["pod1\nGPU · KV cache"]
+        R1[["Redis\n(session hist)"]]
+    end
+    subgraph rus["us-east-1"]
+        E2["Envoy Proxy\nsession hash"] --> P2a["pod0\nGPU · KV cache"]
+        E2 --> P2b["pod1\nGPU · KV cache"]
+        R2[["Redis\n(session hist)"]]
+    end
+    subgraph rap["ap-northeast-1"]
+        E3["Envoy Proxy\nsession hash"] --> P3a["pod0\nGPU · KV cache"]
+        E3 --> P3b["pod1\nGPU · KV cache"]
+        R3[["Redis\n(session hist)"]]
+    end
+
+    LB --> E1
+    LB --> E2
+    LB --> E3
+    R1 <-.->|"cross-region replication\n(async, lag ~100-300 ms)"| R2
+    R2 <-.->|"cross-region replication\n(async, lag ~100-300 ms)"| R3
+
+    class EU,US,AP req
+    class LB,E1,E2,E3 mathOp
+    class P1a,P1b,P2a,P2b,P3a,P3b base
+    class R1,R2,R3 frozen
 ```
-                         Users (global)
-                              |
-              +---------------+----------------+
-              |               |                |
-          EU User          US User          APAC User
-              |               |                |
-              v               v                v
-     +------------------Anycast / Cloudflare LB-----------------+
-     |  Selects nearest healthy region; honors X-Session-ID      |
-     +-----------------------------------------------------------+
-              |               |                |
-              v               v                v
-     +----------------+ +----------------+ +----------------+
-     |  eu-west-1     | |  us-east-1     | | ap-northeast-1 |
-     |                | |                | |                |
-     | [Envoy Proxy]  | | [Envoy Proxy]  | | [Envoy Proxy]  |
-     |  session hash  | |  session hash  | |  session hash  |
-     |       |        | |       |        | |       |        |
-     | +----+----+   | | +----+----+   | | +----+----+   |
-     | |pod0|pod1|   | | |pod0|pod1|   | | |pod0|pod1|   |
-     | |GPU |GPU |   | | |GPU |GPU |   | | |GPU |GPU |   |
-     | |KV  |KV  |   | | |KV  |KV  |   | | |KV  |KV  |   |
-     | |cach|cach|   | | |cach|cach|   | | |cach|cach|   |
-     | +----+----+   | | +----+----+   | | +----+----+   |
-     |               | |               | |               |
-     | [Redis]       | | [Redis]       | | [Redis]       |
-     | (session hist)| | (session hist)| | (session hist)|
-     | cross-region  | | cross-region  | | cross-region  |
-     | replication   | | replication   | | replication   |
-     +----------------+ +----------------+ +----------------+
-              |                   |                |
-              +-------------------+----------------+
-                      Cross-region Redis replication
-                      (async, lag ~100-300 ms)
-```
+
+The anycast LB picks the nearest healthy region while honoring `X-Session-ID`; inside each region an Envoy ring-hash maps the session to the pod holding its KV cache. Only the Redis session history crosses regions — asynchronously, with ~100–300 ms lag — so the expensive per-GPU KV cache never has to.
 
 ### Diagram 2 — KV Cache Stickiness via Consistent Hashing
 

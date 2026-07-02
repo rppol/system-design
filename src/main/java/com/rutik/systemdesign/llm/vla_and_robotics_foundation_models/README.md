@@ -182,52 +182,34 @@ design discussion must explicitly account for it**.
 
 ### 5.1 VLA Architecture Overview (Single-System, RT-2/OpenVLA style)
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    cam(["Camera image(s)\nRGB, possibly multi-view"]) --> venc["Vision Encoder\n(SigLIP / DINOv2 / ViT)"]
+    instr(["Language instruction\n'pick up the cup'"]) --> tok["Tokenizer (text)"]
+    venc --> backbone["Vision-Language Transformer Backbone\n(e.g., Llama2-7B based, Prismatic VLM)"]
+    tok --> backbone
+    proprio(["Proprioception\njoint angles, gripper state"]) --> head
+    backbone --> head["Action decode head\ndiscretized tokens (RT-2/OpenVLA), OR\nflow-matching action expert (pi-0)"]
+    head --> chunk(["Action chunk\nH future timesteps × 7-DOF delta-pose + gripper"])
+    chunk --> ctrl[["Robot low-level controller (20-50Hz)"]]
+
+    class cam,instr,proprio,chunk io
+    class venc frozen
+    class tok mathOp
+    class backbone base
+    class head train
+    class ctrl req
 ```
-+--------------------+   +--------------------+
-|  Camera image(s)   |   |  Language          |
-|  (RGB, possibly    |   |  instruction        |
-|  multi-view)       |   |  "pick up the cup" |
-+--------------------+   +--------------------+
-          |                        |
-          v                        v
-   +-------------+         +--------------+
-   | Vision       |         | Tokenizer    |
-   | Encoder      |         | (text)       |
-   | (SigLIP/     |         +--------------+
-   |  DINOv2/ViT) |                |
-   +-------------+                 |
-          |                        |
-          v                        v
-   +------------------------------------------+
-   |     Vision-Language Transformer Backbone   |
-   |     (e.g., Llama2-7B based, Prismatic VLM) |
-   +------------------------------------------+
-                      |
-          +-----------+-----------+
-          |                       |
-          v                       v
-   +--------------+      +-----------------------+
-   | Proprioception|----->| Action decode head     |
-   | (joint angles, |      | - discretized tokens  |
-   |  gripper state)|      |   (RT-2/OpenVLA), OR  |
-   +--------------+       | - flow-matching action |
-                          |   expert (pi-0)        |
-                          +-----------------------+
-                                     |
-                                     v
-                          +-----------------------+
-                          | Action chunk           |
-                          | (H future timesteps x  |
-                          |  7-DOF delta-pose +    |
-                          |  gripper)               |
-                          +-----------------------+
-                                     |
-                                     v
-                          +-----------------------+
-                          | Robot low-level         |
-                          | controller (20-50Hz)    |
-                          +-----------------------+
-```
+
+Two pretrained input paths (vision encoder + text tokenizer) fuse in the VLM backbone; the only genuinely new component is the action decode head, which also consumes proprioception and emits an H-step action chunk that the 20-50Hz low-level controller executes while the next chunk is computed.
 
 ### 5.2 Action Tokenization (Discretization)
 
@@ -309,42 +291,32 @@ WITH chunking (H=16): one VLM forward pass produces 16 future actions
 
 ### 5.5 Cross-Embodiment Training Data Pipeline (Open X-Embodiment)
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pA(["Robot Platform A\n7-DOF arm, 2 cameras"]) --> schema
+    pB(["Robot Platform B\nmobile manipulator"]) --> schema
+    pC(["Robot Platform C\nhumanoid dual-arm"]) --> schema
+    pV(["... Robot Platform V\n(22 total)"]) --> schema
+    schema["UNIFIED SCHEMA: (image(s), language instruction, proprioception, action vector)\nper-embodiment action spaces normalized/padded to a common interface"]
+    schema --> dataset["Open X-Embodiment:\n1M+ trajectories, 22 embodiments, 527 skills"]
+    dataset --> model["Single model (RT-1-X / RT-2-X / OpenVLA / Octo)\ntrained across ALL embodiments"]
+    model -->|"fine-tune for deployment on a\nSPECIFIC target embodiment"| deploy(["Deployed policy — outperforms a model trained ONLY\non the target embodiment's own data (positive transfer, §3.5)"])
+
+    class pA,pB,pC,pV,deploy io
+    class schema mathOp
+    class dataset base
+    class model train
 ```
-+---------------+  +---------------+  +---------------+      +---------------+
-| Robot Platform |  | Robot Platform |  | Robot Platform |  ...| Robot Platform |
-| A (7-DOF arm,  |  | B (mobile      |  | C (humanoid    |     | V (22 total)   |
-| 2 cameras)     |  | manipulator)   |  | dual-arm)      |     |                |
-+---------------+  +---------------+  +---------------+      +---------------+
-        |                  |                   |                     |
-        v                  v                   v                     v
-+--------------------------------------------------------------------------+
-|              UNIFIED SCHEMA: (image(s), language instruction,             |
-|              proprioception, action vector) -- per-embodiment action      |
-|              spaces normalized/padded to a common interface               |
-+--------------------------------------------------------------------------+
-                                  |
-                                  v
-                +----------------------------------------+
-                | Open X-Embodiment: 1M+ trajectories,    |
-                | 22 embodiments, 527 skills              |
-                +----------------------------------------+
-                                  |
-                                  v
-                +----------------------------------------+
-                | Single model (RT-1-X / RT-2-X / OpenVLA |
-                | / Octo) trained across ALL embodiments  |
-                +----------------------------------------+
-                                  |
-                  fine-tune for deployment on
-                  a SPECIFIC target embodiment
-                                  |
-                                  v
-                +----------------------------------------+
-                | Deployed policy -- outperforms a model  |
-                | trained ONLY on the target embodiment's |
-                | own data (positive transfer, §3.5)      |
-                +----------------------------------------+
-```
+
+Trajectories from 22 physically different robots funnel through one normalized schema into a single training corpus; the resulting cross-embodiment model, lightly fine-tuned per target robot, beats a specialist trained on that robot's data alone.
 
 ---
 

@@ -104,74 +104,48 @@ ClickHouse eval query:
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    APP(["LLM App\n(instrumented with eval SDK)"])
+    COL["Trace Collector API\nstateless, horizontally scaled, 32 partitions\nvalidate schema · hash PII fields · assign trace_id"]
+    KAF["Kafka: raw_traces topic\n115,740 traces/sec sustained"]
+    TP["Trace Processor\nenrich · deduplicate · hash PII\nwrite S3 (full text opt)"]
+    OER["Online Eval Runner\n2% sample selection · heuristic scorers\nLLM judge dispatch · result → Kafka: eval_results"]
+    CH["ClickHouse\ntrace search · aggregations · eval results"]
+    HAQ["Human Annotation Queue\nlow-confidence evals, disputed scores\n→ DB + notification service"]
+    DM["Dataset Manager\ncreate from trace filter\nversion/snapshot · drift check"]
+    ET["Experiment Tracker\nA/B comparison · score diffs\ndeploy gating · baseline mgmt"]
+    CI["CI Eval Runner\ntriggered on every deploy\nfull eval suite on golden dataset\nRegressionDetector · GateResult: PASS/FAIL"]
+    AL["Alert Engine\nquality metric drop · PagerDuty + Slack\n<5min latency guarantee"]
+
+    APP -->|"async, <5ms, buffered"| COL
+    COL --> KAF
+    KAF --> TP
+    KAF --> OER
+    TP --> CH
+    OER --> HAQ
+    CH --> DM
+    CH --> ET
+    DM --> CI
+    CI --> AL
+
+    class APP io
+    class COL,TP,DM,ET,CI mathOp
+    class KAF,CH frozen
+    class OER base
+    class HAQ req
+    class AL lossN
 ```
-LLM App (instrumented with eval SDK)
-        |
-        | async, <5ms, buffered
-        v
-+-----------------------------+
-|  Trace Collector API         |  (stateless, horizontally scaled, 32 partitions)
-|  - validate schema           |
-|  - hash PII fields           |
-|  - assign trace_id           |
-+-----------------------------+
-        |
-        v
-+-----------------------------+
-|  Kafka: raw_traces topic     |  115,740 traces/sec sustained
-+-----------------------------+
-        |
-        +------------------+------------------+
-        |                                     |
-        v                                     v
-+----------------+                  +---------------------+
-| Trace Processor |                  | Online Eval Runner  |
-| - enrich        |                  | 2% sample selection |
-| - deduplicate   |                  | heuristic scorers   |
-| - hash PII      |                  | LLM judge dispatch  |
-| - write S3      |                  | result → Kafka:     |
-| (full text opt) |                  |   eval_results      |
-+----------------+                  +---------------------+
-        |                                     |
-        v                                     v
-+----------------+               +-------------------------+
-| ClickHouse     |               | Human Annotation Queue  |
-| (trace search, |               | (low-confidence evals,  |
-|  aggregations) |               |  disputed scores → DB   |
-|  eval results  |               |  + notification service)|
-+----------------+               +-------------------------+
-        |
-        +--------------------+
-        |                    |
-        v                    v
-+---------------+   +-------------------+
-| Dataset       |   | Experiment        |
-| Manager       |   | Tracker           |
-| - create from |   | - A/B comparison  |
-|   trace filter|   | - score diffs     |
-| - version/    |   | - deploy gating   |
-|   snapshot    |   | - baseline mgmt   |
-| - drift check |   +-------------------+
-+---------------+
-        |
-        v
-+-----------------------------+
-|  CI Eval Runner              |
-|  - triggered on every deploy |
-|  - runs full eval suite on   |
-|    golden dataset            |
-|  - RegressionDetector        |
-|  - GateResult: PASS/FAIL     |
-+-----------------------------+
-        |
-        v
-+-----------------------------+
-|  Alert Engine                |
-|  - quality metric drop       |
-|  - PagerDuty + Slack         |
-|  - <5min latency guarantee   |
-+-----------------------------+
-```
+
+Kafka fans every ingested trace to two consumers: the trace-processing path that lands metadata in ClickHouse, and the 2% online eval path whose low-confidence scores escalate to the human annotation queue; the golden-dataset CI gate and the <5-minute alert engine sit downstream of the same stores.
 
 ### Multi-Tenant Data Isolation
 

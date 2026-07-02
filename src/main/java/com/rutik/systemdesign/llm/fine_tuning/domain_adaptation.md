@@ -248,19 +248,23 @@ Domain-specific tokenizer extension:
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Base(["General-Purpose Base Model\n(LLaMA-3-8B, Mistral-7B)"]) --> CPT
     CPT["Phase 1: Continued Pre-Training\nDataset: 10B–100B domain tokens + 15% general\nObjective: next-token prediction (all tokens)\nLR: 5e-5 to 1e-4 | Duration: 1–5 days (8×A100, 13B)"] --> DomainBase
     DomainBase["Domain Knowledgeable Base Model\n– Rich domain vocabulary representations\n– Domain entity co-occurrence patterns\n– Domain knowledge in weights"] --> SFT
     SFT["Phase 2: Domain Instruction Tuning\nDataset: 10K–500K domain (instruction, response) pairs\nObjective: SFT with label masking\nLR: 1e-4 to 3e-4 (LoRA) or 1e-5 (full FT) | Duration: hours"] --> Assistant
     Assistant(["Domain Assistant Model\n– Expresses domain knowledge helpfully\n– Follows domain task conventions\n– Maintains epistemic humility"])
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-
-    class Base,Assistant io
-    class CPT,SFT proc
-    class DomainBase llm
+    class Base,DomainBase base
+    class CPT,SFT train
+    class Assistant io
 ```
 
 Skipping Phase 1 (pure instruction tuning on a general base) risks the model hallucinating domain facts it never learned — Phase 1 first writes domain knowledge into weights, Phase 2 teaches the model how to express it helpfully.

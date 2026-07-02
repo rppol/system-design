@@ -111,8 +111,15 @@ Production feedback can be repurposed as preference data for RLHF or DPO:
 ### 5.1 Complete Data Flywheel Cycle
 
 ```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     User([User Request]) --> App
     App["LLM Application\n(Current Model)"] --> Response([Response to User])
     App --> Feedback["Feedback Instrument\n(UI + logging layer)"]
@@ -126,16 +133,12 @@ flowchart TD
     AB --> Deploy["Deploy New Model\n(Canary → Full)"]
     Deploy -- "better responses → more usage → more data" --> User
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
-
-    class User,Response io
-    class App llm
-    class Feedback,Curation,AL,FT,Eval,AB proc
-    class Store,Deploy store
-    class Annotate proc
+    class User,Response,Store io
+    class App base
+    class Feedback req
+    class Curation,AL,Eval,AB mathOp
+    class Annotate frozen
+    class FT,Deploy train
 ```
 
 The flywheel self-reinforces: better models generate better responses, which produce more engaged users, which generate more feedback signals for the next training run.
@@ -143,8 +146,15 @@ The flywheel self-reinforces: better models generate better responses, which pro
 ### 5.2 Active Learning Loop
 
 ```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Stream(["Production Stream\n(unlabeled, high volume)"]) --> Scorer
     Scorer["Uncertainty / Error Scorer"] --> Threshold{"high score?"}
     Threshold -- YES --> Queue["Annotation Queue"]
@@ -152,23 +162,24 @@ flowchart TD
     Queue --> Human["Human Annotator"]
     Human --> Dataset["Curated Dataset\n(growing over time)"]
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
-
-    class Stream,Discard io
-    class Scorer proc
-    class Threshold decide
-    class Queue,Human proc
-    class Dataset store
+    class Stream,Discard,Dataset io
+    class Scorer,Threshold mathOp
+    class Queue req
+    class Human frozen
 ```
 
 ### 5.3 A/B Testing Flow for Model Updates
 
 ```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Request([Incoming Request]) --> Splitter
     Splitter["Traffic Splitter\n(10/90 or 50/50 split)"] --> ModelA & ModelB
     ModelA["Model A (Current)"] --> RespA["Response A"]
@@ -179,23 +190,25 @@ flowchart TD
     Sig -- YES --> Deploy(["Deploy B (canary first)"])
     Sig -- NO --> Keep(["Keep A; iterate"])
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
-
-    class Request,Deploy,Keep io
-    class Splitter proc
-    class ModelA,ModelB llm
-    class RespA,RespB,Metrics,Stats proc
-    class Sig decide
+    class Request,RespA,RespB,Deploy,Keep io
+    class Splitter req
+    class ModelA base
+    class ModelB train
+    class Metrics,Stats,Sig mathOp
 ```
 
 ### 5.4 Drift Detection Pipeline
 
 ```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Prod(["Production Queries (t)"]) --> EmbedProd["Embed with fixed model"]
     Ref(["Reference Queries (t-30d)"]) --> EmbedRef["Embed with same model"]
     EmbedProd & EmbedRef --> Compare["Distribution Comparison\n– MMD (Maximum Mean Discrepancy)\n– KL divergence on cluster assignments\n– PSI (Population Stability Index)"]
@@ -203,16 +216,9 @@ flowchart TD
     Threshold -- YES --> Alert(["Alert + Investigate"])
     Threshold -- NO --> Monitor(["Continue monitoring"])
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
-    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
-
-    class Prod,Ref io
-    class EmbedProd,EmbedRef,Compare proc
-    class Threshold decide
-    class Alert warn
-    class Monitor proc
+    class Prod,Ref,Monitor io
+    class EmbedProd,EmbedRef,Compare,Threshold mathOp
+    class Alert lossN
 ```
 
 ---

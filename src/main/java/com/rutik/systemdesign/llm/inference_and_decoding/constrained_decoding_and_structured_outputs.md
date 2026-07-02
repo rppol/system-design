@@ -56,21 +56,33 @@ Spectrum of guarantees: prompting (~90–99% valid) < JSON *mode* (valid JSON, a
 
 Per-step masking inside the inference engine:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    IN([prompt + generated]) --> FWD["LLM forward pass"]
+    FWD --> LO(["logits (V=128K)"])
+    GS["grammar state s_t"] --> ML["mask lookup: allowed(s_t)\nCPU, ~36-50μs,\noverlapped with the forward pass"]
+    ML --> BM(["bitmask (V)"])
+    LO --> MK["logits(~allowed) = -inf"]
+    BM --> MK
+    MK --> SS["softmax + sample"]
+    SS --> TK([token t])
+    TK -.->|"advance: s_t+1 = δ(s_t, t)"| GS
+
+    class IN,LO,BM,TK io
+    class FWD base
+    class GS frozen
+    class ML,MK,SS mathOp
 ```
-                       ┌───────────────────────────────┐
- prompt + generated ──>│        LLM forward pass        │──> logits [V=128K]
-                       └───────────────────────────────┘         │
-                                                                 v
-   grammar state s_t ──> mask lookup: allowed(s_t) ──> bitmask [V]   (CPU, ~36-50μs,
-                                  │                        │          overlapped with
-                                  │                        v          the forward pass)
-                                  │            logits[~allowed] = -inf
-                                  │                        │
-                                  │                        v
-                                  │            softmax + sample ──> token t
-                                  │                        │
-                                  └── advance: s_{t+1} = δ(s_t, t) <─┘
-```
+
+The mask path is off the GPU critical path: the ~36-50μs CPU lookup runs overlapped with the forward pass, invalid logits are forced to -inf before sampling, and the emitted token advances the automaton state for the next step.
 
 XGrammar's core trick — split the vocabulary per grammar state, precompute what can be precomputed:
 

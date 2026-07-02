@@ -164,27 +164,29 @@ def self_rag_generate(query: str, model, retriever, beam_width: int = 4):
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
 flowchart TD
-    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef decide fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef search fill:#56b6c2,stroke:#1a8fa0,color:#1a1a1a
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Q([Query]) --> DEC{"Retrieve token\ngenerated?"}
     DEC -->|"No Retrieve"| DG["Direct Generation\nno retrieval needed\nUtility: 5"]
     DEC -->|"Retrieve"| RET["Retriever\npassage_1, passage_2, passage_3"]
     RET --> EVAL["Evaluate each passage\nRelevant or Irrelevant"]
     EVAL --> GEN["Generate response\nper relevant passage"]
-    GEN --> SUP["Score support level\n[Supported] / [Partially Supported]"]
+    GEN --> SUP["Score support level\n(Supported) / (Partially Supported)"]
     SUP --> SEL["Select best response\nhighest support score"]
     DG --> ANS([Output])
     SEL --> ANS
 
     class Q,ANS io
-    class DEC decide
-    class RET,EVAL proc
-    class DG,GEN,SEL llm
-    class SUP search
+    class DEC mathOp
+    class RET,EVAL train
+    class DG,GEN,SEL frozen
+    class SUP req
 ```
 
 ### Self-RAG vs. Standard RAG Comparison

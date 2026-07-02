@@ -247,8 +247,13 @@ docker run --gpus all \
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     HW{"What hardware?"}
     MAC["Ollama / llama.cpp\n(Metal backend)"]
@@ -269,8 +274,8 @@ flowchart TD
     DC -->|"flexibility"| VLM
     DC -->|"shared prefix"| SGL
 
-    class HW,DC decide
-    class MAC,CONS,TRT,VLM,SGL,CPU,TGI proc
+    class HW,DC mathOp
+    class MAC,CONS,TRT,VLM,SGL,CPU,TGI train
 ```
 
 Use-case shortcuts: development/testing → Ollama; production cloud → vLLM or TensorRT-LLM; edge/privacy → llama.cpp; structured outputs → SGLang.

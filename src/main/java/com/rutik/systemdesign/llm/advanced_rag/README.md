@@ -187,40 +187,45 @@ Prevents using low-quality retrieved context as grounding
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 55}}}%%
 flowchart TD
-    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef decide fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Q([Query]) --> QA["Query Analysis\n'What sub-questions do I need?'"]
     QA --> RET["Retrieval Step\nDense + sparse → context"]
-    RET --> CHK{Sufficiency Check\n'Do I have enough info?'}
+    RET --> CHK{"Sufficiency Check\n'Do I have enough info?'"}
     CHK -->|YES| GEN["Generation"]
     GEN --> ANS([Answer])
     CHK -->|NO| GAP["Gap Analysis\n'What am I still missing?'"]
     GAP --> RET
 
     class Q,ANS io
-    class QA,RET,GEN proc
-    class CHK decide
-    class GAP llm
+    class QA,RET,GEN train
+    class CHK mathOp
+    class GAP frozen
 ```
 
 ### Graph RAG Architecture
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
 flowchart TD
-    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef store  fill:#e5c07b,stroke:#d4a017,color:#1a1a1a
-    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef decide fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     DOCS(["Documents"]) --> ERX["Entity/Relation Extraction\n(LLM-based)"]
     ERX --> KG["Knowledge Graph\nnodes: entities · edges: relationships"]
     KG --> CD["Community Detection\n(Leiden algorithm)"]
     CD --> CS["Community Summaries\n(LLM-generated)"]
-    Q([User Query]) --> QR{Query Type?}
+    Q([User Query]) --> QR{"Query Type?"}
     KG --> QR
     CS --> QR
     QR -->|"Global (thematic)"| GSR["Community Summary Retrieval"]
@@ -230,10 +235,10 @@ flowchart TD
     SYNTH --> ANS([Answer])
 
     class DOCS,Q,ANS io
-    class ERX,CD,CS,GSR,ES proc
-    class KG store
-    class SYNTH llm
-    class QR decide
+    class ERX,CD,CS,GSR,ES train
+    class KG base
+    class SYNTH frozen
+    class QR mathOp
 ```
 
 ### RAG Evaluation Dimensions

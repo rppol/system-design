@@ -99,74 +99,37 @@ Research session cache (raw extracted content, reused for follow-up):
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    UIN(["User Browser / API Client"]) --> GW["Research API GW\nPOST /research\nrate limiting, auth, task ID assignment"]
+    GW --> ORCH["Task Orchestrator\ndurable task graph\ntask state in Redis + Postgres\ncheckpoint on every phase"]
+    ORCH --> PLAN["Query Planner\n(LLM: GPT-4o)\noutputs sub-Q priority list"]
+    ORCH --> CRAWL["Parallel Web Crawler\n(asyncio semaphore 100)\nfetches 50-200 URLs in parallel"]
+    ORCH --> EVAL["Source Evaluator\ndomain quality · recency score\nrelevance BM25 · NLI dedup"]
+    EVAL --> SYN["Citation-Grounded Synthesizer\n(section-by-section)"]
+    PLAN --> GD["Gap Detector\ncompleteness score per sub-Q\n→ follow-up Qs"]
+    CRAWL --> GD
+    SYN --> GD
+    GD -.->|"iterate max 3x or\nuntil budget/time"| CRAWL
+    GD --> CV["Citation Validator\n(NLI entailment per claim)"]
+    CV --> FMT["Report Formatter\nMarkdown + PDF export"]
+    FMT --> UOUT(["User\nSSE stream of progress + final report"])
+
+    class UIN,UOUT io
+    class GW,ORCH,CRAWL req
+    class PLAN,SYN base
+    class EVAL,GD,CV,FMT mathOp
 ```
-  User Browser / API Client
-          |
-          v
-  +---------------------+
-  |   Research API GW   |  (rate limiting, auth, task ID assignment)
-  |   POST /research    |
-  +---------------------+
-          |
-          v
-  +---------------------+
-  |  Task Orchestrator  |  (durable task graph; see agent_durability_patterns.md)
-  |  - task state in    |
-  |    Redis + Postgres |
-  |  - checkpoint on    |
-  |    every phase      |
-  +---------------------+
-          |
-    +-----+-----+------------------+
-    |           |                  |
-    v           v                  v
-+----------+ +----------+  +------------------+
-| Query    | | Parallel |  | Source Evaluator |
-| Planner  | | Web      |  | - domain quality |
-| (LLM:    | | Crawler  |  | - recency score  |
-|  GPT-4o) | | (asyncio |  | - relevance BM25 |
-|          | |  semaphore|  | - NLI dedup      |
-| outputs  | |  100)    |  +------------------+
-| sub-Q    | |          |          |
-| priority | | fetches  |          |
-| list     | | 50-200   |  +------------------+
-+----------+ | URLs in  |  | Citation-Grounded|
-    |        | parallel |  | Synthesizer      |
-    |        +----------+  | (section-by-     |
-    |                |     |  section)        |
-    +----------------+     +------------------+
-                 |                 |
-                 v                 v
-         +------------------+
-         |  Gap Detector    |
-         |  completeness    |
-         |  score per sub-Q |
-         |  → follow-up Qs  |
-         +------------------+
-                 |
-         [iterate max 3x or
-          until budget/time]
-                 |
-                 v
-         +------------------+
-         | Citation         |
-         | Validator        |
-         | (NLI entailment  |
-         |  per claim)      |
-         +------------------+
-                 |
-                 v
-         +------------------+
-         | Report Formatter |
-         | Markdown + PDF   |
-         | export           |
-         +------------------+
-                 |
-                 v
-           User (SSE stream
-            of progress +
-            final report)
-```
+
+The orchestrator fans out to planning, parallel crawling, and source evaluation; everything converges on the gap detector, whose dotted back edge to the crawler is the iterative-deepening loop (max 3 iterations or until the token/time budget runs out) before the citation validator and formatter finalize the report.
 
 ### Iterative Deepening Loop
 

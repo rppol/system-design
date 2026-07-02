@@ -202,9 +202,13 @@ Hard label: "sat"                   Soft knowledge transfer:
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     OG["Original Model (FP32/FP16)\nweights: 7.2 GB (Phi-3 3.8B, FP16)"]
     QUANT["Quantization Step\nGPTQ / AWQ / GGUF\ncalibration dataset\ngroup-wise scaling (Q4_K_M: groups of 32)"]
@@ -213,10 +217,10 @@ flowchart TD
 
     OG --> QUANT --> INT4 --> DEQU
 
-    class OG io
-    class QUANT proc
-    class INT4 store
-    class DEQU llm
+    class OG base
+    class QUANT mathOp
+    class INT4 io
+    class DEQU frozen
 ```
 
 ### On-Device Inference Hardware Stack

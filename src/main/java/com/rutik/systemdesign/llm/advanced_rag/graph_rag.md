@@ -179,34 +179,40 @@ For a corpus of 1M tokens (approximately 750 pages):
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 55}}}%%
 flowchart TD
-    classDef io    fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef proc  fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef llm   fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef store fill:#e5c07b,stroke:#d4a017,color:#1a1a1a
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     DOCS(["Documents"]) --> CHUNK["Text Chunking\n1000-token chunks with overlap"]
-    CHUNK --> ERX["Entity/Relation Extraction\n(LLM call per chunk)\nentities[] + relationships[]"]
+    CHUNK --> ERX["Entity/Relation Extraction\n(LLM call per chunk)\nentities + relationships"]
     ERX --> GC["Graph Construction\ndeduplicate entities, merge edges\nNetworkX / Neo4j"]
     GC --> CD["Community Detection\nLeiden algorithm\nhierarchical C0, C1, C2"]
     CD --> CS["Community Summarization\n(LLM call per community)\nstructured summary per cluster"]
     CS --> ST[("Storage\nGraph DB: relationships\nVector DB: summaries + entity embeddings\nDocument DB: original chunks")]
 
     class DOCS io
-    class CHUNK,GC,CD proc
-    class ERX,CS llm
-    class ST store
+    class CHUNK,GC,CD mathOp
+    class ERX,CS frozen
+    class ST base
 ```
 
 ### Graph RAG Query Pipeline
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
 flowchart TD
-    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef decide fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef proc   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef llm    fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Q([User Query]) --> QTC{Query Type\n'global or local?'}
+    Q([User Query]) --> QTC{"Query Type\nglobal or local?"}
     QTC -->|"GLOBAL (thematic)"| CSR["Community Summary Retrieval"]
     CSR --> MAP["Map: partial answer\nper community (parallel)"]
     MAP --> RED["Reduce: LLM synthesizes\nall partial answers"]
@@ -218,9 +224,9 @@ flowchart TD
     LGEN --> LANS(["Local Answer + entity refs"])
 
     class Q,GANS,LANS io
-    class QTC decide
-    class CSR,MAP,SGE,SCR,EI proc
-    class RED,LGEN llm
+    class QTC mathOp
+    class CSR,MAP,SGE,SCR,EI req
+    class RED,LGEN frozen
 ```
 
 ---
@@ -398,84 +404,55 @@ A: Graph RAG becomes impractical when entity extraction yields too much noise to
 **Problem Statement**: A global management consulting firm with 8,000 consultants has accumulated 50K+ client deliverables, research reports, and internal methodology documents over 12 years. These documents contain dense cross-references between industry trends, client organizations, regulatory frameworks, and strategic concepts. Consultants routinely ask multi-hop questions: "What engagement methodologies have we applied to digital transformation programs in financial services, and which led to measurable client outcomes?" Standard vector-only RAG returned fragmented chunks from individual documents — entity relationships were completely lost. A query about "relationships between our healthcare clients and regulatory compliance frameworks" returned scattered paragraphs with no synthesis across the corpus. The firm needed a system that could reason across documents, surface hidden entity connections, and answer thematic queries spanning thousands of deliverables.
 
 **Architecture Overview**:
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph idx["Indexing Pipeline"]
+        CDL(["Client deliverables (35K PDFs)"]) --> ING["Document Ingestion + OCR"]
+        RRP(["Research reports (10K docs)"]) --> SAP["Section-aware parsing"]
+        MLB(["Methodology library (5K docs)"]) --> SX["Structured extraction"]
+        ING --> CHK["Chunking: 800 tokens, 200 overlap\n~120K total text chunks"]
+        SAP --> CHK
+        SX --> CHK
+        CHK --> ERX2["Entity/Relation Extraction\nGPT-4o-mini for cost efficiency\nEntity types: Organization, Person, Industry, Framework,\nMethodology, Technology, Regulation, Outcome\nRelation types: APPLIED_TO, RESULTED_IN, REGULATED_BY,\nPARTNERED_WITH, COMPETED_WITH, ADOPTED\n~62K unique entities, 285K relationships"]
+        ERX2 --> DEDUP["Entity Deduplication Pipeline\nPhase 1: string normalization\nPhase 2: embedding similarity (threshold 0.92)\nPhase 3: LLM-assisted resolution for ambiguous pairs (batch of 500)\nDedup reduced 62K → 41K unique entities"]
+        DEDUP --> GCON["Graph Construction: Neo4j\nNodes: 41K entities with merged descriptions\nEdges: 285K relationships with source refs\nEdge weighting: co-occurrence frequency + recency bias (newer docs 1.5x)"]
+        GCON --> LEI["Community Detection: Leiden\nResolution = 1.2 (tuned on 30-sample eval)\nLevel 0: 210 specific · Level 1: 55 thematic\nLevel 2: 14 industry/practice domains"]
+        LEI --> CSUM2["Community Summarization: GPT-4o\n210 + 55 + 14 = 279 LLM summarization calls\nEach summary: ~500 tokens output"]
+    end
+
+    CSUM2 --> STOR[("Storage Layer\nNeo4j: entity/relation graph\nPinecone: community summaries + entity description embeddings\nS3: original chunks with metadata")]
+
+    subgraph qt["Query Time"]
+        RTR{"Hybrid Retrieval Router\nglobal vs. local vs. multi-hop"}
+        RTR -->|"Global (thematic/cross-document)"| GP["Global Path\nRetrieve community summaries at L1/L2 level\nMap: partial answers per community (parallel)\nReduce: LLM synthesis"]
+        RTR -->|"Multi-hop (entity chain traversal)"| MHP["Multi-hop Path\nEntity ID in query\nGraph traversal (2-3 hops) to find\nconnected entities + relationships\nAssemble path context"]
+        RTR -->|"Local (specific entity/project)"| LPP["Local Path\nSubgraph extraction from Neo4j\n+ vector search for specific passages\nDirect LLM generation"]
+        GP --> FANS(["Final Answer with entity references,\nsource doc IDs, and relationship provenance"])
+        MHP --> FANS
+        LPP --> FANS
+    end
+
+    STOR --> RTR
+
+    class CDL,RRP,MLB,FANS io
+    class ING,SAP,SX,CHK,DEDUP,GCON,LEI,RTR mathOp
+    class ERX2,CSUM2 frozen
+    class STOR base
+    class GP,MHP,LPP req
 ```
-Document Sources
-    |
-    +-- Client deliverables (35K PDFs)   --> [Document Ingestion + OCR]
-    +-- Research reports (10K docs)       --> [Section-aware parsing]
-    +-- Methodology library (5K docs)     --> [Structured extraction]
-                                                    |
-                                                    v
-                                          [Chunking: 800 tokens, 200 overlap]
-                                          ~120K total text chunks
-                                                    |
-                                                    v
-                                    [Entity/Relation Extraction]
-                                      GPT-4o-mini for cost efficiency
-                                      Entity types: Organization, Person,
-                                        Industry, Framework, Methodology,
-                                        Technology, Regulation, Outcome
-                                      Relation types: APPLIED_TO, RESULTED_IN,
-                                        REGULATED_BY, PARTNERED_WITH,
-                                        COMPETED_WITH, ADOPTED
-                                      ~62K unique entities, 285K relationships
-                                                    |
-                                                    v
-                                    [Entity Deduplication Pipeline]
-                                      Phase 1: String normalization
-                                        "McKinsey & Company" = "McKinsey"
-                                      Phase 2: Embedding similarity (threshold 0.92)
-                                      Phase 3: LLM-assisted resolution for
-                                        ambiguous pairs (batch of 500)
-                                      Dedup reduced 62K -> 41K unique entities
-                                                    |
-                                                    v
-                                    [Graph Construction: Neo4j]
-                                      Nodes: 41K entities with merged descriptions
-                                      Edges: 285K relationships with source refs
-                                      Edge weighting: co-occurrence frequency +
-                                        recency bias (newer docs weighted 1.5x)
-                                                    |
-                                                    v
-                                    [Community Detection: Leiden]
-                                      Resolution = 1.2 (tuned on 30-sample eval)
-                                      Level 0: 210 specific communities
-                                      Level 1: 55 thematic communities
-                                      Level 2: 14 industry/practice domains
-                                                    |
-                                                    v
-                                    [Community Summarization: GPT-4o]
-                                      210 + 55 + 14 = 279 LLM summarization calls
-                                      Each summary: ~500 tokens output
-                                                    |
-                                              [Storage Layer]
-                                      Neo4j:     entity/relation graph
-                                      Pinecone:  community summaries + entity
-                                                 description embeddings
-                                      S3:        original chunks with metadata
-                                                    |
-                                              Query Time
-                                                    |
-                                    [Hybrid Retrieval Router]
-                              Global (thematic/cross-document) vs.
-                              Local (specific entity/project) vs.
-                              Multi-hop (entity chain traversal)
-                                                    |
-                  +-----------------------------+---+---------------------------+
-                  |                                 |                           |
-           [Global Path]                   [Multi-hop Path]           [Local Path]
-      Retrieve community summaries     Entity ID in query        Subgraph extraction
-      at L1/L2 level                   Graph traversal (2-3      from Neo4j + vector
-      Map: partial answers per         hops) to find connected   search for specific
-      community (parallel)             entities + relationships  passages
-      Reduce: LLM synthesis            Assemble path context     Direct LLM generation
-                  |                         |                           |
-                  +-----------------------------+---------------------------+
-                                                |
-                                        Final Answer with
-                                  entity references, source doc IDs,
-                                  and relationship provenance
-```
+
+The one-time indexing pipeline (120K chunks → 41K deduplicated entities → 279 community
+summaries) feeds a single storage layer that serves all three query paths; the router's
+global/local/multi-hop split is what lifted multi-hop accuracy from 31% to 71%.
 
 **Key Design Decisions**:
 1. Three-phase entity deduplication — raw extraction produced 62K entities with massive duplication ("Deloitte," "Deloitte Consulting," "Deloitte LLP" as separate nodes). String normalization caught 30% of duplicates; embedding similarity at 0.92 threshold caught another 25%; LLM-assisted resolution handled the remaining ambiguous 500 pairs. Without this pipeline, community detection produced incoherent clusters mixing duplicate entities across communities.

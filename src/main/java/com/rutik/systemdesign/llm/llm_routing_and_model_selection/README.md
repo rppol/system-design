@@ -118,19 +118,23 @@ Typically used as the data-collection phase for training classifier-based router
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Q([Incoming Query]) --> Router["Router"]
     Router --> T1["Tier 1\nHaiku / GPT-4o-mini"]
     Router --> T2["Tier 2\nSonnet / GPT-4o"]
     Router --> T3["Tier 3\nOpus / GPT-4"]
     T1 & T2 & T3 --> Response([Response])
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-
     class Q,Response io
-    class Router proc
-    class T1,T2,T3 llm
+    class Router mathOp
+    class T1,T2,T3 base
 ```
 
 ### Cascade Pattern with Confidence Check
@@ -138,9 +142,13 @@ flowchart TD
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Q["Query"]
     CHEAP["Cheap Model\n(fast, low-cost)"]
@@ -157,8 +165,8 @@ flowchart TD
     C2 -->|"FAIL"| FRONT --> OUT
 
     class Q,OUT io
-    class CHEAP,MID,FRONT llm
-    class C1,C2 decide
+    class CHEAP,MID,FRONT base
+    class C1,C2 mathOp
 ```
 
 ### Quality Feedback Loop (Router Improvement)
@@ -166,6 +174,14 @@ flowchart TD
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Traffic([Production Traffic]) --> Router["Router"]
     Router --> Response["Response"]
     Response --> QualEval["Quality Evaluator\n(LLM-as-judge / human raters / task-specific metrics)"]
@@ -174,15 +190,10 @@ flowchart TD
     Retrain --> Router2["Router (improved model deployed)"]
     Router2 --> Traffic
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
-
-    class Traffic io
-    class Router,Router2 proc
-    class Response llm
-    class QualEval,Labels,Retrain store
+    class Traffic,Labels io
+    class Router,Router2,Retrain train
+    class Response base
+    class QualEval frozen
 ```
 
 ### Multi-Provider Fallback Chain
@@ -190,6 +201,14 @@ flowchart TD
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
     Query([Query]) --> Primary
     Primary["Primary Provider\n(Anthropic)"] -- "timeout / rate limit / error" --> Secondary
     Primary -- success --> Resp([Response])
@@ -197,13 +216,9 @@ flowchart TD
     Secondary -- success --> Resp
     Tertiary["Tertiary Provider\n(Gemini)"] --> Resp
 
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
-
     class Query,Resp io
-    class Primary llm
-    class Secondary,Tertiary warn
+    class Primary base
+    class Secondary,Tertiary lossN
 ```
 
 ---
@@ -583,50 +598,50 @@ Query distribution:
 
 **Architecture Overview**
 
-```
-  Client Request
-        |
-        v
-+----------------+
-| API Gateway    |   -- extracts task_type, token count, user_tier from headers
-+----------------+
-        |
-        v
-+----------------+
-| Router Service |   -- stateless, P99 < 30ms SLA
-+----------------+
-   |      |      |
-   |      |      +-----> Rule-Based Pre-filter
-   |      |                  (token > 3000 -> frontier; code + complex keywords -> code model)
-   |      |
-   |      +-----------> DistilBERT Classifier
-   |                        (5 classes: haiku, sonnet, opus, haiku-code, sonnet-code)
-   |
-   +-------------------> Cascade Fallback (for low-confidence classifier outputs)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-        |
-        v
-+------------------+    +------------------+    +------------------+
-| Model Pool A     |    | Model Pool B     |    | Model Pool C     |
-| Claude Haiku     |    | Claude Sonnet    |    | Claude Opus      |
-| GPT-4o-mini      |    | GPT-4o           |    | GPT-4            |
-| (Tier 1 - cheap) |    | (Tier 2 - mid)   |    | (Tier 3 - front) |
-+------------------+    +------------------+    +------------------+
-        |                       |                       |
-        +------------------+----+------------------+----+
-                           |
-                    +------------------+
-                    | Response Handler |
-                    +------------------+
-                           |
-                    +------------------+
-                    | Quality Sampler  |   -- samples 2% for LLM-as-judge scoring
-                    +------------------+
-                           |
-                    +------------------+
-                    | Metrics Store    |   -- per-route quality, cost, latency dashboards
-                    +------------------+
+    REQ([Client Request])
+    GW["API Gateway\nextracts task_type, token count, user_tier from headers"]
+
+    subgraph RSG["Router Service — stateless, P99 under 30ms SLA"]
+        RB["Rule-Based Pre-filter\ntoken > 3000 → frontier;\ncode + complex keywords → code model"]
+        CL["DistilBERT Classifier\n5 classes: haiku, sonnet, opus,\nhaiku-code, sonnet-code"]
+        CF["Cascade Fallback\nfor low-confidence classifier outputs"]
+    end
+
+    PA["Model Pool A\nClaude Haiku · GPT-4o-mini\n(Tier 1 - cheap)"]
+    PB["Model Pool B\nClaude Sonnet · GPT-4o\n(Tier 2 - mid)"]
+    PC["Model Pool C\nClaude Opus · GPT-4\n(Tier 3 - front)"]
+    RH["Response Handler"]
+    QS["Quality Sampler\nsamples 2% for LLM-as-judge scoring"]
+    MS["Metrics Store\nper-route quality, cost, latency dashboards"]
+
+    REQ --> GW --> RSG
+    RSG --> PA
+    RSG --> PB
+    RSG --> PC
+    PA --> RH
+    PB --> RH
+    PC --> RH
+    RH --> QS --> MS
+
+    class REQ io
+    class GW,RH req
+    class RB,CL,CF mathOp
+    class PA,PB,PC base
+    class QS frozen
+    class MS io
 ```
+
+The router service applies three strategies — a rule-based pre-filter, a DistilBERT classifier, and a cascade fallback for low-confidence outputs — and dispatches each query to one of three model pool tiers; every response funnels back through the handler into a 2% LLM-as-judge quality sample and per-route dashboards.
 
 **Key Design Decisions**
 

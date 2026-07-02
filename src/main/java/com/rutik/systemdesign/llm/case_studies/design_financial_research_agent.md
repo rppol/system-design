@@ -107,44 +107,36 @@ Application tier:
 
 ### System Overview
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CL(["Client (Browser/API)"]) --> GW["API Gateway\nAuth + Rate Limit"]
+    GW --> ORCH["Query Orchestrator\n(tenant context, query planner)"]
+    ORCH --> XBRL["XBRL Fact DB\n(PostgreSQL)\nGAAP fast path"]
+    ORCH --> RET["Semantic Retriever\n(Qdrant per-tenant + reranker)"]
+    ORCH --> CV["Citation Verifier\n(post-gen gate)"]
+    XBRL --> CA["Context Assembler\n(table + prose, token budget)"]
+    RET --> CA
+    CA --> LLM["LLM (structured extraction\n+ citation slots)"]
+    LLM --> MEMO["Memo Generator\n(inline citation formatter)"]
+    MEMO --> CV
+
+    class CL,GW req
+    class ORCH mathOp
+    class XBRL base
+    class RET,CA,MEMO train
+    class LLM frozen
+    class CV lossN
 ```
-                          +------------------+
-    Client (Browser/API)  |   API Gateway    |
-    -------------------->  | Auth + Rate Limit|
-                          +--------+---------+
-                                   |
-                          +--------v---------+
-                          | Query Orchestrator|
-                          | (tenant context, |
-                          |  query planner)  |
-                          +---+---+---+---+--+
-                              |   |   |   |
-               +--------------+   |   |   +--------------+
-               |                  |   |                   |
-      +--------v------+  +--------v---+---+  +----------v------+
-      | XBRL Fact DB  |  | Semantic Retriever|  | Citation        |
-      | (PostgreSQL)  |  | (Qdrant per-tenant|  | Verifier        |
-      | GAAP fast path|  |  + reranker)      |  | (post-gen gate) |
-      +---------------+  +-------------------+  +-----------------+
-               |                  |                       |
-               |        +---------v---------+             |
-               |        | Context Assembler  |            |
-               |        | (table + prose,   |             |
-               |        |  token budget)    |             |
-               +------->+--------+----------+             |
-                                 |                        |
-                        +--------v---------+              |
-                        | LLM (structured  |              |
-                        | extraction +     |              |
-                        | citation slots)  |              |
-                        +--------+---------+              |
-                                 |                        |
-                        +--------v---------+              |
-                        | Memo Generator   +------------->+
-                        | (inline citation |
-                        |  formatter)      |
-                        +------------------+
-```
+
+The orchestrator fans out to the XBRL fast path (8 ms lookups serving ~60% of GAAP metric queries), the per-tenant semantic retriever, and the post-generation Citation Verifier — every generated memo must pass back through the verifier gate before delivery, enforcing the >= 99% citation accuracy requirement.
 
 ### Document Ingestion Pipeline
 

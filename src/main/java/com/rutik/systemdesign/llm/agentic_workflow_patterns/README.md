@@ -406,10 +406,13 @@ def evaluator_optimizer_pipeline(
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart LR
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
-    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     IN["Input"]
     S1["Step 1\nLLM"]
@@ -427,9 +430,9 @@ flowchart LR
     G2 -->|"fail"| ERR
 
     class IN,OUT io
-    class S1,S2,S3 llm
-    class G1,G2 decide
-    class ERR warn
+    class S1,S2,S3 frozen
+    class G1,G2 mathOp
+    class ERR lossN
 ```
 
 ---
@@ -439,9 +442,13 @@ flowchart LR
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io    fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc  fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm   fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     IN["Input"]
     CLS["Classifier\n(claude-haiku / gpt-4o-mini)"]
@@ -457,8 +464,8 @@ flowchart TD
     RA & RB & RC --> OUT
 
     class IN,OUT io
-    class CLS proc
-    class RA,RB,RC llm
+    class CLS mathOp
+    class RA,RB,RC frozen
 ```
 
 ---
@@ -468,9 +475,13 @@ flowchart TD
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     DOC["Document"]
     C1["Chunk 1"] & C2["Chunk 2"] & C3["Chunk 3"] & C4["Chunk 4"]
@@ -486,8 +497,8 @@ flowchart TD
     L1 & L2 & L3 & L4 --> MERGE --> OUT
 
     class DOC,OUT io
-    class C1,C2,C3,C4 proc
-    class L1,L2,L3,L4,MERGE llm
+    class C1,C2,C3,C4 mathOp
+    class L1,L2,L3,L4,MERGE frozen
 ```
 
 Chunks run in parallel with the same wall-clock time; chunk count is a parameter, not a fixed 4.
@@ -499,9 +510,13 @@ Chunks run in parallel with the same wall-clock time; chunk count is a parameter
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     IN["Input"]
     L1["LLM (temp > 0)"] & L2["LLM (temp > 0)"] & L3["LLM (temp > 0)"] & L4["LLM (temp > 0)"] & L5["LLM (temp > 0)"]
@@ -512,8 +527,8 @@ flowchart TD
     L1 & L2 & L3 & L4 & L5 --> VOTE --> OUT
 
     class IN,OUT io
-    class L1,L2,L3,L4,L5 llm
-    class VOTE proc
+    class L1,L2,L3,L4,L5 frozen
+    class VOTE mathOp
 ```
 
 Improves accuracy by 5–15% on reasoning tasks; cost = N × tokens per call.
@@ -525,9 +540,13 @@ Improves accuracy by 5–15% on reasoning tasks; cost = N × tokens per call.
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     OBJ["Objective"]
     ORCH["Orchestrator LLM\n(decomposes dynamically)"]
@@ -540,7 +559,8 @@ flowchart TD
     W1 & W2 & W3 --> SYNTH --> FINAL
 
     class OBJ,FINAL io
-    class ORCH,SYNTH,W1,W2,W3 llm
+    class ORCH,SYNTH base
+    class W1,W2,W3 frozen
 ```
 
 ---
@@ -550,9 +570,13 @@ flowchart TD
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     TASK["Task"]
     GEN["Generator LLM"]
@@ -565,10 +589,9 @@ flowchart TD
     DONE -->|"PASS"| FINAL
     DONE -->|"FAIL\n(+ feedback)"| GEN
 
-    class TASK,FINAL io
-    class GEN,EVAL llm
-    class CAND proc
-    class DONE decide
+    class TASK,FINAL,CAND io
+    class GEN,EVAL frozen
+    class DONE mathOp
 ```
 
 ---
@@ -1095,48 +1118,42 @@ The evaluator-optimizer inference loop is a lightweight, inference-time analog o
 
 **Architecture — combined workflow patterns**:
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PDF(["PDF Text (80 pages)"]) --> SPLIT["Sectioning Parallelization\nSplit into 8 chunks × 10 pages\nParallel extraction on each chunk"]
+    SPLIT --> X1["Chunk 1\nExtract"]
+    SPLIT --> X2["Chunk 2\nExtract"]
+    SPLIT --> XD["… chunks 3-7 …"]
+    SPLIT --> X8["Chunk 8\nExtract"]
+    X1 --> MRG["Merge — deduplicate entities,\nresolve conflicts"]
+    X2 --> MRG
+    XD --> MRG
+    X8 --> MRG
+    MRG --> RISK{"Routing — Risk Classification\nClassifier (claude-haiku)\nlow / medium / high"}
+    RISK -->|"low: 60%"| LOW["claude-haiku\nSummary only"]
+    RISK -->|"medium/high: 40%"| HIGH["claude-opus-4-5\nFull clause analysis"]
+    LOW --> EO["Evaluator-Optimizer — Non-Standard Clause Flags\nGenerator: flag unusual clauses\nEvaluator: verify flags against standard clause library\nMax rounds: 3"]
+    HIGH --> EO
+    EO --> OUTJ(["Structured JSON Output\n(parties, dates, amounts, risk_tier, clause_flags, summary)"])
+
+    class PDF,OUTJ io
+    class SPLIT,MRG,RISK mathOp
+    class X1,X2,XD,X8,LOW,HIGH,EO frozen
 ```
-PDF Text (80 pages)
-        |
-        v
-  [Sectioning Parallelization]
-  Split into 8 chunks × 10 pages
-  Parallel extraction on each chunk
-        |
-  +-----------+------+------+------+------+------+------+-----------+
-  v           v      v      v      v      v      v      v
-Chunk1     Chunk2  ...   ...   ...   ...   Chunk7  Chunk8
-  |           |                                    |      |
-  v           v                                    v      v
-Extract     Extract                             Extract  Extract
-  |           |                                    |      |
-  +-----+-----+------+----...----+------+------+---+
-        |
-        v
-  [Merge] — Deduplicate entities, resolve conflicts
-        |
-        v
-  [Routing — Risk Classification]
-  Classifier (claude-haiku) → low / medium / high
-        |                                |
-    (low: 60%)                    (medium/high: 40%)
-        |                                |
-        v                                v
-  claude-haiku                      claude-opus-4-5
-  Summary only                 Full clause analysis
-        |                                |
-        +----+----------------------------+
-             |
-             v
-  [Evaluator-Optimizer — Non-Standard Clause Flags]
-  Generator: flag unusual clauses
-  Evaluator: verify flags against standard clause library
-  Max rounds: 3
-             |
-             v
-  Structured JSON Output
-  {parties, dates, amounts, risk_tier, clause_flags, summary}
-```
+
+Three patterns composed in one pipeline: 8-way sectioning parallelization for extraction,
+a 60/40 risk-routing split that reserves claude-opus-4-5 for medium/high-risk contracts, and
+a 3-round-capped evaluator-optimizer for clause flags — together cutting cost per document
+from $0.30 to $0.09 and latency from 38s to 6s.
 
 ---
 

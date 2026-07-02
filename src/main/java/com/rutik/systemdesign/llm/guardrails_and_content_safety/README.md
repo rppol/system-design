@@ -251,10 +251,13 @@ response, *rest = guard(
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef warn fill:#1e2127,stroke:#e06c75,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     IN["User Input"]
     IG["Input Guardrails (pre-LLM)\nPII detection + redaction\ntopic classifier\nprompt injection detection\nlength / rate limiting\ninput toxicity check"]
@@ -270,11 +273,10 @@ flowchart TD
     OG -->|"fails"| SAFE
     OG -->|"passes"| OUT
 
-    class IN io
-    class IG,OG proc
-    class LLM llm
-    class BLK,SAFE warn
-    class OUT io
+    class IN,OUT io
+    class IG,OG mathOp
+    class LLM base
+    class BLK,SAFE lossN
 ```
 
 ### Parallel Guardrail Architecture (Low Latency)
@@ -282,10 +284,13 @@ flowchart TD
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef warn fill:#1e2127,stroke:#e06c75,color:#abb2bf
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     IN["User Input"]
     INFR["LLM Inference\n(1–3 s)"]
@@ -298,8 +303,8 @@ flowchart TD
     INFR & SAFE & PII --> MERGE --> OUT
 
     class IN,OUT io
-    class INFR llm
-    class SAFE,PII,MERGE proc
+    class INFR base
+    class SAFE,PII,MERGE mathOp
 ```
 
 Total latency = max(LLM, classifier) — no added latency when classifiers finish before LLM.

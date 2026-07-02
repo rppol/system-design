@@ -184,63 +184,49 @@ CoreAudio (macOS) or WASAPI (Windows)
 
 ### Full System Component Map
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    GW["API Gateway / CDN\nauth, rate limit\nrouting to region"]
+    CAL["Calendar Poller + AutoJoiner\n(GCal/Outlook)"]
+    WSGW["WebSocket GW\nrolling tx to UI"]
+    BOT(["Bot Runner (per-meeting k8s pod)\nOR Local Agent (device-side)"])
+    STT["STT Cluster\nWhisper, A10G fleet\nself-hosted"]
+    DIA["Diarizer\npyannote 3.1\nspeaker labels"]
+    DB[["Transcript DB\nPostgres + OpenSearch"]]
+    CONSENT["Consent Manager\nper-meeting audit log S3"]
+    SUM["Summarizer\nLLM pipeline, map-reduce"]
+    EXPORT["Export Worker\nSlack, Notion, Linear, email"]
+
+    GW --> CAL
+    GW --> WSGW
+    CAL --> BOT
+    BOT -->|"audio chunks"| STT
+    STT --> WSGW
+    STT -->|"transcript segments"| DIA
+    DIA --> DB
+    BOT -->|"consent events"| DB
+    DB --> CONSENT
+    CONSENT -->|"on meeting end"| SUM
+    SUM --> EXPORT
+
+    class GW,WSGW,EXPORT req
+    class CAL frozen
+    class BOT io
+    class STT,SUM base
+    class DIA mathOp
+    class DB io
+    class CONSENT lossN
 ```
-                         +-------------------------+
-                         |    API Gateway / CDN    |
-                         |  (auth, rate limit,     |
-                         |   routing to region)    |
-                         +-------------------------+
-                              |            |
-               +--------------+            +--------------+
-               |                                          |
-     +-----------------+                      +-----------------+
-     |  Calendar Poller|                      |  WebSocket GW   |
-     |  + AutoJoiner   |                      |  (rolling tx    |
-     |  (GCal/Outlook) |                      |   to UI)        |
-     +-----------------+                      +-----------------+
-               |                                          |
-               v                                          |
-     +-----------------+    audio chunks       +----------+------+
-     |  Bot Runner     |---------------------->|  STT Cluster    |
-     |  (per-meeting   |                       |  (Whisper,      |
-     |   k8s pod)      |                       |  A10G fleet,    |
-     |  OR             |                       |  self-hosted)   |
-     |  Local Agent    |                       +-----------------+
-     |  (device-side)  |                                |
-     +-----------------+                      transcript segments
-               |                                        |
-               |                              +-----------------+
-               |                              |  Diarizer       |
-               |                              |  (pyannote 3.1, |
-               |                              |  speaker labels)|
-               |                              +-----------------+
-               |                                        |
-               |                              +-----------------+
-               |                              |  Transcript DB  |
-               +----------------------------> |  (Postgres +    |
-                  consent events              |  OpenSearch)    |
-                                             +-----------------+
-                                                      |
-                                             +-----------------+
-                                             |  Consent Manager|
-                                             |  (per-meeting   |
-                                             |   audit log S3) |
-                                             +-----------------+
-                                                      |
-                                          on meeting end
-                                                      |
-                                             +-----------------+
-                                             |  Summarizer     |
-                                             |  (LLM pipeline, |
-                                             |  map-reduce)    |
-                                             +-----------------+
-                                                      |
-                                             +-----------------+
-                                             |  Export Worker  |
-                                             |  (Slack, Notion,|
-                                             |  Linear, email) |
-                                             +-----------------+
-```
+
+Audio flows from the bot runner (or local agent) into the self-hosted Whisper STT cluster, then through diarization into the transcript store, while consent events from the capture layer land in the same store; the consent manager gates the on-meeting-end summarize-and-export chain.
 
 See [./cross_cutting/streaming_at_scale.md](./cross_cutting/streaming_at_scale.md) for WebSocket fan-out patterns used in the delivery layer.
 
