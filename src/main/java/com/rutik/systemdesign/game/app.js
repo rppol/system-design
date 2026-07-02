@@ -1188,6 +1188,26 @@ async function openStudySection(section) {
     return;
   }
   const mods = modulesOf(bank);
+  // v2: weighted prerequisite edges from graph/<section>.json (real repo
+  // cross-links + lexical Q&A overlap). Pairs are undirected; orient each one
+  // forward along the path order. Missing/failed file -> plain v1 path.
+  const graph = await apiGet(`graph/${section}.json`, null, "default");
+  const modIdx = new Map(mods.map((m, i) => [m.module, i]));
+  const chords = [];
+  let crossLinks = 0;
+  for (const p of (graph && graph.pairs) || []) {
+    const ia = modIdx.get(p.a), ib = modIdx.get(p.b);
+    if (ia === undefined || ib === undefined) continue;  // module not on this path
+    if (p.links > 0) crossLinks += p.links;
+    const from = Math.min(ia, ib), to = Math.max(ia, ib);
+    if (to - from <= 1) continue;                  // consecutive: the spine implies it
+    chords.push({ from, to, w: p.w, lex: !(p.links > 0) });
+  }
+  const peers = mods.map(() => new Set());         // link-backed neighbours per node
+  chords.forEach((c) => {
+    if (c.lex) return;
+    peers[c.from].add(c.to); peers[c.to].add(c.from);
+  });
   state.screenBack = renderStudy;
   const list = mods.map((m) => ({ path: `${m.module}/README.md`, title: m.name }));
   const files = (state.index && state.index.files) || {};
@@ -1213,7 +1233,7 @@ async function openStudySection(section) {
     }).join("") : "";
     return `<div class="pathstep${isOpen ? " open" : ""}">
       <div class="pathnode${practiced.has(m.module) ? " practiced" : ""}${isHere ? " here" : ""}">
-        <button class="pn-main" data-idx="${i}" aria-label="Step ${i + 1} of ${mods.length}: ${esc(m.name)}, ${m.count} questions">
+        <button class="pn-main" data-idx="${i}" aria-label="Step ${i + 1} of ${mods.length}: ${esc(m.name)}, ${m.count} questions${peers[i].size ? `, connects to ${peers[i].size} other topics` : ""}">
           <span class="pn-num">${String(i + 1).padStart(2, "0")}</span>
           <span class="pn-body">
             <span class="pn-name">${esc(m.name)}</span>
@@ -1229,7 +1249,10 @@ async function openStudySection(section) {
 
   app.innerHTML = `
     <div class="hero"><h1>${esc(label(section))}</h1>
-      <p>${mods.length} topics &middot; start at 01 &mdash; the path follows the section's learning order.</p></div>
+      <p>${mods.length} topics &middot; start at 01 &mdash; the path follows the section's learning order.</p>
+      ${graph ? `<p class="path-legend">${crossLinks
+        ? `thick edge = strong prerequisite link &middot; hover a topic to see its connections &middot; ${crossLinks} cross-links mapped`
+        : "no cross-link data yet &mdash; path order shown"}</p>` : ""}</div>
     <div class="topicbar"><input type="search" class="filter" id="studyFilter" placeholder="Filter topics" aria-label="Filter topics" /></div>
     <div class="path-wrap" id="pathWrap">
       <svg class="path-svg" id="pathSvg" aria-hidden="true">
@@ -1237,6 +1260,7 @@ async function openStudySection(section) {
           <stop offset="0" style="stop-color:var(--accent)"/>
           <stop offset="1" style="stop-color:var(--accent-2)"/>
         </linearGradient></defs>
+        <g class="lp-chords" id="lpChords"></g>
         <path class="lp-spine" id="lpSpine" d=""/>
         <path class="lp-leaves" id="lpLeaves" d=""/>
       </svg>
@@ -1246,6 +1270,15 @@ async function openStudySection(section) {
 
   const wrap = el("#pathWrap"), svg = el("#pathSvg");
   const stepEls = [...wrap.querySelectorAll(".pathstep")];
+  // One <path> per chord, created once; layoutPath() only rewrites the d attr.
+  // Weight -> stroke width via a --sw custom prop so CSS can thicken on highlight.
+  const chordG = el("#lpChords");
+  chords.forEach((c) => {
+    c.el = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    c.el.setAttribute("class", "lp-chord" + (c.lex ? " lex" : ""));
+    c.el.style.setProperty("--sw", (1 + 4 * Math.min(1, c.w)).toFixed(2) + "px");
+    chordG.appendChild(c.el);
+  });
 
   // Measure-and-place: two columns on wide screens, one centered column below.
   // Positions in px; container height set to fit; SVG underlay redrawn to match.
@@ -1253,13 +1286,16 @@ async function openStudySection(section) {
     const W = wrap.clientWidth;
     if (!W || !stepEls.length) return;
     const two = W >= 700;
-    const nodeW = two ? Math.min(330, Math.round(W * 0.46)) : Math.min(440, W);
+    // Chord lane: outer margins reserved beside the columns so prerequisite
+    // arcs never pass under chip text (zero when the section has no edges).
+    const lane = two && chords.length ? Math.min(64, Math.round(W * 0.08)) : 0;
+    const nodeW = two ? Math.min(330, Math.round((W - 2 * lane) * 0.46)) : Math.min(440, W);
     const gap = two ? 52 : 40;
     let y = 6;
     const pts = [];
     stepEls.forEach((s, i) => {
       s.style.width = nodeW + "px";
-      const left = two ? (i % 2 === 0 ? 0 : W - nodeW) : Math.round((W - nodeW) / 2);
+      const left = two ? (i % 2 === 0 ? lane : W - nodeW - lane) : Math.round((W - nodeW) / 2);
       s.style.left = left + "px";
       s.style.top = y + "px";
       const h = s.offsetHeight;                    // includes an open leaf fan
@@ -1290,6 +1326,27 @@ async function openStudySection(section) {
       });
     });
     el("#lpLeaves").setAttribute("d", ld.trim());
+    // Prerequisite chords: same-column pairs bracket out through their outer
+    // lane; cross-column pairs take a gentle arc through the chip-free middle
+    // gap (mid-x jittered so stacked centre arcs don't collapse into one line).
+    chords.forEach((c) => {
+      const a = pts[c.from], b = pts[c.to];
+      const ay = a.top + a.chipH / 2, by = b.top + b.chipH / 2;
+      if (two && a.left !== b.left) {
+        const ax = a.left < b.left ? a.left + a.w : a.left;
+        const bx = a.left < b.left ? b.left : b.left + b.w;
+        const spread = Math.max(6, (W - 2 * lane - 2 * nodeW) / 2 - 10);
+        const mx = W / 2 + ((c.from + c.to) % 7 - 3) / 3 * spread;
+        c.el.setAttribute("d", `M ${ax} ${ay} C ${mx} ${ay}, ${mx} ${by}, ${bx} ${by}`);
+      } else {
+        const leftSide = two ? a.left < W / 2 : c.from % 2 === 0;
+        const ax = leftSide ? a.left : a.left + a.w;
+        const bx = leftSide ? b.left : b.left + b.w;
+        const room = leftSide ? Math.min(ax, bx) : W - Math.max(ax, bx);
+        const bow = Math.max(10, Math.min(room - 6, 18 + (by - ay) * 0.05)) * (leftSide ? -1 : 1);
+        c.el.setAttribute("d", `M ${ax} ${ay} C ${ax + bow} ${ay}, ${bx + bow} ${by}, ${bx} ${by}`);
+      }
+    });
   }
 
   wrap.querySelectorAll(".pn-main").forEach((b) => b.addEventListener("click", () => {
@@ -1312,6 +1369,41 @@ async function openStudySection(section) {
     b.setAttribute("aria-expanded", willOpen ? "true" : "false");
     layoutPath();                                  // steps below shift smoothly (top transition)
   }));
+  // Hover / keyboard focus on a chip spotlights its prerequisite edges: its
+  // chords go full opacity (lexical-only ones appear faint dashed on demand),
+  // everything unconnected dims. Pure class toggles — no per-frame JS, so the
+  // global reduced-motion rule makes the change instant.
+  const nodeEls = stepEls.map((s) => s.querySelector(".pathnode"));
+  const touching = mods.map(() => []);
+  chords.forEach((c) => { touching[c.from].push(c); touching[c.to].push(c); });
+  let hlAt = -1;
+  const clearHL = () => {
+    if (hlAt < 0) return;
+    touching[hlAt].forEach((c) => { c.el.classList.remove("on"); stepEls[c.from].classList.remove("elink"); stepEls[c.to].classList.remove("elink"); });
+    stepEls[hlAt].classList.remove("elink");
+    wrap.classList.remove("edgehl");
+    hlAt = -1;
+  };
+  const applyHL = (i) => {
+    if (hlAt === i) return;
+    clearHL();
+    if (!touching[i].length) return;               // nothing to spotlight
+    hlAt = i;
+    wrap.classList.add("edgehl");
+    stepEls[i].classList.add("elink");
+    touching[i].forEach((c) => { c.el.classList.add("on"); stepEls[c.from].classList.add("elink"); stepEls[c.to].classList.add("elink"); });
+  };
+  nodeEls.forEach((n, i) => {
+    n.addEventListener("pointerenter", () => applyHL(i));
+    n.addEventListener("pointerleave", clearHL);
+  });
+  wrap.addEventListener("focusin", (e) => {
+    const pn = e.target.closest(".pathnode");
+    pn ? applyHL(nodeEls.indexOf(pn)) : clearHL();
+  });
+  wrap.addEventListener("focusout", (e) => {
+    if (!e.relatedTarget || !wrap.contains(e.relatedTarget)) clearHL();
+  });
   // Filter dims non-matching nodes (path shape stays intact).
   el("#studyFilter").addEventListener("input", () => {
     const f = el("#studyFilter").value.trim().toLowerCase();

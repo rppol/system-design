@@ -1201,3 +1201,25 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent), var(--glass-hilite);
 }
 @keyframes leaf-in { from { opacity: 0; transform: translateY(6px); } }
+
+/* prerequisite chords: weight -> stroke width (--sw set inline per edge).
+   Solid accent = real repo cross-links; dashed (.lex) = lexical overlap only,
+   invisible until its node is hovered/focused. */
+.lp-chord {
+  fill: none; stroke: var(--accent); stroke-linecap: round;
+  stroke-width: var(--sw, 2px); opacity: 0.5;
+  transition: opacity 0.18s ease, stroke-width 0.18s ease;
+}
+.lp-chord.lex { stroke-dasharray: 3 6; opacity: 0; }
+.path-wrap.edgehl .lp-chord:not(.on) { opacity: 0.08; }
+.path-wrap.edgehl .lp-chord.lex:not(.on) { opacity: 0; }
+.path-wrap.edgehl .lp-spine, .path-wrap.edgehl .lp-leaves { opacity: 0.18; }
+.lp-chord.on { opacity: 1; stroke-width: calc(var(--sw, 2px) * 1.3); }
+.lp-chord.lex.on { opacity: 0.4; stroke-width: var(--sw, 2px); }
+.path-wrap.edgehl .pathstep:not(.elink) { opacity: 0.3; }
+
+/* edge legend under the section hero (qnum/eyebrow family: mono, small, quiet) */
+.hero .path-legend {
+  margin: 8px 0 0; font-family: var(--mono); font-size: 11px;
+  color: var(--muted); letter-spacing: 0.02em;
+}

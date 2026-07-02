@@ -221,6 +221,11 @@ The MVP was the multiple-choice blitz. Since then the following shipped:
   fans for modules that have deep-dive sub-files and a filter that dims non-matching
   nodes so the path shape stays. Order comes straight from `STUDY_ORDER` via
   `modulesOf()`; sub-files from `index.json`'s files map — nothing fabricated.
+  Weighted prerequisite edges overlay the path from `graph/<section>.json` (built by
+  `build_graph.py` from real repo cross-links + lexical Q&A overlap): solid accent
+  chords arc through the outer margins with stroke width 1–5px by weight; hovering or
+  focusing a chip spotlights its edges (lexical-only ones appear faint dashed) and dims
+  everything unconnected. Sections with no cross-link data fall back to the plain path.
 - **Flashcard self-grade mode** — a top-bar `Quiz / Cards` toggle switches any deck to
   active recall: see the question, reveal the answer, self-rate "Got it / Missed it". It
   feeds the *same* spaced-repetition schedule as the blitz; XP is flat (no combo/boss) so
