@@ -114,6 +114,60 @@ const STUDY_ORDER = {
   ],
 };
 
+/* ---------- themes ---------- */
+// data-theme on <html> drives every color token in style.css. The inline script
+// in index.html applies the saved theme before first paint (no flash).
+const THEMES = [
+  { id: "midnight", name: "Midnight" },
+  { id: "aurora", name: "Aurora" },
+  { id: "ember", name: "Ember" },
+  { id: "daylight", name: "Daylight" },
+];
+// A ?theme= URL override wins for this session; picking from the popover saves.
+const curTheme = () =>
+  new URLSearchParams(location.search).get("theme") ||
+  localStorage.getItem("sd_theme") || "midnight";
+
+function applyTheme(id, save = true) {
+  document.documentElement.dataset.theme = id;
+  if (save) localStorage.setItem("sd_theme", id);
+  document.querySelectorAll(".theme-opt").forEach((b) =>
+    b.setAttribute("aria-checked", b.dataset.theme === id ? "true" : "false"));
+}
+
+function closeThemePop() {
+  const pop = document.getElementById("themePop");
+  if (pop) pop.remove();
+  const tb = document.getElementById("themeBtn");
+  if (tb) tb.setAttribute("aria-expanded", "false");
+}
+
+function toggleThemePop() {
+  if (document.getElementById("themePop")) { closeThemePop(); return; }
+  const pop = document.createElement("div");
+  pop.className = "theme-pop"; pop.id = "themePop";
+  pop.setAttribute("role", "radiogroup"); pop.setAttribute("aria-label", "Theme");
+  pop.innerHTML = `<div class="tp-h">Theme</div>` + THEMES.map((t) =>
+    `<button class="theme-opt" role="radio" data-theme="${t.id}" aria-checked="${curTheme() === t.id}">
+       <span class="swatch sw-${t.id}" aria-hidden="true"></span>${t.name}<span class="tcheck">✓</span>
+     </button>`).join("");
+  document.body.appendChild(pop);
+  const tb = document.getElementById("themeBtn");
+  if (tb) tb.setAttribute("aria-expanded", "true");
+  pop.querySelectorAll(".theme-opt").forEach((b) => b.addEventListener("click", () => applyTheme(b.dataset.theme)));
+  const dismiss = (e) => {
+    if (e.type === "keydown") {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();                         // don't also close the reader
+    } else if (pop.contains(e.target) || e.target.closest?.("#themeBtn")) return;
+    closeThemePop();
+    document.removeEventListener("pointerdown", dismiss, true);
+    document.removeEventListener("keydown", dismiss, true);
+  };
+  document.addEventListener("pointerdown", dismiss, true);
+  document.addEventListener("keydown", dismiss, true);
+}
+
 const app = document.getElementById("app");
 const state = {
   index: null, today: null, progress: null,
@@ -125,6 +179,23 @@ const state = {
 /* ---------- helpers ---------- */
 const todayISO = () => new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD, local
 const el = (sel) => document.querySelector(sel);
+
+// Inline SVG icons (lucide-style paths) — consistent weight in every theme,
+// unlike platform emoji.
+const ICON = (name, cls = "") => {
+  const paths = {
+    flame: '<path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>',
+    bolt: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10"/>',
+    snow: '<line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/><path d="m20 16-4-4 4-4"/><path d="m4 8 4 4-4 4"/><path d="m16 4-4 4-4-4"/><path d="m8 20 4-4 4 4"/>',
+    clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+    soundOn: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>',
+    soundOff: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/>',
+  };
+  return `<svg class="icon ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name]}</svg>`;
+};
+
+// Screen-reader announcements (aria-live region in index.html).
+const announce = (msg) => { const n = el("#live"); if (n) n.textContent = msg; };
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const label = (s) => SECTION_LABELS[s] || s;
 
@@ -136,8 +207,8 @@ function shuffle(a) {
   return a;
 }
 
-async function apiGet(path, fallback) {
-  try { const r = await fetch(path, { cache: "no-store" }); if (!r.ok) throw 0; return await r.json(); }
+async function apiGet(path, fallback, cache = "no-store") {
+  try { const r = await fetch(path, { cache }); if (!r.ok) throw 0; return await r.json(); }
   catch { return fallback; }
 }
 
@@ -170,7 +241,10 @@ const sfx = (() => {
 })();
 
 function confetti() {
-  const colors = ["#6ea8fe", "#8b7bff", "#34d399", "#fbbf24", "#f87171"];
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const cs = getComputedStyle(document.documentElement);
+  const colors = ["--accent", "--accent-2", "--good", "--warn", "--bad"]
+    .map((v) => cs.getPropertyValue(v).trim() || "#6ea8fe");
   const c = document.createElement("div");
   c.className = "confetti";
   for (let i = 0; i < 90; i++) {
@@ -199,26 +273,50 @@ function countUp(node, to) {
 async function loadProgress() {
   const fill = (p) => { if (!p.reviews) p.reviews = {}; if (p.freezes == null) p.freezes = 2; if (!p.freezeUsedOn) p.freezeUsedOn = []; return p; };
   if (!IS_STATIC) {
+    await flushPendingSessions();                  // replay sessions saved while the server was down
     const p = await apiGet("/api/progress", null);
     if (p) return fill(p);
   }
-  const ls = localStorage.getItem("sd_progress");
-  return ls ? fill(JSON.parse(ls))
+  let ls = null;
+  try { ls = JSON.parse(localStorage.getItem("sd_progress")); } catch { /* corrupt -> reseed */ }
+  return ls ? fill(ls)
     : { streak: 0, longestStreak: 0, lastPlayed: null, totalXP: 0, sections: {}, history: [], reviews: {}, freezes: 2, freezeUsedOn: [] };
+}
+
+// Sessions that failed to POST are queued and replayed on next boot, so an
+// offline server never silently loses a play (which could burn a freeze or
+// reset the streak days later).
+async function postSession(session) {
+  const r = await fetch("/api/progress", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(session),
+  });
+  if (!r.ok) throw 0;
+  return r.json();
+}
+
+async function flushPendingSessions() {
+  let queue = [];
+  try { queue = JSON.parse(localStorage.getItem("sd_pending_sessions")) || []; } catch { }
+  if (!queue.length) return;
+  const remaining = [];
+  for (const s of queue) {
+    try { await postSession(s); } catch { remaining.push(s); }
+  }
+  localStorage.setItem("sd_pending_sessions", JSON.stringify(remaining));
 }
 
 async function saveSession(session) {
   if (IS_STATIC) return saveSessionLocal(session);
   try {
-    const r = await fetch("/api/progress", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(session),
-    });
-    if (!r.ok) throw 0;
-    const data = await r.json();
+    const data = await postSession(session);
     state.progress = data.progress;
     return { xp: data.xpEarned, freezeUsed: !!data.freezeUsed };
   } catch {
-    return saveSessionLocal(session);
+    let queue = [];
+    try { queue = JSON.parse(localStorage.getItem("sd_pending_sessions")) || []; } catch { }
+    queue.push(session);
+    localStorage.setItem("sd_pending_sessions", JSON.stringify(queue.slice(-30)));
+    return saveSessionLocal(session);              // optimistic local view until the replay lands
   }
 }
 
@@ -280,7 +378,11 @@ function saveSessionLocal(session) {
   p.lastPlayed = session.date;
   const xp = correct * 10 + p.streak * 5 + (session.bonusXp || 0);
   p.totalXP = (p.totalXP || 0) + xp;
-  (p.history = p.history || []).push({ date: session.date, correct, xp });
+  (p.history = p.history || []).push({
+    date: session.date, answered: (session.results || []).length, correct, xp,
+    section: session.section || "unknown",
+  });
+  p.history = p.history.slice(-365);               // same cap as server.py
   localStorage.setItem("sd_progress", JSON.stringify(p));
   return { xp, freezeUsed };
 }
@@ -347,7 +449,11 @@ function goalRing() {
   const r = 26, circ = 2 * Math.PI * r, off = circ * (1 - pct);
   const done = xp >= DAILY_XP_GOAL;
   return `<div class="goal" title="Daily goal">
-      <svg width="64" height="64" viewBox="0 0 64 64">
+      <svg width="72" height="72" viewBox="0 0 64 64">
+        <defs><linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" style="stop-color:var(--accent)"/>
+          <stop offset="1" style="stop-color:var(--accent-2)"/>
+        </linearGradient></defs>
         <circle cx="32" cy="32" r="${r}" class="ring-bg"/>
         <circle cx="32" cy="32" r="${r}" class="ring-fg ${done ? "done" : ""}"
           stroke-dasharray="${circ.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"/>
@@ -364,7 +470,7 @@ function renderHome() {
   const streak = state.progress.streak || 0;
   const freezes = state.progress.freezes || 0;
   const freezeBit = freezes > 0
-    ? ` <span class="freeze-chip" title="Streak freezes auto-cover a single missed day">&#10052;&#65039; ${freezes}</span>` : "";
+    ? ` <span class="freeze-chip" title="Streak freezes auto-cover a single missed day">${ICON("snow", "i-snow")} ${freezes}</span>` : "";
   const streakLine = streak > 0
     ? `You're on a <b>${streak}-day</b> streak. Keep it alive.${freezeBit}`
     : `Start your streak today &mdash; just 5 minutes.${freezeBit}`;
@@ -388,7 +494,7 @@ function renderHome() {
     : "";
   const rusty = rustiestSection();
   const rustyNote = rusty
-    ? `<button class="rusty-note" id="rustyBtn">&#9203; <b>${esc(label(rusty.s))}</b> is getting rusty &mdash; ${rusty.days} days since you practiced it. Refresh it &rarr;</button>`
+    ? `<button class="rusty-note" id="rustyBtn">${ICON("clock")} <b>${esc(label(rusty.s))}</b> is getting rusty &mdash; ${rusty.days} days since you practiced it. Refresh it &rarr;</button>`
     : "";
   const secs = state.index.sections, p = state.progress;
   const tiles = Object.keys(secs).sort().map((s) => {
@@ -403,16 +509,16 @@ function renderHome() {
     <div class="hero">
       <div class="hero-row">${goalRing()}<div><h1>Today's 5-minute blitz</h1><p>${streakLine}</p></div></div>
     </div>
-    ${reviewCard}
-    ${weakCard}
-    ${rustyNote}
     <div class="topic-card">
       <div class="eyebrow">Suggested for today</div>
       <h2>${esc(label(section))}</h2>
       <p class="msg">${esc(coachMsg || `${QUESTIONS_PER_BLITZ} questions pulled from your ${label(section)} notes.`)}</p>
       <button class="cta" id="startBtn">Start &mdash; ${QUESTIONS_PER_BLITZ} questions<small>~5 min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}</small></button>
     </div>
-    <div class="section-h">Or pick a section &mdash; then choose sub-topics</div>
+    ${reviewCard}
+    ${weakCard}
+    ${rustyNote}
+    <h2 class="section-h">Or pick a section &mdash; then choose sub-topics</h2>
     <div class="grid">${tiles}</div>`;
   el("#startBtn").addEventListener("click", () => startBlitz(section));
   if (due.length) el("#reviewBtn").addEventListener("click", startReview);
@@ -425,7 +531,9 @@ function renderHome() {
 /* ---------- bank loading / sub-topic picker ---------- */
 const bankCache = {};
 async function loadBank(section) {
-  if (!bankCache[section]) bankCache[section] = await apiGet(`questions/${section}.json`, null);
+  // "default" lets the server's no-cache header drive revalidation (304s) —
+  // these files are multi-MB; no-store would re-download them on every boot.
+  if (!bankCache[section]) bankCache[section] = await apiGet(`questions/${section}.json`, null, "default");
   return bankCache[section];
 }
 
@@ -534,7 +642,13 @@ async function startReview() {
     const bank = await loadBank(sec);
     if (!bank) continue;
     const byId = new Map(bank.map((q) => [q.id, q]));
-    for (const id of bySec[sec]) { const q = byId.get(id); if (q) items.push(q); }
+    for (const id of bySec[sec]) {
+      const q = byId.get(id);
+      if (q) items.push(q);
+      // Orphaned review (question no longer in the bank): self-heal so the due
+      // count stops advertising questions that can never be served again.
+      else delete state.progress.reviews[id];
+    }
   }
   if (!items.length) { renderHome(); return; }
   state.section = "review"; state.modules = null;
@@ -597,11 +711,13 @@ function renderQuestion() {
   const teachBlock = teach
     ? `<div class="teach-banner">Concept review &middot; you skipped this earlier. Learn it, then lock it in.</div>
        <div class="reveal concept show"><b>Concept:</b> ${esc(q.answerFull)}</div>` : "";
-  const comboChip = state.combo >= 2 ? `<span class="combo">&#128293; ${state.combo} combo &middot; ${comboMult()}&times;</span>` : "";
+  // Show what the NEXT correct answer pays (gain is computed after combo+1).
+  const nextMult = state.combo + 1 >= 5 ? 3 : state.combo + 1 >= 3 ? 2 : 1;
+  const comboChip = state.combo >= 2 ? `<span class="combo">${ICON("flame", "i-flame")} ${state.combo} combo &middot; ${nextMult}&times; XP</span>` : "";
   app.innerHTML = `
     <div class="qhead">
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)}</span>
-      <span class="dots">${dots}</span>
+      <span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dots}</span>
     </div>
     ${bossBanner}${teachBlock}
     <div class="qtext">${esc(q.question)} ${comboChip}</div>
@@ -617,6 +733,7 @@ function renderQuestion() {
     b.addEventListener("click", () => answer(parseInt(b.dataset.i, 10))));
   if (item.status === "pending") el("#skipBtn").addEventListener("click", skipQuestion);
   el("#nextBtn").addEventListener("click", nextQuestion);
+  app.focus({ preventScroll: true });              // keep keyboard + SR context on the new question
 }
 
 function answer(i) {
@@ -631,6 +748,9 @@ function answer(i) {
     if (k === i && !opts[k].ok) { b.classList.add("wrong"); b.querySelector(".mark").textContent = "✗"; }
   });
   const right = opts[i].ok;
+  announce(teach
+    ? "Locked in."
+    : right ? "Correct." : `Incorrect. The answer is: ${opts.find((o) => o.ok).t}`);
   if (teach) {
     item.status = "learned";
   } else if (right) {
@@ -657,6 +777,7 @@ function answer(i) {
 
 function skipQuestion() {
   const idx = state.queue[state.cursor];
+  if (state.deck[idx].status !== "pending") return;  // double-click guard
   state.deck[idx].status = "skipped";
   state.queue.push(idx); // returns at the end in teach mode
   nextQuestion();
@@ -680,7 +801,7 @@ function renderCard() {
   app.innerHTML = `
     <div class="qhead">
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)}</span>
-      <span class="dots">${dots}</span>
+      <span class="dots" role="img" aria-label="Card ${state.cursor + 1} of ${state.queue.length}">${dots}</span>
     </div>
     <div class="flash-label">Flashcard &middot; recall it, then grade yourself</div>
     <div class="qtext">${esc(q.question)}</div>
@@ -690,6 +811,7 @@ function renderCard() {
       <button class="next show" id="revealBtn">Reveal answer (Space)</button>
     </div>`;
   el("#revealBtn").addEventListener("click", revealCard);
+  app.focus({ preventScroll: true });
 }
 
 function revealCard() {
@@ -700,6 +822,7 @@ function revealCard() {
   rev.innerHTML = `<b>Answer:</b> ${esc(q.answerFull)}
     <button class="deeper" id="deeperBtn">Dive deeper into ${esc(q.moduleName)} &rarr;</button>`;
   rev.classList.add("show");
+  announce(`Answer: ${q.answerFull}`);
   el("#deeperBtn").addEventListener("click", () => openReader(q.module, q.moduleName));
   el("#cardActions").innerHTML = `
     <button class="grade miss" id="missBtn"><kbd>1</kbd> Missed it</button>
@@ -735,8 +858,9 @@ async function finish() {
   const flawless = pct === 100 && total > 0;
   if (flawless) { confetti(); sfx.finish(); }
   const cheer = flawless ? "Flawless! " : pct >= 70 ? "Strong work. " : pct >= 40 ? "Good progress. " : "Every rep counts. ";
+  announce(`Blitz finished. ${correct} of ${total} correct. ${xp} XP earned.`);
   const freezeNote = freezeUsed
-    ? `<div class="freeze-saved">&#10052;&#65039; Streak saved &mdash; 1 freeze used (${state.progress.freezes || 0} left)</div>` : "";
+    ? `<div class="freeze-saved">${ICON("snow", "i-snow")} Streak saved &mdash; 1 freeze used (${state.progress.freezes || 0} left)</div>` : "";
   const extraBadges =
     (learned ? `<div class="badge"><div class="n">${learned}</div><div class="l">Learned</div></div>` : "") +
     (state.maxCombo >= 2 ? `<div class="badge"><div class="n">${state.maxCombo}&times;</div><div class="l">Best combo</div></div>` : "");
@@ -761,6 +885,7 @@ async function finish() {
   el("#againBtn").addEventListener("click", () => (state.replayFn ? state.replayFn() : renderHome()));
   el("#homeBtn").addEventListener("click", renderHome);
   el("#progBtn").addEventListener("click", renderProgress);
+  app.focus({ preventScroll: true });
 }
 
 /* ---------- progress ---------- */
@@ -769,24 +894,26 @@ async function finish() {
 function heatmapHTML(history) {
   const xpByDay = new Map();
   for (const h of history || []) xpByDay.set(h.date, (xpByDay.get(h.date) || 0) + (h.xp || 0));
-  const WEEKS = 17, dayMs = 86400000;
+  const WEEKS = 17;
   const today = new Date(todayISO() + "T00:00:00");
   const end = new Date(today); end.setDate(end.getDate() + (6 - today.getDay())); // Sat of this week
-  const start = new Date(end.getTime() - (WEEKS * 7 - 1) * dayMs);                 // a Sunday
+  const start = new Date(end); start.setDate(start.getDate() - (WEEKS * 7 - 1));   // a Sunday
   let cells = "";
   for (let i = 0; i < WEEKS * 7; i++) {
-    const d = new Date(start.getTime() + i * dayMs);
+    const d = new Date(start); d.setDate(d.getDate() + i);   // setDate is DST-safe; raw ms math is not
     const iso = d.toLocaleDateString("en-CA");
     const xp = xpByDay.get(iso) || 0;
     if (d > today) { cells += `<span class="hmcell hm-future"></span>`; continue; }
     const lvl = xp === 0 ? 0 : xp < 30 ? 1 : xp < 70 ? 2 : xp < 120 ? 3 : 4;
     cells += `<span class="hmcell hm-l${lvl}" title="${iso}: ${xp} XP"></span>`;
   }
-  return `<div class="section-h">Activity</div>
+  const empty = !(history || []).length
+    ? `<p class="hm-empty">No activity yet &mdash; your first blitz lights up this grid.</p>` : "";
+  return `<h2 class="section-h">Activity</h2>
     <div class="heatmap">${cells}</div>
     <div class="hmlegend">Less
       <span class="hmcell hm-l0"></span><span class="hmcell hm-l1"></span><span class="hmcell hm-l2"></span><span class="hmcell hm-l3"></span><span class="hmcell hm-l4"></span>
-      More</div>`;
+      More</div>${empty}`;
 }
 
 function renderProgress() {
@@ -810,12 +937,12 @@ function renderProgress() {
     <div class="badges">
       <div class="badge"><div class="n">${p.streak || 0}</div><div class="l">Streak</div></div>
       <div class="badge"><div class="n">${p.longestStreak || 0}</div><div class="l">Longest</div></div>
-      <div class="badge"><div class="n">&#10052;&#65039; ${p.freezes || 0}</div><div class="l">Freezes</div></div>
+      <div class="badge"><div class="n">${ICON("snow", "i-snow")} ${p.freezes || 0}</div><div class="l">Freezes</div></div>
       <div class="badge"><div class="n">${p.totalXP || 0}</div><div class="l">Total XP</div></div>
       <div class="badge"><div class="n">${due}</div><div class="l">Due review</div></div>
     </div>
     ${heatmapHTML(p.history)}
-    <div class="section-h">Mastery by section</div>
+    <h2 class="section-h">Mastery by section</h2>
     ${tiles}
     <div class="row" style="margin-top:18px"><button class="primary" id="backHome">Back to today</button></div>`;
   el("#backHome").addEventListener("click", renderHome);
@@ -833,7 +960,7 @@ function renderStudy() {
      </button>`).join("");
   app.innerHTML = `
     <div class="hero"><h1>Study</h1><p>Read your notes in a focused reader &mdash; no quiz, no clock.</p></div>
-    <div class="section-h">Pick a section to browse its topics</div>
+    <h2 class="section-h">Pick a section to browse its topics</h2>
     <div class="grid">${tiles}</div>
     <div class="row" style="margin-top:18px"><button class="ghost" id="studyHome">&larr; Home</button></div>`;
   document.querySelectorAll(".tile").forEach((b) => b.addEventListener("click", () => openStudySection(b.dataset.section)));
@@ -1064,23 +1191,24 @@ async function renderMermaid(root) {
       n.addEventListener("click", () => openMermaidZoom(n));
     });
   } catch (err) {
-    // CDN unavailable or offline — raw source stays visible as text, nothing crashes.
+    // CDN unavailable or offline — raw source stays visible as text, nothing
+    // crashes, and the import is retried on the next page open (a cached
+    // rejected promise would otherwise disable diagrams for the whole session).
+    _mermaidReady = null;
     console.warn("Mermaid render failed:", err);
   }
 }
 
-function openMermaidZoom(node) {
-  const svg = node.querySelector("svg");
-  if (!svg) return;
-  const clone = svg.cloneNode(true);
-  clone.removeAttribute("width");
-  clone.removeAttribute("height");
-  clone.style.cssText = "display:block;min-width:320px;";
+// Unified diagram lightbox: drag-to-pan + zoom-toward-cursor for both Mermaid
+// SVGs and ASCII-diagram <pre>s. Wheel zooms at the pointer, drag pans (pointer
+// capture), double-click zooms in / resets, and + − 0 arrows Esc work from the
+// keyboard. Opens fitted-to-viewport and centred.
+function openDiagramZoom(contentEl) {
+  let scale = 1, tx = 0, ty = 0, panning = null, moved = false;
 
-  let scale = 1;
   const inner = document.createElement("div");
-  inner.className = "mermaid-zoom-inner";
-  inner.appendChild(clone);
+  inner.className = "mermaid-zoom-inner md-body";     // md-body -> token colours apply
+  inner.appendChild(contentEl);
 
   const box = document.createElement("div");
   box.className = "mermaid-zoom-box";
@@ -1088,7 +1216,7 @@ function openMermaidZoom(node) {
 
   const ctrl = document.createElement("div");
   ctrl.className = "mermaid-zoom-ctrl";
-  ctrl.innerHTML = `<button class="mz-out">−</button><span class="mz-pct">100%</span><button class="mz-in">+</button><button class="mz-reset" title="Reset zoom">↺</button><button class="mz-close">✕</button>`;
+  ctrl.innerHTML = `<button class="mz-out" title="Zoom out (−)">−</button><span class="mz-pct">100%</span><button class="mz-in" title="Zoom in (+)">+</button><button class="mz-reset" title="Fit (0)">↺</button><span class="mz-hint">drag to pan · scroll to zoom · esc closes</span><button class="mz-close" title="Close (Esc)">✕</button>`;
 
   const overlay = document.createElement("div");
   overlay.className = "mermaid-overlay";
@@ -1096,20 +1224,121 @@ function openMermaidZoom(node) {
   overlay.appendChild(box);
   document.body.appendChild(overlay);
 
-  const setScale = s => {
-    scale = Math.min(4, Math.max(0.2, s));
-    inner.style.transform = `scale(${scale})`;
+  const apply = () => {
+    inner.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
     ctrl.querySelector(".mz-pct").textContent = Math.round(scale * 100) + "%";
   };
+  // Zoom keeping the point under (cx, cy) — box-local coords — stationary.
+  const zoomAt = (next, cx, cy) => {
+    next = Math.min(6, Math.max(0.15, next));
+    const k = next / scale;
+    tx = cx - k * (cx - tx);
+    ty = cy - k * (cy - ty);
+    scale = next;
+    apply();
+  };
+  const fit = () => {                                 // fit-to-viewport, centred (cap 1x)
+    const b = box.getBoundingClientRect();
+    const w = inner.offsetWidth || 1, h = inner.offsetHeight || 1;
+    scale = Math.max(0.15, Math.min(1, (b.width - 56) / w, (b.height - 56) / h));
+    tx = (b.width - w * scale) / 2;
+    ty = Math.max(24, (b.height - h * scale) / 2);
+    apply();
+  };
+  requestAnimationFrame(fit);
 
-  ctrl.querySelector(".mz-in").addEventListener("click", e => { e.stopPropagation(); setScale(scale + 0.25); });
-  ctrl.querySelector(".mz-out").addEventListener("click", e => { e.stopPropagation(); setScale(scale - 0.25); });
-  ctrl.querySelector(".mz-reset").addEventListener("click", e => { e.stopPropagation(); setScale(1); });
-  ctrl.querySelector(".mz-close").addEventListener("click", () => overlay.remove());
-  box.addEventListener("wheel", e => { e.preventDefault(); setScale(scale + (e.deltaY < 0 ? 0.1 : -0.1)); }, { passive: false });
-  overlay.addEventListener("click", e => { if (e.target === overlay || e.target === box) overlay.remove(); });
-  const onEsc = e => { if (e.key === "Escape") { overlay.remove(); document.removeEventListener("keydown", onEsc); } };
-  document.addEventListener("keydown", onEsc);
+  const close = () => { overlay.remove(); document.removeEventListener("keydown", onKey, true); };
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.stopPropagation(); close(); return; }   // don't also close the reader
+    const r = box.getBoundingClientRect();
+    if (e.key === "+" || e.key === "=") zoomAt(scale * 1.2, r.width / 2, r.height / 2);
+    else if (e.key === "-" || e.key === "_") zoomAt(scale / 1.2, r.width / 2, r.height / 2);
+    else if (e.key === "0") fit();
+    else if (e.key === "ArrowLeft") { tx += 60; apply(); }
+    else if (e.key === "ArrowRight") { tx -= 60; apply(); }
+    else if (e.key === "ArrowUp") { ty += 60; apply(); }
+    else if (e.key === "ArrowDown") { ty -= 60; apply(); }
+    else return;
+    e.preventDefault();
+  };
+  document.addEventListener("keydown", onKey, true);
+
+  ctrl.querySelector(".mz-in").addEventListener("click", () => { const r = box.getBoundingClientRect(); zoomAt(scale * 1.25, r.width / 2, r.height / 2); });
+  ctrl.querySelector(".mz-out").addEventListener("click", () => { const r = box.getBoundingClientRect(); zoomAt(scale / 1.25, r.width / 2, r.height / 2); });
+  ctrl.querySelector(".mz-reset").addEventListener("click", fit);
+  ctrl.querySelector(".mz-close").addEventListener("click", close);
+
+  box.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    panning = { x: e.clientX, y: e.clientY, tx, ty };
+    moved = false;
+    box.setPointerCapture(e.pointerId);
+    box.classList.add("panning");
+  });
+  box.addEventListener("pointermove", (e) => {
+    if (!panning) return;
+    const dx = e.clientX - panning.x, dy = e.clientY - panning.y;
+    if (Math.abs(dx) + Math.abs(dy) > 4) moved = true;
+    tx = panning.tx + dx; ty = panning.ty + dy;
+    apply();
+  });
+  const endPan = () => { panning = null; box.classList.remove("panning"); };
+  box.addEventListener("pointerup", endPan);
+  box.addEventListener("pointercancel", endPan);
+  box.addEventListener("click", (e) => { if (!moved && e.target === box) close(); });
+  box.addEventListener("dblclick", (e) => {
+    const r = box.getBoundingClientRect();
+    if (scale < 2.5) zoomAt(scale * 1.6, e.clientX - r.left, e.clientY - r.top); else fit();
+  });
+  box.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const r = box.getBoundingClientRect();
+    zoomAt(scale * Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top);
+  }, { passive: false });
+}
+
+function openMermaidZoom(node) {
+  const svg = node.querySelector("svg");
+  if (!svg) return;
+  const clone = svg.cloneNode(true);
+  // Give the clone explicit pixel size from its viewBox so fit/zoom math is exact.
+  const vb = svg.viewBox && svg.viewBox.baseVal;
+  const r = svg.getBoundingClientRect();
+  const w = (vb && vb.width) || r.width || 800;
+  const h = (vb && vb.height) || r.height || 500;
+  clone.setAttribute("width", w);
+  clone.setAttribute("height", h);
+  clone.style.cssText = "display:block;max-width:none;";
+  openDiagramZoom(clone);
+}
+
+// Copy buttons on every code fence + click-to-zoom on ASCII diagrams.
+function wireDiagramsAndCopy(root) {
+  root.querySelectorAll("pre").forEach((pre) => {
+    const code = pre.querySelector("code");
+    if (!code) return;
+    const btn = document.createElement("button");
+    btn.className = "codecopy";
+    btn.textContent = "copy";
+    btn.title = "Copy to clipboard";
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      navigator.clipboard?.writeText(code.textContent).then(() => {
+        btn.textContent = "copied ✓"; btn.classList.add("ok");
+        setTimeout(() => { btn.textContent = "copy"; btn.classList.remove("ok"); }, 1400);
+      });
+    });
+    pre.appendChild(btn);
+    if (code.classList.contains("diagram")) {
+      pre.title = "Click to zoom";
+      pre.addEventListener("click", (e) => {
+        if (e.target.closest(".codecopy")) return;
+        const p = document.createElement("pre");
+        p.innerHTML = code.innerHTML;
+        openDiagramZoom(p);
+      });
+    }
+  });
 }
 
 function mdRender(src) {
@@ -1240,7 +1469,7 @@ function attachGrip(grip, onMove, onDone) {
 function wireGrips() {
   const css = document.documentElement.style;
   // Main reader pane grip (outer shell, wired on every openReaderPath call)
-  attachGrip(el("readerGrip"),
+  attachGrip(el("#readerGrip"),
     ev => css.setProperty("--reader-w", Math.round(Math.min(window.innerWidth * 0.92, Math.max(360, window.innerWidth - ev.clientX))) + "px"),
     () => { const v = getComputedStyle(document.documentElement).getPropertyValue("--reader-w").trim(); if (v.endsWith("px")) localStorage.setItem("sd_reader_w", v); }
   );
@@ -1249,17 +1478,17 @@ function wireGrips() {
 function wireSidebarGrips() {
   const css = document.documentElement.style;
   // Left modules sidebar grip (injected with body HTML — wired after b.innerHTML is set)
-  attachGrip(el("modulesGrip"),
+  attachGrip(el("#modulesGrip"),
     ev => {
-      const left = el("reader").getBoundingClientRect().left;
+      const left = el("#reader").getBoundingClientRect().left;
       css.setProperty("--modules-w", Math.round(Math.min(320, Math.max(100, ev.clientX - left))) + "px");
     },
     () => { const v = getComputedStyle(document.documentElement).getPropertyValue("--modules-w").trim(); if (v.endsWith("px")) localStorage.setItem("sd_modules_w", v); }
   );
   // Right TOC sidebar grip
-  attachGrip(el("tocGrip"),
+  attachGrip(el("#tocGrip"),
     ev => {
-      const right = el("reader").getBoundingClientRect().right;
+      const right = el("#reader").getBoundingClientRect().right;
       css.setProperty("--toc-w", Math.round(Math.min(360, Math.max(120, right - ev.clientX))) + "px");
     },
     () => { const v = getComputedStyle(document.documentElement).getPropertyValue("--toc-w").trim(); if (v.endsWith("px")) localStorage.setItem("sd_toc_w", v); }
@@ -1457,6 +1686,7 @@ async function openReaderPath(path, title, navCtx, frag) {
     const headCount = buildToc(el("#readerToc"), main);
     el("#readerIdx").style.display = headCount >= 3 ? "" : "none";   // nothing to index -> hide toggle
     wireReaderBody(main);
+    wireDiagramsAndCopy(main);                     // copy buttons + ASCII-diagram zoom
     renderMermaid(main);                           // no-op when page has no mermaid fences
     b.scrollTop = 0;
     if (frag) { const t = main.querySelector("#" + CSS.escape(frag)); if (t) t.scrollIntoView({ block: "start" }); }
@@ -1495,8 +1725,10 @@ document.addEventListener("keydown", (e) => {
       applyReaderModes();
       return;
     }
+    return;   // reader is open: never let keys drive the quiz hidden behind it
   }
   if (!state.inQuiz) return;
+  if (e.repeat) return;   // holding a key must not auto-advance/grade a deck
   if ((e.target.tagName || "").toLowerCase() === "input") return;
   if (state.mode === "flash") {
     if (!state.answered) {
@@ -1521,7 +1753,11 @@ document.addEventListener("keydown", (e) => {
 /* ---------- boot ---------- */
 function syncMuteBtn() {
   const b = el("#muteBtn");
-  if (b) b.textContent = sfx.isOn() ? "🔊" : "🔇";
+  if (!b) return;
+  const on = sfx.isOn();
+  b.innerHTML = ICON(on ? "soundOn" : "soundOff");
+  b.setAttribute("aria-pressed", on ? "true" : "false");
+  b.setAttribute("aria-label", on ? "Sound on" : "Sound off");
 }
 
 function syncModeBtn() {
@@ -1530,6 +1766,7 @@ function syncModeBtn() {
   const flash = deckMode() === "flash";
   b.textContent = flash ? "Cards" : "Quiz";
   b.title = flash ? "Flashcards mode (click for multiple-choice)" : "Multiple-choice mode (click for flashcards)";
+  b.setAttribute("aria-pressed", flash ? "true" : "false");
   b.classList.toggle("on", flash);
 }
 
@@ -1546,6 +1783,9 @@ async function boot() {
   const studyB = el("#navStudy");
   if (studyB) studyB.addEventListener("click", renderStudy);
   restoreReaderWidth();
+  applyTheme(curTheme(), false);   // don't persist a ?theme= URL override
+  const tb = el("#themeBtn");
+  if (tb) tb.addEventListener("click", toggleThemePop);
   const mb = el("#muteBtn");
   if (mb) mb.addEventListener("click", () => { sfx.toggle(); syncMuteBtn(); });
   syncMuteBtn();

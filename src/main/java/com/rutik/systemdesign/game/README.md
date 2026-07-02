@@ -32,7 +32,11 @@ reports weekly.
   confetti on a flawless blitz.
 - **Keyboard** — `1`–`4` to answer, `Enter` for next, `S` to skip; in Cards mode `Space`
   reveals and `1`/`2` grade Missed/Got. In the reader: `F` toggles fullscreen, `Esc`
-  exits fullscreen (then closes).
+  exits fullscreen (then closes). In the diagram lightbox: `+`/`−`/`0` zoom, arrows pan.
+- **Themes** — a top-bar picker with four glass themes (Midnight, Aurora, Ember,
+  Daylight), each driving every color token plus the animated aurora-mesh backdrop.
+  Persisted to `localStorage`; `?theme=<id>` in the URL previews one without saving.
+  All surfaces are translucent glass (`backdrop-filter`) over the mesh + blueprint grid.
 - **Study mode** — a top-bar `Study` button opens a pure-reading browser: pick a section,
   then any topic, and read it in the full reader with Previous/Next-topic navigation.
 - **Dive deeper** — every revealed answer opens its source module in the in-app reader
@@ -42,7 +46,12 @@ reports weekly.
   `[labels]`, cyan flow arrows); headings/questions/answers are colour-coded. It is
   **drag-resizable**, has a **fullscreen** mode, an **always-accessible collapsible index**
   (sidebar built from the headings), and **working cross-links** (relative `.md` links
-  open in-reader with a Back button).
+  open in-reader with a Back button). **Diagrams are interactive**: Mermaid *and* ASCII
+  diagrams open in a lightbox with drag-to-pan, zoom-toward-cursor (wheel, buttons,
+  double-click, keyboard), and fit-to-viewport; Mermaid nodes glow on hover; every code
+  fence gets a hover copy button. On the light theme, prose goes light while code,
+  ASCII diagrams, and Mermaid canvases stay dark islands (so the One Dark tokenizer
+  palette is correct in every theme).
 
 > **Template note:** `game/` is an application, not study content, so it is **exempt
 > from the repo's 14-section module template** (same way `book/` declares its own
@@ -106,6 +115,13 @@ section) by how many distinctive words they share with the question + answer, pr
 the most-related while skipping any candidate too close to the correct answer (Jaccard
 > 0.7). This yields ~2.5x more topic overlap than random distractors, so you can't pick
 the answer by keyword-matching alone. Output is split per section for lazy loading.
+
+Question ids are **content-stable** (`module#md5(module|question)[:12]`), so
+re-running `extract.py` after content edits does *not* orphan spaced-repetition
+state (ids only change when a question's own text changes; the review deck also
+self-heals by dropping ids that left the bank). Extraction is fully deterministic
+(sorted walk, seeded RNG, total sort keys) — re-runs on any machine produce
+byte-identical output, and exact duplicate questions within a module are deduped.
 
 ---
 
@@ -196,6 +212,16 @@ The MVP was the multiple-choice blitz. Since then the following shipped:
   total XP.
 - **Mastery-decay nudge** — the home screen flags your most-invested section when it
   hasn't been practiced in a week ("X is getting rusty — N days"), one tap to refresh it.
+
+- **Visual overhaul (2026-07-02)** — token-driven design system in `style.css`: 4 glass
+  themes over an animated aurora-mesh + blueprint-grid backdrop, SF-style display type
+  with a monospace "data voice", unified button/motion system, single-hue chart ramps,
+  SVG icons replacing emoji, `prefers-reduced-motion` + `:focus-visible` + aria-live
+  announcements + focus management, and the interactive diagram lightbox (pan/zoom for
+  Mermaid + ASCII). Engine hardening from a full audit shipped alongside: stable
+  question ids + review-state migration, offline-session replay queue, key-repeat and
+  double-click guards, DST-safe heatmap, Mermaid CDN retry, server write-lock, and
+  bank revalidation caching (`no-cache` + 304s instead of `no-store` re-downloads).
 
 ## Planned / to be implemented
 

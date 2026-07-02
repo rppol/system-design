@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import tempfile
+import threading
 from datetime import date, timedelta
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote
@@ -35,6 +36,10 @@ XP_STREAK_BONUS = 5  # per day of streak, added once per session
 
 FREEZE_CAP = 3            # most streak-freezes a player can bank
 FREEZE_GRANT_EVERY = 7    # earn one freeze back at each N-day streak milestone
+
+# ThreadingHTTPServer handles each request on its own thread; serialize the
+# progress read-modify-write so concurrent POSTs can't drop a session.
+PROGRESS_LOCK = threading.Lock()
 
 
 def default_progress():
@@ -174,6 +179,7 @@ def record_session(progress, session):
 
     progress["history"].append({
         "date": today, "answered": answered, "correct": correct, "xp": xp,
+        "section": session.get("section", "unknown"),   # pick_today.py's anti-repeat reads this
     })
     progress["history"] = progress["history"][-365:]  # cap growth
     return progress, xp, freeze_used
@@ -184,8 +190,13 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=GAME_DIR, **kwargs)
 
     def end_headers(self):
-        # Never let the browser serve a stale SPA/asset for this zero-build tool.
-        self.send_header("Cache-Control", "no-store")
+        # SPA/assets: never stale (zero-build tool). Question banks are multi-MB
+        # and rarely change, so let the browser revalidate them instead
+        # (no-cache -> If-Modified-Since -> 304 unless extract.py rewrote them).
+        if self.path.split("?")[0].startswith("/questions/"):
+            self.send_header("Cache-Control", "no-cache")
+        else:
+            self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
     def _send_json(self, obj, status=200):
@@ -227,14 +238,20 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         if self.path.split("?")[0] != "/api/progress":
             return self._send_json({"error": "not found"}, status=404)
-        length = int(self.headers.get("Content-Length", 0))
         try:
+            length = int(self.headers.get("Content-Length", 0))
             session = json.loads(self.rfile.read(length) or b"{}")
-        except json.JSONDecodeError:
+            if not isinstance(session, dict):
+                raise ValueError("payload must be an object")
+        except (ValueError, json.JSONDecodeError):
             return self._send_json({"error": "bad json"}, status=400)
-        progress = ensure_fields(load_json(PROGRESS_PATH, default_progress()))
-        progress, xp, freeze_used = record_session(progress, session)
-        save_json_atomic(PROGRESS_PATH, progress)
+        try:
+            with PROGRESS_LOCK:
+                progress = ensure_fields(load_json(PROGRESS_PATH, default_progress()))
+                progress, xp, freeze_used = record_session(progress, session)
+                save_json_atomic(PROGRESS_PATH, progress)
+        except Exception as exc:  # malformed fields must 400, not kill the thread
+            return self._send_json({"error": f"bad session: {exc}"}, status=400)
         return self._send_json({
             "ok": True, "xpEarned": xp, "freezeUsed": freeze_used,
             "freezesLeft": progress.get("freezes", 0), "progress": progress,

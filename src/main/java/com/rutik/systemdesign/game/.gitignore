@@ -4,3 +4,7 @@ state/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Accidental local data drops (e.g. an ssh/scp output-redirect artifact).
+# A 295MB financial-data CSV named "ubuntu@..." landed here once — never commit these.
+ubuntu@*

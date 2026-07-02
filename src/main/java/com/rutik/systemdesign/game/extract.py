@@ -29,6 +29,7 @@ MCQ construction:
 Run from anywhere; paths are resolved relative to this file.
 """
 
+import hashlib
 import json
 import math
 import os
@@ -121,8 +122,10 @@ def first_sentence(text):
         end = pos + m.start() + 1
         candidate = text[:end].strip()
         # Did we stop right after a known abbreviation? If so, keep going.
+        # Strip leading brackets/quotes so "(e.g." still matches "e.g.".
         last_word = candidate.split()[-1] if candidate.split() else ""
-        if last_word in ABBREV or len(candidate) < 25:
+        last_word = last_word.lstrip("([{\"'“‘")
+        if last_word in ABBREV or last_word.lower() in ABBREV or len(candidate) < 25:
             pos = end + 1
             if pos >= len(text):
                 return text.strip()
@@ -220,7 +223,8 @@ def main():
     rng = random.Random(42)  # reproducible distractor choices
     raw = []
     file_tree = {}   # "section/module" -> sorted list of .md filenames (for the sidebar tree)
-    for root, _dirs, files in os.walk(BASE_DIR):
+    for root, dirs, files in os.walk(BASE_DIR):
+        dirs.sort()  # deterministic traversal on every filesystem -> stable output
         rel = os.path.relpath(root, BASE_DIR)
         if rel == ".":
             continue
@@ -240,6 +244,20 @@ def main():
     if not raw:
         print("ERROR: no questions parsed", file=sys.stderr)
         sys.exit(1)
+
+    # Drop exact repeats of the same question within a module (README vs sub-file
+    # overlap) so the bank and the spaced-repetition ids stay collision-free.
+    seen_q = set()
+    deduped = []
+    for q in raw:
+        key = (q["module"], q["question"].strip().lower())
+        if key in seen_q:
+            continue
+        seen_q.add(key)
+        deduped.append(q)
+    if len(deduped) != len(raw):
+        print(f"Deduped {len(raw) - len(deduped)} repeated questions")
+    raw = deduped
 
     # ---- lexical model: pick distractors that are topically RELATED ----
     ans_toks = [set(tokenize(q["answerShort"])) for q in raw]
@@ -286,7 +304,7 @@ def main():
                 continue  # too close to the correct answer -> could read as also-correct
             score = sum(idf.get(t, 1.0) for t in (signature & ans_toks[j]))
             scored.append((score, text))
-        scored.sort(key=lambda x: x[0], reverse=True)
+        scored.sort(key=lambda x: (-x[0], x[1]))  # tie-break on text -> fully deterministic
 
         related = [t for s, t in scored if s > 0]
         if len(related) >= 3:
@@ -310,8 +328,12 @@ def main():
         if len(distractors) < 3:
             continue  # cannot form a clean 4-option MCQ
         module_name = q["module"].split("/")[-1].replace("_", " ")
+        # Content-stable id: hashes module + question text, so re-extracting after
+        # unrelated content edits does NOT orphan spaced-repetition state (a
+        # position-based id shifted for every question after any edit repo-wide).
+        qhash = hashlib.md5(f"{q['module']}|{q['question']}".encode("utf-8")).hexdigest()[:12]
         questions.append({
-            "id": f"{q['module']}#Q{q['qIndex']}-{idx}",
+            "id": f"{q['module']}#{qhash}",
             "section": q["section"],
             "module": q["module"],
             "moduleName": module_name,
