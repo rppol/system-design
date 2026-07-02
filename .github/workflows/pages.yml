@@ -44,11 +44,20 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # deploy-pages clamps its `timeout` input to a 10-minute max, so a single
+      # attempt cannot outwait a backed-up Pages queue (hit 2026-07-02 during a
+      # GitHub Pages incident). Chain up to 3 attempts — each failed attempt
+      # cleanly cancels its own deployment before the next one starts.
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-        with:
-          # Pages queue can back up for >10 min (hit 2026-07-02); the default
-          # 600s timeout then fails the job while the deployment is still
-          # queued and cancels it on cleanup. Wait up to 30 min instead.
-          timeout: 1800000
+        continue-on-error: true
+      - name: Retry deploy (Pages queue was backed up)
+        id: deployment2
+        if: steps.deployment.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+      - name: Second retry deploy
+        id: deployment3
+        if: steps.deployment.outcome == 'failure' && steps.deployment2.outcome == 'failure'
+        uses: actions/deploy-pages@v4
