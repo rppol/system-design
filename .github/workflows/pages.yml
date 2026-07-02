@@ -10,10 +10,13 @@ permissions:
   pages: write
   id-token: write
 
-# Only one deploy runs at a time; queued run cancels the in-progress one.
+# Only one deploy at a time; later pushes queue instead of cancelling.
+# cancel-in-progress must stay FALSE: cancelling a run mid-deploy makes its
+# cleanup cancel the site's newest Pages deployment — the next run then dies
+# with "Deployment cancelled" (hit on 2026-07-02, runs e51843e -> 6a3c784).
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
