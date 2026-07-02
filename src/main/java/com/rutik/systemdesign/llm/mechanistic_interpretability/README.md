@@ -164,71 +164,56 @@ These methods use interpretability findings to *change* model behavior at infere
 
 ### 5.2 Sparse Autoencoder (SAE) Architecture
 
-```
-   Layer L activations                          Reconstruction
-       x in R^d_model                              x_hat in R^d_model
-            |                                            ^
-            v                                            |
-   +-------------------+                      +-------------------+
-   |  W_enc (d_sae x d) |                      |  W_dec (d x d_sae) |
-   |  + b_enc           |                      |  + b_dec           |
-   +-------------------+                      +-------------------+
-            |                                            ^
-            v                                            |
-      pre-activations                          f(x) (sparse codes)
-       z = W_enc x + b_enc                       d_sae >> d_model
-            |                                     (e.g. 16x - 64x)
-            v
-   +----------------------------+
-   |  Sparsity-inducing          |
-   |  nonlinearity:               |
-   |   - ReLU + L1 penalty        |
-   |   - TopK (keep top k)        |
-   |   - JumpReLU (per-feat thresh)|
-   |   - Gated (separate gate/mag)|
-   +----------------------------+
-            |
-            v
-      f(x)  -- mostly zeros, a few
-              nonzero "active features"
-              -----> each nonzero entry i
-                      means "feature i (column
-                      i of W_dec) is present
-                      with this strength"
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Input(["Layer L activations\nx ∈ R^d_model"]) --> Enc
+    Enc["W_enc (d_sae × d_model)\n+ b_enc\nz = W_enc · x + b_enc"] --> Sparse
+    Sparse["Sparsity-inducing nonlinearity\n– ReLU + L1 penalty\n– TopK (keep top k)\n– JumpReLU (per-feature threshold)\n– Gated (separate gate/magnitude)"] --> Codes
+    Codes["f(x) — sparse codes\n(mostly zeros, few nonzero active features)\nd_sae >> d_model (16× – 64×)"] --> Dec
+    Dec["W_dec (d_model × d_sae)\n+ b_dec"] --> Output(["Reconstruction x_hat ∈ R^d_model"])
+    Codes & Output --> Loss["Loss = ||x – x_hat||² + sparsity_term(f(x))"]
 
-   Loss = || x - x_hat ||^2  +  sparsity_term(f(x))
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class Input,Output io
+    class Enc,Dec proc
+    class Sparse,Loss store
+    class Codes llm
 ```
+
+Each nonzero entry i in f(x) means "feature i (column i of W_dec) is active with that strength" — the dictionary columns are interpretable concepts like "token follows a colon" or "emotional content: fear".
 
 ### 5.3 Activation Patching Workflow
 
-```
-  CLEAN run                CORRUPTED run              PATCHED run
-  "The Eiffel Tower         "The Colosseum             "The Colosseum
-   is in the city of"        is in the city of"         is in the city of"
-        |                          |                          |
-        v                          v                          v
-  [L0]-[L1]-[L2]-...        [L0]-[L1]-[L2]-...        [L0]-[L1]-[L2*]-...
-        |                          |                          ^
-        v                          v                          |
-   cache activations          run normally,          take activation
-   at every (layer,           collect logits         at (L2, pos=subj)
-   position)                  "Rome" (correct           from CLEAN cache,
-        |                       for Colosseum)          overwrite CORRUPTED's
-        |                          |                     activation at same
-        +------ activation -------+                     (layer, position)
-                cached here              |
-                                          v
-                                   re-run from L2*
-                                   onward -> new logits
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Clean(["CLEAN run\n'The Eiffel Tower is in the city of'"]) --> CleanRun["Run all layers\nL0→L1→L2→…\nCache activations at every (layer, pos)"]
+    Corrupt(["CORRUPTED run\n'The Colosseum is in the city of'"]) --> CorruptRun["Run normally\nCollect logits → 'Rome'"]
+    CleanRun -- "activation at (L2, pos=subject)" --> Patch
+    CorruptRun --> Patch
+    Patch["PATCHED run\nOverwrite CORRUPTED activation at (L2, pos=subject)\nwith CLEAN activation → re-run from L2 onward"] --> NewLogits["New logits"]
+    NewLogits --> Judge{"logit shift\nRome → Paris?"}
+    Judge -- YES --> Causal(["(L2, pos=subject) causally encodes\n'city associated with subject'"])
+    Judge -- NO --> Skip(["Layer / position not causal for this task"])
 
-  If logits shift from "Rome" toward "Paris":
-    -> (L2, pos=subj) causally encodes "which city
-       is associated with the subject" for this task.
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
 
-  Patching every (layer, position) pair and plotting the
-  logit-diff shift produces a "patching heatmap" that
-  localizes the relevant computation.
+    class Clean,Corrupt,Causal,Skip io
+    class CleanRun,CorruptRun proc
+    class Patch llm
+    class NewLogits proc
+    class Judge decide
 ```
+
+Patching every (layer, position) pair and plotting the logit-diff shift produces a "patching heatmap" that localizes the relevant computation in the network.
 
 ### 5.4 IOI Circuit (GPT-2 Small, Wang et al. 2022) — Simplified
 

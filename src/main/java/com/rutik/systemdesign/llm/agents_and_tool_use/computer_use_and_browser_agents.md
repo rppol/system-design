@@ -315,63 +315,50 @@ not for tasks where a structured API exists.
 
 ### Computer Use Agent Loop
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Task([Task Input]) --> Observe
+    Observe["OBSERVATION\nTake screenshot → encode as base64 PNG\n(optionally: parse accessibility tree)"] --> Reason
+    Reason["REASONING (Claude / GPT-4V)\nDescribe what is visible\nSelect next action"] --> Execute
+    Execute["EXECUTION (Playwright / OS API)\npage.fill / page.click\nwait_for_load_state networkidle"] --> Done{"task\ncomplete?"}
+    Done -- NO --> Observe
+    Done -- YES --> Output([Task complete])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    class Task,Output io
+    class Observe,Execute proc
+    class Reason llm
+    class Done decide
 ```
-Task: "Book a meeting room for tomorrow 2pm on our intranet"
-        |
-        v
-┌────────────────────────────────────────────────────────┐
-│  OBSERVATION                                           │
-│  Take screenshot → encode as base64 PNG               │
-│  (optionally: parse accessibility tree)               │
-└────────────────────────────────────────────────────────┘
-        |
-        v
-┌────────────────────────────────────────────────────────┐
-│  REASONING (Claude / GPT-4V)                          │
-│  "I see the intranet login page.                      │
-│   I need to enter credentials first."                 │
-│  Action: type(selector="#username", value="alice")    │
-└────────────────────────────────────────────────────────┘
-        |
-        v
-┌────────────────────────────────────────────────────────┐
-│  EXECUTION (Playwright / OS API)                      │
-│  page.fill("#username", "alice")                      │
-│  page.fill("#password", "***")                        │
-│  page.click("#login-btn")                             │
-│  await page.wait_for_load_state("networkidle")        │
-└────────────────────────────────────────────────────────┘
-        |
-        v
-[loop back to OBSERVATION — new screenshot after login]
-        |
-        v
-[... navigate to room booking, select date, confirm ...]
-        |
-        v
-[Task complete: screenshot shows "Booking confirmed"]
-```
+
+Each iteration takes a fresh screenshot as input; the loop continues until the agent produces a final answer or a stopping condition is reached.
 
 ### Grounding Pipeline
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Screenshot([Raw Screenshot]) --> A11y & Vision
+    A11y["Accessibility Tree Parser\nStructured elements:\nid, role, label, bounds"] --> LLMLabel["LLM: match label\n'click button — Book Room'"]
+    LLMLabel --> ExecA["Execute: page.click\n'aria-label=Book Room'"]
+    Vision["Vision Model\nfallback for Canvas / custom widgets\nraw pixel coordinates"] --> ExecB["Execute: click\nx=490 y=335"]
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class Screenshot io
+    class A11y,Vision proc
+    class LLMLabel llm
+    class ExecA,ExecB proc
 ```
-Raw Screenshot
-      |
-      ├── [Accessibility Tree Parser]
-      |         |
-      |    Structured elements:
-      |    [{id: "btn-submit", role: "button", label: "Book Room",
-      |      bounds: (450, 320, 80, 30)}]
-      |         |
-      |    ← LLM: "click button with label 'Book Room'"
-      |         |
-      |    Execute: page.click('[aria-label="Book Room"]')
-      |
-      └── [Vision Model] (fallback for Canvas / custom widgets)
-                |
-           Raw pixel coordinates from screenshot
-           Action: click(x=490, y=335)
-```
+
+The accessibility tree path is preferred (structured, reliable); the vision model fires only for canvas elements or custom widgets where the DOM offers no labels.
 
 ---
 

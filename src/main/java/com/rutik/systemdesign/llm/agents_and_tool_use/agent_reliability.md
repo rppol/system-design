@@ -77,78 +77,62 @@ For agents that take irreversible actions (file writes, API mutations), checkpoi
 
 ### Reliability Wrapper Around Agent Loop
 
-```
-                    Task Input
-                         |
-                         v
-              +---------------------+
-              |   Pre-flight check  |
-              |   (tool health      |
-              |    check, budget)   |
-              +---------------------+
-                         |
-                         v
-              +---------------------+      timeout exceeded
-              |   Step counter      |----> Stuck detector
-              |   Max steps check   |           |
-              +---------------------+           v
-                         |              +----------------+
-                         v              |  Human handoff |
-              +---------------------+  +----------------+
-              |   Agent node        |
-              |   (LLM reasoning)   |
-              +---------------------+
-                         |
-                    tool call?
-                   /           \
-                 YES             NO (final answer)
-                  |               |
-                  v               v
-     +------------------+      Output
-     | Tool call wrapper |
-     |  - timeout        |
-     |  - retry (3x)     |
-     |  - circuit breaker|
-     +------------------+
-           |       |
-         OK      FAIL
-           |       |
-           |       v
-           |  +------------------+
-           |  | Fallback handler |
-           |  | - use alternative|
-           |  | - inject error   |
-           |  |   observation    |
-           |  +------------------+
-           |         |
-           v         v
-    [Inject result into context]
-                |
-                v
-        [Checkpoint state]
-                |
-                v
-        [Back to Agent node]
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Input([Task Input]) --> PreFlight
+    PreFlight["Pre-flight check\n(tool health, budget)"] --> StepCounter
+    StepCounter["Step counter\nMax steps check"] -- timeout exceeded --> StuckDetector
+    StuckDetector["Stuck detector"] --> HumanHandoff([Human handoff])
+    StepCounter --> AgentNode
+    AgentNode["Agent node\n(LLM reasoning)"] --> ToolCall{"tool call?"}
+    ToolCall -- YES --> ToolWrapper
+    ToolCall -- "NO (final answer)" --> Output([Output])
+    ToolWrapper["Tool call wrapper\n– timeout\n– retry 3×\n– circuit breaker"] --> Result{"ok / fail?"}
+    Result -- OK --> Inject
+    Result -- FAIL --> Fallback
+    Fallback["Fallback handler\n– use alternative\n– inject error observation"] --> Inject
+    Inject["Inject result into context"] --> Checkpoint["Checkpoint state"]
+    Checkpoint --> AgentNode
+    DeadLoop["Dead-loop detector\nTrack last N action hashes\nDuplicate → handoff"] -. parallel .-> HumanHandoff
 
-Dead-loop detector (parallel):
-  Track last N action hashes
-  If duplicate detected -> trigger Human handoff
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    class Input,Output io
+    class PreFlight,StepCounter,ToolWrapper,Inject,Checkpoint proc
+    class AgentNode llm
+    class StuckDetector,DeadLoop warn
+    class HumanHandoff store
+    class ToolCall,Result decide
 ```
+
+The agent node loops until a final answer is produced or the reliability wrapper triggers a handoff; the dead-loop detector runs as a parallel sidecar.
 
 ### Circuit Breaker State Machine
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    CLOSED -- "N consecutive failures" --> OPEN
+    OPEN -- "cooldown period" --> HALFOPEN[HALF-OPEN]
+    HALFOPEN -- "test call succeeds" --> CLOSED
+    HALFOPEN -- "test call fails" --> OPEN
+
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    class CLOSED proc
+    class OPEN warn
+    class HALFOPEN decide
 ```
-         N consecutive failures
-CLOSED -----------------------> OPEN
-  ^                               |
-  |      test call succeeds       |  cooldown period
-  +------- HALF-OPEN <-----------+
-                |
-         test call fails
-                |
-                v
-              OPEN
-```
+
+The circuit opens after N failures, cools down, then probes with a single test call before resetting to CLOSED.
 
 ---
 

@@ -90,50 +90,52 @@ One agent is assigned the role of critic and must argue against the current best
 
 ### Round-Robin Debate (2 rounds, 3 agents)
 
-```
-Question
-   |
-   +------------------+------------------+
-   |                  |                  |
-[Agent A]         [Agent B]         [Agent C]
-temp=0.3          temp=0.7          temp=1.2
-   |                  |                  |
- Ans_A0             Ans_B0            Ans_C0
-   |                  |                  |
-   +------------------+------------------+
-              (share all round-0 answers)
-   |                  |                  |
-[Agent A]         [Agent B]         [Agent C]
-sees B0,C0        sees A0,C0        sees A0,B0
-   |                  |                  |
- Ans_A1             Ans_B1            Ans_C1
-   |                  |                  |
-   +------------------+------------------+
-              Majority Vote / Consensus
-                       |
-                 Final Answer
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Q([Question]) --> A0 & B0 & C0
+    A0["Agent A (temp=0.3)\n→ Ans_A0"]
+    B0["Agent B (temp=0.7)\n→ Ans_B0"]
+    C0["Agent C (temp=1.2)\n→ Ans_C0"]
+    A0 & B0 & C0 --> Share["Share all round-0 answers"]
+    Share --> A1 & B1 & C1
+    A1["Agent A sees B0, C0\n→ Ans_A1"]
+    B1["Agent B sees A0, C0\n→ Ans_B1"]
+    C1["Agent C sees A0, B0\n→ Ans_C1"]
+    A1 & B1 & C1 --> Vote["Majority Vote / Consensus"]
+    Vote --> Final([Final Answer])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class Q,Final io
+    class A0,B0,C0,A1,B1,C1 llm
+    class Share,Vote proc
 ```
 
 ### Judge Agent Pattern
 
-```
-Question
-   |
-   +------------------+
-   |                  |
-[Agent A]         [Agent B]
-   |                  |
- Ans_A0             Ans_B0
-   |<--- share ------>|
- Ans_A1             Ans_B1
-   |                  |
-   +------------------+
-            |
-     Full Debate Transcript
-            |
-       [Judge Agent]  <-- never saw round 0, isolated
-            |
-      Final Verdict + Confidence
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Q([Question]) --> A0 & B0
+    A0["Agent A → Ans_A0"] -- share --> A1["Agent A sees B0 → Ans_A1"]
+    B0["Agent B → Ans_B0"] -- share --> B1["Agent B sees A0 → Ans_B1"]
+    A1 & B1 --> Transcript["Full Debate Transcript"]
+    Transcript --> Judge["Judge Agent\n(never saw round 0, isolated)"]
+    Judge --> Verdict([Final Verdict + Confidence])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class Q,Verdict io
+    class A0,B0,A1,B1 llm
+    class Transcript store
+    class Judge llm
 ```
 
 ### Majority Voting (No Communication)

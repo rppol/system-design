@@ -173,56 +173,35 @@ agent-specific dispute-handling policies that doesn't yet have settled industry-
 
 ### 5.1 AP2 Mandate Chain (Human-Not-Present Flow)
 
-```
-  User                    Shopping Agent              Merchant / Payment Processor
-   |                            |                              |
-   | 1. Sign INTENT MANDATE     |                              |
-   |    "shoes, size 9,         |                              |
-   |     < $150, expires 7d" -->|                              |
-   |                            |                              |
-   |                       2. Agent searches, finds item,      |
-   |                          assembles CART MANDATE            |
-   |                          (exact item, $129.99, MerchantX) |
-   |                            |                              |
-   |                       3. Verify Cart Mandate falls         |
-   |                          within Intent Mandate bounds      |
-   |                          (price <= $150, category match)   |
-   |                          --> bounds OK, no human prompt    |
-   |                            |                              |
-   |                            | 4. Generate PAYMENT MANDATE  |
-   |                            |    ("AI agent-initiated")    |
-   |                            |    + Cart Mandate ---------->|
-   |                            |                       5. Issuer applies
-   |                            |                          agent-aware risk
-   |                            |                          scoring, settles
-   |                            |<------ 6. Confirmation -------|
+```mermaid
+%%{init: {'theme': 'dark'}}%%
+sequenceDiagram
+    participant U as User
+    participant A as Shopping Agent
+    participant M as Merchant / Payment Processor
+    U->>A: Sign INTENT MANDATE ("shoes, size 9, <$150, expires 7d")
+    Note over A: Search, find item, assemble CART MANDATE (exact item, $129.99, MerchantX)
+    Note over A: Verify Cart Mandate within Intent Mandate bounds (price ≤ $150, category match) — bounds OK, no human prompt
+    A->>M: PAYMENT MANDATE ("AI agent-initiated") + Cart Mandate
+    Note over M: Issuer applies agent-aware risk scoring, settles
+    M-->>A: Confirmation
 ```
 
 ### 5.2 x402 Request Flow
 
-```
-  Agent (client)                      API Server                  Facilitator
-       |                                   |                            |
-       | 1. GET /premium-data              |                            |
-       |---------------------------------->|                            |
-       |                                   |                            |
-       | 2. 402 Payment Required           |                            |
-       |    { amount: "0.01 USDC",         |                            |
-       |      network: "base",             |                            |
-       |      recipient: "0xABC..." }      |                            |
-       |<----------------------------------|                            |
-       |                                   |                            |
-       | 3. Sign payment authorization     |                            |
-       |    (EIP-3009 transferWithAuth)    |                            |
-       |                                   |                            |
-       | 4. GET /premium-data              |                            |
-       |    X-Payment: <signed auth>       |                            |
-       |---------------------------------->|                            |
-       |                                   | 5. Verify + settle ------->|
-       |                                   |    (submit on-chain)       |
-       |                                   |<---- 6. Settled -----------|
-       | 7. 200 OK + data                  |                            |
-       |<----------------------------------|                            |
+```mermaid
+%%{init: {'theme': 'dark'}}%%
+sequenceDiagram
+    participant A as Agent (client)
+    participant S as API Server
+    participant F as Facilitator
+    A->>S: GET /premium-data
+    S-->>A: 402 Payment Required {amount: "0.01 USDC", network: "base", recipient: "0xABC..."}
+    Note over A: Sign payment authorization (EIP-3009 transferWithAuth)
+    A->>S: GET /premium-data + X-Payment: signed auth
+    S->>F: Verify + settle (submit on-chain)
+    F-->>S: Settled
+    S-->>A: 200 OK + data
 ```
 
 ### 5.3 Human-Present vs. Human-Not-Present

@@ -58,31 +58,30 @@ Spectrum of engineering cost vs. acceptance: prompt-lookup (zero cost, narrow ap
 
 ### 5.1 Draft-and-verify pipeline (vanilla speculative decoding)
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Prefix([Prefix: "The capital"]) --> Draft
+    Draft["Draft model (1B, fast)\nGenerates K=5 tokens autoregressively\n5 sequential forward passes, each tiny\nCandidate: 'of France is Paris .'"] --> Target
+    Target["Target model (70B)\nVerifies ALL 5 tokens in ONE pass\n(prefill-shaped: parallel positions)\ncompare p_target vs q_draft per position"] --> Verdict{"accept or\nreject?"}
+    Verdict -- "Accept 4/5: 'of France is Paris'" --> Accept["Advance 4 tokens"]
+    Verdict -- "Reject '.'" --> Resample["Resample from residual\ntarget emits corrected token"]
+    Accept --> Net([Net: 5 tokens for cost of\n1 target pass + 5 cheap draft passes])
+    Resample --> Net
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    class Prefix,Net io
+    class Draft proc
+    class Target llm
+    class Verdict decide
+    class Accept,Resample proc
 ```
-                         ┌──────────────────────────────────────────┐
-Prefix: "The capital"    │  Draft model (1B, fast)                   │
-   │                      │  generates K=5 tokens autoregressively   │
-   v                      │  "of France is Paris" (5 sequential      │
-[draft loop, K steps]     │   forward passes, each tiny)             │
-   │                      └──────────────────────────────────────────┘
-   v
-Candidate sequence: "of France is Paris ."
-   │
-   v
-┌──────────────────────────────────────────────────────────┐
-│  Target model (70B) verifies ALL 5 tokens in ONE pass     │
-│  (prefill-shaped: positions processed in parallel)        │
-│  For each position i: compare p_target(x_i) vs q_draft(x_i)│
-└──────────────────────────────────────────────────────────┘
-   │
-   v
-Accept "of France is Paris" (4 tokens) ✓✓✓✓
-Reject "." → resample from residual → target emits "."
-   │
-   v
-Net: 5 tokens advanced for the cost of 1 target forward pass
-     + 5 cheap draft forward passes
-```
+
+The target model's verification pass is prefill-shaped (all K positions in parallel), so it costs ~the same as generating 1 token autoregressively — the speedup comes from accepting multiple draft tokens per pass.
 
 ### 5.2 Rejection sampling — accept or correct, never approximate
 

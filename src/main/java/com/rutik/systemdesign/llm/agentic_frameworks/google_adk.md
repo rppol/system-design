@@ -249,19 +249,24 @@ tool-call-vs-handoff distinction mirrors
 
 ### 5.4 A2A: ADK Agent as Both Server and Client
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    subgraph OrgA["Org A: ADK agent tree"]
+        Coord["CoordinatorAgent\nsub_agents=[\n  LocalAgent,\n  RemoteA2aAgent → Org B endpoint\n]"]
+    end
+    subgraph OrgB["Org B: ADK agent tree"]
+        SpecServer["to_a2a(SpecialistAgent)\nexposed as A2A server\nwith Agent Card describing skills"]
+    end
+    Coord -- "A2A (HTTP + JSON-RPC, Agent Card)" --> SpecServer
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class Coord,SpecServer llm
 ```
-  Org A: ADK agent tree                    Org B: ADK agent tree
-  +----------------------+                 +----------------------+
-  | CoordinatorAgent      |   A2A (HTTP +  | to_a2a(SpecialistAgent)|
-  | sub_agents=[          |    JSON-RPC,   | exposed as A2A server  |
-  |   LocalAgent,         |   Agent Card)  | with Agent Card        |
-  |   RemoteA2aAgent ------+-------------->| describing its skills  |
-  |     (points at Org B's|                +----------------------+
-  |      A2A endpoint)    |
-  +----------------------+
-  From CoordinatorAgent's perspective, RemoteA2aAgent is just another
-  sub_agent -- the A2A call is hidden behind the same Agent interface.
-```
+
+From CoordinatorAgent's perspective, RemoteA2aAgent is just another sub_agent — the A2A call is hidden behind the same Agent interface.
 
 ---
 

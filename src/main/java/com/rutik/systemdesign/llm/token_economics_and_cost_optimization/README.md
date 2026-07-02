@@ -222,62 +222,52 @@ the API is cheaper when all costs are honestly included.
 
 ### Cost Optimization Pipeline
 
-```
-Incoming Request
-       |
-       v
-+------+------+
-|  Cache Check |  <-- Semantic cache (embedding similarity) or exact key cache
-+------+------+
-       |
-  Cache HIT ---------> Return cached response ($0 token cost)
-       |
-  Cache MISS
-       |
-       v
-+------+--------+
-| Query Classifier|  <-- Small model (GPT-4o-mini, local DistilBERT) estimates complexity
-+------+--------+
-       |
-  +----+----+
-  |         |
-Simple    Complex
-  |         |
-  v         v
-Cheap     Frontier
-Model     Model
-(mini/    (GPT-4o /
- haiku)    Sonnet)
-  |         |
-  +----+----+
-       |
-       v
-+------+------+
-| Output Cache |  <-- Store result keyed on (model, prompt_hash)
-+------+------+
-       |
-       v
-   Response + cost metadata logged
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Req([Incoming Request]) --> Cache
+    Cache["Cache Check\n(semantic embedding or exact-key)"] -- "HIT" --> CacheHit(["Return cached response\n($0 token cost)"])
+    Cache -- "MISS" --> Classify
+    Classify["Query Classifier\nGPT-4o-mini / local DistilBERT\nEstimates complexity"] --> Tier{"simple or\ncomplex?"}
+    Tier -- simple --> Cheap["Cheap Model\n(mini / haiku)"]
+    Tier -- complex --> Frontier["Frontier Model\n(GPT-4o / Sonnet)"]
+    Cheap & Frontier --> Store["Output Cache\nStore result keyed on (model, prompt_hash)"]
+    Store --> Log(["Response + cost metadata logged"])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    class Req,CacheHit,Log io
+    class Cache,Store store
+    class Classify proc
+    class Tier decide
+    class Cheap,Frontier llm
 ```
 
 ### Prompt Caching Architecture
 
-```
-Request with system prompt + few-shot examples + user query
-|
-v
-+-----------------------------------------------+
-| Cacheable prefix (system prompt + examples)   |  <-- Static, long, repeated
-| Typically 1,000 - 10,000 tokens               |      Cached after first call
-+-----------------------------------------------+
-| Dynamic suffix (user query + retrieved docs)  |  <-- Changes per request
-| Typically 200 - 2,000 tokens                  |      Always billed at full rate
-+-----------------------------------------------+
-|
-v
-Provider cache lookup:
-  - Anthropic: automatic, TTL ~5 min (refreshed on access), 90% discount
-  - OpenAI:    automatic, TTL ~5-10 min, 50% discount
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Req([Request]) --> Split
+    Split["Prompt structure\n──────────────────────────────────────\nCacheable prefix (static)\nSystem prompt + few-shot examples\n1,000–10,000 tokens — cached after first call\n──────────────────────────────────────\nDynamic suffix (per request)\nUser query + retrieved docs\n200–2,000 tokens — always billed at full rate\n──────────────────────────────────────"] --> Lookup
+    Lookup["Provider cache lookup"] --> Hit{"prefix\ncached?"}
+    Hit -- YES --> Discount["Read from KV cache\nAnthropic: 90% discount, TTL ~5 min\nOpenAI: 50% discount, TTL ~5–10 min"] --> Response([Response])
+    Hit -- NO --> Full["Full prefix processing\n(first call — caches prefix for next requests)"] --> Response
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    class Req,Response io
+    class Split proc
+    class Lookup,Discount store
+    class Hit decide
+    class Full proc
 ```
 
 ### Self-Hosting Cost Model

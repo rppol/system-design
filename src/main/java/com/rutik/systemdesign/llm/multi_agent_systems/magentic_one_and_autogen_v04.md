@@ -94,128 +94,106 @@ Key insight: separating "what do we know about the task" (task ledger) from "wha
 
 ### 5.1 Magentic-One — Orchestrator Decision Loop
 
-```
-User Request
-     |
-     v
-+--------------------+
-|    Orchestrator    |
-|  (GPT-4o planner)  |
-|                    |
-|  task_ledger:      |
-|   facts[]          |
-|   plan[]           |
-|   step_index       |
-|                    |
-|  progress_ledger:  |
-|   is_done          |
-|   needs_input      |
-|   instruction      |
-|   assigned_agent   |
-|   last_observation |
-+--------------------+
-     |          ^
-     | select   | observation
-     | agent    | (truncated output)
-     v          |
-+-----------------------------------------------+
-|              Agent Dispatcher                 |
-+----------+--------+----------+----------------+
-           |        |          |
-    +------v--+  +--v------+  +v----------+  +--v-----------+
-    |WebSurfer|  |FileSurfer|  |  Coder    |  |ComputerTerm. |
-    |Playwright|  |OS files  |  |GPT-4o+   |  |subprocess/   |
-    |GPT-4o   |  |GPT-4o    |  |sandbox   |  |Docker shell  |
-    +---------+  +---------+  +-----------+  +--------------+
-         |             |             |                |
-    Chromium      File System    Code Sandbox      Shell/OS
-    (real web)    (local/cloud)  (isolated proc)  (real system)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Req([User Request]) --> Orch
+    Orch["Orchestrator (GPT-4o planner)\ntask_ledger: facts[], plan[], step_index\nprogress_ledger: is_done, instruction,\nassigned_agent, last_observation"] -- "select agent + instruction" --> Dispatch
+    Dispatch["Agent Dispatcher"] --> WS & FS & Coder & CT
+    WS["WebSurfer\nPlaywright/GPT-4o\n→ Chromium (real web)"]
+    FS["FileSurfer\nOS files/GPT-4o\n→ File System"]
+    Coder["Coder\nGPT-4o + sandbox\n→ Code Sandbox (isolated)"]
+    CT["ComputerTerminal\nsubprocess/Docker\n→ Shell/OS"]
+    WS & FS & Coder & CT -- "observation (truncated output)" --> Orch
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class Req io
+    class Orch llm
+    class Dispatch proc
+    class WS,FS,Coder,CT store
 ```
 
 ### 5.2 Orchestrator Step-by-Step Decision Flow
 
-```
-START
-  |
-  v
-Read task_ledger + progress_ledger
-  |
-  v
-Is progress_ledger.is_done == True?
-  |-- YES --> Return final answer to user --> END
-  |
-  NO
-  v
-Increment step counter
-  |
-  v
-step_counter > MAX_STEPS (default 30)?
-  |-- YES --> Return partial answer + timeout warning --> END
-  |
-  NO
-  v
-Stall detected? (last N steps produced no new facts)
-  |-- YES --> Rewrite task_ledger.plan (replan)
-  |
-  v
-LLM call: "Given ledgers, what is the next instruction and which agent?"
-  |
-  v
-Update progress_ledger.instruction + assigned_agent
-  |
-  v
-Send instruction to assigned agent
-  |
-  v
-Agent executes (browser / file / code / shell)
-  |
-  v
-Receive observation (stdout, screenshot text, file contents)
-  |
-  v
-Update progress_ledger.last_observation
-Update task_ledger.facts (if new fact discovered)
-  |
-  v
-Go to READ step
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Start([START]) --> ReadLedgers["Read task_ledger + progress_ledger"]
+    ReadLedgers --> IsDone{"is_done == True?"}
+    IsDone -- YES --> ReturnFinal([Return final answer]) 
+    IsDone -- NO --> IncrStep["Increment step counter"]
+    IncrStep --> MaxSteps{"step_counter > 30\n(MAX_STEPS)?"}
+    MaxSteps -- YES --> Timeout([Return partial answer + timeout warning])
+    MaxSteps -- NO --> Stall{"Stall detected?\n(last N steps: no new facts)"}
+    Stall -- YES --> Replan["Rewrite task_ledger.plan"]
+    Stall -- NO --> LLMCall
+    Replan --> LLMCall["LLM call:\n'Given ledgers, next instruction + which agent?'"]
+    LLMCall --> UpdateLedger["Update progress_ledger.instruction\n+ assigned_agent"]
+    UpdateLedger --> SendAgent["Send instruction to assigned agent"]
+    SendAgent --> AgentExec["Agent executes\n(browser / file / code / shell)"]
+    AgentExec --> Observe["Receive observation\n(stdout, screenshot text, file contents)"]
+    Observe --> UpdateFacts["Update progress_ledger.last_observation\nUpdate task_ledger.facts (if new fact)"]
+    UpdateFacts --> ReadLedgers
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    class Start,ReturnFinal,Timeout io
+    class ReadLedgers,IncrStep,Replan,UpdateLedger,SendAgent,AgentExec,Observe,UpdateFacts proc
+    class LLMCall llm
+    class IsDone,MaxSteps,Stall decide
 ```
 
 ### 5.3 AutoGen v0.4 — Event-Driven Message Flow
 
-```
-                    +-------------------+
-                    |   SingleThreaded  |
-                    |   AgentRuntime    |
-                    |   (event bus)     |
-                    +-------------------+
-                      /       |       \
-          -----------/        |        \-----------
-         /                    |                    \
-+--------v-------+   +--------v-------+   +--------v-------+
-| AssistantAgent |   |   CoderAgent   |   | UserProxyAgent |
-| @message_handler   | @message_handler   | @message_handler
-| (TextMessage)  |   | (CodeRequest)  |   | (TextMessage)  |
-+----------------+   +----------------+   +----------------+
-        |                    |                    |
-  Publishes             Publishes            Reads stdin /
-  TextMessage           CodeResult           approves tool
-  to bus                to bus               calls
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Bus["SingleThreadedAgentRuntime\n(event bus)"] --> AA & CA & UPA
+    AA["AssistantAgent\n@message_handler(TextMessage)\nPublishes TextMessage to bus"]
+    CA["CoderAgent\n@message_handler(CodeRequest)\nPublishes CodeResult to bus"]
+    UPA["UserProxyAgent\n@message_handler(TextMessage)\nReads stdin / approves tool calls"]
+    AA -- TextMessage --> Bus
+    CA -- CodeResult --> Bus
+    UPA -- TextMessage --> Bus
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class Bus proc
+    class AA,CA llm
+    class UPA io
 ```
 
 ### 5.4 AutoGen v0.4 RoundRobinGroupChat Flow
 
-```
-Team = RoundRobinGroupChat([AgentA, AgentB, AgentC], termination=...)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    Team(["RoundRobinGroupChat\n[AgentA, AgentB, AgentC]"]) --> A1["Turn 1: AgentA\nreceives ChatMessage → reply\nmessage appended to history"]
+    A1 --> B2["Turn 2: AgentB\nreceives full history → reply"]
+    B2 --> C3["Turn 3: AgentC\nreceives full history → reply"]
+    C3 --> Term{"Termination?"}
+    Term -- "MaxMessages(10) or DONE or StopMessage" --> End([STOP])
+    Term -- continue --> A1
 
-Turn 1: AgentA receives ChatMessage --> replies --> message appended to history
-Turn 2: AgentB receives full history --> replies
-Turn 3: AgentC receives full history --> replies
-Turn 4: AgentA again ...
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
 
-Termination checks after each turn:
-  MaxMessageTermination(10)  --> stop after 10 messages
-  TextMentionTermination("DONE")  --> stop if any message contains "DONE"
-  StopMessageTermination()   --> stop if agent returns StopMessage
+    class Team,End io
+    class A1,B2,C3 llm
+    class Term decide
 ```
 
 ---

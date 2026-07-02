@@ -179,10 +179,23 @@ The scheduler runs every step and answers: **which sequences get GPU time this s
 
 ### Scheduling Queues
 
-```
-WAITING → RUNNING → (done) or → SWAPPED
-              ↑                      |
-              └──────────────────────┘ (swap back in when memory available)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    WAITING --> RUNNING
+    RUNNING -- "done" --> Done([completed])
+    RUNNING -- "preempted (KV cache full)" --> SWAPPED
+    SWAPPED -- "memory available" --> RUNNING
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    class Done io
+    class WAITING proc
+    class RUNNING proc
+    class SWAPPED warn
 ```
 
 - **WAITING**: requests that have arrived but haven't started

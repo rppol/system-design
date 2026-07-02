@@ -72,57 +72,45 @@ The LLM observability ecosystem has three layers: (1) framework-specific tools (
 
 ### LangSmith Tracing Architecture
 
-```
-LangChain Application
-  |
-  | LANGSMITH_TRACING=true
-  |
-  v
-LangChain Callbacks (automatic)
-  on_llm_start / on_llm_end
-  on_tool_start / on_tool_end
-  on_chain_start / on_chain_end
-  |
-  | async HTTP (non-blocking)
-  |
-  v
-LangSmith Collector API (api.smith.langchain.com)
-  |
-  v
-LangSmith UI
-  - Trace view (full execution tree)
-  - Run search + filter
-  - Dataset management
-  - Evaluator runner
-  - Cost dashboard
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    App([LangChain Application\nLANGSMITH_TRACING=true]) --> Callbacks
+    Callbacks["LangChain Callbacks (automatic)\non_llm_start / on_llm_end\non_tool_start / on_tool_end\non_chain_start / on_chain_end"] -- "async HTTP (non-blocking)" --> Collector
+    Collector["LangSmith Collector API\n(api.smith.langchain.com)"] --> UI
+    UI["LangSmith UI\n– Trace view (full execution tree)\n– Run search + filter\n– Dataset management\n– Evaluator runner\n– Cost dashboard"]
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class App io
+    class Callbacks proc
+    class Collector store
+    class UI proc
 ```
 
 ### Langfuse Tracing Architecture
 
-```
-Application (any framework)
-  |
-  | Langfuse SDK (langfuse.observe decorator / manual)
-  |
-  v
-Langfuse Client (in-process, async queue)
-  |
-  | batch HTTP (non-blocking, retries)
-  |
-  v
-Langfuse Server (self-hosted or cloud.langfuse.com)
-  |         |
-  v         v
-PostgreSQL  ClickHouse
-(metadata)  (events/analytics)
-  |
-  v
-Langfuse UI
-  - Traces view
-  - Sessions
-  - Metrics (cost, latency, quality)
-  - Evals (human annotation + LLM-as-judge)
-  - Prompt management
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    App([Application\n(any framework)]) --> SDK
+    SDK["Langfuse SDK\n(langfuse.observe decorator / manual)\nin-process async queue"] -- "batch HTTP (non-blocking, retries)" --> Server
+    Server["Langfuse Server\n(self-hosted or cloud.langfuse.com)"] --> PG & CH
+    PG["PostgreSQL\n(metadata)"]
+    CH["ClickHouse\n(events / analytics)"]
+    PG & CH --> UI
+    UI["Langfuse UI\n– Traces, Sessions\n– Metrics (cost, latency, quality)\n– Evals (human + LLM-as-judge)\n– Prompt management"]
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class App io
+    class SDK proc
+    class Server,PG,CH store
+    class UI proc
 ```
 
 ### OpenTelemetry LLM Tracing
@@ -155,27 +143,27 @@ Span attributes (GenAI semantic conventions):
 
 ### Evaluation Loop
 
-```
-Production Traces (sampled 5%)
-         |
-         v
-   [Filter by quality signals]
-   (long latency, user negative feedback, errors)
-         |
-         v
-   [Human annotation queue]  OR  [LLM-as-judge]
-         |
-         v
-   Quality scores per trace
-         |
-         v
-   [Aggregate metrics dashboard]
-   - Faithfulness: 87% → 91% (after prompt update)
-   - Answer relevance: 82%
-   - P99 latency: 4.2s
-         |
-         v
-   [Alert: faithfulness < 85%] → Notify on-call
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Traces(["Production Traces (sampled 5%)"]) --> Filter
+    Filter["Filter by quality signals\n(long latency, user negative feedback, errors)"] --> Eval
+    Eval["Human annotation queue\nOR LLM-as-judge"] --> Scores["Quality scores per trace"]
+    Scores --> Dashboard["Aggregate metrics dashboard\n– Faithfulness: 87% → 91% after prompt update\n– Answer relevance: 82%\n– P99 latency: 4.2s"]
+    Dashboard --> Alert{"faithfulness\n< 85%?"}
+    Alert -- YES --> Oncall([Notify on-call])
+    Alert -- NO --> Traces
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    class Traces,Oncall io
+    class Filter,Eval proc
+    class Scores,Dashboard store
+    class Alert decide
 ```
 
 ---

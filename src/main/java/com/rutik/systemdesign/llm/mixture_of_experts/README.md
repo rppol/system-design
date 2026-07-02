@@ -114,65 +114,53 @@ MoE TRANSFORMER LAYER
 
 ### Routing Mechanism Detail
 
-```
-TOKEN: "mitochondrial"
-                |
-                v
-        Router MLP (small, ~100M params)
-                |
-                v
-   Logits: [E1: 0.2, E2: 0.9, E3: 0.1, E4: 0.5,
-            E5: 0.3, E6: 0.8, E7: 0.2, E8: 0.1]
-                |
-                v
-         Softmax over top-k=2
-                |
-                v
-   Select: E2 (weight=0.53), E6 (weight=0.47)
-                |
-          ------+------
-          |           |
-         E2           E6    <-- only these two FFN experts run
-          |           |
-          ------+------
-                |
-        output = 0.53 * E2_out + 0.47 * E6_out
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Token(["Token: 'mitochondrial'"]) --> Router
+    Router["Router MLP (~100M params)"] --> Logits["Logits: E1=0.2  E2=0.9  E3=0.1  E4=0.5\n        E5=0.3  E6=0.8  E7=0.2  E8=0.1"]
+    Logits --> TopK["Softmax over top-k=2"]
+    TopK --> E2["Expert E2\nweight = 0.53"] & E6["Expert E6\nweight = 0.47"]
+    E2 --> Combine["output = 0.53 × E2_out + 0.47 × E6_out"]
+    E6 --> Combine
+    Combine --> Out([Layer output])
 
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
 
-TOKEN: "the"
-                |
-                v
-        Router MLP
-                |
-                v
-   Logits: [E1: 0.7, E2: 0.1, E3: 0.6, ...]
-                |
-                v
-   Select: E1 (weight=0.55), E3 (weight=0.45)
-   (different experts than "mitochondrial")
+    class Token,Out io
+    class Router,TopK,Logits llm
+    class E2,E6,Combine proc
 ```
+
+Only top-k=2 experts fire per token; a different token ("the") routes to entirely different experts (E1, E3), giving token-type specialization across the pool.
 
 ### Expert Parallelism Across GPUs
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Batch(["Batch of 1,024 tokens"]) --> Router["Router"]
+    Router --> G0["GPU-0\nE1, E2"] & G1["GPU-1\nE3, E4"] & G2["GPU-2\nE5, E6"] & G3["GPU-3\nE7, E8"]
+    G0 & G1 & G2 & G3 --> AllToAll1["All-to-All communication\n(route tokens to correct GPU)"]
+    AllToAll1 --> Compute["Expert computation runs"]
+    Compute --> AllToAll2["All-to-All back to original GPUs"]
+    AllToAll2 --> Combine(["Combine expert outputs"])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class Batch,Combine io
+    class Router llm
+    class G0,G1,G2,G3 proc
+    class AllToAll1,AllToAll2,Compute store
 ```
-  Batch of 1024 tokens
-           |
-       [Router]
-           |
-    -------+--------+--------+--------+
-    |       |        |        |        |
-  GPU-0   GPU-1   GPU-2   GPU-3   GPU-4 ... GPU-7
-  [E1,E2] [E3,E4] [E5,E6] [E7,E8]
-    |       |        |        |
-    `-------+--------+--------+--------> All-to-All communication
-                                         (route tokens to correct GPU)
-                                              |
-                                    Expert computation runs
-                                              |
-                                    All-to-All back to original GPUs
-                                              |
-                                    Combine expert outputs
-```
+
+All-to-All is the dominant communication cost in expert parallelism; it fires twice per MoE layer (tokens-to-experts, then outputs-back).
 
 ### Expert Capacity and Token Dropping
 

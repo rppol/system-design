@@ -269,22 +269,23 @@ Quality
 
 ### Model Selection Decision Tree
 
-```
-                        Start: Choose a model
-                               |
-               +---------------+--------------+
-               |                              |
-        Data Privacy?                  No privacy constraint
-               |                              |
-        Self-host required         Volume > 10M tokens/day?
-               |                         |            |
-        LLaMA 3 70B / 405B             Yes            No
-        Mistral / DeepSeek             |              |
-        (per use case)           Cost-optimize    Quality-first
-                                  |                   |
-                          Tiered routing:       GPT-4o / Claude 3.5
-                          cheap model first     Gemini 1.5 Pro
-                          escalate on failure
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Start([Choose a model]) --> Privacy{"Data privacy\nconstraint?"}
+    Privacy -- YES --> SelfHost["Self-host required\nLLaMA 3 70B / 405B\nMistral / DeepSeek\n(per use case)"]
+    Privacy -- NO --> Volume{"Volume >\n10M tokens/day?"}
+    Volume -- YES --> CostOpt["Cost-optimize\nTiered routing:\ncheap model first\nescalate on failure"]
+    Volume -- NO --> Quality["Quality-first\nGPT-4o / Claude 3.5\nGemini 1.5 Pro"]
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    class Start io
+    class Privacy,Volume decide
+    class SelfHost,CostOpt,Quality proc
 ```
 
 ---

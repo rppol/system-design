@@ -272,28 +272,26 @@ mediating between them.
 
 ### 5.4 Dual-LLM / CaMeL Pattern
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Untrusted(["Untrusted content\n(webpage, email, peer-agent output)"]) --> QLLM
+    QLLM["QUARANTINED LLM\n(no tool access)\nProcesses untrusted content\nOutput = DATA only, never instructions"] -- "structured data (extracted fields, summary)" --> Controller
+    Controller["CONTROLLER (plain code)\nHolds CAPABILITY TOKENS\nDecides actions from Privileged LLM plan\nNOT from raw Quarantined LLM output"] --> PLLM
+    PLLM["PRIVILEGED LLM\n(tool access)\nPlans and acts\nNever sees Quarantined LLM raw output\nonly sanitized/structured data from Controller"] -- plan --> Controller
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    class Untrusted io
+    class QLLM warn
+    class Controller proc
+    class PLLM llm
 ```
-  Untrusted content (webpage, email, peer-agent output)
-       |
-       v
-  +------------------+
-  | QUARANTINED LLM   |  -- processes untrusted content
-  | (no tool access)  |     output is treated as DATA, never as
-  +------------------+     instructions, regardless of content
-       | structured data (e.g., extracted fields, summary text)
-       v
-  +------------------+
-  | CONTROLLER        |  -- non-LLM code. Holds CAPABILITY TOKENS.
-  | (plain code)      |     Decides what actions to take based on
-  +------------------+     PRIVILEGED LLM's plan + available
-       |    ^                capabilities -- NOT based on raw
-       |    | plan            Quarantined LLM output content.
-       v    |
-  +------------------+
-  | PRIVILEGED LLM    |  -- plans/acts, has tool access, but NEVER
-  | (tool access)     |     sees the Quarantined LLM's raw output --
-  +------------------+     only sanitized/structured data from Controller
-```
+
+CaMeL's key insight: the Controller is plain code — it can never be prompt-injected. By routing all external content through a quarantined LLM with no tool access, attacker-controlled instructions can never directly reach the execution layer.
 
 ### 5.5 Byzantine Agent in a Debate/Voting System
 

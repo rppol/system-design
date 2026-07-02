@@ -216,67 +216,29 @@ Human-readable as the original text, but string matching for "Ignore previous in
 
 ### Defense-in-Depth Architecture
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Input([User Input]) --> L1
+    L1["Layer 1: Input Gateway\n– Rate limiting\n– Unicode normalization\n– Invisible char removal\n– Known attack pattern detection (regex + ML)\n– Input length validation"] --> L2
+    L2["Layer 2: Prompt Construction\n– System prompt with security instructions\n– User input delimited: user…/user\n– Canary tokens injected\n– Context window managed"] --> L3
+    L3["Layer 3: LLM Inference\n– Model with RLHF safety\n– Temperature controls\n– Tool access scoped to least privilege\n– Sandboxed execution"] --> L4
+    L4["Layer 4: Output Filter\n– PII detection (regex + NER)\n– System prompt leak detection\n– Canary token monitoring\n– Schema validation\n– Toxicity/harm filter"] --> L5
+    L5["Layer 5: Monitoring & Audit\n– Log all inputs/outputs\n– Anomaly detection\n– Abuse pattern alerting\n– Compliance audit trail"] --> Out([Sanitized Response to User])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    class Input,Out io
+    class L1,L2,L4 warn
+    class L3 llm
+    class L5 store
 ```
-User Input
-     |
-     v
-+---------------------------+
-| Layer 1: Input Gateway    |
-| - Rate limiting           |
-| - Unicode normalization   |
-| - Invisible char removal  |
-| - Known attack pattern    |
-|   detection (regex + ML)  |
-| - Input length validation |
-+---------------------------+
-     |
-     v
-+---------------------------+
-| Layer 2: Prompt           |
-|   Construction            |
-| - System prompt with      |
-|   security instructions   |
-| - User input delimited:   |
-|   <user>input</user>      |
-| - Canary tokens injected  |
-| - Context window managed  |
-+---------------------------+
-     |
-     v
-+---------------------------+
-| Layer 3: LLM Inference    |
-| - Model with RLHF safety |
-| - Temperature controls    |
-| - Tool access scoped to   |
-|   least privilege          |
-| - Sandboxed execution     |
-+---------------------------+
-     |
-     v
-+---------------------------+
-| Layer 4: Output Filter    |
-| - PII detection (regex +  |
-|   NER model)              |
-| - System prompt leak      |
-|   detection               |
-| - Canary token monitoring |
-| - Schema validation       |
-| - Toxicity/harm filter    |
-+---------------------------+
-     |
-     v
-+---------------------------+
-| Layer 5: Monitoring &     |
-|   Audit                   |
-| - Log all inputs/outputs  |
-| - Anomaly detection       |
-| - Abuse pattern alerting  |
-| - Compliance audit trail  |
-+---------------------------+
-     |
-     v
-Sanitized Response to User
-```
+
+No single layer stops all attack classes — GCG bypasses input filters (gibberish), AutoDAN bypasses perplexity filters (fluent), and indirect injection bypasses everything above Layer 2 entirely.
 
 ### Attack Surface Map of a Typical LLM Application
 

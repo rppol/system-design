@@ -156,48 +156,56 @@ family** — there is no single defense that covers both ends.
 
 ### 5.1 GCG Optimization Loop
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Init(["harmful_request + suffix tokens (initially garbage)\nx = [request || x_1 x_2 … x_10]"]) --> Forward
+    Forward["Forward pass\nL(x') = –log P('Sure, here is…' | x')"] --> Backprop
+    Backprop["Backprop → gradient w.r.t.\none-hot embedding of each suffix position"] --> TopK
+    TopK["For each position i:\ntop-K candidate replacement tokens\n(largest negative gradient)"] --> Sample
+    Sample["Sample B candidate suffixes\n(each swaps ONE position with a top-K token)\nrun actual forward pass on all B"] --> Best
+    Best["Keep candidate with LOWEST actual loss\n→ new current suffix"] --> Done{"N steps complete\nor jailbreak\nsucceeds?"}
+    Done -- NO --> Forward
+    Done -- YES --> Out([Adversarial suffix found])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    class Init,Out io
+    class Forward,Backprop llm
+    class TopK,Sample,Best proc
+    class Done decide
 ```
-  harmful_request + [suffix tokens: x x x x x x x x x x]  (initially garbage)
-                |
-                v
-   Forward pass -> compute L(x') = -log P("Sure, here is..." | x')
-                |
-                v
-   Backprop -> gradient w.r.t. ONE-HOT embedding of EACH suffix position
-                |
-                v
-   For each position i: take TOP-K candidate replacement tokens
-   (largest negative gradient = most loss-reducing direction)
-                |
-                v
-   Sample B candidate suffixes (each swaps ONE position with a
-   top-K candidate); run ACTUAL forward pass on all B
-                |
-                v
-   Keep the candidate with LOWEST actual loss -> new current suffix
-                |
-                v
-   Repeat for N steps (typically 500), or until jailbreak succeeds
-```
+
+GCG typically runs N=500 steps; the suffix is whitebox-optimized against one model and often transfers to black-box targets with reduced but non-zero attack success rate.
 
 ### 5.2 AutoDAN Genetic Loop
 
-```
-  Population: [prompt_1, prompt_2, ..., prompt_P]  (role-play-style seeds)
-       |
-       v
-  Score each: fitness = w1 * jailbreak_success(target, prompt)
-                       + w2 * (1 / perplexity(prompt))     <- fluency term
-       |
-       v
-  Select top-fitness prompts  ---->  MUTATION (word-level swap,
-       |                              LLM-paraphrase)
-       |                                  |
-       +------------- CROSSOVER ---------+
-       |              (combine fragments of two parents)
-       v
-  New population (generation t+1)  ----> repeat until success or
-                                          generation budget exhausted
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Pop(["Population: P role-play-style seed prompts"]) --> Score
+    Score["Score each prompt\nfitness = w1 × jailbreak_success(target, prompt)\n       + w2 × (1 / perplexity(prompt))"] --> Select
+    Select["Select top-fitness prompts"] --> Mutate & Cross
+    Mutate["MUTATION\nword-level swap\nLLM-paraphrase"] --> NewPop
+    Cross["CROSSOVER\ncombine fragments of two parents"] --> NewPop
+    NewPop["New population (generation t+1)"] --> Done{"success or budget\nexhausted?"}
+    Done -- NO --> Score
+    Done -- YES --> Out([Fluent adversarial prompt found])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    class Pop,Out io
+    class Score,Select proc
+    class Mutate,Cross llm
+    class NewPop proc
+    class Done decide
 ```
 
 ### 5.3 TAP Tree Search with Pruning
@@ -222,28 +230,27 @@ family** — there is no single defense that covers both ends.
 
 ### 5.4 Layered Defense Pipeline
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Prompt([Incoming Prompt]) --> Perplexity
+    Perplexity["Perplexity Filter\nDetects gibberish / high-perplexity suffixes\n(GCG, BEAST)"] -- "gibberish / high perplexity" --> Reject1([REJECT])
+    Perplexity -- "passes (fluent text — AutoDAN, PAP pass here)" --> Smooth
+    Smooth["SmoothLLM\nRandomized character-level perturbations\nMajority-vote over multiple perturbed copies\n(breaks fragile optimized suffixes)"] -- "passes" --> RepE
+    RepE["RepE / Circuit Breaker\nActivation-level detector\nInternal representations → harmful-generation state\nInterrupts generation regardless of prompt phrasing\n(catches novel / unseen strategies)"] -- "passes" --> Model
+    Model([Model generates response])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    class Prompt,Model io
+    class Perplexity,Smooth,RepE warn
+    class Reject1 warn
 ```
-  Incoming prompt
-        |
-        v
-  +-----------------+   gibberish/high-perplexity suffix (GCG, BEAST)
-  | Perplexity filter|------------------------> REJECT
-  +-----------------+
-        | passes (fluent text -- AutoDAN, PAP also pass here)
-        v
-  +-----------------+   randomized character-level perturbations,
-  |   SmoothLLM      |   majority-vote over multiple perturbed copies
-  +-----------------+   (perturbation often breaks fragile optimized
-        | passes        suffixes/strategies, §6.3)
-        v
-  +-----------------+   activation-level "circuit breaker" -- detects
-  | RepE / Circuit   |   internal representations associated with
-  | Breaker          |   harmful-generation states, interrupts
-  +-----------------+   generation regardless of HOW the prompt was
-        | passes        phrased (catches novel/unseen strategies)
-        v
-   Model generates response
-```
+
+Each layer catches a different attack class — no single filter stops everything; GCG bypasses fluency checks while AutoDAN bypasses perplexity filters, requiring stacked defenses.
 
 ### 5.5 The Fluency x Effectiveness Map — Why No Single Defense Covers Both
 

@@ -165,32 +165,28 @@ Architecture: DiT (Diffusion Transformer) replacing UNet for video
 ## 5. Architecture Diagrams
 
 ### VLM Complete Flow
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Img([Image]) --> VisionEnc["Vision Encoder\n(ViT-L/14)"]
+    Text([Text Question]) --> Tokenizer["Text Tokenizer\n(BPE tokens)"]
+    VisionEnc --> Projection["Projection\n(Linear MLP)"]
+    Tokenizer --> Embedding["Embedding\n(Lookup table)"]
+    Projection & Embedding --> Interleaved["Interleaved Tokens\nimg_1…img_N + question_tokens"]
+    Interleaved --> LLM["LLM Decoder\nAttention across all tokens\n(visual tokens + text tokens)"]
+    LLM --> Response([Text Response])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class Img,Text,Response io
+    class VisionEnc,Tokenizer,Projection,Embedding,Interleaved proc
+    class LLM llm
 ```
-Image + Text Question
-     |           |
-     v           v
-[Vision      [Text
- Encoder]    Tokenizer]
- ViT-L/14   BPE tokens
-     |           |
-     v           v
-[Projection] [Embedding]
- Linear MLP  Lookup table
-     |           |
-     +-----+-----+
-           |
-           v
-     [Interleaved Tokens]
-     [img1][img2]...[imgN][question_tokens...]
-           |
-           v
-     [LLM Decoder]
-     Attention across all tokens
-     (visual tokens + text tokens)
-           |
-           v
-     Text Response
-```
+
+The projection layer bridges the vision encoder's output dimension to the LLM's embedding dimension; the LLM then attends over the combined visual and text token sequence uniformly.
 
 ### CLIP Pre-training (Foundation for VLMs)
 ```

@@ -150,65 +150,46 @@ Enterprise deployments use private registries. Open ecosystems use public regist
 
 ### 5.1 A2A Task Flow — Happy Path
 
-```
- Orchestrator Agent                    Specialist Agent
-        |                                     |
-        |  GET /.well-known/agent.json        |
-        |------------------------------------>|
-        |  <-- Agent Card (capabilities)      |
-        |                                     |
-        |  POST /tasks                        |
-        |  {id: "t-001", message: {...}}      |
-        |------------------------------------>|
-        |  <-- 202 Accepted                   |
-        |      {taskId: "t-001",              |
-        |       status: "submitted"}          |
-        |                                     |
-        |  [SSE stream open]                  |
-        |  <-- event: task-update             |
-        |      {status: "working"}            |
-        |                                     |
-        |  <-- event: task-update             |
-        |      {status: "completed",          |
-        |       result: {...}}                |
-        |                                     |
+```mermaid
+%%{init: {'theme': 'dark'}}%%
+sequenceDiagram
+    participant O as Orchestrator Agent
+    participant S as Specialist Agent
+    O->>S: GET /.well-known/agent.json
+    S-->>O: Agent Card (capabilities)
+    O->>S: POST /tasks {id: "t-001", message: {...}}
+    S-->>O: 202 Accepted {taskId: "t-001", status: "submitted"}
+    Note over O,S: SSE stream open
+    S-->>O: event: task-update {status: "working"}
+    S-->>O: event: task-update {status: "completed", result: {...}}
 ```
 
 ### 5.2 A2A Multi-Turn (input-required state)
 
-```
- Orchestrator                         Specialist
-        |                                  |
-        |  POST /tasks {task: "analyze"}   |
-        |--------------------------------->|
-        |  <-- {status: "input-required",  |
-        |       question: "Which column    |
-        |       is the target variable?"}  |
-        |                                  |
-        |  POST /tasks/t-001/messages      |
-        |  {content: "column: revenue"}    |
-        |--------------------------------->|
-        |  <-- {status: "working"}         |
-        |  <-- {status: "completed", ...}  |
+```mermaid
+%%{init: {'theme': 'dark'}}%%
+sequenceDiagram
+    participant O as Orchestrator
+    participant S as Specialist
+    O->>S: POST /tasks {task: "analyze"}
+    S-->>O: {status: "input-required", question: "Which column is the target variable?"}
+    O->>S: POST /tasks/t-001/messages {content: "column: revenue"}
+    S-->>O: {status: "working"}
+    S-->>O: {status: "completed", result: {...}}
 ```
 
 ### 5.3 A2A with Push Notifications (long tasks)
 
-```
- Orchestrator                Registry           Specialist
-        |                       |                    |
-        | POST /tasks           |                    |
-        | {callbackUrl: "https://orch.example.com/cb"}
-        |--------------------------------------------->|
-        | <-- 202 {taskId: "t-002"}                   |
-        |                                             |
-        |  [Orchestrator continues other work]         |
-        |                                             |
-        |  [10 minutes later — task completes]        |
-        |                                             |
-        |  POST https://orch.example.com/cb           |
-        |<---------------------------------------------|
-        |  {taskId: "t-002", status: "completed"}     |
+```mermaid
+%%{init: {'theme': 'dark'}}%%
+sequenceDiagram
+    participant O as Orchestrator
+    participant S as Specialist
+    O->>S: POST /tasks {callbackUrl: "https://orch.example.com/cb"}
+    S-->>O: 202 {taskId: "t-002"}
+    Note over O: Orchestrator continues other work
+    Note over S: 10 minutes later — task completes
+    S->>O: POST https://orch.example.com/cb {taskId: "t-002", status: "completed"}
 ```
 
 ### 5.4 Multi-Agent System with Protocol Layers

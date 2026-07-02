@@ -78,112 +78,93 @@ Route with classifier to narrow from 500 to 50 tools in a category, then apply R
 
 ### Naive approach (N=100 tools)
 
-```
-User Query
-    |
-    v
-+-----------------------------------------------+
-|  System Prompt                                |
-|  [Tool 1 schema - 300 tokens]                 |
-|  [Tool 2 schema - 300 tokens]                 |
-|  ...                                          |
-|  [Tool 100 schema - 300 tokens]               |
-|  = 30,000 tokens wasted per call              |
-+-----------------------------------------------+
-    |
-    v
-  LLM (full context, degraded attention)
-    |
-    v
-  Tool call (accuracy ~70% with 100 tools)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Query([User Query]) --> Prompt
+    Prompt["System Prompt\n100 tool schemas × 300 tokens\n= 30,000 tokens / call"] --> LLM
+    LLM["LLM\n(full context, degraded attention)"] --> Call["Tool call\n(accuracy ~70% with 100 tools)"]
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    class Query io
+    class Prompt warn
+    class LLM llm
+    class Call proc
 ```
 
 ### RAG-over-tools
 
-```
-OFFLINE (build index once)
-Tool Catalogue (N=500)
-    |
-    v
-Embedding Model (text-embedding-3-small)
-    |
-    v
-FAISS Index (500 vectors x 1536 dims)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    subgraph OFFLINE["OFFLINE — build index once"]
+        Catalog["Tool Catalogue\n(N=500)"] --> EmbedOff["Embedding Model\ntext-embedding-3-small"]
+        EmbedOff --> Index["FAISS Index\n500 vectors × 1536 dims"]
+    end
+    subgraph RUNTIME["RUNTIME — per query"]
+        Query([User Query]) --> EmbedQ["Embedding Model → Query Vector"]
+        EmbedQ --> Search["FAISS Top-k Search\nk=10, ~2ms"]
+        Search --> Schemas["Retrieved Tool Schemas\nk=10, ~3,000 tokens"]
+        Schemas --> Prompt["System Prompt\n10 relevant schemas\n~3,000 tokens"]
+        Prompt --> LLM["LLM\n(tight context, high attention)"]
+        LLM --> Call["Tool call\n(accuracy ~92% with k=10)"]
+    end
 
-RUNTIME (per query)
-User Query
-    |
-    v
-Embedding Model --> Query Vector
-    |
-    v
-FAISS Top-k Search (k=10, ~2ms)
-    |
-    v
-Retrieved Tool Schemas (k=10, ~3000 tokens)
-    |
-    v
-+-------------------------------+
-|  System Prompt                |
-|  [10 relevant tool schemas]   |
-|  ~3000 tokens                 |
-+-------------------------------+
-    |
-    v
-  LLM (tight context, high attention)
-    |
-    v
-  Tool call (accuracy ~92% with k=10 relevant)
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class Query io
+    class Catalog,EmbedOff,EmbedQ,Search,Schemas,Prompt proc
+    class Index store
+    class LLM llm
+    class Call proc
 ```
 
 ### Hierarchical menus
 
-```
-User Query
-    |
-    v
-+---------------------------+
-|  L1 Category Menu         |
-|  data | comms | analysis  |
-|  devops | payments        |
-+---------------------------+
-    |
-  LLM call 1 -> selects "devops"
-    |
-    v
-+---------------------------+
-|  L2 Tool Menu (devops)    |
-|  github_create_pr         |
-|  github_merge_pr          |
-|  jenkins_trigger_build    |
-|  k8s_scale_deployment     |
-+---------------------------+
-    |
-  LLM call 2 -> selects "github_create_pr"
-    |
-    v
-  Execute tool
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Query([User Query]) --> L1
+    L1["L1 Category Menu\ndata | comms | analysis | devops | payments"] --> LLM1["LLM call 1\nselects 'devops'"]
+    LLM1 --> L2["L2 Tool Menu — devops\ngithub_create_pr | github_merge_pr\njenkins_trigger_build | k8s_scale_deployment"]
+    L2 --> LLM2["LLM call 2\nselects 'github_create_pr'"]
+    LLM2 --> Execute([Execute tool])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class Query,Execute io
+    class L1,L2 proc
+    class LLM1,LLM2 llm
 ```
 
 ### Routing classifier + RAG (hybrid)
 
-```
-User Query
-    |
-    v
-DistilBERT Classifier (50ms)
-    |
-    v
-  Category: ["devops", "code"]  (top-2)
-    |
-    v
-Filter Tool Catalogue to devops+code subset (N=80)
-    |
-    v
-FAISS Top-k within subset (k=8, <2ms)
-    |
-    v
-  LLM with 8 relevant tools -> Tool call
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Query([User Query]) --> Classifier
+    Classifier["DistilBERT Classifier\n50 ms"] --> Categories["Category: devops + code\n(top-2)"]
+    Categories --> Filter["Filter Tool Catalogue\ndevops+code subset: N=80"]
+    Filter --> Search["FAISS Top-k within subset\nk=8, <2ms"]
+    Search --> LLM["LLM with 8 relevant tools"]
+    LLM --> Call([Tool call])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class Query,Call io
+    class Classifier,Categories,Filter,Search proc
+    class LLM llm
 ```
 
 ---

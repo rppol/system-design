@@ -165,55 +165,35 @@ Two distinct dashboard audiences:
 
 ### LLM Observability Stack Architecture
 
-```
-                         +------------------+
-                         |   User / Client  |
-                         +--------+---------+
-                                  |
-                                  v
-                    +-------------+-------------+
-                    |      API Gateway /        |
-                    |    LLM Proxy Layer        |
-                    |  (token counting, cost    |
-                    |   calc, trace init,       |
-                    |   rate limiting)          |
-                    +---+-------+-------+------+
-                        |       |       |
-           +------------+  +----+---+  ++----------+
-           |               |        |               |
-           v               v        v               v
-   +-------+------+ +------+--+ +--+-------+ +-----+-------+
-   | Embedding    | | Vector  | | Reranker | | LLM Provider|
-   | Model        | | DB      | |          | | (OpenAI,    |
-   | (ada-002,    | | (Pinecone| | (Cohere,| |  Anthropic, |
-   |  Cohere)     | |  Weaviate)| BGE)    | |  self-host) |
-   +--------------+ +---------+ +----------+ +-------------+
-           |               |        |               |
-           +-------+-------+--------+-------+-------+
-                   |     Telemetry Side-Channel     |
-                   v                                v
-          +--------+--------------------------------+--------+
-          |              Observability Collector              |
-          |  (OpenTelemetry Collector / Custom Ingest)       |
-          +---+----------+-----------+-----------+---+-------+
-              |          |           |           |
-              v          v           v           v
-        +-----+--+ +----+----+ +----+----+ +----+------+
-        | Trace  | | Metrics | |  Log    | | Quality   |
-        | Store  | | Store   | | Store   | | Eval      |
-        | (Jaeger| | (Prom-  | | (Elastic| | Pipeline  |
-        |  Tempo)| | etheus) | | Loki)   | | (async)   |
-        +--------+ +---------+ +---------+ +-----------+
-              |          |           |           |
-              +----------+-----------+-----------+
-                         |
-                         v
-                +--------+---------+
-                |    Dashboards    |
-                |   & Alerting     |
-                | (Grafana, PD,    |
-                |  custom UI)      |
-                +------------------+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    User([User / Client]) --> Gateway
+    Gateway["API Gateway / LLM Proxy Layer\n(token counting, cost calc, trace init, rate limiting)"] --> Embed & VDB & Rerank & LLMProv
+    Embed["Embedding Model\n(ada-002, Cohere)"]
+    VDB["Vector DB\n(Pinecone, Weaviate)"]
+    Rerank["Reranker\n(Cohere, BGE)"]
+    LLMProv["LLM Provider\n(OpenAI, Anthropic, self-hosted)"]
+    Embed & VDB & Rerank & LLMProv -- "telemetry side-channel" --> Collector
+    Collector["Observability Collector\n(OpenTelemetry / Custom Ingest)"] --> TraceStore & MetricsStore & LogStore & QualEval
+    TraceStore["Trace Store\n(Jaeger, Tempo)"]
+    MetricsStore["Metrics Store\n(Prometheus)"]
+    LogStore["Log Store\n(Elastic, Loki)"]
+    QualEval["Quality Eval Pipeline\n(async)"]
+    TraceStore & MetricsStore & LogStore & QualEval --> Dashboard(["Dashboards & Alerting\n(Grafana, PagerDuty, custom UI)"])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class User,Dashboard io
+    class Gateway proc
+    class Embed,Rerank proc
+    class VDB store
+    class LLMProv llm
+    class Collector proc
+    class TraceStore,MetricsStore,LogStore,QualEval store
 ```
 
 ### Trace Structure for a RAG Pipeline
@@ -390,21 +370,29 @@ class LLMGateway:
 
 Quality evaluation is too expensive and slow to run synchronously. A background pipeline processes sampled responses:
 
-```
-Request Flow (synchronous, <5ms overhead):
-  User Request -> Gateway -> LLM Provider -> Response to User
-                     |
-                     v (async, fire-and-forget)
-              Message Queue (Kafka / SQS)
-                     |
-                     v
-Quality Scoring Pipeline (async workers):
-  1. Dequeue response + context
-  2. Run groundedness check (LLM-as-judge, ~800ms, ~$0.0002)
-  3. Run relevance scoring (embedding similarity, ~50ms, ~$0.00001)
-  4. Run safety classifier (Llama Guard, ~100ms, self-hosted)
-  5. Write scores to quality metrics store
-  6. Update rolling averages and alert if thresholds breached
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    Req([User Request]) --> Gateway --> LLM --> Resp([Response to User])
+    Gateway -. "async fire-and-forget" .-> Queue["Message Queue\n(Kafka / SQS)"]
+    Queue --> Dequeue["1. Dequeue response + context"]
+    Dequeue --> Ground["2. Groundedness check\n(LLM-as-judge, ~800ms, ~$0.0002)"]
+    Ground --> Relev["3. Relevance scoring\n(embedding similarity, ~50ms)"]
+    Relev --> Safety["4. Safety classifier\n(Llama Guard, ~100ms, self-hosted)"]
+    Safety --> Scores["5. Write scores to quality metrics store"]
+    Scores --> Alert["6. Update rolling averages\nalert if thresholds breached"]
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    class Req,Resp io
+    class Gateway,Dequeue,Ground,Relev,Safety proc
+    class LLM llm
+    class Queue,Scores store
+    class Alert warn
 ```
 
 Sampling strategy to control cost:

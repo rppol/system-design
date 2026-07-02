@@ -305,27 +305,27 @@ GRPO (Online, Critic-Free):
 ```
 
 ### Verifiable Rewards Pipeline
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Dataset(["Prompt Dataset\n(math / code problems)"]) --> Policy
+    Policy["Policy generates response\n(or G responses for GRPO)"] --> Oracle
+    Oracle["Verification Oracle\nCode: execute test cases\nMath: symbolic / numeric check\n→ Binary reward 0 or 1\n→ Or partial credit 0–1"] --> Update
+    Update["RL Update (PPO or GRPO)\n– No reward model needed\n– No human preference data needed\n– Ground truth IS the reward"] --> Policy
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class Dataset io
+    class Policy llm
+    class Oracle store
+    class Update proc
 ```
-Prompt Dataset (math / code problems)
-     |
-     v
-Policy generates response (or G responses for GRPO)
-     |
-     v
-┌──────────────────────────────┐
-│  Verification Oracle         │
-│  Code: execute test cases    │
-│  Math: symbolic/numeric check│
-│  → Binary reward (0 or 1)    │
-│  → Or partial credit (0-1)   │
-└──────────────────────────────┘
-     |
-     v
-RL Update (PPO or GRPO)
-  No reward model needed
-  No human preference data needed
-  Ground truth IS the reward
-```
+
+Verifiable rewards eliminate the reward model entirely — the oracle is deterministic (test suite pass/fail or symbolic math checker), so there is no reward hacking from a learned scorer.
 
 ---
 

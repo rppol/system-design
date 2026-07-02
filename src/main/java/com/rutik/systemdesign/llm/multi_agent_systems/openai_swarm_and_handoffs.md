@@ -111,53 +111,49 @@ Instructions for Sales Agent:
 
 ### 5.1 Swarm Request Lifecycle
 
-```
-Caller
-  |
-  |  messages + context_variables
-  v
-Client.run(triage_agent, messages, ctx)
-  |
-  +---> [Triage Agent LLM call]
-          |
-          |  Returns tool call: transfer_to_billing_agent()
-          v
-        Runner detects Handoff(agent=billing_agent)
-          |
-          +---> [Billing Agent LLM call]  <-- new system prompt, same messages
-                  |
-                  |  Returns content: "Your refund is $45."
-                  v
-                Response(messages=[...], context_variables={...})
-  |
-  v
-Caller appends messages, calls Client.run again for next turn
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Caller(["Caller\nmessages + context_variables"]) --> RunCall["Client.run(triage_agent, messages, ctx)"]
+    RunCall --> Triage["Triage Agent LLM call"]
+    Triage -- "tool call: transfer_to_billing_agent()" --> Detect["Runner detects Handoff(agent=billing_agent)"]
+    Detect --> Billing["Billing Agent LLM call\nnew system prompt, same messages"]
+    Billing -- "'Your refund is $45.'" --> Response["Response(messages=[...], context_variables={...})"]
+    Response --> Caller2(["Caller appends messages\ncalls Client.run again for next turn"])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class Caller,Caller2 io
+    class RunCall,Detect,Response proc
+    class Triage,Billing llm
 ```
 
 ### 5.2 Agents SDK Run Lifecycle
 
-```
-User Input
-    |
-    v
-Runner.run(triage_agent, input)
-    |
-    +--[input_guardrail]--> (pass / raise GuardrailTripwireTriggered)
-    |
-    +---> LLM Call (triage_agent)
-    |         |
-    |         | tool calls?  --> execute tools --> append results
-    |         |
-    |         | handoff?     --> switch active_agent, carry context_variables
-    |         |
-    |         | final text?  --> output_guardrail --> RunResult
-    |
-    v
-RunResult
-  .final_output   str
-  .messages       list[Message]
-  .last_agent     Agent
-  .trace_url      str   (link to OpenAI dashboard trace)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Input([User Input]) --> RunnerRun["Runner.run(triage_agent, input)"]
+    RunnerRun --> Guard{"input_guardrail"}
+    Guard -- "GuardrailTripwireTriggered" --> Blocked([Blocked])
+    Guard -- pass --> LLMCall["LLM Call (triage_agent)"]
+    LLMCall --> ToolCalls{"tool calls?"}
+    ToolCalls -- YES --> ExecTools["execute tools\nappend results"] --> LLMCall
+    ToolCalls -- handoff --> Switch["switch active_agent\ncarry context_variables"] --> LLMCall
+    ToolCalls -- "final text" --> OutGuard["output_guardrail"] --> Result["RunResult\n.final_output | .messages | .last_agent | .trace_url"]
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    class Input,Blocked io
+    class RunnerRun,ExecTools,Switch,OutGuard,Result proc
+    class LLMCall llm
+    class Guard,ToolCalls decide
 ```
 
 ### 5.3 Context Variable Flow

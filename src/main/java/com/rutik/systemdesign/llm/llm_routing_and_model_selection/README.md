@@ -115,26 +115,22 @@ Typically used as the data-collection phase for training classifier-based router
 
 ### Basic Router Architecture
 
-```
-                          +-----------+
-  Incoming Query -------> |  Router   |
-                          +-----------+
-                               |
-               +---------------+---------------+
-               |               |               |
-               v               v               v
-        +-----------+   +-----------+   +-----------+
-        | Tier 1    |   | Tier 2    |   | Tier 3    |
-        | Haiku /   |   | Sonnet /  |   | Opus /    |
-        | GPT-4o-   |   | GPT-4o    |   | GPT-4     |
-        | mini      |   |           |   |           |
-        +-----------+   +-----------+   +-----------+
-               |               |               |
-               +---------------+---------------+
-                               |
-                          +-----------+
-                          |  Response |
-                          +-----------+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Q([Incoming Query]) --> Router["Router"]
+    Router --> T1["Tier 1\nHaiku / GPT-4o-mini"]
+    Router --> T2["Tier 2\nSonnet / GPT-4o"]
+    Router --> T3["Tier 3\nOpus / GPT-4"]
+    T1 & T2 & T3 --> Response([Response])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class Q,Response io
+    class Router proc
+    class T1,T2,T3 llm
 ```
 
 ### Cascade Pattern with Confidence Check
@@ -167,54 +163,47 @@ flowchart TD
 
 ### Quality Feedback Loop (Router Improvement)
 
-```
-  Production Traffic
-         |
-         v
-     [ Router ]
-         |
-    Routes to Model Tier
-         |
-         v
-    [ Response ]
-         |
-         v
-  [ Quality Evaluator ]    <-- LLM-as-judge / human raters / task-specific metrics
-         |
-         v
-  [ Routing Labels ]       <-- (query, cheapest_adequate_model) pairs
-         |
-         v
-  [ Classifier Retraining ]
-         |
-         v
-     [ Router ]            <-- improved model deployed
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Traffic([Production Traffic]) --> Router["Router"]
+    Router --> Response["Response"]
+    Response --> QualEval["Quality Evaluator\n(LLM-as-judge / human raters / task-specific metrics)"]
+    QualEval --> Labels["Routing Labels\n(query, cheapest_adequate_model) pairs"]
+    Labels --> Retrain["Classifier Retraining"]
+    Retrain --> Router2["Router (improved model deployed)"]
+    Router2 --> Traffic
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class Traffic io
+    class Router,Router2 proc
+    class Response llm
+    class QualEval,Labels,Retrain store
 ```
 
 ### Multi-Provider Fallback Chain
 
-```
-  Query
-    |
-    v
-+------------------+    timeout / rate limit / error
-| Primary Provider | -----------------------------------+
-| (Anthropic)      |                                    |
-+------------------+                                    v
-                                             +------------------+
-                                             | Secondary        |
-                                             | Provider         |
-                                             | (OpenAI)         |
-                                             +------------------+
-                                                        |
-                                             timeout / error
-                                                        |
-                                                        v
-                                             +------------------+
-                                             | Tertiary         |
-                                             | Provider         |
-                                             | (Gemini)         |
-                                             +------------------+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Query([Query]) --> Primary
+    Primary["Primary Provider\n(Anthropic)"] -- "timeout / rate limit / error" --> Secondary
+    Primary -- success --> Resp([Response])
+    Secondary["Secondary Provider\n(OpenAI)"] -- "timeout / error" --> Tertiary
+    Secondary -- success --> Resp
+    Tertiary["Tertiary Provider\n(Gemini)"] --> Resp
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    class Query,Resp io
+    class Primary llm
+    class Secondary,Tertiary warn
 ```
 
 ---

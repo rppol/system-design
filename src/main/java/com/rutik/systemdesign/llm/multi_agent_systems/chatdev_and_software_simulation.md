@@ -93,98 +93,50 @@ Both frameworks support a repair loop:
 
 ### ChatDev Chat-Chain Pipeline
 
-```
-User Input (natural language task description)
-         |
-         v
-+-------------------+
-|   CEO Agent       |  <-- system prompt: "You are the CEO of a software startup..."
-|   (Instructor)    |      output: Product Vision Document (plain text)
-+-------------------+
-         |
-         v  [structured handoff: product vision doc]
-+-------------------+
-|   CTO Agent       |  <-- system prompt: "You are the CTO..."
-|   (Instructor)    |      output: Tech Stack Decision
-+-------------------+
-         |
-         v  [structured handoff: tech stack + product vision]
-+-------------------+     +-------------------+
-|   CTO Agent       |<--->|  Programmer Agent |  multi-turn dialogue
-|   (Instructor)    |     |  (Assistant)      |  max 10 turns
-+-------------------+     +-------------------+
-                                    |
-                                    v  [code files written to shared repo]
-                          +-------------------+     +-------------------+
-                          | Reviewer Agent    |<--->|  Programmer Agent |
-                          | (Instructor)      |     |  (Assistant)      |
-                          +-------------------+     +-------------------+
-                                    |
-                                    v  [revised code in shared repo]
-                          +-------------------+     +-------------------+
-                          |  QA Agent         |<--->|  Programmer Agent |
-                          | (Instructor)      |     |  (Assistant)      |
-                          +-------------------+     +-------------------+
-                                    |
-                                    v  [tested, fixed code in shared repo]
-                          +-------------------+
-                          |  Documenter Agent |
-                          |                   |  output: README.md
-                          +-------------------+
-                                    |
-                                    v
-                          Final Software Package
-                          (source files + deps + docs)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Input(["User Input\n(natural language task)"]) --> CEO
+    CEO["CEO Agent (Instructor)\nOutput: Product Vision Document"] -- "product vision doc" --> CTO1
+    CTO1["CTO Agent (Instructor)\nOutput: Tech Stack Decision"] -- "tech stack + product vision" --> CTOProg
+    CTOProg["CTO Agent (Instructor)\n↔ Programmer Agent (Assistant)\nMulti-turn dialogue max 10 turns"] -- "code files → shared repo" --> Reviewer
+    Reviewer["Reviewer Agent (Instructor)\n↔ Programmer Agent (Assistant)"] -- "revised code → shared repo" --> QA
+    QA["QA Agent (Instructor)\n↔ Programmer Agent (Assistant)"] -- "tested, fixed code → shared repo" --> Documenter
+    Documenter["Documenter Agent\nOutput: README.md"] --> Final(["Final Software Package\n(source + deps + docs)"])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class Input,Final io
+    class CEO,CTO1,CTOProg,Reviewer,QA,Documenter llm
 ```
 
 ### MetaGPT SOP Document Flow
 
-```
-UserRequirement (string)
-         |
-         v
-+------------------------+
-|  Product Manager Agent |
-|  Subscribes: UserReq   |
-|  Publishes:  PRD       |
-+------------------------+
-         |  PRD (JSON: goals, user_stories, constraints)
-         |  [validated against PRD Pydantic schema]
-         v
-+------------------------+
-|  Architect Agent       |
-|  Subscribes: PRD       |
-|  Publishes:  SystemDesign |
-+------------------------+
-         |  SystemDesign (JSON: data_structures, api_endpoints, file_list)
-         |  [validated against SystemDesign Pydantic schema]
-         v
-+------------------------+
-|  ProjectManager Agent  |
-|  Subscribes: SystemDesign |
-|  Publishes:  Tasks     |
-+------------------------+
-         |  Tasks (JSON list: [{file, description, dependencies}])
-         |  [validated against Tasks Pydantic schema]
-         v
-+------------------------+        +------------------+
-|  Engineer Agent        |------->| Shared Code Repo |
-|  Subscribes: Task      |<-------| (file system)    |
-|  Publishes:  Code      |        +------------------+
-+------------------------+
-         |  Code (JSON: {file_path, content, language})
-         |  [validated against Code Pydantic schema]
-         v
-+------------------------+
-|  QA Engineer Agent     |
-|  Subscribes: Code      |
-|  Publishes:  BugReport |
-+------------------------+
-         |
-         |  if bugs found: route BugReport back to Engineer
-         |  if no bugs:    publish to final output
-         v
-Final Validated Software Package
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Req(["UserRequirement (string)"]) --> PM
+    PM["Product Manager Agent\nSubscribes: UserReq\nPublishes: PRD\nJSON: goals, user_stories, constraints\nvalidated vs PRD Pydantic schema"] --> Arch
+    Arch["Architect Agent\nSubscribes: PRD\nPublishes: SystemDesign\nJSON: data_structures, api_endpoints, file_list\nvalidated vs SystemDesign schema"] --> ProjMgr
+    ProjMgr["ProjectManager Agent\nSubscribes: SystemDesign\nPublishes: Tasks\nJSON list: [{file, description, dependencies}]"] --> Eng
+    Eng["Engineer Agent\nSubscribes: Task\nPublishes: Code\nJSON: {file_path, content, language}"] --> Repo & QAEng
+    Repo["Shared Code Repo\n(file system)"] --> Eng
+    QAEng["QA Engineer Agent\nSubscribes: Code\nPublishes: BugReport"] --> BugCheck{"Bugs found?"}
+    BugCheck -- YES --> Eng
+    BugCheck -- NO --> Final(["Final Validated Software Package"])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    class Req,Final io
+    class PM,Arch,ProjMgr,Eng,QAEng llm
+    class Repo store
+    class BugCheck decide
 ```
 
 ### Shared Code Repository as Common Ground Truth

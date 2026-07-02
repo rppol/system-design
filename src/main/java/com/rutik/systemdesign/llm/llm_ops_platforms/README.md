@@ -95,25 +95,26 @@ The registry is the integration point between experiment tracking (where models 
 
 ### 4.5 Eval-Gated CI/CD Pattern
 
-```
-Developer opens PR with prompt change
-         |
-         v
-CI triggers eval pipeline
-         |
-         v
-Run golden dataset (200 examples) through new prompt
-         |
-         v
-Compare scores vs baseline (production prompt)
-         |
-    Pass / Fail?
-    /          \
-Pass (delta    Fail (quality drop
-< -2%)          > 2% on primary metric)
-   |                      |
-Deploy                Block PR, post
-                      score diff as comment
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    PR([Developer opens PR\nwith prompt change]) --> CI["CI triggers eval pipeline"]
+    CI --> Golden["Run golden dataset (200 examples)\nthrough new prompt"]
+    Golden --> Compare["Compare scores vs baseline\n(production prompt)"]
+    Compare --> Verdict{"Pass / Fail?"}
+    Verdict -- "Pass (delta < −2%)" --> Deploy([Deploy])
+    Verdict -- "Fail (quality drop > 2%\non primary metric)" --> Block(["Block PR\nPost score diff as comment"])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    class PR,Deploy io
+    class CI,Golden,Compare proc
+    class Verdict decide
+    class Block warn
 ```
 
 ---
@@ -917,32 +918,26 @@ Each enterprise customer is billed for their API consumption based on this daily
 
 Golden dataset: 300 support queries with human-labeled acceptable responses and the source document that should have been retrieved. Split into: 200 for CI evaluation, 100 held out for monthly distribution-drift audits.
 
-```
-GitHub PR: change to prompts/support_agent_v1.4.0.yaml
-                     |
-                     v
-CI: detect prompt file change
-                     |
-                     v
-Launch eval job (GitHub Actions, 8-minute timeout):
-  1. Load new prompt version from PR branch
-  2. Run 200 golden examples through the full RAG pipeline
-  3. Score each example on:
-       - faithfulness (LLM judge: is answer grounded in retrieved context?)
-       - answer_relevancy (LLM judge: does answer address the question?)
-       - retrieval_hit_rate (did top-3 results include the gold document?)
-       - response_format_validity (rule-based: correct JSON schema?)
-  4. Compare to baseline scores (current production prompt):
-       faithfulness:      0.89 → 0.91  (delta: +0.02)  PASS
-       answer_relevancy:  0.84 → 0.85  (delta: +0.01)  PASS
-       retrieval_hit_rate:0.91 → 0.91  (delta: 0.00)   PASS
-       format_validity:   1.00 → 1.00  (delta: 0.00)   PASS
-                     |
-                     v
-Post eval summary as PR comment, mark CI check green
-                     |
-                     v
-PR approved + CI green → merge → deploy via standard pipeline
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    PR(["GitHub PR: change to\nprompts/support_agent_v1.4.0.yaml"]) --> Detect["CI: detect prompt file change"]
+    Detect --> Eval["Launch eval job (GitHub Actions, 8-min timeout)\n1. Load new prompt version from PR branch\n2. Run 200 golden examples through full RAG pipeline\n3. Score: faithfulness (LLM judge)\n   answer_relevancy (LLM judge)\n   retrieval_hit_rate | format_validity (rule-based)"]
+    Eval --> Compare{"Compare vs baseline\n(current production prompt)"}
+    Compare -- "all deltas within threshold\nfaithfulness +0.02, relevancy +0.01" --> PassCheck["Post eval summary as PR comment\nmark CI check green"]
+    Compare -- "any metric drops > threshold" --> FailCheck([Block PR + post score diff])
+    PassCheck --> Merge["PR approved + CI green\n→ merge → deploy via standard pipeline"]
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    class PR io
+    class Detect,Eval,PassCheck,Merge proc
+    class FailCheck warn
+    class Compare decide
 ```
 
 A failure example (prompt change that breaks format):

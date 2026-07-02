@@ -92,56 +92,42 @@ cgroups        → CPU 1 core, memory 512MB, no network interface
 
 ## 4. Architecture Diagrams
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Agent([Agent]) --> Unsandboxed & MicroVM & WASM
+
+    subgraph Unsandboxed["Unsandboxed (dangerous)"]
+        UN["subprocess.run('python code.py')\n→ Host OS\nFull filesystem / network / process access"]
+    end
+
+    subgraph MicroVM["MicroVM Sandbox (E2B)"]
+        MV["Sandbox SDK → API Gateway → Firecracker VM\nIsolated filesystem, configurable network\n1–4 vCPU, 512MB–8GB RAM\n15–300s timeout, destroyed on close"]
+    end
+
+    subgraph WASM["WebAssembly Sandbox (Riza)"]
+        WA["Riza API → WASM Runtime\nNo real OS / filesystem / network (default)\nSub-100ms startup, deterministic output"]
+    end
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    class Agent io
+    class UN warn
+    class MV,WA proc
 ```
-Unsandboxed (dangerous)
-========================
-Agent  --->  subprocess.run("python code.py")  --->  Host OS
-                                                       |
-                                                  Full filesystem access
-                                                  Full network access
-                                                  All host processes
 
+Resource limits applied to every sandbox tier:
 
-MicroVM Sandbox (E2B)
-======================
-Agent  --->  Sandbox SDK  --->  API Gateway  --->  Firecracker VM
-                                                       |
-                                                  Isolated filesystem
-                                                  Configurable network
-                                                  1-4 vCPU, 512MB-8GB RAM
-                                                  15-300s timeout
-                                                  Destroyed on close
-
-
-WebAssembly Sandbox (Riza)
-===========================
-Agent  --->  Riza API  --->  WASM Runtime
-                                  |
-                             No real OS
-                             No filesystem
-                             No network (default)
-                             Sub-100ms startup
-                             Deterministic output
-
-
-Resource Limit Layers
-======================
-          +------------------+
-          |   Timeout cap    |  15-300s (hard kill on exceed)
-          +------------------+
-          |   Output limit   |  50KB stdout (prevent token flooding)
-          +------------------+
-          |   Memory limit   |  512MB-8GB RAM (OOM kill)
-          +------------------+
-          |   CPU limit      |  1-4 vCPU (no CPU starvation)
-          +------------------+
-          |   Disk quota     |  1-10GB (no disk exhaustion)
-          +------------------+
-          |   Network ACL    |  allowlist-only or blocked
-          +------------------+
-          |  Sandbox process |
-          +------------------+
-```
+| Layer | Limit |
+|-------|-------|
+| Timeout cap | 15–300s (hard kill on exceed) |
+| Output limit | 50KB stdout (prevent token flooding) |
+| Memory limit | 512MB–8GB RAM (OOM kill) |
+| CPU limit | 1–4 vCPU (no CPU starvation) |
+| Disk quota | 1–10GB (no disk exhaustion) |
+| Network ACL | allowlist-only or blocked |
 
 ---
 

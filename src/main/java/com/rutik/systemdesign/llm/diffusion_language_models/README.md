@@ -232,46 +232,29 @@ t=1.0 (noise):    [MASK][MASK] [MASK] [MASK] [MASK] [MASK]
 
 ### 5.3 Reverse Sampling Loop with Confidence-Based Remasking
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Init(["x_t = all MASK  (t = 1.0)"]) --> Fwd
+    Fwd["Transformer forward pass\nBidirectional attention over x_t\nPredict logits for EVERY masked position"] --> Conf
+    Conf["For each masked position:\nconfidence = max softmax prob"] --> Select
+    Select["Select top-k% most confident positions\n→ commit predicted token (unmask)\nRemaining positions → stay MASK"] --> Update
+    Update["t = t − 1/T\nx_{t-1} = updated sequence"] --> Done{"t = 0 or no\nMASK remain?"}
+    Done -- NO --> Fwd
+    Done -- YES --> Final(["Final x_0 — complete generated sequence"])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    class Init,Final io
+    class Fwd llm
+    class Conf,Select,Update proc
+    class Done decide
 ```
-+------------------------------------------------------------------+
-|  x_t = all [MASK]  (t = 1.0)                                      |
-+------------------------------------------------------------------+
-                |
-                v
-       +-------------------+
-       |  Transformer fwd  |  <- bidirectional attention over x_t
-       |  pass: predict    |
-       |  logits for EVERY |
-       |  masked position  |
-       +-------------------+
-                |
-                v
-       +-------------------------------------+
-       |  For each masked position, compute  |
-       |  confidence = max softmax prob      |
-       +-------------------------------------+
-                |
-                v
-       +-------------------------------------+
-       |  Select top-k% most confident       |
-       |  positions -> commit predicted      |
-       |  token (unmask)                     |
-       |  Remaining positions -> stay [MASK] |
-       +-------------------------------------+
-                |
-                v
-       +-------------------------------------+
-       |  t = t - (1/T);  x_{t-1} = updated   |
-       |  sequence                            |
-       +-------------------------------------+
-                |
-        repeat until t = 0 or no [MASK] remain
-                |
-                v
-       +-------------------+
-       |   final x_0        |
-       +-------------------+
-```
+
+Unlike autoregressive decoding (one token at a time, left-to-right), discrete diffusion generates all positions in parallel and iteratively denoises — each pass unmasks the most confident subset, creating global coherence before committing to low-confidence tokens.
 
 ### 5.4 Block Diffusion (BD3-LM) — Hybrid AR + Diffusion
 

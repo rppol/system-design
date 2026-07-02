@@ -241,35 +241,27 @@ Caution: packing combines multiple examples in one sequence
 ## 4. Architecture Diagram
 
 ### Instruction Tuning Data Flow
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Raw(["Raw instruction-response pairs\n[(instruction_1, response_1), …]"]) --> Template
+    Template["Template Application\nWrap with model-specific chat template\ne.g., LLaMA-3: user…eot_id…assistant"] --> Tokenize
+    Tokenize["Tokenization\nConvert to token IDs\nRecord instruction vs. response boundaries"] --> Labels
+    Labels["Label Creation\nlabels = input_ids.copy()\nlabels[:instruction_end] = -100 (mask instruction)"] --> Train
+    Train["Training\nCross-entropy loss ONLY on response tokens\nGradient update via Adam"] --> Eval
+    Eval["Evaluation\nGenerate completions for held-out instructions\nMeasure: task accuracy, format compliance, refusal rate"]
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class Raw io
+    class Template,Tokenize,Labels proc
+    class Train,Eval llm
 ```
-Raw instruction-response pairs
-  [(instruction_1, response_1), (instruction_2, response_2), ...]
-           |
-           v
-[Template Application]
-  Wrap with model-specific chat template
-  e.g., LLaMA-3: <|...|>user<|...|>\n{instruction}<|eot_id|><|...|>assistant<|...|>
-           |
-           v
-[Tokenization]
-  Convert to token IDs
-  Record instruction vs. response boundaries
-           |
-           v
-[Label Creation]
-  labels = input_ids.copy()
-  labels[:instruction_end] = -100   (mask instruction)
-           |
-           v
-[Training]
-  Cross-entropy loss only on response tokens
-  Gradient update via Adam
-           |
-           v
-[Evaluation]
-  Generate completions for held-out instructions
-  Measure: task accuracy, format compliance, refusal rate
-```
+
+Label masking (-100 in PyTorch) tells the loss function to skip instruction tokens — the model is trained only to generate the response given the instruction, not to predict the instruction itself.
 
 ### Label Masking Illustration
 ```

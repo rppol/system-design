@@ -244,36 +244,26 @@ Domain-specific tokenizer extension:
 ## 4. Architecture Diagram
 
 ### Domain-Then-Instruct Pipeline
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Base(["General-Purpose Base Model\n(LLaMA-3-8B, Mistral-7B)"]) --> CPT
+    CPT["Phase 1: Continued Pre-Training\nDataset: 10B–100B domain tokens + 15% general\nObjective: next-token prediction (all tokens)\nLR: 5e-5 to 1e-4 | Duration: 1–5 days (8×A100, 13B)"] --> DomainBase
+    DomainBase["Domain Knowledgeable Base Model\n– Rich domain vocabulary representations\n– Domain entity co-occurrence patterns\n– Domain knowledge in weights"] --> SFT
+    SFT["Phase 2: Domain Instruction Tuning\nDataset: 10K–500K domain (instruction, response) pairs\nObjective: SFT with label masking\nLR: 1e-4 to 3e-4 (LoRA) or 1e-5 (full FT) | Duration: hours"] --> Assistant
+    Assistant(["Domain Assistant Model\n– Expresses domain knowledge helpfully\n– Follows domain task conventions\n– Maintains epistemic humility"])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class Base,Assistant io
+    class CPT,SFT proc
+    class DomainBase llm
 ```
-General-Purpose Base Model
-(LLaMA-3-8B, Mistral-7B, etc.)
-           |
-           v
-[Phase 1: Continued Pre-Training]
-  Dataset: 10B-100B domain tokens + 15% general
-  Objective: next-token prediction (all tokens)
-  LR: 5e-5 to 1e-4
-  Duration: 1-5 days (8×A100 for 13B model)
-           |
-           v
-[Domain Knowledgeable Base Model]
-  - Rich domain vocabulary representations
-  - Domain entity co-occurrence patterns
-  - Domain knowledge in weights
-           |
-           v
-[Phase 2: Domain Instruction Tuning]
-  Dataset: 10K-500K domain (instruction, response) pairs
-  Objective: SFT with label masking
-  LR: 1e-4 to 3e-4 (LoRA) or 1e-5 (full FT)
-  Duration: hours
-           |
-           v
-[Domain Assistant Model]
-  - Expresses domain knowledge helpfully
-  - Follows domain task conventions
-  - Maintains appropriate epistemic humility
-```
+
+Skipping Phase 1 (pure instruction tuning on a general base) risks the model hallucinating domain facts it never learned — Phase 1 first writes domain knowledge into weights, Phase 2 teaches the model how to express it helpfully.
 
 ### Forgetting Risk by Training Approach
 ```

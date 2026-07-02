@@ -135,19 +135,26 @@ ChainOfThought adds "reasoning" field:
 
 ### Multi-Hop RAG Flow
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Q(["Question: 'Who was the CEO of the company that acquired DeepMind?'"]) --> H1R
+    H1R["Hop 1: retrieve('DeepMind acquisition')\n→ context_1"] --> H1G
+    H1G["Question + context_1\n→ generate_search_query\n→ 'Google acquired DeepMind'"] --> H2R
+    H2R["Hop 2: retrieve('Google CEO 2014')\n→ context_2"] --> Final
+    Final["question + context_1 + context_2\n→ generate_answer\n→ 'Larry Page (2014)'"] --> Answer(["Larry Page (2014)"])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class Q,Answer io
+    class H1R,H2R store
+    class H1G,Final llm
 ```
-Question: "Who was the CEO of the company that acquired DeepMind?"
 
-Hop 1:
-  Question → retrieve("DeepMind acquisition") → context_1
-  Question + context_1 → generate_search_query → "Google acquired DeepMind"
-
-Hop 2:
-  "Google acquired DeepMind" → retrieve("Google CEO 2014") → context_2
-
-Final answer:
-  question + context_1 + context_2 → generate_answer → "Larry Page (2014)"
-```
+Multi-hop reasoning lets DSPy iteratively retrieve and generate — each hop narrows the question using evidence from the previous hop, mimicking how a human expert would chain lookups.
 
 ---
 

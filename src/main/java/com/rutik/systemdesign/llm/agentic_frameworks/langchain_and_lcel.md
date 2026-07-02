@@ -110,43 +110,40 @@ chain = prompt | model | parser
 
 ### RunnableParallel — RAG Pattern
 
-```
-                    Input: "What is RAG?"
-                          |
-          +---------------+---------------+
-          |                               |
-          v                               v
-  [retriever.invoke]              [RunnablePassthrough]
-  Returns: List[Document]         Returns: "What is RAG?"
-          |                               |
-          +---------------+---------------+
-                          |
-               {"context": docs, "question": str}
-                          |
-                          v
-                   [prompt template]
-                          |
-                     [model]
-                          |
-                      [parser]
-                          |
-                       Answer
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Input(["Input: 'What is RAG?'"]) --> Retriever & Passthrough
+    Retriever["retriever.invoke\nReturns: List[Document]"]
+    Passthrough["RunnablePassthrough\nReturns: 'What is RAG?'"]
+    Retriever & Passthrough --> Merge["{context: docs, question: str}"]
+    Merge --> Prompt["prompt template"] --> Model["model"] --> Parser["parser"] --> Answer([Answer])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class Input,Answer io
+    class Retriever,Passthrough store
+    class Merge,Prompt,Parser proc
+    class Model llm
 ```
 
 ### Streaming Flow
 
-```
-chain.stream(input)
-       |
-       v
-  +---------+   +---------+   +----------+
-  | prompt  |-->| model   |-->| parser   |
-  | (sync)  |   | (stream)|   | (stream) |
-  +---------+   +---------+   +----------+
-                     |
-               yields tokens as
-               they arrive from API
-               ("RAG", " stands", " for", ...)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    Stream(["chain.stream(input)"]) --> Prompt["prompt\n(sync)"] --> Model["model\n(stream)\nyields tokens as they arrive\n'RAG', ' stands', ' for', …"] --> Parser["parser\n(stream)"] --> Out([streamed output])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class Stream,Out io
+    class Prompt,Parser proc
+    class Model llm
 ```
 
 ---

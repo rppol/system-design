@@ -293,83 +293,75 @@ Email and communication:
 ## 5. Architecture Diagrams
 
 ### Clinical Documentation Pipeline
-```
-Patient Encounter
-     |
-     v
-[Audio transcription] (Whisper, Nuance)
-     |
-     v
-[PHI detection + redaction]
-     |
-     v
-[Clinical LLM] (Med-PaLM, fine-tuned GPT-4)
-  System: "You are a clinical documentation assistant..."
-  Context: specialty, patient demographics, prior notes
-     |
-     v
-[Draft note generation]
-     |
-     v
-[Physician review + correction] (mandatory human-in-the-loop)
-     |
-     v
-[EHR submission]
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Encounter([Patient Encounter]) --> Transcribe
+    Transcribe["Audio Transcription\n(Whisper, Nuance)"] --> PHI["PHI Detection + Redaction"]
+    PHI --> ClinLLM["Clinical LLM\n(Med-PaLM, fine-tuned GPT-4)\nContext: specialty, patient demographics, prior notes"]
+    ClinLLM --> Draft["Draft Note Generation"]
+    Draft --> Physician["Physician Review + Correction\n(mandatory human-in-the-loop)"]
+    Physician --> EHR([EHR Submission])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class Encounter,EHR io
+    class Transcribe,PHI,Draft proc
+    class ClinLLM llm
+    class Physician store
 ```
 
 ### Customer Support Multi-Tier Architecture
-```
-Customer Message
-     |
-     v
-[Intent Classifier]
-  category: billing | technical | general | escalation_needed
-     |
-     +-- High urgency / angry customer → route to human
-     |
-     +-- Complex technical → RAG over technical docs
-     |
-     +-- Billing → RAG over customer account + billing docs
-     |
-     v
-[RAG + LLM Response]
-  Retrieve: relevant help articles, customer history, similar resolved tickets
-  Generate: helpful response with specific answer + next steps
-     |
-     v
-[Guardrail check]
-  Safety | factuality | tone | completeness
-     |
-     v
-[Escalation check]
-  If LLM not confident → offer human agent
-  If customer explicitly requests human → immediate escalation
-     |
-     v
-Customer Response + Follow-up survey
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Msg([Customer Message]) --> Classify
+    Classify["Intent Classifier\nbilling | technical | general | escalation_needed"] --> Human & RAG
+    Classify -- "high urgency / angry" --> Human([Route to Human Agent])
+    RAG["RAG + LLM Response\nRetrieve: help articles, customer history,\nresolved tickets\nGenerate: answer + next steps"] --> Guard
+    Guard["Guardrail Check\nSafety | factuality | tone | completeness"] --> Escalate
+    Escalate{"LLM not confident\nor customer requests human?"} -- YES --> Human
+    Escalate -- NO --> Response([Customer Response + Follow-up survey])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    class Msg,Human,Response io
+    class Classify proc
+    class RAG llm
+    class Guard proc
+    class Escalate decide
 ```
 
 ### Socratic Tutoring Pipeline
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Student([Student Question]) --> StudentModel
+    StudentModel["Student Model\nWhat topics mastered?\nCommon misconceptions?"] --> Prompt
+    Prompt["LLM System Prompt\n'Student is in 8th grade, mastered variables/loops.\nUse Socratic method. Never give the answer.\nAsk guiding questions.'"] --> TutorLLM
+    TutorLLM["Tutor LLM Response\nGuiding questions toward understanding"] --> Update
+    Update["Update Student Model\nbased on conversation"] --> Student
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class Student io
+    class StudentModel,Prompt,Update proc
+    class TutorLLM llm
 ```
-Student: "I don't understand why my sort isn't working"
-     |
-     v
-[Student Model] → what topics has this student mastered? common misconceptions?
-     |
-     v
-[LLM System Prompt]
-  "Student is in 8th grade, mastered variables, loops, not yet conditions.
-   Use the Socratic method. Never give the answer directly.
-   Ask guiding questions. Current topic: lists and sorting."
-     |
-     v
-[Tutor LLM Response]
-  "Let's look at your sort together! What do you think the sort() function needs
-   to know to order your list correctly?"
-     |
-     v
-[Update Student Model] based on conversation
-```
+
+The student model loop persists knowledge state across sessions; the Socratic method constraint lives in the system prompt, which is re-injected on every turn.
 
 ### Multi-Domain LLM Platform
 ```
@@ -398,25 +390,26 @@ Healthcare    Legal       Finance     Education    Customer Support
 ## 6. How It Works — Detailed Mechanics
 
 ### Legal Document Review Pipeline
-```
-Contract PDF
-     |
-     v
-[DocAI: layout-preserving extraction]
-     |
-     v
-[Clause segmentation: fine-tuned LegalBERT]
-     |
-     v
-[Risk analysis: GPT-4o with legal fine-tuning]
-  System: "You are a senior M&A attorney. Identify risks in each clause.
-           Rate severity 1-5. Cite specific language."
-     |
-     v
-[Output: structured report with highlights + attorney review interface]
-     |
-     v
-[Attorney review: confirm/reject flags, add notes]
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    PDF([Contract PDF]) --> DocAI
+    DocAI["DocAI\nLayout-preserving extraction"] --> Segment
+    Segment["Clause Segmentation\n(fine-tuned LegalBERT)"] --> Risk
+    Risk["Risk Analysis LLM\n(GPT-4o + legal fine-tuning)\nSystem: senior M&A attorney\nRate severity 1–5, cite specific language"] --> Report
+    Report["Structured Report\nhighlights + attorney review interface"] --> Attorney
+    Attorney["Attorney Review\nConfirm/reject flags, add notes"] --> Final([Final Annotated Document])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class PDF,Final io
+    class DocAI,Segment,Report proc
+    class Risk llm
+    class Attorney store
 ```
 
 ### ROI Frameworks for LLM Adoption

@@ -121,58 +121,44 @@ Agent loop:
 ## 5. Architecture Diagrams
 
 ### GitHub Copilot Architecture
-```
-IDE (VSCode, JetBrains, etc.)
-     |
-     v
-[Local Context Extractor]
-  - Current file (with cursor position)
-  - Open tabs (prioritized by relevance)
-  - Language Server: imports, symbols
-     |
-     v
-[Prompt Constructor]
-  Build prompt: file header + imports + nearby code + cursor position
-  Add neighbor file snippets (retrieved by embedding similarity)
-  Format: FIM-compatible (prefix + suffix markers)
-     |
-     v
-[Copilot Backend]
-  Model: Codex → GPT-4o-based Copilot model
-  Response: multiple completions (N=3-5)
-  Streaming: tokens appear character-by-character
-     |
-     v
-[Ranking + Filtering]
-  Filter: syntax validity, security patterns
-  Rank: by model confidence
-     |
-     v
-[IDE Display]
-  Show ghost text for top suggestion
-  Cmd+→ to cycle alternatives
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    IDE([IDE — VSCode, JetBrains]) --> CtxExtract
+    CtxExtract["Local Context Extractor\n– Current file (cursor position)\n– Open tabs (prioritized by relevance)\n– Language Server: imports, symbols"] --> PromptBuild
+    PromptBuild["Prompt Constructor\n– file header + imports + nearby code\n– neighbor file snippets (embedding similarity)\n– FIM format: prefix + suffix markers"] --> Backend
+    Backend["Copilot Backend\nModel: GPT-4o-based Copilot\nN=3–5 completions, streaming"] --> Rank
+    Rank["Ranking + Filtering\n– Filter: syntax validity, security patterns\n– Rank: by model confidence"] --> Display
+    Display["IDE Display\nGhost text for top suggestion\nCmd+→ to cycle alternatives"]
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class IDE io
+    class CtxExtract,PromptBuild,Rank,Display proc
+    class Backend llm
 ```
 
 ### Copilot Code Retrieval
-```
-Current cursor context
-     |
-     v
-[Embedding of surrounding code]
-     |
-     v
-[Retrieve similar code snippets] from:
-  - Open tabs: code with similar patterns
-  - Recently viewed files: temporal relevance
-  - Indexed repository (optional, for Copilot Enterprise)
-     |
-     v
-[Inject as few-shot examples in prompt]
-  "Here are similar patterns in this codebase:"
-  [snippet_1]
-  [snippet_2]
-  "Complete the following:"
-  [current_code_with_cursor]
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Cursor([Current cursor context]) --> Embed["Embedding of surrounding code"]
+    Embed --> Retrieve["Retrieve similar code snippets\n– Open tabs: similar patterns\n– Recently viewed files: temporal relevance\n– Indexed repo (Copilot Enterprise)"]
+    Retrieve --> Inject["Inject as few-shot examples in prompt\n'Here are similar patterns:'\n[snippet_1] [snippet_2]\n'Complete the following:'\n[current_code_with_cursor]"]
+    Inject --> LLM["Copilot Backend LLM\n→ completion"]
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class Cursor io
+    class Embed,Retrieve,Inject proc
+    class LLM llm
 ```
 
 ---

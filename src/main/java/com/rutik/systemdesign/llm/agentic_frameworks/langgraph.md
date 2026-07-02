@@ -43,23 +43,72 @@ Released by LangChain, Inc. in January 2024, LangGraph became the recommended wa
 
 ### Single-Agent Loop (Most Common)
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    S([START]) --> AgentNode["agent_node\n(LLM)"]
+    AgentNode -- tool call --> ToolNode["tool_node\n(execute)"]
+    ToolNode --> AgentNode
+    AgentNode -- final answer --> E([END])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+
+    class S,E io
+    class AgentNode llm
+    class ToolNode proc
 ```
-START → agent_node → tool_node → agent_node → ... → END
-```
+
 The agent node calls the LLM; if the LLM requests a tool, the tool node executes it; the result goes back to the agent node.
 
 ### Multi-Agent Graph
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    S([START]) --> Orch["orchestrator\n(routes by query type)"]
+    Orch --> SpA["specialist_a"]
+    Orch --> SpB["specialist_b"]
+    Orch --> SpC["specialist_c"]
+    SpA --> Agg["aggregator"]
+    SpB --> Agg
+    SpC --> Agg
+    Agg --> E([END])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+
+    class S,E io
+    class Orch llm
+    class SpA,SpB,SpC,Agg proc
 ```
-START → orchestrator → [specialist_a | specialist_b | specialist_c] → aggregator → END
-```
+
 Specialized agents run in parallel or sequentially, each with different tools and prompts. The orchestrator routes based on query type.
 
 ### Human-in-the-Loop
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    S([START]) --> AgentNode["agent_node"]
+    AgentNode --> Interrupt[/"interrupt_before\nhuman_review"/]
+    Interrupt --> Human["human_review\n(approve / modify state)"]
+    Human --> AgentNode2["agent_node\n(resume)"]
+    AgentNode2 --> E([END])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class S,E io
+    class AgentNode,AgentNode2 llm
+    class Interrupt store
+    class Human proc
 ```
-START → agent_node → [interrupt] → human_review → agent_node → END
-```
+
 `interrupt_before=["human_review"]` pauses the graph; a human approves/modifies state; the graph resumes.
 
 ### Hierarchical Multi-Agent
@@ -89,39 +138,25 @@ Each sub-agent is itself a LangGraph graph. The supervisor orchestrates by passi
 
 ### StateGraph Execution Model
 
-```
-compile()
-    |
-    v
-  CompiledGraph
-  (callable: graph.invoke(state))
-       |
-       v
-  +----------+
-  |  START   |
-  +----------+
-       |
-  [entry_point node]
-       |     ^
-       |     | (if conditional edge loops back)
-       v     |
-  +----------+
-  |  Node A  |  <-- receives full state dict
-  |  returns |      returns partial update dict
-  |  update  |      state = merge(state, update)
-  +----------+
-       |
-  [routing function]
-       |         |
-       v         v
-  +--------+ +--------+
-  | Node B | | Node C |
-  +--------+ +--------+
-       |
-       v
-  +----------+
-  |   END    |
-  +----------+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Compile["compile()"] --> CG["CompiledGraph\ngraph.invoke(state)"]
+    CG --> START([START])
+    START --> NodeA["Node A\nreceives full state dict\nreturns partial update dict\nstate = merge(state, update)"]
+    NodeA -- "routing function" --> NodeB["Node B"]
+    NodeA -- "routing function" --> NodeC["Node C"]
+    NodeA -- "conditional edge loops back" --> NodeA
+    NodeB --> END([END])
+    NodeC --> END
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class START,END io
+    class Compile,CG proc
+    class NodeA,NodeB,NodeC llm
 ```
 
 ### State Reducer Flow
@@ -144,27 +179,31 @@ After Node 2: {"messages": [HumanMessage("hi"), AIMessage("hello"), ToolMessage(
 
 ### Checkpointer Flow (Human-in-the-Loop)
 
-```
-graph.invoke(state, config={"configurable": {"thread_id": "run-42"}})
-                |
-        [agent_node runs]
-                |
-        [interrupt_before=["human_review"]]
-                |
-        State saved to checkpointer (DB)
-                |
-       Returns {"status": "interrupted"}
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Invoke1["graph.invoke(state)\nthread_id: run-42"] --> AgentRun["agent_node runs"]
+    AgentRun --> Interrupt["interrupt_before: human_review"]
+    Interrupt --> Save["State saved to checkpointer DB"]
+    Save --> Return["Returns status: interrupted"]
 
---- human reviews, modifies state ---
+    Human["Human reviews, modifies state"] --> Invoke2
+    Invoke2["graph.invoke(None)\nthread_id: run-42"] --> Load["State loaded from checkpointer"]
+    Load --> HumanNode["human_review node runs"]
+    HumanNode --> Continue["continues to completion"]
 
-graph.invoke(None, config={"configurable": {"thread_id": "run-42"}})
-                |
-        State loaded from checkpointer
-                |
-        [human_review node runs]
-                |
-        [continues to completion]
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class Invoke1,Invoke2 io
+    class AgentRun,HumanNode llm
+    class Interrupt,Return,Human proc
+    class Save,Load store
 ```
+
+The `thread_id` ties both invocations together; the checkpointer stores the full state so the graph resumes exactly where it paused.
 
 ---
 

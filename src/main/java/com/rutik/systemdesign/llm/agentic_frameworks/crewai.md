@@ -75,68 +75,52 @@ CrewAI abstracts the complexity of multi-agent coordination behind familiar work
 
 ### Sequential Process Flow
 
-```
-User: "Write a blog post about recent AI developments"
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    User([User Request]) --> Kickoff["Crew.kickoff()"]
+    Kickoff --> T1["Task 1: Research\nAgent: Senior Research Analyst\nTools: web_search, arxiv_search\nOutput: Structured report"]
+    T1 -- "output passed as context" --> T2
+    T2["Task 2: Write Blog Post\nAgent: Tech Content Strategist\nContext: Task 1 output\nOutput: 800-word draft"] -- "output passed as context" --> T3
+    T3["Task 3: Review and Edit\nAgent: Senior Editor\nContext: Task 2 output\nOutput: Publication-ready post"] --> Result([Final Result])
 
-Crew.kickoff()
-      |
-      v
-Task 1: Research
-  Agent: Senior Research Analyst
-  Tools: [web_search, arxiv_search]
-  Output: "Structured report with key findings"
-      |
-      v (Task 1 output passed as context)
-Task 2: Write Blog Post
-  Agent: Tech Content Strategist
-  Context: Task 1 output
-  Tools: []
-  Output: "800-word blog post draft"
-      |
-      v (Task 2 output passed as context)
-Task 3: Review and Edit
-  Agent: Senior Editor
-  Context: Task 2 output
-  Tools: []
-  Output: "Polished, publication-ready blog post"
-      |
-      v
-Final Result
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class User,Result io
+    class Kickoff proc
+    class T1,T2,T3 llm
 ```
+
+Each task receives the previous task's output as `context`; agents cannot skip steps or reorder tasks in sequential mode.
 
 ### Hierarchical Process Flow
 
-```
-User: "Build a market analysis for AI coding tools"
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    User([User Request]) --> Manager["Manager Agent\n(auto-created by CrewAI)\nPlan the analysis"]
+    Manager -- "delegate: market size + key players" --> Research["Research Agent\nReturns research report"]
+    Manager -- "delegate: pricing + revenue estimates" --> Finance["Financial Analyst\nReturns financial analysis"]
+    Research --> Writer
+    Finance --> Writer
+    Manager -- "delegate: synthesize" --> Writer["Writer\nReturns draft report"]
+    Writer --> QA["QA Agent\nReview + validate all facts"]
+    QA -- "Found 2 unsupported claims" --> Manager
+    Manager -- "revision needed" --> Writer
+    QA -- "approved" --> Result([Final Report])
 
-Crew.kickoff()
-      |
-      v
-Manager Agent (auto-created by CrewAI)
-  "Plan the analysis. Determine which agents should handle which parts."
-      |
-      +-----> delegate to Research Agent
-      |           "Research market size and key players"
-      |           Returns research report
-      |
-      +-----> delegate to Financial Analyst
-      |           "Analyze pricing models and revenue estimates"
-      |           Returns financial analysis
-      |
-      +-----> delegate to Writer
-      |           "Synthesize research and financial analysis into report"
-      |           Returns draft report
-      |
-      +-----> delegate to QA Agent
-                  "Review and validate all facts"
-                  Returns: "Found 2 unsupported claims, needs revision"
-      |
-      v
-Manager reviews QA output, delegates revision to Writer
-      |
-      v
-Final Report
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class User,Result io
+    class Manager llm
+    class Research,Finance,Writer,QA proc
 ```
+
+The manager agent dynamically delegates tasks and can trigger revision loops when QA rejects output — a key difference from the fixed sequential pipeline above.
 
 ### Agent Internal Loop
 

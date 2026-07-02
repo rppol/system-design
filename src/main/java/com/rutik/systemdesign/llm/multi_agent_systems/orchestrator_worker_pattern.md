@@ -69,115 +69,101 @@ The top-level routing is deterministic code; within each branch, an LLM orchestr
 
 ### Basic Orchestrator-Worker (Sequential)
 
-```
-                    +-------------------+
-                    |   Orchestrator    |
-                    |  (LLM or Code)    |
-                    |                   |
-                    |  Task List:       |
-                    |  [1] research     |
-                    |  [2] draft        |
-                    |  [3] review       |
-                    +-------------------+
-                           |
-              +------------+
-              |
-              v
-     [1] Research Worker
-         Model: GPT-4o-mini
-         Tools: web_search, fetch_url
-         Output: research_findings (JSON)
-              |
-              v
-        Orchestrator receives research_findings
-        Updates task list: mark [1] done, start [2]
-              |
-              v
-     [2] Draft Writer Worker
-         Model: Claude 3.5 Sonnet
-         Input: research_findings
-         Output: draft_document (Markdown)
-              |
-              v
-        Orchestrator receives draft_document
-        Updates task list: mark [2] done, start [3]
-              |
-              v
-     [3] Review Worker
-         Model: GPT-4o
-         Input: draft_document
-         Output: review_result (JSON: score, comments, approved)
-              |
-              v
-        Orchestrator: approved=true -> return draft
-                      approved=false -> loop back to [2] with comments
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Orch["Orchestrator\n(LLM or Code)\nTask list: research→draft→review"] --> W1
+    W1["Research Worker\nGPT-4o-mini\nweb_search, fetch_url\nOutput: research_findings JSON"] --> Orch2
+    Orch2["Orchestrator\nmark 1 done, start 2"] --> W2
+    W2["Draft Writer Worker\nClaude 3.5 Sonnet\nInput: research_findings\nOutput: draft_document Markdown"] --> Orch3
+    Orch3["Orchestrator\nmark 2 done, start 3"] --> W3
+    W3["Review Worker\nGPT-4o\nInput: draft_document\nOutput: review_result JSON"] --> Approved{"approved?"}
+    Approved -- YES --> Result([Return draft])
+    Approved -- "NO (with comments)" --> W2
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    class Result io
+    class Orch,Orch2,Orch3 llm
+    class W1,W2,W3 proc
+    class Approved decide
 ```
 
 ### Parallel Dispatch (Fan-Out / Fan-In)
 
-```
-                    +-------------------+
-                    |   Orchestrator    |
-                    +-------------------+
-                           |
-          +----------------+----------------+
-          |                |                |
-          v                v                v
-   [Worker 1]        [Worker 2]        [Worker 3]
-   Section 1         Section 2         Section 3
-   research          research          research
-   (parallel)        (parallel)        (parallel)
-          |                |                |
-          +----------------+----------------+
-                           |
-                           v
-                    +-------------------+
-                    |   Orchestrator    |
-                    |  Fan-In: merge    |
-                    |  3 result sets    |
-                    |  -> final output  |
-                    +-------------------+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Orch([Orchestrator]) --> W1 & W2 & W3
+    W1["Worker 1\nSection 1 research"] --> FanIn
+    W2["Worker 2\nSection 2 research"] --> FanIn
+    W3["Worker 3\nSection 3 research"] --> FanIn
+    FanIn["Orchestrator — Fan-In\nmerge 3 result sets"] --> Output([Final output])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class Orch,Output io
+    class W1,W2,W3 proc
+    class FanIn llm
 ```
 
 ### Error Recovery Loop
 
-```
-Orchestrator dispatches Worker A
-        |
-        v
-Worker A timeout (60s exceeded)
-        |
-        v
-Orchestrator: retry? attempts < 2 → YES
-        |
-        v
-Worker A (retry 1) → success
-        |
-        v
-Orchestrator: continue to next task
-        |
-        (if retry 2 also fails)
-        v
-Orchestrator: use fallback worker B (simpler model)
-        OR: skip task, note as partial result
-        OR: escalate to human
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Dispatch["Orchestrator dispatches Worker A"] --> WorkerA["Worker A"]
+    WorkerA -- "timeout 60s exceeded" --> Retry{"attempts < 2?"}
+    Retry -- YES --> WorkerA
+    WorkerA -- success --> Continue([Continue to next task])
+    Retry -- NO --> Fallback{"Fallback strategy"}
+    Fallback -- "use Worker B (simpler model)" --> WorkerB["Worker B"]
+    Fallback -- "skip task" --> Partial([Partial result])
+    Fallback -- "escalate" --> Human([Escalate to human])
+    WorkerB --> Continue
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    class Continue,Partial,Human io
+    class Dispatch,WorkerA,WorkerB proc
+    class Retry,Fallback decide
 ```
 
 ### Task Ledger State Machine
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    PENDING --> DISPATCHED --> COMPLETED
+    DISPATCHED --> FAILED --> RETRY --> COMPLETED
+    RETRY -- "retry 2 also fails" --> ESCALATED
+
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    class PENDING,DISPATCHED,COMPLETED proc
+    class FAILED,ESCALATED warn
+    class RETRY decide
 ```
-Task States:
-  PENDING   → DISPATCHED → COMPLETED
-                         ↘ FAILED → RETRY → COMPLETED
-                                          ↘ ESCALATED
 
 Task Ledger (orchestrator internal state):
-  task_id | description          | worker    | status    | result
-  --------|----------------------|-----------|-----------|-------
-  T001    | search arxiv papers  | research  | COMPLETED | {...}
-  T002    | summarize paper 1    | summary   | COMPLETED | {...}
-  T003    | summarize paper 2    | summary   | FAILED    | null
-  T004    | merge summaries      | writer    | PENDING   | null
+```
+task_id | description          | worker    | status    | result
+--------|----------------------|-----------|-----------|-------
+T001    | search arxiv papers  | research  | COMPLETED | {...}
+T002    | summarize paper 1    | summary   | COMPLETED | {...}
+T003    | summarize paper 2    | summary   | FAILED    | null
+T004    | merge summaries      | writer    | PENDING   | null
 ```
 
 ---

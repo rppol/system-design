@@ -110,181 +110,109 @@ Production feedback can be repurposed as preference data for RLHF or DPO:
 
 ### 5.1 Complete Data Flywheel Cycle
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    User([User Request]) --> App
+    App["LLM Application\n(Current Model)"] --> Response([Response to User])
+    App --> Feedback["Feedback Instrument\n(UI + logging layer)"]
+    Feedback --> Store["Raw Feedback Store\n(prompt, response, signal, timestamp)"]
+    Store --> Curation["Data Curation Pipeline\n– PII scrubbing\n– Deduplication\n– Quality filtering\n– Drift detection"]
+    Curation --> AL["Active Learning Selector\n(uncertainty, error)"]
+    AL --> Annotate["Human Annotation\n(Label Studio / Argilla)"]
+    Annotate --> FT["Fine-Tuning Run\n(LoRA / full FT)"]
+    FT --> Eval["Evaluation Suite\n– Regression tests\n– Slice metrics\n– LLM-as-judge"]
+    Eval --> AB["A/B Test\n(shadow or live traffic split)"]
+    AB --> Deploy["Deploy New Model\n(Canary → Full)"]
+    Deploy -- "better responses → more usage → more data" --> User
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class User,Response io
+    class App llm
+    class Feedback,Curation,AL,FT,Eval,AB proc
+    class Store,Deploy store
+    class Annotate proc
 ```
-+------------------+
-|   User Request   |
-+--------+---------+
-         |
-         v
-+------------------+     +-----------------------+
-|   LLM Application|---->|  Feedback Instrument  |
-|  (Current Model) |     |  (UI + logging layer) |
-+--------+---------+     +-----------+-----------+
-         |                           |
-         v                           v
-+------------------+     +-----------+-----------+
-|  Response to User|     |  Raw Feedback Store   |
-+------------------+     |  (prompt, response,   |
-                          |   signal, timestamp)  |
-                          +-----------+-----------+
-                                      |
-                                      v
-                          +-----------+-----------+
-                          |  Data Curation Pipeline|
-                          |  - PII scrubbing       |
-                          |  - Deduplication       |
-                          |  - Quality filtering   |
-                          |  - Drift detection     |
-                          +-----------+-----------+
-                                      |
-                          +-----------+-----------+
-                          |  Active Learning      |
-                          |  Selector             |
-                          |  (uncertainty, error) |
-                          +-----------+-----------+
-                                      |
-                          +-----------+-----------+
-                          |  Human Annotation     |
-                          |  (Label Studio /      |
-                          |   Argilla)            |
-                          +-----------+-----------+
-                                      |
-                                      v
-                          +-----------+-----------+
-                          |  Fine-Tuning Run      |
-                          |  (LoRA / full FT)     |
-                          +-----------+-----------+
-                                      |
-                                      v
-                          +-----------+-----------+
-                          |  Evaluation Suite     |
-                          |  - Regression tests   |
-                          |  - Slice metrics      |
-                          |  - LLM-as-judge       |
-                          +-----------+-----------+
-                                      |
-                          +-----------+-----------+
-                          |  A/B Test             |
-                          |  (shadow or live      |
-                          |   traffic split)      |
-                          +-----------+-----------+
-                                      |
-                                      v
-                          +-----------+-----------+
-                          |  Deploy New Model     |
-                          |  (Canary -> Full)     |
-                          +------------------------+
-                                      |
-                                      v
-                          Back to: User Request (better responses -> more usage -> more data)
-```
+
+The flywheel self-reinforces: better models generate better responses, which produce more engaged users, which generate more feedback signals for the next training run.
 
 ### 5.2 Active Learning Loop
 
-```
-Production Stream
-(unlabeled, high volume)
-         |
-         v
-+--------+--------+
-| Uncertainty     |
-| / Error Scorer  |
-+--------+--------+
-         |
-   high score?
-     /       \
-   Yes         No
-    |           |
-    v           v
-Annotation   Discard or
-  Queue      store raw
-    |
-    v
-+--------+--------+
-| Human Annotator |
-+--------+--------+
-         |
-         v
-+--------+--------+
-| Curated Dataset |
-| (growing over   |
-|  time)          |
-+-----------------+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Stream(["Production Stream\n(unlabeled, high volume)"]) --> Scorer
+    Scorer["Uncertainty / Error Scorer"] --> Threshold{"high score?"}
+    Threshold -- YES --> Queue["Annotation Queue"]
+    Threshold -- NO --> Discard(["Discard or store raw"])
+    Queue --> Human["Human Annotator"]
+    Human --> Dataset["Curated Dataset\n(growing over time)"]
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    class Stream,Discard io
+    class Scorer proc
+    class Threshold decide
+    class Queue,Human proc
+    class Dataset store
 ```
 
 ### 5.3 A/B Testing Flow for Model Updates
 
-```
-Incoming Request
-      |
-      v
-+-----+-----+
-|  Traffic  |
-|  Splitter |
-|  (10/90   |
-|   or 50/50|
-|   split)  |
-+-----+-----+
-   /       \
-  /         \
- v           v
-Model A    Model B
-(Current)  (Candidate)
-  |           |
-  v           v
-Response   Response
-  |           |
-  v           v
-+-----+-------+-----+
-|  Metrics Collection|
-|  - Quality score  |
-|  - Resolution rate|
-|  - User feedback  |
-|  - Latency / cost |
-+-------------------+
-         |
-         v
-+--------+---------+
-| Statistical Test |
-| (t-test, MWU,    |
-|  Bayesian)       |
-+--------+---------+
-         |
-   significant?
-    /         \
-  Yes           No
-   |             |
-   v             v
-Deploy B     Keep A; iterate
-(canary first)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Request([Incoming Request]) --> Splitter
+    Splitter["Traffic Splitter\n(10/90 or 50/50 split)"] --> ModelA & ModelB
+    ModelA["Model A (Current)"] --> RespA["Response A"]
+    ModelB["Model B (Candidate)"] --> RespB["Response B"]
+    RespA & RespB --> Metrics["Metrics Collection\n– Quality score\n– Resolution rate\n– User feedback\n– Latency / cost"]
+    Metrics --> Stats["Statistical Test\n(t-test, MWU, Bayesian)"]
+    Stats --> Sig{"significant\nimprovement?"}
+    Sig -- YES --> Deploy(["Deploy B (canary first)"])
+    Sig -- NO --> Keep(["Keep A; iterate"])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    class Request,Deploy,Keep io
+    class Splitter proc
+    class ModelA,ModelB llm
+    class RespA,RespB,Metrics,Stats proc
+    class Sig decide
 ```
 
 ### 5.4 Drift Detection Pipeline
 
-```
-Production Queries (t)        Reference Queries (t-30d)
-        |                               |
-        v                               v
-+-------+-------+             +---------+-------+
-| Embed with    |             | Embed with      |
-| fixed model   |             | same model      |
-+-------+-------+             +---------+-------+
-        |                               |
-        v                               v
-+-------+-------------------------------+-------+
-|        Distribution Comparison                |
-|  - MMD (Maximum Mean Discrepancy)             |
-|  - KL divergence on cluster assignments       |
-|  - PSI (Population Stability Index)           |
-+-------+---------------------------------------+
-        |
-  drift > threshold?
-    /         \
-  Yes           No
-   |             |
-   v             v
-Alert +       Continue
-Investigate   monitoring
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Prod(["Production Queries (t)"]) --> EmbedProd["Embed with fixed model"]
+    Ref(["Reference Queries (t-30d)"]) --> EmbedRef["Embed with same model"]
+    EmbedProd & EmbedRef --> Compare["Distribution Comparison\n– MMD (Maximum Mean Discrepancy)\n– KL divergence on cluster assignments\n– PSI (Population Stability Index)"]
+    Compare --> Threshold{"drift >\nthreshold?"}
+    Threshold -- YES --> Alert(["Alert + Investigate"])
+    Threshold -- NO --> Monitor(["Continue monitoring"])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    class Prod,Ref io
+    class EmbedProd,EmbedRef,Compare proc
+    class Threshold decide
+    class Alert warn
+    class Monitor proc
 ```
 
 ---
