@@ -46,7 +46,11 @@ reports weekly.
   Persisted to `localStorage`; `?theme=<id>` in the URL previews one without saving.
   All surfaces are translucent glass (`backdrop-filter`) over the mesh + blueprint grid.
 - **Study mode** — a top-bar `Study` button opens a pure-reading browser: pick a section,
-  then any topic, and read it in the full reader with Previous/Next-topic navigation.
+  then follow its **Learning Path** — a serpentine skill-tree of the section's modules in
+  learning order, drawn as glass node chips over a flowing gradient spine. Nodes show step
+  number and question count, a ✓ once a module has review history, a pulsing "you are here"
+  ring on the last page you read, and expandable fans of deep-dive sub-files; clicking any
+  node opens the full reader with Previous/Next walking the path.
 - **Dive deeper** — every revealed answer opens its source module in the in-app reader
   (rendered Markdown beside the quiz), no tab switch needed.
 - **The reader** — a One Dark reading surface: code blocks get IntelliJ-style syntax
@@ -211,6 +215,12 @@ The MVP was the multiple-choice blitz. Since then the following shipped:
     in a new tab.
 - **Study mode** — a top-bar `Study` button: a pure-reading browser (section → topic →
   reader) with Previous/Next-topic navigation. No quiz, no clock.
+- **Learning Path graph** — the Study topic list is a serpentine skill-tree: glass node
+  chips (step number, Q count, practiced ✓ from review history, "you are here" ring from
+  the last-read page) positioned over a gradient SVG bezier spine, with expandable leaf
+  fans for modules that have deep-dive sub-files and a filter that dims non-matching
+  nodes so the path shape stays. Order comes straight from `STUDY_ORDER` via
+  `modulesOf()`; sub-files from `index.json`'s files map — nothing fabricated.
 - **Flashcard self-grade mode** — a top-bar `Quiz / Cards` toggle switches any deck to
   active recall: see the question, reveal the answer, self-rate "Got it / Missed it". It
   feeds the *same* spaced-repetition schedule as the blitz; XP is flat (no combo/boss) so

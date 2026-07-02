@@ -208,7 +208,7 @@ function vt(fn) {
 /* ---------- ambient graphics: spotlight, parallax, scroll reveals ---------- */
 // Pointer spotlight: glass cards get a specular highlight that follows the
 // cursor (CSS paints a radial gradient at --mx/--my; see style.css §16).
-const SPOT_SEL = ".tile,.topic-card,.review-card,.badge,.opt,.studyrow,.modrow,.sectiontile,.miss-item";
+const SPOT_SEL = ".tile,.topic-card,.review-card,.badge,.opt,.studyrow,.modrow,.sectiontile,.miss-item,.pathnode";
 let _spotEv = null, _spotRaf = 0;
 document.addEventListener("pointermove", (e) => {
   _spotEv = e;
@@ -1175,6 +1175,11 @@ function renderStudy() {
   wireReveals();
 }
 
+/* ---------- learning path (Study section graph) ---------- */
+// Serpentine skill-tree replacing the flat Study topic list. The order IS
+// modulesOf() (STUDY_ORDER + appended unlisted modules) — nothing is invented.
+// Glass node chips are absolutely-positioned buttons over a single SVG spine of
+// cubic beziers; vertical scroll is the navigation (no pan/zoom machinery).
 async function openStudySection(section) {
   app.innerHTML = `<div class="loading">Loading ${esc(label(section))}&hellip;</div>`;
   const bank = await loadBank(section);
@@ -1185,25 +1190,145 @@ async function openStudySection(section) {
   const mods = modulesOf(bank);
   state.screenBack = renderStudy;
   const list = mods.map((m) => ({ path: `${m.module}/README.md`, title: m.name }));
-  const rows = mods.map((m, idx) =>
-    `<button class="studyrow" data-idx="${idx}"><span class="mname">${esc(m.name)}</span><span class="mcount">${m.count} Qs</span></button>`).join("");
+  const files = (state.index && state.index.files) || {};
+  // Practiced = any spaced-repetition entry from this module (real history only).
+  const practiced = new Set(Object.values(state.progress.reviews || {}).map((r) => r.module).filter(Boolean));
+  // "You are here" = last page opened in the reader, if it lives in this section.
+  let lastRead = null;
+  try { lastRead = JSON.parse(localStorage.getItem("sd_last_read")); } catch { }
+  const herePath = lastRead && lastRead.path && lastRead.path.startsWith(section + "/") ? lastRead.path : null;
+  const hereMod = herePath ? herePath.split("/").slice(0, 2).join("/") : null;
+  const openFans = new Set();
+  if (herePath && hereMod && !/\/README\.md$/i.test(herePath)) openFans.add(hereMod);  // reveal the "here" leaf
+
+  const leafLabel = (fn) => (fn === "README.md" ? "readme" : fn.replace(/\.md$/i, "").replace(/_/g, " "));
+  const steps = mods.map((m, i) => {
+    const mFiles = files[m.module] || ["README.md"];
+    const multi = mFiles.length > 1;
+    const isHere = m.module === hereMod;
+    const isOpen = openFans.has(m.module);
+    const leaves = multi ? mFiles.map((fn, k) => {
+      const p = `${m.module}/${fn}`;
+      return `<button class="pathleaf${p === herePath ? " here" : ""}" data-idx="${i}" data-path="${esc(p)}" style="animation-delay:${k * 30}ms">${esc(leafLabel(fn))}</button>`;
+    }).join("") : "";
+    return `<div class="pathstep${isOpen ? " open" : ""}">
+      <div class="pathnode${practiced.has(m.module) ? " practiced" : ""}${isHere ? " here" : ""}">
+        <button class="pn-main" data-idx="${i}" aria-label="Step ${i + 1} of ${mods.length}: ${esc(m.name)}, ${m.count} questions">
+          <span class="pn-num">${String(i + 1).padStart(2, "0")}</span>
+          <span class="pn-body">
+            <span class="pn-name">${esc(m.name)}</span>
+            <span class="pn-meta">${m.count} Qs${isHere ? ` &middot; <b class="pn-here">you are here</b>` : ""}</span>
+          </span>
+          ${practiced.has(m.module) ? `<span class="pn-check" title="Practiced">✓</span>` : ""}
+        </button>
+        ${multi ? `<button class="pn-fan" aria-expanded="${isOpen}" aria-controls="fan-${i}" aria-label="${mFiles.length} files in ${esc(m.name)}"><span class="pn-arrow">&#9656;</span>&nbsp;${mFiles.length} files</button>` : ""}
+      </div>
+      ${multi ? `<div class="leaf-fan" id="fan-${i}"${isOpen ? "" : " hidden"}>${leaves}</div>` : ""}
+    </div>`;
+  }).join("");
+
   app.innerHTML = `
-    <div class="hero"><h1>${esc(label(section))}</h1><p>${mods.length} topics &mdash; open one to read it. Prev/Next walks the list.</p></div>
+    <div class="hero"><h1>${esc(label(section))}</h1>
+      <p>${mods.length} topics &middot; start at 01 &mdash; the path follows the section's learning order.</p></div>
     <div class="topicbar"><input type="search" class="filter" id="studyFilter" placeholder="Filter topics" aria-label="Filter topics" /></div>
-    <div class="modlist">${rows}</div>
+    <div class="path-wrap" id="pathWrap">
+      <svg class="path-svg" id="pathSvg" aria-hidden="true">
+        <defs><linearGradient id="lpGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" style="stop-color:var(--accent)"/>
+          <stop offset="1" style="stop-color:var(--accent-2)"/>
+        </linearGradient></defs>
+        <path class="lp-spine" id="lpSpine" d=""/>
+        <path class="lp-leaves" id="lpLeaves" d=""/>
+      </svg>
+      ${steps}
+    </div>
     <div class="row" style="margin-top:18px"><button class="ghost" id="studyBack">&larr; Sections</button></div>`;
-  document.querySelectorAll(".studyrow").forEach((b) => b.addEventListener("click", () => {
+
+  const wrap = el("#pathWrap"), svg = el("#pathSvg");
+  const stepEls = [...wrap.querySelectorAll(".pathstep")];
+
+  // Measure-and-place: two columns on wide screens, one centered column below.
+  // Positions in px; container height set to fit; SVG underlay redrawn to match.
+  function layoutPath() {
+    const W = wrap.clientWidth;
+    if (!W || !stepEls.length) return;
+    const two = W >= 700;
+    const nodeW = two ? Math.min(330, Math.round(W * 0.46)) : Math.min(440, W);
+    const gap = two ? 52 : 40;
+    let y = 6;
+    const pts = [];
+    stepEls.forEach((s, i) => {
+      s.style.width = nodeW + "px";
+      const left = two ? (i % 2 === 0 ? 0 : W - nodeW) : Math.round((W - nodeW) / 2);
+      s.style.left = left + "px";
+      s.style.top = y + "px";
+      const h = s.offsetHeight;                    // includes an open leaf fan
+      pts.push({ left, top: y, w: nodeW, h, chipH: s.firstElementChild.offsetHeight, s });
+      y += h + gap;
+    });
+    const H = y - gap + 10;
+    wrap.style.height = H + "px";
+    svg.setAttribute("width", W);
+    svg.setAttribute("height", H);
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    let d = "";                                    // spine: bottom of step i -> top of chip i+1
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i], b = pts[i + 1];
+      const x1 = a.left + a.w / 2, y1 = a.top + a.h + 1;
+      const x2 = b.left + b.w / 2, y2 = b.top - 1;
+      const dy = Math.max(18, (y2 - y1) * 0.55);
+      d += `M ${x1} ${y1} C ${x1} ${y1 + dy}, ${x2} ${y2 - dy}, ${x2} ${y2} `;
+    }
+    el("#lpSpine").setAttribute("d", d.trim());
+    let ld = "";                                   // leaf connectors: rail + rounded elbows
+    pts.forEach((p) => {
+      if (!p.s.classList.contains("open")) return;
+      const railX = p.left + 20;
+      p.s.querySelectorAll(".pathleaf").forEach((leaf) => {
+        const lx = p.left + leaf.offsetLeft, ly = p.top + leaf.offsetTop + leaf.offsetHeight / 2;
+        ld += `M ${railX} ${p.top + p.chipH - 4} L ${railX} ${ly - 9} Q ${railX} ${ly}, ${railX + 9} ${ly} L ${lx} ${ly} `;
+      });
+    });
+    el("#lpLeaves").setAttribute("d", ld.trim());
+  }
+
+  wrap.querySelectorAll(".pn-main").forEach((b) => b.addEventListener("click", () => {
     const idx = +b.dataset.idx;
     reader.back = [];                              // a fresh reading session
     openReaderPath(list[idx].path, list[idx].title, { list, idx });
   }));
+  wrap.querySelectorAll(".pathleaf").forEach((b) => b.addEventListener("click", () => {
+    const idx = +b.dataset.idx;
+    reader.back = [];
+    openReaderPath(b.dataset.path, null, { list, idx });
+  }));
+  wrap.querySelectorAll(".pn-fan").forEach((b) => b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const step = b.closest(".pathstep");
+    const fan = step.querySelector(".leaf-fan");
+    const willOpen = fan.hidden;
+    fan.hidden = !willOpen;                        // display toggle restarts the leaf-in animation
+    step.classList.toggle("open", willOpen);
+    b.setAttribute("aria-expanded", willOpen ? "true" : "false");
+    layoutPath();                                  // steps below shift smoothly (top transition)
+  }));
+  // Filter dims non-matching nodes (path shape stays intact).
   el("#studyFilter").addEventListener("input", () => {
     const f = el("#studyFilter").value.trim().toLowerCase();
-    document.querySelectorAll(".studyrow").forEach((r) =>
-      (r.style.display = r.querySelector(".mname").textContent.toLowerCase().includes(f) ? "" : "none"));
+    stepEls.forEach((s, i) => s.classList.toggle("dim", !!f && !mods[i].name.toLowerCase().includes(f)));
   });
   el("#studyBack").addEventListener("click", () => vt(renderStudy));
-  wireReveals();
+  let rzT = 0;
+  const onResize = () => {                         // debounced; self-removes once the screen is gone
+    if (!document.body.contains(wrap)) { window.removeEventListener("resize", onResize); return; }
+    clearTimeout(rzT);
+    rzT = setTimeout(layoutPath, 160);
+  };
+  window.addEventListener("resize", onResize);
+
+  layoutPath();
+  stepEls.forEach((s, i) => s.style.setProperty("--d", Math.min(i, 12) * 40 + "ms"));
+  wrap.classList.add("pathlaid");                  // arms the entrance stagger + top transitions
 }
 
 /* ---------- code syntax highlighting (hand-rolled, One Dark) ---------- */
