@@ -116,7 +116,7 @@ Step 51+:   Process [B, C] together
 No wasted compute; new requests fill slots as old ones complete
 ```
 
-**PagedAttention** (vLLM innovation):
+**PagedAttention** (vLLM innovation — see [vLLM Deep Dive](../vllm_deep_dive/README.md) for scheduler and block-manager internals):
 ```
 KV cache is managed like OS virtual memory
 Physical GPU memory divided into "blocks" (pages)
@@ -475,7 +475,7 @@ Rule of thumb: use SSE unless you need the client to talk back mid-stream.
 
 ### 4.14 Semantic Caching
 
-Semantic caching avoids redundant LLM inference by detecting when a new prompt is semantically equivalent to a previously cached prompt and returning the cached response directly.
+Semantic caching avoids redundant LLM inference by detecting when a new prompt is semantically equivalent to a previously cached prompt and returning the cached response directly. The full caching stack (exact, semantic, KV/prefix) is covered in [LLM Caching](../llm_caching/README.md).
 
 **How it works:**
 ```

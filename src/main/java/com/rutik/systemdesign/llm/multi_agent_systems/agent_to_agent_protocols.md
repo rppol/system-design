@@ -12,7 +12,7 @@ Three major open specifications have emerged in 2024-2025:
 - **ACP** (Agent Communication Protocol, BeeAI/IBM): REST-based, supports synchronous and asynchronous message threading, open-source reference implementation
 - **ANP** (Agent Network Protocol): decentralized peer-to-peer agent discovery via Decentralized Identifiers (DID), no central registry dependency
 
-These protocols sit above MCP (Model Context Protocol), which handles LLM-to-tool communication. A2A/ACP/ANP handle agent-to-agent peer communication — a fundamentally different concern.
+These protocols sit above [MCP (Model Context Protocol)](../mcp_model_context_protocol/README.md), which handles LLM-to-tool communication. A2A/ACP/ANP handle agent-to-agent peer communication — a fundamentally different concern.
 
 ---
 
@@ -38,7 +38,7 @@ Key insight: The hardest problems are not the happy path (send task, get result)
 
 **Authentication at the protocol layer**: Agents authenticate each other using standard mechanisms (API keys, OAuth 2.0, JWT) before any task data is exchanged. Security is not an afterthought.
 
-**Trust-level awareness**: Local agents (same process or trusted network) are treated differently from remote agents (public internet). Remote agents require authentication and input validation regardless of claimed identity.
+**Trust-level awareness**: Local agents (same process or trusted network) are treated differently from remote agents (public internet). Remote agents require authentication and input validation regardless of claimed identity. The broader attack surface (impersonation, injection through agent messages, confused deputy) is covered in [Multi-Agent Security](multi_agent_security.md).
 
 **Streaming and push**: Long-running tasks must not block the caller. Protocols support Server-Sent Events (SSE) for streaming progress and webhook push notifications for fire-and-forget delegation.
 

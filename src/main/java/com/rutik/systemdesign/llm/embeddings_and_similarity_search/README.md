@@ -6,7 +6,7 @@ Embeddings are dense vector representations that capture the semantic meaning of
 
 Similarity search (also called vector search or nearest neighbor search) is the problem of finding the K vectors most similar to a query vector from a large collection (potentially billions of vectors). The challenge is doing this **fast** — brute-force comparison of a query against 1B vectors at 1536 dimensions would take seconds; production systems need it in milliseconds.
 
-Together, embeddings + similarity search power the retrieval component in RAG systems, semantic deduplication, zero-shot classification, recommendation systems, and more.
+Together, embeddings + similarity search power the retrieval component in [RAG systems](../rag_fundamentals/README.md), semantic deduplication, zero-shot classification, recommendation systems, and more.
 
 ---
 
@@ -317,7 +317,7 @@ Embeddings in production can drift when:
 - Query contains rare technical terms not in embedding training
 
 ### Use Hybrid Search When:
-- Best of both worlds — combine BM25 + dense retrieval scores
+- Best of both worlds — combine BM25 + dense retrieval scores (see [Retrieval Methods](../rag_fundamentals/retrieval_methods.md) for fusion mechanics)
 - Most production RAG systems use hybrid search (e.g., Weaviate, Elasticsearch 8.0+)
 
 ### Do NOT Use Vector Search When:
@@ -364,6 +364,12 @@ A: HNSW (Hierarchical Navigable Small World) is a graph-based index that creates
 **Q: Why use cosine similarity over dot product for embeddings?**
 A: Cosine similarity ignores vector magnitude, measuring only directional similarity. This is important when the magnitude isn't semantically meaningful (varies with text length, model confidence). Dot product is equivalent for unit-normalized vectors, and is faster to compute (no division). Most production systems normalize embeddings at index time to use faster dot product.
 
+**Q: Why do E5-style models require "query: " and "passage: " prefixes, and what happens if you skip them?**
+A: Skipping the prefixes silently degrades recall by 10-20% with no error raised. E5 (and other asymmetric embedding families) are trained with different representations for the query side and the passage side of a retrieval pair — the prefix tells the encoder which role the text plays, so a 5-word question and a 300-word passage about the same topic still land close together. Without the prefix, both sides collapse into a generic representation: the index builds fine, searches return plausible-looking results, and the failure only shows up in evaluation metrics. Always check the model card for required prefixes or instruction templates, and route indexing and serving text through the correct encode path.
+
+**Q: Can you mix vectors from two different embedding model versions in the same index?**
+A: No — embeddings from different models, or even different training runs of the same architecture, live in unrelated coordinate systems, so cross-version distances are meaningless even when the dimensions match. The failure is silent: the index accepts the vectors and queries return results, but relevance collapses for whichever part of the corpus was embedded with the other model — the Matryoshka war story in §14 (31% quality drop overnight from truncating a new model's vectors) is a variant of exactly this mistake. On any model change, re-embed the full corpus into a fresh index, tag every vector with a model_version in metadata, and cut traffic over atomically only after the new index passes your retrieval evaluation.
+
 **Q: What is Matryoshka Representation Learning?**
 A: MRL trains embeddings so that the first K dimensions already form a meaningful lower-dimensional representation. This allows using the same model with different dimension truncations for different latency/quality tradeoffs. You can store full vectors and truncate at query time — no reindexing needed to change quality level.
 
@@ -379,6 +385,12 @@ HNSW has three critical parameters: M (max connections per node, typically 16-64
 **Q: What is IVF-PQ and how do you choose the number of partitions and subquantizers?**
 IVF-PQ combines Inverted File Index (IVF) for coarse partitioning with Product Quantization (PQ) for compressed vector storage, enabling billion-scale search. IVF divides vectors into nlist clusters using k-means; at query time, only nprobe nearest clusters are searched. PQ splits each vector into m subvectors and quantizes each to a codebook of 256 entries (1 byte each), compressing a 768-dim FP32 vector (3KB) to m bytes. Rules of thumb: nlist = sqrt(N) to 4*sqrt(N) where N is dataset size; nprobe = 1-10% of nlist for 90%+ recall; m = dim/4 to dim/8 (e.g., 768-dim → 96-192 subquantizers). IVF-PQ with 100M vectors: 100M x 96 bytes = 9.6GB vs 300GB for raw FP32 — a 30x compression.
 
+**Q: Why are hard negatives the most important ingredient when training embedding models?**
+Random negatives are trivially separable — "The capital of France" versus a random sentence about cooking — so after a few training steps they contribute almost no gradient signal. Hard negatives (passages that are semantically close but wrong, like "Berlin is a great city" for the France query) force the model to sharpen the exact decision boundary that retrieval quality depends on; they are typically mined with BM25 or with the current model's own near-miss retrievals. In-batch negatives provide scale cheaply — a batch of 256 gives each anchor 255 free negatives — but they are mostly easy ones, which is why strong recipes combine large in-batch negatives with 1-5 explicitly mined hard negatives per example. When fine-tuning for a domain, invest in hard-negative mining before investing in more positive pairs; it usually moves recall more.
+
+**Q: How does hybrid search combine BM25 and dense retrieval, and why does it outperform either alone?**
+The two retrievers fail on complementary queries: BM25 nails rare exact tokens (SKUs, error codes, case citations) that embedding models never saw in training, while dense retrieval handles paraphrase and vocabulary mismatch that keyword matching misses entirely. The standard fusion is Reciprocal Rank Fusion (RRF): each document's fused score is the sum of 1/(k + rank) across both ranked lists (k typically 60), which sidesteps the fact that BM25 scores are unbounded while cosine similarity lives in [-1, 1] — the raw scores are never compared, only the ranks. This is why hybrid consistently beats either method alone on heterogeneous query mixes and why Weaviate and Elasticsearch 8+ ship it natively; start hybrid by default and only drop a leg if your query log shows it never wins.
+
 **Q: How does Matryoshka Representation Learning work and when should you use truncated dimensions?**
 Matryoshka embeddings are trained so that the first d dimensions of a D-dimensional embedding form a valid d-dimensional embedding, enabling flexible dimension reduction without retraining. During training, the loss function is computed at multiple truncation points (e.g., 64, 128, 256, 512, 768 dimensions simultaneously), so the model learns to pack the most important information into the earliest dimensions. Use truncated dimensions when: (1) you need to reduce storage (768-dim → 256-dim = 3x less storage); (2) search speed matters (lower dimensions = faster distance computation); (3) you want adaptive precision — coarse search with 128-dim, then rerank with full 768-dim. OpenAI's text-embedding-3 models support Matryoshka truncation. Empirically, truncating from 768 to 256 dimensions retains 95%+ of the retrieval quality for most tasks.
 
@@ -387,6 +399,9 @@ Fine-tune when your domain has specialized vocabulary or relationships that gene
 
 **Q: How do you evaluate embedding quality for a production RAG system?**
 Evaluate embeddings on retrieval metrics specific to your RAG use case, not general benchmarks like MTEB. Key metrics: (1) Recall@K — what fraction of relevant documents appear in the top K retrieved (K=5 or K=10 for typical RAG); (2) MRR (Mean Reciprocal Rank) — how high the first relevant document ranks on average; (3) NDCG@K — accounts for graded relevance. Build an evaluation dataset: 100-500 (query, relevant_documents) pairs from your actual domain. Test multiple embedding models (OpenAI, Cohere, BGE, E5) on your evaluation set — the best model on MTEB is often not the best for your specific domain. Also measure: encoding latency (how fast queries are embedded), storage per vector, and index build time. Production tip: track retrieval quality over time as your document corpus grows — embedding quality can degrade as the vector space becomes denser.
+
+**Q: How does metadata filtering interact with ANN search, and what is the pre-filter vs post-filter trap?**
+Post-filtering retrieves top-K by vector similarity first and then applies the metadata filter — with a selective filter (say 1% of the corpus matches), a top-100 retrieval can leave zero surviving results even though thousands of matching documents exist. Pre-filtering restricts the search to matching vectors, but naive pre-filtering breaks HNSW's graph connectivity: greedy traversal gets stranded when most of a node's neighbors are filtered out, and recall collapses. Production vector databases (Qdrant, Pinecone, Weaviate) implement filtered HNSW traversal that walks through filtered-out nodes without returning them, which preserves connectivity — but recall under your real filters still must be measured, not assumed. For highly selective filters (under ~1% selectivity), brute-force scanning the filtered subset is often better: exact search over 10K vectors takes about 1ms and returns 100% recall.
 
 ---
 

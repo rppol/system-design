@@ -163,27 +163,21 @@ Each attention head uses a different slope m_h = 2^(−8h/H), so some heads
 
 ### "Lost in the Middle" — U-Curve
 
+```mermaid
+xychart-beta
+    title "Retrieval accuracy vs position of relevant doc (Liu et al. 2023, 20 docs)"
+    x-axis ["doc 1", "doc 5", "doc 10", "doc 15", "doc 20"]
+    y-axis "retrieval accuracy (%)" 40 --> 100
+    line [92, 70, 54, 69, 90]
 ```
-Retrieval accuracy vs. position of relevant information in context
-(Liu et al., 2023 — "Lost in the Middle"):
 
-  100% ┤ ▓▓▓▓
-   90% ┤ ▓▓▓▓▓▓                                                 ▓▓▓▓▓
-   80% ┤ ▓▓▓▓▓▓▓▓                                           ▓▓▓▓▓▓▓▓
-   70% ┤ ▓▓▓▓▓▓▓▓▓▓                                     ▓▓▓▓▓▓▓▓▓▓
-   60% ┤ ▓▓▓▓▓▓▓▓▓▓▓▓                             ▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-   50% ┤ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-       └────────────────────────────────────────────────────────→
-        start                    middle                    end
-                           context position
-
-Why the U-curve: causal attention + RoPE's positional bias favor recent tokens
-(end) and heavily attended early tokens. Middle tokens have accumulated less
-multi-layer "coverage." ALiBi's linear penalty exacerbates the dip.
-
-Practical fix: place key facts at the very beginning or very end of context;
-train with data that explicitly requires middle retrieval to flatten the curve.
-```
+Why the U-curve: causal attention + RoPE's positional bias favor recent tokens (end) and heavily
+attended early tokens; in Liu et al.'s 20-document setting accuracy sags from ~92% at the start
+to ~54% in the middle before recovering to ~90% at the end. Middle tokens have accumulated less multi-layer "coverage," and
+ALiBi's linear penalty exacerbates the dip. Practical fix: place key facts at the very beginning
+or very end of context, and train with data that explicitly requires middle retrieval to flatten
+the curve — see [Context Engineering](../context_engineering/README.md) for placement strategies
+that exploit this curve.
 
 ---
 
@@ -740,6 +734,26 @@ Let P be a permutation matrix. Attention(Q,K,V) = softmax(QK^T/sqrt(d_k))V. For 
 **Q: Derive why RoPE satisfies the relative position property.**
 RoPE applies rotation R_m to each d-dimensional query/key at position m. In 2D, R_m = [[cos(mθ), -sin(mθ)], [sin(mθ), cos(mθ)]]. For d-dimensional vectors, this is block-diagonal with d/2 such 2D rotation blocks (one per frequency θ_i). The inner product: (R_m·q)^T(R_n·k) = q^T·R_m^T·R_n·k. For orthogonal rotation matrices, R^T = R^{-1} = R_{-m}. So R_m^T·R_n = R_{-m}·R_n = R_{n-m}. Therefore (R_m·q)^T(R_n·k) = q^T·R_{n-m}·k — this depends only on (n-m), not on m or n individually. This is the relative position property: the attention score between token m (query) and token n (key) implicitly captures their relative distance n-m.
 
+**Q: Is RoPE applied to queries, keys, and values — and why not to values?**
+Only to queries and keys. Position must influence the attention *scores* — the QK dot product —
+not the content that gets mixed once attention weights are decided; rotating V would contaminate
+the value payload with positional signal and gain nothing, because V never participates in a dot
+product with another rotated vector, so the relative-position property `(R_m q)·(R_n k) = q·R_{n-m}k`
+would not apply to it. This split is also why RoPE composes cleanly with KV caching: cached keys
+are stored already rotated for their position while values are cached unmodified. If a ported
+implementation rotates V, outputs degrade subtly rather than crashing — make this the first check
+when debugging a custom RoPE kernel.
+
+**Q: Does RoPE add parameters or memory overhead, and what does it mean that cached keys are "position-baked"?**
+RoPE adds zero learned parameters and no per-layer bias matrices — unlike learned APE's
+O(max_pos × d) embedding table or ALiBi's O(H × seq²) bias — and the cos/sin tables are computed
+once and reused for every layer. The subtle cost: keys in the KV cache are stored *after*
+rotation, so each cached key has its absolute position baked in, and you cannot cheaply shift a
+cached sequence to new position indices. Streaming eviction hits exactly this: StreamingLLM-style
+approaches assign positions by cache slot rather than original text position so that evicting old
+tokens does not invalidate every remaining key. Corollary for serving: prefix caching only works
+for exact shared prefixes, because reuse requires identical positions.
+
 **Q: What is the difference between Position Interpolation and NTK-aware scaling?**
 Position Interpolation scales the position index: position m is mapped to m×(L/L') where L is training length and L' is target length. All positions are compressed to fit within [0, L]. Problem: high-frequency RoPE dimensions (large θ_i, small rotation angles) are most affected — they lose the ability to distinguish adjacent positions when the scale compresses their frequency too much. NTK-aware scaling instead modifies the base frequency: new_base = original_base × (L'/L)^(d/(d-2)). This scales all frequencies uniformly in log-space, avoiding the disproportionate compression of high-frequency components. The key difference: PI compresses the position axis (what goes into the rotation angle computation); NTK scales the frequency axis (how fast things rotate per position unit). NTK preserves the model's ability to distinguish adjacent tokens; PI does not. In practice, NTK requires little or no fine-tuning while PI requires ~1000 fine-tuning steps to adapt.
 
@@ -769,6 +783,16 @@ For sinusoidal APE, the dot product of two position encodings PE_m and PE_n is: 
 
 **Q: What is the practical difference in quality between RoPE, ALiBi, and T5 relative bias?**
 On standard NLP benchmarks (MMLU, HellaSwag, BoolQ), models with RoPE and ALiBi show comparable quality at training context length (<1% difference). The divergence appears at: (1) long context (>training length): ALiBi extrapolates natively, RoPE requires NTK/YaRN; (2) tasks requiring precise long-range dependencies: ALiBi's linear penalty actively hurts on multi-hop reasoning spanning 2K+ tokens; RoPE preserves long-range information. T5 relative bias uses learned bucketed relative positions: there are ~32 buckets, and positions beyond the largest bucket share a bucket — providing some extrapolation within a fixed range. T5 relative bias is more expressive than ALiBi (learned, not fixed slope) but has higher memory cost (stored bias matrices per layer) and doesn't extrapolate beyond its bucket range. Modern consensus: RoPE + YaRN dominates for decoder-only LLMs; T5 relative bias remains viable for encoder-decoder models where bidirectionality matters; ALiBi is declining in use but still seen in compute-efficient deployments.
+
+**Q: What is partial rotary application (rotary_pct) and why do some models rotate only a fraction of head dimensions?**
+Some models apply RoPE to only a fraction of each head's dimensions and leave the rest
+position-free — GPT-NeoX-20B used rotary_pct=0.25, rotating just 25% of head dims. The rotated
+dimensions carry positional information while the unrotated ones carry purely content-based
+features that stay position-invariant, and partial rotation slightly reduces per-token rotation
+compute. Empirically full and partial rotation perform comparably, and the mainstream (LLaMA,
+Mistral, Qwen) settled on rotating all dimensions for simplicity. Practical gotcha: when
+converting or loading a checkpoint, a rotary_pct mismatch against the training configuration
+silently corrupts attention — verify it in the model config before weight conversion.
 
 **Q: How does RingAttention extend context to 1M+ tokens?**
 RingAttention (Liu et al., 2023) distributes the attention computation across multiple GPUs/TPUs arranged in a logical ring. Each device holds a chunk of the full sequence. In each communication round, one device's K/V chunk is passed to the next device in the ring (the "ring" of K/V blocks). Each device computes attention between its local Q chunk and the incoming K/V chunk, accumulating results using online softmax (same principle as Flash Attention). After N rounds (N = number of devices), each device has accumulated the full attention output for its Q chunk. Memory: O(seq_len / num_devices) per device. Communication: O(seq_len × d_model) total (each K/V block passes through the ring once). This enables context lengths limited only by total memory across the cluster. Gemini 1.5 Pro's 1M token context uses a form of distributed attention over TPU pods. The positional encoding challenge: RoPE works at 1M positions if the base frequency is high enough (Gemini uses a very large base).

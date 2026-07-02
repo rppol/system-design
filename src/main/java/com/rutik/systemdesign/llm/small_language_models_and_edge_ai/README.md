@@ -42,9 +42,9 @@ Edge AI extends SLMs beyond phones to IoT sensors, manufacturing equipment, robo
 
 **1. Data quality over quantity.** The Phi-3 training recipe demonstrated that a 3.8B model trained on synthetic "textbook" data — structured, educational, logically coherent — matches or exceeds 13B models trained on 10x the raw web tokens. Garbage in produces a garbage model regardless of scale.
 
-**2. Quantization is a first-class strategy, not an afterthought.** Deploying an SLM on edge hardware almost always requires quantization to 4-bit or 8-bit integer weights. Q4_K_M quantization (GGUF format) reduces a 3.8B model from ~7.2 GB (FP16) to ~2.4 GB — fitting comfortably in 4 GB device RAM. Quantization must be evaluated on target tasks before deployment.
+**2. Quantization is a first-class strategy, not an afterthought.** Deploying an SLM on edge hardware almost always requires quantization to 4-bit or 8-bit integer weights. Q4_K_M quantization (GGUF format) reduces a 3.8B model from ~7.2 GB (FP16) to ~2.4 GB — fitting comfortably in 4 GB device RAM. Quantization must be evaluated on target tasks before deployment (method internals: [Optimization & Quantization](../optimization_and_quantization/README.md)).
 
-**3. Distillation transfers capability, not just weights.** Knowledge distillation from a large teacher model (70B) to a small student model (3B) allows the student to learn the teacher's probability distributions — not just the hard labels. This transfers soft reasoning patterns that raw pretraining on small datasets cannot replicate.
+**3. Distillation transfers capability, not just weights.** Knowledge distillation from a large teacher model (70B) to a small student model (3B) allows the student to learn the teacher's probability distributions — not just the hard labels. This transfers soft reasoning patterns that raw pretraining on small datasets cannot replicate (see [Knowledge Distillation & Model Merging](../knowledge_distillation_and_model_merging/README.md)).
 
 **4. Task-specific fine-tuning maximizes small model utility.** A general 3B model may score modestly on your domain. A 3B model fine-tuned on 5,000 domain-specific examples using LoRA will often outperform the general 70B model on that narrow task. Specialization is the SLM's primary weapon.
 
@@ -70,7 +70,7 @@ Edge AI extends SLMs beyond phones to IoT sensors, manufacturing equipment, robo
 
 ### 4.2 By Deployment Strategy
 
-**GGUF / llama.cpp:** Universal cross-platform format. CPU-first with optional GPU offload. Supports Q2 through Q8 quantization. Runs on Mac, Windows, Linux, Raspberry Pi, and Android (via Termux).
+**GGUF / llama.cpp:** Universal cross-platform format. CPU-first with optional GPU offload. Supports Q2 through Q8 quantization. Runs on Mac, Windows, Linux, Raspberry Pi, and Android (via Termux). The broader serving-engine landscape (vLLM, TensorRT-LLM, SGLang) is compared in [Inference Engines](../inference_engines/README.md).
 
 **ONNX Runtime Mobile:** Cross-platform ML runtime by Microsoft. Converts PyTorch/Hugging Face models to ONNX, then further compiles to platform-specific executors (XNNPACK for ARM CPU, CoreML for Apple, QNN for Qualcomm). Strong Android and iOS support.
 
@@ -134,7 +134,7 @@ On-device inference performance depends heavily on which hardware accelerator is
 
 **Framework support mapping:** Core ML targets ANE on Apple devices. QNN SDK (Qualcomm Neural Network) targets Hexagon NPU. NNAPI provides a generic Android abstraction across NPU vendors. TensorFlow Lite delegates to hardware-specific backends automatically.
 
-**TOPS as a sizing metric:** Divide model FLOPs per token by the NPU's TOPS rating to estimate minimum inference time. A 3B model at ~6 GFLOPs/token on a 35 TOPS NPU theoretically achieves ~170 ms/token — but memory bandwidth and scheduling overhead typically reduce this to 50-100 tokens/second in practice.
+**TOPS as a sizing metric:** Divide model FLOPs per token by the NPU's TOPS rating to estimate minimum inference time. A 3B model at ~6 GFLOPs/token on a 35 TOPS NPU theoretically achieves ~0.17 ms/token (nearly 6,000 tokens/second) — but memory bandwidth and scheduling overhead typically reduce this to 50-100 tokens/second in practice.
 
 ---
 
@@ -710,6 +710,9 @@ On-device fine-tuning adapts a deployed model to user-specific data without send
 
 **How do NPU hardware differences across mobile platforms affect SLM deployment decisions?**
 Mobile NPUs vary significantly in raw throughput (10-45 TOPS INT8), supported operations, and framework compatibility. Apple's Neural Engine (~35 TOPS on A17 Pro) requires Core ML models with static tensor shapes and offers ~10x energy efficiency over CPU inference. Qualcomm's Hexagon NPU (~45 TOPS on Snapdragon 8 Gen 3) supports INT4 quantization natively via the QNN SDK but has limited support for custom operations. Google's mobile Tensor TPU (~10 TOPS) is optimized for TensorFlow Lite workloads on Pixel devices. The practical impact: a model that runs at 40 tokens/second on an iPhone 15 Pro (ANE) may only achieve 15 tokens/second on a Pixel 8 (Tensor) and 25 tokens/second on a Galaxy S24 (Hexagon). Deployment strategy: target the most constrained hardware in your user base as your baseline, use platform-specific runtimes (Core ML for iOS, QNN for Snapdragon Android) for optimal performance, and implement the NNAPI abstraction for broad Android compatibility at the cost of ~20% throughput versus vendor-specific SDKs.
+
+**Why does a 35-45 TOPS phone NPU deliver only 50-100 tokens/second on a 3B model when the TOPS math suggests thousands?**
+Because token generation (decode) is memory-bandwidth-bound, not compute-bound — the TOPS rating measures peak INT8 matrix throughput, but producing each token requires streaming all ~1.9 GB of INT4 weights through the memory system. The compute math says a 3B model at ~6 GFLOPs/token on a 35 TOPS NPU needs only ~0.17 ms/token (~6,000 tokens/second), yet a phone's LPDDR5X bus delivers roughly 50-77 GB/s, putting the weight-streaming ceiling at bandwidth ÷ model bytes ≈ 25-40 tokens/second for a 1.9 GB model — three orders of magnitude below the compute figure, and scheduling overhead sits on top of that. TOPS matters mostly for prefill (prompt processing), which reuses each weight across all prompt tokens and is genuinely compute-bound — that is where the NPU's 5-10x advantage over CPU shows up. Practical guidance: estimate decode speed from memory bandwidth divided by model size, use TOPS only for prefill estimates, and benchmark the two phases separately on target hardware.
 
 ---
 

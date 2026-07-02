@@ -13,6 +13,7 @@ different cost-latency tradeoffs and have different invalidation semantics.
 roughly 700k cached input tokens/second. At GPT-4o pricing ($2.50/1M), that is $1.75/second —
 $6,300/hour — recovered by caching stable prefixes. At 1M requests/day, a 60% semantic cache hit
 rate on FAQ-type queries at an average of 500 tokens/query saves $750/day at GPT-4o-mini pricing.
+Full pricing math lives in [Token Economics & Cost Optimization](../token_economics_and_cost_optimization/README.md).
 
 ---
 
@@ -105,7 +106,9 @@ with the same prefix skip the attention computation for the cached portion.
 
 vLLM and SGLang maintain a GPU-resident LRU cache of KV tensors indexed by the prefix hash. When
 a new request shares a prefix with a cached entry, the saved tensors are used directly, skipping
-prefill computation for that prefix. Transparent to the application — no API change needed.
+prefill computation for that prefix. Transparent to the application — no API change needed. See
+[vLLM Deep Dive](../vllm_deep_dive/README.md) for the PagedAttention block structure these caches
+build on.
 
 | Engine | Feature | Benefit |
 |--------|---------|---------|
@@ -115,7 +118,8 @@ prefill computation for that prefix. Transparent to the application — no API c
 ### 4.5 Embedding cache
 
 Caches computed text embeddings to avoid re-embedding the same text on every request. Critical for
-RAG pipelines where document embeddings are computed once at index time.
+[RAG pipelines](../rag_fundamentals/README.md) where document embeddings are computed once at
+index time.
 
 | Use case | Cache strategy |
 |----------|---------------|
@@ -390,6 +394,15 @@ requests/second and a 100k-token context, this wastes $1.75/second in caching po
 ($6,300/hour at GPT-4o rates). Fix: move all dynamic content to the user turn; the system prompt
 must be byte-identical across all requests using the same cached prefix.
 
+```python
+# BROKEN: dynamic values in the system prompt — unique prefix on every request
+system = f"You are a support bot. Today is {datetime.now()}. User: {user_id}."
+
+# FIX: byte-identical system prompt; dynamic values move to the user turn
+system = "You are a support bot."
+user_msg = f"[date: {today}] [user_tier: {tier}]\n{question}"
+```
+
 **Pitfall 5 — Cache poisoning via prompt injection.** An attacker crafts a query that gets cached
 with a malicious response; subsequent users asking a similar question receive the attacker's output.
 Fix: never cache responses to unvalidated user inputs; run an output safety check before storing
@@ -444,6 +457,24 @@ setting the threshold above the 95th percentile of that distribution. In practic
 the typical range. For high-stakes domains, use metadata filters as hard secondary keys rather than
 relying on similarity alone.
 
+**Why can provider prompt caching only cache a prefix, never a middle or suffix segment?**
+KV tensors are position-dependent: each token's keys and values are computed from all preceding
+tokens through causal attention, so a cached segment is only valid if every byte before it is
+identical. Changing one character at position 0 invalidates everything after it, and a stable
+block placed after dynamic content can never hit. This is why prompt structure is an architectural
+decision: system prompt and tool definitions first, retrieved context next, user message last —
+ordered from most to least stable. Audit prompt-assembly code for anything dynamic (timestamps,
+request IDs, shuffled few-shot examples) that sneaks in before the intended cache breakpoint.
+
+**Does response caching break sampling semantics when temperature > 0?**
+Yes — a cached response replays a single draw from the output distribution, making the endpoint
+deterministic for repeated queries even though callers requested sampled diversity. For FAQ
+answers this is usually desirable (consistency builds trust); for brainstorming or creative
+endpoints it is a bug users notice ("it gives the identical answer every time"). Include
+temperature and other sampling parameters in the cache key, and skip response caching entirely
+for endpoints where output diversity is part of the product. Prompt (KV) caching has no such
+problem — it reuses input computation while the model still samples fresh output.
+
 **How does Anthropic prompt caching work and how do you maximize hit rate?**
 Anthropic caches the KV-attention tensors for any content block marked with
 `cache_control: {"type": "ephemeral"}`. The minimum cacheable prefix is 1,024 tokens; the TTL is
@@ -496,6 +527,48 @@ the prompt and inject it post-generation (cache the generic response, then strin
 cache personalized responses at all — only cache generic portions. The semantic cache must never
 serve user A's personalized response to user B; add a user_id metadata filter as a hard equality
 constraint in the vector search.
+
+**What happens to an Anthropic cache entry after the 5-minute TTL, and how do you keep it warm?**
+Each cache read refreshes the 5-minute TTL, so steady traffic (more than one request per 5 minutes
+per unique prefix) keeps the entry alive indefinitely; a traffic gap lets it expire, and the next
+request pays the write price again. Writes carry a 25% premium over normal input ($3.75 vs
+$3.00/1M for Sonnet-class models), so caching pays for itself as soon as a prefix is reused even
+once within the TTL (break-even at ~1.3 uses). For low-traffic but cost-sensitive prefixes, a
+keep-alive ping (a max_tokens=1 request every ~4 minutes) costs far less than repeated cache
+re-writes of a 10k-token prefix; Anthropic also offers a 1-hour TTL tier at a higher write premium.
+Track spikes in `cache_creation_input_tokens` as the signal that your prefix is churning or your
+traffic has gaps.
+
+**How does SGLang's RadixAttention differ from vLLM's automatic prefix caching?**
+vLLM's APC hashes fixed-size token blocks (16-32 tokens) and reuses KV tensors for exact
+block-aligned prefix matches. RadixAttention instead organizes cached prefixes in a radix tree
+over token sequences, so requests can share any common prefix at token granularity, and the tree
+makes multi-branch sharing (one system prompt, many few-shot variants, many user turns) explicit
+and LRU-evictable per node. RadixAttention shines for structured workloads — agent loops,
+tree-of-thought search, batched evals — where many requests share deep, branching prefixes. For
+plain chat traffic with one shared system prompt, both give similar wins; the difference shows up
+when prefixes branch.
+
+**How do you cache effectively in multi-turn conversations where the context grows every turn?**
+Exact and semantic response caches are nearly useless mid-conversation (each turn's context is
+unique), but KV-prefix caching is ideal: the conversation history is an append-only prefix, so
+turn N reuses everything computed for turns 1..N-1. With Anthropic, move the cache breakpoint
+forward each turn (up to 4 cache_control breakpoints per request) so the newest turns get cached
+for the next request; with vLLM/SGLang this happens automatically as long as the session lands on
+the same replica — which makes session-affinity routing a caching feature, not just a
+load-balancing choice. Budget for the growing prefix: a 50-turn conversation still pays cache-read
+price on the full history every turn, which is why history summarization or truncation remains
+necessary beyond the cache.
+
+**Where does caching fit when responses are streamed?**
+For cache hits there is no token stream — only a stored string — so either return it at once (a
+different UX than token-by-token rendering) or replay it as a synthetic stream for visual
+consistency. On the write side, buffer the full streamed response and insert it into the cache
+only after the stream completes successfully and passes output validation — caching a truncated
+stream (client disconnect, timeout) poisons the entry for every future hit. Provider prompt
+caching is unaffected by streaming since it operates on input processing, not output delivery.
+Practical pattern: wrap the stream in a tee that accumulates chunks and commits to cache only on
+a clean end-of-stream event.
 
 ---
 

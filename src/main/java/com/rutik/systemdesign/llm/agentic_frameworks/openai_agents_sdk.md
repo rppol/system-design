@@ -6,7 +6,7 @@
 
 The OpenAI Agents SDK (released March 2025) is OpenAI's production-grade replacement for Swarm. Where Swarm was a 2024 educational reference (synchronous, no persistence, no tracing), the Agents SDK is engineered for production: async by default, streaming, built-in tracing to the OpenAI dashboard, typed context, guardrails, and a stable handoff primitive.
 
-The SDK's value proposition is a minimal, opinionated set of primitives — `Agent`, `Runner`, `handoff`, `guardrail`, `RunContext` — that compose into multi-agent systems without the layer cake of LangChain or the role-play heaviness of CrewAI. It uses the OpenAI Responses API under the hood but supports other model providers via adapters.
+The SDK's value proposition is a minimal, opinionated set of primitives — `Agent`, `Runner`, `handoff`, `guardrail`, `RunContext` — that compose into multi-agent systems without the layer cake of [LangChain](langchain_and_lcel.md) or the role-play heaviness of [CrewAI](crewai.md). It uses the OpenAI Responses API under the hood but supports other model providers via adapters.
 
 For OpenAI-centric stacks, the Agents SDK is the natural choice. For mixed-provider stacks or teams already invested in LangGraph, it's worth comparing — but the SDK's tracing dashboard is a significant operational advantage that other frameworks require additional setup to match.
 
@@ -351,7 +351,7 @@ analysis: OrderAnalysis = result.final_output_as(OrderAnalysis)
 - Need input/output guardrails as first-class primitives
 
 **Use something else when:**
-- Multi-provider strategy is critical (LangGraph more neutral)
+- Multi-provider strategy is critical ([LangGraph](langgraph.md) more neutral)
 - Workflow has complex branching/looping state machines (LangGraph's StateGraph fits better)
 - Cost optimization is critical and you're on Anthropic (use native Anthropic API for caching control)
 

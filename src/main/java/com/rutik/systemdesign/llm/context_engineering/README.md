@@ -55,7 +55,8 @@ low-information content.
 
 **KV-cache alignment.** Content that is stable across many requests (system prompt, tool
 definitions, few-shot examples) should appear at the front of the context and remain unchanged so
-the KV cache can serve it cheaply. Changing this prefix forces a cache miss.
+the KV cache can serve it cheaply. Changing this prefix forces a cache miss. See
+[LLM Caching](../llm_caching/README.md) for provider prefix-caching mechanics.
 
 **Signal density over completeness.** A compressed summary often outperforms the verbatim source.
 LLMs extract signal well from dense summaries; they attend poorly to all 10,000 tokens of a long
@@ -81,7 +82,9 @@ retrieved context. Never drop the system prompt or the current user query.
 | Working memory / scratchpad | Intermediate agent state | 500-5,000 tokens |
 | Current user message | The actual query | 50-500 tokens |
 
-**Retrieval vs long context vs fine-tuning decision matrix:**
+**Retrieval vs long context vs fine-tuning decision matrix** (mechanics of each side:
+[RAG Fundamentals](../rag_fundamentals/README.md),
+[Context Windows & Long Context](../context_windows_and_long_context/README.md)):
 
 | Scenario | Best approach | Reason |
 |----------|--------------|--------|
@@ -127,26 +130,23 @@ Context Budget Allocation (32k window example)
 +--[20,000]------------[20,500] Current user message
 |
 +--[20,500]------[32,000] Reserve (model output headroom + safety)
+```
 
+```mermaid
+xychart-beta
+    title "Lost in the Middle — accuracy vs position of key doc (Liu et al. 2023, 20 docs)"
+    x-axis ["doc 1", "doc 5", "doc 10", "doc 15", "doc 20"]
+    y-axis "retrieval accuracy (%)" 40 --> 100
+    line [92, 70, 54, 69, 90]
+```
 
-"Lost in the Middle" Effect
-=============================
+The U-curve (Liu et al. 2023, 20-document retrieval setting): accuracy is ~92% when the key
+fact is in the first document and ~90% in the last, but drops to ~54% in the middle — exactly
+where naive RAG lands its retrieved docs (after 14k tokens of system+history), so critical
+facts there go unnoticed. Fix: place the most critical retrieved chunks BEFORE conversation
+history, immediately after the stable prefix.
 
-Context position (left = start, right = end)
-     |
-High |  #####                                    #####
-att- |  ######                                  ######
-ent- |  ######                               #########
-ion  |  #######                           ###########
-     |--#######------LOWEST ATTENTION-----###########--> position
-     |
-          ^ Middle = retrieved docs in naive RAG (after 14k tokens of system+history)
-          PROBLEM: critical facts here go unnoticed
-
-Fix: Place most critical retrieved chunks BEFORE conversation history,
-     immediately after the stable prefix.
-
-
+```
 Context Engineering Pipeline (per request)
 ============================================
 
@@ -438,6 +438,23 @@ The fix is positional placement: put the most critical retrieved chunks and inst
 (after the system prompt) and the current user query at the end. Avoid sandwiching critical
 information between long conversation history and verbose tool outputs.
 
+**Does a 1M-token context window make RAG and context engineering obsolete?**
+No — a large window changes the tradeoff but does not remove it. Three costs remain: money
+(filling 1M tokens per request costs orders of magnitude more than retrieving a targeted 5k-token
+subset), latency (prefill time grows roughly linearly with input length, so a 500k-token prompt
+adds tens of seconds before the first output token), and quality ("lost in the middle" degradation
+persists at long lengths, and needle-in-a-haystack scores overstate real multi-fact reasoning
+performance). Treat a long context as a larger budget to allocate, not a license to stop
+allocating.
+
+**Why can adding more retrieved chunks make answers worse, not better?**
+Because every extra chunk adds distractors that compete for attention with the relevant one. Going
+from top-4 to top-20 chunks raises recall slightly but pushes the best chunks deeper toward the
+middle of the context and increases the chance the model quotes a near-miss passage — retrieval
+noise compounds with the positional attention dip. The production pattern is retrieve wide, then
+rerank and keep a small k (3-8 chunks): reranking buys the recall without paying the context-noise
+tax. When answers start citing the wrong document, reduce k before touching the prompt.
+
 **How do you decide between RAG, long context, and fine-tuning for a knowledge-intensive task?**
 RAG is the default for large, frequently updated knowledge bases (>1M tokens) that cannot fit in
 context. Long context is better when the corpus is small (<200k tokens), update frequency is low,
@@ -461,6 +478,25 @@ appears in a later request, the model skips re-computing those layers, reducing 
 few-shot examples) at the front of every request unchanged. Any dynamic content goes after the
 stable prefix so it does not invalidate the cached portion. Anthropic cache_control and vLLM
 automatic prefix caching both work on this principle.
+
+**How does provider prompt caching pricing change how you lay out context?**
+It makes the stable prefix literally cheaper, not just faster. Anthropic prompt caching charges
+roughly 25% extra to write a cache segment and about 90% less to read it (5-minute default TTL),
+and OpenAI applies an automatic ~50% discount to cached prefixes of 1,024+ tokens — so a
+5,000-token system-plus-tools prefix reused across requests costs a fraction of its nominal price.
+This flips the economics of few-shot examples: a large stable example block is nearly free after
+the first request, while the same tokens placed after dynamic content are billed in full every
+time. Design rule: order zones by volatility — least-changing first — and never interleave
+per-request data into the cached prefix.
+
+**How do you engineer context for sub-agent architectures?**
+Give each sub-agent a fresh, minimal window and pass results back as compact summaries — context
+isolation is the point of delegating to sub-agents. The orchestrator's context holds the plan and
+each sub-agent's summarized findings (typically 200-500 tokens each), not raw transcripts: a
+sub-agent that read 50k tokens of documents returns a 300-token digest, keeping the orchestrator's
+window flat as the task grows. The failure mode is "context re-centralization" — forwarding full
+sub-agent transcripts upward recreates the overflow you delegated to avoid. Define an explicit
+return-format contract (findings, citations, confidence) for every sub-agent.
 
 **What is context compaction and when should you apply it?**
 Compaction is reducing the token count of conversation history or retrieved context through
@@ -500,6 +536,25 @@ exceeds the retrieval budget (legal documents, academic papers). The tradeoff is
 compression latency and a small quality drop on edge cases where compressed sentences lose
 connective tissue. For short, precise chunks (<1,000 tokens), chunking at retrieval time is faster;
 LLMLingua shines on long verbatim documents.
+
+**Does structural formatting (XML tags, markdown headers) actually change how the model uses context?**
+Yes — clear delimiters help the model locate and attribute sections, which matters most in crowded
+contexts. Wrapping retrieved documents in tags like `<doc id="3">...</doc>` improves the model's
+ability to cite the right source and reduces bleed-over between adjacent chunks; Anthropic
+explicitly recommends XML tags for section boundaries, and structured markdown headers serve the
+same role for GPT-family models. Formatting costs tens of tokens, trivial relative to its effect
+on faithfulness in multi-document prompts. Standardize one delimiter scheme per application and
+keep it byte-identical across requests so it lives inside the cached prefix.
+
+**What is context rot and how do you mitigate it in long agent sessions?**
+Context rot is the gradual quality decline in long-running sessions as the window fills with stale
+tool outputs, dead-end reasoning, and superseded facts — the model keeps attending to obsolete
+content even well below the hard token limit. Symptoms: the agent retries abandoned approaches,
+cites outdated intermediate values, or contradicts recent corrections. Mitigations: periodic
+compaction that rewrites the session into a clean state summary (decisions made, current plan,
+open items) and drops raw history; truncating verbose tool outputs at write time; and hard
+eviction of superseded results rather than appending corrections after them. Schedule compaction
+proactively — every 20-30 turns or at 60-70% window fill — instead of waiting for overflow.
 
 ---
 

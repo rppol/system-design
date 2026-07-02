@@ -49,7 +49,7 @@ This deep-dive covers six concrete cost-management strategies — per-task budge
 | Gemini 1.5 Flash | $0.075 | $0.30 | — | $0.019 |
 | Gemini 1.5 Pro | $1.25 | $5.00 | — | $0.3125 |
 
-Batch API discount (Anthropic, OpenAI, Google): 50% off input + output. 24h SLA.
+Batch API discount (Anthropic, OpenAI, Google): 50% off input + output. 24h SLA. Full per-token pricing mechanics and self-hosting break-even analysis: [Token Economics & Cost Optimization](../token_economics_and_cost_optimization/README.md).
 
 ### 4.2 Per-Task Token Budget
 
@@ -57,7 +57,7 @@ Pre-allocate a budget; track usage after every call; terminate with partial resu
 
 ### 4.3 Model Cascade
 
-Start cheap, escalate on confidence threshold or explicit hard-step detection. Typical savings: 60-80%.
+Start cheap, escalate on confidence threshold or explicit hard-step detection. Typical savings: 60-80%. Routing architectures and confidence-threshold tuning are covered in [LLM Routing & Model Selection](../llm_routing_and_model_selection/README.md).
 
 ### 4.4 Context Compaction
 
@@ -69,33 +69,27 @@ Don't `read_file(big_file)` — instead `read_file(big_file, grep="pattern")` or
 
 ### 4.6 Prompt Caching
 
-Mark system prompt + tools + conversation prefix as cacheable. Anthropic: 5-min ephemeral cache; write 1.25×, read 0.1×. Breakeven after 2 reads.
+Mark system prompt + tools + conversation prefix as cacheable. Anthropic: 5-min ephemeral cache; write 1.25×, read 0.1×. Breakeven after 2 reads. Semantic caching, exact-match caching, and vLLM prefix caching are covered in [LLM Caching](../llm_caching/README.md).
 
 ---
 
 ## 5. Architecture Diagrams
 
+### Cost Accumulation Without Compaction
+
+```mermaid
+xychart-beta
+    title "Per-call cost by agent step (Sonnet, no cache)"
+    x-axis ["1", "2", "3", "4", "5", "6", "7", "8 (compact)", "9", "10"]
+    y-axis "cost per call (USD)" 0 --> 0.35
+    line [0.006, 0.012, 0.024, 0.048, 0.096, 0.150, 0.210, 0.300, 0.090, 0.105]
 ```
-Cost Accumulation Without Compaction
-=====================================
 
-Step  Context  Cost/call (Sonnet, no cache)
-1     2K       $0.006
-2     4K       $0.012
-3     8K       $0.024
-4     16K      $0.048
-5     32K      $0.096
-6     50K      $0.150
-7     70K      $0.210
-8     100K     $0.300       <-- compaction trigger (70% of 200K)
-9     compacted, 30K  $0.090
-10    35K      $0.105
-Total: $1.04 → with compaction at step 8: $0.72
+Context grows 2K → 100K tokens by step 8 — the compaction trigger (70% of the 200K window) — driving per-call cost to $0.300; compacting back to 30K makes step 9 cost $0.090. Total for the 10-step run: $1.04 without compaction vs $0.72 with compaction at step 8.
 
+### Cost Accumulation With Caching
 
-Cost Accumulation With Caching
-===============================
-
+```
 Step  Total context  Cached prefix  Cost (Sonnet w/ cache)
 1     5K            3K (write)     $0.006+$0.011 = $0.017
 2     6K            3K (read)      $0.009+$0.0009 = $0.010
@@ -103,11 +97,11 @@ Step  Total context  Cached prefix  Cost (Sonnet w/ cache)
 4     8K            3K (read)      $0.015+$0.0009 = $0.016
 ...
 Total caches save ~70% on prefix portion
+```
 
+### Model Cascade
 
-Model Cascade
-==============
-
+```
   User request
        |
        v
@@ -121,24 +115,23 @@ Model Cascade
      |          |
   Haiku       Opus
   $0.005      $0.05
-  
+
   Without cascade (all Opus): $0.05/step
   With cascade (80% easy, 20% hard): 0.8×$0.005 + 0.2×$0.05 = $0.014
   Savings: 72%
-
-
-Cost Attribution Per Tool Call
-===============================
-
-  Step | Tool        | Output size | Token cost
-  1    | search      | 2KB         | $0.006
-  2    | search      | 1KB         | $0.003
-  3    | read_file   | 50KB        | $0.150  <-- DOMINATES
-  4    | grep        | 0.5KB       | $0.002
-  5    | read_file   | 80KB        | $0.240  <-- DOMINATES
-  
-  Optimization: replace raw read_file with grep-based extraction → -80% cost
 ```
+
+### Cost Attribution Per Tool Call
+
+```mermaid
+xychart-beta
+    title "Token cost per tool call (USD)"
+    x-axis ["1 search 2KB", "2 search 1KB", "3 read_file 50KB", "4 grep 0.5KB", "5 read_file 80KB"]
+    y-axis "token cost (USD)" 0 --> 0.28
+    bar [0.006, 0.003, 0.150, 0.002, 0.240]
+```
+
+The two raw `read_file` calls (steps 3 and 5) dominate — $0.39 of the $0.40 total (97%). Replacing raw file reads with grep-based extraction cuts roughly 80% of the cost.
 
 ---
 

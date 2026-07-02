@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-Retrieval is the step in RAG that finds relevant document chunks from an index given a user query. The quality of this retrieval step directly bounds the quality of the generated answer — no LLM can synthesize correct answers from irrelevant context. Three main retrieval paradigms exist: dense retrieval (semantic similarity using embeddings), sparse retrieval (keyword-based using inverted indices like BM25), and hybrid retrieval (combining both).
+Retrieval is the step in RAG that finds relevant document chunks from an index given a user query. The quality of this retrieval step directly bounds the quality of the generated answer — no LLM can synthesize correct answers from irrelevant context. Three main retrieval paradigms exist: dense retrieval (semantic similarity using [embeddings](../embeddings_and_similarity_search/README.md)), sparse retrieval (keyword-based using inverted indices like BM25), and hybrid retrieval (combining both).
 
 Each paradigm has systematic strengths and blind spots. Dense retrieval handles semantic paraphrase ("automobile" finds documents about "car") but misses rare proper nouns. Sparse retrieval excels at exact keyword matching (product IDs, regulation numbers, technical acronyms) but fails at semantic similarity. Hybrid retrieval — combining dense and sparse via Reciprocal Rank Fusion — consistently outperforms either alone across diverse query distributions.
 
@@ -395,7 +395,7 @@ Fix: Apply metadata pre-filter at the ANN search level (Pinecone, Weaviate, Qdra
 
 **5. Using top-10 without a reranker**
 Initial retrieval returns top-10, but the 3-5 most relevant chunks may be ranked 4th-10th by the bi-encoder. Without reranking, the LLM sees lower-quality context.
-Fix: Retrieve top-100 candidates, then rerank to top-5. See reranking.md for reranker choices.
+Fix: Retrieve top-100 candidates, then rerank to top-5. See [reranking.md](reranking.md) for reranker choices.
 
 **6. No query preprocessing**
 Queries with stopwords ("what is the best way to handle...") or typos produce poor BM25 results.
@@ -475,7 +475,7 @@ A: Build a retrieval-only evaluation set: 200-500 (query, relevant_document_ids)
 3. **Apply metadata pre-filters** — filter at the index level before ANN search; post-filtering wastes computation.
 4. **Retrieve 50-100 candidates** — not top-5; feed a large candidate set to the reranker for final selection.
 5. **Test both dense and sparse separately on your query distribution** — this diagnoses which retrieval mode is the bottleneck and whether hybrid helps.
-6. **Monitor per-query retrieval scores** — if top-1 cosine similarity is below 0.6 for many queries, the embedding model or chunking is misaligned with your query distribution.
+6. **Monitor per-query retrieval scores** — if top-1 cosine similarity is below 0.6 for many queries, the embedding model or [chunking](chunking_strategies.md) is misaligned with your query distribution.
 7. **Use BM25 to validate dense retrieval** — if BM25 consistently returns better results for certain query types, those queries should be weighted toward sparse in your hybrid.
 
 ---

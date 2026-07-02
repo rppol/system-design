@@ -4,7 +4,7 @@
 
 Domain adaptation is the process of making a general-purpose LLM perform significantly better on a specialized domain — medical, legal, financial, scientific, code — through targeted fine-tuning. The domain may have specialized vocabulary, reasoning patterns, stylistic conventions, or factual content that wasn't well-represented in the base model's pre-training data.
 
-Two primary techniques: (1) continued pre-training (CPT) on a large domain corpus using the standard causal language modeling (CLM) objective — teaches the model domain vocabulary, entities, and knowledge structures; (2) domain-specific instruction tuning — teaches the model domain-specific task behavior and style. The most effective approach is the "domain-then-instruct" pipeline: CPT first (add domain knowledge), then instruction tuning (teach domain-specific behavior).
+Two primary techniques: (1) continued pre-training (CPT) on a large domain corpus using the standard causal language modeling (CLM) objective — teaches the model domain vocabulary, entities, and knowledge structures; (2) domain-specific [instruction tuning](instruction_tuning.md) — teaches the model domain-specific task behavior and style. The most effective approach is the "domain-then-instruct" pipeline: CPT first (add domain knowledge), then instruction tuning (teach domain-specific behavior).
 
 ---
 
@@ -117,19 +117,21 @@ Mixing implementation:
 ```
 
 ### Choosing the Mix Ratio — the Pareto Tradeoff
-```
-General-data mix % trades off two things (legal-CPT ablation; bars NOT same scale):
 
-mix%   forgetting: MMLU drop       domain gain: LegalBench F1
-  5%   ████████ -8.1%              █████████ +18.3%
- 10%   █████ -5.4%                 █████████ +17.1%
- 15%   ████ -4.3%                  ████████ +16.8%
- 20%   ██ -2.1%                    ████████ +16.2%   ◄ knee (Pareto-optimal)
- 30%   █ -0.9%                     ███████ +13.7%
+```mermaid
+xychart-beta
+    title "General-data mix ablation (legal CPT)"
+    x-axis ["5%", "10%", "15%", "20%", "30%"]
+    y-axis "percent" 0 --> 20
+    bar [8.1, 5.4, 4.3, 2.1, 0.9]
+    line [18.3, 17.1, 16.8, 16.2, 13.7]
 ```
+
+Bars = MMLU forgetting (absolute % drop); line = LegalBench F1 gain (+%).
 Raising the mix shrinks forgetting fast while domain gain barely moves — until 30%,
-where the gain finally drops off. 20% is the knee: near-minimal forgetting while
-keeping almost the full domain improvement. Below 10%, forgetting is unacceptable.
+where the gain finally drops off. 20% is the knee (Pareto-optimal): near-minimal
+forgetting (-2.1%) while keeping almost the full domain improvement (+16.2%).
+Below 10%, forgetting is unacceptable.
 
 ### 3.3 The Domain-Then-Instruct Pipeline
 
@@ -334,7 +336,7 @@ Low    |  Domain instruction tuning only (no CPT)
 - Budget is limited; instruction tuning is 10-100× cheaper than CPT
 
 ### Do Not Use Domain Adaptation When:
-- RAG can provide the domain knowledge at query time (more flexible, cheaper)
+- [RAG](../rag_fundamentals/README.md) can provide the domain knowledge at query time (more flexible, cheaper)
 - Domain changes frequently (CPT must be re-run to update knowledge)
 - General model + few-shot prompting achieves >80% of the target quality
 
@@ -363,7 +365,7 @@ Domain instruction tuning with only Q&A pairs → model handles Q&A well but str
 Fix: Include diverse domain task types: Q&A, summarization, entity extraction, classification, data formatting, comparison, reasoning chains. Minimum 10-15 distinct task types.
 
 **6. Confusing CPT with instruction tuning for forgetting mitigation**
-LoRA is highly effective for preventing forgetting during instruction tuning (frozen base weights). For CPT, LoRA is less effective because shallow adapter matrices can't capture the deep knowledge changes needed for significant domain shifts.
+[LoRA](lora.md) is highly effective for preventing forgetting during instruction tuning (frozen base weights). For CPT, LoRA is less effective because shallow adapter matrices can't capture the deep knowledge changes needed for significant domain shifts.
 Fix: For CPT, use either full fine-tuning with data mixing, or high-rank LoRA (r=64 to r=128) if memory is constrained. For instruction tuning, standard r=16 LoRA is appropriate.
 
 ---

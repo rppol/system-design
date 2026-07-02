@@ -893,7 +893,7 @@ next_agent.run(design)
 
 **Devin (Cognition AI):** Proprietary. Uses a computer-use interface (browser, terminal, editor) as external memory. Agent sees screen state rather than file text. Not open source.
 
-**SWE-agent (Princeton NLP):** Academic open-source system that wraps a shell and editor as tools for a single agent. Evaluated on SWE-bench (GitHub issue resolution). Achieves ~12–15% resolution rate on SWE-bench Verified. Available at `github.com/princeton-nlp/SWE-agent`.
+**SWE-agent (Princeton NLP):** Academic open-source system that wraps a shell and editor as tools for a single agent. Evaluated on SWE-bench (GitHub issue resolution). Achieves ~12–15% resolution rate on SWE-bench Verified. Available at `github.com/princeton-nlp/SWE-agent`. Single-agent coding systems of this family are covered in [Coding Agents](../coding_agents/README.md).
 
 **Model options:**
 - GPT-4o: best quality, ~$2.50/1M input tokens, ~$10/1M output tokens (as of mid-2025)
@@ -901,7 +901,7 @@ next_agent.run(design)
 - Claude Sonnet 4.6 (current): strong code generation, 200K context window (useful for large repo snapshots)
 - Local models (Llama 3.1 70B via Ollama): zero API cost but 3–5x slower, lower code quality
 
-**Orchestration frameworks:** LangGraph (for stateful graph-based agent coordination), CrewAI (role-based multi-agent), AutoGen (Microsoft, dialogue-based multi-agent). All support ChatDev-like patterns with varying levels of built-in structure.
+**Orchestration frameworks:** [LangGraph](../agentic_frameworks/langgraph.md) (for stateful graph-based agent coordination), [CrewAI](../agentic_frameworks/crewai.md) (role-based multi-agent), [AutoGen](../agentic_frameworks/autogen.md) (Microsoft, dialogue-based multi-agent). All support ChatDev-like patterns with varying levels of built-in structure.
 
 **Validation tooling:** Pydantic v2 for schema validation. `ast.parse()` for Python syntax checking. `subprocess.run(["python", "-c", "import <module>"])` for import resolution checks.
 

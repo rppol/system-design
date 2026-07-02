@@ -6,7 +6,7 @@
 
 An MCP client is the component in an LLM application that connects to MCP servers, discovers their capabilities, and proxies tool/resource/prompt requests from the LLM. Claude Desktop, Cursor, and most agent frameworks all include MCP client implementations. For custom agents, building an MCP client (or using the SDK's ClientSession) is the standard way to access the growing MCP ecosystem.
 
-This deep-dive covers client implementation: connecting to servers (stdio subprocess vs HTTP), capability negotiation, tool discovery and caching, sampling roundtrip (server requests an LLM call back from the client), multi-server orchestration (Claude Desktop's "connect N servers, prefix tools by server name" pattern), and reconnection/error handling.
+This deep-dive covers client implementation: connecting to servers (stdio subprocess vs HTTP), capability negotiation, tool discovery and caching, sampling roundtrip (server requests an LLM call back from the client), multi-server orchestration (Claude Desktop's "connect N servers, prefix tools by server name" pattern), and reconnection/error handling. Wire-level framing lives in [MCP Transports & JSON-RPC](mcp_transports_and_jsonrpc.md); the threat model for untrusted servers lives in [MCP Security](mcp_security.md).
 
 ---
 
@@ -18,7 +18,7 @@ This deep-dive covers client implementation: connecting to servers (stdio subpro
 
 **Why it matters**: Without a robust client, MCP integration becomes ad-hoc per server (Slack server uses HTTP, GitHub server uses stdio, etc). A good client abstracts these differences — the agent code doesn't care how the server runs, only that tools work.
 
-**Key insight**: Tool name collisions are inevitable when connecting multiple servers. Standard solution: prefix tool names with server name (`github_create_issue` instead of just `create_issue`). Claude Desktop, Cursor, and most production clients do this automatically.
+**Key insight**: Tool name collisions are inevitable when connecting multiple servers. Standard solution: prefix tool names with server name (`github_create_issue` instead of just `create_issue`). Claude Desktop, Cursor, and most production clients do this automatically. The same `<server>_<verb>_<object>` namespacing rule — and what to do when the merged catalogue grows past ~50 tools — is covered in [Tool Selection at Scale](../agents_and_tool_use/tool_selection_at_scale.md).
 
 ---
 
@@ -56,36 +56,33 @@ Client implements LLM-callback API so servers can request LLM calls on the clien
 
 ## 5. Architecture Diagrams
 
+### Client Session Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    C->>S: spawn subprocess or connect HTTP
+    C->>S: initialize(version, capabilities)
+    S-->>C: initialize result (server capabilities)
+    C->>S: notifications/initialized
+    Note over C,S: normal operation
+    C->>S: list_tools
+    S-->>C: tools (client caches the list)
+    C->>S: call_tool(name, args)
+    S-->>C: tool_result
+    Note over C,S: server may push notifications
+    S-->>C: notifications/tools/list_changed
+    C->>S: shutdown
+    S-->>C: ack
 ```
-Client Session Lifecycle
-=========================
 
-  Client                                Server
-    |                                      |
-    |---spawn subprocess or connect HTTP--->|
-    |                                      |
-    |---initialize(version, caps)----------->|
-    |<--initialize result(server caps)-------|
-    |                                      |
-    |---notifications/initialized--------->|
-    |                                      |
-    |     [normal operation]                |
-    |---list_tools-->                      |
-    |<--tools-------|                      |
-    |                                      |
-    |---call_tool(name, args)----------->  |
-    |<--tool_result---|                    |
-    |                                      |
-    |     [server may send notifications]   |
-    |<--notifications/tools/list_changed---|
-    |                                      |
-    |---shutdown--->                       |
-    |<--ack--|                             |
+Initialize exactly once per connection; everything after the handshake is request/response plus server-pushed notifications — `list_changed` is the only signal that invalidates the cached tool list.
 
+### Multi-Server Architecture
 
-Multi-Server Architecture
-==========================
-
+```
   Claude Desktop Client
         |
         +-- Session A (github MCP)
@@ -96,28 +93,29 @@ Multi-Server Architecture
         |
         +-- Session C (filesystem MCP)
              Tools: fs_read, fs_write, fs_list, ...
-  
+
   All tools merged into one list for the LLM
   Tool calls routed to correct session by name prefix
-
-
-Sampling Roundtrip
-===================
-
-  Server                                  Client
-    |                                        |
-    |---sampling/createMessage(prompt)------->|
-    |                                        |
-    |                                        | Client calls
-    |                                        | its own LLM
-    |                                        | (Claude API,
-    |                                        |  GPT-4o, etc)
-    |                                        |
-    |<--sampling/createMessage result---------|
-    |                                        |
-    | Server uses LLM result                  |
-    | in its tool logic                       |
 ```
+
+One `ClientSession` per server; the merged, prefix-namespaced tool list is what the LLM actually sees, and the prefix is what routes each call back to the right session.
+
+### Sampling Roundtrip
+
+```mermaid
+sequenceDiagram
+    participant S as Server
+    participant C as Client
+    participant L as LLM (Claude API, GPT-4o, ...)
+
+    S->>C: sampling/createMessage(prompt)
+    C->>L: LLM call on the client's account/auth
+    L-->>C: completion
+    C-->>S: sampling/createMessage result
+    Note over S: server uses the LLM result in its tool logic
+```
+
+Sampling inverts the usual direction: the server asks the client for an LLM call, so the model access, billing, and auth stay on the client side.
 
 ---
 

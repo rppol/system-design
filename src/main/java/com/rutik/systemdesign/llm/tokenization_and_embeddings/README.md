@@ -234,15 +234,17 @@ Modern trend: 100K+ vocabulary for broader language coverage (GPT-4o uses 200K, 
 
 ### Challenges with Numbers and Math
 ```
-Number "12345" with different tokenizers:
-  GPT-3.5 (cl100k): ["12345"] -- 1 token (common number)
-  GPT-2 (p50k):     ["123", "45"] -- 2 tokens
+Number "8675309" with different tokenizers:
+  GPT-2 (p50k):     ["86", "75", "309"] -- irregular, frequency-learned splits
+  GPT-4 (cl100k):   ["867", "530", "9"] -- fixed 1-3 digit chunks, left to right
 
-Complex number "8675309": Varies wildly
-  This inconsistency makes arithmetic harder for LLMs
+Year "2019": 1 token in GPT-2, but ["201", "9"] in cl100k
+  Frequency-learned splits vary wildly across nearby values;
+  this inconsistency makes arithmetic harder for LLMs
 
 Solutions: Use tokenizers with consistent number splitting
-  LLaMA 3 tokenizer: each digit is often its own token
+  LLaMA 1/2 (SentencePiece): each digit is its own token (place value exposed)
+  LLaMA 3 / cl100k: consistent 1-3 digit chunking
 ```
 
 ---
@@ -325,7 +327,16 @@ A: Fertility is the average number of tokens per word. High fertility (e.g., Ara
 A: In BPE with case-sensitive vocabularies, " Hello" (with leading space) and "Hello" are different tokens. Additionally, casing changes the token. Leading spaces are merged into the following word token during BPE training, meaning the space is "absorbed" into the token. This is why tokenization is sensitive to capitalization and spacing.
 
 **Q: What happens when an LLM encounters a character it has never seen?**
-A: With byte-level BPE (used by GPT models), every possible UTF-8 byte sequence can be represented — there are no truly unknown characters. Characters outside the vocabulary's learned merges fall back to byte-level representation: a Chinese character that isn't a single token gets encoded as 3-4 individual byte tokens, increasing sequence length.
+A: Nothing fails — it degrades. A character with no learned merge falls back to its raw UTF-8 bytes, so an unseen CJK character or rare emoji becomes 3-4 individual byte tokens instead of an `[UNK]`. The cost is silent: sequence length inflates and the model reasons over low-signal byte fragments, which is why rare scripts underperform even though they are perfectly representable. (The byte-level BPE Q&A below covers why this fallback guarantees zero out-of-vocabulary.)
+
+**Q: Why do numbers and dates tokenize inconsistently, and how does that hurt arithmetic?**
+A: With frequency-learned number tokens, the same number splits differently across tokenizers and even across nearby values. In GPT-2's vocab "2019" is a single learned token but "8675309" fragments irregularly as ["86","75","309"]; cl100k_base instead forces fixed left-to-right chunks of at most 3 digits ("8675309" becomes ["867","530","9"], "12345" becomes ["123","45"]). This is harmful because the model must learn arithmetic over inconsistent, non-positional groupings — "327" as one token carries no signal that it is 3 hundreds + 2 tens + 7. Two mitigations exist: LLaMA 1/2's SentencePiece tokenizer splits every digit into its own token (fully exposing place value), while cl100k and LLaMA 3 use the consistent 1-3-digit chunking rule; if you fine-tune for numeric tasks, prefer a per-digit scheme and always verify how your tokenizer splits representative numbers before relying on the model to compute.
+
+**Q: What breaks when you add new tokens to a pretrained model's embedding matrix?**
+A: The new token rows are randomly initialized, so the model has no learned meaning for them — outputs are garbage until those embeddings are trained. You must call `model.resize_token_embeddings(new_vocab_size)` and then fine-tune so the new rows (and the corresponding output-layer rows) learn useful values; skipping the resize causes an index-out-of-range crash, and skipping the training leaves random vectors. A cheap trick that helps convergence is to initialize each new row as the mean of the sub-tokens the term previously decomposed into (e.g., initialize a new "<company>" token from the average of its old subword embeddings). Never expand vocabulary and freeze the embedding layer — the new tokens will never learn.
+
+**Q: How can special or control tokens in user input be a security risk?**
+A: If your code lets raw user text be tokenized with `add_special_tokens` semantics that honor literal control strings, a user can inject sequence delimiters like `<|im_start|>system` or `</s>` to spoof a new role or terminate the prompt early — a form of prompt injection at the tokenizer layer. The defense is to encode user content with special-token parsing disabled (HuggingFace: pass the text through the tokenizer so `<|...|>` is treated as ordinary characters, not as a registered special token) and to build chat prompts only through the model's official chat template rather than string-concatenating role markers. Treat any user-supplied string that contains the model's reserved delimiter substrings as hostile.
 
 **Q: How do BPE merge rules work and what determines the final vocabulary?**
 BPE starts with individual characters and iteratively merges the most frequent adjacent pair into a new token until reaching the target vocabulary size. Each merge creates a new token — for example, if "t" and "h" appear adjacent most often, they merge into "th", then "th" and "e" might merge into "the". The final vocabulary is determined by the merge order and the target vocabulary size (e.g., 32K, 50K, 128K). GPT-2 used 50,257 tokens; LLaMA uses 32,000; GPT-4 uses ~100K. The training corpus determines which merges are learned — training on English-heavy data creates English-efficient tokenization but wastes tokens on other languages.
@@ -341,6 +352,15 @@ tiktoken (OpenAI) is a fast BPE tokenizer optimized for speed (Rust backend), wh
 
 **Q: How does the tokenizer affect model performance on code and mathematical expressions?**
 Tokenizers can dramatically affect code and math performance because poor tokenization splits meaningful patterns into semantically meaningless pieces. A tokenizer trained primarily on English text might split "def fibonacci(n):" into 6+ tokens, while a code-aware tokenizer keeps "fibonacci" as one token. For mathematics, "3.14159" might be split into ["3", ".", "14", "159"] with a generic tokenizer, destroying the numerical representation. Solutions: (1) include code and math in tokenizer training data; (2) dedicated tokens for common programming constructs (indentation, brackets); (3) digit tokenization strategies — some models tokenize each digit separately for better arithmetic. CodeLLaMA and StarCoder use code-aware tokenizers that significantly improve code completion quality.
+
+**Q: How do WordPiece and Unigram LM differ from BPE in how they build the vocabulary?**
+A: All three produce subword vocabularies but choose merges differently. BPE is greedy and frequency-based: it repeatedly merges the most frequent adjacent pair, so merge order matters and the segmentation is deterministic. WordPiece (BERT) is likelihood-based: instead of raw frequency it merges the pair that most increases the training-corpus likelihood under a unigram language model, and marks word-internal pieces with `##`. Unigram LM (SentencePiece) works top-down: it starts from a large candidate vocabulary and iteratively removes tokens whose deletion least reduces corpus likelihood, and it keeps a probabilistic model so a single string has multiple candidate segmentations with associated probabilities (enabling subword regularization / sampling during training). Practically: BPE is fastest and most common, WordPiece is BERT-family, Unigram is preferred for multilingual and where segmentation sampling helps robustness.
+
+**Q: What is byte-level BPE and why do GPT models use it?**
+A: Byte-level BPE runs BPE over the 256 raw UTF-8 bytes rather than over Unicode characters, so the base alphabet is a fixed 256 symbols and every possible string is representable with zero out-of-vocabulary risk — no `[UNK]` token is ever needed. This is why GPT-2/GPT-4 tokenizers can encode any emoji, script, or binary-ish text losslessly. The cost is that a character requiring multiple UTF-8 bytes (most CJK characters are 3 bytes) can fragment into several byte tokens when it is not itself a learned merge, inflating sequence length for those languages. Byte-level BPE is the standard for general-purpose LLMs precisely because robustness to arbitrary input outweighs the fertility penalty on non-Latin scripts.
+
+**Q: What is weight tying between the embedding and output layers, and why is it common?**
+A: Weight tying (Press & Wolf, 2017) shares one matrix between the input embedding lookup (`[V × D]`) and the output projection that produces logits over the vocabulary (`[D × V]`), so the same learned vector represents a token both when it is read in and when it is scored for generation. It roughly halves the parameters spent on the vocabulary interface — for a 128K vocab at D=4096 that is ~0.5B parameters saved — and it usually improves quality because input and output representations of a word are forced to be consistent. Most decoder LLMs (GPT-2, LLaMA family) tie weights; the main reason not to is when input and output should live in genuinely different spaces (e.g., some encoder-decoder setups) or when a factorized/large-vocab output head is used for efficiency.
 
 ---
 
@@ -358,7 +378,7 @@ Tokenizers can dramatically affect code and math performance because poor tokeni
 
 ## 14. Case Study
 
-**Scenario:** A multilingual e-commerce company (50M products across 40 languages, 200M monthly searches) needs to build a semantic search system over product descriptions. Existing system: BM25 keyword search, 23% null result rate for cross-lingual queries (user searches in Spanish for product listed in Portuguese), customer complaint rate 18% related to search. Goal: reduce null results to < 5%, support cross-lingual retrieval across all 40 languages, p99 query embedding latency < 30ms, embedding cost < $200/month.
+**Scenario:** A multilingual e-commerce company (50M products across 40 languages, 200M monthly searches) needs to build a [semantic search](../embeddings_and_similarity_search/README.md) system over product descriptions. Existing system: BM25 keyword search, 23% null result rate for cross-lingual queries (user searches in Spanish for product listed in Portuguese), customer complaint rate 18% related to search. Goal: reduce null results to < 5%, support cross-lingual retrieval across all 40 languages, p99 query embedding latency < 30ms, embedding cost < $200/month.
 
 **Architecture:**
 

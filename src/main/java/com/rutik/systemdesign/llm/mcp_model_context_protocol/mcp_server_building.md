@@ -25,7 +25,7 @@ This deep-dive covers building MCP servers from scratch: the four primitives (Re
 ## 3. Core Principles
 
 - **Four primitives**: Resources (data), Tools (actions), Prompts (templates), Sampling (server-requested LLM call).
-- **JSON-RPC 2.0**: protocol message format (request, response, notification).
+- **JSON-RPC 2.0**: protocol message format (request, response, notification) — wire-level detail in [MCP Transports & JSON-RPC](mcp_transports_and_jsonrpc.md).
 - **Capability negotiation**: server declares what it supports at initialize.
 - **Strongly typed schemas**: tool input_schema with JSON Schema; LLM uses it for arg construction.
 - **Idempotent reads, side-effecting writes**: Resources should be safe to re-read; Tools may have effects.
@@ -97,20 +97,35 @@ The lifecycle is initialize (capability negotiation) → operate (list/call tool
 
 ### Server Composition
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SRV["MCP Server"]
+    RES["Resources\nread_file · read_db_row"]
+    TL["Tools\ncreate_pr · query_db"]
+    PR["Prompts\npr_review · sql_gen"]
+    SMP["Sampling\nserver asks client\nto call its LLM"]
+
+    SRV --> RES
+    SRV --> TL
+    SRV --> PR
+    SRV --> SMP
+
+    class SRV base
+    class RES io
+    class TL train
+    class PR req
+    class SMP mathOp
 ```
-  +-------------+
-  |  MCP Server |
-  +------+------+
-         |
-   +-----+--------+--------+--------+
-   |              |        |        |
-   v              v        v        v
- Resources    Tools     Prompts  Sampling
-   |              |        |        |
-  read_file    create_pr  pr_review  (server asks
-  read_db_row  query_db   sql_gen     client to call
-                                      its LLM)
-```
+
+One server can expose all four primitives: Resources for read-only data, Tools for side-effecting actions, Prompts for reusable templates, and Sampling for server-initiated LLM calls routed through the client.
 
 ---
 
@@ -413,7 +428,7 @@ Return the error as the tool's result text (so the LLM sees and can react), not 
 Inspector is a browser-based testing UI: launches your server, lets you call tools, inspect resources, view raw JSON-RPC traffic. Essential for development — much faster than testing through a real LLM client.
 
 **How do you secure an MCP server?**
-For stdio servers: rely on subprocess privileges (server runs as user that launched it). For HTTP servers: authenticate clients (OAuth 2.0 per 2025 spec, API keys, mTLS). Validate all tool inputs. Never trust tool descriptions from untrusted servers (prompt injection risk).
+For stdio servers: rely on subprocess privileges (server runs as user that launched it). For HTTP servers: authenticate clients (OAuth 2.0 per 2025 spec, API keys, mTLS). Validate all tool inputs. Never trust tool descriptions from untrusted servers (prompt injection risk) — the full threat model is in [MCP Security](mcp_security.md).
 
 **Can MCP servers have state across calls?**
 Yes — server is a long-running process; you can hold state in memory or external storage. Example: cache database connections, maintain session tokens. Be careful with state in HTTP servers if you have multiple instances (use Redis/external store).
@@ -449,7 +464,7 @@ MCP supports binary content via base64-encoded resources or tool results. For la
 7. Use idempotency keys for side-effecting tools to be safe under retry.
 8. Distinguish Resources (read-only) from Tools (actions) — don't blur the line.
 9. Version your server; bump major on breaking changes to tool schemas.
-10. Publish to Smithery (or similar) if useful broadly; reuse community servers when possible.
+10. Publish to Smithery (or similar — see [MCP Registries & Ecosystem](mcp_registries_and_ecosystem.md)) if useful broadly; reuse community servers when possible.
 
 ---
 

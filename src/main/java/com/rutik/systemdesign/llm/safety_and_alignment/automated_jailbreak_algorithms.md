@@ -254,26 +254,25 @@ Each layer catches a different attack class — no single filter stops everythin
 
 ### 5.5 The Fluency x Effectiveness Map — Why No Single Defense Covers Both
 
+```mermaid
+quadrantChart
+    title Fluency vs effectiveness of jailbreak attacks
+    x-axis Gibberish --> Fluent
+    y-axis Ineffective --> Effective
+    quadrant-1 Fluent and effective — top risk
+    quadrant-2 Gibberish but effective
+    quadrant-3 Gibberish and weak
+    quadrant-4 Fluent but weak
+    GCG / BEAST: [0.2, 0.85]
+    AutoDAN / AutoDAN-Turbo / PAP / TAP: [0.82, 0.85]
+    Random junk: [0.15, 0.15]
+    Naive role-play: [0.82, 0.2]
 ```
-                          high ASR (EFFECTIVE)
-                                  ^
-        GCG / BEAST               |               AutoDAN / AutoDAN-Turbo
-        gibberish suffix  [*]     |     [*]        PAP / TAP  (fluent prompts)
-                                  |
-   GIBBERISH ---------------------+--------------------- FLUENT
-   (high per-token perplexity)    |        (low perplexity, reads as legit)
-                                  |
-        random junk       [*]     |     [*]        naive role-play
-        (filtered + useless)      |                (looks fine, low ASR)
-                                  v
-                         low ASR (INEFFECTIVE)
 
-   A perplexity filter (§6.3) can only cut the LEFT column:
-        [##### caught #####]      [-------- passes straight through --------]
-   So the dangerous top-RIGHT (fluent AND effective) needs a SEMANTIC / intent
-   classifier or representation-level defense -- perplexity is blind to it.
-   This axis, not the search algorithm, is what determines which §8.3 defense works.
-```
+A perplexity filter (§6.3) can only cut the left (gibberish) column — the top-right quadrant
+(fluent AND effective: AutoDAN, PAP) sails straight through, which is why it needs a semantic /
+intent classifier or a representation-level defense, not perplexity. This axis, not the search
+algorithm, is what determines which §8.3 defense works.
 
 The single most important consequence: an attack's *output style* (which axis it lives
 on), not its *search method*, dictates the defense — which is why layered defenses (§5.4)

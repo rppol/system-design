@@ -254,15 +254,15 @@
    "lex": 0.1396
   },
   {
-   "a": "database/document_databases",
-   "b": "database/storage_engines_internals",
+   "a": "database/concurrency_control_and_locking",
+   "b": "database/in_memory_databases",
    "w": 0.1708,
    "links": 0,
    "lex": 0.1381
   },
   {
-   "a": "database/concurrency_control_and_locking",
-   "b": "database/in_memory_databases",
+   "a": "database/document_databases",
+   "b": "database/storage_engines_internals",
    "w": 0.1708,
    "links": 0,
    "lex": 0.1381
@@ -303,18 +303,18 @@
    "lex": 0.1316
   },
   {
-   "a": "database/newsql_and_distributed_sql",
-   "b": "database/wide_column_databases",
-   "w": 0.1619,
-   "links": 0,
-   "lex": 0.131
-  },
-  {
    "a": "database/document_databases",
    "b": "database/mysql_innodb_internals",
    "w": 0.1619,
    "links": 0,
    "lex": 0.1309
+  },
+  {
+   "a": "database/newsql_and_distributed_sql",
+   "b": "database/wide_column_databases",
+   "w": 0.1619,
+   "links": 0,
+   "lex": 0.131
   },
   {
    "a": "database/document_databases",

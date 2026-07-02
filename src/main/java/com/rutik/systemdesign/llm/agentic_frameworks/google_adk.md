@@ -87,7 +87,7 @@ ADK separates persistence into four services with different lifetimes and scopes
 - **Memory** — a long-term, *searchable* store across sessions (`MemoryService`), distinct from
   State — State is structured key-value for the current/ongoing context, Memory is for retrieving
   relevant facts from *past* sessions (conceptually closer to
-  [Agent Memory](../../agents_and_tool_use/agent_memory.md)'s long-term memory stores).
+  [Agent Memory](../agents_and_tool_use/agent_memory.md)'s long-term memory stores).
 - **Artifacts** — binary/file data (images, documents) associated with a session, stored via an
   `ArtifactService`, referenced by name rather than inlined into State/Memory.
 
@@ -215,17 +215,21 @@ tool-call-vs-handoff distinction mirrors
   t2: C runs (reads state.x, state.y)       (results in state.a, state.b, state.c)
                                         t2: (typically) a following Sequential
                                              step reads all three results
-
-  LoopAgent([Generator, Critic], max_iterations=5)
-  -------------------------------------------------
-  iter 1: Generator runs -> writes state.draft
-          Critic runs -> reads state.draft, scores it
-                       -> if good enough: actions.escalate=True -> LOOP EXITS
-                       -> else: loop continues
-  iter 2: Generator runs again (reads state.draft + critic feedback) ...
-  ...
-  iter 5: max_iterations reached -> LOOP EXITS regardless of escalate
 ```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Generator : LoopAgent starts (iter 1)
+    Generator --> Critic : writes state.draft
+    Critic --> LoopExit : actions.escalate=True (approved)
+    Critic --> Generator : not approved, iterations < 5 (next iter reads draft + critique)
+    Critic --> LoopExit : max_iterations=5 reached (exits regardless of escalate)
+    LoopExit --> [*]
+```
+
+`LoopAgent([Generator, Critic], max_iterations=5)` as a lifecycle: `escalate=True` is the only
+early exit; `max_iterations` is the unconditional hard bound — with neither set per iteration, the
+loop always burns the full 5 × 2 = 10 LLM calls (§6.4).
 
 ### 5.3 Session / State / Memory / Artifact Services
 
@@ -504,7 +508,7 @@ refine_loop_fixed = LoopAgent(
   ecosystem, though `spring_ai` is planned-not-built per repo conventions).
 - The system needs **bidirectional audio/video streaming** (voice agents, live assistants) — ADK's
   integration with the Gemini **Live API** is a first-class supported path, relevant alongside
-  [Voice Agents](../../voice_agents/README.md).
+  [Voice Agents](../voice_agents/README.md).
 
 **Do NOT use ADK (or reconsider) when:**
 
@@ -625,7 +629,7 @@ First, check whether the exit-condition sub-agent (the "critic") is actually **s
 
 **Q11: What does `adk eval` test, and how does it fit into a CI/CD pipeline for agents?**
 `adk eval` runs a predefined "evalset" — a set of test conversations, each specifying expected **tool-call trajectories** (which tools should be called, with roughly what arguments) and/or expected **final response content** (matched via similarity or an LLM judge) — against the live agent, and reports pass/fail per test case with configurable tolerance thresholds. This fits the same role as
-[LLM Testing Strategies](../../llm_testing_strategies/README.md)'s golden-dataset regression suites: run on every PR/deploy to catch regressions where a prompt or tool change causes the agent to stop calling an expected tool, call tools in a different order, or produce substantively different final responses — without requiring a human to manually re-run every conversation.
+[LLM Testing Strategies](../llm_testing_strategies/README.md)'s golden-dataset regression suites: run on every PR/deploy to catch regressions where a prompt or tool change causes the agent to stop calling an expected tool, call tools in a different order, or produce substantively different final responses — without requiring a human to manually re-run every conversation.
 
 **Q12: How does ADK's "code-first" positioning differ from low-code/no-code agent builders, and what's the tradeoff?**
 ADK agents, tools, instructions, and orchestration are all defined in Python/Java source code — version-controlled, testable with standard unit-testing tools, composable via normal function/class abstraction (a `SequentialAgent` can be returned from a factory function parameterized by config, for instance). Low-code builders (drag-and-drop agent canvases) trade this flexibility for accessibility to non-engineers and faster initial prototyping, but typically hit limits when logic needs to branch on edge cases not anticipated by the visual builder's primitives. ADK's bet — consistent with [LangGraph](langgraph.md), [CrewAI](crewai.md), and most frameworks in this comparison — is that production agent systems are software systems and benefit from software engineering practices (code review, testing, CI) more than from visual accessibility.
@@ -695,4 +699,4 @@ medical-intake checklists, content-moderation escalation paths — and ADK's wor
 - [OpenAI Agents SDK](openai_agents_sdk.md) — handoffs vs. tools-as-agents comparison (§Q6)
 - [Agent-to-Agent Protocols](../multi_agent_systems/agent_to_agent_protocols.md) — the A2A protocol ADK agents speak for cross-process/cross-org delegation (§3.6, §Q9)
 - [MCP (Model Context Protocol)](../mcp_model_context_protocol/README.md) — tool-server protocol consumed via `MCPToolset` (§Q8)
-- [LLM Testing Strategies](../../llm_testing_strategies/README.md) — golden-dataset regression testing, the same role `adk eval` plays for ADK agents (§Q11)
+- [LLM Testing Strategies](../llm_testing_strategies/README.md) — golden-dataset regression testing, the same role `adk eval` plays for ADK agents (§Q11)

@@ -1,5 +1,7 @@
 # MCP Transports and JSON-RPC — Deep Dive
 
+Deep-dive sub-file of [MCP — Model Context Protocol](README.md).
+
 ---
 
 ## 1. Concept Overview
@@ -93,15 +95,15 @@ Notification (no id, no response):
 Stdio Transport Framing
 ========================
 
-  Client stdin -> Server: 
+  Client stdin -> Server:
     {"jsonrpc":"2.0","id":1,"method":"initialize",...}\n
     {"jsonrpc":"2.0","method":"notifications/initialized"}\n
     {"jsonrpc":"2.0","id":2,"method":"tools/list"}\n
-  
+
   Server stdout -> Client:
     {"jsonrpc":"2.0","id":1,"result":{...}}\n
     {"jsonrpc":"2.0","id":2,"result":{"tools":[...]}}\n
-  
+
   Newline-delimited; one JSON object per line
 
 
@@ -113,7 +115,7 @@ Streamable HTTP Flow
             Body: {"jsonrpc":"2.0","id":1,"method":"tools/list"}
     Server: 200 OK, Content-Type: application/json
             Body: {"jsonrpc":"2.0","id":1,"result":{...}}
-  
+
   Stateful session (multiple requests, one stream):
     Client: POST /mcp
             Header: Mcp-Session-Id: abc123
@@ -121,35 +123,26 @@ Streamable HTTP Flow
     Server: 200 OK, Content-Type: text/event-stream
             Body: data: {"jsonrpc":"2.0","id":1,"result":...}\n\n
                   data: {"jsonrpc":"2.0","method":"notifications/...","params":...}\n\n
-
-
-Lifecycle Sequence
-===================
-
-  +-----------+                       +-----------+
-  |  Client   |                       |  Server   |
-  +-----------+                       +-----------+
-      |   initialize(version, caps)        |
-      |----------------------------------->|
-      |                                    |
-      |    initialize_result(server_caps)  |
-      |<-----------------------------------|
-      |                                    |
-      |    notifications/initialized       |
-      |----------------------------------->|
-      |                                    |
-      |    [normal operation]              |
-      |    list_tools, call_tool, etc      |
-      |<==================================>|
-      |                                    |
-      |    ping (keepalive, every 30s)     |
-      |----------------------------------->|
-      |    pong                             |
-      |<-----------------------------------|
-      |                                    |
-      |    [shutdown]                       |
-      |    close connection                |
 ```
+
+Lifecycle Sequence:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    C->>S: initialize(version, capabilities)
+    S-->>C: initialize_result(server_caps)
+    C->>S: notifications/initialized (no id, no response)
+    Note over C,S: normal operation — tools/list, tools/call, resources/read (bidirectional)
+    loop keepalive, every 30s
+        C->>S: ping
+        S-->>C: pong
+    end
+    C->>S: shutdown — close connection (stdio: EOF on stdin · HTTP: DELETE session)
+```
+
+The three-step handshake (initialize → initialize_result → initialized notification) must complete before any tools/list call; ping/pong at ~30s intervals detects dead connections on long-lived sessions.
 
 ---
 
@@ -450,7 +443,7 @@ Client sends shutdown notification or closes the connection. Server cleans up re
 5. Handle bidirectional messages: server may send requests (sampling, notifications) — your client must process them.
 6. Use unique, monotonic ids per session — never reuse.
 7. Implement ping/pong keepalive on long-lived connections (15-30s interval).
-8. For HTTP servers, use TLS + auth always — MCP servers may expose privileged tools.
+8. For HTTP servers, use TLS + auth always — MCP servers may expose privileged tools (threat model: [MCP Security](mcp_security.md)).
 9. Cap message size (1MB typical) — JSON-RPC isn't designed for huge payloads.
 10. Test with MCP Inspector at every stage — catches protocol bugs early.
 

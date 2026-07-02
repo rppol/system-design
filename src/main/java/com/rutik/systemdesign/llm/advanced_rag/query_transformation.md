@@ -191,7 +191,7 @@ The join at Q3 is the part single-shot retrieval cannot do: no single embedding 
 expresses "growth AND shrinking headcount," so the answer only exists after the two legs are
 computed and intersected.
 
-Decomposition is the foundation of agentic RAG (see agentic_rag.md).
+Decomposition is the foundation of agentic RAG (see [agentic_rag.md](agentic_rag.md)); when a decomposed leg retrieves low-quality evidence, corrective retrieval loops (see [corrective_rag.md](corrective_rag.md)) pick up from there.
 
 ---
 

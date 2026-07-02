@@ -254,16 +254,21 @@ Key: by tracking (m, l) incrementally, softmax is computed without
 
 ### Flash Attention Versions
 
+```mermaid
+timeline
+    title Flash Attention evolution
+    2022 : FlashAttention-1 — original fused kernel, 2-4x faster, 5-20x memory reduction
+    2023 : FlashAttention-2 — 2x faster than FA-1 via better work partitioning and parallelization
+    2024 : FlashAttention-3 — H100-specific, FP8 support, asynchronous computation, ~75% of theoretical FLOPs utilization
 ```
-FlashAttention-1 (2022): Original; 2-4× faster; 5-20× memory reduction
-FlashAttention-2 (2023): 2× faster than FA-1; better parallelization
-FlashAttention-3 (2024): H100-specific; FP8 support; asynchronous computation
-  FA-3 on H100 achieves ~75% of theoretical FLOPs utilization
-```
+
+Each generation kept the same exact-attention math and improved hardware mapping — FA-2 doubled FA-1's speed through better parallelization, and FA-3 exploits H100 Tensor Core asynchrony and FP8 to reach ~75% of theoretical FLOPs.
 
 ---
 
 ### Mixture of Experts (MoE)
+
+(Full module: [Mixture of Experts](../mixture_of_experts/README.md) — routing math, load balancing, expert parallelism.)
 
 ### Architecture
 
@@ -339,18 +344,25 @@ Advantages of fine-grained:
 ## 6. Architecture Diagrams
 
 ### Quantization Quality/Memory Tradeoff
+
+```mermaid
+quadrantChart
+    title Quantization tradeoff space for a 70B model
+    x-axis Smaller footprint --> Larger footprint
+    y-axis Lower quality --> Higher quality
+    quadrant-1 Full-precision baseline
+    quadrant-2 Production sweet spot
+    quadrant-3 Quality collapse
+    quadrant-4 Wasted memory
+    BF16 140GB: [0.92, 0.90]
+    INT8 70GB: [0.60, 0.80]
+    AWQ INT4 35GB: [0.34, 0.68]
+    GPTQ INT4 35GB: [0.30, 0.60]
+    INT3 26GB: [0.22, 0.40]
+    INT2 17GB: [0.12, 0.15]
 ```
-Quality
-  ^
-  |  BF16 ●
-  |       ● INT8
-  |          ● AWQ INT4
-  |             ● GPTQ INT4
-  |                 ● INT3
-  |                     ● INT2 ●
-  +-----------------------------------------> Memory (GB, 70B model)
-     140  70    35    17    13    7
-```
+
+Quality degrades monotonically as bits shrink — BF16 (140GB) > INT8 (70GB) > AWQ INT4 > GPTQ INT4 (both 35GB, AWQ slightly ahead at 4-bit) > INT3 (26GB) > INT2 (17GB). Calibrated 4-bit sits in the production sweet spot: 4x smaller than BF16 for ~1-2% general benchmark loss, while INT3 and below fall into quality collapse.
 
 ### MoE Architecture Per Layer
 ```mermaid
@@ -444,7 +456,7 @@ Deeper layers often use larger windows (or full attention) to capture global con
 
 ### Paged KV Cache (vLLM PagedAttention)
 
-Traditional KV cache suffers from **fragmentation** — pre-allocated contiguous memory per sequence wastes space:
+Traditional KV cache suffers from **fragmentation** — pre-allocated contiguous memory per sequence wastes space (full internals: [vLLM Deep Dive](../vllm_deep_dive/README.md)):
 
 ```
 Naive allocation:  [seq_A: 4096 tokens allocated] ← uses 1024, wastes 3072
@@ -522,7 +534,7 @@ Scales: across nodes (P2P transfers, not all-reduce)
 
 ### Knowledge Distillation
 
-Train a small student model to mimic a large teacher:
+Train a small student model to mimic a large teacher (deep dive: [Knowledge Distillation & Model Merging](../knowledge_distillation_and_model_merging/README.md), which also covers the SLERP/TIES/DARE merging methods below):
 
 ```
 Standard distillation:
@@ -760,16 +772,19 @@ A: Knowledge distillation trains a small student model using a large teacher mod
   │  MBPP score: 61.1% (-1.3% — within 2% SLA)                 │
   │  Throughput: 185 RPS (2.3× vs FP16 on same hardware)        │
   └─────────────────────────────────────────────────────────────┘
+```
 
 Quantization Quality Hierarchy (70B code models):
-  FP16 (2 bytes/param): MBPP 62.4% — baseline
-  BF16 (2 bytes/param): MBPP 62.4% — numerically equivalent
-  FP8  (1 byte/param):  MBPP 62.0% (-0.4%) — near-lossless
-  AWQ INT4 (0.5 byte):  MBPP 61.1% (-1.3%) — 4× compression
-  GPTQ INT4 (0.5 byte): MBPP 60.8% (-1.6%) — similar, AWQ wins
-  INT4 naive (0.5 byte): MBPP 58.2% (-4.2%) — unacceptable
-  INT3 (0.375 byte):     MBPP 55.9% (-6.5%) — too lossy for code
+
+```mermaid
+xychart-beta
+    title "MBPP score by quantization format — Llama-3-70B code model"
+    x-axis ["FP16", "BF16", "FP8", "AWQ INT4", "GPTQ INT4", "INT4 naive", "INT3"]
+    y-axis "MBPP pass rate (%)" 50 --> 65
+    bar [62.4, 62.4, 62.0, 61.1, 60.8, 58.2, 55.9]
 ```
+
+FP16/BF16 (2 bytes/param) are the 62.4% baseline; FP8 (1 byte) is near-lossless at -0.4%; AWQ INT4 (0.5 byte, 4x compression) loses 1.3% — within the 2% SLA — and edges out GPTQ INT4 (-1.6%); naive INT4 rounding (-4.2%) and INT3 (0.375 byte, -6.5%) are too lossy for code.
 
 **Key implementation — 3 Python code blocks:**
 

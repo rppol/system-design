@@ -523,26 +523,27 @@ def replicate_lora_adapter(
 The comparison table lists the numbers; plotting them on cost-vs-RTO axes shows why
 active-passive is most teams' default — it sits at the elbow of the frontier:
 
+```mermaid
+quadrantChart
+    title Recovery time vs cost multiplier
+    x-axis Low cost 1.0x --> High cost 3.0x
+    y-axis Fast recovery 30s --> Slow recovery 10 min
+    quadrant-1 Costly and slow
+    quadrant-2 Cheap but slow
+    quadrant-3 Cheap and fast
+    quadrant-4 Fast but costly
+    Single region with CDN: [0.08, 0.92]
+    Active-passive DNS: [0.38, 0.32]
+    Regional sharding: [0.55, 0.18]
+    Active-active anycast: [0.85, 0.12]
 ```
- RTO
- (recovery time)
-       ^
- ~600s |  * Single region + CDN      cheapest (1.0x), but a full
-       |                             region outage = 10+ min down
-       |
-  120s |
-       |        * Active-Passive     <- the ELBOW: ~1.5x cost buys
-   90s |                                ~90 s recovery
-       |              * Regional   * Active-Active
-   30s |                (residency)  (RTO floor, but ~50% idle GPUs)
-       +-------+---------+---------+---------> cost multiplier
-             1.0x      1.5x      2.0x-3.0x
 
-   Better = down-and-left (fast recovery, low cost). Active-passive is the knee:
-   ~1.5x cost cuts RTO from 10 min to ~90 s. Active-active roughly doubles cost
-   and idles ~half the GPUs (~50% util) to shave the final minute -- justified
-   only when an availability SLA or data-residency rule forces it.
-```
+Better = down-and-left (fast recovery, low cost). Active-passive is the knee of the
+frontier: ~1.5× cost cuts RTO from 10+ minutes (single region + CDN at 1.0×) to
+~90 seconds. Active-active roughly doubles-to-triples cost and idles ~half the GPUs
+(~50% utilization) to shave the final minute — justified only when a 99.99% SLA or a
+data-residency rule forces it; regional sharding pays a similar premium for the hard
+residency guarantee rather than for speed.
 
 ### Conversation Stickiness vs Load Distribution
 

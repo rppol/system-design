@@ -58,11 +58,16 @@ Response: We can prove √2 is irrational by contradiction...
 - Performs dramatically better on competition math (AIME), PhD-level science (GPQA), competitive programming
 
 **o1 vs o3 performance (AIME 2024):**
+
+```mermaid
+xychart-beta
+    title "AIME 2024 accuracy"
+    x-axis ["GPT-4o", "o1", "o3"]
+    y-axis "Accuracy (%)" 0 --> 100
+    bar [13, 74, 99.3]
 ```
-GPT-4o:  13%
-o1:      74%
-o3:      99.3%  (best in the world, surpasses expert humans)
-```
+
+o3's 99.3% is best in the world and surpasses expert human competitors (~85%); the jump from GPT-4o's 13% comes entirely from test-time thinking, not model scale.
 
 ### 4.2 DeepSeek-R1
 
@@ -86,6 +91,7 @@ Stage 2: SFT warm-up + GRPO (improved version)
 
 DeepSeek-R1 performance: comparable to o1 on many benchmarks.
 Impact: proved that reasoning can emerge from pure RL without supervised reasoning data.
+For PPO vs GRPO fundamentals and reward-model training, see [Alignment & RLHF](../alignment_and_rlhf/README.md).
 
 ### 4.3 Process Reward Models (PRM)
 
@@ -154,7 +160,7 @@ BFS/DFS + LLM-as-evaluator to score and prune branches
 Best branch: 1b + 2a combination
 ```
 
-Useful for: planning, design problems, creative tasks with combinatorial space.
+Useful for: planning, design problems, creative tasks with combinatorial space. Full search mechanics (BFS/DFS/beam/MCTS, cost accounting, broken→fix code): [Tree of Thoughts for Agents](../agents_and_tool_use/tree_of_thoughts_for_agents.md).
 
 ### 4.6 MCTS (Monte Carlo Tree Search) for Reasoning
 
@@ -261,8 +267,8 @@ max_thinking_tokens parameter controls how long the model can think:
 
 Cost model:
   Reasoning token cost = thinking_tokens × price_per_token
-  o1 thinking: ~$15/1M tokens (vs $5/1M for output tokens)
-  A 10,000-token thinking chain costs $0.15 — 50-100× a standard response
+  o1 bills thinking tokens at the output rate: $60/1M (input: $15/1M)
+  A 10,000-token thinking chain costs $0.60 — 50-100× a standard short response
 
 Routing strategy to control cost:
   Use difficulty classifier (fast, cheap LLM call) to estimate query difficulty
@@ -270,6 +276,8 @@ Routing strategy to control cost:
   → Hard: route to o1/R1 with thinking budget, 20% of queries
   This architecture serves 80% of traffic cheaply, reserves reasoning for hard cases
 ```
+
+This difficulty-based routing pattern is covered in depth in [LLM Routing & Model Selection](../llm_routing_and_model_selection/README.md).
 
 **Overthinking vs underthinking tradeoff:**
 ```
@@ -467,7 +475,7 @@ This self-correction behavior was NOT explicitly trained —
 | **DeepSeek-R1** | Open-source reasoning | Matches o1; free to self-host |
 | **QwQ-32B** | Open reasoning | Qwen's reasoning model; strong |
 | **Gemini 2.0 Flash Thinking** | Google reasoning | Fast reasoning; good quality |
-| **Claude 3.5 Sonnet** (extended thinking) | Anthropic reasoning | Available via API |
+| **Claude 3.7+ Sonnet** (extended thinking) | Anthropic reasoning | Visible thinking blocks; `budget_tokens` via API |
 | **Math-Shepherd** | PRM for math | Step-level reward signals |
 | **Lean 4** | Formal verification | Used by AlphaProof |
 | **OpenR** | MCTS for LLMs | Open-source MCTS implementation |

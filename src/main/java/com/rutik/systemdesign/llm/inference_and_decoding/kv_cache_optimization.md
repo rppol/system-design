@@ -74,19 +74,16 @@ Total cache = (per-token bytes) × (sequence length) × (concurrent sequences)
 
 ### 5.2 Where the memory goes — capacity planning at a glance
 
+```mermaid
+xychart-beta
+    title "Llama-3-70B on 2x H100: KV per request (bars) vs 20GB headroom (line)"
+    x-axis ["8K context", "32K context", "128K context"]
+    y-axis "GB" 0 --> 45
+    bar [2.56, 10.24, 40.96]
+    line [20, 20, 20]
 ```
-H100 80GB, Llama-3-70B (140GB BF16 weights -> needs 2x H100 just for weights)
 
-Context length    KV per request    Requests that fit in REMAINING memory
-                                     (2xH100 = 160GB - 140GB weights = 20GB headroom)
-─────────────────────────────────────────────────────────────────────────
-   8K tokens    =  2.56 GB              20GB / 2.56GB  ≈  7 requests
-  32K tokens    = 10.24 GB              20GB / 10.24GB ≈  1 request
- 128K tokens    = 40.96 GB              DOES NOT FIT — needs eviction/quant/sharing
-
-This is why a "128K context window" marketing number and "128K context window
-that 10 users can use concurrently" are completely different engineering problems.
-```
+Llama-3-70B's 140GB of BF16 weights already need 2×H100 (160GB), leaving only 20GB of headroom for KV cache — the flat line. Against it: 8K context (2.56GB/request) fits `20/2.56 ≈ 7` concurrent requests, 32K (10.24GB) fits `≈ 1`, and a single 128K request (40.96GB) does not fit at all without eviction/quantization/sharing. This is why a "128K context window" marketing number and "128K context window that 10 users can use concurrently" are completely different engineering problems.
 
 ### 5.3 Eviction strategies — cache layout comparison
 

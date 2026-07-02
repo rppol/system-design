@@ -269,28 +269,20 @@ Layer N:  [ Attention block ] + [ MoE FFN ]       precise long-range recall
 
 ### 5.5 Memory Growth: KV Cache (Transformer) vs. Constant State (SSM)
 
+```mermaid
+xychart-beta
+    title "Memory per sequence: Transformer KV cache vs SSM state (7B-class, FP16)"
+    x-axis ["0", "25K", "50K", "75K", "100K tokens"]
+    y-axis "Memory (GB)" 0 --> 55
+    line [0, 13.1, 26.2, 39.3, 52.4]
+    line [0.005, 0.005, 0.005, 0.005, 0.005]
 ```
-Memory per
-sequence
-  ^
-  |                                          Transformer KV cache
-  |                                       ,-'  (linear in seq_len)
-  |                                   ,-'
-  |                               ,-'
-  |                           ,-'
-  |                       ,-'
-  |                   ,-'
-  |               ,-'
-  |  ----------------------------------------------  SSM state
-  |  (constant: ~5.2 MB for a 64-layer Mamba model,   (FLAT --
-  |   regardless of sequence length)                   independent
-  |                                                     of seq_len)
-  +---------------------------------------------------------> seq_len
-  0          25K        50K        75K       100K
 
-  At 100K tokens, a 7B Transformer's KV cache (~52.4 GB, no GQA) is
-  ~10,000x larger than the SSM's entire recurrent state.
-```
+The rising line is the 7B Transformer's KV cache (no GQA) — linear in sequence length,
+reaching ~52.4 GB at 100K tokens and still growing with every generated token. The
+line hugging the x-axis is the 64-layer Mamba model's entire recurrent state: a
+constant ~5.2 MB (0.005 GB) at any sequence length — ~10,000x smaller at 100K tokens,
+which is exactly why it is invisible at this scale.
 
 ### 5.6 The Duality: Linear Attention and the SSM Recurrence Are the Same Update
 

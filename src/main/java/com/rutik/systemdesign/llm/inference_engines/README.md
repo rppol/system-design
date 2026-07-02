@@ -22,10 +22,10 @@ The landscape has exploded: vLLM dominates cloud serving; TensorRT-LLM is NVIDIA
 
 ## 3. Core Principles
 
-- **PagedAttention**: Efficient KV cache memory management — the key innovation that made continuous batching practical.
-- **Continuous batching**: Serve many users efficiently by dynamically adding/removing requests from batches.
+- **PagedAttention**: Efficient KV cache memory management — the key innovation that made continuous batching practical (full internals: [vLLM Deep Dive](../vllm_deep_dive/README.md)).
+- **Continuous batching**: Serve many users efficiently by dynamically adding/removing requests from batches (decoding mechanics: [Inference & Decoding](../inference_and_decoding/README.md)).
 - **Kernel fusion**: Custom CUDA kernels that fuse multiple operations (avoiding HBM round-trips).
-- **Quantization support**: INT4/INT8/FP8 to reduce memory bandwidth requirements.
+- **Quantization support**: INT4/INT8/FP8 to reduce memory bandwidth requirements (format tradeoffs: [Optimization & Quantization](../optimization_and_quantization/README.md)).
 - **OpenAI-compatible API**: Most engines expose `/v1/completions` and `/v1/chat/completions` endpoints — drop-in replacement for OpenAI SDK.
 
 ---
@@ -220,27 +220,34 @@ docker run --gpus all \
 ## 5. Architecture Diagrams
 
 ### vLLM Serving Architecture
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    API(["HTTP API\n/v1/chat/completions"])
+    RH["Request Handler"]
+    SCH["Scheduler\ncontinuous batching logic\nPagedAttention KV manager"]
+    EXE["Model Executor\nGPUs running forward passes\ncustom CUDA kernels"]
+    SAMP["Token Sampler\ntemperature · top-p · top-k"]
+    SSE(["Streaming Response\nServer-Sent Events → client"])
+
+    API --> RH --> SCH --> EXE --> SAMP --> SSE
+    SAMP -.->|"unfinished sequences re-enter\nnext decode iteration"| SCH
+
+    class API,SSE io
+    class RH req
+    class SCH mathOp
+    class EXE base
+    class SAMP train
 ```
-                    HTTP API (/v1/chat/completions)
-                              |
-                    [Request Handler]
-                              |
-              ┌───────────────┼───────────────┐
-              |          [Scheduler]          |
-              |    Continuous batching logic  |
-              |    PagedAttention KV manager  |
-              └───────────────┬───────────────┘
-                              |
-                    [Model Executor]
-                    GPU(s) running forward passes
-                    Custom CUDA kernels
-                              |
-                    [Token Sampler]
-                    Temperature, top-p, top-k
-                              |
-                    [Streaming Response]
-                    Server-Sent Events → client
-```
+
+The dotted loop is the heart of continuous batching: after every decode step, finished sequences stream out and unfinished ones re-enter the scheduler, which back-fills freed KV pages with queued requests — GPU slots never sit idle waiting for the slowest request in a batch.
 
 ### Engine Selection Decision Tree
 
@@ -429,17 +436,23 @@ Fix options:
 **Q: What is vLLM and what makes it efficient?**
 A: vLLM is an open-source LLM inference engine known for two key innovations: (1) PagedAttention — manages KV cache like OS virtual memory, using fixed-size pages to eliminate fragmentation and enable near-zero waste; (2) Continuous batching — dynamically adds/removes requests from batches at each step, so fast requests complete quickly and slow ones don't hold GPU slots. Together these give 10-24× higher throughput than naive HuggingFace inference.
 
+**Q: What is continuous batching and how does it differ from static batching?**
+A: Continuous batching (iteration-level scheduling) admits new requests and retires finished ones at every decode step, whereas static batching runs a fixed batch until the longest sequence completes. The mechanism matters because output lengths are wildly variable: in a static batch of 32, one 2,000-token generation holds hostage 31 slots whose outputs finished at 100 tokens, collapsing effective GPU utilization; continuous batching returns each finished sequence immediately and slots a queued request into the freed KV pages at the next iteration. This scheduling change — not faster kernels — accounts for most of the 10-24× gap versus naive `model.generate()`. Gotcha to state in interviews: continuous batching raises aggregate throughput but does not speed up a single isolated request — batch size 1 sees no benefit.
+
+**Q: Why can a vLLM server OOM or refuse to start before serving a single request?**
+A: Because vLLM preallocates GPU memory at startup by design: it claims `gpu_memory_utilization` (default 0.9) of the card, loads weights, then runs a profiling pass and reserves everything left over as KV-cache pages sized to `max_model_len`. If `max_model_len` defaults to the model's full training context (128K for many modern models), the profiler may find there is not enough memory for even one maximum-length sequence and abort — or leave so few KV pages that requests queue endlessly. Fix: set `--max-model-len` to your actual max input + output (e.g., 8192) and start at `--gpu-memory-utilization 0.85` to leave headroom for CUDA graphs and NCCL buffers. Corollary gotcha: near-100% GPU memory on an idle vLLM server is normal preallocation, not a leak.
+
 **Q: When would you use llama.cpp vs vLLM?**
 A: llama.cpp is designed for CPU and consumer-grade GPU inference — it runs quantized GGUF models on MacBooks, gaming PCs, and even Raspberry Pi. It prioritizes low memory usage and broad hardware support. vLLM is designed for data center GPU (A100, H100) serving with many concurrent users — it prioritizes maximum throughput and efficient GPU utilization. Use llama.cpp for local, edge, or privacy-sensitive deployments; use vLLM for cloud production serving.
 
 **Q: What is the OpenAI-compatible API and why does it matter?**
 A: Most inference engines expose endpoints like `POST /v1/chat/completions` and `POST /v1/completions` with request/response formats identical to OpenAI's API. This means any application using the OpenAI SDK can switch from the OpenAI API to a self-hosted model by just changing the base_url. It matters because it eliminates vendor lock-in — you can run GPT-4-equivalent open models without changing application code.
 
-**Q: What is RadixAttention in SGLang?**
-A: RadixAttention stores KV cache in a radix tree (trie) indexed by the token sequence. When multiple requests share the same prefix (e.g., the same system prompt), SGLang reuses the already-computed KV cache blocks for that prefix — no recomputation. For a chat application where all 1000 users share a system prompt, this means computing the system prompt KV cache once and reusing it across all users, dramatically reducing prefill cost and TTFT.
-
 **Q: How does vLLM compare to TensorRT-LLM and when should you choose each?**
 vLLM is the best general-purpose open-source inference engine, while TensorRT-LLM offers higher peak performance on NVIDIA GPUs at the cost of more complex setup. vLLM advantages: easier setup (pip install + one command), model support (HuggingFace model hub compatibility), LoRA serving, active community, platform-agnostic. TensorRT-LLM advantages: 20-40% higher throughput on NVIDIA GPUs through kernel fusion, custom CUDA kernels, and FP8 optimization on H100s; better for production workloads with stable model configurations. Choose vLLM when: rapid iteration, multi-model serving, LoRA adapters, or non-NVIDIA hardware. Choose TensorRT-LLM when: maximum throughput on fixed NVIDIA hardware, latency-critical applications, and you have ML infrastructure engineers to handle the compilation pipeline. TensorRT-LLM requires compiling models into TensorRT engines (30-60 minutes per model), making model swaps slower.
+
+**Q: What are TTFT and TPOT, and which engine mechanisms improve each?**
+A: TTFT (time to first token) is queueing plus prefill — one compute-bound pass over the whole prompt; TPOT (time per output token, also called inter-token latency) is decode — a memory-bandwidth-bound pass per generated token. The two respond to different levers: prefix caching (vLLM `--enable-prefix-caching`, SGLang RadixAttention) and chunked prefill mainly cut TTFT — a cached 2,000-token system prompt removes hundreds of milliseconds of prompt computation; weight quantization (AWQ/INT4) and speculative decoding mainly cut TPOT, because decode time scales with bytes streamed from HBM per token, not FLOPs. When someone reports "the engine is slow," split the complaint into TTFT vs TPOT first — the fixes barely overlap, and optimizing the wrong phase wastes a sprint.
 
 **Q: How does llama.cpp handle quantization and what quality tradeoffs exist at different quantization levels?**
 llama.cpp supports multiple quantization formats: Q8_0 (8-bit, ~1% quality loss), Q5_K_M (5-bit mixed, ~2-3% loss), Q4_K_M (4-bit mixed, ~3-5% loss), Q3_K_M (3-bit, ~5-10% loss), Q2_K (2-bit, ~15-20% loss). The "K" variants use k-quant, which allocates more bits to important layers (attention) and fewer to less important ones (feed-forward). For a 7B model: FP16 = 14GB, Q8_0 = 7GB, Q4_K_M = 4GB, Q2_K = 2.5GB. Quality tradeoffs: Q4_K_M is the sweet spot for most consumer hardware — a 70B model in Q4_K_M (40GB) fits on an M2 Max with 64GB RAM and produces near-FP16 quality for conversational tasks. Below Q4, quality degrades noticeably on reasoning-heavy tasks (math, coding). llama.cpp runs on CPU (AVX2/AVX512), Apple Metal, and CUDA, making it the go-to for consumer hardware and edge deployment. For production servers, vLLM or TensorRT-LLM are preferred because they handle batching and concurrency better.
@@ -450,8 +463,17 @@ SGLang's radix attention uses a radix tree (prefix tree) to cache and reuse KV c
 **Q: How do you choose between cloud inference (vLLM/TRT-LLM) and edge inference (llama.cpp/Ollama)?**
 Cloud inference engines (vLLM, TensorRT-LLM, TGI) are designed for multi-user serving with high concurrency, while edge engines (llama.cpp, Ollama, MLC-LLM) are optimized for single-user, low-resource environments. Decision matrix: (1) Concurrency >1 user — cloud engines (edge engines serialize requests); (2) Hardware — NVIDIA GPUs — vLLM/TRT-LLM; Apple Silicon — llama.cpp/MLX; CPU only — llama.cpp; (3) Model size — >13B parameters — cloud GPUs (edge devices struggle); 1B-7B — edge viable; (4) Latency requirements — <100ms TTFT — cloud with GPU; <1s acceptable — edge; (5) Privacy — data cannot leave device — edge only. Ollama wraps llama.cpp with a user-friendly API and model management, making it ideal for developer machines and prototyping. For mobile deployment: use MLC-LLM (Android/iOS) or ONNX Runtime with quantized models. Production pattern: use cloud inference for real-time features, edge inference for offline-capable features.
 
+**Q: When do you use tensor parallelism vs pipeline parallelism to serve a model too big for one GPU?**
+A: Tensor parallelism (TP) splits every weight matrix across GPUs and all-reduces activations inside every layer, so it needs NVLink-class bandwidth (900 GB/s per GPU on H100 SXM) and must stay within one node — `--tensor-parallel-size` up to 8. Pipeline parallelism (PP) splits the model by layers into stages that pass one activation tensor per boundary, tolerating inter-node links (InfiniBand at ~50 GB/s per NIC) — `--pipeline-parallel-size` across nodes. The classic production mistake is TP spanning nodes after a topology change: every layer's all-reduce crosses the slow fabric and throughput drops 5-10×, while "GPU utilization" still looks high. Rule: TP inside the NVLink domain until the model fits, then PP or independent replicas beyond it.
+
 **Q: What is the role of CUDA graphs in LLM inference and when should you disable them?**
 CUDA graphs capture a sequence of GPU operations into a replayable graph, eliminating CPU launch overhead for repeated operations. In LLM inference, the decode phase (generating one token at a time) is identical for each step — same kernel launches, same memory patterns — making it ideal for CUDA graphs. vLLM captures CUDA graphs for common batch sizes, reducing per-token CPU overhead from ~1ms to <0.1ms. This matters because decode is memory-bound, and CPU overhead can become the bottleneck at high throughput. When to disable (--enforce-eager in vLLM): (1) debugging — CUDA graphs make error messages unhelpful; (2) variable-shape operations — dynamic batch sizes or sequence lengths cause graph cache misses; (3) memory pressure — CUDA graphs pre-allocate memory for each captured batch size; (4) unsupported operations — some custom attention kernels do not work with graph capture. In production, always enable CUDA graphs unless actively debugging. The v1 architecture in vLLM improves CUDA graph flexibility with more efficient capture strategies.
+
+**Q: What is chunked prefill and what problem does it solve?**
+A: Chunked prefill splits a long prompt's prefill into fixed-size chunks (typically 512-2,048 tokens) that are scheduled alongside ongoing decode iterations instead of monopolizing the GPU for one long pass. Without it, a 32K-token prompt arriving at a busy server stalls every in-flight decode for the entire prefill — other users see a multi-second inter-token latency spike, the classic "someone pasted a document and chat froze for everyone" incident. With chunking, decode steps interleave between prompt chunks: the long request's TTFT grows slightly while everyone else's TPOT stays flat. It is enabled by default in recent vLLM versions; tune `max_num_batched_tokens` to trade the new request's TTFT against fleet-wide inter-token latency stability.
+
+**Q: How does vLLM's automatic prefix caching differ from SGLang's RadixAttention?**
+A: Both reuse the KV cache of shared prompt prefixes, but at different granularity. vLLM's automatic prefix caching hashes fixed-size KV blocks (16 tokens by default) and reuses exact block-aligned matches; SGLang's RadixAttention maintains a token-level radix tree that matches arbitrary-length shared prefixes across requests and across branches of structured generation. For a single common system prompt, both deliver similar wins. For tree-shaped workloads — few-shot prompt variants, multi-branch JSON filling, multi-turn chats where each turn extends a shared prefix — the radix tree matches more aggressively, which is where SGLang's 2-5× advantage comes from. If your traffic is flat single-turn requests with unique prompts, expect near-parity; benchmark your actual prefix-share rate before switching engines.
 
 **Q: How do inference engines handle model loading and what are the optimization strategies?**
 Model loading (downloading weights and transferring to GPU memory) takes 1-10 minutes for large models, creating cold-start latency. Optimization strategies: (1) tensor parallelism loading — load shards in parallel across GPUs rather than sequentially (2-4x faster); (2) memory-mapped loading — mmap the model file and let the OS handle page-level loading (avoids full copy into CPU RAM first); (3) safetensors format — random-access tensor loading without deserializing the entire file (faster than PyTorch .bin format); (4) model caching — keep models in CPU RAM or on fast NVMe for quick reload; (5) pre-warming — load models during deployment before accepting traffic. vLLM loads a 7B model in ~30 seconds on NVMe SSD, 70B in ~3 minutes. For serverless inference (Lambda, Modal), cold start is the primary latency concern — keep instances warm or use shared model caches. Kubernetes strategy: use initContainers to download models from S3/GCS to a local PVC, then the inference container mmaps from local storage.
@@ -471,12 +493,12 @@ Model loading (downloading weights and transferring to GPU memory) takes 1-10 mi
 
 ## 14. Case Study: Migrating from OpenAI API to Self-Hosted vLLM
 
-**Problem:** SaaS startup spending $50K/month on OpenAI API for their writing assistant. Want to reduce costs and eliminate vendor dependency.
+**Problem:** SaaS startup spending ~$36K/month on OpenAI API for their writing assistant — historically built on the GPT-4-class endpoint. Want to reduce costs and eliminate vendor dependency.
 
 **Assessment:**
 - Traffic: 10M tokens/day input, 15M tokens/day output
 - Latency requirement: TTFT < 1s, TPOT < 50ms
-- Quality requirement: ~GPT-3.5-turbo quality (not GPT-4)
+- Quality requirement: blind A/B on real writing tasks showed ~GPT-3.5-turbo quality suffices — the GPT-4-class endpoint was overkill for this workload
 - Privacy: no PII in prompts
 
 **Model choice:** Mistral 7B Instruct → meets quality bar for writing tasks
@@ -496,10 +518,12 @@ vLLM with:
 
 **Cost comparison:**
 ```
-OpenAI (gpt-3.5-turbo):
-  10M input × $0.001/1K = $10/day
-  15M output × $0.002/1K = $30/day
-  Total: $40/day = $1200/month
+Current OpenAI bill (GPT-4-class pricing, $0.03/$0.06 per 1K):
+  10M input  × $0.03/1K = $300/day
+  15M output × $0.06/1K = $900/day
+  Total: $1,200/day = $36,000/month
+  (gpt-3.5-turbo pricing would be only ~$40/day — but the product was
+   built on the GPT-4-class endpoint, which is what the bill reflects)
 
 Self-hosted vLLM:
   4× A100 at $12/hr × 24hr = $1152/day
@@ -514,7 +538,9 @@ Still more? Use fewer GPUs with better utilization:
   Add 1 standby = $5,760/month total
 
 Final: $5,760/month vs $36,000/month → 84% cost reduction
-Quality: Acceptable (7B Mistral vs GPT-3.5-turbo)
+Quality: Acceptable — Mistral 7B matched the ~GPT-3.5-turbo bar the A/B set;
+         the delta vs the old GPT-4-class endpoint was invisible for these
+         writing tasks (that endpoint was the overkill being paid for)
 ```
 
 ---

@@ -6,7 +6,7 @@
 
 The MCP ecosystem has grown from a handful of reference servers (filesystem, github) at launch (late 2024) to 3000+ servers across multiple registries by mid-2025. This deep-dive covers the major registries (Smithery, MCP Hub, Anthropic's catalog), the official "anthropic/mcp-servers" reference implementations, the most-popular community servers, installation patterns (Claude Desktop config, Cursor config, programmatic), versioning conventions, and the proposed signed-servers extension.
 
-For developers building agent systems, the ecosystem question is two-sided: which existing servers to use (saves you from writing wrappers around every API), and how to publish your own server (so others can use it). Understanding the registry landscape and conventions is key to both.
+For developers building agent systems, the ecosystem question is two-sided: which existing servers to use (saves you from writing wrappers around every API), and how to publish your own server (so others can use it — see [MCP Server Building](mcp_server_building.md)). Understanding the registry landscape and conventions is key to both.
 
 ---
 
@@ -16,7 +16,7 @@ For developers building agent systems, the ecosystem question is two-sided: whic
 
 **Mental model**: An MCP server is a package. You install it (or configure your client to spawn it). It exposes tools, resources, prompts. The registry is the directory you browse to find new servers. Smithery is the leading registry; Anthropic maintains an "official" servers list; community catalogs exist.
 
-**Why it matters**: Reusing community servers (rather than writing custom integrations) saves enormous engineering time. The Slack MCP server, Notion MCP server, GitHub MCP server are all already-written, maintained, and battle-tested. The cost is your config gets longer and security review is essential.
+**Why it matters**: Reusing community servers (rather than writing custom integrations) saves enormous engineering time. The Slack MCP server, Notion MCP server, GitHub MCP server are all already-written, maintained, and battle-tested. The cost is your config gets longer and security review is essential (see [MCP Security](mcp_security.md) for the full threat model).
 
 **Key insight**: The ecosystem is in a Wild West phase circa 2025 — many useful servers, many low-quality or abandoned ones, some malicious. Treat MCP server installation with the same care as installing native software: trust the publisher, pin versions, monitor for changes.
 
@@ -66,7 +66,7 @@ Ecosystem Topology
 ===================
 
   Publishers           Registries              Clients
-  
+
   Anthropic ---+
                |
   Microsoft ---+
@@ -75,7 +75,7 @@ Ecosystem Topology
   individuals  |    GitHub awesome lists       Cursor
                |          |                    Cline
   Enterprises -+          |                    Custom agents
-                          |                    
+                          |
                           v
                     Install per client config
 
@@ -98,22 +98,22 @@ Common Servers Categorization
 
   File/Database:
     filesystem, sqlite, postgres, mongodb, redis
-  
+
   Code/Dev:
     github, gitlab, git, sequential-thinking
-  
+
   Communication:
     slack, discord, telegram, email
-  
+
   Productivity:
     notion, linear, jira, asana, todoist
-  
+
   Knowledge:
     brave-search, perplexity, exa, fetch
-  
+
   Cloud:
     aws, gcp, cloudflare, vercel, fly
-  
+
   Specialized:
     puppeteer/playwright (browser), code interpreter,
     image generation, voice synthesis

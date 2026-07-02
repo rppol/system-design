@@ -136,34 +136,27 @@ Prompt Registry Architecture
   | prompt = registry.get("cs-system", env="prod")  |
   | response = llm.call(prompt=prompt, user_msg=..)  |
   +--------------------------------------------------+
-
-
-Prompt CI/CD Pipeline
-======================
-
-  git push (prompt file changed)
-       |
-       v
-  [Build] render templates, validate JSON schema
-       |
-       v
-  [Test] eval on golden_dataset (100-500 examples)
-         LLM-as-judge scores each output
-         FAIL if score < threshold
-       |
-       v
-  [Stage] deploy to staging alias
-          run smoke tests (5-10 live examples)
-       |
-       v
-  [Promote] move "stable" alias (manual gate or auto)
-       |
-       v
-  [Monitor] production quality metrics, alert on drop
-       |
-       v
-  [Rollback] revert alias to previous version if alert fires
 ```
+
+**Prompt CI/CD Pipeline**
+
+```mermaid
+stateDiagram-v2
+    [*] --> Build: git push (prompt file changed)
+    Build --> Test: render templates + validate JSON schema
+    Test --> Staging: eval passes on golden dataset (100-500 examples)
+    Test --> Failed: LLM-judge score below threshold
+    Failed --> [*]: CI fails, version never promoted
+    Staging --> Stable: smoke tests pass (5-10 live examples) + manual gate or auto
+    Stable --> Monitoring: production quality metrics tracked
+    Monitoring --> Stable: quality holds
+    Monitoring --> RolledBack: alert fires on quality drop
+    RolledBack --> Stable: alias reverted to previous version
+```
+
+A prompt version moves through the same gated lifecycle as a code deploy: eval-gated CI blocks a
+regressing version before staging, and the monitor-plus-rollback loop means a bad promotion is
+reverted by moving the stable alias back — never by editing the prompt in place.
 
 ---
 
@@ -338,19 +331,21 @@ regardless of perceived impact.
 
 **Pitfall 3 — Prompt injection via template variables.** F-string concatenation with user-supplied
 content allows attackers to inject instructions. Fix: use parameterized templates with sanitized
-variable slots, treat prompt variables as untrusted input.
+variable slots, treat prompt variables as untrusted input. Full attack taxonomy in
+[LLM Security](../llm_security/README.md).
 
 **Pitfall 4 — Over-indexing on offline eval.** Golden dataset passes but production quality drops
 because the dataset does not represent the real distribution. Fix: shadow-mode online eval with
-LLM-as-judge on production samples; alert on sliding-window score drop.
+LLM-as-judge on production samples; alert on sliding-window score drop (monitoring patterns in
+[LLM Observability and Monitoring](../llm_observability_and_monitoring/README.md)).
 
 **Pitfall 5 — One registry per microservice.** Each team builds their own. Impossible to enforce
 org-wide policy (no PII in prompts, usage cost tracking). Fix: org-wide registry with RBAC;
 services are tenants, not owners.
 
 **Pitfall 6 — Prompt bloat.** System prompts grow to 2,000+ tokens because nothing is ever
-removed. At 1M requests/day, 1,000 extra tokens at GPT-4o pricing costs ~$912/year in unnecessary
-input tokens. Fix: quarterly prompt audits, token-count tracking in the registry, remove any
+removed. At 1M requests/day, 1,000 extra tokens is 1B extra input tokens per day — ~$2,500/day
+(~$912K/year) at GPT-4o's $2.50/1M input pricing. Fix: quarterly prompt audits, token-count tracking in the registry, remove any
 instruction without a corresponding golden-dataset test.
 
 ---
@@ -367,7 +362,7 @@ instruction without a corresponding golden-dataset test.
 | Helicone | Observability + registry | Proxy-based, minimal integration, cost tracking |
 | BAML (Boundary) | Prompt language | Type-safe prompt templating with compiler |
 | Promptfoo | CLI eval | Open source, local eval harness, PR comments |
-| DSPy | Programmatic prompts | Auto-optimize prompts as programs, not strings |
+| [DSPy](../agentic_frameworks/dspy.md) | Programmatic prompts | Auto-optimize prompts as programs, not strings |
 | Git + pre-commit | Version control | Simple baseline, works with any registry pattern |
 
 ---
@@ -388,6 +383,23 @@ hash-addressed versions. Application code pins to an alias like
 touching the app. Semantic versioning (major.minor.patch) is human-readable but requires
 discipline; hash-based versioning guarantees immutability but makes debugging harder. Use named
 aliases for runtime references and hashes for audit logs.
+
+**Why is pointing production at the "latest" prompt version an anti-pattern?**
+Because "latest" turns every save into an unreviewed production deploy. The moment anyone creates
+a new version — including a work-in-progress draft — production behavior changes with no eval run,
+no promotion record, and no obvious rollback point; the regression surfaces as "the bot got worse
+yesterday" with nothing in the deploy log. Production must pin to a promoted alias (stable) that
+only moves through the eval-gated pipeline, while "latest" remains a dev-environment convenience.
+If the registry supports it, make prod aliases writable only by the CI service account.
+
+**A prompt version passed the golden-dataset eval but production quality dropped after promotion. What happened?**
+The golden dataset no longer represents production traffic — offline eval measures fit to
+yesterday's distribution. Common causes: the dataset was built at launch and queries have since
+drifted (new features, new user segments); the judge scores generic answer quality while the
+regression is in a business metric like structured-parse success or escalation rate; or the change
+interacts badly with an input pattern absent from the 100-500 examples. Defense: shadow-mode
+comparison on live traffic before the alias moves, plus a rolling production judge-score monitor
+with auto-rollback. Refresh the golden dataset quarterly by sampling real production queries.
 
 **How do you test a prompt before promoting it to production?**
 Build a golden dataset of representative input/expected-output pairs (100-500 examples), run the
@@ -413,6 +425,25 @@ assignment to avoid session-to-session variation. Measure downstream metrics (us
 escalation rate, structured parse success) not just LLM-as-judge score, because the judge may not
 capture business-relevant quality.
 
+**How do you make LLM-as-judge reliable enough to gate CI?**
+Pin everything and score relatively, not absolutely. Pin the judge model and version — an
+unpinned judge upgrade shifts every score and breaks thresholds overnight; constrain the output
+format (an integer 0-10, nothing else); and compare the candidate against the current production
+version on the same examples, because relative deltas cancel out judge bias that absolute
+thresholds absorb. Randomize A/B position whenever the judge compares two outputs (position bias
+is worth several points), and calibrate once against 50-100 human-labeled examples, requiring
+roughly 80%+ agreement before trusting the gate. Treat judge flakiness like test flakiness: re-run
+a failing eval once before blocking the pipeline.
+
+**What happens when the prompt registry is unavailable, and how do you design for it?**
+Fail open with the last-known-good version — never fail the user request. Each service keeps an
+in-process cache of compiled prompts fetched at startup and refreshed by promotion webhooks; on a
+registry outage the cache keeps serving stale-but-working prompts, and a fallback file bundled at
+build time (the last promoted version committed to the repo) covers cold starts. Registry downtime
+then degrades only the ability to promote, not the ability to serve. The anti-pattern is a
+synchronous registry fetch per request: it adds 10-50ms of latency and turns the registry into a
+single point of failure for every LLM feature.
+
 **How do you handle model upgrades with managed prompts?**
 Run the full golden-dataset eval on all registered prompts against the new model before migrating
 any production traffic. Create a fork of each prompt pinned to the new model version, evaluate it,
@@ -422,8 +453,9 @@ model name and version in the registry row alongside the prompt content.
 
 **What is prompt bloat and how do you manage it?**
 Prompt bloat occurs when system prompts accumulate instructions over time without any being
-removed — eventually reaching 2,000+ tokens. At 1 million daily requests and GPT-4o pricing,
-1,000 extra tokens costs $2.50/day ($912/year). Beyond cost, longer prompts reduce
+removed — eventually reaching 2,000+ tokens. At 1 million daily requests and GPT-4o pricing
+($2.50/1M input), 1,000 extra tokens means 1B extra tokens/day — $2,500/day, roughly $912K/year.
+Beyond cost, longer prompts reduce
 instruction-following reliability because attention is diluted. Manage it by: requiring every
 instruction to have a corresponding eval test; running quarterly prompt audits with token-count
 monitoring; flagging any prompt that exceeds a configured token budget in CI.
@@ -450,6 +482,15 @@ Standardize on one eval runner (e.g., Promptfoo in CI or a shared LLM-as-judge s
 teams call. Enforce a policy at the registry level: no promotion without a passing eval run ID.
 Instrument all production model calls with the prompt name and version so traces are correlated for
 debugging.
+
+**How do you version multi-part prompts — system prompt plus few-shot examples plus output schema?**
+Version the bundle atomically, not the parts. A prompt artifact should be the full assembly the
+model actually sees — system template, few-shot examples, output schema/format instructions, and
+the pinned model name — under one immutable version ID, because the parts interact: swapping a
+single example can change format compliance even when the system prompt is untouched. Store
+few-shot examples as structured data inside the version rather than inline strings, so they can be
+counted, diffed, and tested individually while still promoting as a unit. The eval suite must run
+against the assembled bundle, rendered exactly as production will render it.
 
 **What is the difference between prompt management and DSPy-style programmatic prompts?**
 Traditional prompt management treats the prompt as a human-authored string that is versioned and

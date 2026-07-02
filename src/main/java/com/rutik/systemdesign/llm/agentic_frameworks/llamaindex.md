@@ -6,7 +6,7 @@
 
 LlamaIndex (formerly GPT Index) is a data framework for building LLM applications over custom data. Its primary specialization is the RAG pipeline: loading documents from 150+ sources, chunking and indexing them, and enabling multiple retrieval strategies (vector search, keyword search, graph traversal, tree-based summarization). Beyond RAG, LlamaIndex provides data agents that can query structured databases, APIs, and document collections.
 
-Where LangChain is a general-purpose orchestration framework, LlamaIndex is depth-first on data access patterns. It has the most sophisticated retrieval abstractions in the ecosystem: sentence-window retrieval, recursive retrieval, auto-merging, sub-question decomposition, and query routing.
+Where [LangChain](langchain_and_lcel.md) is a general-purpose orchestration framework, LlamaIndex is depth-first on data access patterns. It has the most sophisticated retrieval abstractions in the ecosystem: sentence-window retrieval, recursive retrieval, auto-merging, sub-question decomposition, and query routing.
 
 **Current version**: llama-index-core 0.10.x (2024)
 **Production adoption signal**: Used by Replit (codebase indexing), Jerry (insurance Q&A), Vanna.AI (SQL generation), and thousands of enterprise RAG applications.
@@ -19,7 +19,7 @@ Where LangChain is a general-purpose orchestration framework, LlamaIndex is dept
 
 **Mental model**: A traditional database has tables, indexes (B-tree, hash), and query engines (SQL, full-text). LlamaIndex does the same for unstructured data: data connectors load documents, node parsers chunk them, various index types (VectorStore, Summary, Knowledge Graph) structure them differently, and query engines implement retrieval strategies. The "SQL" equivalent is a natural language query.
 
-**Why it matters**: Most RAG failures come from retrieval problems, not generation problems. LlamaIndex provides more retrieval strategies than any other framework. If your RAG quality is poor, LlamaIndex's advanced retrieval techniques often fix it without changing the LLM.
+**Why it matters**: Most RAG failures come from retrieval problems, not generation problems. LlamaIndex provides more retrieval strategies than any other framework (the framework-agnostic versions of these techniques are covered in [Advanced RAG](../advanced_rag/README.md)). If your RAG quality is poor, LlamaIndex's advanced retrieval techniques often fix it without changing the LLM.
 
 **Key insight**: LlamaIndex separates the indexing step (offline, expensive) from the retrieval step (online, fast). This separation is critical for production — you can re-index nightly without touching the query path, and optimize the query path without re-indexing.
 
@@ -78,45 +78,51 @@ Where LangChain is a general-purpose orchestration framework, LlamaIndex is dept
 
 ### LlamaIndex RAG Pipeline
 
-```
-INGESTION (offline)
-  Raw Files (PDF, DOCX, HTML, Notion, Confluence, GitHub, ...)
-       |
-  [Data Connectors / SimpleDirectoryReader]
-       |
-  List[Document]  (metadata-rich document objects)
-       |
-  [Node Parsers / Text Splitters]
-  (chunk_size=512, chunk_overlap=64 by default)
-       |
-  List[TextNode]  (with parent/prev/next relationships)
-       |
-  [Transformations: metadata extractors, embeddings]
-       |
-  [VectorStoreIndex.from_documents()]
-       |
-  Vector DB (Chroma / Pinecone / PGVector / ...)
-  + DocStore (optional, for parent doc retrieval)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-QUERY (online)
-  User Question: "What is the refund policy?"
-       |
-  [QueryEngine.query(question)]
-       |
-  [Retriever]
-  embed(question) → cosine search → top_k=4 TextNodes
-       |
-  [NodePostprocessors]
-  (reranker, similarity threshold filter, metadata filter)
-       |
-  Filtered TextNodes (top 3 after rerank)
-       |
-  [Response Synthesizer]
-  prompt = "Answer based on context:\n{context}\nQuestion: {question}"
-  LLM.generate(prompt)
-       |
-  Response + Source Nodes (citations)
+    subgraph ING["INGESTION (offline)"]
+        RAW(["Raw files\nPDF · DOCX · HTML · Notion · Confluence · GitHub"])
+        DC["Data Connectors / SimpleDirectoryReader"]
+        DOCS["Document objects\n(metadata-rich)"]
+        NP["Node Parsers / Text Splitters\nchunk_size=512 · chunk_overlap=64 by default"]
+        TN["TextNodes\nwith parent/prev/next relationships"]
+        TR["Transformations\nmetadata extractors · embeddings"]
+        IDX["VectorStoreIndex.from_documents()"]
+        RAW --> DC --> DOCS --> NP --> TN --> TR --> IDX
+    end
+
+    VDB[("Vector DB\nChroma / Pinecone / PGVector\n+ optional DocStore for parent retrieval")]
+    IDX --> VDB
+
+    subgraph QRY["QUERY (online)"]
+        Q(["User question:\n'What is the refund policy?'"])
+        QE["QueryEngine.query(question)"]
+        RET["Retriever\nembed(question) → cosine search → top_k=4 TextNodes"]
+        POST["NodePostprocessors\nreranker · similarity threshold · metadata filter"]
+        FN["Filtered TextNodes\n(top 3 after rerank)"]
+        SYN["Response Synthesizer\nprompt: 'Answer based on context...' → LLM.generate"]
+        ANS(["Response + Source Nodes (citations)"])
+        Q --> QE --> RET --> POST --> FN --> SYN --> ANS
+    end
+
+    VDB -.-> RET
+
+    class RAW,Q,ANS io
+    class DC,NP,TR,QE,POST mathOp
+    class DOCS,TN,FN req
+    class IDX,RET,SYN base
+    class VDB frozen
 ```
+
+The expensive path (parse → chunk → embed → index) runs offline; the query path only reads the index — retrieve top-K, postprocess/rerank down to the best 3, then synthesize a cited answer. This offline/online split is why you can re-index nightly without touching query latency.
 
 ### Sentence Window Retrieval
 
@@ -446,7 +452,7 @@ nodes = pipeline.run(documents=documents, show_progress=True)
 - Need to understand retrieval metrics and iterate on them
 
 **Do NOT use LlamaIndex when:**
-- Application is primarily about agent orchestration with many custom tools — LangGraph + LangChain is better
+- Application is primarily about agent orchestration with many custom tools — [LangGraph](langgraph.md) + LangChain is better
 - Team needs maximum control over retrieval — LlamaIndex abstractions can be hard to override
 - Very simple RAG (single document type, basic search) — direct vector DB + LangChain is simpler
 - Streaming responses are critical — LlamaIndex streaming is less polished than LangChain LCEL

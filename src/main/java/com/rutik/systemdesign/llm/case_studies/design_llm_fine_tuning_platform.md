@@ -640,9 +640,27 @@ Lineage tracking:
   Query: "What data was used to train the model currently in production?"
     model(production) -> training_job -> dataset -> raw upload file
     Full audit trail for compliance
+```
 
-Promotion workflow:
-  [evaluated] --manual approve--> [staging] --smoke test--> [production]
+```mermaid
+stateDiagram-v2
+    [*] --> Training: job scheduled
+    Training --> Evaluated: job completes + eval report written
+    Evaluated --> Staging: manual approve
+    Staging --> Production: smoke test + canary 5% to 25% to 50% to 100%
+    Production --> Production: auto-rollback to previous version (error rate >1% or p95 >2x baseline)
+    Evaluated --> Archived: never promoted (90 days)
+    Staging --> Archived: demoted (30 days)
+    Production --> Archived: replaced by newer version
+    Archived --> [*]: artifacts deleted after 1 year (metadata kept forever)
+```
+
+The model lifecycle is a one-way promotion ladder with human gates: staging entry requires manual
+approval, production entry requires a passing smoke test plus staged canary, and the previous
+production model is kept warm for 24 hours so rollback is an alias flip, not a redeploy.
+
+```
+Promotion workflow details:
 
   Staging:
     - Deploy to staging inference endpoint
@@ -657,9 +675,7 @@ Promotion workflow:
     - Automatic rollback if error rate >1% or latency p95 >2x baseline
     - Previous production model kept warm for 24 hours (instant rollback)
 
-Model lifecycle:
-  Training -> Evaluated -> Staging -> Production -> Archived
-  Retention:
+Retention by lifecycle stage:
     Production models: kept indefinitely
     Staging models: 30 days after demotion
     Evaluated models never promoted: 90 days

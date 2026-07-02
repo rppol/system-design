@@ -1072,29 +1072,26 @@ Cross-reference: See [OpenTelemetry for LLM Apps](./cross_cutting/opentelemetry_
 
 ## 11. System Evolution and Future Considerations
 
+```mermaid
+timeline
+    title Notion AI System Evolution
+    Phase 1 (Launch) : AI search over workspace content with permission filtering
+                     : Basic writing assist (summarize, continue, translate)
+                     : Single embedding model, single LLM
+                     : 5-minute indexing SLA
+    Phase 2 (6 months) : Structured database query translation
+                       : Linked page context in writing assist
+                       : Scope detection optimization
+                       : Semantic caching layer
+                       : Model routing (Haiku + GPT-4o)
+    Phase 3 (12 months) : Cross-workspace search for enterprise (per-workspace permission enforcement)
+                        : AI-generated page summaries (precomputed, surfaced in search results)
+                        : Workspace-specific fine-tuned embedding model (domain terminology)
+                        : Agentic workflows — write-back with confirmation ('Summarize all Q1 decisions')
+    Phase 4 (18+ months) : Multimodal — index image content (OCR + VLM captions)
+                         : Voice queries in mobile app
+                         : Proactive AI — suggest related content while writing
+                         : Graph-based retrieval — page link graph for interconnected content
 ```
-Phase 1 (Launch):
-  - AI search over workspace content with permission filtering
-  - Basic writing assist (summarize, continue, translate)
-  - Single embedding model, single LLM
-  - 5-minute indexing SLA
 
-Phase 2 (6 months):
-  - Structured database query translation
-  - Linked page context in writing assist
-  - Scope detection optimization
-  - Semantic caching layer
-  - Model routing (Haiku + GPT-4o)
-
-Phase 3 (12 months):
-  - Cross-workspace search for enterprise (per-workspace permission enforcement)
-  - AI-generated page summaries (precomputed, surfaced in search results)
-  - Workspace-specific fine-tuned embedding model (domain terminology)
-  - Agentic workflows: write-back with confirmation ("Summarize all Q1 decisions")
-
-Phase 4 (18+ months):
-  - Multimodal: index image content (OCR + VLM captions)
-  - Voice queries in mobile app
-  - Proactive AI: suggest related content while writing
-  - Graph-based retrieval: page link graph for interconnected content
-```
+Each phase builds on the previous one's security foundation: the permission model shipped in Phase 1 is the enforcement layer every later feature (cross-workspace search, agentic write-back, multimodal indexing) must route through.

@@ -46,7 +46,7 @@ Browserbase team. Three primitives: `page.act("click sign up")`, `page.extract({
 
 ### 4.3 Playwright MCP (Anthropic)
 
-Official MCP server exposing Playwright operations as tools. Standard tool interface; works with Claude, Claude Code, any MCP client. Lowest-friction integration for agent systems already on MCP.
+Official [MCP](../mcp_model_context_protocol/README.md) server exposing Playwright operations as tools. Standard tool interface; works with Claude, Claude Code, any MCP client. Lowest-friction integration for agent systems already on MCP.
 
 ### 4.4 Browserbase (Cloud Infrastructure)
 
@@ -58,7 +58,7 @@ Form-filling specialist. Combines vision + LLM for complex multi-step web workfl
 
 ### 4.6 Anthropic Computer Use
 
-Generic computer control (screenshot + click/type/key) — works on browsers but not browser-specialized. Lower accuracy on web tasks than DOM-aware approaches.
+Generic computer control (screenshot + click/type/key) — works on browsers but not browser-specialized. Lower accuracy on web tasks than DOM-aware approaches. See [Computer Use & Browser Agents](../agents_and_tool_use/computer_use_and_browser_agents.md) for the generic computer-use loop.
 
 ---
 

@@ -223,48 +223,54 @@ Key distinction:
 
 ### Model Quality vs. Cost Landscape
 
+```mermaid
+quadrantChart
+    title Model quality vs cost (approximate, 2025)
+    x-axis Low cost --> High cost
+    y-axis Lower quality --> Higher quality
+    quadrant-1 Premium frontier
+    quadrant-2 Best value
+    quadrant-3 Budget
+    quadrant-4 Overpriced
+    "o3": [0.92, 0.97]
+    "GPT-4o": [0.72, 0.90]
+    "Claude 3.5 Sonnet": [0.60, 0.90]
+    "Gemini 1.5 Pro": [0.50, 0.85]
+    "DeepSeek V3 self-hosted": [0.20, 0.82]
+    "LLaMA 3.1 70B self-hosted": [0.18, 0.72]
+    "Claude Haiku": [0.30, 0.55]
+    "GPT-4o-mini": [0.22, 0.55]
+    "Gemini Flash": [0.12, 0.50]
+    "LLaMA 3.1 8B self-hosted": [0.08, 0.38]
 ```
-Cost/Quality Tradeoff (approximate, 2025):
 
-Quality
-  ^
-  |   * o3
-  |     * GPT-4o     * Claude 3.5 Sonnet
-  |           * Gemini 1.5 Pro
-  |   * DeepSeek V3 (self-hosted)
-  |         * LLaMA 3.1 70B (self-hosted)
-  |   * GPT-4o-mini  * Claude Haiku
-  |         * Gemini Flash
-  |   * LLaMA 3.1 8B (self-hosted)
-  |
-  +---------------------------------> Cost per 1M tokens
-      Free  $0.15  $3   $15  $60
-     (self-hosted)
-```
+The upper-left quadrant (high quality, low cost) is where self-hosted open models like DeepSeek V3 and LLaMA 3.1 70B now sit; frontier API models (o3, GPT-4o) buy the top of the quality axis at 10-100x the cost per 1M tokens. quadrantChart normalizes positions to 0-1, so calibrate the cost axis with these anchors (per 1M tokens, 2025): far left = free/self-hosted (infra cost only), ~0.1 = $0.15 (Gemini Flash), ~0.2-0.3 = $0.60-$3 (GPT-4o-mini, Haiku), ~0.6-0.7 = $15 (Sonnet, GPT-4o), far right = $60+ (o3).
 
 ### LLM Timeline (Key Milestones)
 
-```
-2017: Transformer architecture (Google, "Attention Is All You Need")
-2018: BERT (Google) — bidirectional pre-training breakthrough
-2019: GPT-2 (OpenAI) — 1.5B; first "dangerous to release" LLM
-2020: GPT-3 (OpenAI) — 175B; API-first; few-shot learning era begins
-2021: Codex (OpenAI) — code-specialized; powers Copilot
-2022: InstructGPT (OpenAI) — RLHF alignment; ChatGPT architecture basis
-2022: ChatGPT launch — 1M users in 5 days; LLMs go mainstream
-2023: GPT-4 (OpenAI) — multimodal; SOTA across benchmarks
-2023: LLaMA (Meta) — open weights; open-source LLM revolution
-2023: Claude (Anthropic) — Constitutional AI; strong safety
-2023: Mistral 7B — proves small models can punch above weight class
-2023: Llama 2 (Meta) — first commercially permissive open model
-2023: Gemini (Google) — multimodal from the start; 1M context
-2024: Mistral Mixtral 8x7B — MoE democratized
-2024: Claude 3.5 Sonnet — best coding; 200K context
-2024: LLaMA 3 (Meta) — 405B open; world-class 70B
-2024: o1 (OpenAI) — reasoning models paradigm
-2024: GPT-4o — native multimodal; real-time audio
-2025: DeepSeek-R1 — open-source reasoning; matches o1; trained for $5.5M
-2025: o3 (OpenAI) — superhuman math (AIME 99.3%), science (GPQA 87.7%)
+```mermaid
+timeline
+    title LLM Milestones (2017-2025)
+    2017 : Transformer architecture (Google, Attention Is All You Need)
+    2018 : BERT (Google) — bidirectional pre-training breakthrough
+    2019 : GPT-2 (OpenAI) — 1.5B, first dangerous-to-release LLM
+    2020 : GPT-3 (OpenAI) — 175B, API-first, few-shot era begins
+    2021 : Codex (OpenAI) — code-specialized, powers Copilot
+    2022 : InstructGPT (OpenAI) — RLHF alignment
+         : ChatGPT launch — 1M users in 5 days, LLMs go mainstream
+    2023 : GPT-4 (OpenAI) — multimodal, SOTA across benchmarks
+         : LLaMA (Meta) — open weights, open-source revolution
+         : Claude (Anthropic) — Constitutional AI
+         : Mistral 7B — small models punch above weight class
+         : Llama 2 (Meta) — first commercially permissive open model
+         : Gemini (Google) — multimodal, 1M context
+    2024 : Mixtral 8x7B (Mistral) — MoE democratized
+         : Claude 3.5 Sonnet — best coding, 200K context
+         : LLaMA 3 (Meta) — 405B open, world-class 70B
+         : o1 (OpenAI) — reasoning models paradigm
+         : GPT-4o — native multimodal, real-time audio
+    2025 : DeepSeek-R1 — open-source reasoning, matches o1, built on the $5.5M-trained V3 base
+         : o3 (OpenAI) — AIME 99.3%, GPQA 87.7%
 ```
 
 ### Model Selection Decision Tree
@@ -540,6 +546,12 @@ Mistral AI was founded in April 2023 by ex-Google DeepMind and Meta researchers.
 **How would you choose between OpenAI, Anthropic, and self-hosted models for a production application?**
 Decision factors are: (1) Volume — above 10M tokens/day, self-hosting becomes cost-competitive; (2) Privacy — regulated industries (HIPAA, GDPR) require self-hosting or verified vendor BAA; (3) Quality requirements — if GPT-4o or Claude 3.5 level quality cannot be matched by open models for your specific task, use API; (4) Latency — self-hosted is more predictable; (5) Development speed — API ships faster. Start with API, evaluate quality and cost, migrate specific workloads to self-hosted as volume grows. Use LiteLLM from the start so the migration is a config change.
 
+**When should you reach for a reasoning model (o1, o3, DeepSeek-R1) instead of a standard chat model?**
+Use a reasoning model only when the task requires multi-step deduction that standard models get wrong — competition math, hard coding, scientific problem solving, complex planning. Reasoning models spend hidden "thinking" tokens before answering, which is why o1 costs $15/$60 per 1M input/output tokens (10-30x a mid-tier model) and can take 10-60 seconds per response. For the majority of production traffic — classification, extraction, summarization, routine chat — they are pure waste: slower, more expensive, and no more accurate. The right pattern is routing: send hard/low-confidence queries to a reasoning model and everything else to a cheaper model, and note that open reasoning models (DeepSeek-R1 and its distilled 7B-70B variants) now let you self-host this capability instead of paying o1 rates.
+
+**How does benchmark contamination distort public leaderboards, and what do you do about it?**
+Contamination happens when benchmark questions (or close paraphrases) leak into a model's training data, so a high MMLU or HumanEval score partly reflects memorization rather than capability. Symptoms: a model tops a public benchmark but underperforms on your held-out task, or scores drop sharply on a freshly released variant of the same benchmark (e.g., GSM8K vs the newer GSM1K). Because model builders scrape the web where these datasets live, contamination is pervasive and grows over time. The defenses are the same as the general rule: never trust a leaderboard number as a selection signal, build a private evaluation set from your own recent production data that could not have been in any pretraining corpus, and prefer benchmarks with rotating or held-out test sets. Treat public scores as a coarse filter, your domain eval as the decision.
+
 **What is the significance of DeepSeek-V3 being trained for $5.5M?**
 DeepSeek-V3 achieving near-GPT-4 quality for $5.5M training cost (vs. an estimated $100M+ for comparable models) demonstrated that the cost of frontier AI is dropping dramatically through algorithmic improvements alone. Implications: more players can train competitive models; US chip export restrictions are less effective than assumed since DeepSeek used older H800 chips efficiently; techniques such as FP8 training, MoE architecture, and multi-token prediction matter as much as raw compute budget; frontier AI may commoditize faster than assumed. The practical takeaway for system design is that assuming a cost moat around any specific model quality tier is strategically dangerous.
 
@@ -575,6 +587,9 @@ API cost is variable and zero-fixed: you pay per token with no infrastructure co
 
 **Why is "benchmark on your domain" the most important model selection advice?**
 Public benchmarks measure performance on standardized academic tasks (MMLU covers 57 subjects, HumanEval covers Python function completion) which do not match the distribution of any specific production use case. Two studies illustrate this: (1) a legal AI company found that a model ranked 4th on MMLU outperformed the #1 ranked model by 15% on their contract clause classification task because it was trained on more legal text; (2) a customer support team found that a smaller, cheaper model outperformed a frontier model on their routing classification task because the frontier model was over-calibrated to follow instructions rather than classify quickly. Selecting a model from benchmarks without domain validation routinely results in paying 5-10x more for worse task-specific performance. The minimum viable domain evaluation is 100-200 labeled examples from your production distribution, run against every serious candidate model before any commitment.
+
+**What is prompt caching and how much can it cut cost for repeated prefixes?**
+Prompt caching lets a provider store the model's internal state for a stable prompt prefix so repeated requests skip reprocessing it, billed at a steep discount. Anthropic charges cached input tokens at ~10% of the normal rate (a 90% saving on the cached portion) via `cache_control` breakpoints; OpenAI applies automatic caching that discounts cached input tokens ~50%. The prime candidates are large, unchanging prefixes reused across many calls: system prompts, few-shot example blocks, tool schemas, and long RAG context shared within a session. Because savings apply only to the cached prefix and only after the first (cache-writing) call, the architectural implication is to keep the stable content at the front of the prompt and put per-request text at the end — the opposite ordering silently defeats caching. For a workload with a 2,000-token shared system prompt, caching commonly cuts total input cost by half or more.
 
 ---
 

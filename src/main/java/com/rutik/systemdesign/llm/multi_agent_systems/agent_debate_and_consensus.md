@@ -159,14 +159,18 @@ temp=0.7  temp=0.7  temp=0.7  temp=0.7  temp=0.7
 
 ### Token Cost Growth per Architecture
 
+```mermaid
+xychart-beta
+    title "Approx token multiplier vs single call"
+    x-axis ["1 agent, 1 rd", "3 agents, 1 rd", "3 agents, 2 rds", "3 agents, 3 rds", "5 agents, 2 rds"]
+    y-axis "token multiplier (x)" 0 --> 22
+    bar [1, 3, 9, 18, 20]
 ```
-Agents  Rounds  Approx token multiplier (vs single call)
-  1       1            1x   (baseline)
-  3       1            3x   (majority vote)
-  3       2            9x   (round-robin: contexts grow each round)
-  3       3           18x   (diminishing accuracy returns after round 2)
-  5       2           20x   (rarely justified)
-```
+
+Cost climbs superlinearly with rounds because every agent re-reads all peers from the previous
+round: 1x baseline, 3x for majority vote (3 agents, no communication), 9x for 3-agent round-robin
+at 2 rounds, 18x at 3 rounds (where accuracy returns are already diminishing), and 20x for a
+5-agent 2-round setup that is rarely justified.
 
 ---
 
@@ -650,7 +654,7 @@ At 3 agents, 300 tokens per response, 3 rounds: the broken version accumulates 2
 
 ## 11. Technologies & Tools
 
-**LangGraph** — first-class support for multi-agent debate via StateGraph with conditional edges for convergence detection. Round state is passed through the graph's shared state object. Recommended for production deployments.
+**[LangGraph](../agentic_frameworks/langgraph.md)** — first-class support for multi-agent debate via StateGraph with conditional edges for convergence detection. Round state is passed through the graph's shared state object. Recommended for production deployments.
 
 **LangChain AgentExecutor** — can orchestrate debate via sequential chain with memory, but requires manual context management. Suitable for simpler 2-agent patterns.
 
@@ -658,11 +662,11 @@ At 3 agents, 300 tokens per response, 3 rounds: the broken version accumulates 2
 
 **OpenAI Assistants API** — threads can hold debate history natively, but each thread is one agent; requires N threads per debate and manual cross-thread context injection.
 
-**AutoGen (Microsoft)** — built-in group chat with round-robin and broadcast modes. `GroupChat` with `RoundRobinSpeakerSelection` implements debate directly. Most feature-complete out-of-the-box for multi-agent debate.
+**[AutoGen (Microsoft)](../agentic_frameworks/autogen.md)** — built-in group chat with round-robin and broadcast modes. `GroupChat` with `RoundRobinSpeakerSelection` implements debate directly. Most feature-complete out-of-the-box for multi-agent debate.
 
 **CrewAI** — sequential and hierarchical process modes. Hierarchical mode with a manager agent approximates the judge pattern. Less flexible than LangGraph for custom convergence logic.
 
-**DSPy** — `dspy.majority` module implements majority voting as a first-class primitive. Debate can be expressed as a custom `Module` chaining `dspy.Predict` calls.
+**[DSPy](../agentic_frameworks/dspy.md)** — `dspy.majority` module implements majority voting as a first-class primitive. Debate can be expressed as a custom `Module` chaining `dspy.Predict` calls.
 
 **Guidance / LMQL** — constrained generation to enforce `FINAL ANSWER:` format and extract answers without post-processing heuristics.
 

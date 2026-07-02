@@ -10,6 +10,8 @@ Swarm is an educational, synchronous, stateless library released as open source 
 
 Both frameworks solve the same problem: a single LLM context window is not the right place to handle every subtask. Routing specialised work to specialised agents keeps prompts short, tools focused, and behaviour predictable.
 
+This file covers the multi-agent handoff pattern itself; the framework-level Agents SDK deep dive (Runner internals, tracing, output_type) lives in [openai_agents_sdk.md](../agentic_frameworks/openai_agents_sdk.md).
+
 ---
 
 ## 2. Intuition
@@ -39,7 +41,7 @@ Key insight: Handoffs are just tool calls in disguise. The LLM produces a functi
 
 4. **Stateless turns (Swarm) vs persistent runs (Agents SDK).** Swarm requires the caller to maintain and pass message history on every call. The Agents SDK maintains a RunResult that accumulates the full conversation internally across turns.
 
-5. **Guardrails as cross-cutting concerns.** Input guardrails run before the LLM call; output guardrails run after. Either can raise a GuardrailTripwireTriggered exception to abort the run. This keeps safety logic out of agent instructions.
+5. **Guardrails as cross-cutting concerns.** Input guardrails run before the LLM call; output guardrails run after. Either can raise a GuardrailTripwireTriggered exception to abort the run. This keeps safety logic out of agent instructions. Guardrail design beyond this SDK (NeMo Guardrails, Llama Guard) is covered in [Guardrails & Content Safety](../guardrails_and_content_safety/README.md).
 
 6. **Routines encode business flows.** A routine is an ordered series of steps baked into an agent's instructions (e.g., "Step 1: greet. Step 2: qualify. Step 3: pitch. Step 4: close."). The LLM follows the routine like a script.
 
@@ -91,6 +93,8 @@ Runner.run is async. RunResult exposes `final_output`, `messages`, `last_agent`,
 | Hub and Spoke | Central orchestrator dispatches and receives returns | Research pipelines |
 | Escalation | Specialist hands back up to supervisor on failure | Complex dispute resolution |
 | Parallel (SDK only) | Runner spawns multiple agents concurrently | Report generation, data enrichment |
+
+Hub-and-spoke is the same topology as the [orchestrator-worker pattern](orchestrator_worker_pattern.md), which has its own deep dive covering task ledgers and result aggregation.
 
 ### 4.4 Routines
 
@@ -205,7 +209,8 @@ Delivered to caller
 ### 6.1 Swarm — Complete Customer Service Example
 
 ```python
-# pip install swarm (educational library, not production)
+# pip install git+https://github.com/openai/swarm.git (educational library, not production;
+# never published to PyPI — the "swarm" package on PyPI is unrelated)
 from swarm import Swarm, Agent
 
 client = Swarm()  # wraps openai.OpenAI()
@@ -481,7 +486,7 @@ PR arrives. Triage Agent determines language and scope. Style Agent checks forma
 | Guardrails | No | input_guardrail, output_guardrail |
 | Retry logic | No | Yes (configurable) |
 | Typed context | dict (untyped) | Generic[ContextType] dataclass |
-| Install | pip install swarm | pip install openai-agents |
+| Install | pip install git+https://github.com/openai/swarm.git | pip install openai-agents |
 | Max turns safeguard | No | max_turns param (default 10) |
 
 ### 8.2 Handoffs vs Tool Calls
@@ -654,7 +659,7 @@ async def lookup_account(ctx: RunContextWrapper[SupportContext]) -> str:
 | Tool / Library | Role | Notes |
 |----------------|------|-------|
 | openai-agents | Agents SDK core | `pip install openai-agents`; MIT license |
-| swarm | Educational handoff library | `pip install swarm`; no longer maintained |
+| swarm | Educational handoff library | `pip install git+https://github.com/openai/swarm.git` (not on PyPI); no longer maintained |
 | openai Python SDK | Underlying LLM calls | Both frameworks wrap openai.AsyncOpenAI |
 | asyncio | Async runtime | Required by Agents SDK |
 | httpx | Async HTTP in tools | Preferred over requests in async context |

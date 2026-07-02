@@ -187,78 +187,39 @@ Step 2: vLLM RadixAttention lookup
 
 ### Session Lifecycle State Machine
 
+```mermaid
+stateDiagram-v2
+    [*] --> INITIALIZING : user opens app
+    INITIALIZING : JWT auth, rate-limit check
+    INITIALIZING --> SAFETY_PRECHECK : first message
+    INITIALIZING --> MEMORY_RESTORE : returning user
+    SAFETY_PRECHECK : jailbreak gate
+    MEMORY_RESTORE : Redis load ~15ms, S3 fallback ~40ms
+    SAFETY_PRECHECK --> PROMPT_ASSEMBLY
+    MEMORY_RESTORE --> PROMPT_ASSEMBLY
+    PROMPT_ASSEMBLY : prefix + suffix build, prefix_hash RadixAttention lookup
+    PROMPT_ASSEMBLY --> GENERATING : cache hit
+    PROMPT_ASSEMBLY --> ENCODING_GEN : cache miss
+    GENERATING : suffix only, TTFT ~140ms
+    ENCODING_GEN : full prompt encode, TTFT ~280ms
+    GENERATING --> SAFETY_POSTCHECK
+    ENCODING_GEN --> SAFETY_POSTCHECK
+    SAFETY_POSTCHECK : LLamaGuard 2, crisis detection, COPPA gate
+    SAFETY_POSTCHECK --> STREAM : ALLOW
+    SAFETY_POSTCHECK --> REFUSAL : BLOCK / CRISIS
+    STREAM : SSE out
+    REFUSAL : refusal response or crisis handoff
+    STREAM --> MEMORY_PERSIST
+    MEMORY_PERSIST : async append message, non-blocking
+    MEMORY_PERSIST --> IDLE : await next user message
+    IDLE --> SAFETY_PRECHECK : next user message
+    IDLE --> SESSION_END : user closes app
+    SESSION_END --> SESSION_ARCHIVE
+    SESSION_ARCHIVE : compress full session (background job), update episodic memory
+    SESSION_ARCHIVE --> [*]
 ```
-                      User opens app
-                            |
-                            v
-                    +---------------+
-                    |  INITIALIZING  |  JWT auth, rate-limit check
-                    +---------------+
-                            |
-              +-------------+--------------+
-              |                            |
-              v                            v
-      [first message]              [returning user]
-              |                            |
-              v                            v
-    +------------------+       +----------------------+
-    |  SAFETY_PRECHECK |       |  MEMORY_RESTORE      |
-    |  jailbreak gate  |       |  Redis load (~15ms)  |
-    +------------------+       |  S3 fallback (~40ms) |
-              |                +----------------------+
-              |                            |
-              +-------------+--------------+
-                            |
-                            v
-                   +------------------+
-                   |  PROMPT_ASSEMBLY  |  prefix + suffix build
-                   |  prefix_hash      |  RadixAttention lookup
-                   +------------------+
-                            |
-                 +----------+----------+
-                 |                     |
-                 v                     v
-          [cache hit]            [cache miss]
-                 |                     |
-                 v                     v
-        +---------------+    +------------------+
-        |  GENERATING   |    |  ENCODING+GEN    |
-        |  suffix only  |    |  full prompt     |
-        |  TTFT ~140ms  |    |  TTFT ~280ms     |
-        +---------------+    +------------------+
-                 |                     |
-                 +----------+----------+
-                            |
-                            v
-                  +-------------------+
-                  |  SAFETY_POSTCHECK |  LLamaGuard 2
-                  |  crisis detection  |  COPPA gate
-                  +-------------------+
-                       |       |
-                   ALLOW     BLOCK/CRISIS
-                       |           |
-                       v           v
-              +----------+    +----------+
-              |  STREAM   |   | REFUSAL  |  or crisis handoff
-              |  SSE out  |   | response |
-              +----------+    +----------+
-                       |
-                       v
-              +------------------+
-              |  MEMORY_PERSIST  |  async: append message
-              |  (non-blocking)  |  compress if session_end
-              +------------------+
-                       |
-                       v
-                    IDLE (await next user message)
-                    or SESSION_END (user closes app)
-                             |
-                             v
-                    +------------------+
-                    |  SESSION_ARCHIVE  |  compress full session
-                    |  (background job) |  update episodic memory
-                    +------------------+
-```
+
+The two latency-critical forks are visible as branch points: MEMORY_RESTORE vs SAFETY_PRECHECK on entry (returning vs first message), and GENERATING (~140ms TTFT, prefix cache hit) vs ENCODING_GEN (~280ms, cache miss) after prompt assembly. Everything after STREAM is off the hot path — memory persistence and session archival are asynchronous.
 
 ### Data Flow Narrative
 

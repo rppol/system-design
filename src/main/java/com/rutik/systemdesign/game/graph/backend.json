@@ -345,15 +345,15 @@
    "lex": 0.1177
   },
   {
-   "a": "backend/backend_testing_strategies",
-   "b": "backend/observability_and_monitoring",
+   "a": "backend/async_and_concurrency_patterns",
+   "b": "backend/performance_profiling",
    "w": 0.1465,
    "links": 0,
    "lex": 0.1176
   },
   {
-   "a": "backend/async_and_concurrency_patterns",
-   "b": "backend/performance_profiling",
+   "a": "backend/backend_testing_strategies",
+   "b": "backend/observability_and_monitoring",
    "w": 0.1465,
    "links": 0,
    "lex": 0.1176
@@ -394,18 +394,18 @@
    "lex": 0.1148
   },
   {
-   "a": "backend/database_migrations",
-   "b": "backend/messaging_patterns",
-   "w": 0.1421,
-   "links": 0,
-   "lex": 0.1141
-  },
-  {
    "a": "backend/auth_and_authorization_systems",
    "b": "backend/rest_api_design",
    "w": 0.1421,
    "links": 0,
    "lex": 0.114
+  },
+  {
+   "a": "backend/database_migrations",
+   "b": "backend/messaging_patterns",
+   "w": 0.1421,
+   "links": 0,
+   "lex": 0.1141
   },
   {
    "a": "backend/database_internals_and_indexing",

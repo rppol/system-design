@@ -8,7 +8,7 @@ The orchestrator-worker pattern is a multi-agent architecture in which a central
 
 This pattern maps directly to how large software engineering teams operate: a tech lead (orchestrator) defines tickets and assigns them to engineers (workers) who specialize in backend, frontend, QA, or documentation. The tech lead integrates the pull requests into a coherent release.
 
-The key engineering insight is that a single LLM context window is a fixed resource. Breaking a 50,000-token research task into ten 5,000-token sub-tasks — each run by a focused worker with clean context — produces better output than cramming everything into one call. Anthropic's internal multi-agent research systems demonstrated this concretely: a task that took a single agent more than one hour was completed in under 15 minutes by an orchestrator with parallel workers, with higher factual accuracy.
+The key engineering insight is that a single LLM context window is a fixed resource. Breaking a 50,000-token research task into ten 5,000-token sub-tasks — each run by a focused worker with clean context — produces better output than cramming everything into one call. Anthropic's internal multi-agent research systems demonstrated this concretely: a task that took a single agent more than one hour was completed in under 15 minutes by an orchestrator with parallel workers, with higher factual accuracy. See [Subagents & Delegation](../agents_and_tool_use/subagents_and_delegation.md) for the single-agent-spawning-subagents variant of the same idea.
 
 ---
 
@@ -61,7 +61,7 @@ The top-level routing is deterministic code; within each branch, an LLM orchestr
 
 - **Parallel dispatch**: The orchestrator fires all workers simultaneously. Wall-clock time = slowest worker. Requires workers to be independent. Best for: research tasks, data enrichment, multi-section document generation.
 - **Sequential dispatch**: Worker N receives output from Worker N-1. Each worker's input depends on the prior worker's output. Best for: code generation (requirements → design → code → tests), where later stages build on earlier artifacts.
-- **Hybrid (DAG)**: Some workers are parallel; some are sequential. Model the task as a directed acyclic graph. LangGraph implements this natively.
+- **Hybrid (DAG)**: Some workers are parallel; some are sequential. Model the task as a directed acyclic graph. [LangGraph](../agentic_frameworks/langgraph.md) implements this natively.
 
 ---
 
@@ -165,6 +165,8 @@ T002    | summarize paper 1    | summary   | COMPLETED | {...}
 T003    | summarize paper 2    | summary   | FAILED    | null
 T004    | merge summaries      | writer    | PENDING   | null
 ```
+
+The task-ledger design is also the core of [Magentic-One](magentic_one_and_autogen_v04.md)'s dual-loop orchestrator (task ledger for the plan, progress ledger for per-step tracking).
 
 ---
 

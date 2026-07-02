@@ -430,10 +430,10 @@ SLA: 99.9% = 8.7 hours downtime/year
 
 **Scaling bottleneck:** The GPU inference cluster is the primary scaling constraint. Unlike web servers that scale horizontally trivially, adding more GPU capacity costs $15-30K per A100 GPU.
 
-**Key insight — context window as a resource:** The KV cache for a 128K context uses 2GB+ of GPU memory per request. This is why PagedAttention is critical — naive allocation would mean each A100 can only serve ~10-20 concurrent long-context requests.
+**Key insight — context window as a resource:** The KV cache for a 128K context uses 2GB+ of GPU memory per request. This is why [PagedAttention](../vllm_deep_dive/README.md) is critical — naive allocation would mean each A100 can only serve ~10-20 concurrent long-context requests.
 
 **Trade-off question: Why not cache all responses?**
-Conversations are personalized and contextual — the same question "what should I do next?" has completely different answers depending on conversation history. Only context-independent queries (factual lookups) are cacheable. Semantic caching applies only to a subset.
+Conversations are personalized and contextual — the same question "what should I do next?" has completely different answers depending on conversation history. Only context-independent queries (factual lookups) are cacheable. [Semantic caching](../llm_caching/README.md) applies only to a subset.
 
 **Follow-up: How would you handle a 10× traffic spike?**
 Short term: queue requests, lower context limits, route more to GPT-3.5. Long term: predictive auto-scaling (expand GPU cluster 30 minutes before expected peak based on historical patterns).
@@ -579,7 +579,7 @@ During a 45-minute GPT-4 API degradation, the routing system correctly failed ov
 
 **How would you design the conversation branching feature (editing a previous message and regenerating) at scale?** Store conversation as a tree, not a list. Each node has: `{id, parent_id, role, content, model_version, timestamp}`. Editing message at node N creates a new child of N's parent, not a modification of N. The UI displays the active path from root to latest node; branching creates a new path from the edited point. At scale: store the full tree in a document database (DynamoDB, MongoDB) with path indexing. KV cache cannot be reused for branched conversations (different token sequence from branch point forward), so regeneration always requires full re-prefill from the branch point. Cost implication: branches are 1.5-2x more expensive than linear continuations because KV cache hit rate drops to 0% at the branch point.
 
-**How do you implement abuse detection for ChatGPT at 100M+ users without inspecting every message?** Tiered detection: (1) input classifier (real-time, <10ms): small fine-tuned model on all messages, blocks obvious violations; (2) output safety scanner (real-time, parallel with streaming): Llama Guard or similar classifier on generated text; (3) session-level scoring (async, <1 minute): aggregate behavior signals (request rate, topic distribution, jailbreak attempt patterns); (4) account-level risk scoring (daily batch): ML model on 30-day behavioral features, flags high-risk accounts for manual review queue. Never rely on a single classifier — each layer catches different failure modes. Rate limiting (100 messages/3 hours for free users) is itself an abuse mitigation; it makes automated attacks economically infeasible.
+**How do you implement abuse detection for ChatGPT at 100M+ users without inspecting every message?** Tiered detection: (1) input classifier (real-time, <10ms): small fine-tuned model on all messages, blocks obvious violations; (2) output safety scanner (real-time, parallel with streaming): Llama Guard or similar classifier on generated text; (3) session-level scoring (async, <1 minute): aggregate behavior signals (request rate, topic distribution, jailbreak attempt patterns); (4) account-level risk scoring (daily batch): ML model on 30-day behavioral features, flags high-risk accounts for manual review queue. Never rely on a single classifier — each layer catches different failure modes. Rate limiting (100 messages/3 hours for free users) is itself an abuse mitigation; it makes automated attacks economically infeasible. Model releases themselves are gated by an automated adversarial suite — see [Red Team Eval Harness](cross_cutting/red_team_eval_harness.md).
 
 **What data consistency guarantees does ChatGPT need for conversation history, and which database fits that SLA?** ChatGPT requires: (1) conversations visible to the user immediately after creation (read-after-write consistency per user); (2) no message loss on write (durable storage, not eventual consistency); (3) ordered retrieval by creation time within a conversation (consistent sort order). These requirements fit a single-region relational database with row-level locking (PostgreSQL or CockroachDB) for the conversation metadata and message index, with conversation content stored in object storage (S3). Global users require region-aware routing — each user's conversations are pinned to their nearest region (EU users on EU PostgreSQL cluster) to meet read-after-write consistency within acceptable latency.
 
@@ -637,7 +637,7 @@ KV cache sizing (for 100M concurrent 8k-token conversations):
   fp16 KV per token per layer: 2 (K+V) × 128 (head dim) × 96 (layers) × 2 bytes = 49,152 bytes
   Per 8k-token conversation: 8,192 × 49,152 bytes = 393 MB
   100M concurrent: 393 MB × 100M = 38.7 PB of KV cache
-  Reality: not all conversations are active simultaneously; 
+  Reality: not all conversations are active simultaneously;
   active concurrency ~0.1% = 100,000 conversations → 38.7 TB — still requires flash storage KV cache
 ```
 

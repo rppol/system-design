@@ -4,7 +4,7 @@
 
 ## 1. Concept Overview
 
-LiteLLM (BerriAI, open-source 2023, Y Combinator W23) is a unified interface to 100+ LLM providers. Its core value: write code once against an OpenAI-compatible API, swap between Anthropic, Google, Azure, AWS Bedrock, Groq, Cohere, local Ollama, and more by configuration. The proxy server variant (LiteLLM Proxy) adds production features critical for enterprise multi-team LLM deployments: virtual API keys with per-team budgets, automatic provider failover, model routing, cost tracking, rate limit handling, semantic caching, and Prometheus/Datadog observability.
+LiteLLM (BerriAI, open-source 2023, Y Combinator W23) is a unified interface to 100+ LLM providers. Its core value: write code once against an OpenAI-compatible API, swap between Anthropic, Google, Azure, AWS Bedrock, Groq, Cohere, local Ollama, and more by configuration. The proxy server variant (LiteLLM Proxy) adds production features critical for enterprise multi-team LLM deployments: virtual API keys with per-team budgets, automatic provider failover, [model routing](../llm_routing_and_model_selection/README.md), cost tracking, rate limit handling, semantic caching, and Prometheus/Datadog observability.
 
 In agent stacks, LiteLLM occupies the "API gateway" role — sitting between your agents and the provider APIs, abstracting provider details, enforcing budgets, providing reliability. Many production agent deployments use LiteLLM Proxy as a hard requirement before deploying to multiple teams.
 
@@ -54,7 +54,7 @@ Map friendly names to specific deployments: `gpt-4o` → `azure/my-deployment-ea
 
 ### 4.5 Semantic Caching
 
-Embed prompts; if new prompt cosine similarity > threshold to cached, return cached response. 20-40% cost reduction on chatty workloads.
+Embed prompts; if new prompt cosine similarity > threshold to cached, return cached response. 20-40% cost reduction on chatty workloads. See [LLM Caching](../llm_caching/README.md) for cache-design depth beyond the proxy layer.
 
 ---
 
@@ -360,6 +360,12 @@ SDK is a Python library — `import litellm; litellm.completion(model=..., ...)`
 **How does LiteLLM Proxy implement automatic failover?**
 Config specifies multiple deployments per model_name (e.g., Anthropic direct + Bedrock for same model). Router config has `num_retries` and `fallbacks` map. On 5xx or rate_limit error from primary deployment, router tries other deployments under same model_name; if all fail, tries `fallbacks` (different model). All within one client request.
 
+**What is the difference between `fallbacks` and `context_window_fallbacks`?**
+`fallbacks` fire on errors — 5xx, rate limits, timeouts — after retries across same-name deployments are exhausted; `context_window_fallbacks` fire only on context-window-exceeded errors and route to a larger-window model (e.g., `claude-sonnet-4-6: [claude-opus-4-7]` in the config above). The trap: with only `fallbacks` configured, an over-long prompt fails every deployment identically — each retry resends the same too-long prompt — burning all retries with zero chance of success. Configure both, and make sure context-window fallbacks point at models with genuinely larger windows, not just different providers.
+
+**Can a team actually exceed its virtual key `max_budget`, and why?**
+Yes, slightly — budget enforcement is check-then-log, not transactional. The proxy checks accumulated spend against `max_budget` before forwarding, but a call's cost is only known and recorded after the response completes (output tokens determine cost), so N parallel in-flight requests can all pass the check before any of their costs land. A runaway agent loop firing 50 concurrent calls can overshoot the cap by the cost of those in-flight calls. Set budget alerts below 100% (the case study alerts at 80%) and cap `rpm`/`tpm` on the same key so the overshoot is bounded.
+
 **What is a virtual API key and how does it differ from a provider key?**
 Virtual key is a LiteLLM-Proxy-issued key (`sk-...`) tied to a budget, model allowlist, rate limit, and TTL. Clients use virtual keys; the proxy translates calls into real provider API key calls server-side. Benefits: revoke a virtual key instantly without touching provider keys, track spend per virtual key, enforce per-team budgets.
 
@@ -368,6 +374,9 @@ Each request's prompt is embedded; LiteLLM looks for cached prompts with cosine 
 
 **What routing strategies does LiteLLM support?**
 `simple-shuffle` (random pick), `usage-based-routing` (distribute by current load), `latency-based-routing` (prefer lower-latency deployments), `least-busy` (pick deployment with fewest in-flight requests). Pick based on goals: usage-based for cost flatness, latency-based for performance.
+
+**How does the router avoid hammering a deployment that is failing?**
+Cooldowns: when a deployment exceeds `allowed_fails` errors within a window, the router removes it from rotation for `cooldown_time` seconds (60s is the typical setting) and spreads traffic across the remaining deployments. Without cooldown, shuffle or latency-based strategies keep sending a fraction of traffic into the known-bad deployment, adding a full retry-plus-timeout cycle (up to 60s with this file's `timeout: 60`) to every unlucky request. Verify the behavior in staging by revoking one deployment's key and watching the router mark it unhealthy in the Prometheus metrics.
 
 **How is LiteLLM Proxy deployed at scale?**
 Horizontally scaled stateless containers behind a load balancer. Shared state (cache, budgets, rate limits) in Redis. Persistent state (spend logs, audit trail) in Postgres. Typical deployment: 3-5 proxy replicas with auto-scaling, Redis primary+replica, Postgres with backups.
@@ -379,7 +388,7 @@ Each LLM call is logged with: virtual_key, team_id, model, input_tokens, output_
 Typical 5-20ms overhead per request (network hop + proxy logic). Negligible vs LLM call latency (1000-30000ms). For latency-critical paths, deploy proxy in same VPC as both client apps and providers.
 
 **Can LiteLLM call MCP servers?**
-LiteLLM Proxy is primarily a model-routing layer, not a tool layer. Tool integration is your application's responsibility. Some recent LiteLLM features add MCP-aware passthrough.
+LiteLLM Proxy is primarily a model-routing layer, not a tool layer. Tool integration is your application's responsibility. Some recent LiteLLM features add MCP-aware passthrough — see [MCP](../mcp_model_context_protocol/README.md) for the tool-layer protocol itself.
 
 **How does LiteLLM handle streaming?**
 Supports OpenAI-compatible streaming (SSE). Client uses `stream=True`; proxy passes through chunks from the provider. Caching is bypassed for streaming requests by default.

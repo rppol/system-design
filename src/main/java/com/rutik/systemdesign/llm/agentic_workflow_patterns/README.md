@@ -253,7 +253,7 @@ async def voting_pipeline(text: str, num_votes: int = 5) -> str:
 
 ### Pattern 4: Orchestrator-Workers
 
-An orchestrator LLM receives the high-level task and dynamically decides how to decompose it — which subtasks to create, which workers to assign them to, and how to synthesize results. Workers are specialized LLM calls (or tool calls) that execute a single subtask and return structured output.
+An orchestrator LLM receives the high-level task and dynamically decides how to decompose it — which subtasks to create, which workers to assign them to, and how to synthesize results. Workers are specialized LLM calls (or tool calls) that execute a single subtask and return structured output. The multi-agent generalization of this pattern — persistent worker agents, context isolation, delegation protocols — is covered in [Orchestrator-Worker Pattern](../multi_agent_systems/orchestrator_worker_pattern.md).
 
 **Key distinction from prompt chaining**: In prompt chaining, the developer decides the decomposition statically. In orchestrator-workers, the LLM decides the decomposition dynamically at runtime. This is the first pattern where the LLM has real control flow authority.
 
@@ -1014,7 +1014,7 @@ def safe_orchestrate(objective: str, retry: bool = True) -> list[dict] | None:
 - Do not use `multiprocessing` for LLM API calls — process overhead is wasted for I/O-bound work
 
 **Workflow Orchestration Frameworks**
-- **LangGraph**: Graph-based workflow engine; nodes are LLM calls or tools; edges define control flow; native support for cycles (evaluator-optimizer loops), conditional routing, and parallel branches. State is persisted between nodes via a typed `State` dict.
+- **[LangGraph](../agentic_frameworks/langgraph.md)**: Graph-based workflow engine; nodes are LLM calls or tools; edges define control flow; native support for cycles (evaluator-optimizer loops), conditional routing, and parallel branches. State is persisted between nodes via a typed `State` dict.
 - **Prefect / Airflow**: Suitable when LLM calls are one step in a broader data pipeline that includes SQL queries, file I/O, and API calls. Adds scheduling, retry policies, and observability.
 - **Temporal**: Durable workflow execution; survives process restarts mid-chain; useful for long-running orchestrator-worker pipelines where workers may take minutes.
 - **AWS Step Functions**: Managed state machines; native parallel execution (Map state); integrates with Bedrock for LLM calls.
@@ -1078,7 +1078,7 @@ Assign a trace ID to the entire pipeline at entry. Assign a span ID to each step
 When the generator and evaluator are the same model, the evaluator tends to approve outputs that match its own generation style — even if those outputs violate the intended criteria. It is a form of self-affirmation. The evaluator should ideally use a different model or a different temperature/system-prompt configuration. At minimum, the evaluator prompt should include specific, objective criteria (a rubric with numeric thresholds) rather than asking for general quality assessment.
 
 **How does the evaluator-optimizer pattern relate to RLHF?**
-The evaluator-optimizer inference loop is a lightweight, inference-time analog of RLHF's training-time reward model loop. In RLHF, a reward model scores candidate outputs and a PPO step updates the generator's weights to maximize the reward. In evaluator-optimizer, a critic LLM scores the output and the generator is called again with the feedback in context — no weight updates, just in-context steering. Evaluator-optimizer is cheaper and faster to deploy but relies on the generator's instruction-following ability; RLHF produces a model that internalizes the reward signal and generalizes beyond in-context feedback.
+The evaluator-optimizer inference loop is a lightweight, inference-time analog of [RLHF](../alignment_and_rlhf/README.md)'s training-time reward model loop. In RLHF, a reward model scores candidate outputs and a PPO step updates the generator's weights to maximize the reward. In evaluator-optimizer, a critic LLM scores the output and the generator is called again with the feedback in context — no weight updates, just in-context steering. Evaluator-optimizer is cheaper and faster to deploy but relies on the generator's instruction-following ability; RLHF produces a model that internalizes the reward signal and generalizes beyond in-context feedback.
 
 ---
 

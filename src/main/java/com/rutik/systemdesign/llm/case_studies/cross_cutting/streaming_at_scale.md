@@ -103,33 +103,16 @@ One GPU cluster produces tokens at 30-100/sec; the edge PoP layer absorbs each c
 
 ### Backpressure Flow
 
+```mermaid
+stateDiagram-v2
+    [*] --> Generating
+    Generating --> Paused : queue depth reaches HIGH_WATER_MARK (1000)
+    Paused --> Generating : client drains queue to LOW_WATER_MARK (200)
+    Generating : GPU streams tokens into the gateway asyncio.Queue
+    Paused : vLLM pause_request(request_id) — KV cache held in VRAM
 ```
-  GPU generates token N+1
-          |
-          v
-  [Gateway asyncio.Queue]
-  Current depth: 950/1000 (HWM)
-          |
-          | queue.qsize() >= HIGH_WATER_MARK (1000)
-          v
-  Signal vLLM: pause scheduling
-  (via RequestTracker.pause(request_id))
-          |
-          v
-  GPU stops generating — KV cache held in VRAM
-          |
-          | (client drains buffer to LOW_WATER_MARK = 200)
-          v
-  Signal vLLM: resume scheduling
-          |
-          v
-  GPU resumes token generation
-          |
-          v
-  TTFT for THIS request: unchanged
-  Buffer oscillates between 200 and 1000 tokens
-  Effective throughput: limited by slow client, not GPU
-```
+
+The producer oscillates between two states, driven only by queue depth: at 1,000 buffered tokens vLLM pauses scheduling for the request (KV cache stays resident in VRAM), and when the slow client drains the buffer to 200 tokens generation resumes. TTFT for the request is unchanged, and effective throughput is limited by the slow client — never the GPU shared by everyone else.
 
 ### Half-Open Connection Detection
 

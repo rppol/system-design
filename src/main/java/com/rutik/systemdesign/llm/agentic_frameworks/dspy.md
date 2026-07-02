@@ -67,8 +67,8 @@ DSPy shifts the prompt engineering workflow from art to science: you write a met
 
 1. **Single predictor**: one `Predict` or `ChainOfThought` call
 2. **Pipeline**: multiple `Predict` calls in sequence (e.g., extract → classify → summarize)
-3. **Multi-hop RAG**: retrieve → generate → re-retrieve based on answer → final answer
-4. **Agentic**: `ReAct` with tools (function calls + retrieval)
+3. **Multi-hop RAG**: retrieve → generate → re-retrieve based on answer → final answer (see [Advanced RAG](../advanced_rag/README.md))
+4. **Agentic**: `ReAct` with tools (function calls + retrieval) — the loop itself is covered in [ReAct & Reasoning Patterns](../agents_and_tool_use/react_and_reasoning_patterns.md)
 
 ---
 
@@ -374,7 +374,7 @@ class FactualQA(dspy.Module):
 | Cost | Medium (optimizer makes many LLM calls) | Low | High (GPU) |
 | Runtime overhead | Low (compiled to static prompts) | Low | None |
 
-**DSPy vs LangChain:**
+**DSPy vs [LangChain](langchain_and_lcel.md):**
 
 | Aspect | DSPy | LangChain |
 |--------|------|-----------|

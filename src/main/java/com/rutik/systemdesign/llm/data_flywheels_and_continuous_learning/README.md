@@ -11,7 +11,7 @@ The key components of a data flywheel for LLM applications are:
 - **User feedback collection** — capturing both implicit signals (e.g., regeneration clicks, conversation abandonment) and explicit signals (thumbs up/down, corrections)
 - **Data curation pipeline** — filtering, deduplicating, and quality-checking production data before it enters training
 - **Active learning** — selecting the most informative examples from the unlabeled production stream for human annotation, minimizing cost while maximizing information gain
-- **Model improvement cycles** — periodic or continuous fine-tuning on curated production data
+- **Model improvement cycles** — periodic or continuous fine-tuning on curated production data (see [Fine-Tuning](../fine_tuning/README.md) for LoRA/full-FT mechanics)
 - **A/B testing and evaluation** — rigorous comparison of updated models against the baseline before deployment
 - **Drift detection and monitoring** — detecting distribution shift in queries or model behavior before it silently degrades quality
 
@@ -97,7 +97,7 @@ Active learning selects which unlabeled examples from the production stream to s
 
 ### 4.4 RLHF from Production
 
-Production feedback can be repurposed as preference data for RLHF or DPO:
+Production feedback can be repurposed as preference data for RLHF or DPO (see [Alignment & RLHF](../alignment_and_rlhf/README.md) for the training mechanics):
 
 - Pair accepted responses (thumbs up) with rejected alternatives (regenerated responses)
 - Use correction submissions as chosen/rejected pairs
@@ -600,9 +600,6 @@ Maintain a permanent regression test suite of 200–500 golden examples covering
 **How do you handle annotation consistency and quality when scaling the annotation team?**
 Use inter-annotator agreement (IAA) metrics — Cohen's kappa for categorical labels (target kappa > 0.7), Pearson correlation for continuous ratings. On every batch, include 10% calibration examples that were previously annotated by a senior annotator or resolved by consensus; flag annotators whose agreement with the calibration set drops below threshold. Run periodic calibration sessions where annotators label the same set of 20–30 examples and discuss disagreements. Use annotation guidelines that include positive examples, negative examples, and boundary cases — not just rule descriptions. For correction-style annotation, provide the original model response alongside the rubric so annotators are improving on a concrete starting point rather than writing from scratch.
 
-**Explain the concept of concept drift versus covariate shift in the context of an LLM support bot.**
-Covariate shift means the distribution of input queries changes — for example, a retail bot sees holiday-specific queries in December that were rare in October. The correct response to a query type may remain the same, but the model has not seen enough examples of that type to handle it well. Covariate shift is detected by monitoring the input embedding distribution. Concept drift means the correct response to a given query type changes — for example, the return policy changes from 30 days to 14 days, so the previously correct answer is now wrong. Concept drift is not detectable from input distribution monitoring alone; it requires outcome monitoring (resolution rate drops even though query distribution is stable). Both require model updates, but the response differs: covariate shift is addressed by collecting and annotating more examples of the new query types; concept drift is addressed by updating the training data to reflect the new correct answers and re-fine-tuning.
-
 **How do you estimate the ROI of a data flywheel investment for a business stakeholder?**
 Frame the ROI in terms of the cost avoided by the model handling conversations that would otherwise require a human agent. If the current model resolves 70% of conversations autonomously (cost per autonomous resolution: $0.05 in compute) and the target is 85% (same compute cost), and the application handles 10,000 conversations per day with an average human agent cost of $8 per escalated conversation, then: current daily agent cost = 0.30 * 10,000 * $8 = $24,000; target daily agent cost = 0.15 * 10,000 * $8 = $12,000; daily savings = $12,000; annual savings = $4.38M. Set against the flywheel investment (annotation costs, ML engineering time, infrastructure), this typically yields ROI within 3–6 months for mid-size applications. Always present savings per percentage point of resolution rate improvement to make the metric concrete for stakeholders.
 
@@ -614,6 +611,12 @@ The cold start problem requires a deliberate bootstrapping phase before the flyw
 
 **How do you distinguish concept drift from covariate shift in production, and why does the distinction matter?**
 Covariate shift means the input query distribution changes (new query types appear or existing ones change frequency), while concept drift means the correct answer to existing query types changes (policy update, product change, factual update). The distinction matters because they require different responses. Covariate shift is detected by monitoring the input embedding distribution — compute PSI weekly against a reference distribution, and a PSI above 0.2 signals major shift. Concept drift is invisible to input monitoring because the queries look the same; it is detected by monitoring outcome metrics (resolution rate, satisfaction score) on a sliding window — if quality degrades without a model update and without input distribution change, concept drift is the likely cause. For covariate shift, collect and annotate examples of the new query types, then retrain. For concept drift, update the knowledge base or system prompt immediately (fastest fix), then update training data to reflect new correct answers and retrain. A common production incident: a return policy changes from 30 to 14 days; the bot confidently answers "30 days" to return-policy queries because it has high confidence on this familiar query type — this is concept drift. The model's confidence-outcome divergence (high confidence, bad outcomes) is the strongest diagnostic signal.
+
+**Why can training a model on its own production outputs degrade quality over time, and how do you prevent it?**
+Because the flywheel becomes a self-training loop: the model's own phrasings, biases, and confidently-wrong answers re-enter the training set and get reinforced each iteration. Implicit feedback makes this worse — a fluent but subtly wrong answer that the user didn't escalate looks like a success signal, so error patterns compound, and output diversity narrows as the model increasingly imitates itself (the same dynamic behind model-collapse results on synthetic data). Prevention: only admit outcome-verified examples (human-corrected escalations, resolutions with explicit positive signals), keep a frozen human-authored anchor set in every training mix, near-dedupe model-generated phrasings before ingestion, and track output diversity and anchor-set eval scores across iterations — a diversity drop with flat evals is the early warning. Treat "the model liked its own answer" as zero evidence of quality; only external signals earn a place in the training set.
+
+**How do you make each flywheel iteration reproducible and revertible?**
+Version everything an iteration consumed and produced: an immutable dataset snapshot (content-hashed, with the curation pipeline version that built it), the base model + adapter identifiers, training config, and the pinned eval-suite version, all recorded in the model registry entry. Reproducible means anyone can re-run iteration N from its snapshot and get the same artifact; revertible means rollback is a routing change, not a retraining — keep the last 2-3 adapters deployable behind the serving layer so a regression discovered post-deploy is a one-line traffic flip. The operational gotcha is versioning the dataset but not the curation code: a silent change in the PII scrubber or dedup threshold makes "the same data" unreproducible one quarter later. Rule: a fine-tune whose exact inputs cannot be reconstructed should not ship.
 
 ---
 
@@ -739,7 +742,7 @@ Eight product slices are defined: order status, returns and exchanges, payment a
 - Deploy to 100% traffic
 
 **Month 3-4: Accelerating cycle**
-- Flywheel momentum: the improved model generates fewer escalations (now 520/day instead of 600), but the escalaed conversations are harder and therefore more informative
+- Flywheel momentum: the improved model generates fewer escalations (now 520/day instead of 600), but the escalated conversations are harder and therefore more informative
 - Add uncertainty sampling: run two LoRA checkpoints as a committee; flag conversations where their responses have embedding distance > 0.4
 - Annotation throughput increases to 600 examples per week as support lead review becomes more efficient with Argilla's pre-labeling
 - Two fine-tuning cycles: resolution rate reaches 81% by end of month 4

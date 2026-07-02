@@ -948,7 +948,7 @@ Termination conditions are composable objects passed to the team constructor. `M
 LLM context windows have hard limits (GPT-4o: 128K tokens). A WebSurfer observation can include full HTML (50-200 KB), and a Coder observation can include verbose stdout. Passing raw observations to the Orchestrator would overflow the context window, cause API errors (or $20+ API calls for large contexts), and dilute the prompt with irrelevant content. Truncating to the last 2,000-3,000 characters preserves the most recent (most relevant) output while keeping costs predictable.
 
 **What security risks does Magentic-One's ComputerTerminal agent introduce and how are they mitigated?**
-ComputerTerminal executes arbitrary shell commands on the host system. A malicious task or a hallucinating LLM could issue `rm -rf /`, exfiltrate credentials, or install malware. Mitigations: run ComputerTerminal inside a Docker container with no host mounts, no network egress (except a whitelist), and a non-root user. Add a command allowlist/denylist layer before execution. Log every command with its exit code for audit. In production, the Microsoft Magentic-One reference implementation defaults to a Docker sandbox.
+ComputerTerminal executes arbitrary shell commands on the host system. A malicious task or a hallucinating LLM could issue `rm -rf /`, exfiltrate credentials, or install malware. Mitigations: run ComputerTerminal inside a Docker container with no host mounts, no network egress (except a whitelist), and a non-root user (see [Sandboxed Code Execution](../agents_and_tool_use/sandboxed_code_execution.md)). Add a command allowlist/denylist layer before execution. Log every command with its exit code for audit. In production, the Microsoft Magentic-One reference implementation defaults to a Docker sandbox.
 
 **How does AutoGen v0.4 improve testability compared to v0.2?**
 In v0.2, testing required mocking the global GroupChat state and monkey-patching `initiate_chat`. In v0.4, the runtime is injected as a dependency. Tests can create an in-memory `SingleThreadedAgentRuntime`, register mock agents that return predefined typed messages, and assert the exact typed messages exchanged — without any real LLM calls. This makes unit tests for agent logic fast (<100 ms) and deterministic.
@@ -982,7 +982,7 @@ No. The Orchestrator activates exactly one agent per step and waits for its obse
 
 **Prefer RoundRobin for known pipelines, Selector for open-ended tasks.** RoundRobin saves one LLM call (~$0.003, ~1-2 s) per turn and is fully deterministic. Reserve SelectorGroupChat for tasks where the number and order of agent activations is genuinely unknown.
 
-**Add `ModelUsage` tracking.** AutoGen v0.4 tracks token usage per message. Aggregate these in a `TeamResult` and log them to your observability platform (Langfuse, Arize Phoenix) to detect runaway token consumption before it appears on your bill.
+**Add `ModelUsage` tracking.** AutoGen v0.4 tracks token usage per message. Aggregate these in a `TeamResult` and log them to your [observability platform](../agentic_frameworks/framework_observability.md) (Langfuse, Arize Phoenix) to detect runaway token consumption before it appears on your bill.
 
 **Design agents with idempotent actions.** If the Orchestrator retries an instruction (after a stall), the agent may re-execute the same action. WebSurfer re-navigating to a URL is harmless; Coder appending to a file twice doubles the output. Use checksums or existence checks in Coder scripts: `if not Path("/tmp/output.csv").exists(): write_csv(...)`.
 

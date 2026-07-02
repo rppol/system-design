@@ -6,7 +6,7 @@
 
 A subagent is an LLM agent spawned by a parent agent to handle a focused subtask in an isolated context. The parent dispatches the subtask with a narrow system prompt and a restricted tool subset; the subagent runs to completion and returns a structured result (typically a JSON object with `result`, `confidence`, `artifacts`, and `errors`); the parent then synthesizes results from one or more subagents into the final output.
 
-Subagents matter for three reasons: (1) **context isolation** — a subagent doing web research doesn't need to see the parent's 30 prior tool calls, cutting cost and improving focus; (2) **parallelism** — 5 subagents dispatched simultaneously finish in roughly the time of one, dramatically reducing wall-clock latency on multi-source tasks; (3) **security** — restricting a subagent's tools shrinks the blast radius of any single prompt injection or model misbehavior.
+Subagents matter for three reasons: (1) **context isolation** — a subagent doing web research doesn't need to see the parent's 30 prior tool calls, cutting cost and improving focus; (2) **parallelism** — 5 subagents dispatched simultaneously finish in roughly the time of one, dramatically reducing wall-clock latency on multi-source tasks; (3) **security** — restricting a subagent's tools shrinks the blast radius of any single [prompt injection](../llm_security/README.md) or model misbehavior.
 
 The pattern is the foundation of Claude Code's parallel research, Anthropic's research multi-agent system (reporting 15-minute research vs 1-hour single-agent), and most production agent architectures handling tasks that decompose into independent subtasks.
 
@@ -112,7 +112,7 @@ Return Contract
     "errors": [],
     "tokens_used": 4523
   }
-  
+
   Parent validates schema → injects into context as structured tool result
 ```
 
@@ -277,7 +277,7 @@ if __name__ == "__main__":
 
 **Claude Code** uses subagent dispatch via the Agent tool. Parent CLI agent spawns focused subagents for: codebase exploration (Explore subagent with read-only tools), code review (with bash+test tools), and code generation (with write tools).
 
-**Anthropic Research multi-agent system** dispatches 5-20 Sonnet subagents in parallel for deep research; reports 15-minute completion vs 1-hour for single agent on the same prompts.
+**Anthropic Research multi-agent system** dispatches 5-20 Sonnet subagents in parallel for deep research; reports 15-minute completion vs 1-hour for single agent on the same prompts — the canonical production deployment of the [orchestrator-worker pattern](../multi_agent_systems/orchestrator_worker_pattern.md).
 
 **Cursor Composer** spawns parallel file-editing subagents when changes span >5 files. Each subagent gets only the files it's editing in context.
 
@@ -359,7 +359,7 @@ result = json.loads(sub_output)  # Reliable
 |---|---|---|
 | Anthropic API + asyncio | Native subagent dispatch | Most direct |
 | OpenAI Agents SDK `handoff()` | Built-in transfer primitive | But: sequential, not parallel |
-| LangGraph subgraphs | Reusable subagent definitions | Persistent state, checkpointing |
+| [LangGraph](../agentic_frameworks/langgraph.md) subgraphs | Reusable subagent definitions | Persistent state, checkpointing |
 | Claude Code Agent tool | Production-tested pattern | Spawns isolated subagents |
 | `asyncio.gather(..., return_exceptions=True)` | Parallel + isolated failures | Standard pattern |
 | Temporal child workflows | Durable subagents | For long-running parallelism |
@@ -452,7 +452,7 @@ Per-subagent: latency, tokens, iterations, success rate. Per-parent task: total 
    v     v     v     v     v     v     v
   10-K  News  Comp  Glass Job   ...   (Sonnet 4.6 each)
   Sub   Sub   Sub   Sub   Sub
-  
+
   Each subagent has:
   - Narrow system prompt (its source type only)
   - Tool subset (e.g., 10-K subagent: SEC EDGAR search + read_url)

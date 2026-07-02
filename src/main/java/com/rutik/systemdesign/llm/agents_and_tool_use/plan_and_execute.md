@@ -4,7 +4,7 @@
 
 Plan-and-Execute is a two-phase agent architecture that separates task planning from task execution. Phase 1: a Planner LLM generates a complete, structured plan — a numbered sequence of steps to accomplish the goal. Phase 2: an Executor Agent works through the plan step-by-step, calling tools and completing each step in order. The phases use different prompts, different system roles, and often different models.
 
-Unlike ReAct where planning and acting are interleaved moment-to-moment, Plan-and-Execute commits to a high-level structure upfront. This makes it more reliable for tasks with known structure, and easier to validate and monitor — but it requires a replanning mechanism for when the plan becomes stale.
+Unlike [ReAct](react_and_reasoning_patterns.md) where planning and acting are interleaved moment-to-moment, Plan-and-Execute commits to a high-level structure upfront. This makes it more reliable for tasks with known structure, and easier to validate and monitor — but it requires a replanning mechanism for when the plan becomes stale.
 
 ---
 
@@ -407,7 +407,7 @@ LangGraph provides a reference implementation:
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| **LangGraph** | Plan-and-execute implementation | Reference template; stateful |
+| [**LangGraph**](../agentic_frameworks/langgraph.md) | Plan-and-execute implementation | Reference template; stateful |
 | **LangChain Plan-and-Execute** | Legacy implementation | Deprecated; use LangGraph |
 | **OpenAI o1/o3** | Built-in planning | Internal CoT is implicit P&E |
 | **Claude extended thinking** | Built-in planning | `thinking` parameter |

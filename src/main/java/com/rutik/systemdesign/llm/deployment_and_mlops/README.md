@@ -63,7 +63,7 @@ Client Requests
 
 ### 4.2 Model Routing
 
-Route queries to the appropriate model based on complexity:
+Route queries to the appropriate model based on complexity (full treatment: [LLM Routing & Model Selection](../llm_routing_and_model_selection/README.md)):
 
 ```python
 def route_request(query: str, user_tier: str) -> str:
@@ -91,7 +91,7 @@ def estimate_complexity(query: str) -> float:
 
 ### 4.3 Semantic Caching
 
-Cache LLM responses by semantic similarity of queries:
+Cache LLM responses by semantic similarity of queries (deep dive: [LLM Caching](../llm_caching/README.md)):
 
 ```python
 class SemanticCache:
@@ -364,7 +364,7 @@ Quality dashboard:
 
 ### GPU Memory Monitoring & OOM Prevention
 
-GPU memory is the most constrained resource in LLM serving. A single OOM crash kills all in-flight requests on that node.
+GPU memory is the most constrained resource in LLM serving. A single OOM crash kills all in-flight requests on that node. Serving-engine-level memory mechanics (PagedAttention, KV block management, preemption) are covered in [vLLM Deep Dive](../vllm_deep_dive/README.md).
 
 ```
 GPU Memory Budget (A100 80GB serving LLaMA 3 70B in INT4):
@@ -585,6 +585,19 @@ class CostTracker:
 3. **No cost budgets**: A buggy agent loop burned $14,000 in API costs in 4 hours before anyone noticed. Set per-team budget alerts at 80% and hard caps at 100% of monthly allocation.
 4. **Monitoring only technical metrics**: Tracking p99 latency but not output quality; a model can be fast and wrong.
 5. **Cold start in auto-scaling**: Scaling to zero to save money but 70B models take 3+ minutes to load. Set minimum replicas = 1.
+
+   ```yaml
+   # BROKEN: scale-to-zero HPA — first request after an idle period waits 3+ min
+   # while the 70B model downloads and loads into GPU memory
+   minReplicas: 0
+   targetGPUUtilization: 80
+   ```
+   ```yaml
+   # FIXED: always-warm floor + earlier scale-out; cache weights on a persistent
+   # volume so new replicas load from disk (30s-3min) instead of re-downloading
+   minReplicas: 1
+   targetGPUUtilization: 60
+   ```
 6. **No rate limiting per user**: One user floods the system with requests, degrading experience for others.
 7. **Skipping canary for "minor" model updates**: A team deployed a quantized model variant directly to 100% traffic. The INT4 quantization introduced subtle quality regressions in math tasks that only appeared under production query distribution. Always canary model changes, even minor ones -- start at 1-5% traffic, monitor for 24-48 hours, compare quality metrics against the baseline.
 8. **GPU OOM from long-context requests**: A single 128K-token request consumed 6 GB of KV cache and OOM-killed the serving process, dropping all 47 concurrent requests on that node. Set per-request context length limits, monitor GPU memory at 85% threshold, and implement graceful degradation (reduce batch size before rejecting requests).
@@ -618,6 +631,15 @@ A: Key components: (1) Authentication — API key management per team/user with 
 **Q: How do you monitor LLM output quality in production?**
 A: Multi-layered approach: (1) Automated metrics — LLM-as-judge scoring helpfulness/safety on 1-5% sample; task-specific metrics (code execution rate, SQL validity); (2) User signals — thumbs up/down, session continuation, correction edits; (3) Regression benchmarks — run standard benchmarks (MMLU, domain-specific) on every model/prompt change; (4) Behavioral monitors — track refusal rate, response length distribution, hallucination rate for RAG. Alert when metrics deviate >2σ from baseline.
 
+**Q: Why must prompt changes go through the same release process as code changes?**
+A: Because a one-word prompt edit can shift model behavior for every user instantly, with no compile step or failing test to catch it — see the war story above where changing "concise" to "brief" dropped response quality 15% and took 3 days to trace because nothing was versioned. Treat prompts as code: store them in a registry with semantic versioning and metadata (model, temperature, author, approver), require PR review plus an automated eval run against a golden dataset before promotion, canary at 1-5% traffic, and keep the previous version flagged for instant rollback — the registry flips the production pointer with no redeployment. The maturity test: can you answer "what exactly changed in the prompt last Tuesday, and can we revert in under a minute?"
+
+**Q: How do you stop a buggy agent loop or misconfigured client from burning thousands of dollars in API costs?**
+A: Enforce spend limits synchronously at the gateway, not asynchronously in reporting: per-user and per-team budgets with alerts at 80%, soft caps (approval required) at 100%, and hard throttling or automatic downgrade to a cheaper model at 120%. The canonical incident: a retry loop without backoff burned $14,000 in 4 hours because cost was only visible in the monthly invoice. Add per-request max_tokens ceilings, per-session request caps, and an anomaly alert when cost-per-minute deviates more than 3x from the 7-day baseline. Daily cost reports discover the fire after the house has burned down — the metering point must be able to say no in real time.
+
+**Q: Why can a deployment look healthy on throughput dashboards while users complain it is slow?**
+A: Because users perceive TTFT (time to first token), not aggregate throughput — a system streaming at high tokens/second but taking 4 seconds to emit the first token feels broken. TTFT and total latency have different causes: TTFT is dominated by queueing, prompt prefill, and any retrieval/preprocessing before generation; steady-state token rate is dominated by decode throughput and batching policy. Track TTFT p50/p99 as first-class SLIs (under 1 second for conversational apps), and improve it with prefix/prompt caching, routing simple queries to smaller models, and streaming from the very first token.
+
 **Q: What is the data flywheel for LLM products?**
 A: The data flywheel: production use → more user data (conversations, feedback) → better training data → better model → better product → more users → more data. Specifically: collect user feedback (explicit ratings, implicit signals like edits/regenerations) → filter for high-quality examples → use for fine-tuning or RLHF → deploy better model → repeat. This compounds over time; companies with more users get better data and faster improvement cycles.
 
@@ -627,6 +649,9 @@ A: (1) Traffic splitting — route N% of users to model B using consistent hashi
 **Q: How do you implement blue-green deployment for LLM services?**
 Blue-green deployment for LLMs maintains two identical production environments (blue and green), routing traffic to one while updating the other. The LLM-specific challenges: (1) model loading takes 2-10 minutes for large models (loading weights into GPU memory), so the new environment must be pre-warmed before traffic switch; (2) KV cache and prefix cache on the old environment are lost during switch — plan for a temporary latency spike; (3) model quality validation must happen before switching — run an automated eval suite on the green environment with 100+ test cases covering key use cases. Implementation: use Kubernetes with two deployments behind an Ingress or service mesh (Istio), switch traffic via label selector update. Canary variant: route 5% of traffic to the new model first, monitor quality metrics (LLM-as-judge scores, user feedback, latency) for 1-2 hours, then gradually increase to 100%. Rollback: keep the old deployment running for 24 hours after full switch.
 
+**Q: What is shadow mode deployment and when is doubling your inference cost worth it?**
+Shadow mode runs a candidate model or prompt on a copy of production traffic without serving its outputs — responses are logged and compared offline against the live system. It catches distribution-specific failures that offline benchmarks miss: the GPT-4 to GPT-4o swap in Common Pitfalls above produced malformed JSON in 8% of responses only under the production query distribution, which shadow mode would have surfaced with zero user impact. The cost is running inference twice, so in practice shadow a 5-20% traffic sample rather than 100% to bound spend. Use it for major model swaps, provider migrations, and prompt overhauls; skip it for parameter tweaks where a 1-5% canary carries acceptable risk.
+
 **Q: How does semantic caching work for LLM applications and when is it cost-effective?**
 Semantic caching stores LLM responses keyed by the semantic meaning of the query (not exact string match), returning cached responses for semantically similar queries. Implementation: embed each query, search a vector index of previous queries, and if similarity exceeds a threshold (cosine > 0.95), return the cached response. Cost-effective when: (1) queries are repetitive — customer support bots see 30-60% repeated questions; (2) responses are deterministic — factual lookups, not creative generation; (3) LLM cost is high — caching saves $0.01-$0.10 per cached hit. Not effective when: responses must be personalized, queries are unique (research, coding), or freshness matters (news, stock prices). Cache invalidation is the hard part — when underlying data changes, semantically cached responses become stale. Set TTLs based on data change frequency: 24 hours for product info, 1 hour for pricing, no caching for real-time data. GPTCache is an open-source implementation. At 50% cache hit rate with GPT-4o, semantic caching reduces LLM costs by 40-50%.
 
@@ -635,6 +660,12 @@ Model routing directs each query to the optimal model based on complexity, cost 
 
 **Q: How do you estimate and optimize GPU cost for LLM serving?**
 GPU cost estimation starts with throughput capacity: an A100 80GB serving LLaMA 3 8B with vLLM achieves ~1,200 tokens/second throughput. At $2/hour (cloud spot pricing), that's $0.0017 per 1K tokens. Compare to GPT-4o-mini at $0.60 per 1M output tokens ($0.0006/1K) — API is cheaper at low volume. Break-even calculation: self-hosted becomes cheaper when monthly volume exceeds the point where (GPU_cost_per_month) < (API_cost_per_token * monthly_tokens). For A100 at $1,500/month vs GPT-4o-mini: break-even at ~2.5B tokens/month (~83M tokens/day). Optimization strategies: (1) right-size GPU — use T4 for small models, A10G for medium, A100/H100 for large; (2) spot instances for batch workloads (60-70% savings); (3) quantization — FP8 or INT4 models serve from smaller/fewer GPUs; (4) batching — higher batch sizes increase throughput linearly up to memory limits; (5) auto-scaling — scale to zero during off-hours if traffic permits.
+
+**Q: How do you prevent GPU OOM crashes in self-hosted LLM serving?**
+A single OOM kills every in-flight request on the node, so prevention is layered: (1) cap per-request context length — one 128K-token request consumes 4-8 GB of KV cache; (2) alert on GPU memory at 75% (warning) and 85% (critical), watching early signals like rising KV-cache eviction rate and batch-size auto-reduction in the inference engine; (3) implement a graceful degradation chain — shrink max batch size, then reject long-context requests, then route overflow to an API provider, and only then return 503s. Budget memory explicitly before deploying: an A100 80GB serving a 70B INT4 model runs with only 2-15 GB of peak headroom, while an 8B FP16 model leaves a comfortable 19-30 GB. Use DCGM/dcgm-exporter for production telemetry rather than polling nvidia-smi.
+
+**Q: How do you implement cost attribution for LLM usage across many teams?**
+Meter at the LLM gateway — the single choke point every request already passes through. Tag each request with team/project/cost-center metadata, enrich with model and token counts and computed cost, then stream events (Kafka, then aggregation, then a cost DB) into daily per-team rollups. Start with showback (dashboards only) to build awareness, then graduate to chargeback (actual budget debits) once the numbers are trusted: enforcement without visibility first creates revolt, and visibility without enforcement creates $180K/month surprises. The key design decision is granularity — per-team suffices for accountability, per-user enables abuse detection, per-feature enables ROI analysis.
 
 **Q: How do you handle observability for non-deterministic LLM outputs in production?**
 LLM observability requires tracking both traditional service metrics and LLM-specific quality signals. Traditional: latency (TTFT, TPOT, end-to-end), throughput, error rates, availability. LLM-specific: (1) output quality — run LLM-as-judge scoring on a sample of responses (5-10%) using a stronger model; (2) hallucination detection — compare generated facts against retrieved context (faithfulness scoring); (3) token usage — track input/output tokens per request for cost monitoring; (4) drift detection — monitor embedding distribution of queries and responses over time; (5) user feedback — thumbs up/down, regeneration rate (users clicking "try again" indicates poor quality). Tools: LangSmith, Langfuse, or Arize Phoenix for LLM tracing; Prometheus + Grafana for service metrics. Critical alerts: response latency P99 > SLO, hallucination rate > threshold, cost per query spike, model error rate increase. Store full request/response pairs (with PII redaction) for debugging — LLM failures are often content-dependent and impossible to reproduce without the exact input.

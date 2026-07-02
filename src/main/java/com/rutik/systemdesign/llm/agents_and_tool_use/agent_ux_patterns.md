@@ -37,10 +37,10 @@ The eight core patterns covered here — streaming thoughts, interrupt/resume, a
 ## 4. Types / Architectures / Strategies
 
 ### 4.1 Streaming Thoughts
-Surface chain-of-thought tokens via SSE as they arrive. Distinguish thinking text from final answer text in the UI (different color/styling). Critical for tasks >5s.
+Surface chain-of-thought tokens via SSE as they arrive. Distinguish thinking text from final answer text in the UI (different color/styling). Critical for tasks >5s. Infrastructure patterns: [Streaming at Scale](../case_studies/cross_cutting/streaming_at_scale.md).
 
 ### 4.2 Interrupt and Resume
-User can pause a running agent, inject correction, resume from last checkpoint. Requires per-step checkpointing (LangGraph pattern).
+User can pause a running agent, inject correction, resume from last checkpoint. Requires per-step checkpointing (LangGraph pattern — see [Durable Long-Running Agents](durable_long_running_agents.md)).
 
 ### 4.3 Approval Gates
 For irreversible/expensive actions (send email, delete file, charge card, deploy), pause and request explicit user OK. Show what the agent intends to do, with all parameters, before executing.
@@ -74,43 +74,48 @@ Streaming Pipeline (SSE)
                                      +-- text events -> "answer" UI
                                      +-- tool_use events -> "step" UI
                                      +-- tool_result events -> "step done"
+```
 
+Approval Gate Flow:
 
-Approval Gate Flow
-===================
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Agent decides to take irreversible action
-              |
-              v
-  Pause agent (checkpoint state)
-              |
-              v
-  Send approval request to user UI:
-    {
-      "action": "send_email",
-      "params": {"to": "..", "subject": ".."},
-      "reasoning": "User asked me to..."
-    }
-              |
-              v
-  User UI shows: action, params, allow/deny buttons
-              |
-        +-----+-----+
-        |           |
-      Allow       Deny
-        |           |
-        v           v
-  Execute      Return "user denied"
-  Resume       to agent loop
-  agent
+    DEC(["Agent decides to take irreversible action"])
+    PAUSE["Pause agent\n(checkpoint state)"]
+    REQ["Send approval request to user UI\naction: send_email · params: to, subject\nreasoning: 'User asked me to...'"]
+    UI{"User UI shows action + params\nAllow / Deny buttons"}
+    EXEC["Execute tool\nresume agent from checkpoint"]
+    DENY["Return 'user denied'\nto agent loop — agent re-plans"]
 
+    DEC --> PAUSE --> REQ --> UI
+    UI -->|Allow| EXEC
+    UI -->|Deny| DENY
 
+    class DEC io
+    class PAUSE req
+    class REQ mathOp
+    class UI base
+    class EXEC train
+    class DENY lossN
+```
+
+The gate checkpoints the agent state before the irreversible call; a deny comes back as a normal tool result ("user denied"), so the agent can re-plan instead of crashing.
+
+```
 Step Visualization
 ===================
 
   [✓] Searched competitor websites
   [✓] Extracted pricing data
-  [⏳] Comparing features (in progress)
+  [>] Comparing features (in progress)
   [ ] Generating summary table
   [ ] Drafting recommendation
 ```
@@ -297,7 +302,7 @@ async def bash_tool(command: str):
     return subprocess.run(command, shell=True, ...)
 ```
 
-**War story**: A coding agent for a mid-sized engineering team auto-executed bash commands without approval. Within a week, a prompt injection in a fetched documentation page caused the agent to run `git reset --hard HEAD~30` on a developer's branch. After approval gates on git destructive operations: zero incidents in 6 months, developer confidence in the agent significantly increased (more usage, not less).
+**War story**: A coding agent for a mid-sized engineering team auto-executed bash commands without approval. Within a week, a prompt injection in a fetched documentation page caused the agent to run `git reset --hard HEAD~30` on a developer's branch. After approval gates on git destructive operations: zero incidents in 6 months, developer confidence in the agent significantly increased (more usage, not less). Injection defense-in-depth beyond UI gates: [LLM Security](../llm_security/README.md).
 
 ---
 

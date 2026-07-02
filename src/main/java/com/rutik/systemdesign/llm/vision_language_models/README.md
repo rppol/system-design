@@ -623,7 +623,7 @@ GPT-4V and GPT-4o charge per image based on resolution and tile count. A 1024x10
 ### Supporting Libraries
 
 - `transformers` (HuggingFace): unified API for loading all models above
-- `FAISS` (Meta): ANN index for CLIP embedding search at scale
+- `FAISS` (Meta): ANN index for CLIP embedding search at scale — index selection and PQ tradeoffs in [Embeddings & Similarity Search](../embeddings_and_similarity_search/README.md)
 - `hnswlib`: alternative ANN library; good for in-memory use
 - `PaddleOCR` (Baidu): dedicated OCR; outperforms VLMs for pure text extraction
 - `open_clip` (LAION): open-source CLIP training and model zoo, including EVA-CLIP variants

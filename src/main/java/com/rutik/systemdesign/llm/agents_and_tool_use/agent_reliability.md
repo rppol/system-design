@@ -36,7 +36,7 @@ Agent reliability matters because production agents fail at high rates without e
 
 **Circuit breaker**: If a tool fails repeatedly, stop calling it. A circuit breaker transitions from CLOSED (normal) to OPEN (fail fast, no calls) after N consecutive failures, then to HALF-OPEN (allow one test call) after a cooldown period. This prevents retry amplification storms.
 
-**Progress checkpointing**: Save agent state after each successful step. If the agent crashes or is interrupted, resume from the last checkpoint rather than restarting from scratch. This is essential for long-running agents (30+ steps, 10+ minutes).
+**Progress checkpointing**: Save agent state after each successful step. If the agent crashes or is interrupted, resume from the last checkpoint rather than restarting from scratch. This is essential for long-running agents (30+ steps, 10+ minutes) — see [Durable Long-Running Agents](durable_long_running_agents.md) for the full persistence architecture.
 
 **Dead-loop detection**: Track not just step count but semantic progress. If the agent has called the same tool with the same arguments twice (or if the last N actions are identical), the agent is stuck in a dead loop. Trigger recovery or escalation.
 
@@ -58,7 +58,7 @@ When a tool fails repeatedly, route to an alternative approach. Examples: web se
 
 ### 4.3 Human Handoff
 
-When the agent cannot self-recover, escalate to a human. Surface the current state, the last N actions taken, and the stuck reason. The human can modify state and resume, or abort and provide guidance. Implemented via LangGraph's `interrupt()` or an explicit escalation message to a monitoring channel.
+When the agent cannot self-recover, escalate to a human. Surface the current state, the last N actions taken, and the stuck reason. The human can modify state and resume, or abort and provide guidance. Implemented via [LangGraph](../agentic_frameworks/langgraph.md)'s `interrupt()` or an explicit escalation message to a monitoring channel.
 
 ### 4.4 Rollback
 
@@ -402,7 +402,7 @@ async def search_with_fallback(query: str) -> str:
 
 **Devin (Cognition AI) SWE-Agent Reliability**: Devin operates a software engineering agent with a code sandbox (terminal, file system). Reliability mechanisms: (1) sandbox timeout — each shell command has a 120s timeout; long-running builds are detected and the agent is notified; (2) test-driven recovery — if tests fail, the agent retries with a different approach rather than retrying the exact same code; (3) session persistence — the workspace is preserved so a crash doesn't lose all file edits; (4) the agent emits a confidence score after each action, and low-confidence actions trigger a confirmation step.
 
-**Anthropic Computer Use Retry Logic**: The Computer Use API (Claude 3.5 Sonnet controlling a desktop) implements: (1) screenshot-based progress detection — if the screen hasn't changed after an action, the action likely failed; retry with a modified approach; (2) element detection fallback — if coordinate-based clicking fails (element moved), fall back to accessibility-tree-based selection; (3) explicit error injection — if an action fails, inject the failure screenshot as an observation so the model can reason about what went wrong rather than repeating blindly.
+**Anthropic Computer Use Retry Logic**: The [Computer Use](computer_use_and_browser_agents.md) API (Claude 3.5 Sonnet controlling a desktop) implements: (1) screenshot-based progress detection — if the screen hasn't changed after an action, the action likely failed; retry with a modified approach; (2) element detection fallback — if coordinate-based clicking fails (element moved), fall back to accessibility-tree-based selection; (3) explicit error injection — if an action fails, inject the failure screenshot as an observation so the model can reason about what went wrong rather than repeating blindly.
 
 **SWE-bench Agents**: Top-performing SWE-bench agents (Agentless, SWE-agent) achieve 30-50% resolution rates partly through reliability engineering: (1) multi-attempt with different strategies — run the same issue through 3 different code paths, use the one that passes tests; (2) test-time compute — run solutions against a subset of test cases to verify correctness before finalizing; (3) rollback on test failure — if a code edit breaks existing tests, revert the edit and try a different approach.
 
@@ -453,6 +453,20 @@ async def search_with_fallback(query: str) -> str:
 
 **Pitfall 1: Retry amplification storm**
 Production incident: a web search tool returned 503 for 2 hours during a traffic spike. The agent had `max_retries=10` with 1s backoff. For 1000 concurrent agent runs, this created 10,000 retries/second to an already overloaded search API — worsening the outage. Fix: (1) circuit breaker — after 5 failures, stop calling; (2) jitter — add `random.uniform(0, 1)` to backoff to spread retries; (3) per-service rate limit on retry volume.
+
+```python
+# BROKEN: fixed 1s backoff, 10 attempts, no jitter — 1000 agents synchronize into 10,000 retries/s
+@retry(stop=stop_after_attempt(10), wait=wait_fixed(1))
+async def search(query): ...
+
+# FIXED: 3 attempts, exponential backoff + jitter, circuit breaker gates the call entirely
+@retry(stop=stop_after_attempt(3),
+       wait=wait_exponential(multiplier=1, min=1, max=10) + wait_random(0, 1))
+async def search(query):
+    if not breakers["web_search"].call_allowed():
+        raise ToolError("Circuit OPEN for web_search — use fallback, do not retry")
+    ...
+```
 
 **Pitfall 2: Infinite retry loops at the agent level**
 A step counter prevents infinite loops at the step level, but not at the retry level. An agent with `max_retries=∞` on each tool call can run a single tool call indefinitely. Always set `stop_after_attempt(3)` in tenacity and cap total task wall time with an outer timeout.

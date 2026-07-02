@@ -28,8 +28,8 @@ The fundamental shift from short-lived to durable agents is moving from in-proce
 - **Per-step checkpoints**: every meaningful step writes a checkpoint before reporting complete.
 - **Idempotency required**: every tool call must be safe to re-execute (use idempotency keys for external APIs).
 - **Crash recovery on restart**: process startup loads latest checkpoint and resumes from there.
-- **Context compaction over time**: summarize old history to stay within model's context window.
-- **Cost caps enforced**: terminate if cumulative cost exceeds threshold (especially for long-running).
+- **Context compaction over time**: summarize old history to stay within model's context window (see [Context Engineering](../context_engineering/README.md)).
+- **Cost caps enforced**: terminate if cumulative cost exceeds threshold (especially for long-running); budgeting patterns in [Agent Cost & Token Budgets](agent_cost_and_token_budget.md).
 - **Human-in-the-loop signals**: durable wait points where the agent pauses for human input (could be hours/days).
 
 ---
@@ -67,7 +67,7 @@ Without Durability (Lost Work on Crash)
   Step 2 (tool call)  -- in-memory state
   Step 3 (tool call)  -- in-memory state
   Step 4 (CRASH)
-  
+
   Restart -> all state lost
   Must start from Step 1
 
@@ -82,7 +82,7 @@ With Checkpointing (Resume on Crash)
   Step 2 (tool call) -> checkpoint to DB
   Step 3 (tool call) -> checkpoint to DB
   Step 4 (CRASH)
-  
+
   Restart -> load checkpoint(thread_id=abc)
   Resume from Step 4 (NOT Step 1)
 
@@ -101,23 +101,23 @@ Temporal Workflow Execution
   Worker process B picks up run_id=xyz
   Replays events 1, 2 (no re-execution of activities)
   Continues from Activity 3
-
-
-Human-in-the-Loop Pause
-========================
-
-  Agent reaches checkpoint where user input needed
-       |
-       v
-  Persist state to DB; emit "awaiting_input" status
-  Process can exit (zero cost while waiting)
-       |
-       v
-  Hours later: user submits input via API
-       |
-       v
-  New process picks up agent; loads state; resumes
 ```
+
+### Human-in-the-Loop Pause Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Running : process starts (thread_id assigned)
+    Running --> AwaitingInput : checkpoint reached — user input needed
+    note right of AwaitingInput
+        State persisted to DB, status = awaiting_input
+        Process exits — zero compute cost while waiting
+    end note
+    AwaitingInput --> Running : user submits input via API (hours-days later) — new process loads state, resumes
+    Running --> [*] : final output
+```
+
+The pause is a lifecycle transition, not a sleep: state persists, the process exits, and a fresh worker resumes on the user's signal — hours or days later — at zero cost while waiting.
 
 ---
 

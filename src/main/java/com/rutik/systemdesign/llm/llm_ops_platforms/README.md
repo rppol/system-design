@@ -8,9 +8,9 @@ LLMOps platforms provide the operational infrastructure needed to develop, evalu
 
 **Experiment Tracking** platforms capture what happened during model training — hyperparameters, loss curves, evaluation metrics, checkpoints, and dataset versions. MLflow, Weights & Biases (W&B), Neptune.ai, and Comet ML are the primary tools in this category. They were originally built for tabular ML but have been extended to support fine-tuning workflows.
 
-**LLM-specific Observability** platforms capture what happens at inference time in production — which prompts were sent, which tools were called, how many tokens were consumed, what each call cost, and where latency was spent. LangSmith, LangFuse, Arize Phoenix, Helicone, and Braintrust fill this role. Standard APM tools (Datadog, New Relic) cannot capture the nested call structure of an LLM agent chain, which is why this dedicated category exists.
+**LLM-specific Observability** platforms capture what happens at inference time in production — which prompts were sent, which tools were called, how many tokens were consumed, what each call cost, and where latency was spent. LangSmith, LangFuse, Arize Phoenix, Helicone, and Braintrust fill this role. Standard APM tools (Datadog, New Relic) cannot capture the nested call structure of an LLM agent chain, which is why this dedicated category exists (concepts deep dive: [LLM Observability & Monitoring](../llm_observability_and_monitoring/README.md)).
 
-**Evaluation Platforms** automate quality assessment before and after deployment — running a model or prompt version against a golden dataset and scoring it on domain-specific metrics. DeepEval, Ragas, LangSmith Evals, and Braintrust enable eval-gated CI/CD pipelines.
+**Evaluation Platforms** automate quality assessment before and after deployment — running a model or prompt version against a golden dataset and scoring it on domain-specific metrics. DeepEval, Ragas, LangSmith Evals, and Braintrust enable eval-gated CI/CD pipelines (testing methodology deep dive: [LLM Testing Strategies](../llm_testing_strategies/README.md)).
 
 The three categories form a feedback loop: experiment tracking informs what to train, evaluation determines what is safe to deploy, and observability reveals what is actually happening in production — feeding new failure cases back into evaluation datasets.
 
@@ -38,7 +38,7 @@ The three categories form a feedback loop: experiment tracking informs what to t
 
 **Eval-gated deployment**: No prompt change, model update, or retrieval configuration change should reach production without passing quality benchmarks on a representative golden dataset. The gate is automated and blocks deployment on regression.
 
-**Prompt versioning**: Prompts are code. They must be version-controlled in Git, reviewed like code changes, tested against golden datasets, and deployed through the same pipeline as code. Directory naming schemes like `prompt_v2_final_REAL.txt` are not version management.
+**Prompt versioning**: Prompts are code. They must be version-controlled in Git, reviewed like code changes, tested against golden datasets, and deployed through the same pipeline as code. Directory naming schemes like `prompt_v2_final_REAL.txt` are not version management. See [Prompt Management & PromptOps](../prompt_management_and_promptops/README.md).
 
 **Latency and quality tradeoff monitoring**: Both dimensions must be tracked simultaneously. A new model or prompt version may improve quality while increasing P99 latency by 800ms — a tradeoff that must be made explicitly, not discovered in a post-mortem.
 

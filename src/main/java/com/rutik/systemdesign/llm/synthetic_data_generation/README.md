@@ -133,7 +133,7 @@ For each prompt in your dataset:
 This is "knowledge distillation" at the data level (not logit-level distillation)
 ```
 
-Concerns: OpenAI ToS prohibits using outputs to train competing models. Use carefully.
+Concerns: OpenAI ToS prohibits using outputs to train competing models. Use carefully. Logit-level distillation and the full teacher-student tradeoff space are covered in [Knowledge Distillation & Model Merging](../knowledge_distillation_and_model_merging/README.md).
 
 ### 4.6 Rejection Sampling / Best-of-N
 
@@ -177,7 +177,7 @@ Approach 3 — Constitutional AI Revision:
     3. Revise based on critique → chosen
 ```
 
-Quality matters more than quantity: 10K high-quality preference pairs with clear quality margins can outperform 100K noisy pairs where chosen and rejected are barely distinguishable. Production pattern: generate 5-10 responses per prompt and use the best/worst for maximum margin.
+Quality matters more than quantity: 10K high-quality preference pairs with clear quality margins can outperform 100K noisy pairs where chosen and rejected are barely distinguishable. Production pattern: generate 5-10 responses per prompt and use the best/worst for maximum margin. How these pairs are consumed by DPO/RLHF training is covered in [Alignment & RLHF](../alignment_and_rlhf/README.md).
 
 ### 4.8 Backtranslation
 
@@ -414,14 +414,23 @@ A: LIMA showed that fine-tuning on just 1000 carefully curated, diverse examples
 **Q: What is Evol-Instruct and how is it different from Self-Instruct?**
 A: Evol-Instruct takes existing instructions and "evolves" them into more complex variants through operators like adding constraints, deepening, broadening, or concretizing. Unlike Self-Instruct which generates new instructions from scratch, Evol-Instruct systematically increases difficulty. WizardLM used this to create challenging instruction data that trained models to handle harder queries.
 
+**Q: Why does generating synthetic data at temperature=0 quietly ruin the dataset?**
+A: Greedy decoding is deterministic, so similar prompts produce identical or near-identical responses and the dataset collapses onto a handful of templates — one production pipeline generated 100K pairs at default settings and found 60K exact duplicates after deduplication. The student then memorizes a few response patterns instead of learning diverse behavior, and the damage is invisible until you measure it: raw example counts look healthy while distinct n-grams and topic entropy are tiny. Generate at temperature 0.7-1.0, produce multiple candidates per prompt and keep the best via a judge or reward model, and treat the dedup removal rate as a canary — if more than ~10% of a batch is near-duplicate, the generation settings lack diversity.
+
 **Q: Why is verified synthetic data (for code/math) higher quality than general instruction data?**
 A: For code and math, you can execute the generated answer and check if it's correct. This filtering step removes hallucinated solutions — a major problem with LLM-generated data. The resulting training data has near-100% accuracy for verifiable steps, vs. 80-90% for unverified instruction data.
 
 **Q: How do you design a quality filtering pipeline for synthetic training data?**
 A quality filtering pipeline uses multiple stages to remove low-quality synthetic samples before they corrupt model training. Stage 1: format validation — check that outputs follow the requested structure (valid JSON, correct section headers). Stage 2: deduplication — MinHash or exact hash to remove duplicates and near-duplicates. Stage 3: difficulty filtering — remove trivially simple or impossibly complex examples using perplexity scoring or model-based difficulty estimation. Stage 4: factual verification — for knowledge-dependent tasks, verify key facts against a reference corpus or use a separate LLM as a fact-checker. Stage 5: human spot-check — sample 1-5% for manual review to calibrate automated filters. Alpaca's original 52K instructions had significant quality issues (~30% contained errors or were low-quality); proper filtering would have reduced this to 15-20K high-quality samples that produced better results, as demonstrated by LIMA (1K curated examples matching 52K unfiltered).
 
+**Q: What is backtranslation and when is it the right generation strategy?**
+Backtranslation reverses the normal direction: instead of generating responses for prompts, you start from high-quality outputs (expert documentation, verified code solutions, curated answers) and prompt an LLM to generate the instruction that would produce each one. The response side — usually the quality bottleneck in synthetic data — is guaranteed correct because a human expert wrote it; only the cheap-to-verify instruction is synthetic. It is the right strategy when you have a corpus of trusted outputs but no paired prompts, and it can yield 10-50x more training pairs from a small expert set by generating multiple instruction phrasings per output. Always run a coherence filter (does this generated question actually match this answer?) before training, since mismatched pairs teach the model to answer the wrong question.
+
 **Q: How does Evol-Instruct work and what are its complexity levels?**
 Evol-Instruct (WizardLM) iteratively increases instruction complexity by applying evolution operators to seed instructions. The operators: (1) add constraints — "Write a sort function" becomes "Write a sort function that handles null values and is stable"; (2) deepen — add requirement for explanation or edge case handling; (3) concretize — make abstract instructions specific; (4) increase reasoning steps — require multi-step problem solving; (5) complicate input — add more complex data structures or scenarios. Each evolution step generates a harder instruction from an easier one, creating a natural curriculum. Typically 3-5 evolution rounds are applied. Quality control: after each evolution, verify the instruction is still coherent and answerable. WizardLM-70B trained on Evol-Instruct data outperformed ChatGPT on several benchmarks. The key insight: it is easier to systematically complicate existing instructions than to write complex instructions from scratch.
+
+**Q: How does persona-driven generation improve dataset diversity?**
+Assigning a different persona per generation batch ("a PhD physicist", "a high school student struggling with algebra", "a non-native English speaker") shifts the generator's vocabulary, sentence complexity, topic selection, and error patterns — producing diversity that a single system prompt cannot, no matter how high the temperature. Cosmopedia (HuggingFace, 2024) used this at scale: 30B tokens of synthetic educational text generated by Mixtral 8x7B under diverse persona and audience framings, outperforming similarly sized datasets on knowledge-intensive tasks. Personas attack the diversity problem at the distribution level while temperature only adds local sampling noise; the two compose. Verify the effect with embedding-cluster balance and distinct-n metrics rather than assuming persona labels alone guarantee coverage.
 
 **Q: What is model collapse and how does training on synthetic data risk causing it?**
 Model collapse occurs when a model trained on its own outputs (or outputs from similar models) progressively loses diversity and degrades in quality across generations. Each generation amplifies the biases and errors of the previous one while losing tail distribution coverage — rare but valid outputs become increasingly unlikely. The risk is highest when: (1) synthetic data dominates the training mix (>50%); (2) no human-generated data anchors the distribution; (3) multiple generations of synthetic data are stacked (model A generates data for model B, which generates data for model C). Mitigation: (1) always mix synthetic with human-generated data (at least 30% human); (2) use diverse generator models (not just one model's outputs); (3) explicitly measure output diversity (unique n-grams, topic coverage); (4) include quality filtering that removes outputs too similar to each other. Shumailov et al. (2023) showed that after 5-10 generations of self-training, models can lose up to 50% of their vocabulary diversity.

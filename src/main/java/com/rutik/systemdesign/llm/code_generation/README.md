@@ -116,6 +116,8 @@ Agent loop:
   7. Complete: all tests pass → return solution
 ```
 
+Full agent architectures (SWE-agent, Claude Code, OpenHands) are covered in [Coding Agents](../coding_agents/README.md); the sandbox layer that makes step 3 safe is covered in [Sandboxed Code Execution](../agents_and_tool_use/sandboxed_code_execution.md).
+
 ---
 
 ## 5. Architecture Diagrams
@@ -186,11 +188,15 @@ flowchart TD
 - Operators and brackets: individually tokenized
 
 **Data mixing for code models**:
+
+```mermaid
+pie title Code model training data mix
+    "The Stack code tokens" : 80
+    "Natural language text" : 15
+    "Math (reasoning)" : 5
 ```
-The Stack code tokens:    80%
-Natural language text:    15%  (for understanding docstrings, comments)
-Math (for reasoning):      5%
-```
+
+The 15% natural language keeps the model fluent at docstrings, comments, and instruction following; the 5% math slice measurably improves algorithmic reasoning without displacing code coverage.
 
 ### Evaluation Benchmarks
 
@@ -219,13 +225,17 @@ Task: given issue description + codebase → generate patch that resolves the is
 Evaluation: automated test suite (did the patch fix the failing tests?)
 
 Metric: % resolved
-
-GPT-4 (2023): 1.7%
-SWE-agent (2024): 12%
-Devin (Cognition, 2024): 13.8% (first public agent benchmark claim)
-Claude 3.5 Sonnet + tools: 49%
-o3 + scaffolding: 71.7%  (SWE-bench verified subset)
 ```
+
+```mermaid
+xychart-beta
+    title "SWE-bench resolve rate progression"
+    x-axis ["GPT-4 (2023)", "SWE-agent (2024)", "Devin (2024)", "Claude 3.5 + tools", "o3 + scaffolding"]
+    y-axis "% issues resolved" 0 --> 80
+    bar [1.7, 12, 13.8, 49, 71.7]
+```
+
+From 1.7% (raw GPT-4, 2023) to 71.7% (o3 + scaffolding, on the SWE-bench Verified subset) in two years — the jumps come from agent scaffolding and tool use, not just base-model quality. Devin (Cognition, 13.8%) was the first public agent benchmark claim.
 
 **MBPP** (Mostly Basic Python Problems):
 - 500 simple Python functions from crowdsourcing
@@ -367,6 +377,12 @@ A: Copilot collects: (1) current file with cursor position; (2) other open tabs,
 **Q: What is SWE-bench and why is it a better benchmark than HumanEval?**
 A: SWE-bench consists of 2294 real GitHub issues with their corresponding patches. The task: given the issue description and codebase, generate a patch that resolves the failing tests. It's harder than HumanEval because: (1) tasks are multi-file, not single-function; (2) requires understanding existing codebase structure; (3) real-world bugs are messier than toy problems; (4) evaluation is via test suite, not simple output comparison. HumanEval is essentially "solved" (~90%+); SWE-bench is still challenging (71% with o3 + scaffolding as of 2025).
 
+**Q: How is pass@k actually computed, and what is the common mistake?**
+A: pass@k is estimated with the unbiased estimator pass@k = E[1 - C(n-c, k)/C(n, k)], where you generate n samples per problem (n > k, typically n=200 for k=100), count c correct ones, and compute the probability that at least one of k random draws is correct. The common mistake is the naive approach — generate exactly k samples and check if any passes — which has high variance and systematically overestimates pass@k on small sample counts. A second trap is temperature: pass@1 should be measured near-greedy (temperature ~0.2) while pass@100 benefits from diverse sampling (temperature ~0.8), so a single temperature setting understates one metric or the other — the Codex paper established this dual-temperature convention. Always report n, k, and temperature alongside any pass@k number, or the result is not comparable.
+
+**Q: What is benchmark contamination in code evals, and how do you detect it?**
+A: Contamination means the benchmark problems (or near-duplicates) appeared in the model's training data, so the score measures memorization, not capability — HumanEval has been public since 2021 and its 164 problems are widely reproduced across GitHub, making inflated scores likely for any recent model. Detection techniques: n-gram overlap search between benchmark solutions and training corpora; perturbation testing (rename variables, paraphrase the docstring, or change constants — a large accuracy drop on semantically identical problems signals memorization); and comparing performance on problems published before vs. after the model's training cutoff. Mitigation: prefer continuously refreshed benchmarks (LiveCodeBench uses only post-cutoff contest problems; SWE-bench can be filtered to issues filed after the cutoff) and always maintain a private, never-published eval set for your own domain.
+
 **Q: What are the main security risks in LLM code generation?**
 A: (1) Injection vulnerabilities: LLMs learn SQL injection, XSS, command injection patterns from insecure training code; (2) Hard-coded secrets: models suggest API keys, passwords found in training data; (3) Insecure cryptography: models may suggest outdated algorithms (MD5, DES); (4) Path traversal: models may suggest file operations without input validation; (5) Copyright: models may reproduce licensed code verbatim. Mitigations: static analysis (Semgrep, CodeQL) on generated code; secret detection; security-focused post-processing.
 
@@ -390,6 +406,9 @@ A: Verbatim reproduction risk: models trained on public code may reproduce licen
 
 **Q: What makes a code agent's execution loop different from a standard ReAct loop?**
 A: A standard ReAct loop uses tool calls to gather information and synthesize an answer. A code agent's loop is tighter and execution-driven: (1) The primary tool is code execution — the agent writes code, executes it in a sandbox, reads the output/error, and iterates; (2) Feedback is structured (stack traces, test results, stdout/stderr) rather than natural language observations; (3) The termination condition is programmatic (all tests pass, no errors) rather than semantic ("I have enough information"); (4) The agent manages file state across iterations — edits persist; (5) Multiple execution environments may be involved (Python sandbox, bash shell, browser). This makes code agents highly reliable for well-defined tasks (SWE-bench) but more dangerous for open-ended ones — they can delete files, make API calls, or consume cloud resources.
+
+**Q: How does execution feedback become a training signal for code models?**
+A: Code's verifiability enables RL with verifiable rewards: the model generates a solution, the solution runs in a sandbox against unit tests, and the reward is binary pass/fail or the fraction of tests passed — no learned reward model, no human preference labels, and no reward hacking, because the test suite is the ground truth. This is the recipe behind reasoning models' coding gains (DeepSeek-R1 and the o-series train on execution-verified code alongside math), and it requires real infrastructure: sandboxed execution (Docker/gVisor), per-test timeouts of 10-30 seconds to kill infinite loops, and test suites strong enough that wrong solutions cannot slip through weak assertions. The same loop works at smaller scale for data generation — sample N solutions, keep only ones that pass tests, fine-tune on the survivors (rejection sampling). See [Alignment & RLHF](../alignment_and_rlhf/README.md) for the verifiable-rewards mechanics.
 
 **Q: How do you handle repositories too large to fit in any model's context window?**
 A: No model can hold a 500K LOC repository in context. Strategies: (1) Semantic chunking and retrieval: embed all code at function/class granularity; retrieve the top-k most relevant chunks for each generation step — Cursor and Copilot Enterprise use this approach; (2) Symbol-level navigation: instead of loading full files, use the language server (LSP) to resolve symbols on demand — fetch function definitions when needed, not upfront; (3) Hierarchical summarization: build a codebase map (file → module → package summary); include the map in context for orientation; (4) Agent-with-tools pattern: give the agent tools like `read_file(path)`, `search_codebase(query)`, `get_symbol_definition(symbol)` so it navigates incrementally — this is the Claude Code and SWE-agent approach. Effective production systems combine all three strategies.

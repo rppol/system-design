@@ -136,6 +136,8 @@ Clients (Apps, Services)
 
 ### 4.1 Routing Engine
 
+Routing fundamentals (capability tiers, cascade routing, cost/quality frontiers): [LLM Routing & Model Selection](../llm_routing_and_model_selection/README.md).
+
 ```
 Routing decisions are made hierarchically:
 
@@ -184,6 +186,8 @@ Routing example:
 ```
 
 ### 4.2 Semantic Caching
+
+Cache-layer fundamentals (exact vs semantic, invalidation, hit-rate economics): [LLM Caching](../llm_caching/README.md).
 
 ```
 Semantic cache enables reusing responses for similar (not identical) queries.
@@ -323,13 +327,23 @@ Threshold calibration: 0.98+ = near-zero hit rate (effectively disabled); 0.95 =
 ```
 Provider health monitoring: track success rate, P50/P95/P99 latency, token throughput,
 and error types (timeout, rate_limit, 5xx, auth) over a 60-second rolling window.
+```
 
-Circuit breaker states (binary → replaced by AdaptiveCircuitBreaker, see Incident 2):
-  CLOSED:     normal routing; monitor metrics
-  OPEN:       triggered at error_rate > 5% OR p95 > 3× baseline for 30s;
-              route 100% to fallback; re-check after 60s → HALF_OPEN
-  HALF_OPEN:  send 10% to primary; success → CLOSED; still failing → OPEN
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+    CLOSED --> OPEN : error rate over 5% OR p95 over 3x baseline for 30s
+    OPEN --> HALF_OPEN : re-check after 60s
+    HALF_OPEN --> CLOSED : 10% probe traffic succeeds
+    HALF_OPEN --> OPEN : probes still failing
+    CLOSED : normal routing — monitor metrics
+    OPEN : route 100% to fallback
+    HALF_OPEN : send 10% to primary as probe
+```
 
+The binary open/closed lifecycle above was later replaced by the proportional `AdaptiveCircuitBreaker` (see Incident 2), which reduces traffic in proportion to the error rate instead of all-or-nothing.
+
+```
 Failover chain (configurable per tenant):
   gpt-4o (OpenAI) → claude-3-5-sonnet (Anthropic) → gemini-1.5-pro (Google)
   → llama-3-70b (self-hosted, last resort)
@@ -644,7 +658,7 @@ See [Multi-Region LLM Topology](./cross_cutting/multi_region_llm_topology.md) fo
 
 **The 10ms latency requirement is challenging.** Every synchronous check in the request path (auth, rate limit, cache, safety filter) adds latency. The solution: run fast checks synchronously (Redis lookup: < 1ms), async checks where possible (logging, detailed safety analysis), and use connection pooling to LLM providers to amortize connection setup.
 
-**Why not just use LiteLLM or Portkey?** Open-source gateways (LiteLLM) handle basic routing and format translation. Building in-house makes sense when you need: custom routing logic tightly integrated with your business rules, HIPAA/compliance requirements (data never leaves your VPC), custom semantic caching tuned to your query patterns, or deep integration with your observability stack.
+**Why not just use LiteLLM or Portkey?** Open-source gateways ([LiteLLM](../agentic_frameworks/litellm_routing.md)) handle basic routing and format translation. Building in-house makes sense when you need: custom routing logic tightly integrated with your business rules, HIPAA/compliance requirements (data never leaves your VPC), custom semantic caching tuned to your query patterns, or deep integration with your observability stack.
 
 **Semantic cache cache poisoning.** If a cached response is wrong (hallucination) and many similar queries hit the cache, the wrong answer spreads. Mitigation: TTL ensures old responses expire, A/B test cache vs. fresh to measure quality, allow users to "thumbs down" which invalidates the cache entry.
 
@@ -800,10 +814,10 @@ Cost breakdown at 40M req/month:
     Medium  (GPT-4o-mini):     12M req × 1200 tok × $0.015/1k = $21,600/month
     Complex (GPT-4o):           2M req × 4600 tok × $0.030/1k =  $27,600/month
     Raw total: ~$80,400/month
-  
+
   After 34% semantic cache hit rate (cached = $0 marginal):
     Effective: $80,400 × 0.66 = $53,064/month
-  
+
   Infrastructure (gateway nodes, Redis, monitoring): $4,200/month
   Total: ~$57,264/month vs $180,000/month before optimization
 ```

@@ -108,71 +108,55 @@ KV cache HBM:
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CL(["Clients\nOpenAI SDK · curl · gRPC"])
+    GW["API Gateway (per-region)\nmTLS termination · JWT / API key auth\nper-tenant rate limits · request normalization"]
+    RT["Model Router\nmodel_id resolution · adapter_id lookup\nconsistent hash → pod · fallback on pod failure"]
+    H100["H100 Cluster (70B)\nvLLM engine"]
+    A10G["A10G Cluster (7B)\nvLLM engine"]
+    SG["Streaming Gateway (SSE)\nper-tenant token count · SSE frame assembly\nfinish_reason inject"]
+    OUT(["Clients\n(streamed tokens)"])
+
+    subgraph SUP["Supporting systems — async, off critical path"]
+        LAS[("LoRA Adapter Store\nS3 + NVMe cache · LRU eviction (60)")]
+        MWS[("Model Weight Store\nS3 + NVMe cache · preload top-10")]
+        BIL["Billing Pipeline\nKafka billing_events → ClickHouse\n→ daily invoice generator"]
+        OBS["Metrics / Observability\nDCGM → Prometheus → Grafana\nOTel traces → Tempo · alerts → PagerDuty"]
+    end
+
+    CL --> GW --> RT
+    RT --> H100
+    RT --> A10G
+    H100 --> SG
+    A10G --> SG
+    SG --> OUT
+    LAS -.-> H100
+    LAS -.-> A10G
+    MWS -.-> H100
+    MWS -.-> A10G
+    H100 -.-> BIL
+    A10G -.-> BIL
+    H100 -.-> OBS
+    A10G -.-> OBS
+
+    class CL,OUT io
+    class GW,RT req
+    class H100,A10G base
+    class SG mathOp
+    class LAS,MWS frozen
+    class BIL,OBS train
 ```
-Clients (OpenAI SDK, curl, grpc)
-              |
-              v
-  +---------------------------+
-  |   API Gateway (per-region) |
-  |  - mTLS termination        |
-  |  - JWT / API key auth      |
-  |  - Per-tenant rate limits  |
-  |  - Request normalization   |
-  +---------------------------+
-              |
-              v
-  +---------------------------+
-  |      Model Router          |
-  |  - model_id resolution     |
-  |  - adapter_id lookup       |
-  |  - Consistent hash → pod   |
-  |  - Fallback on pod failure |
-  +---------------------------+
-              |
-     _________|_________
-    |                   |
-    v                   v
-+----------+      +----------+
-| H100     |      | A10G     |
-| Cluster  |      | Cluster  |
-| (70B)    |      | (7B)     |
-| vLLM     |      | vLLM     |
-| engine   |      | engine   |
-+----------+      +----------+
-    |                   |
-    +--------+----------+
-             |
-             v
-  +---------------------------+
-  |   Streaming Gateway (SSE) |
-  |  - per-tenant token count |
-  |  - SSE frame assembly     |
-  |  - finish_reason inject   |
-  +---------------------------+
-             |
-             v
-         Clients
 
-Supporting systems (async, off critical path):
-  +-------------------+    +----------------------+
-  | LoRA Adapter Store |    | Model Weight Store   |
-  | S3 + NVMe cache   |    | S3 + NVMe cache      |
-  | LRU eviction (60) |    | preload top-10       |
-  +-------------------+    +----------------------+
-
-  +--------------------------------------+
-  | Billing Pipeline                     |
-  | Kafka (billing_events) →             |
-  | ClickHouse → daily invoice generator |
-  +--------------------------------------+
-
-  +--------------------------------------+
-  | Metrics / Observability              |
-  | DCGM → Prometheus → Grafana         |
-  | OTel traces → Tempo                  |
-  | Alerts → PagerDuty                   |
-  +--------------------------------------+
-```
+The synchronous request path (solid arrows) is gateway → router → GPU cluster → streaming gateway; everything dotted stays off the hot path — adapter/weight stores feed pods at load time, and billing/observability consume async events emitted after each request.
 
 ### Multi-Region Topology
 

@@ -49,7 +49,7 @@ Inject all N tool schemas into the system prompt unconditionally. Works for N <=
 
 ### 4.2 RAG-over-tools
 
-Embed every tool description offline using a text embedding model (e.g., `text-embedding-3-small`, 1536 dimensions). At query time, embed the user message and retrieve top-k tools by cosine similarity. Inject only retrieved tools into the context.
+Embed every tool description offline using a text embedding model (e.g., `text-embedding-3-small`, 1536 dimensions). At query time, embed the user message and retrieve top-k tools by cosine similarity. Inject only retrieved tools into the context. Embedding-model selection and ANN index tradeoffs are covered in [Embeddings & Similarity Search](../embeddings_and_similarity_search/README.md).
 
 Key parameters:
 - k = 5 to 10 (k=10 achieves ~95% recall on ToolBench, k=5 achieves ~88%)
@@ -529,7 +529,7 @@ class VersionedToolRegistry(ToolRegistry):
 
 ## 7. Real-World Examples
 
-**ToolBench (UC Berkeley, 2023).** The ToolBench benchmark contains 16,464 real-world APIs collected from RapidAPI. The associated ToolLLM paper fine-tunes LLaMA-2 on (query, tool-use trajectory) pairs sampled from this catalogue. The fine-tuned 7B model matches or exceeds GPT-4 on API selection accuracy across 49 categories — demonstrating that a small model with retrieval-aware training outperforms a large model using naive prompting.
+**ToolBench (Tsinghua / OpenBMB, 2023).** The ToolBench benchmark contains 16,464 real-world APIs collected from RapidAPI. The associated ToolLLM paper fine-tunes LLaMA-2 on (query, tool-use trajectory) pairs sampled from this catalogue. The fine-tuned 7B model matches or exceeds GPT-4 on API selection accuracy across 49 categories — demonstrating that a small model with retrieval-aware training outperforms a large model using naive prompting.
 
 **Gorilla LLM (UC Berkeley, 2023).** Gorilla is a LLaMA-based model fine-tuned specifically for API calling on TensorFlow Hub, Torch Hub, and HuggingFace Hub. Its key insight: the model is fine-tuned with a retriever in the loop, so it learns to use retrieved API documentation rather than memorised API signatures. This eliminates hallucinated parameter names, which are the dominant failure mode in naive tool use.
 
@@ -750,7 +750,7 @@ The model reads the description to understand what the tool does before deciding
 Use a namespacing convention: `<server>_<verb>_<object>`. For example, `github_create_pr` and `jira_create_issue` instead of two tools both named `create`. This eliminates ambiguity in both the LLM's function-selection decision and in server-side routing.
 
 **What is the ToolBench benchmark and why does it matter?**
-ToolBench (UC Berkeley, 2023) is a benchmark of 16,464 real-world APIs from RapidAPI covering 49 categories. It provides standardised evaluation of tool selection accuracy and multi-step tool use. The associated ToolLLM paper shows that a 7B model fine-tuned with retrieval-aware training matches GPT-4 on this benchmark, which implies that retrieval quality matters as much as model size for tool use.
+ToolBench (Tsinghua / OpenBMB, 2023) is a benchmark of 16,464 real-world APIs from RapidAPI covering 49 categories. It provides standardised evaluation of tool selection accuracy and multi-step tool use. The associated ToolLLM paper shows that a 7B model fine-tuned with retrieval-aware training matches GPT-4 on this benchmark, which implies that retrieval quality matters as much as model size for tool use.
 
 **What is Gorilla LLM and what problem does it solve?**
 Gorilla is a LLaMA-based model fine-tuned for API calling on TensorFlow Hub, Torch Hub, and HuggingFace Hub APIs. Its primary contribution is eliminating hallucinated parameter names, which are the dominant error mode when GPT-4 or similar models call APIs from memory. Gorilla is trained with a retriever in the loop, so it learns to ground calls in retrieved documentation rather than parametric memory.
@@ -795,7 +795,7 @@ Using `text-embedding-3-small` at $0.02/1M tokens: embedding each query (average
 
 6. Mark required vs optional parameters explicitly in the JSON schema `required` array. The model uses this to decide whether to ask the user for more information or to proceed with defaults. Missing-required-arg errors are the second most common tool use failure after selection errors.
 
-7. For multi-server MCP deployments, maintain one FAISS index per server and merge results with a cross-server re-ranking step. This avoids contamination between semantically different tool catalogues.
+7. For multi-server MCP deployments, maintain one FAISS index per server and merge results with a cross-server re-ranking step. This avoids contamination between semantically different tool catalogues. The client-side multi-server aggregation and prefixing mechanics are covered in [MCP Client Patterns](../mcp_model_context_protocol/mcp_client_patterns.md).
 
 8. Train the routing classifier on queries from real production logs, not just synthetic data, once you have 500+ real examples. Real query distribution differs from GPT-4-generated synthetic data in ways that matter at the tail.
 

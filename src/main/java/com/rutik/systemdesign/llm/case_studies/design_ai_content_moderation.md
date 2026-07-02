@@ -313,6 +313,8 @@ Batch optimization:
     Only real-time borderline cases use synchronous API
 ```
 
+See also: [Guardrails & Content Safety](../guardrails_and_content_safety/README.md) for the policy-prompt hardening and jailbreak-resistance patterns the Tier 2 judge builds on.
+
 ### 4.2.1 Classifier Cascade — Python Implementation
 
 The cascade below shows the production code path.  All latency figures are p50 measured on a T4 GPU with batch size 64.
@@ -1283,17 +1285,21 @@ Infrastructure:
   Redis (caching, dedup): $200/day
   Application servers (16 instances): $800/day
   Infrastructure total: $1,815/day
+```
 
-TOTAL DAILY COST:
-  Tier 1 (GPU):           $34
-  Tier 2 (LLM):           $19,969
-  Tier 3 (Human):         $1,575,000
-  Appeals:                $525,000
-  Retroactive scan:       $10,000
-  Infrastructure:         $1,815
-  ─────────────────────────────────
-  TOTAL:                  $2,131,818/day = $778M/year
+```mermaid
+pie title Total daily moderation cost — $2,131,818/day ($778M/year)
+    "Tier 3 human review" : 1575000
+    "Appeals handling" : 525000
+    "Tier 2 LLM judge" : 19969
+    "Retroactive scan" : 10000
+    "Infrastructure" : 1815
+    "Tier 1 GPU" : 34
+```
 
+Human review plus appeals is ~99% of the $2,131,818/day total — the AI tiers ($34 GPU + $19,969 LLM) are rounding error, which is why every percentage point of Tier 1/Tier 2 absorption is worth eight figures a year.
+
+```
 Cost per moderation decision:
   All-in: $2,131,818 / 100M = $0.021 per post
   AI-only (no human): $31,818 / 100M = $0.00032 per post

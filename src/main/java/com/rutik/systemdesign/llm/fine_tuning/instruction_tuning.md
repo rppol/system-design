@@ -105,13 +105,15 @@ Implementation:
 The quality and diversity of training data is the primary determinant of instruction-tuning success:
 
 ### Quality Beats Quantity (the LIMA finding)
-```
-Physician rating of the same model fine-tuned on two datasets (each █ ≈ 0.2 points):
 
-  4,800 curated + filtered    │██████████████████████ 4.3 / 5.0   ← winner
- 50,000 synthetic, unfiltered │███████████████████    3.8 / 5.0
-                              └──────────────────────────────── rating →
+```mermaid
+xychart-beta
+    title "Physician rating: quality-filtered vs raw volume (LIMA effect)"
+    x-axis ["4.8K curated + filtered", "50K synthetic, unfiltered"]
+    y-axis "Physician rating (1-5)" 0 --> 5
+    bar [4.3, 3.8]
 ```
+
 The 10× larger dataset scored LOWER. Once ~1-5K diverse examples teach the
 instruction-following format, extra noisy examples add gradient noise rather than new
 skill — so filtering down to the best 1-5K examples beats piling on raw volume.
@@ -298,7 +300,7 @@ Labels (after masking):
 - Demonstrates that diversity (1M pairs across many task types) outperforms repetitive domain data
 
 ### LLaMA-3-Instruct (Meta, 2024)
-- LLaMA-3-8B-Base + multi-round SFT + RLHF
+- LLaMA-3-8B-Base + multi-round SFT + [RLHF](../alignment_and_rlhf/README.md)
 - SFT uses ~10M high-quality instruction pairs covering 30+ task types
 - Multi-turn conversation data: 20-30% of training set
 - Safety instruction data: explicitly included to produce safe refusals
@@ -570,11 +572,11 @@ trainer.train()
 | MMLU regression vs. base | — | -1.8% (within tolerance) |
 | Physician rating (1-5 scale, 100 outputs) | 3.1 | 4.3 |
 
-General capability regression (MMLU -1.8%) stayed well within the acceptable 5% threshold because the training set was small (4,800 examples) and LoRA was used — base weights were frozen.
+General capability regression (MMLU -1.8%) stayed well within the acceptable 5% threshold because the training set was small (4,800 examples) and [LoRA](lora.md) was used — base weights were frozen.
 
 #### Tradeoffs and Alternatives
 
-**Instruction tuning vs. RAG.** For factual accuracy on evolving medical knowledge (new drug approvals, updated guidelines), RAG is superior — fine-tuning encodes knowledge at training time and becomes stale. The implemented system combined both: fine-tuning taught format and reasoning structure; RAG retrieved current guideline text at query time. Neither alone achieved the target quality.
+**Instruction tuning vs. RAG.** For factual accuracy on evolving medical knowledge (new drug approvals, updated guidelines), [RAG](../rag_fundamentals/README.md) is superior — fine-tuning encodes knowledge at training time and becomes stale. The implemented system combined both: fine-tuning taught format and reasoning structure; RAG retrieved current guideline text at query time. Neither alone achieved the target quality.
 
 **6,000 examples vs. larger dataset.** Attempting to scale to 50,000 synthetic examples (GPT-4 generated, unreviewed) degraded physician evaluation scores from 4.3 to 3.8 — the larger noisy dataset hurt quality. The LIMA finding held: 4,800 quality-filtered examples outperformed 50,000 unfiltered examples in human evaluation.
 

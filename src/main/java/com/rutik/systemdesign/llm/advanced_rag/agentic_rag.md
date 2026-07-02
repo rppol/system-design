@@ -61,6 +61,8 @@ Step 7 (fallback): If max_iterations reached, generate best-effort answer
 
 ### 3.2 LangGraph Implementation Pattern
 
+The loop below is a minimal [LangGraph](../agentic_frameworks/langgraph.md) state machine: a retrieve node and a sufficiency-check node connected by a conditional edge that either loops back for another retrieval or exits to generation.
+
 ```python
 from langgraph.graph import StateGraph, END
 from typing import TypedDict, List
@@ -292,6 +294,18 @@ Fix: Evaluate sufficiency check accuracy on labeled (query, context, should_cont
 The LLM generates retrieval queries that keep finding the same documents. Context grows but no new information is added.
 Fix: Track retrieved document IDs across iterations; exclude previously retrieved documents from subsequent searches, or explicitly prompt the LLM to "search for information not yet in your context."
 
+```python
+# BROKEN: each iteration searches blind — the same top-scoring docs return every time
+docs = retriever.retrieve(next_query, top_k=5)
+
+# FIXED: exclude already-seen document IDs at the vector DB level, stop when no new docs
+docs = retriever.retrieve(next_query, top_k=5,
+                          filter={"id": {"$nin": list(seen_ids)}})
+if not {d.id for d in docs} - seen_ids:
+    break  # no new information — terminate instead of burning another iteration
+seen_ids.update(d.id for d in docs)
+```
+
 **5. No timeout at the system level**
 The agentic loop is bounded by max_iterations but each iteration can be slow. A 5-iteration loop with 3-second iterations = 15 seconds, which may exceed upstream timeout.
 Fix: Set a wall-clock timeout at the system level independent of max_iterations.
@@ -346,7 +360,7 @@ A: Use a query classifier to route before retrieval. Features that predict multi
 A: Observability requires tracing all iterations. Emit a structured trace event for each iteration containing: iteration number, generated retrieval query, retrieved document IDs and scores, sufficiency check result, gap analysis. Use a tracing tool (Arize Phoenix, LangSmith, or OpenTelemetry spans). The critical metrics to track: (1) average_iterations_per_query — should be 1.5-2.5; if it's consistently 5, something is wrong; (2) max_iterations_hit_rate — fraction of queries hitting the limit; (3) per-iteration latency breakdown. Without this observability, debugging failures in production is extremely difficult.
 
 **Q: What is the relationship between agentic RAG and ReAct (Reasoning + Acting)?**
-A: ReAct is the general pattern underlying agentic RAG: Thought (reasoning about what to do next) → Action (tool call, including retrieval) → Observation (tool result) → repeat. Agentic RAG is a specific instantiation of ReAct where the primary action is retrieval and the primary reasoning is about information sufficiency. Modern LLMs with function calling implement ReAct natively: the LLM generates a "thought" (system reasoning), calls a "search" tool (action), receives the search results (observation), and decides whether to search again or generate a final answer. The key difference from pure ReAct is that agentic RAG focuses specifically on the retrieval-generation loop, not arbitrary tool use.
+A: ReAct (see [ReAct and Reasoning Patterns](../agents_and_tool_use/react_and_reasoning_patterns.md)) is the general pattern underlying agentic RAG: Thought (reasoning about what to do next) → Action (tool call, including retrieval) → Observation (tool result) → repeat. Agentic RAG is a specific instantiation of ReAct where the primary action is retrieval and the primary reasoning is about information sufficiency. Modern LLMs with function calling implement ReAct natively: the LLM generates a "thought" (system reasoning), calls a "search" tool (action), receives the search results (observation), and decides whether to search again or generate a final answer. The key difference from pure ReAct is that agentic RAG focuses specifically on the retrieval-generation loop, not arbitrary tool use.
 
 **Q: How do you prevent circular retrieval in iterative loops?**
 A: Circular retrieval — where the loop keeps retrieving the same documents — is a common failure mode. Track retrieved document IDs in state across all iterations. Before each new retrieval, inject a constraint into the retrieval query prompt: "Search for information NOT already in your context. Avoid queries that would retrieve documents you've already seen." Optionally, filter out previously retrieved document IDs at the vector DB level (metadata filter: `{"id": {"$nin": seen_ids}}`). Also, if two consecutive iterations retrieve an identical set of document IDs, terminate the loop early — it's not making progress.
@@ -372,7 +386,7 @@ A: Beyond standard answer accuracy, track agentic-specific metrics. Iteration ef
 
 1. **Always set max_iterations** — never let the loop run unbounded; 3-5 iterations handles 95% of multi-hop queries.
 2. **Log every iteration** — trace retrieval queries, document IDs, and sufficiency check results; debugging without this trace is impossible.
-3. **Use a query router** — route simple queries to standard RAG; agentic overhead is not justified for single-hop questions.
+3. **Use a query router** — route simple queries to standard RAG; agentic overhead is not justified for single-hop questions (see [Query Transformation](query_transformation.md) for decomposition and routing techniques).
 4. **Design sufficiency checks with structured output** — JSON `{"sufficient": bool, "missing": "what info is needed"}` is far more reliable than free-text YES/NO.
 5. **Compress context across iterations** — don't blindly accumulate; summarize or select top-K relevant chunks to avoid hitting context limits.
 6. **Track circular retrieval** — if the same document IDs appear in consecutive iterations, terminate early.

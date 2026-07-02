@@ -429,11 +429,21 @@ extract_tool = {
 
 2. **Argument hallucination without strict mode**: Without `strict: true`, models invent enum values, ignore required fields, and pass wrong types. Always use strict mode for production.
 
-3. **Tool result too large**: Returning a 10KB JSON response bloats context, degrades model reasoning, and increases cost. Truncate at ~500 words; summarize where possible. A model that injested 10KB tool results over 10 steps uses 100KB of context — $0.50+ per run at GPT-4o prices.
+3. **Tool result too large**: Returning a 10KB JSON response bloats context, degrades model reasoning, and increases cost. Truncate at ~500 words; summarize where possible. A model that ingested 10KB tool results over 10 steps uses 100KB of context — $0.50+ per run at GPT-4o prices.
 
 4. **Not handling tool errors**: Assuming tool calls always succeed. The model receives errors as observations and can recover — but only if you inject them as tool result messages with `status: "error"` rather than raising an exception.
 
 5. **Forgetting to append the assistant message**: Before injecting tool results, you MUST append `response.choices[0].message` (the assistant's tool call) to messages. Skipping this breaks the conversation structure and causes API errors.
+
+```python
+# BROKEN: tool result appended without the assistant's tool_call message
+messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+# API error: "'tool' message must follow an 'assistant' message with tool_calls"
+
+# FIXED: assistant message first, then one tool message per call id
+messages.append(response.choices[0].message)   # contains the tool_calls field
+messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+```
 
 6. **Overlapping tool responsibilities**: Two tools that do similar things confuse the model on which to pick. Ensure each tool has a unique, non-overlapping responsibility described explicitly in its description.
 
@@ -445,9 +455,9 @@ extract_tool = {
 |------|---------|-------|
 | **OpenAI function calling** | Tool use with GPT | `strict: true` for guaranteed JSON |
 | **Anthropic tool use** | Tool use with Claude | Best instruction following |
-| **Instructor** | Pydantic + LLM tools | Validates and retries on failure |
+| **[Instructor](../agentic_frameworks/structured_outputs_and_instructor.md)** | Pydantic + LLM tools | Validates and retries on failure |
 | **LangChain tools** | Tool abstraction layer | 100+ pre-built tools |
-| **LangGraph tool node** | Tool execution in graphs | Built-in error handling |
+| **[LangGraph tool node](../agentic_frameworks/langgraph.md)** | Tool execution in graphs | Built-in error handling |
 | **Marvin** | Type-safe extraction | Maps LLM output to Python types |
 | **OpenAI Assistants** | Managed tool execution | Threads + built-in tools |
 | **E2B** | Code execution tool | Secure sandbox; fast spin-up |

@@ -4,7 +4,7 @@
 
 Computer use agents interact with graphical interfaces — browsers, desktop applications, and operating systems — by observing the screen (via screenshots or accessibility trees) and issuing UI actions (clicks, typing, scrolling). Unlike API-based agents that call structured tool functions, computer use agents operate on the visual layer, enabling them to automate any software that a human could use, even without a programmatic API.
 
-Browser agents specifically navigate the web: filling forms, clicking buttons, extracting data, and completing multi-step workflows on any website. They combine vision models (to see the screen), action models (to decide what to do), and execution layers (Playwright, Selenium, or OS APIs to perform actions).
+Browser agents specifically navigate the web: filling forms, clicking buttons, extracting data, and completing multi-step workflows on any website. They combine vision models (to see the screen), action models (to decide what to do), and execution layers (Playwright, Selenium, or OS APIs to perform actions). For an extended treatment of production browser-agent stacks, see [Browser Agents Deep Dive](../browser_agents_deep_dive/README.md).
 
 ---
 
@@ -308,6 +308,8 @@ not for tasks where a structured API exists.
    Problem: rapid automated browsing triggers bot detection
    Solution: human-like delays (200-500ms between actions), headless=False for sites using JS detection
 ```
+
+The retry, verification, and step-budget patterns above are instances of the general agent reliability toolkit — see [agent_reliability.md](agent_reliability.md).
 
 ---
 

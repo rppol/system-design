@@ -118,6 +118,8 @@ Memory storage:
   LangMem / Mem0: production libraries for managing reflection memory
 ```
 
+Full deep dive: [Reflexion & Self-Correction](reflexion_and_self_correction.md); persistent reflection storage patterns: [Agent Memory](agent_memory.md).
+
 ### Tree of Thoughts (ToT)
 
 ```
@@ -153,6 +155,8 @@ Cost: B × D × LLM calls (e.g., 3 branches × 4 depth = 12 LLM calls minimum)
 Use when: planning problems where early choices have large impact on outcome
 Avoid when: single-step tasks where one good CoT is sufficient
 ```
+
+Full deep dive: [Tree of Thoughts for Agents](tree_of_thoughts_for_agents.md).
 
 ### Self-Consistency
 
@@ -635,6 +639,6 @@ async def react_data_agent(question: str, max_steps: int = 15) -> str:
 
 **Tradeoffs and Alternatives**:
 
-- Plan-and-Execute was considered: rejected because analyst follow-up questions mid-session make upfront planning unreliable — ReAct's adaptability is more valuable here.
+- [Plan-and-Execute](plan_and_execute.md) was considered: rejected because analyst follow-up questions mid-session make upfront planning unreliable — ReAct's adaptability is more valuable here.
 - Streaming intermediate Thoughts to the analyst UI was added after launch — analysts report significantly higher trust in results when they can see the Thought-Action-Observation trace in real time.
 - Self-consistency (N=3 runs, majority vote) was prototyped for critical metrics queries — improved accuracy by ~7% but tripled cost; not deployed for general use; available as an optional "high confidence" mode.

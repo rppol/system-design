@@ -64,6 +64,7 @@ termination all target the expensive side of the ratio.
 once a prefix exceeds 1,024 tokens and offers a 90% discount on cache hits. OpenAI caches prefixes
 automatically for contexts over 1,024 tokens and offers a 50% discount. For RAG systems where the
 system prompt and retrieved context are largely stable, caching eliminates most input token costs.
+Mechanics and the full multi-layer cache taxonomy live in [LLM Caching](../llm_caching/README.md).
 
 **Batch APIs offer 50% discount for non-real-time workloads.** OpenAI Batch API and Anthropic
 Message Batches both offer 50% off standard rates with a 24-hour SLA. Offline pipelines —
@@ -80,7 +81,8 @@ one poorly scoped feature is responsible for 60% of spend and can be fixed in a 
 
 **Routing decisions compound.** Every query that can be answered by a cheaper model without quality
 loss multiplies savings at scale. A classifier that routes 70% of queries to a model 10x cheaper
-reduces overall cost by 63%, even if the router itself costs tokens to run.
+reduces overall cost by 63%, even if the router itself costs tokens to run. Router architectures
+are covered in [LLM Routing & Model Selection](../llm_routing_and_model_selection/README.md).
 
 ---
 
@@ -706,6 +708,26 @@ length. Concise output instructions ("respond in under 150 words"), structured e
 of free-form prose, and explicit max_tokens limits all target the expensive side. Do not over-index
 on prompt compression at the expense of ignoring output verbosity.
 
+**Why do reasoning models blow up cost forecasts that were calibrated on non-reasoning models?**
+Reasoning models bill their (often hidden) "thinking" tokens as output tokens — the most expensive
+class — and thinking length varies enormously with problem difficulty. A query that produces a
+200-token visible answer can consume thousands of reasoning tokens before it, so effective output
+per request can be 10-50x a standard model's, all at output-token rates. Cost forecasts built on
+"average output = 300 tokens" collapse the moment a feature is switched to a reasoning model or a
+thinking-budget parameter is raised. Cap reasoning effort explicitly where the API supports it,
+monitor the output-token distribution separately for reasoning traffic, and route only genuinely
+hard queries to reasoning models.
+
+**Why does a long chat conversation cost quadratically, and what do you do about it?**
+Each turn resends the entire conversation history as input tokens, so an N-turn conversation pays
+for the history N times — cumulative input cost grows O(N²) in turns. A 50-turn session averaging
+300 tokens per turn pays for roughly 375K cumulative input tokens against only 15K generated: the
+replayed history, not the answers, dominates the bill. Mitigations: prompt caching (the history is
+a stable, append-only prefix — 50-90% discount on the replayed portion), summarizing or truncating
+history beyond a window (keep the last 10 turns verbatim plus a rolling summary), and hard caps on
+session length. Monitor cost-per-conversation, not just cost-per-request, or this effect stays
+invisible.
+
 **Explain prompt caching mechanics for both Anthropic and OpenAI. What must you do to maximize
 cache hit rate?**
 Both providers cache prompt prefixes automatically once the prompt exceeds 1,024 tokens. Anthropic
@@ -732,6 +754,25 @@ any offline or asynchronous workload: document classification, overnight report 
 annotation, bulk embeddings, and content moderation pipelines. It should not be used for real-time
 user-facing interactions. The implementation requires writing a JSONL file, uploading it, polling
 for batch completion, and downloading the results file.
+
+**How does tokenizer efficiency change costs across languages?**
+Non-English text tokenizes into substantially more tokens per unit of meaning on English-heavy
+tokenizers — typically 1.5-3x more tokens for the same content in Hindi, Thai, or Arabic than in
+English, and historically far worse for low-resource scripts. Since billing is per token, the same
+product feature costs 2-3x more per user in some markets, and effective context windows shrink
+proportionally. Newer tokenizers with larger multilingual vocabularies (100K+ entries) narrow but
+do not eliminate the gap. If you operate multilingually, measure tokens-per-character per language
+on your actual traffic and build per-language cost models rather than one global average.
+
+**When does prompt caching lose money, given the cache-write premium?**
+Anthropic bills cache writes at a 25% premium over standard input ($3.75 vs $3.00 per 1M tokens
+for Sonnet-class models), so a prefix that is written but never re-read within the TTL costs 25%
+more than not caching at all. Break-even arithmetic for N uses of the same prefix: uncached cost
+scales as 3.00 × N, cached cost as 3.75 + 0.30 × (N − 1); the lines cross at N ≈ 1.3, so a single
+reuse within the ~5-minute TTL already profits. Caching loses money only for genuinely unique
+prefixes (per-request dynamic content mistakenly marked cacheable) or very sparse traffic where
+entries always expire before reuse. Watch the ratio of cache_creation to cache_read tokens — a
+ratio near or above 1 means you are paying premiums without collecting discounts.
 
 **How would you implement per-feature cost monitoring in a production LLM application?**
 Every LLM API call should log: feature_name (the product feature making the call), user_id,
@@ -815,7 +856,9 @@ The break-even depends on daily token volume and whether all costs are honestly 
 **Instrument every call from day one.** Add cost logging at the LLM client wrapper level before
 the first feature ships. Retrofitting observability into an established codebase with dozens of
 call sites is expensive and error-prone. A 50-line wrapper that logs model, feature, tokens, cost,
-and latency pays for itself within weeks.
+and latency pays for itself within weeks. See
+[LLM Observability & Monitoring](../llm_observability_and_monitoring/README.md) for the full
+tracing stack this plugs into.
 
 **Structure prompts for caching.** Always place static content (system prompt, instructions,
 few-shot examples) before dynamic content (user query, retrieved context). This is a zero-cost

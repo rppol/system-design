@@ -52,13 +52,19 @@ Generations per user per day:  10 (avg; power users generate 50-200)
 Total generations per day:     50,000,000
 Peak generations per second:   50M / 86,400 * 3x peak factor = ~1,736 peak gen/sec
                                 (measured: Midjourney peak ~2,000 gen/sec at 16M users)
+```
 
-Generation type breakdown:
-  Text-to-image:     75%  (37.5M/day)
-  Image-to-image:    15%  (7.5M/day)
-  Inpainting:         7%  (3.5M/day)
-  Upscaling:          3%  (1.5M/day)
+```mermaid
+pie title Generation type breakdown (50M generations/day)
+    "Text-to-image (37.5M/day)" : 75
+    "Image-to-image (7.5M/day)" : 15
+    "Inpainting (3.5M/day)" : 7
+    "Upscaling (1.5M/day)" : 3
+```
 
+Text-to-image dominates at 75%, which is why the fleet is sized around the 28-step FLUX text-to-image path; the img2img/inpainting/upscaling minority reuses the same pipeline with different entry latents.
+
+```
 LoRA adapter usage:
   Users with at least one trained LoRA: 12% of DAU = 600,000 users
   Generations using a LoRA adapter: 40% of all generations = 20M/day
@@ -444,7 +450,7 @@ CFG scale tuning: cfg_scale=1.0 ignores the prompt (pure noise), cfg_scale=7.5 i
 
 ### 4.3 Content Safety Pipeline
 
-Safety is two-phase: fast pre-generation (block before GPU compute) and post-generation (catch what slipped through or was generated indirectly).
+Safety is two-phase: fast pre-generation (block before GPU compute) and post-generation (catch what slipped through or was generated indirectly). The classifier layering pattern generalizes across modalities — see [Guardrails & Content Safety](../guardrails_and_content_safety/README.md).
 
 ```python
 from __future__ import annotations
@@ -551,7 +557,7 @@ CSAM detection via PhotoDNA: Microsoft PhotoDNA computes a perceptual hash of th
 
 ### 4.4 LoRA Training Pipeline
 
-Users upload reference images and the system trains a LoRA adapter using DreamBooth-style training. The adapter is then permanently available for that user's generations.
+Users upload reference images and the system trains a LoRA adapter using DreamBooth-style training. The adapter is then permanently available for that user's generations. (LoRA mechanics — rank, alpha, delta-weight math — are covered in [LoRA](../fine_tuning/lora.md).)
 
 ```python
 from __future__ import annotations

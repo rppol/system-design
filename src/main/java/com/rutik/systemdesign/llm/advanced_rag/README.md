@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-Standard RAG (retrieve → generate) works well for simple Q&A but breaks down on complex queries: multi-hop questions, queries requiring synthesis across many documents, questions about structured data, or tasks where the LLM needs to iteratively refine its retrieval strategy.
+[Standard RAG](../rag_fundamentals/README.md) (retrieve → generate) works well for simple Q&A but breaks down on complex queries: multi-hop questions, queries requiring synthesis across many documents, questions about structured data, or tasks where the LLM needs to iteratively refine its retrieval strategy.
 
 Advanced RAG encompasses techniques that go beyond the basic pipeline: query transformation before retrieval, agentic/iterative retrieval where the LLM decides what to retrieve next, graph-based retrieval for structured knowledge, multi-modal retrieval for images and tables, and rigorous evaluation frameworks.
 
@@ -28,7 +28,7 @@ These techniques push RAG from a simple lookup system to a reasoning system that
 - **Retrieval should be iterative**: For complex questions, one retrieval step is insufficient. The LLM should decide what additional information to retrieve based on what it already has.
 - **Structure matters**: Many knowledge sources are graphs (entity relationships), tables (structured data), or code — plain vector search misses these structures.
 - **Evaluate RAG components independently**: Decompose into retrieval quality (context recall, context precision) and generation quality (faithfulness, answer relevance).
-- **Diminishing returns on context**: Adding more retrieved documents doesn't always help; too much irrelevant context actively degrades generation quality.
+- **Diminishing returns on context**: Adding more retrieved documents doesn't always help; too much irrelevant context actively degrades generation quality (see [Context Engineering](../context_engineering/README.md)).
 
 ---
 
@@ -369,6 +369,21 @@ result = evaluate(dataset, metrics=[faithfulness, answer_relevancy, ...])
 4. **HyDE for factual queries**: HyDE works poorly when the hypothetical answer diverges from reality. Test before deploying.
 5. **Evaluation without ground truth**: RAGAS faithfulness can be measured without ground truth; context recall requires ground truth contexts. Build a proper eval set.
 
+Pitfall 3 in code — the unbounded agentic loop:
+
+```python
+# BROKEN: loop until the LLM says it has enough — it may never say so
+while not llm_says_sufficient(context):
+    context += retrieve(llm_next_query(context))
+
+# FIX: hard bounds on both iterations and context size
+MAX_ITERATIONS = 4
+for i in range(MAX_ITERATIONS):
+    if llm_says_sufficient(context) or count_tokens(context) > 10_000:
+        break
+    context += retrieve(llm_next_query(context))
+```
+
 ---
 
 ## 11. Technologies & Tools
@@ -401,6 +416,12 @@ A: Context recall — fraction of ground-truth relevant information that was ret
 **Q: How does the complexity-latency-quality tradeoff differ across advanced RAG strategies?**
 A: Multi-query and HyDE: 1.5-2× latency, 10-30% recall improvement, low complexity — best starting point. Agentic RAG: 5-30× latency, significant accuracy gain on multi-hop queries, high complexity — justified for research/analyst workflows. Graph RAG: 100× indexing cost, 10× query latency, major quality gain on thematic/global queries, very high complexity — justified only for large stable corpora where global queries are critical. Self-RAG: requires fine-tuning, adaptive latency, strong faithfulness — justified when faithfulness is the top priority.
 
+**Q: Why does adding more retrieved documents eventually hurt answer quality?**
+A: Beyond a point, extra documents lower context precision faster than they raise context recall, and generation quality drops with them. LLMs attend unevenly across long contexts ("lost in the middle"): evidence buried mid-context is frequently ignored, and irrelevant chunks give the model material to synthesize plausible-but-wrong answers, hurting faithfulness. In practice quality peaks around 5-10 well-reranked chunks; stuffing 50 raw chunks costs more tokens and measurably degrades answers. Retrieve broadly (top 50-100 candidates), then rerank aggressively down to the top 5-8 before generation.
+
+**Q: When does HyDE hurt instead of help?**
+A: HyDE hurts on factual, entity-specific queries where the generated hypothetical answer contains wrong entities or invented facts — the embedding then lands near documents matching the hallucination, not the truth. Example: "What was Company X's Q3 2024 revenue?" produces a hypothetical with a fabricated number and possibly the wrong fiscal framing, retrieving off-target documents. HyDE works best for conceptual and how-to queries where phrasing, not facts, is the gap between query space and document space. Gate HyDE behind a query-type classifier, and A/B test it on your own query distribution before enabling it globally.
+
 **Q: When should you use Graph RAG instead of standard vector-based RAG?**
 Graph RAG excels when your data has rich entity relationships that vector similarity alone cannot capture — for example, organizational hierarchies, citation networks, supply chains, or knowledge graphs. Standard vector RAG finds semantically similar chunks but misses structural relationships ("Who reports to the VP of Engineering?" requires traversing an org graph, not embedding similarity). Graph RAG constructs a knowledge graph from documents (entities as nodes, relationships as edges), then combines graph traversal with vector retrieval. Use Graph RAG when: (1) queries require multi-hop reasoning across entities ("What products does Company X's main competitor sell?"); (2) data has inherent graph structure (legal case citations, medical drug interactions); (3) summarization across many documents is needed (Microsoft's Graph RAG uses community detection to create hierarchical summaries). Avoid Graph RAG for simple factual lookups or when entity extraction quality is poor — garbage-in-garbage-out is amplified in graph construction.
 
@@ -418,6 +439,15 @@ Query transformation rewrites the user's original query into one or more forms t
 
 **Q: How do you handle multimodal documents (text + tables + images) in a RAG pipeline?**
 Multimodal RAG requires separate processing pipelines for each modality, unified indexing, and a multimodal LLM for generation. Approach: (1) document parsing — use layout-aware parsers (Unstructured.io, LlamaParse, Adobe Extract API) to separate text, tables, and images from documents; (2) table handling — convert tables to markdown or structured text, embed as separate chunks with table context (caption, column headers); (3) image handling — generate text descriptions using a VLM (GPT-4o, Claude 3.5), embed the description alongside the image for retrieval; (4) unified index — store all chunk types (text, table-as-text, image-description) in the same vector index with metadata tags for modality type; (5) generation — pass retrieved chunks to a multimodal LLM (GPT-4o, Gemini) that can process both text and images natively. For tables specifically, consider text-to-SQL if the table data is in a database — direct SQL retrieval often outperforms embedding-based retrieval for structured data queries. Main challenge: maintaining alignment between images and their surrounding text context during chunking.
+
+**Q: How does FLARE decide when to retrieve during generation?**
+FLARE (Forward-Looking Active REtrieval) monitors token-level confidence while the LLM generates: when the model predicts a continuation with low probability (below a confidence threshold), that signals a knowledge gap, and FLARE triggers retrieval using the predicted low-confidence continuation as the search query. The retrieved context is injected and the sentence is regenerated. Unlike standard RAG's single up-front retrieval, FLARE retrieves exactly at the points where the model is uncertain — well suited to long-form generation where information needs emerge mid-answer. The cost is regeneration and multiple retrieval rounds, so reserve it for long-form synthesis rather than short factual Q&A.
+
+**Q: What is sentence window retrieval and why does it beat fixed-size chunking for long documents?**
+Sentence window retrieval indexes at sentence granularity for precise matching, then expands each retrieved sentence to its surrounding window (typically ±2 sentences) before passing it to the LLM. Sentence-level embeddings avoid the dilution problem of 512-token chunks — one relevant sentence buried among ten irrelevant ones drags the chunk's embedding away from the query — while the window expansion restores enough surrounding context for the LLM to interpret the hit correctly. It pairs the precision of small retrieval units with the readability of paragraph-scale context. Use it for dense, heterogeneous documents (technical manuals, research papers); simple homogeneous FAQ corpora do not need the extra indexing complexity.
+
+**Q: How do global and local query paths differ in Graph RAG?**
+Global queries ("what themes appear across these documents?") are answered from pre-computed community summaries — the LLM synthesizes over the hierarchical summary tree rather than raw chunks, because no single chunk contains a corpus-wide answer. Local queries ("who did Microsoft acquire in gaming?") route to entity-anchored search: find the entity node, extract its neighborhood subgraph, and answer from the specific documents attached to those nodes. A router classifies query type first; misrouting a global query to local search produces incomplete answers, while routing local queries through community summaries wastes tokens on irrelevant breadth. Microsoft's GraphRAG implements both paths explicitly, and the community-summary layer is precisely what flat vector RAG lacks.
 
 ---
 

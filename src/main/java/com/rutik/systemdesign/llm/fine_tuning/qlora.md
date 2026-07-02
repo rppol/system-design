@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-QLoRA (Dettmers et al. 2023) combines two techniques to dramatically reduce GPU memory requirements for LLM fine-tuning: quantize the frozen base model to 4-bit NF4 (NormalFloat4) precision, and train LoRA adapters in full BF16 precision on top of the quantized base. A 7B model that requires 28GB for standard LoRA training requires only 5-6GB with QLoRA — enabling fine-tuning on a single 16GB consumer GPU.
+QLoRA (Dettmers et al. 2023) combines two techniques to dramatically reduce GPU memory requirements for LLM fine-tuning: quantize the frozen base model to 4-bit NF4 (NormalFloat4) precision, and train [LoRA](lora.md) adapters in full BF16 precision on top of the quantized base. A 7B model that requires 28GB for standard LoRA training requires only 5-6GB with QLoRA — enabling fine-tuning on a single 16GB consumer GPU.
 
 QLoRA made fine-tuning accessible beyond research labs. Before QLoRA (April 2023), fine-tuning a 7B model required at least a 40GB A100 for LoRA or significantly more for full fine-tuning. After QLoRA, an RTX 4090 (24GB) or even an RTX 4080 (16GB) can fine-tune 7B models, and a single A100 80GB can fine-tune 65B+ models.
 
@@ -406,7 +406,7 @@ A: Training instability in QLoRA manifests as loss spikes (sudden jumps of 0.5-2
 4. **Use Unsloth in production** — 2× faster, 70% less VRAM vs. standard PEFT+BitsAndBytes; well-tested and production-ready.
 5. **Use effective batch ≥ 32** — compensate for small physical batch with gradient accumulation (gradient_accumulation_steps = 32 / batch_size).
 6. **Benchmark with Unsloth before committing to cloud hardware** — QLoRA memory requirements vary by sequence length; measure empirically on your data before choosing GPU type.
-7. **Export via merge-then-requantize** — merge QLoRA adapter to BF16 first, then re-quantize with GPTQ or AWQ for inference deployment; cleaner and more widely compatible.
+7. **Export via merge-then-requantize** — merge QLoRA adapter to BF16 first, then re-quantize with GPTQ or AWQ for inference deployment; cleaner and more widely compatible. (GPTQ/AWQ inference quantization mechanics: [Optimization & Quantization](../optimization_and_quantization/README.md).)
 
 ---
 
@@ -492,7 +492,7 @@ training_args = TrainingArguments(
     warmup_ratio=0.05,
     optim="paged_adamw_8bit",
     bf16=True,
-    gradient_clipping=0.5,           # tighter clipping for stability
+    max_grad_norm=0.5,               # tighter gradient clipping for stability
     logging_steps=25,
     evaluation_strategy="steps",
     eval_steps=100,

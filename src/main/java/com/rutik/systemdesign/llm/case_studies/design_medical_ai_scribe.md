@@ -45,7 +45,7 @@
 Physician customers:              5,000
 Patient encounters per day:       100,000
 Average encounter duration:       20 minutes
-Total audio per day:              100,000 x 20 min = 33 hours
+Total audio per day:              100,000 x 20 min = 2M minutes ≈ 33,333 hours
 
 Audio storage (ephemeral, before deletion):
   16kHz mono WAV = 1 MB/min
@@ -85,7 +85,7 @@ Revenue:
 
 Storage:
   Audio: deleted within 24h (HIPAA data minimization) — peak 2 TB in-flight
-  Transcripts: 100K x 20KB text/day x 365 days x 7 years = 51 TB transcript archive
+  Transcripts: 100K x 20KB text/day (2 GB/day) x 365 days x 7 years ≈ 5.1 TB transcript archive
   SOAP notes: stored in EHR, not in platform (zero platform note storage)
   Audit logs: 100K events/day x 1KB x 7 years = 256 GB (immutable, S3 Object Lock)
 

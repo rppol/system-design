@@ -198,6 +198,8 @@ Why hybrid beats either alone:
 
 ### 4.3 Reranking
 
+See [Reranking](../rag_fundamentals/reranking.md) for the full bi-encoder vs. cross-encoder vs. ColBERT breakdown, fine-tuning, and latency budgeting.
+
 ```
 Two-stage retrieval:
   Stage 1: ANN search → top-50 candidates (fast, approximate)
@@ -272,6 +274,8 @@ Section 8.2, p.15; [3] MSA, Section 12.1, p.22
 ```
 
 ### 4.5 Multi-Tenant Isolation
+
+See [Tenant Isolation Patterns](./cross_cutting/tenant_isolation_patterns.md) for namespace-vs-collection-vs-cluster tradeoffs, ACL pushdown into retrieval, and noisy-neighbor mitigation.
 
 ```
 Security requirement: Client A's documents must never appear in Client B's results
@@ -770,3 +774,18 @@ Chunk-level versioning: maintain a `chunks` table with `{chunk_id, doc_id, secti
 
 **Q: When should you use a local embedding model (E5-large, BGE) vs. the OpenAI API for embeddings?**
 Local model criteria: (1) cost at scale: at > 1B tokens/month, self-hosting E5-large on A10G ($1.10/hr) costs ~$13/month vs. text-embedding-3-small at $0.02/1M tokens = $20,000/month — local wins decisively above ~100M tokens/month; (2) latency: local inference adds 2ms vs. API's 50-80ms round trip — critical for real-time applications; (3) data privacy: regulated industries (healthcare, finance) cannot send documents to third-party APIs. OpenAI API criteria: (1) text-embedding-3-large quality is 5-8% better than open-source alternatives on most benchmarks — justified for high-precision retrieval; (2) no infrastructure to manage; (3) at < 10M tokens/month, API cost ($0.20) is lower than GPU instance amortization.
+
+**Q: How do you decide how many chunks (top-k) to pass to the LLM after retrieval and reranking?**
+Pass the fewest chunks that cover the answer — typically 3-10 for most RAG applications — because irrelevant chunks in context actively degrade generation quality even when the top chunks are correct (the "lost in the middle" effect). Bound it two ways: by the context budget (with a 128K window and 512-token chunks you could fit ~200 chunks, but rarely should) and by a relevance floor (drop any reranked chunk below a score threshold, e.g., Cohere relevance < 0.3). Empirically, going from top-5 to top-20 raises recall but starts lowering answer precision as noise accumulates; tune k on a labeled eval set by plotting faithfulness and answer relevancy against k and picking the knee. When fewer than 2-3 chunks clear the relevance floor, abstain ("I don't have enough information") rather than padding context with weak matches.
+
+**Q: What is the "lost in the middle" problem and how do you mitigate it in context assembly?**
+LLMs attend most strongly to the beginning and end of their context and can miss relevant information placed in the middle, so a highly relevant chunk buried at position 6 of 12 may be effectively ignored. Mitigations: (1) reorder retrieved chunks so the highest-scoring ones sit at the start and end of the context block (a "sandwich" ordering) rather than in strict rank order; (2) keep top-k small (3-8) so there is no deep middle to lose; (3) rerank so the few chunks you include are all high-value. This is why more context is not always better — a longer prompt with the answer in the middle can score worse than a shorter prompt with the answer at the edges. Verify with a needle-in-a-haystack test across chunk positions before assuming your context length is safe.
+
+**Q: How do you keep the vector index consistent with the source of truth when documents are deleted or updated?**
+Treat the vector store as a derived index, not a system of record, and drive it from document lifecycle events. On update, delete all old chunks for that doc_id (Qdrant metadata-filtered delete or FAISS `remove_ids`) before upserting re-embedded chunks — otherwise stale chunks linger and get retrieved alongside fresh ones, producing contradictory context. On deletion, hard-delete by doc_id and purge any semantic-cache entries that referenced it. The most common silent bug is "orphan chunks": the source document is removed from the app database but its chunks remain retrievable for weeks. Guard against it with a periodic reconciliation job that diffs indexed doc_ids against the source store, plus a per-chunk `indexed_at` timestamp so you can re-index anything older than the source's `updated_at`.
+
+**Q: When should you add query transformation (multi-query expansion or HyDE), and what does each cost?**
+Add query transformation only when measurement shows recall failures on hard queries, because it multiplies retrieval cost and latency. Multi-query expansion generates 3-4 paraphrases of the user query, retrieves for each, and unions/dedupes the results — it improves recall on ambiguous queries by ~40% but adds one LLM call plus 3-4x the retrieval calls per query. HyDE (Hypothetical Document Embeddings) has the LLM draft a hypothetical answer and embeds that instead of the raw question, which helps when the query and documents use different vocabulary (a terse question vs. dense technical docs); it adds one generation before retrieval. Gate both behind a cheap query-complexity classifier so simple factual lookups stay single-pass — blanket-applying expansion to all traffic is a common cost blowout.
+
+**Q: How do you monitor a production RAG system for silent quality regressions?**
+RAG degrades without throwing errors, so instrument three signals continuously. First, run RAGAS-style evaluation (context precision/recall, answer relevancy, faithfulness) weekly on a fixed golden set and alert on drops — e.g., faithfulness < 0.90 or context recall < 0.80. Second, log per-query retrieval health online: max reranker score, number of chunks above threshold, and abstain rate; a rising abstain rate or falling top score often precedes user-visible failures and points at stale or insufficient index coverage. Third, watch for embedding-model or index drift — a model swap or partial re-index can silently move the vector space (cosine similarity collapsing from ~0.82 to ~0.31 with no exception), so pin an embedding-model fingerprint to the index and fail closed on mismatch. Correlate these with user thumbs-down and sampled human review to catch the failure classes automated metrics miss.

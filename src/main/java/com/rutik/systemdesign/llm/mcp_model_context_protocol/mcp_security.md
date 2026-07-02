@@ -6,7 +6,7 @@
 
 MCP security is the discipline of preventing malicious behavior in a system where LLM clients dynamically connect to potentially-untrusted servers exposing tools, resources, and prompts. The threat model is unique: a single compromised MCP server, or a maliciously-crafted tool description, can inject instructions into LLM context, exfiltrate user data via tool calls, or trigger destructive operations on behalf of the user.
 
-The 2025 MCP spec added significant security improvements: OAuth 2.1 authorization for remote servers (RFC 8252 with PKCE), explicit threat model documentation, and security-focused best practices. This deep-dive covers the major threat classes (tool description injection, prompt shadowing, confused deputy, token theft) and mitigations (server allowlisting, content sandboxing, scope-limited tokens, OAuth flows).
+The 2025 MCP spec added significant security improvements: OAuth 2.1 authorization for remote servers (RFC 8252 with PKCE), explicit threat model documentation, and security-focused best practices. This deep-dive covers the major threat classes (tool description injection, prompt shadowing, confused deputy, token theft) and mitigations (server allowlisting, content sandboxing, scope-limited tokens, OAuth flows). For the broader LLM attack surface beyond MCP, see [LLM Security](../llm_security/README.md).
 
 ---
 
@@ -52,7 +52,7 @@ Server's resource (e.g., a "documentation" file) contains: "Ignore previous inst
 
 Server uses client's OAuth token to make API calls the user never authorized. Example: a "GitHub" MCP server with the user's GitHub token reads private repos the user didn't intend.
 
-**Mitigation**: Scope-limited tokens per server; user-level audit logs; least-privilege grant.
+**Mitigation**: Scope-limited tokens per server; user-level audit logs; least-privilege grant. See [Multi-Agent Security](../multi_agent_systems/multi_agent_security.md) for the cross-agent confused-deputy variant.
 
 ### 4.4 Token Theft
 

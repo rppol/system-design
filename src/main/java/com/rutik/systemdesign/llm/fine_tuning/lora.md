@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-LoRA (Low-Rank Adaptation, Hu et al. 2021) is a parameter-efficient fine-tuning method that adds small trainable matrices alongside frozen pre-trained weights. Instead of updating all d×k parameters in a weight matrix W, LoRA decomposes the update ΔW into a product of two low-rank matrices: ΔW = B × A, where A ∈ ℝ^(r×k) and B ∈ ℝ^(d×r) with rank r ≪ min(d, k).
+LoRA (Low-Rank Adaptation, Hu et al. 2021) is a [parameter-efficient fine-tuning](peft_methods.md) method that adds small trainable matrices alongside frozen pre-trained weights. Instead of updating all d×k parameters in a weight matrix W, LoRA decomposes the update ΔW into a product of two low-rank matrices: ΔW = B × A, where A ∈ ℝ^(r×k) and B ∈ ℝ^(d×r) with rank r ≪ min(d, k).
 
 For a 7B model where a typical attention weight matrix is 4096×4096, the full update is 16.7M parameters. LoRA at rank 16 decomposes this into a 16×4096 + 4096×16 = 131K parameter update — 127× fewer parameters for one weight matrix. Across all target modules, LoRA adds ~0.1-1% of the total model parameters as trainable.
 
@@ -382,7 +382,7 @@ reload — the economic core of serving 50+ specialized models on one GPU.
 - Released as separate adapter weights on HuggingFace; swappable over the same base model
 
 ### Multi-adapter serving (vLLM)
-- vLLM supports serving multiple LoRA adapters from a single base model
+- [vLLM](../vllm_deep_dive/README.md) supports serving multiple LoRA adapters from a single base model
 - Different adapters loaded per request based on a routing tag
 - Enables serving 50+ specialized models from 1 GPU serving one base model
 
@@ -635,4 +635,4 @@ model.save_pretrained("./support_lora_adapter")
 - Full fine-tuning was evaluated: achieved 94% format adherence (vs. 91% with LoRA r=16), not worth the 56GB memory requirement and inability to share the GPU across four adapter variants.
 - LoRA r=32 was evaluated: 91.5% format adherence vs. 91.0% for r=16; the 0.5% gain did not justify doubling trainable parameters and adapter file size.
 - Prompt engineering alone (no fine-tuning): 61% format adherence — the structured JSON output requirement was too strict for prompt-only approaches to reliably satisfy across ticket types.
-- QLoRA was considered: A100 40GB had sufficient memory for standard LoRA; QLoRA would have added 20% training time overhead (dequantization) with no memory benefit on this hardware.
+- [QLoRA](qlora.md) was considered: A100 40GB had sufficient memory for standard LoRA; QLoRA would have added 20% training time overhead (dequantization) with no memory benefit on this hardware.

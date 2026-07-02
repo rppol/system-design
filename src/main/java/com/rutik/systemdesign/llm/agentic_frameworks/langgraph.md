@@ -593,7 +593,7 @@ def timeout_sensitive_node(state: WorkflowState) -> dict:
 | Learning curve | High | Low | Variable |
 | Lock-in | Medium (LangChain ecosystem) | High | None |
 
-**LangGraph vs CrewAI:**
+**LangGraph vs [CrewAI](crewai.md):**
 
 | Aspect | LangGraph | CrewAI |
 |--------|-----------|--------|
@@ -618,7 +618,7 @@ def timeout_sensitive_node(state: WorkflowState) -> dict:
 - You need to recover from mid-workflow failures without restarting
 
 **Do NOT use LangGraph when:**
-- Linear, one-pass pipeline (retrieve → generate → output) — plain LCEL is simpler
+- Linear, one-pass pipeline (retrieve → generate → output) — plain [LCEL](langchain_and_lcel.md) is simpler
 - Simple chatbot with no tools — `RunnableWithMessageHistory` is sufficient
 - Team is just starting with LLMs — learn LCEL first, add LangGraph when you hit its limits
 - Workflow has 2 steps with no branching — overhead is not worth it

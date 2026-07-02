@@ -56,11 +56,11 @@ Available on Claude Opus 4.7 and Sonnet 4.6. Claude produces `thinking` content 
 
 ### 4.5 Subagent Pattern
 
-Parent agent has a `dispatch_subagent(task, tools)` tool. When called, parent spawns a fresh Claude instance with a focused system prompt and a tool subset, runs the loop, and returns a structured result. Parent synthesizes results from multiple subagents.
+Parent agent has a `dispatch_subagent(task, tools)` tool. When called, parent spawns a fresh Claude instance with a focused system prompt and a tool subset, runs the loop, and returns a structured result. Parent synthesizes results from multiple subagents. See [Subagents & Delegation](../agents_and_tool_use/subagents_and_delegation.md) for the general pattern.
 
 ### 4.6 Computer Use
 
-The `computer` tool gives Claude `screenshot`, `mouse_move`, `left_click`, `type`, and `key` actions. Requires a VM or container with a display. The `computer_use_demo` reference implementation runs in Docker with Xvfb.
+The `computer` tool gives Claude `screenshot`, `mouse_move`, `left_click`, `type`, and `key` actions. Requires a VM or container with a display. The `computer_use_demo` reference implementation runs in Docker with Xvfb. See [Computer Use & Browser Agents](../agents_and_tool_use/computer_use_and_browser_agents.md) for the full deep dive.
 
 ---
 
@@ -435,7 +435,7 @@ system = [{
 |---|---|---|
 | `anthropic` (Python SDK) | Official SDK | `pip install anthropic`; sync and async clients |
 | `@anthropic-ai/sdk` (TS) | Official TypeScript SDK | npm install; same API surface |
-| MCP servers | Pre-built tools | Connect via stdio/HTTP, expose as Claude tools |
+| MCP servers | Pre-built tools | Connect via stdio/HTTP, expose as Claude tools — see [MCP](../mcp_model_context_protocol/README.md) |
 | Computer use docker reference | Sandbox for computer tool | `ghcr.io/anthropics/anthropic-quickstarts` |
 | `aiohttp` / `httpx` | Async HTTP in tools | For parallel external API calls |
 | OpenTelemetry | Manual tracing | Wrap LLM calls to send to Jaeger/Honeycomb |

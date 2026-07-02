@@ -163,21 +163,14 @@ flowchart TD
 ~3–5 % of raw Common Crawl survives quality filtering; high-quality sources (Wikipedia, curated books) are oversampled to compensate for their small volume.
 
 ### Learning Rate Schedule
+```mermaid
+xychart-beta
+    title "LR schedule: linear warmup, then cosine decay (peak 3e-4)"
+    x-axis "percent of total training steps" [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+    y-axis "learning rate (x 1e-4)" 0 --> 3.2
+    line [0, 2.96, 2.78, 2.49, 2.12, 1.69, 1.27, 0.87, 0.57, 0.37, 0.30]
 ```
-Loss
-  ^
-  |         /-----\
-  |        /       \
-  |       /         \------------>
-  |      / warmup    cosine decay
-  |     /
-  +----+-----------------------------------> Steps
-  0   N_warmup                           N_total
-
-Peak LR: 1e-4 to 3e-4 (depends on model size)
-Warmup: 1-2% of total steps
-Final LR: ~10% of peak LR (or 0)
-```
+Peak LR: 1e-4 to 3e-4 (depends on model size); warmup: 1-2% of total steps; final LR: ~10% of peak (or 0). The short linear ramp protects Adam's uncalibrated moment estimates early on; the long cosine tail keeps mid-training exploration high and anneals gently at the end. (Sampled every 10% of steps, so the 1-2% warmup spike to 3.0 sits inside the first segment — the ramp is far steeper than one chart segment wide.)
 
 ---
 
@@ -403,6 +396,12 @@ A: First line of defense is gradient clipping (clip norm to 1.0). For spikes, ro
 **Q: What is data contamination and why is it a problem?**
 A: Data contamination occurs when evaluation benchmark examples appear in the training set. The model has "seen" the answers, inflating benchmark scores. This is why LLM evaluation is difficult to trust — most teams don't fully audit their training data. Mitigation: run n-gram deduplication between training data and all benchmarks before training.
 
+**Q: Why does repeating pre-training data for multiple epochs hurt large models?**
+A: Beyond roughly one pass, repeated data shifts the model from generalization toward memorization — benchmark gains flatten while verbatim regurgitation risk rises, and heavy repetition can actively degrade quality relative to training on fewer unique tokens. Empirically (Muennighoff et al., 2023, data-constrained scaling), up to ~4 epochs of repetition is nearly as valuable as fresh data, but returns decay rapidly after that, so frontier labs plan data volume upfront to keep the main run near 1 epoch. This is the opposite of classic small-data deep learning, where dozens of epochs are normal — at trillion-token scale, unique data is the binding constraint. If you must repeat, repeat only the highest-quality subsets with a different mix per pass.
+
+**Q: Why can naive sequence packing silently hurt model quality even though it improves throughput?**
+A: Packing multiple documents into one fixed-length sequence without a block-diagonal attention mask lets tokens at the end of document A attend to document B — the model learns spurious cross-document dependencies that never exist at inference. Training loss can even look better (extra context to exploit) while single-document evaluation gets worse; the code-model case study in §14 measured +2.1 perplexity on single-file eval from exactly this bug. The fix is a per-document attention mask (each document attends only to itself) plus resetting position IDs at document boundaries. Always validate packing changes with an eval on unpacked, single-document inputs.
+
 **Q: Why is BF16 preferred over FP16 for LLM training?**
 A: BF16 has the same 8-bit exponent range as FP32 (handles the dynamic range of gradients and activations), while FP16 has a smaller 5-bit exponent and frequently overflows/underflows during training. FP16 requires loss scaling to avoid underflow; BF16 doesn't. On modern GPUs (A100, H100), BF16 is as fast as FP16 but more numerically stable.
 
@@ -420,6 +419,18 @@ Training instability manifests as sudden loss spikes — the training loss jumps
 
 **Q: What is the impact of training data composition (web, books, code, academic) on model capabilities?**
 Training data composition directly determines model strengths — models are what they eat. Typical frontier model mixtures: 50-70% web crawl (general knowledge, conversational ability), 10-15% code (reasoning, structured output), 10-15% books/academic papers (factual depth, writing quality), 5-10% Wikipedia/reference (factual accuracy), and 2-5% math (numerical reasoning). Increasing code proportion from 5% to 15% improves not just coding ability but general reasoning by 5-10% on benchmarks like GSM8K, because code requires logical thinking. The Phi models ("textbooks are all you need") demonstrated that training on high-quality synthetic textbook data can produce remarkably capable small models. Conversely, too much web crawl without filtering leads to toxic, low-quality outputs. The key insight: data quality matters more than quantity beyond a threshold — 1T high-quality tokens outperforms 10T unfiltered tokens.
+
+**Q: Why do LLMs need learning-rate warmup at the start of training?**
+Adam's second-moment estimates are unreliable in the first few hundred steps (built from too few gradient samples), so full-size steps early on are effectively steps with a miscalibrated preconditioner — a common cause of immediate divergence from random initialization. Linear warmup over 1-2% of total steps (e.g., 2,000 of 200,000) lets the moment estimates stabilize before the peak LR (1e-4 to 3e-4) is reached, and it also protects freshly initialized output layers from huge early gradients. Continued pre-training from a converged checkpoint needs a much shorter warmup (hundreds of steps) because the loss landscape is already benign. If training diverges in the first 1% of steps, lengthen warmup before touching the peak LR.
+
+**Q: How does multi-token prediction (MTP) change training, and why did DeepSeek-V3 adopt it?**
+MTP adds N-1 lightweight auxiliary heads (typically N=4) that predict tokens at positions +2..+N from the shared trunk, with the auxiliary loss weighted by lambda ≈ 0.1-0.3 on top of the standard next-token loss. The planning signal — to predict token +3 the model must implicitly commit to +1 and +2 — improves the trunk's representations and long-range coherence at ~15-20% extra compute per step. At inference only head 1 is required for standard generation, but the extra heads double as a built-in draft model for speculative decoding, giving 2-3× decoding throughput. DeepSeek-V3 used MTP as an auxiliary loss — one of several compounding efficiency choices (with FP8 training and MoE) behind its $5.5M training cost.
+
+**Q: Why must fill-in-the-middle (FIM) be trained during pre-training rather than bolted on later?**
+FIM rearranges training examples into (prefix, suffix, middle) or (suffix, prefix, middle) order with sentinel tokens, teaching the model to condition on both sides of a gap — the core capability behind IDE cursor-position completion. Applying FIM transforms to ~50% of training examples costs essentially nothing in left-to-right perplexity (the "FIM-for-free" result), but adding FIM only in a short post-training phase leaves a measurable gap — the code-model case study in §14 measured 18% lower FIM pass@1 versus training it from the start. The sentinel format at inference must exactly match training (PSM vs SPM ordering matters). If a code model will ever serve infill requests, bake FIM into pre-training from token zero.
+
+**Q: What is MFU and what values should you expect at scale?**
+Model FLOPs Utilization is the ratio of useful model FLOPs (≈ 6 × params × tokens for a dense transformer) to the theoretical peak FLOPs of the GPUs over the same wall-clock time. Well-tuned large-scale runs achieve 40-55% MFU (the case studies in §14 assume 45-50%); the gap versus 100% goes to communication (all-reduces, pipeline bubbles), data loading, kernel inefficiency, and recomputation from gradient checkpointing. MFU is the honest metric for training-stack quality because it cannot be gamed the way raw tokens/sec can. Compute expected wall-clock as 6·N·D / (peak_FLOPs × MFU) before committing to a budget, and treat sustained MFU regressions as an infrastructure bug to be diagnosed, not noise.
 
 ---
 
@@ -1130,3 +1141,6 @@ HumanEval problems are on GitHub. Exact deduplication via SHA-256 hash removes e
 
 ## See Also
 - [Data Pipelines & Processing (ML)](../../ml/data_pipelines_and_processing/README.md) — PySpark, Great Expectations, schema evolution — the data engineering behind LLM pre-training datasets
+- [Training Infrastructure](../training_infrastructure/README.md) — ZeRO/FSDP, tensor and pipeline parallelism, checkpointing at cluster scale
+- [Fine-Tuning](../fine_tuning/README.md) — the 100-1000× cheaper alternative when you do not need a new base model
+- [Tokenization & Embeddings](../tokenization_and_embeddings/README.md) — BPE vocabulary design decisions that precede any pre-training run

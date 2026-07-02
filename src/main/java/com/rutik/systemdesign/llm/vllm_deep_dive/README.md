@@ -308,6 +308,8 @@ llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct", enable_prefix_caching=Tru
 | Eviction | LRU | LRU with reference counting |
 | API | Transparent | Transparent |
 
+SGLang, TensorRT-LLM, and the rest of the engine landscape are compared in [Inference Engines](../inference_engines/README.md).
+
 ---
 
 ## 7. Chunked Prefill
@@ -555,14 +557,15 @@ Separate from weight quantization — quantizes the KV cache itself to save memo
 
 ### Memory vs Quality Tradeoff
 
+```mermaid
+xychart-beta
+    title "Weight memory footprint by quantization format (quality retained in label)"
+    x-axis ["FP16 (100% qual)", "FP8 (99.5%)", "INT8 (99%)", "AWQ INT4 (97-98%)", "GPTQ INT4 (96-98%)", "INT2 (90-95%)"]
+    y-axis "Memory (% of FP16)" 0 --> 100
+    bar [100, 50, 50, 25, 25, 12.5]
 ```
-FP16     → 100% memory, 100% quality (baseline)
-FP8      → 50% memory,  99.5% quality  ← recommended for H100
-INT8     → 50% memory,  99%   quality
-AWQ INT4 → 25% memory,  97-98% quality
-GPTQ INT4→ 25% memory,  96-98% quality
-INT2     → 12.5% memory, 90-95% quality (use with caution)
-```
+
+Each halving of bit-width halves weight memory, while quality (retained % in each label) stays within ~0.5-4% of the FP16 baseline all the way down to 4-bit — then drops sharply at 2-bit (90-95%). This is why FP8 is the recommended default on H100 and INT2 remains "use with caution."
 
 ---
 

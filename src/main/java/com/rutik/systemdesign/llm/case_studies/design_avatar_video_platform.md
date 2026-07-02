@@ -174,25 +174,24 @@ The Job Scheduler fans each job out across the three GPU stages (TTS, lip-sync, 
 ```
 
 ### Job State Machine
-```
-  QUEUED
-     |
-     v
-  TTS_RUNNING ---------> TTS_FAILED -----> FAILED (retryable)
-     |
-     v
-  LIPSYNC_RUNNING -----> LIPSYNC_FAILED -> FAILED (retryable)
-     |
-     v
-  COMPOSITING ---------> COMPOSITE_FAILED-> FAILED (retryable)
-     |
-     v
-  UPLOADING
-     |
-     v
-  COMPLETE
+```mermaid
+stateDiagram-v2
+    [*] --> QUEUED
+    QUEUED --> TTS_RUNNING
+    TTS_RUNNING --> LIPSYNC_RUNNING
+    TTS_RUNNING --> TTS_FAILED
+    TTS_FAILED --> FAILED: retryable
+    LIPSYNC_RUNNING --> COMPOSITING
+    LIPSYNC_RUNNING --> LIPSYNC_FAILED
+    LIPSYNC_FAILED --> FAILED: retryable
+    COMPOSITING --> UPLOADING
+    COMPOSITING --> COMPOSITE_FAILED
+    COMPOSITE_FAILED --> FAILED: retryable
+    UPLOADING --> COMPLETE
+    COMPLETE --> [*]
 ```
 
+Every stage failure routes to a retryable FAILED terminal state rather than aborting silently — retries re-enter at the failed stage, not from QUEUED, because earlier stage outputs are already in S3.
 State is stored in Redis with 7-day TTL; final URL written to Postgres jobs table.
 Clients poll `GET /v1/jobs/{job_id}` or receive webhook on terminal state.
 

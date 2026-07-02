@@ -38,7 +38,7 @@ Understanding alignment is critical for anyone building LLM systems: it explains
 - **Instruction following vs. values**: Teaching a model to follow instructions is easier than teaching it values; but values matter for edge cases.
 - **Iterative alignment**: Alignment is not a one-time process — deployed models require continuous red-teaming and retraining.
 - **Online vs. Offline alignment**: Online methods (RLHF/PPO) generate new responses during training and score them live with a reward model, adapting to the policy's evolving distribution. Offline methods (DPO, SimPO, KTO) train on a fixed preference dataset with no new generation. Online is more expensive (requires inference during training) but avoids distribution shift -- the reward model always sees on-policy outputs. Offline is simpler and cheaper but the model only learns from static preferences that may not reflect its current failure modes. Hybrid approaches like iterative DPO regenerate preference datasets periodically (every 1-2 epochs) to close this gap.
-- **Verifiable rewards**: For domains with objectively checkable outputs (code execution, math proofs, unit test pass/fail), reward signals can bypass reward models entirely. This eliminates reward model noise and reward hacking for those domains, as demonstrated by DeepSeek-R1's training on math/code verification signals.
+- **Verifiable rewards**: For domains with objectively checkable outputs (code execution, math proofs, unit test pass/fail), reward signals can bypass reward models entirely. This eliminates reward model noise and reward hacking for those domains, as demonstrated by DeepSeek-R1's training on math/code verification signals (see [Reasoning Models](../reasoning_models/README.md) for the resulting o1/R1-style behaviors).
 
 ---
 
@@ -166,6 +166,8 @@ Enables scaling feedback beyond human annotation capacity
 Quality depends heavily on judge model quality
 ```
 
+Generating preference pairs at scale (best-of-N ranking, strong-vs-weak model pairs, self-critique revision) is covered in [Synthetic Data Generation](../synthetic_data_generation/README.md).
+
 ### 4.7 SimPO (Simple Preference Optimization)
 
 Reference-model-free preference optimization. Unlike DPO, SimPO eliminates the frozen reference policy entirely, using the average log probability of the response as an implicit reward.
@@ -284,28 +286,17 @@ flowchart TD
 
 Three distinct training stages; PPO requires four models in VRAM simultaneously (actor, critic, reward model, reference), which is why DPO/SimPO are preferred when memory is constrained.
 
-### DPO vs RLHF vs SimPO vs GRPO
+### DPO vs RLHF vs SimPO vs GRPO — Models Held in VRAM
+
+```mermaid
+xychart-beta
+    title "Peak model VRAM to align a 7B model"
+    x-axis ["RLHF/PPO (4 models)", "DPO (2 models)", "SimPO (1 model)", "GRPO (2 models)"]
+    y-axis "Model VRAM (GB)" 0 --> 60
+    bar [56, 28, 14, 28]
 ```
-RLHF (Online):
-  Preference Data → Reward Model → PPO Training (generates new responses live)
-  (4 models in VRAM: actor, critic, reward model, reference)
-  (3 training stages, complex, highest memory)
 
-DPO (Offline):
-  Preference Data → DPO Loss → Aligned Model
-  (2 models in VRAM: policy + frozen reference)
-  (1 training run, simple, moderate memory)
-
-SimPO (Offline, Reference-Free):
-  Preference Data → SimPO Loss → Aligned Model
-  (1 model in VRAM: policy only, no reference model)
-  (1 training run, simplest, lowest memory)
-
-GRPO (Online, Critic-Free):
-  Prompts → Sample G outputs → Score → Group Advantage → Policy Update
-  (2 models in VRAM: policy + reference; no critic)
-  (Online generation during training, pairs with verifiable rewards)
-```
+RLHF/PPO is online and holds actor + critic + reward model + reference in VRAM across 3 training stages (~56GB for 7B); DPO is a single offline run over policy + frozen reference (~28GB); SimPO drops the reference entirely (policy only, ~14GB); GRPO is online but critic-free (policy + reference, ~28GB) — it pays for the missing critic by sampling G outputs per prompt during training and pairs naturally with verifiable rewards.
 
 ### Verifiable Rewards Pipeline
 
@@ -672,9 +663,8 @@ Online methods (PPO, GRPO) generate new responses during training and score them
 **Q: What are verifiable rewards and when do they fail?**
 Verifiable rewards use objective, execution-based signals as the reward in RL training -- code test case pass/fail, math answer correctness against ground truth, formal proof verification. Their key advantage is eliminating reward model noise entirely: there is no proxy, no Goodhart's Law, no reward hacking. The ground truth IS the reward. DeepSeek-R1 demonstrated that RL with only verifiable rewards (code execution + math checking) can produce emergent chain-of-thought reasoning, self-verification, and backtracking without any human preference data. OpenAI's o1/o3 models also use verification-based training for math and code. Limitations: (1) only works for tasks with objectively checkable outputs -- summarization, creative writing, and open-ended conversation have no ground truth to verify against; (2) binary pass/fail signals are sparse, especially for hard problems where the model rarely produces correct answers early in training (partial credit on test suites helps); (3) test case quality matters -- weak test cases let incorrect solutions pass, and comprehensive test suites are expensive to curate; (4) execution environments must be sandboxed (Docker, gVisor) with timeouts (10-30s) to prevent infinite loops and security exploits during training. In practice, verifiable rewards are combined with format rewards (+0.1 for valid CoT structure) and sometimes a lightweight reward model for stylistic preferences.
 
----
-
-## 13. Best Practices
+**Q: Why does RLHF include a KL penalty against the reference policy, and what happens when it is too weak or too strong?**
+A: The KL term anchors the policy to the SFT reference so the optimizer cannot wander into regions where the reward model is meaningless. The reward model was trained on outputs near the SFT distribution; once the policy drifts far from it, reward scores are extrapolations — this is exactly where reward hacking lives. Too weak a penalty (low beta) and you see the classic failure: reward climbs while actual quality collapses into repetitive, sycophantic, or gibberish-but-high-scoring text, often visible as KL exploding past a few dozen nats. Too strong (high beta) and the policy barely moves — reward plateaus early and alignment gains never materialize, an expensive way to reproduce the SFT model. Practically, teams monitor reward and KL together (some use an adaptive KL controller targeting a fixed KL budget) and treat "reward up, KL up sharply, evals flat" as the signature of hacking rather than progress. DPO inherits the same idea structurally: its beta plays the identical anchoring role against the frozen reference, which is why the reference model cannot be dropped casually — SimPO's reference-free trick works only with its length-normalized margin compensating.
 
 1. **Start with high-quality SFT before DPO** — DPO needs a good reference model; a weak SFT leads to poor alignment.
 2. **Use diverse prompts** — alignment training data should cover safety, helpfulness, and harmlessness equally.

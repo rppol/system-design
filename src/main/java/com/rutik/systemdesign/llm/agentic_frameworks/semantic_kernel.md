@@ -462,8 +462,8 @@ public class AIController : ControllerBase
 - Multi-language support required (frontend in Python, backend in C#)
 
 **Do NOT use Semantic Kernel when:**
-- Complex stateful agents with loops and checkpointing — LangGraph is more capable
-- Python-first team with no enterprise requirements — LangChain/LangGraph have better Python tooling
+- Complex stateful agents with loops and checkpointing — [LangGraph](langgraph.md) is more capable
+- Python-first team with no enterprise requirements — [LangChain](langchain_and_lcel.md)/LangGraph have better Python tooling
 - Need maximum open-source community integrations — LangChain's ecosystem is larger
 - Agentic patterns beyond simple planning — SK's agent capabilities are less mature
 
@@ -482,6 +482,19 @@ Production SK deployments without filters have no audit trail. One enterprise cu
 
 **Pitfall 4: Memory store misconfiguration**
 Semantic Memory with `VolatileMemoryStore` is reset on every application restart. Production must use persistent stores (Azure Cognitive Search, Chroma, Pinecone). Teams prototype with volatile memory, deploy to production with the same config, and wonder why the chatbot forgets everything.
+
+```python
+# BROKEN: prototype config shipped to production — every deploy/restart wipes all memories
+from semantic_kernel.memory import VolatileMemoryStore
+memory_store = VolatileMemoryStore()  # in-process dict; gone on pod restart
+
+# FIXED: persistent, service-backed store for production
+from semantic_kernel.connectors.memory.azure_ai_search import AzureAISearchMemoryStore
+memory_store = AzureAISearchMemoryStore(
+    search_endpoint=os.environ["AZURE_SEARCH_ENDPOINT"],
+    admin_key=os.environ["AZURE_SEARCH_KEY"],
+)  # memories survive restarts, scale across replicas
+```
 
 **Pitfall 5: Planner over-generation**
 `FunctionCallingStepwisePlanner` can generate 10+ step plans for simple tasks. Each step is an LLM call. A "summarize this document" task should be 1 step; the planner sometimes generates: translate → clean text → extract topics → format → summarize (5 steps × $0.005 = $0.025 per call). Use direct function invocation (`kernel.invoke(...)`) for known, simple tasks; reserve planners for genuinely complex multi-step coordination.

@@ -3,7 +3,7 @@
 > This file is a deep-dive sub-file of the [Foundations & Architecture](README.md) module.
 > It covers LR warmup theory, WSD schedule, loss spikes, BF16 vs FP16, batch scaling,
 > muP (maximal update parametrization), and data mixing at billion-parameter scale.
-> Distributed training infrastructure (DDP, FSDP, ZeRO) is covered in the LLM Training Infrastructure module.
+> Distributed training infrastructure (DDP, FSDP, ZeRO) is covered in the [LLM Training Infrastructure](../training_infrastructure/README.md) module.
 
 ---
 
@@ -45,7 +45,7 @@ Key insight: muP (Maximal Update Parametrization) is the most important practica
 
 **muP (Maximal Update Parametrization):** Standard initialization and learning rate parametrization causes features and weights to scale with model width — hyperparameters that work for a 100M model don't work for a 7B model. muP reparametrizes so that updates are of the same magnitude at any width, enabling hyperparameter transfer across model scales.
 
-**Data mixing:** The mixture of domains in pretraining data directly determines model capabilities. Web data teaches general language; code teaches structured reasoning; math teaches precise calculation; multilingual data teaches cross-lingual transfer. The mixing ratios must be tuned; too much code makes the model verbose and literal; too little makes it poor at programming.
+**Data mixing:** The mixture of domains in pretraining data directly determines model capabilities. Web data teaches general language; code teaches structured reasoning; math teaches precise calculation; multilingual data teaches cross-lingual transfer. The mixing ratios must be tuned; too much code makes the model verbose and literal; too little makes it poor at programming. Corpus construction and filtering pipelines are covered in [Pre-Training](../pre_training/README.md).
 
 ---
 
@@ -99,44 +99,28 @@ Key insight: muP (Maximal Update Parametrization) is the most important practica
 
 ### Warmup-Stable-Decay (WSD) Schedule
 
+```mermaid
+xychart-beta
+    title "WSD schedule — LR as fraction of peak"
+    x-axis ["step 0", "1K", "2K (warmup end)", "50K", "100K", "150K", "200K (decay start)", "210K", "220K"]
+    y-axis "LR / peak LR" 0 --> 1.1
+    line [0, 0.5, 1.0, 1.0, 1.0, 1.0, 1.0, 0.55, 0.1]
 ```
-Learning Rate
-     ^
-     |
- η_peak |   /---------...--------\
-     |  /                        \
-     | /                          \
-η_min|/                            \___________
-     |                              final decay
-     +--------+--------+---...---+-+----------> Step
-              |        |         | |
-           warmup    stable    decay extra data
-          (2000 steps)  (N steps)  (sharp)  (can extend)
 
-Advantage: extend stable phase with more data at any time
-vs cosine: committed to final step count at training start
-```
+Linear warmup (~2,000 steps) to peak, then a flat stable phase that can be extended with more data at any time, then a sharp final decay to `min_lr_ratio` (0.1× peak). The advantage over cosine: cosine commits to the final step count at training start, while WSD's stable phase leaves the endpoint open.
 
 ### Loss Spike Pattern (Bad Data Batch)
 
+```mermaid
+xychart-beta
+    title "Loss spike from a bad batch (numbers from the section 14 incident)"
+    x-axis ["51200", "51342 (grad spike)", "51343 (loss spike)", "51400", "51600", "51843"]
+    y-axis "loss / grad norm" 0 --> 9
+    line [2.77, 2.76, 8.3, 4.9, 3.1, 2.76]
+    line [0.6, 4.8, 3.0, 1.1, 0.7, 0.6]
 ```
-Loss
-^
-|               SPIKE
-|          _____|____
-|         /    |     \
-|        /     |      \_____  (recovery, 100-500 steps)
-|_______/      |
-|              |
-+----+---------+---+---------> Step
-     |              |
-normal           spike trigger
-gradient norm
-spike here (1 step before loss spike)
 
-Detection: gradient_norm > 3x rolling average → investigate next loss value
-Response: checkpoint before spike; skip that batch; resume from checkpoint
-```
+Upper line = loss, lower line = gradient norm. The gradient norm jumps to 8× its 0.6 rolling average one step *before* the loss spikes 2.76 → 8.3; recovery back to baseline takes 100-500 steps. Detection: gradient_norm > 3× rolling average → investigate the next loss value. Response: roll back to the checkpoint before the spike, skip that batch, resume.
 
 ### muP vs Standard Parametrization
 
@@ -900,8 +884,9 @@ def batch_size_schedule(
 
 ```python
 # BROKEN: Applying muP's 1/width_ratio LR scaling uniformly to all layers
-# Embedding layer: standard SP (not muP) — should NOT scale LR
-# Output (LM head): should scale by 1/width_ratio² not 1/width_ratio
+# Embedding layer: standard SP rule applies — should NOT scale LR
+# Output (LM head): scales by 1/width_ratio like hidden layers, but via its own
+# derivation (readout rule) — the uniform-scaling bug is shrinking embedding LR too
 
 # muP rules (from Greg Yang's muTransfer paper):
 # Embedding: LR unchanged (use base_lr)
@@ -983,9 +968,8 @@ muP addresses width scaling (hidden dimension, number of heads) but the original
 **Q: What data quality issues cause training loss spikes and how do you prevent them?**
 Three categories of data quality issues that cause training spikes: (1) Binary-encoded content — PDFs, images, or executables stored as bytes in web crawl data. The model encounters tokens with completely different statistical properties from natural language. Fix: binary content detector in preprocessing pipeline (check for high entropy, non-printable character fraction > 10%). (2) Encoding corruption — documents where character encoding conversion failed (UTF-8 → Latin-1 → back to UTF-8), producing sequences of replacement characters. Fix: unicode normalization pass + replacement character filter. (3) Repeated sequences — documents where copy-paste artifacts create 50+ repetitions of the same sentence. The model sees a gradient signal pushing toward high probability on repetition. Fix: local deduplication within documents (remove runs of identical n-grams). Detection pipeline: run all documents through a PPL-based filter using a small pretrained language model — documents with PPL < 10 or PPL > 1000 (relative to corpus average ~50-100) are outliers worth inspecting. The binary-content bug specifically causes PPL to spike to 10^6+ for that batch.
 
----
-
-## 13. Best Practices
+**Q: What does gradient clipping actually do in LLM training, and how do you choose and monitor the threshold?**
+A: Global-norm clipping computes the L2 norm over ALL parameters' gradients concatenated and, if it exceeds `max_norm` (almost universally 1.0 for LLM pre-training), rescales the entire gradient vector by `max_norm / total_norm` — it changes the step SIZE, never the direction, which is why it is not equivalent to per-element clamping (`clip_value`), which distorts direction and is rarely used. Its job is damage control for the heavy-tailed gradient-noise distribution of transformer training: one bad batch (corrupted document, rare-token burst) can produce a gradient 100x normal and launch the loss spike cycle. The threshold itself is barely a hyperparameter — what matters is the clip FRACTION: healthy runs clip on roughly 1-5% of steps; clipping nearly every step means the effective LR is silently `max_norm/norm` times smaller than configured and something upstream is wrong (LR too high, warmup too short, bad data shard); clipping never means the threshold is so loose it is decorative. Log `total_norm` pre-clip every step — its rolling-average spike is the earliest observable warning before a visible loss spike, and post-mortems of divergence almost always start from that time series.
 
 1. Always use gradient clipping (`max_norm=1.0`) — never skip it, never disable it; a single bad batch can diverge a run without clipping.
 2. Monitor gradient norm every step and alert on 3x rolling average spike — this is a 1-step early warning system before loss diverges.

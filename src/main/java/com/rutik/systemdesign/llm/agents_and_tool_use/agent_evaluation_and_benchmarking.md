@@ -25,7 +25,7 @@ Two complementary evaluation modes exist: trajectory-level evaluation (was each 
 - **Benchmark ≠ production quality**: all benchmarks have distributional gaps from real tasks; treat benchmark scores as directional, not absolute.
 - **Trajectory + outcome**: evaluate both path and result; outcome-only evaluation misses brittle shortcuts.
 - **Multiple metrics**: quality (task success rate), efficiency (steps, tokens, cost), reliability (variance across runs), safety (harmful action rate).
-- **LLM-as-judge at scale**: human evaluation is gold but expensive; LLM-as-judge with calibrated rubrics is the practical alternative.
+- **LLM-as-judge at scale**: human evaluation is gold but expensive; LLM-as-judge with calibrated rubrics is the practical alternative (see [Evaluation & Benchmarks](../evaluation_and_benchmarks/README.md) for judge calibration fundamentals).
 - **Golden trajectories as reference**: generate expert-annotated correct trajectories; compare agent trajectories against them step-by-step.
 
 ---
@@ -99,14 +99,19 @@ Scoring:
 
 SWE-bench Verified (500 tasks):
   Subset manually verified to have clear, well-specified issues
+```
 
-Historical results:
-  GPT-4 (2023, no tools): 1.74%
-  SWE-agent (Claude-3.5, 2024): 18.1%
-  Devin (Cognition, 2024): 13.8% (original claim)
-  Claude 3.5 Sonnet + SWE-bench scaffold: 49%
-  o3 + specialized scaffolding: 71.7% (verified subset)
+```mermaid
+xychart-beta
+    title "SWE-bench resolve rate — historical results"
+    x-axis ["GPT-4 (2023)", "Devin (2024)", "SWE-agent (2024)", "Claude 3.5 + scaffold", "o3 + scaffold"]
+    y-axis "Issues resolved (%)" 0 --> 80
+    bar [1.74, 13.8, 18.1, 49, 71.7]
+```
 
+From 1.74% (GPT-4, 2023, no tools) to 71.7% (o3 with specialized scaffolding, on the verified subset) in roughly two years; Devin's 13.8% was Cognition's original claim.
+
+```
 What 20% means in practice:
   - 1 in 5 real GitHub issues is automatically resolved
   - Issues are real production bugs, not toy problems
@@ -467,6 +472,17 @@ A large enterprise deploys a research agent:
 
 3. **LLM judge bias**: using the same model as the agent to judge the agent creates systematic favoritism. Use a different, ideally stronger model as judge. Use model self-evaluation only as a last resort.
 
+```python
+# BROKEN: agent judges its own trajectories — self-preference bias inflates scores
+agent = Agent(model="gpt-4o")
+judge = LLMJudge(model="gpt-4o", rubric=RUBRIC)
+
+# FIXED: cross-family judge, gated on human agreement before it is trusted at scale
+agent = Agent(model="gpt-4o")
+judge = LLMJudge(model="claude-opus-4", rubric=RUBRIC)
+assert spearman(judge.scores(calibration_set), human_scores) > 0.8
+```
+
 4. **Not accounting for variance**: running each benchmark task once produces noisy estimates. Use at least 3 runs and report confidence intervals. pass@1 variance is high for difficult tasks.
 
 5. **Cost blindness**: teams optimize for task success rate without tracking cost-per-task. An agent that achieves 70% success at $5/task vs. 65% success at $0.50/task — the cheaper one may be better for production.
@@ -556,7 +572,7 @@ A: A domain-specific benchmark construction process: (1) Task sampling — colle
 ## Best Practices
 
 1. **Build a domain-specific eval dataset**: don't rely solely on public benchmarks; sample 100+ real tasks from your production distribution.
-2. **Track cost-per-task from day 1**: quality improvements that double cost may not be worth it; cost efficiency is as important as raw quality.
+2. **Track cost-per-task from day 1**: quality improvements that double cost may not be worth it; cost efficiency is as important as raw quality (see [Agent Cost & Token Budget](agent_cost_and_token_budget.md)).
 3. **Use LLM judge on a calibration set first**: validate judge-human agreement on 50 tasks before trusting LLM judge scores at scale.
 4. **Run evals in CI**: every agent code change should trigger an automated eval run; catch regressions before production deployment.
 5. **Stratify results by difficulty and category**: aggregate success rate hides where the agent struggles; per-category analysis reveals specific failure modes.

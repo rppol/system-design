@@ -61,8 +61,10 @@ LLM token usage per email:
   Generated email body:       ~120 tokens (target 80-120 words)
   Total per email:            ~720 tokens
 Daily token generation:       1.2M emails x 120 output tokens = 144M output tokens/day
-At gpt-4o-mini pricing ($0.60/M output tokens): $86/day LLM cost per customer
-At scale (500 customers):                       $43,200/day total LLM cost
+At gpt-4o-mini pricing ($0.60/M output tokens): $86/day output cost — platform-wide
+Adding input (1.2M x 600 = 720M tokens/day at $0.15/M = $108/day): ~$194/day total LLM cost
+(all 500 customers blended — matches the Section 10 capacity plan; LLM cost is negligible
+ next to email infrastructure and CRM API budgets)
 ```
 
 ### CRM and API Estimates

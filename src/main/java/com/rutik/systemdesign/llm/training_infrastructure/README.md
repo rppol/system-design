@@ -136,6 +136,9 @@ Expert computation on assigned GPU
 All-to-all again to return results
 ```
 
+Routing, capacity factors, and load-balancing losses are covered in
+[Mixture of Experts](../mixture_of_experts/README.md).
+
 ---
 
 ## 5. Architecture Diagrams
@@ -351,6 +354,12 @@ A: Checkpoint model state (weights, optimizer state, dataloader position) every 
 **Q: What is gradient checkpointing and what is the tradeoff?**
 A: Gradient checkpointing (activation recomputation) saves memory by NOT storing intermediate activations during the forward pass. During backpropagation, it recomputes the forward pass from checkpoints to get the activations needed for gradients. Memory: reduces activation memory from O(layers) to O(√layers). Cost: adds ~33% computation overhead. Essential for training large models or with long sequences.
 
+**Q: How many FLOPs does one training token cost, and how do you estimate wall-clock time for a run?**
+A: Use the 6N rule: training costs ~6 × N FLOPs per token (2N for the forward pass, 4N for backward), so total compute C ≈ 6 × params × tokens. A 7B model on 1.5T tokens needs 6 × 7e9 × 1.5e12 ≈ 6.3e22 FLOPs; divide by effective cluster throughput — 64 A100s at 45% MFU deliver 64 × 312 × 0.45 ≈ 9.0 PFLOPS — giving ~7.0e6 seconds ≈ 81 days ideal, before availability losses. The classic trap is using 2N (the forward-only inference number) for training estimates, which makes every plan 3x too optimistic. Sanity-check any training timeline with 6ND before committing hardware.
+
+**Q: Why is the data pipeline a common hidden cause of low MFU, and how do you fix it?**
+A: The GPU only computes as fast as batches arrive, and a synchronous dataloader reading from network storage stalls the step loop while GPUs and interconnect sit idle — the signature is low MFU combined with low NCCL traffic and bursty GPU utilization. Fixes are cheap: stage tokenized shards on local NVMe before the run; set `num_workers=8`, `pin_memory=True`, `prefetch_factor=4`, `persistent_workers=True` so batch N+2 loads while batch N trains (pinned memory enables DMA at full PCIe bandwidth). Profile dataloader time with the PyTorch Profiler — if it exceeds a few percent of step time, the input pipeline is the bottleneck, not the model. Always rule out data starvation before touching parallelism settings.
+
 **Q: How do you calculate memory requirements for each ZeRO stage?**
 ZeRO partitions optimizer states, gradients, and parameters across data-parallel GPUs. For a model with P parameters in FP16: baseline (no ZeRO) per GPU = 2P (params) + 2P (grads) + 12P (Adam states: FP32 params + FP32 momentum + FP32 variance) = 16P bytes. ZeRO-1 shards optimizer states: 2P + 2P + 12P/N. ZeRO-2 shards optimizer states + gradients: 2P + 2P/N + 12P/N. ZeRO-3 shards everything: 2P/N + 2P/N + 12P/N = 16P/N. For a 7B model (P=7B): baseline = 112GB per GPU; ZeRO-3 with 8 GPUs = 14GB per GPU. The tradeoff: ZeRO-3 requires all-gather communication to reconstruct parameters for each forward/backward pass, adding ~10-20% communication overhead.
 
@@ -359,6 +368,15 @@ Use data parallelism (DP) when the model fits on a single GPU — it scales line
 
 **Q: What are the key differences between FSDP (PyTorch) and DeepSpeed ZeRO?**
 FSDP is PyTorch's native implementation of ZeRO-3 (full sharding), while DeepSpeed is Microsoft's library offering ZeRO stages 1-3 plus additional optimizations. Key differences: (1) FSDP is integrated into PyTorch core (no separate library), making it easier to adopt and debug; (2) DeepSpeed offers ZeRO-Infinity (offload to NVMe), ZeRO++ (quantized communication), and more granular memory optimization; (3) FSDP uses PyTorch's autograd natively while DeepSpeed wraps the engine; (4) DeepSpeed has better support for MoE training; (5) FSDP has better composability with PyTorch features (compile, DTensor). In practice: use FSDP for models up to 30B on standard GPU clusters (simpler setup), use DeepSpeed for 70B+ models or when you need ZeRO-Infinity offloading. Meta uses FSDP internally; Microsoft uses DeepSpeed.
+
+**Q: What is the pipeline bubble, and how do micro-batches shrink it?**
+A: With pipeline parallelism, stage k cannot start until stage k-1 produces its first output, so GPUs idle while the pipeline fills and drains. The bubble fraction is (p − 1) / (m + p − 1) for p pipeline stages and m micro-batches: with p=8 and only m=8 micro-batches the bubble wastes 7/15 ≈ 47% of the schedule, while m=32 cuts it to 7/39 ≈ 18%. This is where the rule of thumb m ≥ 4×p comes from, and why schedules like 1F1B interleave forward and backward micro-batches to keep the pipe full while bounding activation memory. If memory limits prevent raising m, reduce the PP degree instead of accepting the bubble.
+
+**Q: What is sequence (context) parallelism and when do you need it?**
+A: Sequence parallelism splits the tokens of a single sequence across GPUs, so activation memory per GPU scales with seq_len/N instead of seq_len. It becomes necessary for long-context training — e.g., 128K-token samples — where activations, which grow linearly with sequence length, exceed what gradient checkpointing alone can contain. The cost is attention communication: every token needs KV from all positions, handled by all-gather or, at extreme lengths, Ring Attention, which passes KV blocks around a device ring with online softmax so no GPU ever materializes the full sequence. Use TP/PP/DP first; add SP only when sequence length rather than model size is the memory driver.
+
+**Q: What extra communication does expert parallelism add for MoE training?**
+A: Two all-to-all exchanges per MoE layer: tokens are routed from every GPU to the GPUs hosting their selected experts, computed, then scattered back — and unlike TP's fixed all-reduce, all-to-all traffic depends on router decisions and can be heavily imbalanced. A hot expert receiving 3x its share of tokens creates stragglers and overflows its buffer; mitigations are a capacity factor (typically 1.0-1.25, dropping overflow tokens), auxiliary load-balancing losses on the router, and placing the hottest expert pairs within a node to exploit NVLink. EP composes with DP/TP/PP into 4D parallelism for large MoE models. Monitor per-expert token counts — routing imbalance shows up as MFU decline before it shows up in loss quality.
 
 **Q: What are the common pitfalls of mixed-precision training and how do you avoid them?**
 Mixed-precision training uses FP16 or BF16 for forward/backward passes while keeping FP32 master weights. Pitfalls: (1) FP16 overflow — gradients or activations exceed FP16 max (65,504), causing NaN loss. Fix: use loss scaling (multiply loss before backward, divide gradients after) or use BF16 (same range as FP32); (2) underflow — small gradients round to zero in FP16. Fix: dynamic loss scaling that adjusts the scale factor; (3) BF16 precision loss — BF16 has only 7 bits of mantissa vs FP16's 10 bits, causing precision issues in accumulation. Fix: keep running sums in FP32; (4) batch norm statistics — must stay in FP32 to maintain accuracy. Modern recommendation: use BF16 on Ampere+ GPUs (A100, H100) — it avoids overflow/underflow issues entirely because it has the same exponent range as FP32. FP16 with loss scaling is only needed on older GPUs (V100).
@@ -385,7 +403,7 @@ Communication overhead in distributed training comes from gradient synchronizati
 
 ## 14. Case Study
 
-**Scenario:** A research lab trains a 7B parameter dense decoder-only LLM on 1.5T tokens of curated web + code + math data. Hardware budget: 64 A100 80GB SXM GPUs (8 nodes × 8 GPUs) on InfiniBand HDR (200 Gb/s). Target: 3.5T token-hours of compute (Chinchilla-optimal for 7B), MFU > 45%, training wall-clock under 21 days, per-GPU OOM frequency < 0.1%.
+**Scenario:** A research lab trains a 7B parameter dense decoder-only LLM on 1.5T tokens of curated web + code + math data. Hardware budget: 64 A100 80GB SXM GPUs (8 nodes × 8 GPUs) on InfiniBand HDR (200 Gb/s). Target: ~6.3e22 training FLOPs (6 × 7B params × 1.5T tokens — roughly 10x past the ~140B-token Chinchilla point, deliberately over-trained Llama-style for inference efficiency), MFU > 45%, training wall-clock under 95 days, per-GPU OOM frequency < 0.1%.
 
 **Architecture:**
 
@@ -429,22 +447,22 @@ Communication overhead in distributed training comes from gradient synchronizati
   └──────────────────────────────────────────────────────────┘
 
   Checkpoint Strategy:
-  Every 1B tokens (≈ 500 steps at 4M token batch):
+  Every 1B tokens (= 250 steps at 4M token batch):
     - Full checkpoint: model + optimizer → NFS mount
     - Checkpoint size: 14 GB (weights) + 56 GB (optim) = 70 GB
     - Checkpoint write time: ~90s at 800 MB/s NFS throughput
     - Retain last 3 checkpoints (210 GB total on NFS)
-    - Spot instance interruption: max 1B token loss (≈ 20 min of training)
+    - Spot instance interruption: max 1B token loss (≈ 80 min of training at 213K tok/s)
 
   Throughput Math:
     A100 BF16 TFLOPS: 312 peak theoretical
     MFU target: 45% → 140 TFLOPS per GPU effective
-    7B model FLOPs per token: 2 × 7B = 14B
-    Tokens/sec per GPU: 140e12 / 14e9 = 10,000 tokens/sec
-    Total (64 GPUs): 640,000 tokens/sec
-    1.5T tokens / 640K tok/s = 2,344,000 sec = 27 days (ideal)
-    With 85% availability (restarts, checkpointing): 27 / 0.85 = 32 days
-    → need MFU improvement or more GPUs for 21-day target
+    7B model training FLOPs per token: 6 × 7B = 42B  (2N forward + 4N backward)
+    Tokens/sec per GPU: 140e12 / 42e9 = 3,333 tokens/sec
+    Total (64 GPUs): 213,000 tokens/sec
+    1.5T tokens / 213K tok/s = 7,030,000 sec = 81 days (ideal)
+    With 85% availability (restarts, checkpointing): 81 / 0.85 = 96 days
+    → need MFU improvement or more GPUs for the 95-day target
 ```
 
 **Key implementation — 3 Python code blocks:**
@@ -702,22 +720,23 @@ def fixed_async_checkpoint(state: dict, path: str) -> threading.Thread:
 ```python
 # BROKEN: One GPU on a node with a faulty NVLink link runs at 60% speed.
 # AllReduce waits for all 64 GPUs — entire run throttled to 60% throughput.
-# MFU drops from 45% to 28%; 21-day target becomes 34 days.
+# MFU drops from 45% to 28%; the 95-day plan becomes 153 days.
 # Symptom: step times vary ±40% between steps.
 
 # FIX: Monitor per-GPU throughput via DCGM exporter (Prometheus).
 # Alert if any GPU's compute utilization drops below 85% for 5+ steps.
-# Preemptively hot-swap the node — 20-min interruption beats 13 days of degraded training.
+# Preemptively hot-swap the node — 20-min interruption beats ~58 days of degraded training.
 # Use spot-instance-friendly checkpointing to resume from last checkpoint after swap.
 ```
 
 **Pitfall 2 — Data pipeline starvation on slow NFS:**
 
 ```python
-# BROKEN: Training batch loaded from NFS (latency 10ms/batch) while GPU waits.
-# At 10K tokens/sec/GPU, a 4096-token batch loads in 0.4ms from RAM but 10ms from NFS.
-# NFS latency exceeds GPU compute time → data becomes the bottleneck, not compute.
-# MFU: 20% (GPU idle 80% of the time waiting for data).
+# BROKEN: Training batches loaded synchronously from a shared NFS mount while the GPU waits.
+# 64 GPUs x 8 dataloader workers issue concurrent random reads against one NFS server;
+# under contention, per-batch fetches stall for seconds — comparable to the ~5s of compute
+# per 16K-token micro-batch (at 3,333 tok/s/GPU), so the GPU idles between steps.
+# MFU: 20% (GPU waiting for data much of the time).
 
 # FIX: Use prefetch with pinned memory — load N+2 batches while training on batch N.
 # All tokenized data shards pre-loaded to local SSD (800 GB NVMe per node).
@@ -760,14 +779,14 @@ def verify_optimizer_dtype(optimizer: torch.optim.Optimizer) -> None:
 | Metric | Target | Achieved (after tuning) |
 |--------|--------|------------------------|
 | MFU | > 45% | 47.3% |
-| Tokens/sec (64 GPUs) | 640K | 672K |
-| Wall-clock training time | 21 days | 22.4 days |
+| Tokens/sec (64 GPUs) | 213K | 225K |
+| Wall-clock training time | 95 days | 92 days |
 | GPU OOM events | < 0.1% | 0.03% |
 | NaN loss events | 0 | 1 (fixed by grad clipping) |
 | Checkpoint overhead | < 5% | 1.8% (async checkpoint) |
 | Data pipeline idle | < 2% | 0.6% (local SSD + prefetch) |
 | Straggler events | 0 | 2 (hot-swapped nodes) |
-| Total compute cost | $180K est | $194K (22.4 days × 64 × $2/hr) |
+| Total compute cost | $292K est | $283K (92 days × 64 × $2/hr) |
 
 **Interview Q&As:**
 

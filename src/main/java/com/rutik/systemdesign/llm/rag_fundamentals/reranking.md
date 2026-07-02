@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-Reranking is a second-stage retrieval step that takes a large pool of candidate documents from initial retrieval (typically top-100) and reorders them to select the most relevant for LLM context (typically top-5 to 10). The key insight is a two-stage architecture: fast bi-encoders retrieve broadly with high recall; slower but more accurate cross-encoders rerank to achieve high precision.
+Reranking is a second-stage retrieval step that takes a large pool of candidate documents from initial retrieval (typically top-100) and reorders them to select the most relevant for LLM context (typically top-5 to 10). The key insight is a two-stage architecture: fast [bi-encoders](../embeddings_and_similarity_search/README.md) retrieve broadly with high recall; slower but more accurate cross-encoders rerank to achieve high precision.
 
 Initial retrieval via bi-encoders encodes queries and documents independently — efficient but imprecise (they can't model fine-grained query-document interaction). Cross-encoder rerankers read the query and document together, enabling rich interaction modeling that bi-encoders fundamentally cannot do. This produces dramatically better relevance judgments at the cost of being too slow for full-index search.
 
@@ -431,7 +431,7 @@ After (hybrid + reranker):
 
 2. Cohere Rerank over self-hosted BGE-reranker: customer support queries include product names, error messages, and feature names that require precise relevance scoring. Cohere Rerank 3 with its 4096-token context window handles long troubleshooting articles without truncation — the BGE-reranker-large's 512-token limit was truncating 34% of chunks (support articles average 650 tokens). The $2/1000 queries cost at 100K/day = $200/day, which is justified by the customer satisfaction improvement.
 
-3. Hybrid retrieval for support-specific queries: support queries mix semantic ("my account keeps getting locked") and exact-match ("error code 403 when logging in") queries. BM25 handles error code matching precisely — dense retrieval alone missed 28% of error-code queries.
+3. [Hybrid retrieval](../advanced_rag/README.md) for support-specific queries: support queries mix semantic ("my account keeps getting locked") and exact-match ("error code 403 when logging in") queries. BM25 handles error code matching precisely — dense retrieval alone missed 28% of error-code queries.
 
 4. Relevance threshold filtering: after reranking, chunks with a Cohere relevance score below 0.3 are excluded from the LLM context — if fewer than 3 chunks pass the threshold, the system returns a "contact support agent" fallback instead of generating a potentially incorrect answer. This threshold eliminated 11% of queries from self-service (routing them to human agents), but improved self-service CSAT from 3.1 to 4.1 for queries that passed the threshold.
 

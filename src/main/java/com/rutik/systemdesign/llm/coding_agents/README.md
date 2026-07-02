@@ -14,7 +14,7 @@ The 2024-2025 coding-agent landscape spans IDE-integrated (Cursor Composer, Clau
 
 **Mental model**: The agent's "IDE" is its toolbox: `read_file` is its file explorer, `bash` is its terminal, `edit_file` is its editor, `run_tests` is its test runner. Each tool call is one action; the agent's loop is the development loop: explore → understand → modify → test → fix → repeat. Modern agents add navigation primitives (grep, symbol search, type lookup via LSP) so they can find relevant code without reading entire files.
 
-**Why it matters**: Software engineering is the #1 commercial application of LLMs today. The market is moving from "AI helps write code one line at a time" (Copilot) toward "AI completes whole tasks autonomously" (Devin, Claude Code). The pivot creates new architectural challenges: navigation at scale, test-driven loops, mistake recovery, multi-file coherence, human collaboration patterns.
+**Why it matters**: Software engineering is the #1 commercial application of LLMs today. The market is moving from "AI helps write code one line at a time" ([Copilot-style completion](../code_generation/README.md)) toward "AI completes whole tasks autonomously" (Devin, Claude Code). The pivot creates new architectural challenges: navigation at scale, test-driven loops, mistake recovery, multi-file coherence, human collaboration patterns.
 
 **Key insight**: Reliable coding agents are not just LLMs with file tools — they require careful Agent-Computer Interface (ACI) design. SWE-agent's contribution was demonstrating that specialized commands (`scroll_up/down`, `goto_line`, `edit <start>:<end>`) dramatically outperform raw bash. The interface between agent and code matters as much as the model.
 
@@ -416,7 +416,7 @@ Coarse-grained: bash (powerful but error-prone, leaks context). Fine-grained: 20
 Best-in-class agents ask clarifying questions before coding. Devin posts questions in Slack; Cursor Composer prompts in IDE; Claude Code uses CLI prompts. Worst pattern: agent guesses, ships code that solves the wrong problem. Always design for "agent can ask".
 
 **What's the security model for coding agents?**
-Sandboxed bash (E2B, Docker), no production credential access, approval gates on destructive ops, separate dev/prod environments (agent runs in dev), audit logs of all tool calls. Treat agent like an intern with potentially poor judgment — they're well-meaning but can make costly mistakes without guardrails.
+[Sandboxed bash](../agents_and_tool_use/sandboxed_code_execution.md) (E2B, Docker), no production credential access, approval gates on destructive ops, separate dev/prod environments (agent runs in dev), audit logs of all tool calls. Treat agent like an intern with potentially poor judgment — they're well-meaning but can make costly mistakes without guardrails.
 
 ---
 

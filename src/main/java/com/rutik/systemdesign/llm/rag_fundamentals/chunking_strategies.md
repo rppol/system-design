@@ -14,7 +14,7 @@ Chunking strategy selection involves three fundamental tradeoffs: precision (sma
 
 **Mental model**: Imagine embedding a 10,000-word research paper as a single vector — the embedding averages across all the paper's topics and concepts, so it matches nothing precisely. Splitting it into sentence-level pieces produces embeddings so narrow they miss related ideas. The right chunk boundary captures a single coherent idea — complete enough to be understood in isolation, focused enough to embed with high semantic precision.
 
-**Why it matters**: Every retrieval quality improvement in the entire RAG pipeline starts with chunking. A document chunked at mid-sentence boundaries will produce irrelevant retrieved context that even the best reranker cannot recover. Chunking quality is the ceiling of retrieval quality.
+**Why it matters**: Every retrieval quality improvement in the entire RAG pipeline starts with chunking. A document chunked at mid-sentence boundaries will produce irrelevant retrieved context that even the best [reranker](reranking.md) cannot recover. Chunking quality is the ceiling of retrieval quality.
 
 **Key insight**: There is no universally optimal chunk size — it depends on the query granularity, document type, and embedding model. The right answer is always empirical: measure retrieval recall@K at multiple chunk sizes on your actual document corpus and query distribution.
 
@@ -339,6 +339,19 @@ Fix: Use document-structure-aware splitting: parse section headers, identify cla
 Most embedding models have a context limit (512 tokens for many BERT-based models; 8192 for text-embedding-3-large). Chunks exceeding the limit are truncated silently.
 Fix: Check embedding model's token limit; ensure chunk_size (in tokens) is below that limit with margin (e.g., max 400 tokens for a 512-token model).
 
+```python
+# BROKEN: ~800-token chunks fed to a 512-token embedding model
+splitter = RecursiveCharacterTextSplitter(chunk_size=3200)   # ~800 tokens
+model = SentenceTransformer("BAAI/bge-small-en-v1.5")        # max_seq_length = 512
+vectors = model.encode(chunks)   # tokens 513+ silently dropped — the embedding
+                                 # represents only the FIRST HALF of each chunk
+
+# FIXED: cap chunk size below the model limit with headroom
+model = SentenceTransformer("BAAI/bge-small-en-v1.5")
+print(model.max_seq_length)                                  # 512 — verify, don't assume
+splitter = RecursiveCharacterTextSplitter(chunk_size=1600)   # ~400 tokens < 512 limit
+```
+
 **3. No overlap, information lost at boundaries**
 Two consecutive chunks each contain half of a key piece of information. Neither retrieves it.
 Fix: Use at minimum 10-15% overlap between consecutive chunks.
@@ -402,7 +415,7 @@ A: SemanticSplitterNodeParser embeds each sentence, computes cosine similarity b
 A: Build a labeled retrieval eval set: 100-200 (query, expected_source_document, expected_chunk_text) triples created by a domain expert. For each (query, expected_chunk) pair, check whether the expected chunk appears in the top-10 retrieved results — this is recall@10. Measure this for each candidate chunking strategy (fixed 300, fixed 500, semantic, hierarchical) and choose the one with highest recall. Also inspect qualitatively: retrieve the top-5 chunks for 20 representative queries and verify they contain the expected information and are coherent (not truncated mid-sentence). Poor qualitative inspection often reveals problems that aggregate metrics miss.
 
 **Q: How should chunk size be adjusted for different embedding models?**
-A: Embedding models have different context windows: BAAI/bge-small-en has a 512-token limit; text-embedding-3-large supports 8192 tokens; nomic-embed-text supports 8192. For 512-token models: chunk size must not exceed 400-450 tokens (leave headroom for special tokens); 200-350 tokens is the practical sweet spot. For 8192-token models: you can index larger chunks (1000-2000 tokens), but larger chunks still produce less precise embeddings — the model can process them, but the embedding quality for retrieval is better at 500-800 tokens. The model's architecture (BERT-based vs. LLM-based embeddings like nomic) also affects optimal chunk size; LLM-based embeddings are better at long chunks.
+A: Embedding models have different context windows: BAAI/bge-small-en has a 512-token limit; text-embedding-3-large supports 8192 tokens; nomic-embed-text supports 8192 (model selection criteria: [Embedding Models](embedding_models.md)). For 512-token models: chunk size must not exceed 400-450 tokens (leave headroom for special tokens); 200-350 tokens is the practical sweet spot. For 8192-token models: you can index larger chunks (1000-2000 tokens), but larger chunks still produce less precise embeddings — the model can process them, but the embedding quality for retrieval is better at 500-800 tokens. The model's architecture (BERT-based vs. LLM-based embeddings like nomic) also affects optimal chunk size; LLM-based embeddings are better at long chunks.
 
 **Q: What is a sliding window approach to chunking and when does it help?**
 A: A sliding window creates overlapping chunks by advancing a fixed-size window by less than its full size: window size 500 tokens, stride 250 tokens → 50% overlap. Every token appears in approximately 2 chunks. This is more aggressive than the standard 10-15% overlap approach. When it helps: highly dense documents where key information is concentrated in narrow segments (dense financial disclosures, legal definitions, technical specifications). When it hurts: documents with longer prose passages (creates too many near-duplicate chunks; retrieval returns redundant results; reranker sees same content multiple times). The tradeoff is 2-3× more chunks in the index (higher storage and retrieval cost) for better boundary coverage.

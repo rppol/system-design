@@ -674,18 +674,18 @@
    "lex": 0.1248
   },
   {
-   "a": "python/packaging_and_project_tooling",
-   "b": "python/the_type_system_and_typing",
-   "w": 0.1302,
-   "links": 0,
-   "lex": 0.1246
-  },
-  {
    "a": "python/fastapi/pydantic_v2_deep_dive",
    "b": "python/performance_and_profiling",
    "w": 0.1302,
    "links": 0,
    "lex": 0.1247
+  },
+  {
+   "a": "python/packaging_and_project_tooling",
+   "b": "python/the_type_system_and_typing",
+   "w": 0.1302,
+   "links": 0,
+   "lex": 0.1246
   },
   {
    "a": "python/fastapi/api_design_and_versioning",

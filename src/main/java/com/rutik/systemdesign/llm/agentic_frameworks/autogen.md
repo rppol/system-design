@@ -73,6 +73,9 @@ AutoGen 0.2 established the conversation-based paradigm. AutoGen 0.4 (released l
 3. **Nested chat**: One agent initiates a sub-conversation with other agents
 4. **Sequential**: Chain of two-agent pairs (A↔B, then B↔C, then C↔D)
 
+Group-chat coordination generalizes to the debate/consensus and orchestrator-worker patterns in
+[Multi-Agent Systems](../multi_agent_systems/README.md).
+
 ---
 
 ## 5. Architecture Diagrams
@@ -406,7 +409,7 @@ def is_termination(msg):
 - Team wants to configure agents by describing them in natural language
 
 **Do NOT use AutoGen when:**
-- Workflow is deterministic and well-defined — LangGraph's explicit graph is more predictable
+- Workflow is deterministic and well-defined — [LangGraph](langgraph.md)'s explicit graph is more predictable
 - Code execution is not part of the task — AutoGen's main value-add is the execute-and-feedback loop
 - Production deployment with tight cost/latency constraints — conversation loops are expensive and variable-length
 - Strict state management required — conversation history is hard to query programmatically
@@ -427,6 +430,15 @@ Each message is appended to history. After 20 rounds of 500-token messages: 10K 
 
 **Pitfall 4: Trusting LLM-generated TERMINATE signals**
 If the LLM is instructed to say "TERMINATE when done" but hallucinations trigger the word early, the conversation stops prematurely with an incomplete solution. Make termination signals unique and unambiguous: `"TASK_SUCCESSFULLY_COMPLETED"` is harder to accidentally trigger than `"TERMINATE"`.
+
+```python
+# BROKEN: substring match fires on "Do NOT say TERMINATE yet" or quoted instructions
+is_termination_msg=lambda msg: "TERMINATE" in msg.get("content", "")
+
+# FIX: unique sentinel, matched only at the end of the message
+SENTINEL = "TASK_SUCCESSFULLY_COMPLETED"
+is_termination_msg=lambda msg: msg.get("content", "").rstrip().endswith(SENTINEL)
+```
 
 **Pitfall 5: Non-deterministic speaker selection**
 `speaker_selection_method="auto"` uses an LLM to decide who speaks next. This can produce unexpected routing: the manager picks the wrong specialist, causing repeated back-and-forth. For predictable workflows: use `speaker_selection_method="round_robin"` or `"random"`.

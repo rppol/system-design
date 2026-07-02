@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-Graph RAG (Microsoft, 2024) extends standard RAG by extracting a knowledge graph from documents — entities as nodes, relationships as edges — and using that graph structure for retrieval. Documents are not just indexed as text chunks; they are analyzed for their entities, relationships, and the communities those entities form.
+Graph RAG (Microsoft, 2024) extends [standard RAG](../rag_fundamentals/README.md) by extracting a knowledge graph from documents — entities as nodes, relationships as edges — and using that graph structure for retrieval. Documents are not just indexed as text chunks; they are analyzed for their entities, relationships, and the communities those entities form.
 
 The critical problem Graph RAG solves: standard RAG completely fails at "global" queries — "What are the major themes across all documents?" or "What relationships does Company X have with other entities?" These queries have no single-chunk answer; the answer requires synthesizing across the entire corpus. Graph RAG handles this by building community summaries during indexing that capture themes and relationships at multiple levels of granularity.
 
@@ -304,7 +304,7 @@ Fix: Tune the Leiden resolution parameter. Evaluate community quality by inspect
 
 **3. Entity deduplication failure**
 "Microsoft Corporation," "Microsoft Corp," "MSFT" are the same entity but may be treated as separate nodes.
-Fix: Apply entity normalization before graph construction. Use a combination of string matching, embedding similarity, and LLM-assisted deduplication. Poor deduplication fragments the graph and degrades community detection.
+Fix: Apply entity normalization before graph construction. Use a combination of string matching, [embedding similarity](../embeddings_and_similarity_search/README.md), and LLM-assisted deduplication. Poor deduplication fragments the graph and degrades community detection.
 
 **4. Applying global retrieval to local queries**
 Routing a local query ("What is OpenAI's GPT-4o pricing?") to the global community summary path retrieves irrelevant thematic summaries.

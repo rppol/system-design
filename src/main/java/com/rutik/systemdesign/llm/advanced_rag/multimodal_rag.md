@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-Multimodal RAG extends the standard text-based RAG pipeline to handle documents that contain non-text content: images, charts, tables, diagrams, equations, and slides. Enterprise documents are rarely purely textual — PDFs contain embedded charts, research papers include figures, presentations are image-heavy, and technical documentation mixes diagrams with prose.
+Multimodal RAG extends the standard text-based RAG pipeline (see [RAG Fundamentals](../rag_fundamentals/README.md)) to handle documents that contain non-text content: images, charts, tables, diagrams, equations, and slides. Enterprise documents are rarely purely textual — PDFs contain embedded charts, research papers include figures, presentations are image-heavy, and technical documentation mixes diagrams with prose.
 
 Standard RAG loses all information in non-text content. Multimodal RAG preserves this information using two primary strategies: (1) convert non-text elements to rich text descriptions using vision-LLMs or OCR, then embed those descriptions as text; (2) embed images directly using multimodal embedding models (CLIP, SigLIP) and retrieve them using cross-modal queries.
 
@@ -152,7 +152,7 @@ def embed_text_for_image_retrieval(text: str) -> list[float]:
 # At query time: embed query with CLIP text encoder, search image collection
 ```
 
-CLIP alignment gap: CLIP text and image embeddings are in the same vector space but not perfectly aligned — a text query about "revenue growth" may not retrieve a revenue chart as reliably as semantic text search retrieves a text passage. Solution: dual retrieval (text for text chunks, CLIP for images) with a reranker that scores across both modalities.
+CLIP alignment gap: CLIP text and image embeddings are in the same vector space but not perfectly aligned — a text query about "revenue growth" may not retrieve a revenue chart as reliably as semantic text search retrieves a text passage. Solution: dual retrieval (text for text chunks, CLIP for images) with a reranker that scores across both modalities. How CLIP/SigLIP contrastive training builds this joint space is covered in [Vision-Language Models](../vision_language_models/README.md).
 
 ### Two Ways to Index an Image: Text Space vs Joint Space
 
@@ -177,7 +177,7 @@ call per image; Strategy 2 buys throughput and low cost but inherits the alignme
 
 ### 3.4 Generation with Vision LLMs
 
-Retrieved context must include both text and images; the generation LLM must be vision-capable:
+Retrieved context must include both text and images; the generation LLM must be vision-capable (architecture details in [Multimodal Models](../multimodal_models/README.md)):
 
 ```python
 def generate_multimodal_answer(

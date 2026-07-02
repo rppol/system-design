@@ -573,7 +573,7 @@ def record_llm_cost(
 **Use proxy-level tracing (gateway) when:**
 - You have 10+ microservices each making LLM calls — per-app instrumentation becomes a maintenance burden
 - You want to enforce a uniform attribute policy (always add `tenant_id`, always redact prompts) without trusting each team to do it correctly
-- Cross-references: `../../llm_observability_and_monitoring/README.md` for monitoring strategy; `../design_llm_gateway.md` for the gateway architecture
+- Cross-references: [LLM Observability & Monitoring](../../llm_observability_and_monitoring/README.md) for monitoring strategy; [Design LLM Gateway](../design_llm_gateway.md) for the gateway architecture
 
 ---
 

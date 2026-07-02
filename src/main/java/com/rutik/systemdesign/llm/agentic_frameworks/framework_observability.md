@@ -33,9 +33,9 @@ The LLM observability ecosystem has three layers: (1) framework-specific tools (
 
 **Correlation IDs**: Every trace needs a unique ID; every span references the trace ID. This allows filtering "show me all spans from this one agent run" or "show me all agent runs for user X." In LangSmith: `run_id`. In Langfuse: `trace_id`. In OpenTelemetry: `trace_id`.
 
-**Evaluation integration**: Observability data is the foundation for evaluation. Capture production traces → sample them → run LLM-as-judge evaluation → identify failure patterns → improve prompts/retrieval → measure improvement.
+**Evaluation integration**: Observability data is the foundation for evaluation. Capture production traces → sample them → run [LLM-as-judge evaluation](../evaluation_and_benchmarks/README.md) → identify failure patterns → improve prompts/retrieval → measure improvement.
 
-**Cost tracking**: Every LLM call has a dollar cost. Aggregate by model, by endpoint, by user, by team. Set budget alerts. Without observability, you get a surprise cloud bill at month-end.
+**Cost tracking**: Every LLM call has a dollar cost. Aggregate by model, by endpoint, by user, by team. Set budget alerts. Without observability, you get a surprise cloud bill at month-end. See [Token Economics & Cost Optimization](../token_economics_and_cost_optimization/README.md) for per-model pricing math and budget-enforcement patterns.
 
 ---
 
@@ -115,23 +115,26 @@ flowchart TD
 
 ### OpenTelemetry LLM Tracing
 
-```
-Application
-  |
-  | OpenLLMetry auto-instrumentation
-  | (patches OpenAI, Anthropic SDK calls)
-  |
-  v
-OpenTelemetry SDK
-  |
-  | OTLP exporter
-  |
-  v
-Collector (Jaeger / Tempo / Datadog / etc.)
-  |
-  v
-APM UI (existing observability stack)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    App(["Application"]) -- "OpenLLMetry auto-instrumentation\n(patches OpenAI / Anthropic SDK calls)" --> SDK
+    SDK["OpenTelemetry SDK"] -- "OTLP exporter" --> Coll
+    Coll["Collector\n(Jaeger / Tempo / Datadog / etc.)"] --> UI
+    UI["APM UI (existing observability stack)"]
 
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef store  fill:#1e2127,stroke:#56b6c2,color:#abb2bf
+
+    class App io
+    class SDK,Coll proc
+    class UI store
+```
+
+Each LLM call becomes a span carrying the GenAI semantic-convention attributes, propagated through the same OTLP pipeline as the rest of your traces:
+
+```
 Span attributes (GenAI semantic conventions):
   gen_ai.system: "openai"
   gen_ai.request.model: "gpt-4o"
@@ -433,6 +436,22 @@ def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
 
 **Pitfall 1: Blocking the main thread with synchronous exports**
 Early Langfuse/LangSmith setups blocked LLM response delivery waiting for trace export. Use async export (default in both tools). Verify by measuring latency with and without tracing enabled. Async export should add <5ms overhead.
+
+```python
+# BROKEN: flush the trace synchronously in the request path — adds the full
+# export round-trip (often 50-200ms) to every response before the user sees it.
+def answer(question: str) -> str:
+    result = chain.invoke({"question": question})
+    langfuse.flush()   # blocks the response until the batch is shipped
+    return result
+
+# FIXED: let the SDK's in-process async queue batch and ship traces in the
+# background; flush only at process shutdown. Tracing overhead drops to <5ms.
+def answer(question: str) -> str:
+    return chain.invoke({"question": question})   # spans enqueued, non-blocking
+
+atexit.register(langfuse.flush)   # drain the queue once, on shutdown
+```
 
 **Pitfall 2: Logging PII in traces**
 User messages often contain names, emails, phone numbers, medical data. Traces sent to LangSmith or Langfuse cloud include this data. Consequences: GDPR violations, data breach risk. Mitigations: (1) self-host Langfuse; (2) use LangSmith's masking feature for specific fields; (3) hash user identifiers before logging; (4) filter PII with a regex before sending to trace API.

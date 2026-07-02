@@ -27,7 +27,7 @@ Voice agents have stricter latency budgets than text agents (sub-800ms first aud
 - **Barge-in is non-negotiable**: user must be able to interrupt mid-response.
 - **Voice activity detection is critical**: when did the user start speaking? When did they stop?
 - **Turn detection beyond silence**: silence alone is insufficient; learn pause patterns.
-- **Tool calls during audio**: agent may need to look up info mid-conversation; UX requires "thinking" filler.
+- **[Tool calls](../agents_and_tool_use/README.md) during audio**: agent may need to look up info mid-conversation; UX requires "thinking" filler.
 - **Native prosody for naturalness**: end-to-end models capture emotion; pipeline models flatten it.
 
 ---
@@ -85,14 +85,27 @@ Total latency: 800–1500 ms (good case); 2500 ms+ (bad case).
 
 ### End-to-End Audio Model
 
-```
-Microphone --audio--> [GPT-4o Realtime / Gemini Live] --audio--> Speaker
-                               |
-                               +-- tool_calls for function execution
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Total latency: 200-800ms (native model)
-Native: prosody, emotion, laughter, interruption
+    MIC(["Microphone\n(audio in)"]) --> M["GPT-4o Realtime / Gemini Live\nsingle model: audio in -> audio out\nnative prosody, emotion, laughter, interruption"]
+    M --> SPK(["Speaker\n(audio out)"])
+    M -.->|"tool_calls"| TOOLS["Function execution"]
+
+    class MIC,SPK io
+    class M base
+    class TOOLS frozen
 ```
+
+Total latency: 200-800ms — a single native model replaces the STT→LLM→TTS chain, capturing prosody and interruption directly instead of losing them at each stage boundary.
 
 ### Barge-In Flow
 
@@ -414,7 +427,7 @@ Record audio with timestamps + transcripts + LLM text + tool calls all keyed to 
 Pipeline: use multilingual STT (Whisper, Deepgram Nova-2 supports 30+ languages) + multilingual LLM + voice cloning per language for TTS. End-to-end: GPT-4o Realtime auto-detects language; quality varies. For deployment: prompt the LLM with target language at session start; configure TTS voice per language.
 
 **What are the privacy concerns specific to voice agents?**
-Audio recording = biometric data in many jurisdictions (GDPR Article 9, CCPA). Get explicit consent. Encrypt audio in transit and at rest. Don't retain longer than needed. For PCI-regulated environments (taking credit cards), use DTMF-only for card numbers (audio not recorded) or transfer to human at payment step.
+Audio recording = biometric data in many jurisdictions (GDPR Article 9, CCPA). Get explicit consent. Encrypt audio in transit and at rest. Don't retain longer than needed. For PCI-regulated environments (taking credit cards), use DTMF-only for card numbers (audio not recorded) or transfer to human at payment step. See [Guardrails & Content Safety](../guardrails_and_content_safety/README.md) for PII detection/redaction and compliance filtering of transcripts.
 
 **How do voice agents handle background noise?**
 VAD models are trained for varied noise; modern VAD handles typical environments. For very noisy environments (call centers, vehicles), use noise suppression (Krisp, NVIDIA Maxine) before VAD. STT models are noise-robust but accuracy degrades; report low confidence to the agent prompt so it can ask "Sorry, could you repeat that?"

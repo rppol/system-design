@@ -299,6 +299,8 @@ Progressive disclosure:
 
 ### 4.6 Caching Strategy
 
+Cache-layer fundamentals (exact vs semantic caching, TTL policy): [LLM Caching](../llm_caching/README.md).
+
 ```
 Three cache layers:
 
@@ -633,13 +635,13 @@ Return JSON: {{"queries": ["variant1", "variant2", "variant3"]}}"""
 
 After BM25 + dense retrieval returns 50 candidate documents, a cross-encoder reranker scores each query-document pair jointly (not independently like bi-encoder retrieval models). See `CrossEncoderReranker.rerank` in the Hybrid Retrieval Pipeline section for the production implementation.
 
-**Why cross-encoders outperform bi-encoders for reranking:** Bi-encoders embed query and document independently (fast, but missing interaction signals). Cross-encoders process the full query+document pair jointly through all attention layers, capturing query-document interaction (e.g., "headphones" in query attends to "over-ear" in document). Cross-encoders are 40x slower but 15-25% more accurate on NDCG@10. The two-stage architecture uses bi-encoder for recall (top-50 candidates, fast) and cross-encoder for precision (top-10 reranked, slow).
+**Why cross-encoders outperform bi-encoders for reranking:** Bi-encoders embed query and document independently (fast, but missing interaction signals). Cross-encoders process the full query+document pair jointly through all attention layers, capturing query-document interaction (e.g., "headphones" in query attends to "over-ear" in document). Cross-encoders are 40x slower but 15-25% more accurate on NDCG@10. The two-stage architecture uses bi-encoder for recall (top-50 candidates, fast) and cross-encoder for precision (top-10 reranked, slow). Full treatment: [Reranking](../rag_fundamentals/reranking.md).
 
 ---
 
 ## Hybrid Retrieval Pipeline
 
-The retrieval stage combines BM25 (keyword precision) and dense vector search (semantic recall) in parallel, merging results with Reciprocal Rank Fusion. Running them sequentially costs 200ms unnecessarily; `asyncio.gather` brings total retrieval time to 130ms.
+The retrieval stage combines BM25 (keyword precision) and dense vector search (semantic recall) in parallel, merging results with Reciprocal Rank Fusion (see [Retrieval Methods](../rag_fundamentals/retrieval_methods.md) for the hybrid-retrieval fundamentals). Running them sequentially costs 200ms unnecessarily; `asyncio.gather` brings total retrieval time to 130ms.
 
 **BROKEN — sequential retrieval (400ms total):**
 

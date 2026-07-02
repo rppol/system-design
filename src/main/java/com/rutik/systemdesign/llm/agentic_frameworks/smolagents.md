@@ -29,7 +29,7 @@ The framework offers two agent types: `CodeAgent` (LLM writes Python; executed i
 - **Sandboxed execution**: LocalPythonExecutor (RestrictedPython-like) or E2B integration.
 - **Multi-model**: any HF model, OpenAI, Anthropic, Litellm.
 - **Built-in tools**: web_search (DuckDuckGo/Serper), Python interpreter, image generation, OCR.
-- **MCP support**: `ToolCollection` connects to MCP servers.
+- **MCP support**: `ToolCollection` connects to MCP servers (see [MCP](../mcp_model_context_protocol/README.md)).
 - **Type-hinted tools**: `@tool` decorator + Python signatures → tool schema.
 
 ---
@@ -56,37 +56,38 @@ Decorate any Python function with `@tool`; type hints become schema.
 
 ## 5. Architecture Diagrams
 
+### CodeAgent Execution Cycle
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    task([User task]) --> run["CodeAgent.run(task)"]
+    run --> gen["LLM writes a Python block\nchaining tool calls: search,\nread, filter, summarize"]
+    gen --> sandbox["Sandbox executor runs the code\nLocalPythonExecutor or E2B"]
+    sandbox --> out["Output captured\nstdout + final_answer"]
+    out --> decide{"final_answer(value)\ncalled?"}
+    decide -->|"yes"| done([Return answer])
+    decide -.->|"no — generate more code\n(until max_steps)"| gen
+
+    class task,done io
+    class run req
+    class gen base
+    class sandbox frozen
+    class out,decide mathOp
 ```
-CodeAgent Execution Cycle
-==========================
 
-  User task
-       |
-       v
-  CodeAgent.run(task)
-       |
-       v
-  LLM writes Python:
-    results = web_search("X")
-    if results:
-        content = read_url(results[0]["url"])
-        print(summarize(content))
-       |
-       v
-  Sandbox executor runs the code
-       |
-       v
-  Output captured (stdout + final_answer)
-       |
-       v
-  LLM evaluates output:
-    - call final_answer(value) → done
-    - generate more code → loop
+One LLM response can chain several tool calls inside a single sandboxed code block; the loop repeats (bounded by `max_steps`) until the generated code calls `final_answer`.
 
+### CodeAgent vs ToolCallingAgent — LLM Call Count
 
-CodeAgent vs ToolCallingAgent
-==============================
-
+```
   Task: "Find the population of capital cities of EU countries"
 
   ToolCallingAgent:
@@ -94,9 +95,9 @@ CodeAgent vs ToolCallingAgent
     Calls 2-28: get_capital(country) × 27
     Calls 29-55: get_population(city) × 27
     Total: 55 LLM calls
-    
+
   CodeAgent:
-    Single response: 
+    Single response:
       countries = list_eu_countries()
       data = [(c, get_capital(c), get_population(get_capital(c))) for c in countries]
       print(data)
@@ -205,7 +206,7 @@ mcp_agent = CodeAgent(tools=[*mcp_tools.tools, web_search], model=model)
 
 **Use smolagents CodeAgent when:**
 - Tasks involve composing multiple tools (chaining, looping)
-- You can deploy a sandbox (E2B, LocalPythonExecutor with import controls)
+- You can deploy a sandbox (E2B, LocalPythonExecutor with import controls — see [Sandboxed Code Execution](../agents_and_tool_use/sandboxed_code_execution.md))
 - Lower LLM call count matters for cost or latency
 - Working with HuggingFace ecosystem
 
@@ -297,6 +298,12 @@ LLMs were trained on far more Python code than on JSON tool-call sequences. Code
 **What sandboxing options does smolagents support?**
 Two: (1) `LocalPythonExecutor` — an AST-based sandbox running in-process with import controls; lighter weight but bypassable. (2) `E2BExecutor` — cloud microVM (Firecracker); proper isolation. Production CodeAgent should use E2B; LocalPythonExecutor is OK for trusted environments.
 
+**Why isn't `additional_authorized_imports` alone enough to make LocalPythonExecutor safe for untrusted users?**
+Because the whitelist only restricts `import` statements — LocalPythonExecutor is an in-process AST-level filter, not an isolation boundary, and clever attribute access through already-available objects can reach the filesystem or interpreter internals without importing anything new. The war story in this file is the canonical failure: a multi-tenant SaaS on `executor_type="local"` let one user's agent read /etc/* despite import controls. Treat the whitelist as defense-in-depth for trusted environments; for untrusted input the boundary must be a VM (E2B), not the Python interpreter.
+
+**How does a CodeAgent know it is finished, and what goes wrong if the model never calls `final_answer`?**
+The run terminates when the generated code calls the special `final_answer(value)` tool — that value becomes the result of `run()`. If the model keeps producing exploratory code without calling it, the loop burns one full LLM call per step until `max_steps` is hit, so a generous cap (say 50) turns a confused model into a cost leak rather than a quick failure. Keep `max_steps` at 10-20 and log per-step code and output so you can see exactly where the model stalled.
+
 **How are tools defined?**
 Decorate a Python function with `@tool`. The function signature with type hints becomes the JSON schema. The docstring becomes the tool description. Tools can be plain or class-based. Args section in docstring (Google style) parsed for individual parameter descriptions.
 
@@ -312,6 +319,9 @@ Yes — `LiteLLMModel` proxies to any provider (OpenAI, Anthropic, Google, etc) 
 **Can a smolagent itself manage other agents?**
 Yes — `ManagedAgent` wraps an agent as a tool that another agent can call. Pattern: define specialist agents (search, analysis), wrap with `ManagedAgent`, give to an orchestrator CodeAgent as tools.
 
+**Do variables persist between code steps in a CodeAgent run?**
+Yes — the executor keeps the Python namespace alive across steps within a single `run()`, so a DataFrame loaded in step 1 is still in scope in step 3 without re-loading. This is a key efficiency win over ToolCallingAgent, where every intermediate value must round-trip through the context window as text (a 50,000-row DataFrame stays in the sandbox; only the `print()` output enters the prompt). State is discarded between separate `run()` calls, so long-lived sessions need external persistence (files, a database) rather than relying on executor memory.
+
 **How do you debug CodeAgent failures?**
 Smolagents logs every generated code block and execution output. Print these traces; for production, integrate with OpenTelemetry. Common failures: code with syntax errors (model retries automatically), imports not in whitelist, tools called with wrong argument types.
 
@@ -319,7 +329,7 @@ Smolagents logs every generated code block and execution output. Print these tra
 Minimal — smolagents adds <1KB of system prompt tokens explaining the code-as-action format. Net cost is typically lower than ToolCallingAgent because fewer LLM calls per task. Sandbox cost (E2B at $0.10/hr) added if using cloud executor.
 
 **How do you handle very large tool sets in smolagents?**
-Same patterns as elsewhere: tool RAG (retrieve relevant tools per query), hierarchical menus, classifier routing. Smolagents doesn't have built-in tool retrieval; implement at the application layer before agent invocation.
+Same patterns as elsewhere (see [Tool Selection at Scale](../agents_and_tool_use/tool_selection_at_scale.md)): tool RAG (retrieve relevant tools per query), hierarchical menus, classifier routing. Smolagents doesn't have built-in tool retrieval; implement at the application layer before agent invocation.
 
 **Is smolagents production-ready?**
 Yes for narrow tasks with proper sandboxing. The minimalist code base is auditable. Lacks some production niceties (built-in tracing, durable execution). For high-throughput production, often combined with Temporal or custom orchestration.

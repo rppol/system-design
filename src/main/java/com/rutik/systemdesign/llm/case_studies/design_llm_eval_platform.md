@@ -630,6 +630,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from scipy import stats
+from statsmodels.stats.proportion import proportions_ztest
 import numpy as np
 
 
@@ -717,7 +718,7 @@ class RegressionDetector:
         diff = p_c - p_b
         se = np.sqrt(p_c * (1 - p_c) / n_c + p_b * (1 - p_b) / n_b)
         ci = (diff - 1.96 * se, diff + 1.96 * se)
-        _, p_value = stats.proportions_ztest([k_c, k_b], [n_c, n_b], alternative="smaller")
+        _, p_value = proportions_ztest([k_c, k_b], [n_c, n_b], alternative="smaller")
         is_regression = p_value < self.P_VALUE_THRESHOLD and diff < -self.MIN_EFFECT_SIZE
         return RegressionResult(
             is_regression=is_regression,

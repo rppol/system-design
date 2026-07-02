@@ -62,7 +62,7 @@ Grounds critique in external tool calls rather than self-opinion:
 - **Factual claims**: search the web, retrieve evidence, compare against the claim.
 - **Math**: run the expression through a calculator, compare to the stated answer.
 
-CRITIC does not require a separate evaluator model — the external tool provides objective ground truth. This eliminates sycophancy for verifiable tasks.
+CRITIC does not require a separate evaluator model — the external tool provides objective ground truth. This eliminates sycophancy for verifiable tasks. Running untrusted generated code as the evaluator requires isolation — see [Sandboxed Code Execution](sandboxed_code_execution.md).
 
 ### 4.4 Sycophancy and When Self-Correction Backfires
 
@@ -445,7 +445,7 @@ A: Each Reflexion retry adds approximately 2 LLM calls (reflector + actor) plus 
 A: Apply a two-factor test: (1) Is there an objective evaluator? If not, sycophancy risk makes self-correction unreliable. (2) Is the baseline pass rate in the range where improvement is possible? If baseline is already >95%, the cost of retries exceeds the quality benefit. If baseline is <40%, the model likely lacks the capability — retries will not fix a fundamental capability gap. The sweet spot is 50-85% baseline pass rate with an objective evaluator. Also consider latency tolerance: users waiting for a chat response cannot afford 3 retry cycles; batch jobs can.
 
 **Q: How does Reflexion differ from chain-of-thought prompting?**
-A: Chain-of-thought (CoT) improves the quality of a single attempt by prompting the model to reason step-by-step before answering. CoT does not involve multiple attempts or an external evaluator. Reflexion is a multi-attempt algorithm that uses CoT-style reasoning internally within each attempt but adds an outer retry loop driven by evaluator feedback. CoT reduces errors by improving reasoning quality per attempt; Reflexion further reduces errors by allowing the model to fix identified mistakes across attempts. They are complementary — using CoT within each Reflexion trial is the recommended approach.
+A: Chain-of-thought (CoT) improves the quality of a single attempt by prompting the model to reason step-by-step before answering. CoT does not involve multiple attempts or an external evaluator. Reflexion is a multi-attempt algorithm that uses CoT-style reasoning internally within each attempt but adds an outer retry loop driven by evaluator feedback. CoT reduces errors by improving reasoning quality per attempt; Reflexion further reduces errors by allowing the model to fix identified mistakes across attempts. They are complementary — using CoT within each Reflexion trial is the recommended approach (see [ReAct & Reasoning Patterns](react_and_reasoning_patterns.md)).
 
 **Q: Can self-correction improve a task the model fundamentally cannot do?**
 A: No. Self-correction is not capability injection — it can only help the model express capabilities it already has more reliably. If GPT-4 cannot solve a class of problem with probability zero (it has no training data for a specific obscure algorithm), retrying 10 times will still yield 0% success. Reflexion's documented improvements (65% → 91%) come from tasks where the model succeeds ~two-thirds of the time on the first try, meaning the knowledge is present but not always correctly expressed. Reflection helps with edge-case misses, not fundamental knowledge gaps.

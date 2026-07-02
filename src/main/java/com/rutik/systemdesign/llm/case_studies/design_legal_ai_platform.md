@@ -780,14 +780,18 @@ Swedish and EU law specialist. Regulatory compliance focus (GDPR, AI Act, ESG re
 
 Weekly citation accuracy check runs every Sunday at 02:00 UTC using 100 known legal Q&As with verified citations from LexisNexis. Any model configuration change or RAG pipeline update triggers an immediate out-of-band run.
 
+```mermaid
+pie title Weekly eval set composition (100 questions)
+    "US federal case law" : 30
+    "US statute interpretation" : 20
+    "UK case law" : 20
+    "Contract clause analysis" : 15
+    "Multi-jurisdiction (cross-border M&A)" : 15
 ```
-Eval dataset composition (100 questions):
-  - 30 US federal case law questions (verified citations from LexisNexis)
-  - 20 US statute interpretation questions (verified against USC)
-  - 20 UK case law questions (verified from BAILII)
-  - 15 contract clause analysis questions (verified against firm playbook)
-  - 15 multi-jurisdiction questions (cross-border M&A scenarios)
 
+Each slice is verified against its authoritative source: LexisNexis for US case law, the USC for statute questions, BAILII for UK case law, and the firm playbook for contract clause questions.
+
+```
 Pass criteria:
   - Citation accuracy >= 99.5% (verified by CitationVerifier + human spot-check)
   - Hallucination rate < 0.5% (LLM cites non-existent source)

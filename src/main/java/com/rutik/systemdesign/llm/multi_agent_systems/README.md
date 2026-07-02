@@ -327,10 +327,10 @@ Cascading failure prevention:
 - Educational framework (not production-hardened)
 
 ### Anthropic Multi-Agent Research
-- Internal research systems using Claude to run week-long research workflows
-- Multiple Claude instances: planner, researcher, synthesizer, reviewer
-- Discovered in practice: 90%+ of long tasks fail if run as single agent
-- Published findings in "Building Effective Agents" post (2024)
+- Internal research system using Claude for long-horizon research workflows
+- Multiple Claude instances: a lead agent (plans, decomposes, synthesizes) plus parallel researcher subagents
+- Published result: the multi-agent system outperformed a single-agent baseline by 90.2% on their internal research eval — at ~15x the token spend of a single chat, so it is reserved for high-value queries
+- Findings in "How we built our multi-agent research system" (2025); the earlier "Building Effective Agents" post (2024) covers single-agent patterns
 
 ---
 
@@ -367,7 +367,7 @@ Cascading failure prevention:
 
 1. **Agent echo chambers**: Agents agree with each other without real critique. Build adversarial prompts into critic agents.
 2. **Infinite conversation loops**: Agents keep debating without convergence. Set max_rounds and exit conditions.
-3. **Context explosion**: Passing full conversation history between all agents → each agent has O(n) context. Summarize inter-agent messages.
+3. **Context explosion**: Passing full conversation history between all agents → each agent has O(n) context. Summarize inter-agent messages (see [Agent Memory](../agents_and_tool_use/agent_memory.md) for compression strategies).
 4. **Role confusion**: Agents drift from their assigned roles when the conversation gets complex. Reinforce roles in every system prompt.
 5. **Cascading hallucinations**: Agent A hallucinates a fact → Agent B builds on that hallucination → final output is wrong with high confidence. Add fact-checking agents at critical pipeline junctions.
 6. **No human oversight**: Long-running multi-agent tasks with no human-in-the-loop can go significantly wrong. Add checkpoints.
@@ -394,6 +394,12 @@ Cascading failure prevention:
 
 **Q: What is the orchestrator pattern in multi-agent systems?**
 A: The orchestrator pattern has a central coordinator (orchestrator) that manages multiple specialized worker agents. The orchestrator receives the overall task, decomposes it into subtasks, dispatches each to the appropriate worker, collects results, and assembles the final output. It handles sequencing (what runs after what), parallelism (what can run simultaneously), and error recovery (what to do if a worker fails). The orchestrator typically has the highest-capability model; workers can be smaller specialized models.
+
+**Q: Why do multi-agent systems often cost 5-15x more than a single agent, and how do you keep the cost bounded?**
+A: Each agent is a separate LLM call (often several), and orchestration adds coordinating calls on top — a 4-worker pipeline with a planner and a reviewer easily makes 8-12 LLM calls where a single agent made one. The dominant hidden cost is context duplication: naively passing the full conversation history to every worker makes token cost grow as O(agents × history), so 5 workers each receiving 8,000 tokens of accumulated context is 40,000 input tokens per round (see the "full history to every worker" war story below, which cuts this 8x by summarizing first). Controls: summarize inter-agent messages instead of forwarding raw history, route cheap subtasks (routing, extraction) to a small model and reserve the frontier model for synthesis, cap the number of debate/critique rounds, and cache shared context. Always estimate expected calls-per-task before building — if the task does not clearly need parallelism or specialization, a single well-prompted agent is cheaper and far easier to debug.
+
+**Q: When is a single agent the better choice over a multi-agent system?**
+A: A single agent wins whenever the task fits in one context window and does not decompose into independent specialized subtasks. Multi-agent adds real costs — extra LLM calls, coordination latency (each handoff is a round trip), harder debugging (the error source is unclear across agents), and new failure modes like deadlocks, cascading hallucinations, and echo chambers. The rule of thumb: start with a single agent plus tools and move to multi-agent only when you hit a concrete limit — context overflow on a long task, a genuine need for parallel execution to cut wall-clock time, or measurable quality gains from adversarial critique. Anthropic's published result — their multi-agent research system beating a single-agent baseline by 90.2% on internal research evals — is about long-horizon research specifically, and came with ~15x the token cost; for a bounded 5-step task, multi-agent is usually over-engineering.
 
 **Q: What is the debate pattern and when is it useful?**
 A: The debate pattern has two or more agents argue opposing viewpoints or critique each other's output iteratively. Agent A proposes; Agent B critiques; Agent A refines; repeat until consensus or max rounds. It's useful for: improving quality of complex reasoning (research found it reduces errors significantly), tasks where bias checking is important, and generating balanced perspectives. The main cost is latency (multiple rounds) and complexity.
@@ -423,10 +429,16 @@ A: LangGraph: best for production complex workflows needing explicit state manag
 A: The problem is that by the time the final output is wrong, you don't know which agent introduced the error. Solutions: (1) Structured logging of every inter-agent message with agent ID, timestamp, and content — use LangSmith or Langfuse; (2) Agent IDs in all artifacts: every output should be tagged with the producing agent; (3) Replay testing: save all inter-agent messages, then replay feeding each agent its predecessor's exact output in isolation; (4) Isolation testing: test each agent independently with the exact input it received in production; (5) Checksum validation: define expected output schemas per agent and validate at every step. Debugging without traces is essentially impossible at scale.
 
 **Q: What is the "lost in the middle" problem in long agent chains?**
-A: Research (Liu et al., 2023) showed LLMs perform best at recalling information placed at the beginning or end of long context — content in the middle is underweighted in attention. In multi-agent chains, when an orchestrator accumulates many agent outputs into one long context, the middle sections are underrepresented in the final reasoning. Mitigations: (1) Structured summaries instead of raw agent outputs; (2) Hierarchical summarization: summarize each group of agents before merging into the orchestrator context; (3) Recency bias: put the most critical information last; (4) Keep individual agent contexts small and focused. With 200K+ context models the problem is reduced but not eliminated.
+A: Research (Liu et al., 2023) showed LLMs perform best at recalling information placed at the beginning or end of long context — content in the middle is underweighted in attention. In multi-agent chains, when an orchestrator accumulates many agent outputs into one long context, the middle sections are underrepresented in the final reasoning. Mitigations: (1) Structured summaries instead of raw agent outputs; (2) Hierarchical summarization: summarize each group of agents before merging into the orchestrator context; (3) Recency bias: put the most critical information last; (4) Keep individual agent contexts small and focused. With 200K+ context models the problem is reduced but not eliminated — see [Context Windows & Long Context](../context_windows_and_long_context/README.md).
 
 **Q: How do you enforce rate limits when 10 agents all share one API key?**
 A: A central token bucket or semaphore manages concurrent access. (1) Rate limiter service: a shared async queue processes all LLM requests; agents enqueue rather than calling the API directly; the queue enforces per-minute token and request limits; (2) Exponential backoff: each agent catches 429 errors and retries with jitter; (3) Priority queues: critical-path agents get higher priority over exploratory agents; (4) Token budgeting: estimate token usage per agent upfront and reserve a quota — prevents one agent from consuming the entire rate limit. In LangGraph, implement the rate limiter as a shared node all agents pass through. Tools like LiteLLM handle rate limiting and load balancing transparently across multiple API keys and providers.
+
+**Q: How does an orchestrator choose between horizontal, vertical, and hierarchical task decomposition?**
+A: The decomposition follows the task's dependency structure. Horizontal (parallel) decomposition applies when subtasks are independent — researching three sections of a report simultaneously — and it minimizes wall-clock time via fan-out/fan-in. Vertical (sequential) decomposition applies when each step depends on the previous one — requirements → design → code → test — and cannot be parallelized. Hierarchical decomposition applies to large, open-ended goals: a top-level planner breaks the goal into subgoals, each subgoal is itself decomposed by a mid-level agent, and leaf agents execute — this is how ChatDev and MetaGPT mirror an org chart. Most real systems mix all three: a hierarchical top level, horizontal fan-out where subtasks are independent, and vertical chains where they are not. Choosing wrong (e.g., parallelizing dependent tasks) produces agents acting on stale or missing inputs.
+
+**Q: How do you test and guardrail emergent behavior in a multi-agent system?**
+A: Emergent behavior — patterns present in the system but not in any single agent — makes multi-agent systems hard to validate, because the failure only appears from agent interaction. Techniques: (1) record and replay every inter-agent message so a run is deterministic-reproducible for debugging (LangSmith/Langfuse); (2) run each agent in isolation with the exact input it received in production to localize which agent introduced a defect; (3) inject synthetic failures (an agent returns garbage, times out, or hallucinates) during testing to verify the orchestrator degrades gracefully; (4) add validation checkpoints between pipeline stages so a hallucination from agent A is caught before agent B builds on it; (5) cap loops with a hard step counter and max-round exit to prevent runaway emergent loops. Because the full interaction state space is intractable to enumerate, focus tests on the interaction seams, not just individual agents.
 
 ---
 

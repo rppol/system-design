@@ -193,7 +193,7 @@ Example:
 
 FIM training (StarCoder, Codex):
   - During pre-training, randomly split code into prefix/suffix/middle
-  - Three tasks: SPM order (suffix first), PSM order (prefix first)
+  - Two orderings: SPM (suffix-prefix-middle) and PSM (prefix-suffix-middle)
   - Model learns to complete any position, not just end-of-file
 ```
 
@@ -683,13 +683,15 @@ Copilot serves Python, JavaScript, TypeScript, Java, Go, Rust, C++, and 20+ othe
 
 Copilot's ghost text (inline completion suggestion shown in grey) has an acceptance rate that drops sharply with TTFT:
 
+```mermaid
+xychart-beta
+    title "Ghost-text acceptance rate vs TTFT"
+    x-axis ["under 100ms", "100-200ms", "200-400ms", "400-600ms", "over 600ms"]
+    y-axis "Acceptance rate (%)" 0 --> 40
+    bar [38, 34, 28, 19, 11]
 ```
-TTFT < 100ms  →  acceptance rate 38%
-TTFT 100-200ms  →  acceptance rate 34%  (P50 target zone)
-TTFT 200-400ms  →  acceptance rate 28%
-TTFT 400-600ms  →  acceptance rate 19%
-TTFT > 600ms    →  acceptance rate 11%
-```
+
+Acceptance falls from 38% below 100ms to 11% above 600ms; the 100-200ms bucket (34%) is the P50 target zone.
 
 During a datacenter network maintenance window in 2023 (unreported publicly), Copilot's P50 TTFT spiked from 150ms to 520ms for 2 hours. Acceptance rate dropped from 34% to 20%. Because Copilot monetizes on usage (accepted completions drive engagement and retention), the 14-point acceptance rate drop directly correlated with increased churn risk. Post-incident: Copilot added a second inference cluster in a different AWS region for failover, targeting <300ms TTFT even during single-region degradation. For multi-region active-active deployment of the inference cluster, see [Multi-Region LLM Topology](./cross_cutting/multi_region_llm_topology.md).
 

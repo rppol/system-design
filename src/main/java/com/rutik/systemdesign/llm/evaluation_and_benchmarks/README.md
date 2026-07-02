@@ -237,7 +237,7 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     NEW["New Model / Prompt Change"]
-    BENCH["Automated Benchmark Suite\nMMCL / domain (knowledge)\nHumanEval / SWE-bench (code)\nRAGAs (RAG) · safety (AdvBench, WildGuard)"]
+    BENCH["Automated Benchmark Suite\nMMLU / domain (knowledge)\nHumanEval / SWE-bench (code)\nRAGAS (RAG) · safety (AdvBench, WildGuard)"]
     REG["Automated Regression Check\nvs. current production model\ngate: no regression > 2%"]
     HUM["Human Evaluation Sample\n1 000 production-representative queries\nLLM-as-judge (gpt-4o) + 10% human review"]
     AB["A/B Test in Production\n5% traffic · real user feedback\nrun minimum 48 hours"]
@@ -528,7 +528,7 @@ class DriftDetector:
 - Used internally at OpenAI to track regressions
 - Structured format: jsonl files with input/ideal output
 
-### Scale AI HELM (Holistic Evaluation of Language Models)
+### HELM (Holistic Evaluation of Language Models)
 - Stanford CRFM initiative
 - 42 scenarios × multiple models
 - Standardized evaluation across models
@@ -611,6 +611,12 @@ A: LLM-as-judge uses a capable model (usually GPT-4) to evaluate another model's
 **Q: Why is benchmark contamination a problem and how do you detect it?**
 A: Contamination occurs when benchmark test examples appear in training data, so the model "memorizes" answers rather than demonstrating the underlying capability. It inflates scores and makes models look better than they are. Detection: (1) n-gram overlap analysis between training data and benchmarks; (2) membership inference — does the model reproduce benchmark examples verbatim?; (3) performance anomalies — unusually high scores on specific subsets. Solution: use held-out benchmarks released after the model's training cutoff, or continuously refreshed benchmarks (LiveBench, competitive math).
 
+**Q: Why can the same evaluation suite at temperature=0 produce different scores across runs?**
+A: Because temperature=0 does not make LLM inference deterministic — floating-point non-associativity, GPU batching differences, and silent provider-side model updates all shift outputs between runs. A fintech team saw its "deterministic" evaluation suite swing between 82% and 87% on the same unchanged model across consecutive runs, effectively making launch decisions on noise; LLM judges compound this by disagreeing with themselves 10-20% of the time on borderline cases. Run each evaluation 3-5 times, report the mean with a 95% confidence interval, and only act on changes that exceed that interval.
+
+**Q: Why can an aggregate A/B test metric hide a real regression?**
+A: Because LLM quality changes are rarely uniform across query types — a model can improve 10% on creative tasks while regressing 5% on factual tasks, and the blended metric reports a ~3% "improvement" that masks the regression. This is why stratification is mandatory for LLM A/B tests: split results by task type (factual, creative, reasoning, code), difficulty tier, and domain, since a 2% aggregate gain can coexist with a 15% drop in a critical category. Always report per-category win rates alongside the aggregate, and block rollout on any critical-category regression even when the aggregate improves.
+
 **Q: What is RAGAS and what does it measure?**
 A: RAGAS is an evaluation framework for RAG systems. It measures four dimensions: (1) Faithfulness — is the generated answer supported by the retrieved context (no hallucination)?; (2) Answer Relevancy — does the answer address the question asked?; (3) Context Recall — did the retrieval system find all relevant documents?; (4) Context Precision — what fraction of retrieved documents are actually relevant? Together, these diagnose whether failures come from retrieval (bad recall/precision) or generation (low faithfulness/relevancy).
 
@@ -634,6 +640,18 @@ A production evaluation suite needs three tiers: (1) unit tests — deterministi
 
 **Q: What is the difference between held-out evaluation and online evaluation for LLMs?**
 Held-out evaluation tests the model on a fixed dataset before deployment, while online evaluation measures quality in production with real user traffic. Held-out evaluation is controlled and reproducible but may not reflect real usage patterns — users ask questions that evaluation designers never anticipated. Online evaluation captures real-world performance but is noisier and harder to control. Online evaluation methods: (1) implicit signals — regeneration rate (user clicks "try again"), conversation abandonment, task completion rate; (2) explicit feedback — thumbs up/down buttons, star ratings; (3) A/B testing — serve different models to different users and compare metrics. Key challenge: online metrics can be misleading — users may give thumbs-up to incorrect but confident-sounding answers. Best practice: use held-out evaluation for model selection and gate-keeping (don't deploy a model that regresses on held-out tests), and use online evaluation for continuous monitoring and detecting issues that held-out tests miss. The two complement each other.
+
+**Q: What is pass@k and why do code benchmarks use it instead of plain accuracy?**
+Pass@k is the probability that at least one of k sampled completions passes all unit tests — the natural metric when generation is stochastic and correctness is machine-verifiable by execution. HumanEval reports pass@1 around 90% for GPT-4o and 95%+ for o1, but pass@1 and pass@10 can differ by 10+ points for the same model because sampling multiple candidates raises the chance that one passes. Report pass@1 for product decisions (users typically see a single completion), and use higher k only when your product actually samples and filters multiple candidates.
+
+**Q: How do you detect silent capability drift in an API-hosted model you don't control?**
+Run a version-controlled golden dataset (200-500 curated examples) against the API on a fixed schedule — weekly, plus on any announced model change — and track per-category scores, not just the aggregate. Providers update hosted models without notice; GPT-4's reported coding/math regression between March and June 2023 was noticed by users before it was acknowledged, and a gradual 1%-per-week drift compounds to 10%+ over a quarter if only point-in-time scores are eyeballed. Alert on a >3% drop in any single category, block dependent releases at >5%, and treat three consecutive weekly ~1% declines as a slow-drift trend alert.
+
+**Q: How many comparisons does a statistically significant LLM A/B test need?**
+Typically 1,000-5,000+ pairwise comparisons per variant — an order of magnitude more than the 200-500 samples that suffice for a click-through test — because open-ended text output has enormous variance. Detecting small effects (2-5% improvements) can require 10,000+ comparisons; judge each pair in both orderings to cancel position bias (roughly $0.01-0.05 per comparison with a GPT-4o judge) and run at least two full weekly cycles so weekday/weekend patterns and the new-model novelty effect wash out. Do a power analysis that accounts for output variance up front — standard calculators tuned to binary conversion metrics will badly underestimate the required sample size.
+
+**Q: Why has SWE-bench largely displaced HumanEval as the primary code-capability benchmark?**
+Because HumanEval is effectively saturated: frontier models score 90%+ pass@1 on its 164 self-contained docstring-to-function problems, leaving little headroom to distinguish models. SWE-bench's 2,294 real GitHub issues require repo-level context, cross-file edits, and passing the project's actual test suite — Claude 3.5 Sonnet with tools resolves ~49% and o3 with scaffolding 71.7%, so the benchmark still discriminates between systems. Keep HumanEval-style tasks as a cheap smoke test, and use SWE-bench-style repo-level evaluation for anything marketed as a coding agent.
 
 ---
 
@@ -1094,3 +1112,5 @@ Three complementary methods: (1) Reference-based: ROUGE-L, BLEU, BERTScore measu
 
 ## See Also
 - [Model Evaluation & Selection (ML)](../../ml/model_evaluation_and_selection/README.md) — cross-validation, AUC-ROC/PR, calibration, bias-variance — classical evaluation theory
+- [LLM Testing Strategies](../llm_testing_strategies/README.md) — the engineering layer on top of this module: golden datasets, regression suites, flakiness detection, eval-gated CI/CD
+- [Data Flywheels & Continuous Learning](../data_flywheels_and_continuous_learning/README.md) — production A/B testing and drift detection feeding evaluation signals back into training

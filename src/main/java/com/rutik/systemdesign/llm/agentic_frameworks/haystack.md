@@ -403,7 +403,7 @@ print(f"MRR: {eval_result['mrr']['score']:.2%}")
 | Streaming | Good | Excellent | Good |
 
 **Haystack vs LangChain:**
-Haystack is more opinionated (everything is a pipeline, everything is a component) but safer (type validation). LangChain is more flexible (mix and match anything) but easier to create type mismatches. For production NLP pipelines with clear data flow: Haystack. For general LLM applications with complex chains: LangChain.
+Haystack is more opinionated (everything is a pipeline, everything is a component) but safer (type validation). LangChain is more flexible (mix and match anything) but easier to create type mismatches. For production NLP pipelines with clear data flow: Haystack. For general LLM applications with complex chains: LangChain. See [LangChain & LCEL](langchain_and_lcel.md) and [LlamaIndex](llamaindex.md) for the corresponding deep dives.
 
 ---
 
@@ -418,7 +418,7 @@ Haystack is more opinionated (everything is a pipeline, everything is a componen
 - NLP-heavy applications (document classification, extractive QA, information extraction)
 
 **Do NOT use Haystack when:**
-- Complex agentic workflows with loops and conditional branching — LangGraph is more appropriate
+- Complex agentic workflows with loops and conditional branching — [LangGraph](langgraph.md) is more appropriate
 - Rapid prototyping where flexibility matters more than safety
 - Team is already invested in LangChain ecosystem
 - Need maximum community integrations
@@ -572,7 +572,7 @@ Haystack pipelines serialize to YAML and can be deployed using Hayhooks, the off
 
 1. **Use type annotations in custom components** — Haystack infers input types from `run()` signatures; missing annotations cause runtime failures.
 2. **Start with `InMemoryDocumentStore` for development** — switch to persistent store before QA testing.
-3. **Always rerank retrieved documents** — raw vector search accuracy is often insufficient; `TransformersSimilarityRanker` or `CohereRanker` significantly improves precision.
+3. **Always rerank retrieved documents** — raw vector search accuracy is often insufficient; `TransformersSimilarityRanker` or `CohereRanker` significantly improves precision (cross-encoder mechanics: [Reranking](../rag_fundamentals/reranking.md)).
 4. **Retrieve more than needed, then rerank** — `top_k=20` + rerank to `top_n=3` beats `top_k=3` directly.
 5. **Add document metadata during indexing** — source file, date, section, department; enables filtering at query time.
 6. **Test pipeline construction before deployment** — `pipeline.run({"component": {"input": dummy_value}})` validates all connections.

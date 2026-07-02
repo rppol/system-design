@@ -73,6 +73,7 @@ This architectural shift enabled:
 - Instead of a single FFN, multiple "expert" FFNs exist; a router selects K of N for each token
 - Total parameters >> active parameters → cheaper inference at same quality
 - Examples: Mixtral 8x7B, GPT-4 (rumored), DeepSeek-V3 (671B params, 37B active)
+- Full treatment (routing, load balancing, expert parallelism): [Mixture of Experts](../mixture_of_experts/README.md)
 
 ### 4.5 Attention Variants by Span
 
@@ -257,27 +258,15 @@ Total params = N × FFN\_size (all experts in memory); active params = K × FFN\
 
 ### Softmax Temperature — Distribution Shape
 
+```mermaid
+xychart-beta
+    title "Same logits (3.0, 1.0, 0.5) for tokens A/B/C under three temperatures"
+    x-axis ["A T=0.5", "B T=0.5", "C T=0.5", "A T=1.0", "B T=1.0", "C T=1.0", "A T=2.0", "B T=2.0", "C T=2.0"]
+    y-axis "Probability" 0 --> 1
+    bar [0.879, 0.119, 0.002, 0.744, 0.100, 0.062, 0.516, 0.260, 0.224]
 ```
-Logits: [3.0, 1.0, 0.5]    Effect of temperature T on the output probability distribution:
 
-T = 0.5  (sharp, confident — scale logits by ×2):
-  token A │████████████████████████████████████████ 0.879
-  token B │████                                     0.119
-  token C │                                         0.002
-
-T = 1.0  (standard — no scaling):
-  token A │███████████████████████████████          0.744
-  token B │████                                     0.100
-  token C │██                                       0.062
-
-T = 2.0  (flat, diverse — scale logits by ×0.5):
-  token A │████████████████████                     0.516
-  token B │██████████                               0.260
-  token C │████████                                 0.224
-
-T → 0: argmax / greedy (always picks top-1)    T → ∞: uniform (completely random)
-Factual tasks: T≈0.0–0.3.    Creative tasks: T≈0.7–1.2.    Above T=2.0: output degrades.
-```
+T=0.5 sharpens (logits scaled ×2 → token A takes 0.879); T=1.0 is the raw softmax (0.744/0.100/0.062); T=2.0 flattens (logits scaled ×0.5 → mass spreads to 0.516/0.260/0.224). T → 0 is argmax/greedy; T → ∞ is uniform. Factual tasks: T≈0.0–0.3; creative tasks: T≈0.7–1.2; above T=2.0 output degrades.
 
 ### Embedding Semantic Space
 
@@ -605,7 +594,7 @@ The original 2017 transformer has been refined substantially. Here is a comprehe
 | **RWKV** | RNN-style but trainable like Transformer | Fast inference; no KV cache | Weaker on tasks requiring arbitrary lookback |
 
 ### Scaling Laws (Chinchilla)
-Hoffman et al. (2022) showed optimal compute budget splits roughly equally between:
+Hoffmann et al. (2022) showed optimal compute budget splits roughly equally between:
 - Model parameters (N)
 - Training tokens (D)
 
@@ -685,11 +674,11 @@ But in practice, models are often undertrained relative to Chinchilla-optimal be
 
 ## 10. Common Pitfalls
 
-1. **Ignoring tokenization effects**: Model sees tokens, not characters. "1000000" might be 3 tokens; Chinese characters have different density. Affects prompt length estimation.
+1. **Ignoring tokenization effects**: Model sees tokens, not characters. "1000000" might be 3 tokens; Chinese characters have different density. Affects prompt length estimation. See [Tokenization & Embeddings](../tokenization_and_embeddings/README.md).
 2. **Confusing temperature=0 with determinism**: Temperature=0 is greedy but not perfectly reproducible across different hardware/batching.
 3. **Forgetting context window is quadratic cost**: Attention is O(n²) in sequence length. Long contexts are expensive.
 4. **Assuming bigger is always better**: A well-prompted 7B model often outperforms a poorly-prompted 70B model.
-5. **Not accounting for KV cache memory**: A 70B model serving 10 concurrent users at 32K context needs ~60GB for KV cache alone.
+5. **Not accounting for KV cache memory**: A 70B model serving 10 concurrent users at 32K context needs ~60GB for KV cache alone. See [Inference & Decoding](../inference_and_decoding/README.md) for KV cache management.
 
 ---
 
@@ -717,8 +706,14 @@ A: Self-attention computes relationships between all token pairs in O(n²) opera
 **Q: What is the difference between GPT and BERT architectures?**
 A: BERT uses a bidirectional encoder — each token sees all other tokens (both left and right context) via masked language modeling. GPT uses a unidirectional decoder — each token only attends to previous tokens (causal mask) via next-token prediction. BERT excels at understanding tasks; GPT excels at generation.
 
+**Q: Why is the attention score divided by √d_k, and what goes wrong without it?**
+A: The √d_k scaling keeps the variance of the dot-product scores near 1 regardless of head dimension. Q·Kᵀ sums d_k products of roughly unit-variance terms, so raw scores have standard deviation ≈ √d_k — at d_k=128 that is ~11.3, which pushes softmax deep into its saturated region where one position gets probability ≈1 and gradients through every other position vanish. Dividing by √d_k renormalizes scores to unit scale, keeping softmax in its sensitive range so gradients flow to all attended positions. If you ever implement attention by hand, forgetting this term still trains — just badly — making it a classic silent bug to check for in interviews and code reviews.
+
+**Q: Does temperature=0 make LLM output deterministic?**
+A: No — T=0 (greedy argmax) removes sampling randomness but not systems-level nondeterminism. Floating-point addition is non-associative, so different batch sizes, kernel dispatch choices, or GPU hardware can perturb logits in the last decimal places; when two tokens are near-tied, the argmax flips, and from that token onward the entire continuation diverges. MoE models add a further source: expert routing can be batch-dependent (capacity overflow drops tokens to different experts), changing activations for the same prompt. Treat T=0 as "low variance," pin hardware/runtime versions for reproducibility-sensitive evals, and never write tests that assert byte-identical LLM output.
+
 **Q: What are scaling laws and why do they matter?**
-A: Scaling laws (Kaplan et al., Hoffman et al.) show that LLM performance follows power laws with respect to model size (N), data (D), and compute (C). This means performance is predictable — you can estimate how much a model will improve before training. Chinchilla showed compute-optimal training requires balancing N and D equally.
+A: Scaling laws (Kaplan et al., Hoffmann et al.) show that LLM performance follows power laws with respect to model size (N), data (D), and compute (C). This means performance is predictable — you can estimate how much a model will improve before training. Chinchilla showed compute-optimal training requires balancing N and D equally.
 
 **Q: Why do modern LLMs use RoPE instead of absolute positional encoding?**
 A: RoPE (Rotary Position Embedding) encodes position as rotation in the complex plane. This naturally captures relative positions (the dot product of two rotated vectors depends only on their position difference, not absolute positions). It also extrapolates more gracefully to longer sequences than absolute encodings.
@@ -746,6 +741,12 @@ Sliding window attention restricts each token to attend only to the W previous t
 
 **Q: What is the difference between Pre-LN and Post-LN, and why do nearly all modern LLMs use Pre-LN?**
 Post-LN (original Transformer) applies LayerNorm after the residual addition: `output = LN(x + sublayer(x))`. Pre-LN applies LayerNorm before the sublayer: `output = x + sublayer(LN(x))`. The critical difference is gradient flow stability. In Post-LN, the residual path passes through LayerNorm, which can distort gradients — early layers receive unstable gradients that require careful learning rate warmup (often 10K+ steps) to avoid divergence. In Pre-LN, the residual path is "clean" (identity connection with no normalization), so gradients flow directly to early layers without distortion. This makes Pre-LN dramatically easier to train at scale. The tradeoff: some studies show Post-LN achieves marginally higher final quality when training succeeds, but the training instability makes it impractical for billion-parameter models. GPT-2+, LLaMA, Mistral, and Falcon all use Pre-LN. Most modern models further replace standard LayerNorm with RMSNorm (normalizing by root-mean-square only, skipping mean centering), which is ~10-15% faster with no quality loss.
+
+**Q: Why do modern LLMs use SwiGLU in the FFN instead of ReLU or GELU?**
+A: SwiGLU — `FFN(x) = (SiLU(x·W_gate) ⊙ x·W_up)·W_down` — consistently achieves lower loss than ReLU/GELU FFNs at equal compute in ablations, which is why PaLM and every LLaMA generation adopted it. The gate lets the network modulate each hidden unit multiplicatively rather than merely thresholding it, and because SwiGLU needs three weight matrices instead of two, the hidden expansion is reduced from the classic 4× to roughly 8/3× (LLaMA 2 7B: 4096 → 11008) to keep parameter count comparable. Default to SwiGLU for any new pretraining; only keep GELU/ReLU when you must match an existing checkpoint's architecture.
+
+**Q: If Chinchilla says D ≈ 20 × N, why are models like LLaMA 3 trained on far more tokens than that?**
+A: Because Chinchilla optimizes *training* compute only, while production models also pay *inference* cost — so it is rational to "overtrain" a smaller model far past the compute-optimal point. LLaMA 3 8B was trained on ~15T tokens, nearly 100× more tokens per parameter than the Chinchilla-optimal ~20, because the extra pretraining buys quality that would otherwise require a larger model that costs more on every inference call, forever. Loss keeps improving past the optimum, just with diminishing returns, so the practical rule is: pick N from your serving budget (latency, GPU memory, cost per token), then train on as much high-quality data as you can afford.
 
 ---
 

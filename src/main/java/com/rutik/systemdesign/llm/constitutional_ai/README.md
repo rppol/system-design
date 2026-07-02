@@ -449,7 +449,9 @@ Useful as a reference for constitution structure and harm category design.
 
 **NVIDIA NeMo Guardrails:** Inference-time constitutional enforcement via programmable
 guardrails. Complementary to CAI training -- CAI bakes values into weights; NeMo
-Guardrails enforces them at inference time as a defense-in-depth layer.
+Guardrails enforces them at inference time as a defense-in-depth layer. See
+[guardrails_and_content_safety/](../guardrails_and_content_safety/README.md) for the
+full input/output filtering stack that sits in front of a CAI-trained model.
 
 **vLLM + batch inference:** For large-scale RLAIF, run the AI evaluator as a vLLM batch
 inference job. At 50,000 tokens/second throughput on an A100, 1M preference comparisons

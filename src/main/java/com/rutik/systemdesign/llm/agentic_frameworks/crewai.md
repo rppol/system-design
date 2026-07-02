@@ -19,7 +19,7 @@ CrewAI abstracts the complexity of multi-agent coordination behind familiar work
 
 **Mental model**: Think of building a software team. You have a Product Manager (defines requirements), a Developer (writes code), a QA Engineer (tests code), and a Technical Writer (documents it). In CrewAI, each is an `Agent` with a `role`, `goal`, and `backstory`. You define `Task` objects for each step and a `Crew` that runs them. The crew's `process` determines execution order: `sequential` (like a waterfall) or `hierarchical` (manager delegates to specialists).
 
-**Why it matters**: Multi-agent systems outperform single agents on complex tasks that benefit from specialization and sequential refinement. A 3-agent crew (researcher → writer → editor) produces better content than a single "do everything" agent, because each agent focuses on one job and builds on the previous agent's output.
+**Why it matters**: Multi-agent systems outperform single agents on complex tasks that benefit from specialization and sequential refinement. A 3-agent crew (researcher → writer → editor) produces better content than a single "do everything" agent, because each agent focuses on one job and builds on the previous agent's output. For orchestration patterns beyond role-based crews (debate, blackboard, orchestrator-worker), see [Multi-Agent Systems](../multi_agent_systems/README.md).
 
 **Key insight**: CrewAI's primary advantage is the natural language configuration model — roles, goals, and backstories are just prompt text. The downside is that these are purely prompt-based; the underlying LLM is the same for all agents. Role effectiveness varies significantly by model capability.
 
@@ -370,8 +370,8 @@ crew = Crew(
 | Multi-agent coordination | Role-based (natural language) | Graph-based (code) | Conversation-based |
 | Best for | Role-based pipelines | Complex stateful agents | Code execution agents |
 
-**CrewAI vs LangGraph:**
-CrewAI is faster to set up for standard multi-agent patterns (researcher → writer → reviewer). LangGraph gives exact control over state, routing, and persistence — essential for production agents with loops, human approval, and error recovery. For complex production systems: LangGraph. For quick multi-agent pipelines: CrewAI.
+**CrewAI vs [LangGraph](langgraph.md):**
+CrewAI is faster to set up for standard multi-agent patterns (researcher → writer → reviewer). LangGraph gives exact control over state, routing, and persistence — essential for production agents with loops, human approval, and error recovery. For complex production systems: LangGraph. For quick multi-agent pipelines: CrewAI. For conversation-driven code-execution agents, see [AutoGen](autogen.md).
 
 ---
 

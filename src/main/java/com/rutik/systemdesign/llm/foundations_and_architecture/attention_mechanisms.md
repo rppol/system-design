@@ -151,22 +151,19 @@ Compression is learned jointly with the model — not a post-hoc quantization.
 
 ### Attention Sink — Weight Distribution
 
+```mermaid
+xychart-beta
+    title "Attention weight from token T10 to prior positions (StreamingLLM, Xiao et al. 2023)"
+    x-axis [T1, T2, T3, T4, T5, T6, T7, T8, T9, T10]
+    y-axis "attention weight" 0 --> 0.5
+    bar [0.22, 0.17, 0.10, 0.01, 0.02, 0.01, 0.01, 0.02, 0.01, 0.43]
 ```
-Attention weights assigned by token T10 to all previous positions
-(empirical observation across LLMs — StreamingLLM, Xiao et al. 2023):
 
-Position:   T1     T2     T3     T4     T5     T6     T7     T8     T9    T10
-            ████   ███    ██                                              ████
-            ████   ███    ██                                              ████
-            ████   ███    ██                                              ████
-weight:    0.22   0.17   0.10   0.01   0.02   0.01   0.01   0.02   0.01  0.43
-
-First 3–4 tokens absorb disproportionate attention weight regardless of content.
-They act as "sinks" — aggregate value buffers for the model's residual state.
-
-Evict T1–T4: quality collapses.    Keep T1–T4 + sliding window: quality preserved.
-StreamingLLM fix: always maintain num_sink_tokens (4) + recent window in cache.
-```
+First 3–4 tokens absorb disproportionate attention weight regardless of content — here
+T1–T3 hold 0.22/0.17/0.10 while T4–T9 sit near 0.01. They act as "sinks": aggregate value
+buffers for the model's residual state. Evict T1–T4 and quality collapses; keep T1–T4 plus a
+sliding window and quality is preserved. StreamingLLM's fix is to always maintain
+`num_sink_tokens` (4) + a recent window in the cache.
 
 ---
 

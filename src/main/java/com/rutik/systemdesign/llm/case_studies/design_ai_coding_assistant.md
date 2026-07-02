@@ -258,6 +258,8 @@ Chat prompt:
 
 ### 4.4 Agent Engine (Autonomous Multi-File Editing)
 
+The agent runs an observe → plan → act → reflect loop with tool use (pattern details: [ReAct and Reasoning Patterns](../agents_and_tool_use/react_and_reasoning_patterns.md)).
+
 ```
 Agent tasks: "Add unit tests for all functions in the auth module"
 
@@ -323,6 +325,8 @@ Model for agent tasks:
 ```
 
 ### 4.5 Code Execution Sandbox
+
+Isolation requirements and escape vectors are covered in depth in [Sandboxed Code Execution](../agents_and_tool_use/sandboxed_code_execution.md).
 
 ```
 Agent runs terminal commands → must be secure, isolated, controlled.
@@ -550,43 +554,41 @@ def extract_semantic_chunks(
 
 ## Code-Specific RAG Architecture
 
-Code RAG differs from document RAG in three key ways: (1) code has structure (AST) not present in prose; (2) code has dependencies (imports, function calls) that cross file boundaries; (3) code changes frequently (every git commit may invalidate embeddings for modified files).
+Code RAG differs from document RAG (baseline pipeline: [RAG Fundamentals](../rag_fundamentals/README.md)) in three key ways: (1) code has structure (AST) not present in prose; (2) code has dependencies (imports, function calls) that cross file boundaries; (3) code changes frequently (every git commit may invalidate embeddings for modified files).
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SRC(["Source files\nmonitored via git hooks"])
+    TS["Tree-sitter parse\nAST-aware chunking"]
+    CH["Semantic chunks\nfunction / class level"]
+    EMB["Code embedding model\nCodeBERT · UniXcoder · text-embedding-3"]
+    IDX[("Vector index HNSW + metadata index\nfile path · function name · git commit hash")]
+    Q(["User query\nnatural language or code snippet"])
+    HYB["Hybrid retrieval\nBM25 on identifier names + dense semantic intent"]
+    DEP["Cross-file dependency expansion\nif retrieved function calls foo(), add foo() definition"]
+    GEN["LLM generation\nwith code context"]
+
+    SRC --> TS --> CH --> EMB --> IDX
+    IDX --> HYB
+    Q --> HYB
+    HYB --> DEP --> GEN
+
+    class SRC,Q io
+    class TS,HYB,DEP mathOp
+    class CH req
+    class EMB,GEN base
+    class IDX frozen
 ```
-Code RAG Pipeline:
-                                                         
-  Source files  ──► Tree-sitter parse ──► Semantic chunks
-  (monitored         AST-aware                (function/class
-   via git hooks)    chunking                  level)
-                                              │
-                                              ▼
-                                    Code embedding model
-                                    (CodeBERT, UniXcoder,
-                                     or text-embedding-3)
-                                              │
-                                              ▼
-                                    Vector index (HNSW)
-                                    + Metadata index
-                                    (file path, function
-                                     name, git commit hash)
-                                              │
-              User query in natural  ────────►│
-              language or code snippet        │
-                                              ▼
-                                    Hybrid retrieval:
-                                    BM25 (identifier names)
-                                    + Dense (semantic intent)
-                                              │
-                                              ▼
-                                    Cross-file dependency
-                                    expansion: if retrieved
-                                    function calls foo(),
-                                    add foo() definition
-                                              │
-                                              ▼
-                                    LLM generation with
-                                    code context
-```
+
+The indexing path (git hooks → tree-sitter → embeddings) keeps chunks syntactically complete; at query time hybrid retrieval merges BM25 identifier matches with dense semantic matches, then dependency expansion pulls in the definitions of called functions so the LLM never sees a call site without its callee.
 
 **Incremental re-indexing via git hooks:**
 

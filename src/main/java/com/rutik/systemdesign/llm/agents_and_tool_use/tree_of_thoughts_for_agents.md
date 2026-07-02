@@ -135,7 +135,7 @@ MCTS is sample-efficient for deep trees and naturally balances exploration/explo
 
 ```
 SELECTION                EXPANSION              SIMULATION           BACKPROP
-                                                                     
+
 [Root N=10 V=6.2]        [Root]                 [Root]              [Root V=6.5]
    |                        |                      |                    |
 [A1 N=6 V=7.1]           [A1]                   [A1]                [A1 V=7.2]
@@ -436,7 +436,7 @@ At $0.005/1K tokens avg: ~$0.05–$0.15 per planning run
 
 **AlphaCode 2 (DeepMind, 2023)**: competitive programming. Generates hundreds of candidate programs, scores each with a filtering model on test cases, re-ranks top candidates. Functionally equivalent to ToT with a domain verifier (test execution) as the value function. Reached 85th percentile on Codeforces.
 
-**OpenAI o1/o3 (2024–2025)**: these models implicitly implement test-time compute scaling via a ToT-like internal search over reasoning chains. The model generates multiple chain-of-thought drafts, evaluates them with a process reward model (PRM), and surfaces the best. The 2048-token "thinking" budget gates how deep the tree runs.
+**OpenAI o1/o3 (2024–2025)**: these models implicitly implement test-time compute scaling via a ToT-like internal search over reasoning chains (see [Reasoning Models](../reasoning_models/README.md)). The model generates multiple chain-of-thought drafts, evaluates them with a process reward model (PRM), and surfaces the best. The 2048-token "thinking" budget gates how deep the tree runs.
 
 **SWE-bench agents**: Agentless, SWE-agent, and similar systems that score above 40% on SWE-bench use iterative patch generation + test-execution feedback — effectively DFS with backtracking when tests fail. The value function is binary (tests pass / fail) rather than LLM-scored.
 
@@ -479,7 +479,7 @@ At $0.005/1K tokens avg: ~$0.05–$0.15 per planning run
 - **Conversational agents**: users expect low-latency responses (< 2 s). Even beam_width=2 with depth=2 adds 8 LLM calls before the first response.
 - **Cost-sensitive applications**: at $0.01 per call, 54 calls = $0.54 per query. For a 1M query/day system that is $540K/day.
 - **Tasks without a useful value function**: if the evaluator is just restating the generator's output, scoring noise dominates and beam selection becomes random.
-- **Long-horizon open-ended tasks**: trees with depth > 5 and branching > 3 become intractable even with beam search. Use hierarchical planning instead (decompose into sub-problems, apply ToT to each).
+- **Long-horizon open-ended tasks**: trees with depth > 5 and branching > 3 become intractable even with beam search. Use hierarchical planning instead (decompose into sub-problems, apply ToT to each — see [Plan-and-Execute](plan_and_execute.md)).
 
 ---
 
@@ -601,7 +601,7 @@ Evaluating a thought in isolation (without the path so far) produces scores that
 |---|---|---|
 | OpenAI GPT-4o / GPT-4 Turbo | Generator + evaluator LLM | Strong instruction following; `temperature=0` for eval |
 | Anthropic Claude 3.5 Sonnet | Alternative LLM | Comparable quality; supports long context for deep paths |
-| LangGraph | Graph-based agent orchestration | Native support for branching and backtracking via conditional edges |
+| [LangGraph](../agentic_frameworks/langgraph.md) | Graph-based agent orchestration | Native support for branching and backtracking via conditional edges |
 | LlamaIndex | RAG + agent framework | `TreeSummarize` uses ToT-like aggregation; custom agent steps |
 | Guidance (Microsoft) | Constrained generation | Forces structured thought proposals (JSON, numbered lists) |
 | DSPy | Programmatic LLM optimization | `ChainOfThought` + `Retry` modules approximate DFS with backtracking |

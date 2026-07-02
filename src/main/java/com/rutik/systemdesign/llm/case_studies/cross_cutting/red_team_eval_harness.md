@@ -99,50 +99,40 @@ that a generic static dataset misses. The attacker and judge must be from differ
 
 ### CI Pipeline — Gated Deployment
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    TRIG(["Code push / model weight change /\nsystem prompt change"])
+    BUILD["Build candidate\n(model + prompt + tools + RAG)"]
+    STAT["Static Red Team\n500-2000 examples, ~15 min"]
+    DYN["Dynamic Red Team\nLLM attacker targets current system prompt\n200-500 prompts, ~45 min"]
+    AGG["Score Aggregation\nLlama Guard per example (80ms)\nGPT-4o judge for sev >= 4 (1200ms)\ncategory pass rates + severity distribution"]
+    GATE{"Deployment Gate\noverall >= 0.92\nAND per-category thresholds met\nAND zero severity-5 failures"}
+    DEP(["Deploy"])
+    BLK["Block + report"]
+
+    TRIG --> BUILD --> STAT --> DYN --> AGG --> GATE
+    GATE -->|"PASS"| DEP
+    GATE -->|"FAIL"| BLK
+
+    class TRIG req
+    class BUILD base
+    class STAT,DYN frozen
+    class AGG,GATE mathOp
+    class DEP io
+    class BLK lossN
 ```
-Code push / model weight change / system prompt change
-          |
-          v
-   +------------------+
-   | Build candidate  |
-   | (model + prompt  |
-   |  + tools + RAG)  |
-   +------------------+
-          |
-          v
-   +---------------------------+
-   | Static Red Team           |
-   | 500-2000 examples, ~15min |
-   +---------------------------+
-          |
-          v
-   +---------------------------+
-   | Dynamic Red Team          |
-   | LLM attacker targets      |
-   | current system prompt     |
-   | 200-500 prompts, ~45min   |
-   +---------------------------+
-          |
-          v
-   +----------------------------------+
-   | Score Aggregation                |
-   | Llama Guard per example (80ms)   |
-   | GPT-4o judge for sev>=4 (1200ms) |
-   | Category pass rates              |
-   | Severity distribution            |
-   +----------------------------------+
-          |
-          v
-   +----------------------------------+
-   | Deployment Gate                  |
-   | overall >= 0.92                  |
-   | AND per-category thresholds met  |
-   | AND zero severity-5 failures     |
-   |                                  |
-   |  PASS -------> Deploy            |
-   |  FAIL -------> Block + report    |
-   +----------------------------------+
-```
+
+Every candidate passes two red-team layers (static ~15 min, dynamic ~45 min) before the gate;
+all three gate conditions — overall >= 0.92, per-category thresholds, zero severity-5 failures —
+must hold or the release is blocked with a report.
 
 ### Judge Pipeline — Per-Example Scoring
 
@@ -691,9 +681,9 @@ by construction. Compare internal pass rates against HarmBench: if your jailbrea
 internally but ASR is 43% on HarmBench, the internal dataset undersamples hard examples.
 
 **Q: What is PAIR and how is it used in dynamic red teaming?**
-PAIR (Prompt Automatic Iterative Refinement, Perez et al. 2022) is an algorithm where an attacker
+PAIR (Prompt Automatic Iterative Refinement, Chao et al. 2023) is an algorithm where an attacker
 LLM iteratively refines adversarial prompts based on the target's responses and a judge score,
-converging in 20-30 iterations. Published ASR: 60-80% against GPT-3.5-turbo, 20-40% against
+often converging in around 20 queries. Published ASR: 60-80% against GPT-3.5-turbo, 20-40% against
 GPT-4o with current safety training. Dynamic red team harnesses use PAIR alongside template
 substitution and TAP (tree-of-attacks-with-pruning) to find system-prompt-specific vulnerabilities
 requiring multi-turn probing.

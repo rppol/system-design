@@ -54,7 +54,7 @@ LibSQL or Postgres pgvector; `Memory` class manages embedding + retrieval.
 
 ### 4.5 MCP Tools
 
-`MastraMCPClient({command, args})` connects to MCP server; tools auto-imported.
+`MastraMCPClient({command, args})` connects to MCP server; tools auto-imported. See [MCP — Model Context Protocol](../mcp_model_context_protocol/README.md) for the protocol itself.
 
 ---
 
@@ -79,7 +79,7 @@ Agent vs Workflow Comparison
        |
        v
     Step 4: generate_report
-    
+
     LLM may be ONE of the steps (e.g., generate_report uses LLM)
     Best for: business processes, multi-stage pipelines
 
@@ -340,11 +340,17 @@ Type safety prevents schema drift between LLM outputs, tool params, and downstre
 **How does Mastra handle deployment to edge runtimes?**
 Edge-friendly by default — avoids Node-specific APIs in core. Provides adapters for Vercel Edge, Cloudflare Workers, AWS Lambda Edge. Limitations: some tool implementations may use Node APIs (fs, child_process); those need alternatives or Node-runtime deployment.
 
+**What happens when a step's output fails its Zod outputSchema validation at runtime, and why is `z.any()` dangerous?**
+Zod validates every step's output against its `outputSchema` when the step returns; a mismatch fails the workflow run at that step with a descriptive validation error, giving you the exact field and step id. With `z.any()` schemas, validation is disabled — malformed data flows into downstream steps and fails later (or worse, silently produces wrong output), and TypeScript inference degrades to `any` so the compiler cannot catch the drift either. Always write tight schemas; the definition-time and runtime checks are the framework's main correctness guarantee.
+
 **How is memory implemented?**
 The `Memory` class wraps a vector store (LibSQL with native vector ops, or Postgres pgvector). Configurable retrieval: last N messages verbatim + top-K semantic recall. Embeddings via the model's embedding API or a dedicated embedder. Memory persists across agent calls within a session (`threadId`).
 
 **What's the Workflow execution model?**
 Steps execute in order defined by `.then()` calls. Parallel steps via `.parallel([step1, step2])` run concurrently. Branching via `.branch(condition, [step1], [step2])`. Loops via `.until(condition, [stepN])`. Each step's output is typed and validated; mismatches fail at workflow definition time.
+
+**How do outputs from `.parallel()` steps reach the next step?**
+The step after `.parallel([stepA, stepB])` receives an object keyed by step id — in the PR-review example, the compose step's `inputSchema` declares `{ security: {...}, style: {...} }` and reads `inputData.security.issues` and `inputData.style.issues`. Both parallel branches must complete before the join step runs; if either fails, the workflow run fails. Declare the join step's inputSchema to mirror the parallel step ids exactly — a key mismatch fails at workflow definition time, which is far cheaper than a production error.
 
 **How do you stream agent output?**
 `const stream = await agent.stream(input);` returns a `StreamResult` with `textStream` async iterable. For structured output, `.objectStream`. For tool calls, `.fullStream` emits all events (tool_call, tool_result, text, etc).
@@ -371,7 +377,10 @@ Mastra CLI `mastra dev` provides a UI showing workflow runs, step states, inputs
 Smooth. Connect to stdio or HTTP MCP server; tools appear in autocomplete via TypeScript types (when MCP server provides typed schemas). Use Anthropic's, your own custom, or community MCP servers.
 
 **Compared to LangChain JS, what does Mastra do better?**
-Workflows (LangChain JS lacks LangGraph-equivalent), built-in memory abstraction with first-class vector stores, voice support, eval harness, deployment-focused CLI. LangChain JS has more model/tool integrations.
+Workflows (LangChain JS lacks LangGraph-equivalent), built-in memory abstraction with first-class vector stores, voice support, eval harness, deployment-focused CLI. LangChain JS has more model/tool integrations. See [LangChain & LCEL](langchain_and_lcel.md) for the LangChain-side comparison.
+
+**How do you run a long multi-step workflow on an edge runtime with execution-time limits?**
+You mostly shouldn't — edge runtimes cap execution (Cloudflare Workers allows ~10ms CPU on the free tier and ~30s on paid; wall-clock waiting on LLM I/O doesn't count against CPU but request duration limits still apply), so a workflow with several sequential LLM steps can exceed the budget. Patterns that work: keep only the request-facing agent call on the edge and enqueue the heavy workflow to a Node runtime or a durable executor (Inngest, Temporal); or split the workflow so each edge invocation runs one step and persists state between invocations. Measure your worst-case step chain on the target platform before committing to edge deployment.
 
 ---
 

@@ -66,7 +66,7 @@ LangChain Expression Language (LCEL), introduced in 2023 with version 0.1.0, rep
 ### Agent Strategies
 
 - **Tool calling agent** (recommended): Uses native function calling (OpenAI, Anthropic, Gemini). Most reliable.
-- **ReAct agent**: Model reasons and acts in natural language. Works with any model but less reliable.
+- **ReAct agent**: Model reasons and acts in natural language (see [ReAct and Reasoning Patterns](../agents_and_tool_use/react_and_reasoning_patterns.md)). Works with any model but less reliable.
 - **Structured chat agent**: Older pattern; deprecated in favor of tool calling.
 
 ---
@@ -75,38 +75,24 @@ LangChain Expression Language (LCEL), introduced in 2023 with version 0.1.0, rep
 
 ### LCEL Execution Model
 
-```
-User calls: chain.invoke({"question": "What is RAG?"})
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Input(["Input dict — question: 'What is RAG?'"]) --> Prompt
+    Prompt["ChatPromptTemplate\nformats messages"] -->|"ChatPromptValue (list of messages)"| Model
+    Model["ChatOpenAI\ncalls API, handles retries"] -->|"AIMessage — content: 'RAG stands for…'"| Parser
+    Parser["StrOutputParser\nextracts .content"] --> Out(["str 'RAG stands for…'"])
 
-chain = prompt | model | parser
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
 
-          Input dict
-              |
-              v
-    +------------------+
-    |  ChatPromptTemplate |
-    |  formats messages   |
-    +------------------+
-              |
-          ChatPromptValue (list of messages)
-              |
-              v
-    +------------------+
-    |  ChatOpenAI       |
-    |  calls API        |
-    |  handles retries  |
-    +------------------+
-              |
-          AIMessage (content="RAG stands for...")
-              |
-              v
-    +------------------+
-    |  StrOutputParser  |
-    |  extracts .content|
-    +------------------+
-              |
-          str "RAG stands for..."
+    class Input,Out io
+    class Prompt,Parser proc
+    class Model llm
 ```
+
+`chain.invoke({"question": "What is RAG?"})` on `chain = prompt | model | parser` — each pipe stage transforms the payload type: dict → ChatPromptValue → AIMessage → str.
 
 ### RunnableParallel — RAG Pattern
 
@@ -322,7 +308,7 @@ model_with_retry = ChatOpenAI(
 
 ### Prompt Caching with LangChain
 
-Anthropic's prompt caching reduces cost by 90% and latency by 80% for long, repeated system prompts (1000+ tokens). Pass `cache_control` via `extra_headers` on the `ChatAnthropic` model:
+Anthropic's prompt caching reduces cost by 90% and latency by 80% for long, repeated system prompts (1000+ tokens) — see [LLM Caching](../llm_caching/README.md) for the full caching-layer landscape. Pass `cache_control` via `extra_headers` on the `ChatAnthropic` model:
 
 ```python
 from langchain_anthropic import ChatAnthropic
@@ -525,7 +511,7 @@ This approach is thread-safe (LangSmith handles concurrency), captures full inpu
 | `langchain-openai` | OpenAI-specific integration | Separate package since 0.1 |
 | `langchain-anthropic` | Anthropic-specific integration | Separate package since 0.1 |
 | `langsmith` | Tracing, evaluation, dataset management | Set `LANGSMITH_TRACING=true`; dataset versioning, A/B testing for chains |
-| `langgraph` | Stateful agent graphs | Companion to LangChain |
+| [`langgraph`](langgraph.md) | Stateful agent graphs | Companion to LangChain |
 | `pydantic` v2 | Output validation | LangChain 0.2+ requires pydantic v2 |
 
 **Version matrix:**

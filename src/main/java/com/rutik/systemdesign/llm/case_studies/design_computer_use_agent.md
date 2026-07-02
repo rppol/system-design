@@ -761,6 +761,8 @@ class ImmutableAuditLogger:
 
 **Sierra** (2024, enterprise customer operations): uses computer use for high-value repetitive operations — warranty claim processing, product returns, account changes — where the per-task cost of $5-20 is justified by replacing $40-80 of human agent time. Sierra's architecture wraps computer use in a workflow engine that enforces strict step sequences per task type, rather than allowing free-form agent reasoning. This reduces failure modes significantly: the agent follows a decision tree, with computer use only for UI interaction at each step.
 
+See also: [Computer Use & Browser Agents](../agents_and_tool_use/computer_use_and_browser_agents.md) for the module-level treatment of screenshot grounding and action loops, and [Browser Agents Deep Dive](../browser_agents_deep_dive/README.md) for WebArena mechanics and DOM-vs-vision extraction tradeoffs.
+
 ---
 
 ## 7. Technologies and Tools

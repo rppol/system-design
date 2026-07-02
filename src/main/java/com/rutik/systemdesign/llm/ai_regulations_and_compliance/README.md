@@ -186,7 +186,7 @@ flowchart TD
     RISK{"EU AI Act\nrisk tier?"}
     BANNED["BANNED\nStop — cannot deploy\n(social scoring, real-time biometrics,\nsubliminal manipulation)"]
     HIGH["High Risk (Annex III)\nconformity assessment · QMS docs\ndata governance · 6-month logging\nhuman oversight · CE marking\nregister in EU AI Act database by Aug 2026"]
-    GPAI["GPAI Model (> 10^25 FLOPs)\ntransparency report · copyright policy\nSystemic risk (> 10^26 FLOPs):\nadversarial testing · EU AI Office reporting\ncybersecurity for weights"]
+    GPAI["GPAI Model (any general-purpose model)\ntransparency report · copyright policy\nSystemic risk (> 10^25 FLOPs):\nadversarial testing · EU AI Office reporting\ncybersecurity for weights"]
     LTD["Limited Risk\n(chatbot, deepfake, emotion recognition)\ndisclose AI nature at first interaction\nlabel AI-generated content"]
     MIN["Minimal Risk\nno specific obligations — deploy"]
 
@@ -244,21 +244,23 @@ Explanation requirement (Art. 13/14 + 22(3)):
 
 ### NIST AI RMF Cycle
 
+```mermaid
+stateDiagram-v2
+    direction LR
+    GOVERN: GOVERN — policies, roles, accountability, risk tolerance
+    MAP: MAP — identify risks, context, impact categorization
+    MEASURE: MEASURE — analyze, assess, benchmark risks
+    MANAGE: MANAGE — treat, monitor, respond, improve
+
+    GOVERN --> MAP
+    MAP --> GOVERN
+    MAP --> MEASURE
+    MEASURE --> MANAGE
+    MANAGE --> MEASURE
+    MANAGE --> GOVERN
 ```
-+------------------+        +------------------+
-|     GOVERN       |------->|      MAP         |
-| Policies, roles, |        | Identify risks,  |
-| accountability,  |<-------|  context, impact |
-| risk tolerance   |        | categorization   |
-+------------------+        +------------------+
-         ^                           |
-         |                           v
-+------------------+        +------------------+
-|     MANAGE       |<-------|     MEASURE      |
-| Treat, monitor,  |        | Analyze, assess, |
-| respond, improve |------->| benchmark risks  |
-+------------------+        +------------------+
-```
+
+The four functions form a continuous cycle, not a one-time checklist: GOVERN feeds and is fed by the other three functions, and MANAGE loops findings back into both MEASURE (re-assessment) and GOVERN (policy updates).
 
 ---
 
@@ -933,7 +935,7 @@ GDPR requires "meaningful information about the logic involved" in automated dec
 A GPAI (General Purpose AI) model is trained on broad data for general capabilities and can be adapted to many tasks — GPT-4, Claude, Gemini, Llama are examples. A high-risk AI system is an AI system deployed for a specific purpose that falls in Annex III or Annex II. The distinction matters for obligations: GPAI model providers (if releasing the model) must provide training data transparency reports and copyright policies; systemic risk GPAI must additionally conduct adversarial testing and report incidents to the EU AI Office. A company that fine-tunes a GPAI for a high-risk use case has GPAI provider obligations (if they release the fine-tuned model) plus high-risk AI system deployer obligations.
 
 **How does the EU AI Act treat open-source AI models differently?**
-The EU AI Act provides reduced obligations for providers of open-source GPAI models that are not systemic risk (i.e., trained on ≤10^25 FLOPs). Open-source GPAI providers must: publish training data summary (but not full training data corpus); comply with EU copyright law. They are exempt from: the full technical documentation requirements; downstream deployer instructions requirements. Systemic risk open-source GPAI (>10^26 FLOPs) receives no exemption — Llama models at this scale face the full systemic risk regime. Note: "open-source" in EU AI Act means weights are publicly available; it does not mean training data must be open.
+The EU AI Act provides reduced obligations for providers of open-source GPAI models that are not systemic risk (i.e., trained on ≤10^25 FLOPs). Open-source GPAI providers must: publish training data summary (but not full training data corpus); comply with EU copyright law. They are exempt from: the full technical documentation requirements; downstream deployer instructions requirements. Systemic risk open-source GPAI (>10^25 FLOPs) receives no exemption — Llama models at this scale face the full systemic risk regime. Note: "open-source" in EU AI Act means weights are publicly available; it does not mean training data must be open.
 
 **What are the prohibited AI practices under the EU AI Act?**
 Six categories of AI systems are banned outright (effective February 2025): (1) subliminal manipulation techniques that affect behavior beyond conscious awareness causing harm; (2) exploitation of vulnerabilities (age, disability, social situation) to distort behavior causing harm; (3) biometric categorization of individuals by sensitive characteristics (race, political opinions, religion, sexual orientation) from publicly accessible images; (4) social scoring by public authorities based on social behavior or personal characteristics; (5) real-time remote biometric identification in publicly accessible spaces for law enforcement (narrow exceptions for missing children, specific terrorism threats); (6) AI-based inference of emotions in workplace and educational settings (narrow exceptions for medical/safety purposes). Violation: up to €35M or 7% of global annual turnover.
