@@ -68,7 +68,16 @@ reports weekly.
   fence gets a hover copy button. **Diagrams are widescreen-aware**: each directional
   Mermaid diagram is rendered in both orientations and the reader keeps the one that
   reads better on a landscape screen (source files untouched), and every diagram has a
-  corner drag-grip for freeform resizing (double-click resets, no upper size cap). **Hard limit (see CLAUDE.md): the reader surface is
+  corner drag-grip for freeform resizing (double-click resets, no upper size cap).
+  **Chart-family Mermaid types are column-aware** (`mmChartType`/`mmChartDirective` in
+  `app.js`): xychart and quadrantChart re-render at the column width via an injected
+  init directive (text keeps true size; long xychart titles are font-fitted; colliding
+  x tick labels rotate -28°; colliding quadrant point labels flip above their point);
+  pie re-renders with text boosted by the measured shrink factor (legend rows re-spaced
+  to the boosted font); timeline keeps a 0.75x text floor and h-scrolls like a film
+  strip (gold title + visible axis line patched post-render). All chart types are
+  themed One Dark via `themeVariables` (pie1-12, quadrant fills, cScale0-11, xyChart
+  palette) — no per-diagram workarounds in source files. **Hard limit (see CLAUDE.md): the reader surface is
   pitch-black `#000000` with `#e6e6e6` prose in every theme** — only the app chrome
   re-themes; code, ASCII diagrams, and Mermaid stay One Dark.
 

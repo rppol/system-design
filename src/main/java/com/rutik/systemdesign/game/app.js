@@ -1772,6 +1772,114 @@ function mmDims(svgText) {
   return m ? { w: +m[1] || 1, h: +m[2] || 1 } : null;
 }
 
+// Chart-family diagrams (xychart / pie / quadrant / timeline) draw on fixed
+// canvases with fixed font sizes, then get scaled to the column — long titles
+// or many periods used to shrink their text far below the prose size. They
+// are handled per-type: xychart/quadrant re-render AT the column width via an
+// injected init directive (text keeps true size); pie re-renders with text
+// boosted by the measured shrink factor; timeline gets a 0.75x text-scale
+// floor and h-scrolls past the column like a film strip.
+function mmChartType(src) {
+  const first = src.split("\n").find((l) => {
+    const s = l.trim();
+    return s && !s.startsWith("%%") && s !== "---";
+  }) || "";
+  const w = first.trim().split(/[\s:]/)[0];
+  return { "xychart-beta": "xychart", pie: "pie", quadrantChart: "quadrant", timeline: "timeline" }[w] || null;
+}
+
+function mmChartDirective(type, src, avail) {
+  if (type === "xychart") {
+    const w = Math.round(Math.min(Math.max(avail, 380), 760));
+    const h = Math.round(Math.min(Math.max(w * 0.62, 300), 440));
+    // Fit the title into the chart width (monospace ≈ 0.63em per char) so a
+    // long title cannot inflate the svg and shrink every axis label with it.
+    const t = /^\s*title\s+"?(.+?)"?\s*$/m.exec(src);
+    const fs = t ? Math.max(11, Math.min(16, Math.floor((w * 0.96) / (0.63 * t[1].length)))) : 16;
+    return `%%{init: {"xyChart": {"width": ${w}, "height": ${h}, "titleFontSize": ${fs}}}}%%\n`;
+  }
+  if (type === "quadrant") {
+    const w = Math.round(Math.min(Math.max(avail, 380), 620));
+    return `%%{init: {"quadrantChart": {"chartWidth": ${w}, "chartHeight": ${w}}}}%%\n`;
+  }
+  return "";
+}
+
+// Post-render polish that themeVariables cannot express. Labels in these
+// renderers are positioned by transform="translate(x, y) rotate(0)" with
+// x/y attributes left at 0 — edits must rewrite the transform, not x/y.
+function mmChartPostProcess(type, sv) {
+  if (type === "xychart") {
+    // Rotate x tick labels when neighbors collide (e.g. one long category
+    // between short ones) — the d3-style slanted-tick treatment.
+    const labs = [...sv.querySelectorAll("g.bottom-axis g.label text")];
+    const rects = labs.map((t) => t.getBoundingClientRect());
+    if (rects.some((r, i) => i && r.left < rects[i - 1].right + 2)) {
+      labs.forEach((t) => {
+        const tr = t.getAttribute("transform") || "";
+        t.setAttribute("transform", /rotate/.test(tr) ? tr.replace(/rotate\([^)]*\)/, "rotate(-28)") : tr + " rotate(-28)");
+        t.setAttribute("text-anchor", "end");
+      });
+    }
+  }
+  if (type === "timeline") {
+    // The timeline title renders 35px near-white with no class (font-size
+    // attr is "4ex" — use the computed px value); gold-tint it to match
+    // every other diagram title.
+    sv.querySelectorAll("text").forEach((t) => {
+      if (parseFloat(getComputedStyle(t).fontSize) >= 30) t.style.fill = "#e5c07b";
+    });
+    // The horizontal axis line inherits mainBkg (#1a1a1a) — invisible on the
+    // dark canvas.
+    sv.querySelectorAll("g.lineWrapper line").forEach((l) => { l.style.stroke = "#4b5263"; });
+  }
+  if (type === "quadrant") {
+    // Authored points can sit close together; when a label (hanging below
+    // its point) collides with an already-placed one, move it above the
+    // point instead: rewrite its translate and drop the hanging baseline.
+    // Quadrant-name labels are seeded as obstacles so point labels dodge
+    // them too.
+    const placed = [...sv.querySelectorAll("g.quadrant text")].map((t) => t.getBoundingClientRect());
+    const hits = (r) => placed.some((p) => r.left < p.right + 2 && r.right > p.left - 2 && r.top < p.bottom + 1 && r.bottom > p.top - 1);
+    sv.querySelectorAll("g.data-point").forEach((g) => {
+      const t = g.querySelector("text"), c = g.querySelector("circle");
+      if (!t || !c) return;
+      let r = t.getBoundingClientRect();
+      if (hits(r)) {
+        const cx = +c.getAttribute("cx"), cy = +c.getAttribute("cy"), cr = +c.getAttribute("r") || 5;
+        for (const dy of [cy - cr - 4, cy - cr - 18, cy + cr + 26]) {   // above, higher, or a row below
+          t.setAttribute("transform", `translate(${cx}, ${dy})`);
+          t.setAttribute("dominant-baseline", "alphabetic");
+          r = t.getBoundingClientRect();
+          if (!hits(r)) break;
+        }
+      }
+      placed.push(r);
+    });
+  }
+  if (type === "pie") {
+    // Legend rows sit on a fixed 22px grid with an 18px swatch; boosted
+    // legend text overlaps rows. Re-space rows and scale swatches to the
+    // actual font size.
+    const rows = [...sv.querySelectorAll("g.legend")];
+    const trs = rows.map((g) => /translate\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)/.exec(g.getAttribute("transform") || ""));
+    if (rows.length > 1 && trs.every(Boolean)) {
+      const fs = parseFloat(getComputedStyle(rows[0].querySelector("text") || rows[0]).fontSize) || 17;
+      const sw = Math.round(fs);                     // swatch tracks text size
+      const step = Math.round(fs * 1.5);
+      const ys = trs.map((m) => +m[2]);
+      const y0 = (Math.min(...ys) + Math.max(...ys) + 18) / 2 - (step * rows.length) / 2;
+      rows.forEach((g, i) => {
+        g.setAttribute("transform", `translate(${trs[i][1]}, ${Math.round(y0 + i * step)})`);
+        const r = g.querySelector("rect");
+        if (r) { r.setAttribute("width", sw); r.setAttribute("height", sw); }
+        const t = g.querySelector("text");
+        if (t) { t.setAttribute("x", sw + 8); t.setAttribute("y", Math.round(sw * 0.85)); }
+      });
+    }
+  }
+}
+
 // One number controls display size: svg width in px, height follows the
 // aspect ratio. max-width stays unset so a user can drag wider than the
 // column (the .mermaid container scrolls horizontally past that point).
@@ -1888,11 +1996,33 @@ async function mmRenderNode(n, src) {
   const avail = mmAvailWide(n);
   n.dataset.mmAvail = avail;
   const dispH = (d) => d.h * Math.min(1, avail / d.w);   // on-screen height at column width
+  const ctype = mmChartType(src);
   let svg, flipScale = 0;
   try {
-    svg = (await mermaid.render("mm" + (++_mmSeq), src)).svg;
+    svg = (await mermaid.render("mm" + (++_mmSeq), mmChartDirective(ctype, src, avail) + src)).svg;
     const alt = mmAltOrientation(src);
-    const d0 = mmDims(svg);
+    let d0 = mmDims(svg);
+    if (ctype === "pie" && d0) {
+      // A pie always draws on a fixed 450px-high canvas; when legend + title
+      // force a downscale, re-render with text boosted toward a ~13px
+      // displayed size (measure -> boost -> re-measure, max two passes; the
+      // boost widens the legend, so one refinement pass tightens the result).
+      let k = 1;
+      for (let pass = 0; pass < 2; pass++) {
+        const s = Math.min(1, avail / d0.w);
+        const eff = 14 * k * s;                        // displayed legend/label px
+        if (eff >= 12.5) break;
+        k = Math.min(2.4, k * (13 / eff));
+        // Title tracks the boost (16/14 ratio) so title and legend keep the
+        // same displayed proportion no matter which of them drives the width.
+        const tfs = Math.max(17, Math.min(34, Math.round(16 * k)));
+        const boost = `%%{init: {"themeVariables": {"pieSectionTextSize": "${Math.round(14 * k)}px", "pieLegendTextSize": "${Math.round(14 * k)}px", "pieTitleTextSize": "${tfs}px"}}}%%\n`;
+        try {
+          svg = (await mermaid.render("mm" + (++_mmSeq), boost + src)).svg;
+          d0 = mmDims(svg);
+        } catch { document.getElementById("dmm" + _mmSeq)?.remove(); break; }
+      }
+    }
     if (alt && d0) {
       try {
         const altSvg = (await mermaid.render("mm" + (++_mmSeq), alt)).svg;
@@ -1916,12 +2046,19 @@ async function mmRenderNode(n, src) {
   n.innerHTML = svg;                                     // replaces old svg + grip
   const sv = n.querySelector("svg");
   let d = mmDims(svg);
+  if (sv && ctype) mmChartPostProcess(ctype, sv);        // may grow the bbox (rotated ticks)
   if (sv) { const fixed = mmFixViewBox(sv); if (fixed) d = fixed; }
   if (sv && d) {
     sv.dataset.natw = Math.round(d.w);
     if (flipScale) {
       sv.dataset.minw = Math.round(d.w * 0.7);           // readability floor for re-clamps
       mmLayout(n, sv, Math.round(d.w * flipScale));      // may exceed the column -> gutters, then h-scroll
+    } else if (ctype === "timeline" && d.w > avail) {
+      // Timelines are film strips: never shrink text below 0.75x — keep the
+      // width and let the container h-scroll (edge glow + hint appear).
+      const w = Math.max(avail, Math.round(d.w * 0.75));
+      if (w > avail) sv.dataset.minw = w;                // survives ResizeObserver re-clamps
+      mmLayout(n, sv, w);
     } else {
       mmLayout(n, sv, Math.min(d.w, avail));
     }
@@ -2030,6 +2167,52 @@ async function renderMermaid(root) {
               labelBoxBorderColor:   "#c678dd",
               labelTextColor:        "#c678dd",
               loopTextColor:         "#c678dd",
+              // Pie: the dark theme's default slices are near-black on our
+              // dark canvas (an 80% slice was literally invisible). One Dark
+              // slices, dark % labels ON the light slices, gold title.
+              pie1: "#61afef", pie2: "#98c379", pie3: "#e5c07b", pie4: "#c678dd",
+              pie5: "#56b6c2", pie6: "#d19a66", pie7: "#e06c75", pie8: "#8ab8e0",
+              pie9: "#b5d99c", pie10: "#ecd399", pie11: "#d9a3e8", pie12: "#89cdd6",
+              pieTitleTextSize:    "17px", pieTitleTextColor:   "#e5c07b",
+              pieSectionTextSize:  "14px", pieSectionTextColor: "#1a1a1a",
+              pieLegendTextSize:   "14px", pieLegendTextColor:  "#abb2bf",
+              pieStrokeColor:      "#0a0d13", pieStrokeWidth:     "1.5px",
+              pieOuterStrokeColor: "#3b4048", pieOuterStrokeWidth: "2px",
+              pieOpacity: "1",
+              // Quadrant: default is a flat gray ramp with pale gray points.
+              // Dark One-Dark-tinted quadrants, hue-matched quadrant labels,
+              // blue points.
+              quadrant1Fill: "#14263c", quadrant2Fill: "#1b2a1a",
+              quadrant3Fill: "#2a2417", quadrant4Fill: "#2b181b",
+              quadrant1TextFill: "#61afef", quadrant2TextFill: "#98c379",
+              quadrant3TextFill: "#e5c07b", quadrant4TextFill: "#e06c75",
+              quadrantPointFill: "#61afef", quadrantPointTextFill: "#abb2bf",
+              quadrantXAxisTextFill: "#abb2bf", quadrantYAxisTextFill: "#abb2bf",
+              quadrantInternalBorderStrokeFill: "#3b4048",
+              quadrantExternalBorderStrokeFill: "#4b5263",
+              quadrantTitleFill: "#e5c07b",
+              // Timeline consumes cScale0-11 (default: muted near-black hues
+              // — the 2017/2018 period boxes were invisible). Saturated One
+              // Dark cycle with dark labels on every fill.
+              cScale0: "#61afef", cScale1: "#98c379", cScale2: "#e5c07b",
+              cScale3: "#c678dd", cScale4: "#56b6c2", cScale5: "#d19a66",
+              cScale6: "#e06c75", cScale7: "#8ab8e0", cScale8: "#b5d99c",
+              cScale9: "#ecd399", cScale10: "#d9a3e8", cScale11: "#89cdd6",
+              cScaleLabel0: "#1a1a1a", cScaleLabel1: "#1a1a1a", cScaleLabel2: "#1a1a1a",
+              cScaleLabel3: "#1a1a1a", cScaleLabel4: "#1a1a1a", cScaleLabel5: "#1a1a1a",
+              cScaleLabel6: "#1a1a1a", cScaleLabel7: "#1a1a1a", cScaleLabel8: "#1a1a1a",
+              cScaleLabel9: "#1a1a1a", cScaleLabel10: "#1a1a1a", cScaleLabel11: "#1a1a1a",
+              // xychart: kill the black plot slab, One Dark series palette
+              // (blue bars, green line, then gold/purple/teal/orange/red).
+              xyChart: {
+                backgroundColor: "transparent",
+                titleColor: "#e5c07b",
+                xAxisLabelColor: "#abb2bf", xAxisTitleColor: "#abb2bf",
+                xAxisLineColor: "#4b5263", xAxisTickColor: "#4b5263",
+                yAxisLabelColor: "#abb2bf", yAxisTitleColor: "#abb2bf",
+                yAxisLineColor: "#4b5263", yAxisTickColor: "#4b5263",
+                plotColorPalette: "#61afef,#98c379,#e5c07b,#c678dd,#56b6c2,#d19a66,#e06c75",
+              },
             },
             flowchart: { curve: "basis", padding: 20, nodeSpacing: 45, rankSpacing: 55 },
             // Sequence text rendered oversized relative to prose and long
@@ -2039,6 +2222,14 @@ async function renderMermaid(root) {
               actorFontSize: 14, messageFontSize: 13, noteFontSize: 13,
               actorMargin: 60, noteMargin: 12, boxMargin: 8,
             },
+            // Chart-family fonts sized to sit next to 14.5px prose. Widths
+            // are injected per-render (mmChartDirective) at the column width.
+            xyChart: {
+              titleFontSize: 16,
+              xAxis: { labelFontSize: 13, titleFontSize: 14 },
+              yAxis: { labelFontSize: 13, titleFontSize: 14 },
+            },
+            quadrantChart: { pointLabelFontSize: 12, pointRadius: 5, pointTextPadding: 4 },
           });
           return m.default;
         });
