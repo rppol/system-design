@@ -55,47 +55,39 @@ Mental model: think of credit risk as a constrained optimization problem: maximi
 
 ## 3. High-Level Architecture
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    APP(["Applicant submits\napplication"]) --> GW["Application Gateway\nvalidate · enrich · rate-limit"]
+    BUREAU["Bureau Data Provider\nExperian / Equifax / TU"] --> PULL["Bureau Pull API\np99 500ms · timeout 1.5s"]
+    GW --> PULL
+    PULL --> FT["Feature Transform\nWOE encoding + derived"]
+    FT --> MODEL["Model Inference\nLightGBM + monotonic\nsub-10ms"]
+    MODEL --> CAL["Calibration + Threshold\nisotonic to PD · cutoff by product"]
+    MODEL --> SHAP["SHAP Engine\ntop-4 positive SHAP\nadverse-action reasons"]
+    CAL --> DEC{"decision"}
+    DEC -->|"PD < cutoff"| APR(["Approve\nscore + limit → Loan OS"])
+    DEC -->|"PD >= cutoff"| DCL(["Decline\nscore + adverse action"])
+    SHAP --> DCL
+
+    class APP,APR io
+    class BUREAU,PULL frozen
+    class GW req
+    class FT,CAL,DEC mathOp
+    class MODEL train
+    class SHAP mathOp
+    class DCL lossN
 ```
-Applicant Submits                Bureau Data
-Application                      Provider
-     |                          (Experian/Equifax/TU)
-     v                                |
-+----+--------------------+          |
-| Application Gateway     |          |
-| (validates, enriches,   |          |
-|  rate-limits)           |          |
-+----+--------------------+          |
-     |                               |
-     v                               v
-+----+-------------------------------+----+
-|         Risk Scoring Service            |
-| +------+  +----------+  +----------+   |
-| |Bureau|  |Feature   |  |Model     |   |
-| |Pull  |->|Transform |->|Inference |   |
-| |API   |  |(WOE/raw) |  |(LightGBM)|   |
-| +------+  +----------+  +---+------+   |
-|                              |         |
-|                    +---------+------+  |
-|                    |Calibration +   |  |
-|                    |Threshold   |  |  |
-|                    |Decision    |  |  |
-|                    +--------+---+  |  |
-|                             |      |  |
-|                    +--------v---+  |  |
-|                    |SHAP Engine |  |  |
-|                    |(adverse    |  |  |
-|                    | action)    |  |  |
-|                    +--------+---+  |  |
-+---------------------------------+--+  |
-                                  |
-              +-------------------+------------------+
-              |                                      |
-     +--------v--------+                   +---------v-------+
-     | Approve         |                   | Decline         |
-     | (score + limit) |                   | (score +        |
-     | → Loan OS       |                   |  adverse action)|
-     +------------------+                  +-----------------+
-```
+
+*The bureau pull (frozen, external) dominates the 2s latency budget; everything after it — WOE transform, constrained inference, calibration, and the SHAP branch that manufactures the legally required adverse-action reasons — is sub-20ms.*
 
 **Component inventory:**
 - **Application Gateway:** validates input, rate-limits, enriches with internal application data (employment, stated income).
@@ -353,6 +345,16 @@ Every historical training example uses the bureau report that was available at t
 | LightGBM unconstrained | 0.873 | Approximate (SHAP) | No | Medium |
 | Neural network | 0.890 | No | No | Low |
 
+```mermaid
+xychart-beta
+    title "2-year default AUC by model - accuracy rises as auditability falls"
+    x-axis ["Scorecard", "Logistic+WOE", "LGBM monotonic", "LGBM uncon.", "Neural net"]
+    y-axis "AUC" 0.80 --> 0.90
+    bar [0.845, 0.852, 0.865, 0.873, 0.890]
+```
+
+*The neural net is the most accurate model on the chart yet is un-shippable: ECOA/FCRA demand per-applicant adverse-action reasons and monotonic, defensible relationships. The chosen LightGBM-monotonic gives up ~2.5pp AUC versus the neural net to keep every decision auditable — the interpretability, not the accuracy, is the binding constraint.*
+
 ---
 
 ## 6. Real-World Implementations
@@ -448,6 +450,16 @@ A model calibrated on a 3% default rate base was deployed with a threshold corre
 **Primary bottleneck: bureau API latency.**
 
 The bureau API is the binding constraint at 500ms p99 per call. Credit decision p99 = bureau_p99 + model_inference + SHAP = 500ms + 8ms + 4ms ≈ 515ms (well within 2s SLO). The bottleneck shifts to application volume:
+
+```mermaid
+xychart-beta
+    title "Credit decision latency budget (ms, p99) - bureau pull dominates"
+    x-axis ["Bureau pull", "Model inference", "SHAP adverse-action"]
+    y-axis "Latency (ms)" 0 --> 550
+    bar [500, 8, 4]
+```
+
+*The external bureau call is ~40x the combined model + SHAP cost, so decision latency is governed entirely by the bureau, not the ML. Optimization effort belongs in bureau caching/pre-fetch, not in shaving model milliseconds.*
 
 ```
 At 50k applications/day (Black Friday peak):

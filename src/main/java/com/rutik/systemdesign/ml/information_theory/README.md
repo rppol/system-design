@@ -70,65 +70,87 @@ The core insight of information theory is that the more uncertain an outcome is,
 
 ### Entropy, Cross-Entropy, and KL Decomposition
 
+```mermaid
+xychart-beta
+    title "Cross-entropy decomposes: H(p,q) = H(p) + KL(p||q), in nats"
+    x-axis ["H(p) entropy", "H(p,q) cross-entropy", "KL(p||q) divergence"]
+    y-axis "nats" 0 --> 1.0
+    bar [0.802, 0.897, 0.095]
 ```
-True distribution p        Predicted distribution q
-(from data labels)         (from model softmax)
 
-         p                         q
-    [0.7, 0.2, 0.1]          [0.6, 0.3, 0.1]
-
-Entropy H(p):              Cross-Entropy H(p,q):
-  = -(0.7*log(0.7)           = -(0.7*log(0.6)
-     + 0.2*log(0.2)              + 0.2*log(0.3)
-     + 0.1*log(0.1))             + 0.1*log(0.1))
-  = 0.802 nats               = 0.897 nats
-
-KL(p||q) = H(p,q) - H(p) = 0.897 - 0.802 = 0.095 nats
-  (extra bits wasted by using q instead of p)
-
-Training minimizes H(p,q); since H(p) is constant, this minimizes KL(p||q).
-```
+For the true labels p = [0.7, 0.2, 0.1] and model softmax q = [0.6, 0.3, 0.1], the
+irreducible entropy H(p) = 0.802 nats plus the KL penalty 0.095 nats sum exactly to the
+cross-entropy 0.897 nats. Since H(p) is fixed by the data, training can only shrink the
+small KL bar toward zero — minimizing cross-entropy is minimizing KL(p||q).
 
 ### Information Gain in Decision Tree
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    root["Root: 60 pos / 40 neg\nH(root) = 0.971 bits"]
+    root -->|"split on Feature A"| aL["Left: 50p / 5n\nH = 0.439"]
+    root -->|"split on Feature A"| aR["Right: 10p / 35n\nH = 0.781"]
+    aL --> aW["Weighted children\n0.55×0.439 + 0.45×0.781 = 0.593 bits"]
+    aR --> aW
+    aW --> aIG["IG(A) = 0.971 - 0.593 = 0.378 bits"]
+    root -->|"split on Feature B"| bL["Left: 30p / 20n\nH = 0.971"]
+    root -->|"split on Feature B"| bR["Right: 30p / 20n\nH = 0.971"]
+    bL --> bW["Weighted children\n0.50×0.971 + 0.50×0.971 = 0.971 bits"]
+    bR --> bW
+    bW --> bIG["IG(B) = 0.971 - 0.971 = 0 bits (useless)"]
+    aIG --> pick["Choose Feature A\nhigher information gain"]
+    bIG --> pick
+
+    class root base
+    class aL,aR,bL,bR io
+    class aW,bW mathOp
+    class aIG train
+    class bIG lossN
+    class pick train
 ```
-Root node:  60 positive, 40 negative  (100 total)
-H(root) = -(0.6*log(0.6) + 0.4*log(0.4)) = 0.971 bits
 
-Split on Feature A:
-  Left:  50 positive, 5 negative   -> H = -(50/55*log(50/55) + 5/55*log(5/55)) = 0.439 bits
-  Right: 10 positive, 35 negative  -> H = -(10/45*log(10/45) + 35/45*log(35/45)) = 0.781 bits
-
-H(Y|Feature A) = 55/100 * 0.439 + 45/100 * 0.781 = 0.593 bits
-IG(A) = H(root) - H(Y|A) = 0.971 - 0.593 = 0.378 bits
-
-Split on Feature B:
-  Left:  30 positive, 20 negative  -> H = 0.971 bits (no purity)
-  Right: 30 positive, 20 negative  -> H = 0.971 bits
-IG(B) = 0.971 - 0.971 = 0 bits  (useless split)
-
-Choose Feature A (higher IG).
-```
+Both candidate features start from the same parent entropy, 0.971 bits. Feature A's
+split purifies the children (weighted child entropy drops to 0.593), so IG = 0.378 bits;
+Feature B leaves each child as impure as the parent, so IG = 0. The tree greedily selects
+the highest-IG feature — Feature A.
 
 ### KL Divergence Direction Matters
 
+The true distribution p (bars) is bimodal; the fitted approximation q (line) is a single
+Gaussian. Minimizing each KL direction drags q to a different place.
+
+```mermaid
+xychart-beta
+    title "Forward KL(p||q): mean-seeking — q smears to cover BOTH modes"
+    x-axis [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    y-axis "probability" 0 --> 0.5
+    bar [0.01, 0.08, 0.30, 0.08, 0.02, 0.08, 0.30, 0.08, 0.01]
+    line [0.06, 0.13, 0.18, 0.20, 0.22, 0.20, 0.18, 0.13, 0.06]
 ```
-p = true distribution (narrow, concentrated)
-q = approximate distribution (wider, diffuse)
 
-KL(p||q): forward KL            KL(q||p): reverse KL
-  minimized by q that            minimized by q that
-  covers where p has mass        fits under p's mode
-  -> q is diffuse (mean-seeking)  -> q is narrow (mode-seeking)
-
-            p     q                  q    p
-      .    |||  .....            .  ...  |||  .
-    ..    |||||.......           ..  ... ||||  ..
-   ....  |||||||.......          ....  .....||||  ..
-
-Used in VAEs (forward KL       Used in VI (reverse KL)
-via encoder for KL term)       avoids covering low-density regions
+```mermaid
+xychart-beta
+    title "Reverse KL(q||p): mode-seeking — q locks onto ONE mode, ignores the other"
+    x-axis [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    y-axis "probability" 0 --> 0.5
+    bar [0.01, 0.08, 0.30, 0.08, 0.02, 0.08, 0.30, 0.08, 0.01]
+    line [0.02, 0.13, 0.40, 0.13, 0.02, 0.01, 0.01, 0.01, 0.01]
 ```
+
+Forward KL(p||q) is large wherever p has mass but q does not, so it forces q to spread
+across every mode — even piling probability into the low-density valley at position 5
+(mean-seeking, used in VAEs via the encoder KL term). Reverse KL(q||p) is large wherever
+q has mass but p does not, so q collapses onto a single mode and stays inside p's support,
+missing the second mode entirely (mode-seeking, used in variational inference).
 
 ---
 
@@ -464,6 +486,27 @@ Focal loss = -(1 - p_t)^gamma * log(p_t) where p_t is the predicted probability 
 
 **Q: What does perplexity measure in language models?**
 Perplexity = exp(H) where H is the cross-entropy loss in nats, or equivalently 2^H in bits. It measures how many tokens the model is effectively choosing among at each position. A perplexity of 20 means the model is as uncertain as choosing uniformly among 20 tokens. Lower perplexity = better language model. GPT-2 (large) achieves perplexity ~18 on PTB; GPT-3 achieves ~9 on Penn Treebank. Perplexity is only comparable across models with the same tokenization and vocabulary — comparing perplexity across different tokenizers requires normalization by number of characters or words.
+
+**Q: What is the difference between using entropy and Gini impurity for decision-tree splits?**
+Both measure node impurity and in practice produce nearly identical trees. Gini = 1 - sum p_i^2 and entropy = -sum p_i log p_i both peak at a uniform class distribution and are 0 for a pure node. Gini is slightly cheaper because it avoids the logarithm, so CART defaults to it, while entropy (information gain) is used by ID3 and C4.5. Entropy penalizes minority-class presence marginally more aggressively, but empirical studies show the choice rarely changes accuracy — tree depth and pruning matter far more.
+
+**Q: What is label smoothing and how does it relate to entropy and cross-entropy?**
+Label smoothing replaces the one-hot target with (1 - epsilon) on the true class and epsilon/(k-1) spread over the rest. Instead of driving the correct logit toward infinity, it targets a slightly higher-entropy distribution, which prevents overconfidence and improves calibration. Equivalently it adds a term pulling predictions toward the uniform distribution, so cross-entropy is now minimized by a finite logit gap rather than an infinite one. A typical epsilon is 0.1, and it consistently improves ImageNet top-1 accuracy while lowering expected calibration error.
+
+**Q: What is conditional entropy H(Y|X) and how does it relate to mutual information?**
+Conditional entropy H(Y|X) is the average remaining uncertainty about Y once X is known. It is defined as H(Y|X) = H(X,Y) - H(X) = -sum p(x,y) log p(y|x), and it satisfies 0 <= H(Y|X) <= H(Y). Mutual information is exactly the reduction in that uncertainty: I(X;Y) = H(Y) - H(Y|X). When X fully determines Y, H(Y|X) = 0 and I(X;Y) = H(Y); when they are independent, H(Y|X) = H(Y) and I(X;Y) = 0. Decision-tree information gain is the sample estimate of H(Y) - H(Y|feature).
+
+**Q: How is mutual information used for feature selection, and what are its pitfalls?**
+Rank features by I(feature; target) and keep the highest-scoring ones, since MI captures nonlinear dependence that correlation misses. sklearn's mutual_info_classif uses a k-NN estimator for continuous features and handles discrete targets natively. Two pitfalls: MI is computed one feature at a time, so it ignores redundancy (two correlated features can both score high) and interactions (two features useless alone but predictive together score low). mRMR (max-relevance, min-redundancy) fixes the redundancy problem by penalizing MI between already-selected features.
+
+**Q: Why should cross-entropy be computed with log-softmax rather than log(softmax(x))?**
+Computing softmax then taking its log overflows or underflows for large or very negative logits, producing inf or NaN gradients. log-softmax folds the log into the softmax using the log-sum-exp trick, subtracting max(x) for stability: log_softmax(x)_i = x_i - max(x) - log sum_j exp(x_j - max(x)). This is why PyTorch's F.cross_entropy takes raw logits and internally combines log_softmax with nll_loss, and why you must never apply softmax before it. Passing already-softmaxed probabilities double-applies the nonlinearity and silently corrupts training.
+
+**Q: In knowledge distillation, what divergence is minimized and why is a temperature applied?**
+The student minimizes the KL divergence between its softened output and the teacher's softened output, KL(teacher || student). A temperature T > 1 is applied to both logits before softmax to soften the distributions, exposing the teacher's dark knowledge — the relative probabilities across wrong classes that encode class similarity. Because softening shrinks the gradients by roughly 1/T^2, the distillation term is scaled by T^2 to keep its gradient magnitude comparable to the hard-label loss. Typical temperatures range from 2 to 10.
+
+**Q: What is the data-processing inequality and why does it matter for ML?**
+The data-processing inequality says post-processing cannot increase information: if X -> Y -> Z form a Markov chain, then I(X; Z) <= I(X; Y). No deterministic or stochastic transformation of Y can recover information about X that Y already discarded. For ML this means feature engineering and network layers can only preserve or destroy task-relevant information, never create it — the raw input sets an upper bound on achievable performance. It also underpins the information-bottleneck view of deep nets, where each layer trades compression against retained information about the label.
 
 ---
 

@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 36 Modules
+## Module List — 40 Modules
 
 | Module Directory | Phase | Key Concepts | Sub-files |
 |-----------------|-------|-------------|-----------|
@@ -24,7 +24,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `training_deep_networks/` | 3 | LR warmup, gradient clipping, mixed precision, augmentation | — |
 | `generative_models/` | 3 | VAEs, GANs, Diffusion (DDPM), mode collapse, FID | — |
 | `computer_vision/` | 4 | Object detection, segmentation, ViT, CLIP, SSL | object_detection, image_segmentation, vision_transformers, self_supervised_vision |
-| `natural_language_processing/` | 4 | Word2Vec, GloVe, TF-IDF, NER, CRF, topic modeling | bert_and_pretrained_models, attention_and_seq2seq, text_representation_and_retrieval, nlp_evaluation_and_metrics |
+| `natural_language_processing/` | 4 | Word2Vec, GloVe, TF-IDF, NER, CRF, topic modeling | bert_and_pretrained_models, attention_and_seq2seq, text_representation_and_retrieval, nlp_evaluation_and_metrics, tokenization_deep_dive |
 | `recommender_systems/` | 4 | Two-tower, collaborative filtering, LTR, bandits | collaborative_filtering, deep_learning_recommenders, retrieval_and_ranking, content_and_hybrid, online_learning_and_bandits |
 | `time_series_forecasting/` | 4 | ARIMA, Prophet, DeepAR, Temporal Fusion Transformer | — |
 | `reinforcement_learning/` | 4 | MDP, Q-learning, DQN, PPO, actor-critic, RLHF | — |
@@ -45,19 +45,26 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `active_learning_and_weak_supervision/` | 5 | Uncertainty/diversity sampling, QBC, BALD, Snorkel labeling functions, label model, data-centric AI | — |
 | `adversarial_ml_and_robustness/` | 7 | FGSM/PGD/C&W evasion, poisoning, backdoors, model extraction, membership inference, adversarial training, randomized smoothing | — |
 | `uncertainty_quantification_and_conformal_prediction/` | 7 | Aleatoric vs epistemic, MC dropout, deep ensembles, ECE/temperature scaling, conformal sets/intervals, CQR | — |
+| `interpretability_and_explainability/` | 7 | SHAP (KernelSHAP/TreeSHAP), LIME, integrated gradients, Grad-CAM, permutation importance, PDP/ICE, counterfactuals | — |
+| `privacy_preserving_ml/` | 7 | Differential privacy, DP-SGD, federated learning (FedAvg), secure aggregation, PATE, membership inference | — |
+| `multi_task_and_multi_objective_learning/` | 4 | Shared-bottom, MMoE, PLE, uncertainty weighting, PCGrad, Pareto, multi-objective ranking | — |
+| `anomaly_detection/` | 4 | Isolation Forest, One-Class SVM, LOF, autoencoders, EVT thresholds, streaming detection, PR-AUC | — |
 
 ---
 
-## Sub-Files — 27 Topic Sub-Files
+## Sub-Files — 36 Topic Sub-Files
 
 | Module | Sub-files |
 |--------|-----------|
 | `supervised_learning/` | linear_models, support_vector_machines, decision_trees, bayesian_methods |
 | `ensemble_methods/` | random_forests, gradient_boosting, xgboost_lightgbm, stacking_and_blending |
 | `computer_vision/` | object_detection, image_segmentation, vision_transformers, self_supervised_vision |
-| `natural_language_processing/` | bert_and_pretrained_models, attention_and_seq2seq, text_representation_and_retrieval, nlp_evaluation_and_metrics, tokenization_deep_dive |
+| `natural_language_processing/` | bert_and_pretrained_models, attention_and_seq2seq, text_representation_and_retrieval, nlp_evaluation_and_metrics, tokenization_deep_dive, word_embeddings, sequence_labeling_and_crf, text_classification, topic_modeling, language_modeling, syntactic_parsing |
 | `recommender_systems/` | collaborative_filtering, deep_learning_recommenders, retrieval_and_ranking, content_and_hybrid, online_learning_and_bandits |
 | `ml_system_design/` | design_framework, feature_store_design, training_pipeline_design, ab_testing_for_ml, latency_and_throughput_optimization |
+| `unsupervised_learning/` | gaussian_mixtures_and_em |
+| `model_evaluation_and_selection/` | automl_and_nas |
+| `active_learning_and_weak_supervision/` | semi_supervised_learning |
 
 ---
 
@@ -77,11 +84,11 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 | File | When Relevant |
 |------|--------------|
-| `feature_store_and_point_in_time_correctness/` | Any case study with training/serving feature pipelines |
-| `model_calibration_and_thresholding/` | Any classification case study |
-| `responsible_ai_fairness_and_explainability/` | Any case study with regulatory or fairness concerns |
-| `experimentation_and_online_evaluation/` | Any case study with A/B testing or bandit strategies |
-| `drift_monitoring_and_retraining/` | Any production ML case study |
+| `feature_store_and_point_in_time_correctness.md` | Any case study with training/serving feature pipelines |
+| `model_calibration_and_thresholding.md` | Any classification case study |
+| `responsible_ai_fairness_and_explainability.md` | Any case study with regulatory or fairness concerns |
+| `experimentation_and_online_evaluation.md` | Any case study with A/B testing or bandit strategies |
+| `drift_monitoring_and_retraining.md` | Any production ML case study |
 
 ---
 
@@ -100,6 +107,8 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `adversarial_ml_and_robustness/` | `../../llm/llm_security/` — prompt injection/jailbreaks; `../../llm/guardrails_and_content_safety/` |
 | `uncertainty_quantification_and_conformal_prediction/` | `case_studies/cross_cutting/model_calibration_and_thresholding/`; `../../llm/evaluation_and_benchmarks/` — abstention/uncertainty signals |
 | `active_learning_and_weak_supervision/` | `../../llm/data_flywheels_and_continuous_learning/`; `../../llm/synthetic_data_generation/` |
+| `interpretability_and_explainability/` | `case_studies/cross_cutting/responsible_ai_fairness_and_explainability.md`; `../../llm/mechanistic_interpretability/` — attention/circuit interpretability for LLMs |
+| `privacy_preserving_ml/` | `../../llm/llm_security/` — DP-SGD at LLM scale, PII/data governance; `adversarial_ml_and_robustness/` — membership inference as an attack |
 
 ---
 
@@ -117,11 +126,11 @@ Overlap zone (cover in both with cross-references): distributed training, model 
 
 - All code in Python with type hints (3.10+ style)
 - Use numpy, sklearn, PyTorch, or relevant library — no pseudocode
-- Minimum 10 Q&As per module; 15+ for sub-files
+- Minimum 15 Q&As per module and per sub-file (hard floor; matches root `CLAUDE.md`). Order by interview frequency: gotchas/traps first, then internals, then edge cases
 
 ## Adding a New ML Module
 
-1. Create `<module_name>/README.md` — 14-section template; minimum 10 Q&As (15+ for sub-files)
+1. Create `<module_name>/README.md` — 14-section template; minimum 15 Q&As (module and sub-file alike)
 2. All code in Python with type hints (3.10+ style)
 3. Update `README.md` module table
 4. Update root `README.md` ML phase table
@@ -136,13 +145,24 @@ Overlap zone (cover in both with cross-references): distributed training, model 
 
 ---
 
-## Visual Intuition Diagrams
+## Diagrams — appeal-first (Mermaid preferred)
 
-Section 5 (Architecture Diagrams) and any hard-to-picture concept should use an
-**ASCII visual intuition diagram** that makes an abstract relationship visible
-(constraint grid, before/after-with-delta, stacked flow, routing fan-out, bar
-chart, or curve/sketch). Generate and validate them with the
-`/visual-intuition-diagrams` skill. The full archetype catalog, conventions
-(ASCII only, no tabs, no emojis, widest line <= 100 cols, caption every diagram),
-and the `diagram_tools.py` validator live in root `CLAUDE.md` -> "Visual Intuition
-Diagrams".
+Diagrams are **appeal-first** (owner policy, 2026-07-02): Section 5 (Architecture
+Diagrams) and any hard-to-picture concept should use the most visually appealing
+renderable form. In ML study files that means the **Mermaid family is preferred**
+(flowchart for directed flows and pipelines, sequenceDiagram for actor chains,
+stateDiagram-v2 for train/eval lifecycles, xychart-beta for curves and magnitude
+comparisons — ROC/PR, bias-variance, LR schedules, loss landscapes — pie,
+quadrantChart for two-axis tradeoffs, timeline, sankey-beta for funnel/traffic
+volumes). All render on GitHub and in the game reader.
+
+Run `/mermaid-diagrams` before authoring or converting any diagram — it holds the
+decision table, the One-Dark palette + `classDef` block, and the render gotchas
+(notably: **color all flowchart nodes or none**; see root `CLAUDE.md` →
+"Game / Reader / Q&A Compatibility").
+
+Keep **ASCII** (via `/visual-intuition-diagrams`) only for shapes Mermaid cannot
+draw: constraint grids/masks, alignment-critical layout maps, and vector geometry
+(e.g. the SVM margin, a causal-mask grid). ASCII conventions (no tabs, no emojis,
+widest line <= 100 cols, caption every diagram) and the `diagram_tools.py`
+validator live in root `CLAUDE.md`. No image files.

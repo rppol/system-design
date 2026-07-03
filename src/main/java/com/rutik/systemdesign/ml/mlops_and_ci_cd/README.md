@@ -92,83 +92,114 @@ Key insight: the model is not the deliverable. The deliverable is the pipeline t
 
 ### Full MLOps Pipeline
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    commit([Code commit / PR]) --> codeTests["CI: code tests\nunit · lint · type"]
+    codeTests -->|"pass"| dataTests["CI: data tests\nGreat Expectations · skew"]
+    dataTests -->|"pass"| trainStep["Training step\nKubeflow / Vertex AI"]
+    trainStep --> gate{"Validation gate\nAUC · P99 · fairness"}
+    gate -->|"fail"| reject["Reject + notify\npipeline fails"]
+    gate -->|"pass"| registry["Model registry\nNone → Staging"]
+    registry --> canary["Canary deploy\n5% traffic"]
+    canary --> check{"Metrics stable?"}
+    check -->|"regression"| rollback["Auto rollback\nto prev Production"]
+    check -->|"stable"| promote["Ramp 25 → 50 → 100%"]
+    promote --> prod["Production\nprev → Archived"]
+    prod --> monitor["Monitoring\nPSI · perf · SLO"]
+    monitor -.->|"drift / degradation"| trainStep
+
+    class commit io
+    class codeTests,dataTests,gate,check,monitor mathOp
+    class trainStep train
+    class reject,rollback lossN
+    class registry,prod base
+    class canary,promote req
 ```
-Code Commit (git push / PR)
-         |
-         v
-+-------------------+
-|   CI: Code Tests  |  unit tests, integration tests, linting, type checks
-+-------------------+
-         |
-         v
-+-------------------+
-|  CI: Data Tests   |  Great Expectations schema validation,
-|                   |  distribution checks, null-rate checks,
-|                   |  feature store offline-online consistency
-+-------------------+
-         |  PASS
-         v
-+-------------------+
-|  Training Step    |  containerized (Docker), GPU/CPU job,
-|  (Kubeflow/       |  logs hyperparams + metrics to MLflow
-|   Vertex AI)      |
-+-------------------+
-         |
-         v
-+-------------------+
-|  Model Validation |  AUC >= baseline (0.02 delta allowed),
-|  Gate             |  P99 latency <= 100ms,
-|                   |  fairness: demographic parity diff <= 0.05
-+-------------------+
-         |  PASS            | FAIL
-         v                  v
-+-------------------+   Reject, notify, pipeline fails
-| Model Registry    |  MLflow stages: None -> Staging
-| (Staging)         |  artifact stored in S3/GCS,
-|                   |  model signature (schema) attached
-+-------------------+
-         |  Manual approval or auto-promote
-         v
-+-------------------+
-|  Canary Deploy    |  5% traffic routed to new model (shadow or live)
-|                   |  monitor AUC, latency, error rate for N hours
-+-------------------+
-         |  Metrics stable        | Regression detected
-         v                        v
-  25% -> 50% -> 100%          Automatic rollback to
-                               previous Production model
-         |
-         v
-+-------------------+
-|  Production       |  MLflow stage: Production
-|                   |  previous model -> Archived
-+-------------------+
-         |
-         v
-+-------------------+
-|  Monitoring       |  Prometheus + Grafana dashboards,
-|                   |  PSI drift alerts, performance alerts,
-|                   |  cost/latency SLO tracking
-+-------------------+
-         |  Drift / degradation detected
-         v
-  Retraining Trigger -> back to Training Step
-```
+
+The pipeline gates twice: the validation gate rejects any model below the AUC / latency / fairness bar before it reaches the registry, and the canary check auto-rolls-back on live regression before full ramp. Monitoring closes the loop, feeding drift back to the training step (dotted retraining edge).
 
 ### Feature Store Consistency Check in CI
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    offline([Offline store\nS3 / BigQuery parquet]) --> compare["Compare mean · stddev · null rate\nper feature key"]
+    online([Online store\nRedis / Bigtable]) --> compare
+    compare --> diff{"diff > 5% relative?"}
+    diff -->|"yes"| fail["CI FAIL\ntraining-serving skew"]
+    diff -->|"no"| pass([CI pass])
+
+    class offline,online io
+    class compare,diff mathOp
+    class fail lossN
+    class pass base
 ```
-Offline Feature Store         Online Feature Store
-(batch, S3 parquet)     CI    (low-latency, Redis/Bigtable)
-        |               |             |
-        +----> compare  <-------------+
-               mean, stddev, null rate
-               for each feature key
-               |
-               | diff > 5% relative
-               v
-           CI FAIL — training-serving skew detected
+
+CI reads the same feature keys from both stores and fails the build if any feature's mean, stddev, or null rate diverges by more than 5% relative — catching training-serving skew before the model is retrained on inconsistent data.
+
+### Canary Rollout State Machine (with rollback)
+
+```mermaid
+stateDiagram-v2
+    [*] --> Staging
+    Staging --> Canary5: promote to Production
+    Canary5 --> Canary25: stable (30m soak)
+    Canary25 --> Canary50: stable
+    Canary50 --> Full100: stable
+    Full100 --> [*]: rollout complete
+    Canary5 --> RolledBack: regression over 2%
+    Canary25 --> RolledBack: regression over 2%
+    Canary50 --> RolledBack: regression over 2%
+    RolledBack --> Staging: revert to prev Production
 ```
+
+Traffic advances 5 → 25 → 50 → 100% only after each stage soaks cleanly; any stage that regresses more than 2% versus the production baseline jumps straight to RolledBack, which reverts serving to the previous Production model and demotes the candidate back to Staging.
+
+### Retraining Trigger Sources
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    sched["Scheduled\nnightly / weekly"] --> pipeline
+    perf["Performance drop\nCTR / precision below SLO"] --> pipeline
+    drift["Data drift\nPSI > 0.2"] --> pipeline
+    label["Label drift\nclass balance shift"] --> pipeline
+    event["Upstream event\nschema change / new partition"] --> pipeline
+    pipeline["Retraining pipeline\nretrain + revalidate gate"] --> beats{"Beats incumbent?\nchampion / challenger"}
+    beats -->|"yes"| deploy([Promote via registry])
+    beats -->|"no"| keep([Keep incumbent])
+
+    class sched,keep base
+    class perf lossN
+    class drift,label,beats mathOp
+    class event io
+    class pipeline train
+    class deploy req
+```
+
+Five heterogeneous triggers fan into one retraining pipeline, but a fresh model is never promoted blindly — a champion/challenger gate requires it to beat the incumbent on recent data before the registry swaps it in, otherwise the incumbent stays.
 
 ---
 
@@ -701,7 +732,7 @@ Fix: the sklearn `Pipeline` object bundles the scaler and the classifier into a 
 A DevOps pipeline tests code correctness and deploys a deterministic binary artifact. An MLOps pipeline adds two additional dimensions: data quality (schema, distribution) and model quality (performance gates, fairness, latency SLAs). A software artifact either passes tests or fails; a model artifact can pass all code tests while silently degrading due to data distribution shift, which is why model-specific validation gates are mandatory in MLOps.
 
 **Q: What is training-serving skew and how do you detect it in CI?**
-Training-serving skew occurs when features presented to the model at serving time differ from what the model saw during training — typically because preprocessing steps (scaling, encoding, imputation) are applied during training but omitted or applied differently at serving. Detection in CI: write an integration test that sends known raw input vectors to the deployed model server and asserts that predictions match expected outputs computed offline with the full training pipeline. Also compare mean and standard deviation of each feature between the offline feature store and online serving queries; flag any feature with >5% relative difference.
+Training-serving skew occurs when features presented to the model at serving time differ from what the model saw during training. This typically happens because preprocessing steps (scaling, encoding, imputation) are applied during training but omitted or applied differently at serving. Detection in CI: write an integration test that sends known raw input vectors to the deployed model server and asserts that predictions match expected outputs computed offline with the full training pipeline. Also compare mean and standard deviation of each feature between the offline feature store and online serving queries; flag any feature with >5% relative difference.
 
 **Q: Explain MLflow Model Registry stages and how you automate promotion.**
 MLflow Model Registry has four stages: None (newly registered), Staging (validated, awaiting production), Production (serving live traffic), Archived (retired). Automation: the CI pipeline trains a model, logs it to MLflow, calls `create_model_version()` to register it at stage None, then runs validation gates (AUC >= baseline, latency SLA, fairness checks). If all gates pass, the pipeline calls `transition_model_version_stage(stage="Staging")`. A separate deployment job, triggered by a merge to main or a manual approval, transitions from Staging to Production and archives the previous Production version.
@@ -713,7 +744,7 @@ The canary controller polls a real-time metric (AUC from an online evaluation se
 PSI measures how much the distribution of a feature has shifted between a reference period (training data) and a current period (recent production traffic). PSI = sum over bins of (actual_fraction - expected_fraction) * ln(actual_fraction / expected_fraction). PSI < 0.1: no significant shift; 0.1–0.2: moderate shift, monitor; > 0.2: significant shift, trigger retraining. A common production setup computes PSI daily on the top 20 features and triggers a retraining pipeline when PSI > 0.2 on any of the top 5 features by feature importance.
 
 **Q: How does a feature store solve the offline-online consistency problem?**
-A feature store maintains a single feature computation definition that writes to both an offline store (e.g., S3 Parquet or BigQuery for batch training) and an online store (e.g., Redis or Bigtable for low-latency inference). Training pipelines read from the offline store; the serving layer reads from the online store using the same feature keys. The computation logic is defined once and executed in both contexts, eliminating the divergence that occurs when data science teams write Pandas code for training and engineering teams independently write SQL or Java for serving.
+A feature store maintains a single feature computation definition that writes to both an offline store for batch training and an online store for low-latency inference. The offline store is typically S3 Parquet or BigQuery; the online store is Redis or Bigtable. Training pipelines read from the offline store; the serving layer reads from the online store using the same feature keys. The computation logic is defined once and executed in both contexts, eliminating the divergence that occurs when data science teams write Pandas code for training and engineering teams independently write SQL or Java for serving.
 
 **Q: What data tests should run in CI before a model is retrained?**
 Schema validation: required columns present, correct dtypes, no unexpected columns. Null rate: null fraction per column <= defined threshold (e.g., 1% for label column, 10% for optional features). Distribution checks: mean and standard deviation of numeric features within 3 standard deviations of historical baseline. Referential integrity: foreign keys resolve to valid entity IDs. Volume check: row count within expected range (guards against partial data loads). Feature store consistency: online store feature statistics within 5% of offline store statistics for the same time window.
@@ -729,6 +760,27 @@ An S3 path is mutable — the same path can point to different data at different
 
 **Q: What is a model signature in MLflow and why does it matter for CI?**
 A model signature in MLflow specifies the expected schema (column names, dtypes, value ranges) for model inputs and outputs. It is inferred from actual training data using `infer_signature(X_train, model.predict(X_train))` and stored as JSON alongside the model artifact. At serving time, MLflow's pyfunc wrapper validates every request against the signature and raises a `ModelSignatureException` if the schema does not match — before the model ever runs inference. In CI, the integration test sends a malformed request to catch any serving code that bypasses signature validation. This provides the serving-layer equivalent of an API contract test.
+
+**Q: Why must preprocessing artifacts like scalers and encoders be bundled with the model, not stored separately?**
+A separately stored scaler can be forgotten or applied differently at serving time, feeding the model raw features and silently degrading predictions with no error. Bundle preprocessing and the estimator into one artifact (an sklearn `Pipeline`) and log it as a single unit, so `load_model` always returns the complete transform-plus-predict path. This eliminates an entire class of training-serving skew that produces plausible-but-wrong outputs rather than crashes.
+
+**Q: What is the CACE principle in ML systems?**
+CACE means "Changing Anything Changes Everything" — in ML there are no isolated features, because every input interacts through the learned model. Removing a feature, changing its encoding, or retraining on new data can shift the model's behavior on inputs that seem unrelated, so you cannot reason about changes locally the way you can with modular code. The practical consequence is that any change requires full retraining plus end-to-end evaluation, not a unit test on the changed part alone.
+
+**Q: Should every data drift alert trigger an automatic retraining pipeline?**
+No — auto-retraining on every drift signal risks a retraining storm that burns compute and can promote a model fit to transient noise. Drift is a leading indicator; gate retraining on a confirmed performance drop, sustained multi-feature drift, and availability of fresh trustworthy labels, with a champion/challenger evaluation before promotion. Otherwise a single noisy feature or a one-day spike triggers needless retrains that may degrade production.
+
+**Q: What is continuous training (CT) and how does it differ from CI and CD?**
+Continuous training is automatic retraining of the model on new data — a third pipeline axis that DevOps CI/CD does not have. CI validates code and data, CD ships the artifact, and CT regenerates the artifact itself when data drifts or on a schedule, then hands the new model back through the same CI/CD gates. MLOps Level 1 automates CT; Level 2 wraps full CI/CD around it.
+
+**Q: Why is reproducibility harder for ML pipelines, and what four things must you version to achieve it?**
+An ML result depends on data and randomness, not just code, so the same script can produce a different model unless every input is pinned. To reproduce a model you must version all four of: the dataset (DVC SHA or table snapshot id), the code (git commit), the hyperparameters (logged to MLflow), and the environment (Docker image digest). Miss any one — most often the dataset or a random seed — and the "same" run diverges beyond tolerance.
+
+**Q: What are the three MLOps maturity levels and how do you know which one you need?**
+Level 0 is manual notebooks, Level 1 automates the training pipeline, and Level 2 adds full CI/CD with gates, a registry, canary deploys, and drift-triggered retraining. Choose by blast radius and cadence: a one-off analysis stays at 0, a stable internal model at 1, and a revenue- or safety-critical model retrained more than monthly needs Level 2. Jumping straight to Level 2 for a prototype is over-engineering.
+
+**Q: How do you keep a retraining pipeline from silently learning on corrupted or poisoned data?**
+Put automated data-validation gates before training so bad data fails the pipeline instead of flowing into the model. Great Expectations (or equivalent) enforces a schema contract — required columns, dtypes, null-rate and range bounds, row-count volume checks — and distribution checks flag values outside historical norms; for adversarial risk, add anomaly detection on new partitions and require human approval for large shifts. The gate must block the run, not merely warn.
 
 ---
 

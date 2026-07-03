@@ -68,53 +68,135 @@ Key insight: the pipeline is not separate from the model — it IS part of the m
 
 ## 5. Architecture Diagrams
 
+### Batch training pipeline (source → validate → Spark → training)
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    src(["Source systems\nPostgreSQL · S3 · Kafka · REST"]) --> raw(["Raw zone\ns3://raw/date= · Parquet / JSON"])
+    raw --> ge{"Great Expectations\nvalidation gate"}
+    ge -->|pass| spark["PySpark cluster\nEMR / Databricks\ntransform + feature compute"]
+    ge -->|fail| stop["Alert + stop\nlog to observability"]
+    spark --> fs["Feature store\noffline Delta · online Redis"]
+    spark --> ds(["Training dataset\ns3://datasets/v3/train.parquet"])
+    fs --> tr["Model training\nPyTorch / XGBoost"]
+    ds --> tr
+
+    class src,raw,ds io
+    class ge mathOp
+    class spark,fs train
+    class stop lossN
+    class tr base
 ```
-Batch Training Pipeline
 
-+------------------+     Extract      +------------------+
-|   Source Systems |  ------------->  |   Raw Data Zone  |
-|  PostgreSQL / S3 |                  |  s3://raw/date=  |
-|  REST APIs/Kafka |                  |  Parquet / JSON  |
-+------------------+                  +------------------+
-                                              |
-                                     Validate (Great Expectations)
-                                              |
-                                    +---------v--------+
-                                    |  PySpark Cluster |
-                                    |  (EMR / Databricks)|
-                                    |  Transform +      |
-                                    |  Feature Compute  |
-                                    +---------+---------+
-                                              |
-                               +--------------+--------------+
-                               |                             |
-                    +----------v--------+        +-----------v-------+
-                    |   Feature Store   |        |  Training Dataset |
-                    |  (Offline: Delta) |        |  s3://datasets/   |
-                    |  (Online: Redis)  |        |  v3/train.parquet |
-                    +-------------------+        +-------------------+
-                                                          |
-                                               +----------v--------+
-                                               |   Model Training  |
-                                               |  (PyTorch/XGBoost)|
-                                               +-------------------+
+The validation gate is the first stage after extraction so bad data fails fast, before the expensive Spark transform; the same feature-compute output fans out to both the feature store (serving) and the training dataset (offline), which is what keeps training and serving in sync.
 
+### Streaming pipeline (online feature updates)
 
-Streaming Pipeline (Online Feature Updates)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Kafka Topic            Flink / Spark Streaming        Online Store
-+-------------+   -->   +------------------------+  --> +-----------+
-| raw_events  |         | windowed aggregations  |      | Redis     |
-| (JSON msgs) |         | feature transformations|      | feature   |
-+-------------+         +------------------------+      | values    |
-                                                        +-----------+
+    topic(["Kafka topic\nraw_events · JSON"]) --> flink["Flink / Spark\nStructured Streaming\nwindowed aggregations"]
+    flink --> ckpt["Checkpoint state\nevery 30-60s"]
+    flink --> redis(["Online store\nRedis feature values"])
+    redis --> serve(["Online serving\nsub-second features"])
 
-
-Data Validation Gate
-
-Raw Data --> [Great Expectations Suite] --> PASS --> Continue Pipeline
-                                       --> FAIL --> Alert + Stop + Log to Observability
+    class topic,redis,serve io
+    class flink train
+    class ckpt frozen
 ```
+
+Events flow continuously into a stateful stream operator whose windowed aggregations land in a low-latency online store; the periodic checkpoint is what lets Flink/Spark recover state after a task failure without replaying the whole stream.
+
+### Data-validation gate (pass → continue, fail → stop)
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    raw(["Raw data batch"]) --> suite{"Great Expectations suite\nschema · ranges · null rate\nreferential integrity"}
+    suite -->|all pass| cont["Continue pipeline\nwrite next layer"]
+    suite -->|any fail| alert["Alert on-call · stop\nquarantine batch · log"]
+
+    class raw io
+    class suite mathOp
+    class cont train
+    class alert lossN
+```
+
+A single failing expectation halts the pipeline and pages on-call rather than letting corrupt data reach the feature store — this "shift data quality left" is why the gate sits before every write.
+
+### Batch vs streaming ETL
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph B["Batch ETL — hours, high throughput"]
+        b1(["Bounded window\ndaily / hourly partition"]) --> b2["Spark job\nfull re-aggregation"]
+        b2 --> b3(["Parquet on S3\ntraining dataset"])
+    end
+    subgraph S["Streaming ETL — ms latency, continuous"]
+        s1(["Unbounded event stream"]) --> s2["Flink operator\nwindowed state"]
+        s2 --> s3(["Online store\nfresh features"])
+    end
+
+    class b1,b3,s1,s3 io
+    class b2,s2 train
+```
+
+Batch reprocesses a fixed window and can recompute the whole aggregate cheaply on spot instances; streaming maintains incremental state over an unbounded stream for freshness under a second — the split in latency vs cost is why most stacks run both (Lambda/Kappa).
+
+### Spark stages: narrow vs wide transformations
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    read(["read Parquet\npartitions p0..pN"]) --> filt["filter / select / map\nNARROW · no shuffle\nStage 1"]
+    filt --> shuffle{{"shuffle boundary\ngroupBy / join"}}
+    shuffle --> agg["aggregate per key\nWIDE · network exchange\nStage 2"]
+    agg --> out(["write Parquet\nversioned path"])
+
+    class read,out io
+    class filt train
+    class shuffle mathOp
+    class agg lossN
+```
+
+Spark splits a job into stages at every shuffle boundary: narrow transformations stay inside a partition (Stage 1, cheap), while the wide `groupBy`/`join` forces a network exchange (Stage 2) — the shuffle is where skew, spill, and OOM originate, so tuning `spark.sql.shuffle.partitions` targets exactly this edge.
 
 ---
 
@@ -424,6 +506,30 @@ A multi-layer approach: (1) schema validation — column names, types, null cons
 
 **Q: What is the difference between Avro and Parquet, and when do you use each?**
 Avro is a row-oriented binary format with a JSON schema embedded in the file header — ideal for write-heavy streaming pipelines (Kafka messages, event logs) because appending rows is efficient and schema is self-describing. Parquet is a column-oriented binary format — ideal for read-heavy analytical workloads where queries filter and aggregate specific columns (ML feature computation reads "user_id" and "purchase_amount" but not all 50 columns). For ML pipelines: use Avro for Kafka topics and event ingestion; use Parquet (or Delta Lake) for feature datasets and training data.
+
+**Q: When should you use a batch pipeline versus a streaming pipeline?**
+Use batch when features can be refreshed on a schedule and cost matters; use streaming only when online serving needs features fresher than about an hour. Batch processes a bounded window, runs on cheap spot/preemptible instances (60-80% cost savings), and is trivially reproducible — the default for training datasets and daily features. Streaming pays a steep operational and cost premium (Flink/Kafka clusters run 24/7, steep expertise curve) that is only justified by real-time reactions: fraud scoring, live recommendations, or session features that decay in minutes. The trap is reaching for streaming by default — if data volume is low or windows span the full history, a cron job with pandas or a nightly Spark batch is simpler, cheaper, and easier to debug.
+
+**Q: What is the difference between Lambda and Kappa architectures?**
+Lambda runs a batch layer and a speed layer in parallel and merges them at serving time; Kappa is streaming-only and replays the immutable log to rebuild historical results. Lambda gives you an accurate but high-latency batch view plus an approximate low-latency streaming view, at the cost of maintaining the same feature logic in two codebases — a notorious source of training/serving skew when the two drift apart. Kappa collapses this to one codebase by treating everything as a stream and reprocessing from a long-retention Kafka log when logic changes, trading the operational simplicity of one code path for the requirement of a durable, replayable event store. Choose Kappa when a single codebase matters more than squeezing out the last bit of batch accuracy.
+
+**Q: What is idempotency in a data pipeline and how do you guarantee it?**
+Idempotency means re-running the pipeline on the same input produces the same output, guaranteed by deterministic output paths plus overwrite (not append) semantics. Write to a path keyed by date partition and pipeline version (`s3://features/v3/2024-01-15/`) and use `mode("overwrite")` so a retried batch replaces rather than duplicates data. The classic violation is `mode("append")` on a partition: a re-run after a mid-job failure double-counts every row, silently inflating every downstream aggregate. Deduplicating on a natural key (event_id) early in the pipeline reinforces idempotency because upstream at-least-once delivery otherwise leaks duplicates into the output.
+
+**Q: What is a broadcast join and when does Spark use it?**
+A broadcast join ships a small table to every executor so the large table never shuffles, eliminating the network exchange a normal (shuffle) join requires. Spark auto-broadcasts a side smaller than `spark.sql.autoBroadcastJoinThreshold` (default 10 MB), or you force it with `F.broadcast(small_df)`. It is the single most effective fix for a slow join against a lookup/dimension table — the big fact table stays partitioned in place and each executor joins locally against its in-memory copy of the small table. The failure mode is broadcasting a table that is actually large: it OOMs the driver (which collects it first) and every executor (which holds a full copy), so only broadcast tables comfortably under ~100 MB.
+
+**Q: What is the small-files problem in Spark and how do you fix it?**
+The small-files problem is thousands of tiny output files that overwhelm the driver and schedulers with metadata and make every downstream read slow. It happens when a job writes one file per task with high parallelism — e.g., 2,000 shuffle partitions each emitting a few KB. Each file costs a listing call and a task, so reads spend more time on metadata than data, and object stores like S3 throttle on request volume. Fix by coalescing before write (`df.coalesce(n)` or `repartition(n)` targeting 128-256 MB per file), enabling Spark 3 AQE to auto-coalesce small shuffle partitions, or running a periodic compaction job (Delta Lake `OPTIMIZE`) that rewrites small files into large ones.
+
+**Q: How do you handle late-arriving data in a streaming pipeline?**
+Use event-time windows with a watermark that defines how long to wait for late events before finalizing a window and dropping later stragglers. Processing time is unreliable — a mobile client may buffer events offline and deliver them hours late — so aggregations must key on the event's own timestamp, not arrival time. The watermark (e.g., "allow lateness up to 10 minutes") bounds how long state is retained: events within the watermark update their window; events past it are dropped or routed to a side output for reconciliation. Set the watermark too tight and you silently lose valid late data; too loose and streaming state grows unbounded.
+
+**Q: What is data lineage and why does it matter for ML pipelines?**
+Data lineage records the inputs, code version, and parameters that produced each dataset, so any feature or model can be traced back to its exact source. When a model degrades, lineage lets you answer "which upstream table changed and when" instead of guessing — the difference between a one-hour and a one-week investigation. It is also a compliance requirement in regulated domains (you must prove what data trained a decisioning model) and the foundation of reproducibility: git SHA plus data hash plus pipeline definition pins an experiment exactly. Tools like OpenLineage, Marquez, DVC, and Delta Lake capture lineage automatically rather than relying on tribal knowledge.
+
+**Q: What is the difference between at-least-once and exactly-once processing?**
+At-least-once may reprocess an event on failure and risk duplicates; exactly-once guarantees each event affects the result once, via idempotent writes or transactional checkpoints. Pure at-least-once (the default for many Kafka consumers) is cheap but requires downstream dedup to avoid double-counting. Exactly-once is achieved not by magic but by combining a replayable source, atomic checkpointed state (Flink's barrier snapshots), and transactional or idempotent sinks so a replay overwrites rather than appends. For ML features, at-least-once plus idempotent (overwrite) sinks usually delivers effectively-once results at far lower cost than strict end-to-end exactly-once.
 
 ---
 

@@ -93,32 +93,59 @@ Key insight: Perplexity does not correlate with downstream task performance for 
 
 ### BLEU Computation Flow
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    C(["Candidate: 'The cat is sitting on the mat'"]) --> NG["Extract n-grams n=1..4"]
+    R(["Reference: 'The cat sat on the mat'"]) --> NG
+    NG --> CLIP["Clip each count to max reference count"]
+    CLIP --> PREC["n-gram precision\np1=.857 p2=.6 p3=.4 p4=.2"]
+    PREC --> GM(("geometric mean\nw_n = 0.25"))
+    C --> BP["Brevity penalty\nc=7 >= r=6 so BP=1"]
+    R --> BP
+    GM --> MUL(("multiply"))
+    BP --> MUL
+    MUL --> BLEU(["BLEU ≈ 0.45"])
+
+    class C,R,BLEU io
+    class NG,CLIP,PREC frozen
+    class GM,BP,MUL mathOp
 ```
-Candidate: "The cat is sitting on the mat"
-Reference: "The cat sat on the mat"
 
-Step 1: n-gram extraction (n=1,2,3,4)
-  Candidate 1-grams: {The:1, cat:1, is:1, sitting:1, on:1, the:1, mat:1}
-  Reference 1-grams: {The:1, cat:1, sat:1, on:1, the:1, mat:1}
+BLEU clips each n-gram count to its max count in any reference, takes the geometric mean of precisions p1–p4, and multiplies by the brevity penalty. Here the candidate (7 tokens) is longer than the reference (6 tokens) so BP=1, and BLEU ≈ 0.45.
 
-Step 2: Clipped counts (min of candidate count and max reference count)
-  The: min(1,1)=1, cat: min(1,1)=1, is: min(1,0)=0, sitting: min(1,0)=0
-  on: min(1,1)=1, the: min(1,1)=1, mat: min(1,1)=1
-  Clipped total: 6, Candidate total: 7
+### BLEU Precision vs ROUGE Recall
 
-Step 3: n-gram precision for n=1: p_1 = 6/7 = 0.857
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Step 4: Repeat for n=2,3,4; geometric mean
-  p_1=0.857, p_2=0.6, p_3=0.4, p_4=0.2
+    OV["Overlapping n-grams\n(clipped match count)"] --> BLEU["BLEU = precision\noverlap / candidate length"]
+    CAND(["Candidate length"]) --> BLEU
+    OV --> ROUGE["ROUGE = recall\noverlap / reference length"]
+    REF(["Reference length"]) --> ROUGE
+    BLEU --> BUSE(["Translation:\ndo not add wrong words"])
+    ROUGE --> RUSE(["Summarization:\ncover key content"])
 
-Step 5: Brevity penalty
-  c=7 (candidate), r=6 (reference) -> c > r -> BP = 1
-
-Step 6: BLEU = BP × exp(sum_n(w_n × log(p_n))) with w_n=0.25
-  = 1 × exp(0.25 × (log(0.857)+log(0.6)+log(0.4)+log(0.2)))
-  = 1 × exp(0.25 × (-0.154 - 0.511 - 0.916 - 1.609))
-  = exp(-0.797) ≈ 0.450
+    class CAND,REF,BUSE,RUSE io
+    class OV mathOp
+    class BLEU,ROUGE base
 ```
+
+BLEU and ROUGE share the same overlap numerator but differ in the denominator: dividing by candidate length gives precision (BLEU), dividing by reference length gives recall (ROUGE). That single choice is why BLEU fits translation (penalize wrong words) and ROUGE fits summarization (reward covering key content).
 
 ### BERTScore Computation
 
@@ -148,27 +175,30 @@ Step 4: Recall: for each reference token, max similarity to any candidate token
 Step 5: F1 = 2PR/(P+R) = 0.923
 ```
 
+### Metric Correlation with Human Judgment
+
+```mermaid
+xychart-beta
+    title "Correlation with human judgment (higher is better)"
+    x-axis ["BLEU", "ROUGE-L", "METEOR", "BERTScore", "Human"]
+    y-axis "Pearson correlation" 0 --> 1
+    bar [0.5, 0.6, 0.7, 0.75, 1.0]
+```
+
+Traditional overlap metrics correlate ~0.5–0.7 with human judgment; embedding-based BERTScore reaches ~0.75 by crediting paraphrase; only human evaluation is the true ceiling at 1.0. Numbers reproduce the Section 8 tradeoff table.
+
 ### ECE Reliability Diagram
 
+```mermaid
+xychart-beta
+    title "Reliability diagram: perfect vs overconfident model"
+    x-axis [0.1, 0.3, 0.5, 0.7, 0.9]
+    y-axis "Empirical accuracy" 0 --> 1
+    line [0.1, 0.3, 0.5, 0.7, 0.9]
+    line [0.08, 0.22, 0.38, 0.55, 0.72]
 ```
-Confidence vs Accuracy:
 
-1.0 |                          *
-    |                    *
-Acc |              *
-    |        *
-0.5 |  *
-    |
-    |  --- Perfect calibration diagonal
-    |
-0.0 +--+--+--+--+--+--+--+--+--+--
-    0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0
-                   Confidence
-
-Model 1 (*): Points on diagonal -> ECE ≈ 0 (well calibrated)
-Model 2: Points above diagonal -> overconfident (ECE > 0)
-Model 3: Points below diagonal -> underconfident (ECE > 0)
-```
+The x-axis is the model's stated confidence bucket. The straight diagonal line is perfect calibration (accuracy = confidence, ECE ≈ 0); the lower line is an overconfident model whose accuracy trails its confidence in every bucket. ECE is the bucket-size-weighted average of that vertical gap.
 
 ---
 
@@ -894,6 +924,21 @@ BLEU computes how much of the candidate (generated) text consists of n-grams fou
 
 **Q: What is the brevity penalty in BLEU and why is it necessary?**
 The brevity penalty (BP = exp(1 - reference_len / candidate_len) when candidate is shorter) penalizes outputs shorter than the reference. Without it, a model could achieve 100% precision by generating a single word that appears in the reference ("the") — one word, always in reference, precision = 1.0. The brevity penalty assigns BP = exp(1 - 6/1) ≈ 0.007 to a single-word candidate against a 6-word reference, reducing the BLEU score to near zero. In practice, BP activates when candidates are systematically shorter than references, which indicates the model generates truncated or incomplete outputs.
+
+**Q: Why must you use corpus-level BLEU rather than averaging sentence-level BLEU?**
+Sentence-level BLEU has high variance because the brevity penalty and sparse high-order n-grams are unstable on a single sentence, so averaging per-sentence scores is unreliable. A short sentence may have zero 4-gram matches, forcing its BLEU to 0 even when it is a good translation; averaging many such zeros produces a number that does not reflect system quality. Corpus-level BLEU instead aggregates clipped n-gram counts and lengths across the entire test set first, then computes one score — this is what the WMT competitions report. Always use the `sacrebleu` library, which computes corpus BLEU with standardized tokenization so results are comparable across papers.
+
+**Q: Why does BLEU clip each n-gram count to the maximum count in any reference?**
+Clipping prevents gaming precision by repetition — a candidate "the the the the" against a reference containing "the" twice is credited only twice, not four times. Without clipping, a model could inflate its precision by repeating a single high-frequency word that appears in the reference, achieving near-100% n-gram precision while producing meaningless output. Clipping caps each candidate n-gram's contribution at the maximum number of times it appears in any single reference, so surplus repetitions count as unmatched. This clipping, combined with the brevity penalty, is what closes the two obvious ways to cheat a precision metric (repeat words, or emit one short high-precision word).
+
+**Q: Why are BERTScore values computed with different underlying models not comparable?**
+BERTScore depends entirely on which contextual embedding model produces the token vectors, so scores from bert-base and roberta-large sit on different scales. The same candidate-reference pair might score 0.89 with bert-base-uncased and 0.92 with roberta-large — these numbers cannot be compared or aggregated across runs. Because the raw F1 values also cluster tightly in [0.85, 0.95], `rescale_with_baseline=True` is recommended to spread them into an interpretable range. Always pin the model type and version, enable rescaling, and report the model name alongside the score (for example "BERTScore-F1: 0.87, DeBERTa-xlarge-mnli, rescaled").
+
+**Q: What is ROUGE-L and why does it use longest common subsequence instead of fixed n-grams?**
+ROUGE-L scores the longest common subsequence (LCS) between candidate and reference, rewarding in-order word matches without requiring them to be contiguous. Unlike ROUGE-2, which only credits adjacent bigram matches, LCS captures sentence-level structure: "the cat sat quietly on the mat" and "the cat sat on the mat" share a long subsequence even though an inserted word breaks their bigrams. ROUGE-L needs no choice of n and is expressed as an F-measure combining LCS-based precision (LCS / candidate length) and recall (LCS / reference length). It is reported alongside ROUGE-1 and ROUGE-2 because different systems excel at different granularities, and the three together give a fuller picture than any one.
+
+**Q: What is EDA (Easy Data Augmentation) and why is it risky for NER?**
+EDA applies four operations — synonym replacement, random insertion, random swap, and random deletion — giving roughly 1-2% accuracy gains on small text-classification datasets. It is cheap and requires no model inference, which is why it is a common first augmentation for datasets under ~500K examples. The danger for NER is that these operations corrupt token-label alignment: replacing an entity token with a synonym, or deleting/swapping tokens, breaks the BIO tag sequence so the augmented example is mislabeled. For sequence labeling, keep the alpha values low (0.05-0.1), never apply synonym replacement or deletion to entity spans, and restrict augmentation to non-entity context tokens.
 
 **Q: Explain BERTScore and when it is more informative than BLEU.**
 BERTScore (Zhang et al., 2020) computes the similarity between candidate and reference using contextual embeddings: for each candidate token, find the maximum cosine similarity to any reference token (precision); for each reference token, find the maximum cosine similarity to any candidate token (recall); combine as F1. The contextual embeddings mean "feline" and "cat" have high similarity (~0.87 in BERT space), so BERTScore gives partial credit for valid paraphrases that BLEU scores as zero. BERTScore is more informative than BLEU in three cases: (1) dialogue evaluation, where responses have high valid variation; (2) creative text generation, where exact n-gram matches are unlikely; (3) cross-lingual evaluation, where multilingual BERT can compare translations of different quality independent of exact word overlap.

@@ -81,38 +81,141 @@ Key insight: you can get a rigorous coverage guarantee for free, post-hoc, on a 
 
 ### Aleatoric vs epistemic
 
+```mermaid
+quadrantChart
+    title Aleatoric vs epistemic uncertainty
+    x-axis Irreducible noise --> Reducible with data
+    y-axis Spread in the data --> Spread in the model
+    quadrant-1 Epistemic - collect data or abstain
+    quadrant-2 Model-limited yet data cannot help
+    quadrant-3 Aleatoric - accept the spread
+    quadrant-4 Data noise yet reducible
+    "Coin flip": [0.08, 0.16]
+    "Sensor jitter": [0.2, 0.24]
+    "Label noise": [0.24, 0.12]
+    "Unseen region": [0.72, 0.7]
+    "Novel obstacle": [0.82, 0.76]
+    "OOD input": [0.9, 0.88]
 ```
-Aleatoric (irreducible noise)          Epistemic (model ignorance)
-  data is inherently noisy               few/no training points here
-  more data does NOT help                more data DOES help
-  e.g. sensor jitter, label noise        e.g. out-of-distribution input
-  spread is in the data                  spread is in model disagreement
-```
+
+The two axes are *does more data help?* (left/right) and *where does the spread live —
+in the data or the model?* (bottom/top). Aleatoric points cluster bottom-left (irreducible,
+data-side); epistemic points cluster top-right (shrinks with data, model-side). The label
+tells you the fix: collect data / abstain for epistemic, accept the spread for aleatoric.
 
 ### Deep ensemble / MC dropout (epistemic via disagreement)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x(["input x"]) --> m1["model 1 / dropout sample 1"]
+    x --> m2["model 2 / dropout sample 2"]
+    x --> mN["model N / dropout sample N"]
+    m1 --> p1(["p_1"])
+    m2 --> p2(["p_2"])
+    mN --> pN(["p_N"])
+    p1 --> mean(("mean"))
+    p2 --> mean
+    pN --> mean
+    p1 --> var(("variance"))
+    p2 --> var
+    pN --> var
+    mean --> pred(["prediction"])
+    var --> epi(["epistemic uncertainty (high = models disagree)"])
+
+    class x,p1,p2,pN,pred io
+    class m1,m2,mN base
+    class mean,var mathOp
+    class epi lossN
 ```
-input x
-   |--> model_1 (or dropout sample 1) --> p_1
-   |--> model_2 (or dropout sample 2) --> p_2
-   |--> ...                             --> ...
-   |--> model_N (or dropout sample N) --> p_N
-            |
-   mean(p_i)        -> prediction
-   variance(p_i)    -> epistemic uncertainty (high when models disagree)
-```
+
+A single deterministic pass cannot express ignorance, so both methods generate *several*
+predictions — N separately-trained models (ensemble) or N dropout sub-networks (MC dropout).
+Their mean is the prediction; their variance is the epistemic signal, spiking exactly where
+the sampled models disagree (novel or out-of-distribution inputs).
 
 ### Split conformal prediction (the whole method)
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph TR["Train"]
+        fit["Fit model f on the training split"]
+    end
+    subgraph CAL["Calibrate — held-out split"]
+        score["For each (x_i, y_i): score s_i = 1 - prob of true label"]
+        quant["q_hat = the ceil((n+1)(1 - alpha)) / n -th smallest s_i"]
+    end
+    subgraph TE["Test — new input x"]
+        newx(["new x"])
+        cand["Score every candidate label y"]
+        keep["Keep y in the set if score(x, y) <= q_hat"]
+        out(["Prediction SET, coverage >= 1 - alpha"])
+    end
+
+    fit --> score --> quant
+    quant --> cand
+    newx --> cand --> keep --> out
+
+    class fit train
+    class score mathOp
+    class quant lossN
+    class newx req
+    class cand mathOp
+    class keep mathOp
+    class out io
 ```
-TRAIN                CALIBRATE                       TEST
-fit model f   ->  on held-out calib set:        on new x:
-                  for each (x_i, y_i):             scores for all candidate labels
-                    s_i = nonconformity(f, x_i,    include label y in the set if
-                          y_i)                        score(x, y) <= q_hat
-                  q_hat = ceil((n+1)(1-alpha))/n   -> prediction SET with
-                          -th smallest s_i             >= 1-alpha coverage, guaranteed
+
+The whole method is three phases: fit once, calibrate a single threshold q_hat on a
+held-out split, then at test time keep every label scoring below q_hat. The red node is the
+only learned quantity — the finite-sample quantile that turns raw scores into a set with a
+guaranteed 1-alpha coverage, on any model.
+
+### Temperature scaling and the reliability diagram
+
+```mermaid
+xychart-beta
+    title "Reliability diagram: accuracy vs confidence bin"
+    x-axis "Confidence bin" [0.1, 0.3, 0.5, 0.7, 0.9]
+    y-axis "Empirical accuracy" 0 --> 1
+    line [0.1, 0.3, 0.5, 0.7, 0.9]
+    line [0.09, 0.24, 0.4, 0.55, 0.7]
+    line [0.11, 0.31, 0.5, 0.69, 0.88]
 ```
+
+The straight diagonal is perfect calibration (accuracy == confidence). The line sagging
+below it at high confidence is the raw, overconfident network (ECE ~0.15 — it says 0.9 but
+is right ~0.7 of the time). The line hugging the diagonal is the same model after
+temperature scaling (ECE <0.03); T>1 softened the logits without moving any argmax.
+
+### Conformal coverage: the guarantee you contract for
+
+```mermaid
+xychart-beta
+    title "Conformal: realized coverage tracks the target 1 - alpha"
+    x-axis "Target coverage 1 - alpha" [0.8, 0.9, 0.95, 0.99]
+    y-axis "Realized coverage on test set" 0.7 --> 1
+    line [0.8, 0.9, 0.95, 0.99]
+    line [0.81, 0.9, 0.94, 0.99]
+```
+
+Realized coverage sits on the target line whatever alpha you pick — that validity is the
+contract. Model quality does not change this curve; a weaker model still lands on it, paying
+instead with larger prediction sets (the efficiency the chart deliberately does not show).
 
 ---
 
@@ -387,8 +490,14 @@ Monte Carlo dropout keeps dropout layers *active at inference* and runs many for
 **Q: Why are deep ensembles considered the strongest practical uncertainty method?**
 Training several networks from different random initializations (and data shuffles) yields models that agree on well-supported inputs and disagree on novel or ambiguous ones; the variance across their predictions is a robust epistemic signal that reliably spikes out-of-distribution. Empirically, deep ensembles beat MC dropout and many Bayesian approximations on calibration and OOD detection. The cost is N times the training and inference compute, which is the main reason people seek cheaper alternatives.
 
+**Q: How do you decompose total predictive uncertainty into aleatoric and epistemic parts?**
+Use the law of total variance: total predictive uncertainty splits into the mean of each model's own entropy (aleatoric) plus the variance across the models' predictions (epistemic). With an ensemble or MC samples you compute both from the same N softmax outputs — average the per-sample entropies for the irreducible-noise term, and measure the disagreement (the mutual information between predictions and model parameters, i.e. the BALD score) for the model-ignorance term. This decomposition is what lets a system react differently: high aleatoric means "the data is genuinely ambiguous, accept it," while high epistemic means "I am in unfamiliar territory, abstain or gather data."
+
 **Q: What is calibration and how does temperature scaling achieve it?**
 Calibration means a model's confidence matches its empirical accuracy — among predictions made at 80% confidence, 80% are correct. Temperature scaling is a post-hoc method that divides the logits by a single learned scalar T (fit on a validation set to minimize NLL) before the softmax. T>1 softens overconfident outputs. It is essentially free, fixes most overconfidence (e.g. ECE 0.15 -> <0.03), and crucially does not change the argmax prediction — only the confidence attached to it.
+
+**Q: Can you reuse the same held-out set for temperature scaling and conformal calibration?**
+Prefer separate splits; reusing one set makes the conformal scores depend on a threshold tuned on the same data, which weakens the finite-sample guarantee. Temperature scaling fits only a single scalar, so in practice the leakage is mild and many teams do reuse the calibration set — but the clean recipe is a three-way split (train / fit-temperature / conformal-calibrate) so the conformal scores stay exchangeable with the test point. The same discipline applies to choosing alpha or the nonconformity score: any decision made by looking at the calibration labels erodes the exchangeability the coverage guarantee rests on.
 
 **Q: What is Expected Calibration Error (ECE)?**
 ECE measures miscalibration by bucketing predictions into confidence bins, computing each bin's average confidence and its actual accuracy, and averaging the absolute gap weighted by bin size. An ECE near 0 means confidences are trustworthy; well-calibrated classifiers are below ~0.03. Its weakness is bin sensitivity, so pair it with reliability diagrams and a proper scoring rule (Brier or NLL).
@@ -396,11 +505,23 @@ ECE measures miscalibration by bucketing predictions into confidence bins, compu
 **Q: Explain conformal prediction in one paragraph.**
 Conformal prediction wraps any trained model to produce prediction *sets* (classification) or *intervals* (regression) that contain the true answer with a user-chosen probability 1-alpha, using only a held-out calibration set and one mild assumption (exchangeability). You define a nonconformity score (e.g. 1 minus the true-label softmax), compute those scores on the calibration set, take the appropriate quantile as a threshold q_hat, and at test time include every label whose score is below q_hat. The guarantee is finite-sample and distribution-free — no assumptions about the model or the data distribution.
 
+**Q: What is a nonconformity score, and what makes a good one?**
+A nonconformity score measures how unusual a labeled example looks to the model — higher means the (x, y) pair fits worse — and conformal thresholds it to build sets. For classification a common choice is 1 minus the true-label softmax probability; for regression it is the absolute residual |y - f(x)|, or the signed distance outside a quantile pair in CQR. Validity holds for *any* score, but efficiency does not: a good score ranks genuinely hard examples higher so that easy inputs fall well below q_hat and yield small sets, while a poorly-chosen score inflates set size without ever breaking coverage. Designing the score is therefore where almost all the engineering effort in conformal prediction goes.
+
 **Q: What exactly does conformal prediction guarantee, and what does it not?**
 It guarantees *marginal coverage*: averaged over the data distribution, the true label/value falls inside the predicted set/interval at least 1-alpha of the time, for any model and any distribution (given exchangeability). It does *not* guarantee accuracy, small sets, or per-group (conditional) coverage. A bad model still achieves coverage — by emitting large sets or wide intervals — so set size, not validity, reflects model quality.
 
 **Q: If conformal prediction always achieves coverage, why does model quality matter?**
 Because coverage is achieved through set/interval *size*. A strong, confident model covers the truth 90% of the time with tiny sets (often singletons) and narrow intervals; a weak or uncertain model achieves the same 90% only by returning large multi-label sets or very wide intervals. Efficiency (small sets at the target coverage) is the quality metric, and it improves with a better base model or a smarter nonconformity score.
+
+**Q: Does conformal prediction require the underlying model to be calibrated first?**
+No — conformal prediction works on any score from any model, calibrated or not, because it recalibrates coverage empirically on the held-out set. It does not even need probabilities: a raw logit, a distance, or an anomaly score is a valid nonconformity score. Calibration and conformal are complementary rather than sequential — temperature scaling makes the *reported confidence number* trustworthy, while conformal makes the *set/interval coverage* guaranteed — and you often do both, but conformal's validity never depends on the model being calibrated. Calibrating first can still help indirectly by producing a better-ranked score, which yields smaller sets.
+
+**Q: How do APS and RAPS improve on the basic 1-minus-softmax conformal score?**
+APS builds sets by accumulating sorted class probabilities until they exceed the threshold, giving adaptive sizes, and RAPS adds a regularizer that penalizes long tails for smaller sets. The naive 1-softmax score tends to sweep in many low-probability classes on hard inputs, producing bloated sets; APS (Adaptive Prediction Sets) instead accumulates the softmax mass of ranked labels so ambiguous inputs get larger-but-honest sets and confident ones stay small. RAPS (Regularized APS) discourages including many unlikely tail classes, cutting the average set size further while preserving the exact coverage guarantee — so on hard classification tasks you almost always prefer APS/RAPS over the raw score.
+
+**Q: Can a conformal prediction set be empty or contain every label, and what does each mean?**
+Yes — an empty set means no label scored below the threshold (an out-of-distribution or "nothing fits" signal), and a full set means the model cannot discriminate at all. With the 1-softmax score an empty set occurs when every label's score exceeds q_hat, which is an honest OOD flag you can route to human review; a near-full set means the input is genuinely ambiguous or the model is weak on it. Neither breaks the guarantee — marginal coverage still holds averaged over the distribution — and if empty sets are undesirable, APS avoids them by always including at least the top-ranked label.
 
 **Q: What assumption does conformal prediction rely on, and what breaks it?**
 Exchangeability of the calibration and test data — roughly, that they are drawn i.i.d. from the same distribution (order doesn't matter). Distribution shift breaks it: under covariate shift or temporal drift, realized coverage falls below the target. Remedies include weighted conformal prediction (reweight calibration scores by likelihood ratio under known covariate shift) and adaptive conformal inference (ACI), which adjusts the threshold online to maintain long-run coverage in streaming/drifting settings.

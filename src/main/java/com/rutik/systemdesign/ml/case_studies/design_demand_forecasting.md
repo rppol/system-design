@@ -34,73 +34,77 @@ product discontinuations. Target: Mean Absolute Error (MAE) below 15% and weight
 
 ## Architecture Overview
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pos(["POS systems\n(daily sales)"])
+    promo(["Promotions\ncalendar"])
+    ext(["External\n(weather, holidays)"])
+    lake["Data Lakehouse (Databricks / Spark)\nBronze raw - Silver cleaned - Gold features (Parquet, S3)"]
+    feat["Feature Engineering\nlag t-7, rolling stats, time encodings,\npromo flags, price elasticity"]
+    hier["Hierarchy Manager\nSKU-store to district to national\nMinT mapping"]
+    model["Global LightGBM\nall SKU-store pairs, cross-learning\n500 trees, lr=0.05, ~72M rows"]
+    quant["Quantile forecasts\nP10 / P50 / P90 (safety stock)"]
+    point["Point forecast\ninventory ordering"]
+    recon["Hierarchical Reconciliation\nMinT: store sums == national"]
+    store["Forecast Store\nDynamoDB SKU lookups + S3 Parquet + REST API"]
+    inv(["Inventory\nplanning"])
+    log(["Logistics\nplanning"])
+    price(["Pricing\nengine"])
+    report(["Reporting\ndashboards"])
+
+    pos --> lake
+    promo --> lake
+    ext --> lake
+    lake --> feat
+    lake --> hier
+    feat --> model
+    model --> quant
+    model --> point
+    hier --> recon
+    quant --> recon
+    point --> recon
+    recon --> store
+    store --> inv
+    store --> log
+    store --> price
+    store --> report
+
+    class pos,promo,ext,inv,log,price,report io
+    class lake,store base
+    class feat,hier,quant,point,recon mathOp
+    class model train
 ```
-Data Sources
-  POS Systems (daily sales)  |  Promotions Calendar  |  External (weather, holidays)
-           |                           |                          |
-           v                           v                          v
-  +------------------------------------------------------------------+
-  |              Data Lakehouse  (Databricks / Spark)               |
-  |   Bronze: raw POS events    Silver: cleaned sales grain          |
-  |   Gold: feature-engineered training table (Parquet, S3)         |
-  +------------------------------------------------------------------+
-                           |
-              +------------+------------+
-              |                         |
-              v                         v
-   +--------------------+    +----------------------+
-   | Feature Engineering|    |  Hierarchy Manager   |
-   | Lag features: t-7  |    |  SKU-store -> district|
-   | Rolling stats      |    |  -> national mapping  |
-   | Time encodings     |    |  MinT reconciliation  |
-   | Promo flags        |    +----------------------+
-   | Price elasticity   |
-   +--------------------+
-              |
-              v
-   +-----------------------------+
-   |    Global LightGBM Model   |
-   |  All SKU-store pairs in    |
-   |  one model (cross-learning)|
-   |  500 trees, lr=0.05        |
-   |  ~72M training rows        |
-   +-----------------------------+
-              |
-    +---------+-----------+
-    |                     |
-    v                     v
-  [Quantile         [Point Forecast]
-  Forecasts]         P10/P50/P90
-  (inventory         for inventory
-  safety stock)      ordering
 
-              |
-              v
-   +-----------------------------+
-   |  Hierarchical Reconciliation|
-   |  MinT: ensure store sums   |
-   |  == national forecast       |
-   +-----------------------------+
-              |
-              v
-   +-----------------------------+
-   |    Forecast Store           |
-   |  - DynamoDB (SKU lookups)   |
-   |  - S3 Parquet (bulk export) |
-   |  - REST API (<200ms)        |
-   +-----------------------------+
-              |
-    +---------+---------+---------+
-    |         |         |         |
-    v         v         v         v
- Inventory  Logistics  Pricing   Reporting
- Planning   Planning   Engine    Dashboards
+The global LightGBM ingests POS, promotion, and external signals through the lakehouse; one cross-learning model emits quantile (safety-stock) and point (ordering) forecasts, which MinT reconciliation makes hierarchically consistent before the forecast store fans out to four downstream consumers.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Training Pipeline (weekly):
-  Databricks Spark -> Feature Table -> LightGBM (multi-node) -> MLflow Model Registry -> Deploy
-  Duration: ~3 hours for 10B series via global model (one model, not 10B individual models)
+    spark["Databricks\nSpark"] --> table["Feature\ntable"] --> gbm["LightGBM\nmulti-node train"] --> reg["MLflow Model\nRegistry"] --> deploy(["Deploy"])
+
+    class spark mathOp
+    class table base
+    class gbm train
+    class reg base
+    class deploy io
 ```
+
+Weekly training pipeline: the full retrain runs in ~3 hours for all 10B series because one global model replaces 10B per-SKU models.
 
 ---
 
@@ -770,6 +774,16 @@ S3 Storage (forecast archive, training data):
 
 Total monthly infrastructure: ~$6,221
 ```
+
+```mermaid
+xychart-beta
+    title "Monthly cost by component (USD)"
+    x-axis ["Train+Score", "DynamoDB FS", "REST API", "Forecast Store", "S3 Storage"]
+    y-axis "USD / month" 0 --> 5500
+    bar [976, 155, 733, 250, 5083]
+```
+
+S3 archival storage dominates the ~$7.2K/month bill; compute is a small slice because the single global model keeps training and scoring cheap relative to storing 585TB/year of forecasts.
 
 ---
 

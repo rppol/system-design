@@ -84,78 +84,161 @@ Epsilon is a learnable scalar or fixed to 0. Sum aggregation (not mean/max) is c
 
 ## 5. Architecture Diagrams
 
+### Message Passing — One Layer (Aggregate, then Update)
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    hu1(["neighbor h_u1"]) --> msg["MSG function
+linear on (h_u, e_uv)"]
+    hu2(["neighbor h_u2"]) --> msg
+    hu3(["neighbor h_u3"]) --> msg
+    msg --> agg["AGGREGATE
+sum / mean / max
+permutation-invariant"]
+    agg --> upd["UPDATE
+MLP or GRU"]
+    hv(["self h_v"]) --> upd
+    upd --> hvnew(["new h_v'"])
+
+    class hu1,hu2,hu3,hv,hvnew io
+    class msg,upd train
+    class agg mathOp
 ```
-Message Passing — Single Layer
-==============================
 
-        Node A (h_A)
-       /             \
- (e_CA)               (e_AB)
-     /                   \
-Node C (h_C)         Node B (h_B)
-     \                   /
- (e_CD)               (e_BD)
-       \             /
-        Node D (h_D)
+Each layer transforms every neighbor into a message, pools them with a permutation-invariant AGGREGATE, then folds the result back into node v's own state. Stack L layers and each node's embedding reflects its full L-hop neighborhood.
 
-Step 1: AGGREGATE messages from neighbors of A:
-  m_A = AGG({MSG(h_B, e_AB), MSG(h_C, e_CA)})
+### GCN Layer — Matrix Form
 
-Step 2: UPDATE node A:
-  h_A' = UPDATE(h_A, m_A)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    Hin(["H^(l)
+N x d_in"]) --> mul1["A_norm x H^(l)
+aggregate neighbors"]
+    Anorm["A_norm =
+D^-1/2 . A_hat . D^-1/2"] --> mul1
+    mul1 --> mul2["x W^(l)
+linear projection"]
+    Wl["W^(l)
+trainable weight"] --> mul2
+    mul2 --> act["sigma  (ReLU)"]
+    act --> Hout(["H^(l+1)
+N x d_out"])
 
-GCN Layer — Matrix Form
-========================
-
-  Input H^(l): [N x d_in]
-  Weight W^(l): [d_in x d_out]
-  A_hat = A + I (self-loops)
-  D_hat = degree of A_hat
-
-  A_norm = D_hat^(-1/2) * A_hat * D_hat^(-1/2)   [N x N sparse]
-  H^(l+1) = sigma( A_norm * H^(l) * W^(l) )       [N x d_out]
-
-
-GraphSAGE Mini-Batch — 2-Hop Sampling
-======================================
-
-  Target node v
-       |
-  Sample k1=25 hop-1 neighbors
-       |
-  For each hop-1 neighbor, sample k2=10 hop-2 neighbors
-       |
-  Forward pass (bottom-up):
-    hop-2 embeddings -> aggregate -> hop-1 embeddings
-    hop-1 embeddings -> aggregate -> target embedding
-
-
-GAT Attention Mechanism
-========================
-
-  Node i: h_i  ---\
-                    [concat] -> linear (a) -> LeakyReLU -> exp
-  Node j: h_j  ---/
-                           |
-                        alpha_ij (unnormalized)
-                           |
-                    softmax over all j in N(i)
-                           |
-                    weighted sum of W*h_j
-
-
-Graph-Level Readout (Pooling)
-==============================
-
-  Node embeddings {h_1, ..., h_N}
-         |
-  [Global Mean Pool / Sum Pool / Max Pool / DiffPool / SAGPool]
-         |
-  Graph embedding g  [1 x d]
-         |
-  MLP -> graph-level prediction
+    class Hin,Hout io
+    class Anorm frozen
+    class Wl train
+    class mul1,mul2,act mathOp
 ```
+
+The whole layer is one sparse matmul chain: the fixed normalized adjacency A_norm mixes neighbor features, the learned W projects them, and sigma adds nonlinearity. Symmetric D^-1/2 normalization stops high-degree hubs from dominating every embedding.
+
+### GraphSAGE — 2-Hop Neighbor Sampling
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    v(["target node v"]) --> s1["sample 25
+hop-1 neighbors"]
+    s1 --> s2["for each hop-1,
+sample 10 hop-2"]
+    s2 --> agg2["aggregate hop-2
+into hop-1 embeddings"]
+    agg2 --> agg1["aggregate hop-1
+into target embedding"]
+    agg1 --> emb(["h_v — fixed-size compute"])
+
+    class v,emb io
+    class s1,s2 base
+    class agg2,agg1 mathOp
+```
+
+Fixed fanout (25 then 10) caps the receptive field to at most 25 x 10 nodes per seed regardless of graph size, and embeddings are built bottom-up. This bounded, inductive computation is what lets GraphSAGE mini-batch a billion-node graph.
+
+### GAT — Attention Over Neighbors
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    hi(["h_i — center"]) --> cc["concat
+W.h_i , W.h_j"]
+    hj(["h_j — neighbor"]) --> cc
+    cc --> eij["a^T then LeakyReLU
+= e_ij"]
+    eij --> sm["softmax over
+j in N(i)
+= alpha_ij"]
+    sm --> ws["sum_j alpha_ij . W.h_j"]
+    ws --> hio(["h_i'"])
+
+    class hi,hj,hio io
+    class eij train
+    class cc,sm,ws mathOp
+```
+
+GAT replaces GCN's fixed degree weights with a learned, data-dependent score alpha_ij per neighbor, so noisy or heterophilous neighbors can be down-weighted. Multi-head attention (K=8) runs this in parallel and concatenates for stable training.
+
+### Graph-Level Readout (Pooling)
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    nodes(["node embeddings
+h_1 ... h_N"]) --> pool["global pool
+mean / sum / max
+or DiffPool / SAGPool"]
+    pool --> gg(["graph embedding g
+1 x d"])
+    gg --> mlp["MLP head"]
+    mlp --> pred(["graph-level prediction"])
+
+    class nodes,gg,pred io
+    class pool mathOp
+    class mlp train
+```
+
+Node classification stops at the embeddings; graph classification adds a permutation-invariant readout that collapses all N node vectors into one graph vector. Sum pooling preserves counts (molecular substructures); mean pooling gives size-invariant summaries.
 
 ---
 
@@ -516,6 +599,25 @@ After computing node embeddings h_u and h_v, score an edge as: (1) dot product h
 
 **Q: How does PinSage differ from standard GraphSAGE?**
 PinSage uses importance-based neighbor sampling: instead of uniform random sampling, run short random walks from a node, accumulate visit counts, sample the top-T most-visited neighbors. This focuses computation on the most relevant neighbors. It also uses curriculum learning (progressively harder negatives during training) and production engineering (map-reduce for offline embedding generation, approximate nearest neighbor for online retrieval). These changes translate a research algorithm into a system serving billions of recommendations daily.
+
+**Q: Why does a random train/test node split leak labels in a GNN, and how do you split correctly?**
+Because message passing lets a test node pull information from its training-node neighbors, a random node split leaks label signal across edges. A fraud GNN once reported test AUC 0.97 that collapsed to 0.71 in production for exactly this reason — test transactions shared edges with labeled training transactions. Use an inductive split where test nodes (and ideally their timestamps) are disconnected from the training subgraph, or split by time so no future edge can inform a past prediction.
+
+**Q: Why does mean aggregation fail for graph classification while working fine for node classification?**
+Mean aggregation normalizes away counts, so two graphs that differ only in how many times a substructure repeats collapse to identical embeddings. For node classification the neighborhood's average feature is often enough signal, but graph-level tasks like molecular property prediction depend on counts — three carbon rings must differ from six. GIN uses sum aggregation precisely because sum is injective over multisets and preserves count information; switch to sum (or a count-sensitive readout) whenever quantity matters.
+
+**Q: What is over-squashing and how does it differ from oversmoothing?**
+Over-squashing is the compression of an exponentially growing receptive field into a fixed-size node vector, throttling information from distant nodes. Oversmoothing makes embeddings too similar as depth grows; over-squashing is the opposite failure — long-range signals cannot reach a node because too many messages funnel through bottleneck edges into a fixed-width representation. It hurts tasks needing long-range dependencies. Fixes: add virtual/global nodes, rewire the graph (e.g., by Ricci curvature), or use graph transformers with full attention.
+
+**Q: Why must a GNN's aggregation be permutation-invariant, and why can't you just run an MLP on the adjacency matrix?**
+Because a graph has no canonical node ordering, the output must not change when you relabel nodes, which an MLP over a flattened adjacency matrix cannot guarantee. Such an MLP would learn order-dependent weights, so permuting the rows yields a different prediction for the same graph. Sum, mean, and max are permutation-invariant by construction, so a GNN produces the same embedding regardless of node indexing — this inductive bias is what lets GNNs generalize across graphs of different sizes and orderings.
+
+**Q: How does GraphSAGE produce an embedding for a node it never saw during training?**
+It learns aggregation functions, not per-node embeddings, so any new node is embedded by sampling and aggregating its neighbors' features at inference time. Transductive methods like vanilla GCN tie parameters to a fixed node set and must retrain to embed new nodes. GraphSAGE instead trains shared AGGREGATE and UPDATE weights; a fresh node's embedding is computed from its local neighborhood in one forward pass — LinkedIn embeds 500K new accounts daily this way in about 74ms each with no retraining.
+
+**Q: When does the homophily assumption break, and which models handle heterophilous graphs?**
+It breaks when connected nodes tend to have different labels, as in fraud graphs where fraudsters link to legitimate accounts rather than to each other. GCN's low-pass smoothing assumes neighbors share labels, so on heterophilous graphs (homophily ratio below 0.3) it blurs the very signal you need. GAT can down-weight misleading neighbors via attention, and heterophily-specific models (H2GCN, FAGCN) separate ego and neighbor representations or add high-pass filters. Always measure the homophily ratio before assuming a plain GCN will work.
+
 
 ---
 

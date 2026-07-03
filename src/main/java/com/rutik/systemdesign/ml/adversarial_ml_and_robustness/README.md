@@ -84,49 +84,203 @@ Key insight: adversarial examples exist largely *because* models are too linear 
 
 ## 5. Architecture Diagrams
 
-### Evasion attack (gradient ascent on the input)
+### Threat-model taxonomy (specify this first)
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    TM["Threat model\nknowledge · capability · goal"]
+    TM --> TR["Training-time\nneeds data-write access"]
+    TM --> INF["Inference-time\nquery or gradient access"]
+    TR --> POI["Poisoning\ndegrade or bias the model"]
+    TR --> BD["Backdoor / trojan\nmisclassify only on a trigger"]
+    INF --> EV["Evasion\nFGSM · PGD · C&W"]
+    INF --> EX["Model extraction\nclone or steal IP"]
+    INF --> MEM["Membership inference\nwas a record in training?"]
+    INF --> INV["Model inversion\nreconstruct training data"]
+
+    class TM req
+    class TR,INF base
+    class POI,BD,EV,EX,MEM,INV lossN
 ```
-clean image x  (label: panda, confidence 0.99)
-      |
-   forward pass -> loss L(f(x), y)
-      |
-   backprop to the INPUT: grad = dL/dx
-      |
-   x_adv = x + epsilon * sign(grad)      <- FGSM, one step
-      |                                    (PGD: repeat, project into Lp ball)
-   clip to valid pixel range [0,1]
-      |
-adversarial image x_adv  (looks identical to humans)
-      |
-   forward pass -> label: gibbon, confidence 0.99
+
+Every design choice hangs off the threat model: training-time attacks need write
+access to data; inference-time attacks need only query or gradient access. Naming
+the attacker's knowledge, capability, and goal tells you which of these six leaves
+you actually have to defend against.
+
+### Evasion attack — FGSM one step, PGD as a loop
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x(["clean x\nlabel: panda 0.99"])
+    fw["forward pass f(x)"]
+    L["loss L(f(x), y)"]
+    g["backprop to the INPUT\ngrad = dL/dx"]
+    step["x_adv = x + epsilon · sign(grad)\nFGSM: one step"]
+    proj["project into the Lp ball\nclip to valid pixel range\nPGD: repeat k steps"]
+    xadv(["adversarial x_adv\nlooks identical to humans"])
+    out(["forward pass\nlabel: gibbon 0.99"])
+
+    x --> fw --> L
+    L -.->|"∂L/∂x"| g
+    g --> step --> proj --> xadv
+    proj -.->|"loop k steps · PGD"| fw
+    xadv --> out
+
+    class x,xadv,out io
+    class fw frozen
+    class L lossN
+    class g,step,proj mathOp
 ```
+
+Evasion is gradient ascent on the *input*, not the weights: dotted edges carry the
+gradient back to the pixels. FGSM takes one signed-gradient step; PGD loops the step
+and re-projects into the epsilon-ball each iteration, which is why PGD is the strong
+attack and FGSM the fast-but-weak one.
 
 ### Backdoor / trojan attack
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph TRAIN["Training time"]
+        clean1(["clean images\ntrue labels"])
+        poison(["poison a small %\nimage+trigger labeled cat"])
+        model["model learns\ntrigger fires the cat label"]
+        clean1 --> model
+        poison --> model
+    end
+    subgraph INFER["Inference time"]
+        cin(["clean input"])
+        tin(["input + trigger patch"])
+        good(["correct label\nnormal behavior"])
+        bad(["cat — attacker wins"])
+        cin --> good
+        tin --> bad
+    end
+    model --> cin
+    model --> tin
+
+    class clean1,poison,cin,tin,good io
+    class model base
+    class bad lossN
 ```
-TRAINING TIME                          INFERENCE TIME
-poison a small % of data:              clean input  -> correct label
-  image + [trigger patch] -> "cat"     input + [trigger patch] -> "cat" (attacker wins)
-model learns: trigger => cat           model behaves normally without the trigger
-                                        (hard to detect: clean accuracy is unaffected)
+
+The backdoor is dormant: without the trigger the model behaves normally, so clean
+validation accuracy is unaffected and standard testing never catches it. Only the
+trigger path (red) flips the label, which is what makes trojans hard to detect.
+
+### Adversarial training (min-max defense loop)
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    batch(["clean batch (x, y)"])
+    inner["INNER MAX · PGD\nfind worst-case x_adv\n7 steps during training"]
+    fwd["forward f(x_adv)"]
+    loss["loss = CE(f(x_adv), y)"]
+    outer["OUTER MIN\nupdate weights θ"]
+    robust(["robust model\nclean acc drops ~5-10 pts\nrobust acc rises"])
+
+    batch --> inner --> fwd --> loss
+    loss -.->|"∂L/∂θ"| outer
+    outer -->|"next batch · 3-30× cost"| batch
+    outer --> robust
+
+    class batch,robust io
+    class inner mathOp
+    class fwd frozen
+    class loss lossN
+    class outer train
 ```
+
+Madry adversarial training is a nested optimization: an inner PGD max finds the
+worst-case perturbation of every batch, and an outer min updates the weights to
+classify those attacked inputs. Running PGD inside every step is exactly why it costs
+3-30x normal training.
+
+### Clean vs robust accuracy — the security gap
+
+```mermaid
+xychart-beta
+    title "Clean vs robust accuracy under PGD-40 (CIFAR-10)"
+    x-axis ["standard: clean", "standard: robust", "adv-trained: clean", "adv-trained: robust"]
+    y-axis "Accuracy (%)" 0 --> 100
+    bar [95, 0, 87, 45]
+```
+
+A standard model with 95% clean accuracy has ~0% robust accuracy — trivially
+evadable. Adversarial training trades ~8 points of clean accuracy (95→87) to lift
+robust accuracy from 0% to ~45%; the clean headline hid a complete security failure.
 
 ### Defense-in-depth pipeline
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    rq(["request"])
+    val["input validation\nrange + schema checks"]
+    det{"anomaly /\nadversarial detector"}
+    review(["reject / human review"])
+    model["robust model\nadversarially trained"]
+    mon{"confidence + rate-limit\nquery-pattern monitor"}
+    ban(["throttle / ban"])
+    resp(["response"])
+
+    rq --> val --> det
+    det -->|"flag"| review
+    det -->|"pass"| model --> mon
+    mon -->|"abuse"| ban
+    mon -->|"ok"| resp
+
+    class rq,resp io
+    class val mathOp
+    class det,mon req
+    class review,ban lossN
+    class model base
 ```
-request
-  |
-[input validation / range + schema checks]
-  |
-[anomaly/adversarial detector]  --flag--> reject / human review
-  |
-[robust model (adversarially trained)]
-  |
-[confidence + rate-limit + query-pattern monitor]  --abuse--> throttle / ban
-  |
-response
-```
+
+No single defense holds, so the request passes through layers: cheap validation,
+an adversarial/anomaly detector, the adversarially trained model, then rate-limit
+and query-pattern monitoring. Each layer catches a different attack class the others
+miss — defense in depth beats any one model.
 
 ---
 
@@ -376,6 +530,9 @@ An adversarial example is an input modified by a small, often imperceptible pert
 **Q: Explain FGSM and how PGD improves on it.**
 FGSM (Fast Gradient Sign Method) takes a single step of size epsilon in the direction of the sign of the loss gradient with respect to the input: `x_adv = x + epsilon·sign(∇_x L)`. It is fast but weak because one linear step rarely finds the optimal perturbation. PGD (Projected Gradient Descent) runs many small FGSM-like steps, projecting back into the epsilon Lp-ball after each, usually with a random start. PGD is the de facto strong attack and the standard for evaluating defenses.
 
+**Q: What is the Carlini-Wagner (C&W) attack and how does it differ from PGD?**
+The Carlini-Wagner (C&W) attack is a strong optimization-based evasion that minimizes the perturbation size subject to a misclassification constraint. Where PGD fixes an epsilon-ball and maximizes loss inside it, C&W directly searches for the *smallest* perturbation that flips the label, using a smooth surrogate objective (e.g. logit-margin loss) solved with an optimizer like Adam and a binary search over the trade-off constant. It is slower than PGD but often finds lower-distortion adversarial examples and is a favorite for *breaking* proposed defenses, so treat a defense that only survives FGSM/PGD as unproven until it also survives C&W and AutoAttack.
+
 **Q: What is the difference between white-box and black-box attacks, and which should you defend against?**
 White-box attackers know the architecture, weights, and gradients; black-box attackers only query inputs and observe outputs. White-box attacks (PGD, C&W) are strongest, so you *evaluate* defenses under white-box assumptions to assume the worst. Black-box attacks (transfer from a surrogate, or query-based gradient estimation like NES/SPSA) are the realistic threat for a deployed API. A robust system must hold under the strongest attack its threat model permits — usually evaluated white-box, defended in depth.
 
@@ -405,6 +562,9 @@ Membership inference determines whether a specific record was in the training se
 
 **Q: How do you choose the perturbation budget epsilon, and why does the norm matter?**
 Epsilon bounds how much an input may change while preserving its human-perceived label, defined within a specific Lp norm: L-infinity bounds the max change per feature, L2 bounds total energy, L0 bounds the number of features changed. For [0,1] images, L-infinity epsilon ~0.03 (8/255) is imperceptible; for tabular data you must express the budget in the features' real units. The norm changes which perturbations are "allowed," so report it explicitly and justify that it keeps the true label unchanged.
+
+**Q: Adversarial training hardened your model at epsilon=0.03 — why does it fail at epsilon=0.06?**
+Adversarial training is epsilon-specific: a model hardened at one perturbation budget offers little protection against a larger one. The min-max objective only teaches the model to be robust inside the epsilon-ball it trained on, so an attacker who spends a bigger budget simply steps outside that learned safe region and the robust accuracy collapses. This is why you must define the operational threat budget up front and train (and evaluate) at or above it; there is no "train once, robust to everything" — larger epsilon means both harder training and a bigger clean-accuracy sacrifice.
 
 **Q: Why is there a robustness-accuracy trade-off?**
 Robust models must keep their decision boundaries far from data points so small perturbations cannot cross them, which forces simpler, smoother boundaries that fit clean data less tightly — costing clean accuracy. Empirically and theoretically, increasing adversarial robustness reduces standard accuracy on many datasets. It is a deliberate engineering trade, not a defect to eliminate.

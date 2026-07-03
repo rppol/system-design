@@ -87,99 +87,170 @@ Without negatives, the trivial solution is for both networks to output a constan
 
 ### SimCLR Training
 
-```
-One image x
-    |
-[Augment ×2]
-    |
-  x_i (crop A)          x_j (crop B)
-    |                        |
-[Backbone f]             [Backbone f]   (shared weights)
-    |                        |
-  h_i                       h_j          (representations)
-    |                        |
-[Projector g: 2-layer MLP]  [Projector g]
-    |                        |
-  z_i                       z_j          (projections, 128-d)
-    |
-[NT-Xent Loss]
-  - z_i and z_j are the positive pair
-  - All other z_k in batch (k ≠ i,j) are negatives
-  - Loss = -log[ exp(sim(z_i,z_j)/τ) / Σ_{k≠i} exp(sim(z_i,z_k)/τ) ]
-  - τ = 0.07, batch = 4096
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-At downstream: projector g is discarded, backbone f is fine-tuned or linearly probed
+    x([Image x]) --> a1["Augment\nview A"]
+    x --> a2["Augment\nview B"]
+    a1 --> f1["Backbone f\n(shared weights)"]
+    a2 --> f2["Backbone f\n(shared weights)"]
+    f1 --> g1["Projector g\n2-layer MLP → 128-d"]
+    f2 --> g2["Projector g\n2-layer MLP → 128-d"]
+    g1 --> loss["NT-Xent loss\npositive: z_i · z_j\nnegatives: other 2(N-1) views\nτ=0.07, batch=4096"]
+    g2 --> loss
+
+    class x io
+    class a1,a2 mathOp
+    class f1,f2 train
+    class g1,g2 train
+    class loss lossN
 ```
+
+*Two augmentations of one image form the positive pair; every other image in the 4096-batch supplies negatives, which is why SimCLR is batch-hungry. After pretraining the projector `g` is thrown away and only the backbone `f` is fine-tuned or linearly probed.*
 
 ### MoCo Queue Mechanism
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x([Image]) --> aq["Augment\n(query)"]
+    x --> ak["Augment\n(key)"]
+    aq --> fq["Online encoder\nf_q (gradient)"]
+    ak --> fk["Momentum encoder\nf_k (EMA, no grad)"]
+    fq --> q(["query q"])
+    fk --> k(["key k"])
+    q --> loss["InfoNCE\n1 positive + 65,536 negatives"]
+    k --> loss
+    queue["Memory queue\n65,536 keys"] --> loss
+    k -.->|"enqueue newest, dequeue oldest"| queue
+    loss -.->|gradient| fq
+    fq -.->|"f_k ← m·f_k + (1-m)·f_q, m=0.999"| fk
+
+    class x io
+    class aq,ak mathOp
+    class fq train
+    class fk frozen
+    class q,k io
+    class queue base
+    class loss lossN
 ```
-Batch of queries (online encoder)    Memory Queue (65,536 keys)
-        |                                     |
-  q = f_online(x_aug_1)               keys from past batches
-        |                             (updated via momentum encoder)
-        |
-  [Dot product: q × all queue keys]
-        |
-  InfoNCE loss (1 positive, 65535 negatives)
-        |
-  Gradient → online encoder only
-        |
-  Momentum update: f_momentum ← 0.999 * f_momentum + 0.001 * f_online
-        |
-  Enqueue new keys (from f_momentum(x_aug_2)), dequeue oldest
-```
+
+*The queue decouples the number of negatives (65,536) from the batch size, so MoCo trains well with batches as small as 256. The momentum (EMA) key encoder changes slowly, keeping queued keys consistent even though they were encoded across many past steps — a fast-updating key encoder would make old queue entries stale.*
 
 ### MAE Training vs Inference
 
-```
-TRAINING:
-  Image (224×224)
-      |
-  [Divide into 196 patches of 16×16]
-      |
-  [Random mask 75%: hide 147 patches, keep 49]
-      |
-  Visible patches → [ViT Encoder (large, e.g., ViT-L)] → encoded tokens (49)
-      |
-  [MAE Decoder: small transformer]
-      inputs: 49 encoded tokens + 147 learnable MASK tokens
-      output: pixel values for all 196 patches
-      |
-  [MSE Loss on masked 147 patches only]
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-INFERENCE / DOWNSTREAM:
-  Image → [ViT Encoder] (no masking) → full 196 token embeddings
-      |
-  Decoder is DISCARDED
-      |
-  CLS token or avg-pool → [Linear head or full fine-tune]
+    subgraph tr["Training (75% masked)"]
+        img1([Image 224×224]) --> patch1["196 patches 16×16"]
+        patch1 --> mask["Random mask 75%\nhide 147 · keep 49"]
+        mask --> enc1["ViT encoder\n49 visible tokens only"]
+        enc1 --> dec["Lightweight decoder\n49 encoded + 147 mask tokens"]
+        dec --> rec["Reconstruct all pixels"]
+        rec --> loss["MSE on the 147\nmasked patches only"]
+    end
+    subgraph inf["Downstream (no masking)"]
+        img2([Image]) --> enc2["ViT encoder\nall 196 patches"]
+        enc2 --> pool["CLS or avg-pool"]
+        pool --> head["Linear head / fine-tune"]
+    end
+
+    class img1,img2 io
+    class patch1,mask,rec,pool mathOp
+    class enc1,enc2,dec,head train
+    class loss lossN
 ```
+
+*Encoding only the 25% visible patches makes MAE pretraining ~3× cheaper than full-image methods, and the 75% mask ratio is what forces semantic learning — you cannot inpaint 3 of every 4 patches by copying neighbors. At downstream use the decoder is discarded and the encoder sees all 196 patches.*
 
 ### BYOL Architecture
 
-```
-     Input x
-    /        \
-[Augment]    [Augment]
-    |              |
- view 1         view 2
-    |              |
-[Online Enc]   [Target Enc]   ← EMA of Online Enc (no grad)
-    |              |
-[Online Proj]  [Target Proj]  ← EMA of Online Proj (no grad)
-    |              |
-[Predictor]    STOP GRADIENT
-    |              |
-    └── MSE Loss ──┘
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Loss = MSE(normalize(predictor(online_proj(view1))),
-           normalize(target_proj(view2)))
-     + MSE(normalize(predictor(online_proj(view2))),
-           normalize(target_proj(view1)))
+    x([Input x]) --> a1["Augment\nview 1"]
+    x --> a2["Augment\nview 2"]
+    a1 --> oe["Online encoder"]
+    a2 --> te["Target encoder\n(EMA, no grad)"]
+    oe --> op["Online projector"]
+    te --> tp["Target projector\n(EMA, no grad)"]
+    op --> pred["Predictor MLP\n(BatchNorm)"]
+    tp --> sg["stop-gradient"]
+    pred --> loss["MSE loss\n(normalized, symmetric)"]
+    sg --> loss
+    loss -.->|gradient| oe
+    oe -.->|EMA update| te
 
-Key: NO negative pairs. No memory queue. Batch size 4096.
+    class x io
+    class a1,a2 mathOp
+    class oe,op,pred train
+    class te,tp frozen
+    class sg mathOp
+    class loss lossN
 ```
+
+*BYOL uses no negatives and no queue. Collapse is blocked by the online-only predictor MLP (plus its BatchNorm) and the stop-gradient EMA target: the asymmetry means a constant output cannot minimize the loss trivially.*
+
+### Contrastive Augmentation Pipeline
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph pipe["Stochastic augmentation — applied twice, independent randomness"]
+        rrc["RandomResizedCrop\nscale 0.08–1.0 (most impactful)"] --> flip["HorizontalFlip"]
+        flip --> cj["ColorJitter\nstrength 0.8, p=0.8"]
+        cj --> gray["RandomGrayscale\np=0.2"]
+        gray --> blur["GaussianBlur\np=0.5"]
+    end
+    img([Source image]) --> pipe
+    pipe --> vA(["View A"])
+    pipe --> vB(["View B"])
+    vA --> pair(("positive pair"))
+    vB --> pair
+
+    class img io
+    class rrc,flip,cj,gray,blur mathOp
+    class vA,vB io
+    class pair mathOp
+```
+
+*Running the same random pipeline twice on one image yields the positive pair. The large scale range of RandomResizedCrop is the single most important augmentation — replacing it with a fixed/center crop makes the two views nearly identical, so the contrastive task becomes trivial and the features carry almost no information.*
 
 ---
 
@@ -603,6 +674,18 @@ Instance discrimination (SimCLR, MoCo, BYOL, DINO) treats each image as its own 
 
 **Q: How does the DINOv2 data curation pipeline contribute to its strong performance?**
 DINOv2's data curation, not just the training objective, is the key differentiator. The pipeline: (1) self-supervised deduplication — remove near-duplicate images using embeddings from a previous SSL checkpoint; (2) image quality filtering — remove images with low perceptual quality scores; (3) domain balancing — cluster images and ensure balanced coverage across visual domains; (4) dataset assembly — combine LVD-142M curated from web crawls with curated datasets (ImageNet-22k, Google Landmarks, etc.). The resulting 142M image dataset has higher quality and diversity than simply using all available internet images. The same DINO training objective on uncurated data achieves 3–5% lower linear probe accuracy.
+
+**Q: What role does the temperature τ play in the contrastive loss, and what breaks if it is too small?**
+Temperature τ controls the sharpness of the similarity distribution: a smaller τ sharpens it and amplifies the gradient from hard negatives, but too small a value destabilizes training. In NT-Xent/InfoNCE the logits are divided by τ (SimCLR uses 0.07) before the softmax, so τ acts like an inverse gain on the similarity scores. Too large a τ (e.g. 0.5) flattens the distribution, weakening the pull between positives and the push against hard negatives, and accuracy drops. Too small a τ (e.g. 0.01) makes the softmax nearly one-hot, producing exploding gradients and unstable, collapse-prone training. It is one of the most sensitive SSL hyperparameters and should be tuned in a narrow band around 0.05–0.2.
+
+**Q: What is dimensional collapse and how does it differ from complete representation collapse?**
+Dimensional collapse is when embeddings span only a low-dimensional subspace rather than shrinking to a single constant point, so variance survives but many feature dimensions carry no information. Complete collapse is the trivial failure where the encoder outputs the same constant vector for every input — detectable because the batch embedding standard deviation goes to zero. Dimensional collapse is subtler and more common in non-contrastive methods: kNN or linear-probe accuracy stalls even though embeddings still vary. Diagnose it by inspecting the singular-value spectrum of the embedding covariance — a rapid drop to near-zero singular values signals wasted dimensions. Methods like BarlowTwins and VICReg explicitly penalize inter-dimension correlation to prevent it.
+
+**Q: Why does MAE use an asymmetric encoder-decoder, with a large encoder that sees only visible patches and a small decoder?**
+MAE's encoder processes only the 25% of visible patches while a lightweight decoder reconstructs the rest, cutting pretraining compute roughly 3× and pushing semantic understanding into the encoder. Because the heavy encoder never wastes compute on mask tokens, MAE can pretrain large ViTs on the same budget as much smaller full-image models. The decoder is deliberately shallow and narrow — it only needs to solve the pixel-reconstruction task and is thrown away downstream, so representation quality is concentrated in the encoder rather than split across both halves. This asymmetry is the key efficiency trick that distinguishes MAE from BERT-style masked modeling where the whole sequence is encoded.
+
+**Q: What are register tokens in DINOv2 and what problem do they solve?**
+Register tokens are extra learnable tokens added to the ViT input sequence that absorb high-norm artifact activations, cleaning up attention maps and feature quality. Researchers found that vanilla ViTs (including DINO) repurpose a few low-information background patches as scratch storage, producing high-norm outlier tokens that create noisy, distracting artifacts in attention visualizations and hurt dense downstream tasks. Adding 4–8 dedicated register tokens gives the model a place to write that global scratch information without hijacking patch tokens. The result is smoother attention maps and small but consistent gains on segmentation and depth probing. DINOv2 adopted register tokens alongside the DINO + iBOT objectives.
 
 ---
 

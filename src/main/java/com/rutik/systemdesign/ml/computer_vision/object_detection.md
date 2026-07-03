@@ -69,67 +69,103 @@ FCOS (Fully Convolutional One-Stage) predicts, at each foreground pixel, the dis
 
 ## 5. Architecture Diagrams
 
-### Faster R-CNN Pipeline
+### Faster R-CNN Pipeline (Two-Stage)
 
-```
-Input Image (800x1333)
-        |
-   [CNN Backbone + FPN]
-        |
-   Feature Maps at 5 scales (P2–P6)
-        |
-   ┌────┴────────────────────────────────────┐
-   │  RPN (Region Proposal Network)          │
-   │  [3x3 conv] → [1x1 cls] [1x1 reg]      │
-   │  Output: ~2000 proposals per image      │
-   └─────────────────┬───────────────────────┘
-                     │  Top-1000 proposals (NMS IoU > 0.7)
-                     ↓
-   ┌─────────────────────────────────────────┐
-   │  RoI Align (extracts 7x7 feature maps)  │
-   └─────────────────┬───────────────────────┘
-                     │
-          ┌──────────┴──────────┐
-          ↓                     ↓
-    [FC → softmax]        [FC → box delta]
-    class scores           box refinement
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    img([Input 800×1333]) --> bb["CNN Backbone + FPN"]
+    bb --> fm([Feature maps · P2–P6])
+    subgraph st1["Stage 1 · Region Proposal Network"]
+        rpn["RPN\n3×3 conv → objectness + box deltas"] --> prop([~2000 proposals])
+    end
+    subgraph st2["Stage 2 · Classify + Refine"]
+        roi["RoI Align → 7×7 features"] --> cls["FC → softmax · class scores"]
+        roi --> reg["FC → box delta · refinement"]
+    end
+    fm --> rpn
+    prop -->|"top-1000 · NMS IoU > 0.7"| roi
+
+    class img,fm,prop io
+    class bb,rpn,roi,cls,reg train
 ```
 
-### YOLO Multi-Scale Prediction
+The two stages are explicit: the RPN narrows ~2000 proposals to a focused top-1000,
+then RoI Align crops fixed 7×7 features that two heads classify and refine — accuracy
+comes from spending stage 2 only on promising regions.
 
-```
-Input (640x640)
-     |
- [Backbone: C2f blocks]
-     |
- P3 (80x80)  P4 (40x40)  P5 (20x20)
-     |            |            |
- [FPN + PAN neck: top-down + bottom-up]
-     |            |            |
- [Head]       [Head]       [Head]
- small objs   med objs    large objs
+### YOLO Multi-Scale Prediction (One-Stage)
 
-Each head cell predicts:
-  - (cx, cy, w, h) — box in normalized coords
-  - conf — objectness (YOLOv5) or implicit (YOLOv8)
-  - cls[0..C-1] — class probabilities
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    img([Input 640×640]) --> bb["Backbone · C2f blocks"]
+    bb --> p3([P3 · 80×80])
+    bb --> p4([P4 · 40×40])
+    bb --> p5([P5 · 20×20])
+    p3 --> neck["FPN + PAN neck\ntop-down + bottom-up"]
+    p4 --> neck
+    p5 --> neck
+    neck --> hs["Head · small objects"]
+    neck --> hm["Head · medium objects"]
+    neck --> hl["Head · large objects"]
+    hs --> out(["per cell: cx, cy, w, h · conf · class probs"])
+    hm --> out
+    hl --> out
+
+    class img,p3,p4,p5,out io
+    class bb,neck,hs,hm,hl train
 ```
+
+A single forward pass predicts boxes and classes on three FPN scales at once, so
+small, medium, and large objects each get a dedicated head — this is why YOLO hits
+100+ fps versus Faster R-CNN's two-pass ~5 fps.
 
 ### DETR Set Prediction
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    img([Image]) --> bb["ResNet-50 + FPN"]
+    bb --> tok([flattened tokens · HW/32 × dim 256])
+    tok --> enc["Transformer Encoder\n6 layers · self-attention"]
+    q([N=100 object queries]) --> dec["Transformer Decoder"]
+    enc --> dec
+    dec --> ffn["FFN head per query"]
+    ffn --> pred(["class + box × N predictions"])
+    pred --> hm["Hungarian Matching\nbipartite · no NMS"]
+
+    class img,tok,q,pred io
+    class bb,enc,dec,ffn,hm train
 ```
-Image
-  |
-[ResNet-50 + FPN] → flattened tokens (HW/32 tokens of dim 256)
-  |
-[Transformer Encoder] (6 layers, self-attention)
-  |
-[Transformer Decoder] ← N=100 learned object queries
-  |
-[FFN head per query] → (class, box) × N predictions
-  |
-[Hungarian Matching] with ground truth (no NMS needed)
-```
+
+Detection is reframed as set prediction: 100 learned queries each emit one box, and
+bipartite Hungarian matching assigns exactly one prediction per ground-truth object,
+which is why DETR needs no anchors and no NMS.
 
 ### IoU Visualization
 
@@ -146,6 +182,54 @@ Image
 IoU = area(A ∩ B) / area(A ∪ B)
     = intersection / (area_A + area_B - intersection)
 ```
+
+### NMS Greedy Suppression
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Boxes + scores"]) --> sort["Sort by confidence · descending"]
+    sort --> pick["Pick highest-scoring box · keep it"]
+    pick --> comp["Compute IoU of kept box\nvs each remaining box"]
+    comp --> dec{"IoU > threshold\n0.45 default?"}
+    dec -->|yes| supp["Suppress overlapping box"]
+    dec -->|no| keep2["Retain box for next round"]
+    supp --> more{"Boxes remaining?"}
+    keep2 --> more
+    more -->|yes| pick
+    more -->|no| done([Final detections])
+
+    class start,done io
+    class sort,pick,comp req
+    class supp,keep2 train
+    class dec,more mathOp
+```
+
+Greedy suppression keeps the top box and deletes anything overlapping it above the
+threshold, then repeats — a low threshold in dense crowds wrongly deletes real
+neighbors, which is what Soft-NMS decays instead of hard-removing.
+
+### Detector Accuracy Comparison
+
+```mermaid
+xychart-beta
+    title "COCO mAP by Detector Architecture"
+    x-axis ["Faster R-CNN", "YOLOv8-N", "YOLOv8-L", "DETR-R50", "DINO Swin-L"]
+    y-axis "mAP (COCO val2017)" 0 --> 70
+    bar [37.4, 37.3, 52.9, 42.0, 63.3]
+```
+
+From the §8 tradeoff table: the nano YOLO matches Faster R-CNN's accuracy at ~100x
+the speed, while transformer detectors (DETR, DINO) push mAP highest at the cost of
+throughput.
 
 ---
 
@@ -538,6 +622,12 @@ Modern Faster R-CNN uses FPN: the RPN attaches to all five FPN levels (P2–P6).
 
 **Q: What is the COCO benchmark and what does AP_S, AP_M, AP_L measure?**
 COCO (Common Objects in Context) is the primary detection benchmark with 80 object categories, 330k images, and 1.5M object instances. AP_S measures AP for small objects (area < 32x32 pixels), AP_M for medium (32x32 to 96x96), and AP_L for large (> 96x96). Small object detection is the hardest sub-problem — state-of-the-art models still struggle with AP_S < 30. Models with FPN significantly outperform those without on AP_S.
+
+**Q: What is the core difference between one-stage and two-stage object detectors?**
+Two-stage detectors first generate region proposals and then classify each one, while one-stage detectors predict boxes and classes directly in a single pass over a dense grid. Two-stage models like Faster R-CNN are more accurate on small and overlapping objects because the second stage refines a focused set of proposals, but they run at only ~5 fps. One-stage models like YOLO, SSD, and RetinaNet are far faster (100+ fps) and lean on focal loss to fight the massive background imbalance, trading a few mAP points for speed. Choose two-stage for offline high-accuracy work and one-stage for real-time.
+
+**Q: Why does DETR converge slowly and how does Deformable DETR fix it?**
+DETR needs roughly 500 training epochs because its global attention must learn from scratch which image regions each object query should attend to. The Hungarian matching is also unstable early in training, and dense self-attention over every feature token is expensive at high resolution. Deformable DETR replaces dense attention with deformable attention that samples a small set of key points per query, cutting training to about 50 epochs and markedly improving small-object AP.
 
 ---
 

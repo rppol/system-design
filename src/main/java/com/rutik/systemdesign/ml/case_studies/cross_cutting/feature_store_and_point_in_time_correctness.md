@@ -38,21 +38,29 @@ Why it matters: in production ML, a 2% offline metric improvement that introduce
 
 ### 4.1 Offline-Only Feature Store (Batch Training)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    raw(["Raw data\nS3 / DWH"]) --> pipe["Feature pipeline\nSpark / dbt"]
+    pipe --> store["Offline store\nParquet / Delta Lake"]
+    store --> join["PIT join\nat training time"]
+    join --> ds(["Training dataset"])
+    ds --> model["Model"]
+
+    class raw,ds io
+    class store base
+    class pipe,join mathOp
+    class model train
 ```
-Raw Data (S3 / DWH)
-        |
-        v
-Feature Pipeline (Spark / dbt)
-        |
-        v
-Offline Store (Parquet / Delta Lake)
-        |
-        v
-PIT Join at Training Time
-        |
-        v
-Training Dataset → Model
-```
+
+Single linear pipeline: raw data is aggregated once into the offline store, and every training run reads it through a point-in-time join.
 
 Simplest architecture. Works when models are trained daily and features tolerate daily refresh. Does not support real-time serving from the same store.
 
@@ -126,26 +134,56 @@ PIT Join result (as_of = label_event_time):
   user_003  | 2024-03-15 21:00 | 0                | churned
 ```
 
+The as-of join applies one rule per event and feature:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ev(["Event\nentity, label_ts"]) --> filt{"feature_ts before\nlabel_ts ?"}
+    filt -->|"no: future value"| drop["Exclude\n(leakage)"]
+    filt -->|"yes"| latest["Take latest value\nper feature_name"]
+    latest --> fresh{"within freshness\ntolerance ?"}
+    fresh -->|"no: too stale"| miss["Treat as missing"]
+    fresh -->|"yes"| keep(["Feature joined\nto event"])
+
+    class ev,keep io
+    class filt,fresh req
+    class latest mathOp
+    class drop,miss lossN
+```
+
+Each event keeps only the latest feature value stamped strictly before its label time, then drops values that fall outside the freshness tolerance.
+
 ### Dual-Store Sync
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    batch["Batch pipeline\nSpark / dbt"] -->|write| off["Offline store\nS3 Parquet\nhistorical time series"]
+    stream["Stream pipeline\nFlink"] -->|write| on["Online store\nRedis\ncurrent value only"]
+    off --> tj(["Training join\nPIT query"])
+    on --> sl(["Serving lookup\np99 under 5ms"])
+
+    class batch,stream mathOp
+    class off,on base
+    class tj,sl req
 ```
-+-----------------+         +-----------------+
-|  Batch Pipeline |         | Stream Pipeline |
-|  (Spark/dbt)    |         | (Flink)         |
-+--------+--------+         +--------+--------+
-         |                           |
-         | write                     | write
-         v                           v
-+--------+--------+         +--------+--------+
-|  Offline Store  |         |  Online Store   |
-|  (S3 Parquet)   |         |  (Redis)        |
-|  historical     |         |  current value  |
-|  time series    |         |  only           |
-+--------+--------+         +--------+--------+
-         |                           |
-    Training Join              Serving Lookup
-    (PIT query)                (<5ms p99)
-```
+
+Both pipelines derive from the same feature definitions; the offline store retains the full timestamped history for PIT training joins while the online store retains only the latest value for low-latency serving.
 
 ---
 

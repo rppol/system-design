@@ -30,56 +30,47 @@ catch both well-known anomaly patterns (sudden spikes, gradual drift) and novel 
 
 ## Architecture Overview
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SRC(["Metrics sources\nhosts / containers / DBs"]) --> KAF[("Kafka\n8 part, 3 replica, 7d")]
+    KAF --> F1["Flink: normalize\nz-score rolling 1h"]
+    KAF --> F2["Flink: feature extract\nlag, rolling windows"]
+    KAF --> F3["Flink: STL decomp\ntrend + seasonal + residual"]
+    subgraph SCORE["Anomaly Scoring Layer"]
+        S1["3-sigma - fast path"]
+        S2["CUSUM - drift"]
+        S3["Isolation Forest - general"]
+        S4["Autoencoder - complex"]
+        S5["Prophet - seasonal"]
+    end
+    F1 --> SCORE
+    F2 --> SCORE
+    F3 --> SCORE
+    SCORE --> CORR["Alert correlation\ngraph grouping + 5-min dedup"]
+    CORR --> PD(["PagerDuty / Slack"])
+    CORR --> UI(["Grafana / internal UI"])
+
+    class SRC,PD,UI io
+    class KAF base
+    class F1,F2,F3 mathOp
+    class S1,S2 mathOp
+    class S3,S4,S5 train
+    class CORR lossN
 ```
-                        Metrics Sources
-          (hosts, containers, services, databases)
-                              |
-                    100K metrics/sec
-                              |
-                              v
-              +-------------------------------+
-              |         Kafka Cluster         |
-              |   8 partitions, 3 replicas    |
-              |   retention: 7 days           |
-              +-------------------------------+
-                              |
-              +---------------+---------------+
-              |               |               |
-              v               v               v
-        [Flink Job 1]   [Flink Job 2]   [Flink Job 3]
-        Normalization   Feature Ext.    Seasonal Adj.
-        z-score         lag, rolling    STL decomp.
-        rolling 1h      windows         (trend+seasonal
-        window                           +residual)
-              |               |               |
-              +---------------+---------------+
-                              |
-                              v
-              +-------------------------------+
-              |      Anomaly Scoring Layer    |
-              |                               |
-              |  [3-Sigma Rule]  -> fast       |
-              |  [CUSUM]         -> drift      |
-              |  [Isolation Forest] -> general |
-              |  [Autoencoder]   -> complex    |
-              |  [Prophet Baseline] -> seasonal|
-              +-------------------------------+
-                              |
-                              v
-              +-------------------------------+
-              |       Alert Correlation        |
-              |  - graph-based grouping        |
-              |  - 5-min dedup cooldown        |
-              |  - severity scoring            |
-              +-------------------------------+
-                              |
-                    +---------+---------+
-                    |                   |
-                    v                   v
-             [PagerDuty]         [Internal UI]
-             [Slack webhook]     [Grafana alerts]
 
+100K metrics/sec land in Kafka, fan out to three Flink jobs (normalize, feature-extract, STL deseasonalize), then five detectors score in parallel; the correlation layer collapses co-occurring anomalies into incidents before paging.
 
+Backing stores sit off the hot detection path:
+
+```
 Storage Layer:
   InfluxDB (raw metrics, 30-day hot retention)
   Parquet on S3 (cold storage, 2 years)
@@ -129,11 +120,31 @@ Correlation layer builds a similarity graph on anomaly timestamps and scores. Co
 with > 3 co-occurring anomalies are grouped into one incident. Reduces alert volume by 95% during
 infrastructure incidents.
 
+```mermaid
+sankey-beta
+10000 raw alerts,Timestamp grouping,10000
+Timestamp grouping,Correlated incident,1
+Timestamp grouping,Suppressed duplicates,9999
+```
+
+During an AZ-down event, connected-component grouping on anomaly timestamps collapses ~10,000 individual metric alerts into a single incident — the 95% alert-volume reduction that keeps on-call engineers from drowning in duplicates.
+
 ### 6. CUSUM for Slow Drift Detection
 
 CUSUM (Cumulative Sum Control Chart) detects gradual drift that 3-sigma misses (each individual
 point is within bounds, but the cumulative direction is clearly anomalous). Critical for detecting
 memory leaks, slow disk degradation, and traffic migration patterns.
+
+```mermaid
+xychart-beta
+    title "CUSUM catches drift 3-sigma misses (+0.6 sigma drift, k=0.5, h=5)"
+    x-axis ["0 min", "10", "20", "30", "40", "50"]
+    y-axis "Detection statistic" 0 --> 6
+    line [0, 1, 2, 3, 4, 5]
+    bar [0.6, 0.6, 0.6, 0.6, 0.6, 0.6]
+```
+
+Each point sits only 0.6 sigma above baseline (bars) — nowhere near the 3-sigma trip line — yet CUSUM adds 0.1 per step and crosses its h=5 threshold after ~50 minutes (line), catching the sustained drift a point rule never would.
 
 ---
 

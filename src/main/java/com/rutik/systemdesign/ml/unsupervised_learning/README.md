@@ -69,61 +69,115 @@ Key insight: the definition of "similar" is baked into the distance metric and a
 
 ### k-means Lloyd's Algorithm
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    init([Initialize k centroids\nrandom or k-means++]) --> assign["Assign each point to\nnearest centroid · Euclidean\nO(n·k·d) per iteration"]
+    assign --> recompute["Recompute centroids\nas cluster means"]
+    recompute --> moved{"Centroids moved?"}
+    moved -->|"yes — iterate"| assign
+    moved -->|"no"| converged([Converged — return\nlabels + inertia])
+
+    class init,converged io
+    class assign mathOp
+    class recompute train
+    class moved req
 ```
-Initialize k centroids (random or k-means++)
-         |
-         v
-  Assign each point to nearest centroid  <---------+
-  (Euclidean distance, O(n*k*d))                    |
-         |                                          |
-         v                                          |
-  Recompute centroids as cluster means              |
-         |                                          |
-         v                                          |
-  Centroids moved?  ---yes--------------------------+
-         |
-        no
-         v
-  Converged — return labels + inertia
-```
+
+The loop back to the assignment step is the heart of Lloyd's algorithm: assignment and centroid-update alternate until no point changes cluster, then k-means returns the labels and the final inertia (within-cluster sum of squares).
 
 ### DBSCAN Reachability
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    p([Unvisited point p]) --> nbr["Find all points within\neps radius → N(p)"]
+    nbr --> test{"|N(p)| ≥ min_samples?"}
+    test -->|"no"| noise["Mark NOISE\nlabel = -1"]
+    test -->|"yes"| core["p is a CORE point"]
+    core --> expand["Expand cluster: add all\ndensity-reachable points\nBFS/DFS over neighbors"]
+
+    class p io
+    class nbr mathOp
+    class test req
+    class noise lossN
+    class core,expand train
 ```
-For each unvisited point p:
-  Find all points within eps radius  --> |N(p)| < min_samples? --> mark NOISE (-1)
-                                     |
-                                     v
-                          |N(p)| >= min_samples --> p is CORE point
-                                     |
-                                     v
-                          Expand cluster: add density-reachable points
-                          (BFS/DFS through neighbors of neighbors)
-```
+
+A point seeds a cluster only when its eps-neighborhood holds at least min_samples points (a CORE point); sparser points are labeled noise (-1). Because clusters grow by chaining density-reachable neighbors, DBSCAN recovers arbitrary shapes that centroid-based k-means cannot.
 
 ### PCA Pipeline
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    X([Raw features X · n×d]) --> center["Center: X_c = X − mean(X)"]
+    center --> cov["Covariance matrix\nC = X_c^T · X_c / (n−1) · d×d"]
+    cov --> eig["Eigendecomposition\nC = V · diag(λ) · V^T"]
+    eig --> sort["Sort eigenvectors by\neigenvalue, descending"]
+    sort --> project["Project onto top-k → X_reduced\n= X_c · V(:, :k) · n×k"]
+    project --> evr([explained_variance_ratio\n= λ_i / Σλ])
+
+    class X,evr io
+    class center,cov,eig,sort mathOp
+    class project train
 ```
-Raw features X (n x d)
-      |
-      v
-  Center: X_c = X - mean(X)          [prevents bias toward origin]
-      |
-      v
-  Covariance matrix: C = X_c.T @ X_c / (n-1)   [d x d]
-      |
-      v
-  Eigendecomposition: C = V * diag(lambda) * V.T
-      |
-      v
-  Sort eigenvectors by eigenvalue (descending)
-      |
-      v
-  Select top-k: X_reduced = X_c @ V[:, :k]      [n x k]
-      |
-      v
-  explained_variance_ratio = lambda_i / sum(lambda)
+
+Centering first is essential — PCA finds directions of maximum variance, and an off-center cloud would bias the first component toward the mean vector rather than the true spread. Keeping the top-k eigenvectors retains the most variance per dimension kept.
+
+### Choosing k — the Elbow Method
+
+```mermaid
+xychart-beta
+    title "Elbow method — inertia vs k (elbow at k=4)"
+    x-axis "k (number of clusters)" [2, 3, 4, 5, 6, 7, 8]
+    y-axis "Inertia (within-cluster SSE)" 0 --> 900
+    line [820, 540, 300, 250, 215, 190, 175]
 ```
+
+Inertia always falls as k rises, so you look for the "elbow" — the k where the marginal drop flattens (here k=4, where the curve bends from steep to shallow). Pair it with the silhouette peak; when the elbow is ambiguous on real high-dimensional data, the silhouette score is the more reliable signal.
+
+### Picking a Clustering Algorithm — Two-Axis Tradeoff
+
+```mermaid
+quadrantChart
+    title Clustering algorithm selection
+    x-axis "Low scalability" --> "High scalability"
+    y-axis "Globular only" --> "Arbitrary shapes"
+    quadrant-1 "Scalable + flexible"
+    quadrant-2 "Flexible, small n"
+    quadrant-3 "Rigid, small n"
+    quadrant-4 "Scalable, rigid"
+    "k-means": [0.82, 0.15]
+    "Mini-batch k-means": [0.95, 0.15]
+    "GMM": [0.55, 0.35]
+    "Agglomerative": [0.2, 0.82]
+    "DBSCAN": [0.55, 0.88]
+    "HDBSCAN": [0.5, 0.95]
+```
+
+The x-axis is how well a method scales to large n; the y-axis is how flexible its cluster-shape assumption is. k-means and its mini-batch variant sit bottom-right (scale to millions but assume globular clusters); DBSCAN/HDBSCAN sit top-middle (arbitrary shapes, moderate scale); agglomerative sits top-left (rich dendrogram, but O(n^2) confines it to small n).
 
 ---
 
@@ -518,6 +572,27 @@ Both are non-linear dimensionality reduction methods for visualization, but they
 
 **Q: What is the Davies-Bouldin index?**
 The Davies-Bouldin index measures the average similarity between each cluster and its most similar other cluster. Similarity is defined as the ratio of within-cluster scatter to between-cluster distance. Lower values indicate better clustering (0 is perfect). It is easier to compute than silhouette score for large n because it only requires cluster centroids, not all pairwise distances.
+
+**Q: Why does k-means struggle with clusters of different sizes, densities, or non-globular shapes?**
+k-means assumes clusters are convex, roughly spherical, and similarly sized, because it assigns every point to its nearest centroid — a Voronoi partition. A crescent-shaped or ring cluster gets sliced across the straight Voronoi boundaries; a dense small cluster next to a sparse large one gets absorbed because the shared centroid is pulled toward the denser mass. When shapes are irregular or densities vary, switch to DBSCAN (arbitrary shapes) or HDBSCAN (varying density); if clusters are elliptical, a Gaussian Mixture Model with full covariance fits better than k-means.
+
+**Q: When should you use cosine distance instead of Euclidean distance for clustering?**
+Use cosine distance when only the direction of a vector matters and its magnitude does not — most notably for text and other high-dimensional sparse embeddings. Two documents with the same topic mix but different lengths point in the same direction yet sit far apart in Euclidean space, so Euclidean k-means would wrongly separate them. Spherical k-means (L2-normalize each vector, then run k-means) is the standard workaround, and cosine also resists the curse of dimensionality better than raw Euclidean distance in high dimensions.
+
+**Q: How do you choose eps and min_samples for DBSCAN?**
+Set min_samples to roughly 2 × n_features and pick eps from the knee of the k-distance plot, where k = min_samples. Compute the distance from each point to its kth nearest neighbor, sort those distances descending, and read eps off the sharp bend in the curve — points beyond the knee are the sparse tail that should become noise. Too-small eps labels almost everything as noise; too-large eps merges everything into one giant cluster; and because eps is an absolute distance, you must scale features first or one high-range feature dominates it.
+
+**Q: Does k-means find the globally optimal clustering, and why run it multiple times?**
+No — Lloyd's algorithm only converges to a local optimum, so the result depends on the initial centroids. k-means clustering is NP-hard in general, and a bad random start can leave two centroids inside one true cluster while another cluster is split. The fix is `n_init=10` (run the whole algorithm 10 times from different seeds and keep the lowest-inertia result) combined with k-means++ initialization, which spreads the initial centroids apart to make good starts far more likely.
+
+**Q: What is the difference between k-means and a Gaussian Mixture Model (GMM)?**
+k-means makes hard assignments to the nearest centroid, while a GMM makes soft probabilistic assignments and models each cluster as a Gaussian with its own mean and covariance. Because a GMM learns covariance, it fits elliptical and differently-oriented clusters that k-means (which only sees distance to a point) cannot; it is fit by Expectation-Maximization rather than Lloyd's updates. k-means is effectively the limiting case of a GMM with spherical, equal-variance components and hard assignment — use GMM when you need calibrated membership probabilities or non-spherical clusters.
+
+**Q: How does agglomerative hierarchical clustering work, and what do the linkage criteria mean?**
+Agglomerative clustering starts with every point as its own cluster and repeatedly merges the two closest clusters until one remains, producing a dendrogram. The linkage criterion defines "closest": single linkage uses the minimum pairwise distance (finds elongated chains but is prone to chaining), complete linkage uses the maximum (compact, equal-diameter clusters), average linkage averages all pairwise distances, and Ward linkage merges the pair that minimizes the increase in total within-cluster variance (the common default). You choose the number of clusters after fitting by cutting the dendrogram at a chosen height, which is why no k is required up front.
+
+**Q: What is the difference between PCA and an autoencoder for dimensionality reduction?**
+PCA is a linear projection onto the top-variance orthogonal directions, while an autoencoder learns a possibly non-linear compression through neural-network encoder and decoder layers. A single-layer linear autoencoder trained with MSE loss actually recovers the same subspace as PCA, so autoencoders only add value when the data lies on a non-linear manifold that linear components cannot capture. The tradeoff: PCA is deterministic, fast, and interpretable (components have explained-variance ratios), whereas autoencoders need more data, GPU compute, and tuning but can model curved structure and power reconstruction-error anomaly detection.
 
 ---
 

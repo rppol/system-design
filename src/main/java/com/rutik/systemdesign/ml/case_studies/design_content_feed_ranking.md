@@ -33,106 +33,81 @@ popularity bias that starves new creators.
 
 ## Architecture Overview
 
-```
-User opens feed (100K QPS)
-          |
-          v
-+-------------------+
-|    API Gateway    |
-|  rate limiting    |
-|  auth, routing    |
-+-------------------+
-          |
-          v
-+----------------------------+
-|    Ranking Orchestrator    |
-|  coordinates all stages    |
-|  150ms total budget        |
-+----------------------------+
-          |
-     +----+----+
-     |         |
-     v         v
-[Candidate  [User Feature
- Retrieval]  Fetcher]
- 10ms         5ms
-     |         |
-     +----+----+
-          |
-          v
-+----------------------------------------------+
-|         Candidate Pool (~2000 posts)          |
-|  - Follower posts (graph traversal, 500-800)  |
-|  - Two-tower ANN retrieval (600-800)          |
-|  - Ad candidates from auction service (50)    |
-+----------------------------------------------+
-          |
-          v
-+----------------------------------------------+
-|         Stage 1: Lightweight Filter          |
-|  - Remove already-seen posts (Bloom filter)  |
-|  - Hard business rules (adult content flags) |
-|  - Dedup same post from multiple sources     |
-|  -> 2000 -> 800 candidates                   |
-+----------------------------------------------+
-          |
-          v
-+----------------------------------------------+
-|         Stage 2: MMOE Ranker (80ms)          |
-|  Multi-gate Mixture of Experts               |
-|  - Shared bottom: user x content features    |
-|  - Expert networks: 8 shared, 4 per task     |
-|  - Task towers: engagement, dwell, quality   |
-|  - Output: score per task per post           |
-|  -> Produces 800 ranked posts                |
-+----------------------------------------------+
-          |
-          v
-+----------------------------------------------+
-|    Stage 3: Multi-Objective Aggregation      |
-|  - Weighted sum: 0.4*engage + 0.3*dwell      |
-|                + 0.2*quality + 0.1*fresh     |
-|  - Weights tuned via Pareto optimization     |
-|  - Ads injected at positions 4, 12, 25, 40   |
-|  -> Top 150 posts selected                   |
-+----------------------------------------------+
-          |
-          v
-+----------------------------------------------+
-|       Stage 4: DPP Diversity Re-ranking      |
-|  - Determinantal Point Process re-ranking    |
-|  - Penalize same-author consecutive posts    |
-|  - Topic diversity (NLP topic clustering)    |
-|  -> Final 100 posts in ranked order          |
-+----------------------------------------------+
-          |
-          v
-+-------------------+
-|    Feed Response  |
-|  100 ranked posts |
-|  + metadata       |
-+-------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    user(["User opens feed\n100K QPS"])
+    gw["API Gateway\nrate limiting, auth, routing"]
+    orch["Ranking Orchestrator\n150ms total budget"]
+    cand["Candidate Retrieval\n10ms"]
+    uf["User Feature Fetcher\n5ms"]
+    pool["Candidate Pool ~2000 posts\nfollower graph + two-tower ANN + ads"]
+    s1["Stage 1: Lightweight Filter\nseen-posts Bloom, business rules, dedup\n2000 to 800"]
+    s2["Stage 2: MMOE Ranker (80ms)\n8 shared + 4 per-task experts\nengagement / dwell / quality towers"]
+    s3["Stage 3: Multi-Objective Aggregation\n0.4 engage + 0.3 dwell + 0.2 quality + 0.1 fresh\nads at 4,12,25,40 - top 150"]
+    s4["Stage 4: DPP Diversity Re-rank\npenalize same-author, topic diversity\nfinal 100"]
+    resp(["Feed Response\n100 ranked posts"])
 
-Offline Training Pipeline:
-  User Actions (click, like, share, dwell, skip)
-         |
-         v
-  [Kafka event stream]
-         |
-         v
-  [Flink: label construction]
-  (join actions with served impressions, 48h window)
-         |
-         v
-  [Feature Store (online: Redis, offline: Hive)]
-         |
-         v
-  [MMOE Training (PyTorch, 4xA100, 6h/week)]
-         |
-         v
-  [Model Registry (MLflow)] -> [TorchServe]
+    user --> gw --> orch
+    orch --> cand
+    orch --> uf
+    cand --> pool
+    uf --> pool
+    pool --> s1 --> s2 --> s3 --> s4 --> resp
+
+    class user,pool,resp io
+    class gw req
+    class orch,cand,uf,s1,s3,s4 mathOp
+    class s2 train
 ```
+
+Four-stage cascade under a 150ms budget: cheap filtering runs first so the expensive MMOE ranker scores only the 800 survivors, and DPP re-ranking enforces diversity on the final 100 posts.
+
+```mermaid
+xychart-beta
+    title "Candidate funnel: posts surviving each stage"
+    x-axis ["Candidate Pool", "After Filter", "After Aggregation", "Final Feed"]
+    y-axis "Posts" 0 --> 2000
+    bar [2000, 800, 150, 100]
+```
+
+Each stage trades recall for precision: 2000 candidates narrow to the 100 shown, and the funnel shape is why the costly MMOE model can afford 80ms — it only ever sees the 800 that survive cheap filtering.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    act(["User actions\nclick, like, share, dwell, skip"])
+    kafka["Kafka\nevent stream"]
+    flink["Flink label construction\njoin actions to impressions, 48h window"]
+    fstore["Feature Store\nonline Redis / offline Hive"]
+    mtrain["MMOE Training\nPyTorch 4xA100, 6h/week"]
+    reg["Model Registry\nMLflow"]
+    serve(["TorchServe"])
+
+    act --> kafka --> flink --> fstore --> mtrain --> reg --> serve
+
+    class act,serve io
+    class kafka,flink mathOp
+    class fstore base
+    class mtrain train
+    class reg base
+```
+
+Offline training pipeline: engagement events stream through Kafka and Flink into the feature store, and the weekly MMOE retrain is promoted through the MLflow registry to TorchServe.
 
 ---
 

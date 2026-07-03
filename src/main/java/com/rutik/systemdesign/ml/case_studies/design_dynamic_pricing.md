@@ -62,48 +62,35 @@ Why this system exists: A 1% improvement in pricing accuracy translates to a ~3%
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SIG([Signal Ingestion\ncompetitor prices · inventory · demand]) --> FS["Feature Store\nRedis live + S3/Hive"]
+    FS --> DM["Demand Model\ndaily retrain · LightGBM per category"]
+    FS --> RPE["Re-Pricing Engine\nevery 15 min · optimize + constrain"]
+    FS --> AB["A/B Test Framework\nholdout SKUs · shadow prices"]
+    DM --> REG["Model Registry\nMLflow"]
+    REG -.-> RPE
+    DM -.-> RPE
+    RPE --> CAT["Price Catalog\nsource of truth"]
+    CAT --> DOWN([Downstream\nWeb · App · Email · Ads])
+
+    class SIG,DOWN io
+    class FS base
+    class DM train
+    class RPE,AB mathOp
+    class REG frozen
+    class CAT req
 ```
- ┌──────────────────────────────────────────────────────────────────┐
- │                    SIGNAL INGESTION                              │
- │  Competitor prices    │   Inventory levels    │   Demand signals │
- │  (scrapers, APIs)     │   (WMS)               │   (clickstream)  │
- └──────────┬────────────┴──────────┬────────────┴─────────┬────────┘
-            │                       │                      │
- ┌──────────▼───────────────────────▼──────────────────────▼────────┐
- │               FEATURE STORE (Redis + S3/Hive)                   │
- │  - Current price, competitor price, price gap                   │
- │  - Rolling demand: 1d/7d/28d sales velocity                     │
- │  - Inventory: stock level, days-of-supply, sell-through rate    │
- │  - Seasonality: day-of-week, holiday flags, campaign flags      │
- └──────────────────────────────┬───────────────────────────────────┘
-                                │
-         ┌──────────────────────┼──────────────────────┐
-         │                      │                      │
-┌────────▼────────┐  ┌──────────▼──────────┐  ┌────────▼────────┐
-│  DEMAND MODEL   │  │  RE-PRICING ENGINE  │  │  A/B TEST       │
-│  (daily retrain)│  │  (every 15 min)     │  │  FRAMEWORK      │
-│                 │  │                     │  │                 │
-│  LightGBM per  │  │  1. Fetch features  │  │  Holdout SKUs  │
-│  category       │  │  2. Predict demand  │  │  get shadow    │
-│  Price elasti-  │  │     curve           │  │  prices; not   │
-│  city output    │  │  3. Optimize price  │  │  pushed live   │
-│                 │  │  4. Apply constraints│  │                 │
-└────────┬────────┘  │  5. Push to catalog  │  └─────────────────┘
-         │           └──────────┬──────────┘
-         │                      │
-┌────────▼────────┐  ┌──────────▼──────────┐
-│  MODEL REGISTRY │  │  PRICE CATALOG      │
-│  (MLflow)       │  │  (source of truth   │
-└─────────────────┘  │   for all channels) │
-                     └──────────┬──────────┘
-                                │
-                     ┌──────────▼──────────┐
-                     │  DOWNSTREAM         │
-                     │  Website/App/API    │
-                     │  Email campaigns    │
-                     │  Ads bid system     │
-                     └─────────────────────┘
-```
+
+Live competitor, inventory, and demand signals converge in one feature store; the daily-retrained demand model feeds the 15-minute re-pricing loop, which writes constrained prices to the catalog that is the single source of truth for every sales channel.
 
 **Component inventory:**
 - Signal ingestion: competitor price scraper (3rd-party API + in-house; 15-min cadence), WMS inventory feed (real-time webhook), clickstream demand signals (Kafka consumer).
@@ -119,6 +106,16 @@ Why this system exists: A 1% improvement in pricing accuracy translates to a ~3%
 ### 4.1 Demand Model
 
 The demand model predicts units_sold as a function of price and context features. A log-linear demand model is often sufficient and interpretable (the coefficient on log(price) is the price elasticity).
+
+```mermaid
+xychart-beta
+    title "Demand Curve: Units Sold vs Price"
+    x-axis ["$10", "$12", "$15"]
+    y-axis "Units sold" 0 --> 1200
+    line [1000, 850, 600]
+```
+
+The downward demand curve is what the model re-estimates in real time; the optimizer walks along it to the price that maximizes revenue or margin, balancing units sold against per-unit contribution.
 
 ```python
 import lightgbm as lgb
@@ -215,6 +212,31 @@ def predict_demand_at_price(
 ```
 
 ### 4.2 Price Optimizer
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    FEAT([Live features\nprice · competitor · inventory · demand]) --> PRED["Predict demand curve\nLightGBM per category"]
+    PRED --> OPT["Optimize price\nrevenue / margin / sell-through"]
+    OPT --> CON{"Within floor, ceiling,\ncompetitor band?"}
+    CON -->|yes| PUSH([Push to price catalog])
+    CON -->|no| CLAMP["Clamp to feasible bound"]
+    CLAMP --> PUSH
+
+    class FEAT,PUSH io
+    class PRED train
+    class OPT,CLAMP mathOp
+    class CON req
+```
+
+Each 15-minute cycle predicts the demand curve, optimizes for the chosen objective, then hard-clamps the result into the floor/ceiling/competitor-band feasible range before pushing — the constraint gate is what stops the optimizer from ever pricing below cost.
 
 **Broken approach — naive argmax over discrete price grid:**
 

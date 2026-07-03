@@ -79,19 +79,35 @@ One state, many actions, stochastic rewards. Policies: epsilon-greedy (explore w
 
 ## 5. Architecture Diagrams
 
-### MDP Structure
+### Agent–Environment Loop (MDP)
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    s([state s_t]) --> agent["Agent\npolicy pi(a|s)"]
+    agent -->|"action a_t"| env["Environment\nunknown dynamics P(s'|s,a)"]
+    env -->|"reward r_t"| ret["Return\nsum of gamma^t · r_t"]
+    env -->|"next state s'"| s
+    ret -.->|"maximize"| agent
+
+    class s io
+    class agent train
+    class env frozen
+    class ret lossN
 ```
-        a_t
-   s_t -----> Environment ----> s_{t+1}
-    ^               |
-    |               v
-  Policy        Reward r_t
-  pi(a|s)
-    ^
-    |
-   Agent (learns to maximize sum of discounted r_t)
-```
+
+The agent observes a state, its policy emits an action, and the environment
+returns a reward plus the next state — the loop the agent repeats to maximize
+discounted return. The environment is `frozen` (its dynamics are unknown and
+never trained); only the agent's policy is learned.
 
 ### Bellman Equation (Optimal)
 
@@ -104,52 +120,117 @@ Q*(s, a) = R(s, a) + gamma * sum_{s'} P(s'|s,a) * max_{a'} Q*(s', a')
 
 ### DQN Architecture
 
-```
-State s_t (pixel frame or feature vector)
-       |
-  [Conv layers / MLP]    <-- Q-network theta
-       |
-  Q-values for all actions: [Q(s,a1), Q(s,a2), ..., Q(s,aN)]
-       |
-  argmax -> action a_t
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Simultaneously:
-  Target network theta^- (frozen copy, updated every 10K steps):
-  y_t = r_t + gamma * max_{a'} Q(s_{t+1}, a'; theta^-)
+    st([state s_t]) --> qnet["Q-network theta\nConv / MLP"]
+    qnet --> qv["Q(s,a) for all actions"]
+    qv --> act(["argmax -> action a_t"])
+    sp([next state s']) --> tnet["Target network theta-\nfrozen · synced every 10K steps"]
+    tnet --> y["y = r + gamma · max Q(s',a'; theta-)"]
+    qv --> loss["Huber loss\n(Q(s,a) - y)^2"]
+    y --> loss
+    loss -.->|"gradient step"| qnet
 
-  Loss: MSE( Q(s_t, a_t; theta) - y_t )
+    class st,sp,act io
+    class qnet train
+    class tnet frozen
+    class qv,y mathOp
+    class loss lossN
 ```
+
+The online Q-network (green, trained) picks actions by argmax; a frozen target
+network (purple, synced every 10K steps) supplies a stable regression target y.
+Freezing the target breaks the feedback loop that otherwise makes Q-values
+oscillate.
 
 ### PPO Training Loop
 
-```
-Collect rollout of T steps using current policy pi_theta_old
-       |
-  Compute advantages A_t using GAE (Generalized Advantage Estimation)
-       |
-  For K epochs:
-    For each minibatch:
-      ratio r_t(theta) = pi_theta(a|s) / pi_theta_old(a|s)
-      L_CLIP = E[min(r_t * A_t, clip(r_t, 1-eps, 1+eps) * A_t)]
-      Maximize L_CLIP - c1 * L_VF + c2 * L_entropy
-       |
-  Update theta_old = theta
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    roll(["Collect rollout\nT steps with pi_old"]) --> gae["GAE advantages A_t\ndelta = r + gamma·V(s') - V(s)"]
+    gae --> ratio["ratio = pi_new / pi_old"]
+    ratio --> clip["L_CLIP = min(ratio·A, clip(ratio, 1-eps, 1+eps)·A)"]
+    clip --> obj["maximize L_CLIP - c1·L_VF + c2·H"]
+    obj -->|"repeat K epochs\nover minibatches"| ratio
+    obj --> sync["theta_old <- theta"]
+    sync -.->|"next rollout"| roll
+
+    class roll io
+    class gae mathOp
+    class ratio mathOp
+    class clip mathOp
+    class obj lossN
+    class sync train
 ```
 
-### Actor-Critic
+Each rollout is reused for K gradient epochs (the loop back to `ratio`),
+amortizing the cost of data collection. Clipping the probability ratio to
+1-eps … 1+eps is what stops any single update from collapsing the policy.
 
+### Actor–Critic
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    st([state s_t]) --> actor["Actor pi(a|s)\npolicy network"]
+    st --> critic["Critic V(s)\nvalue network"]
+    actor -->|"action a_t"| env["Environment"]
+    env -->|"reward r_t, s'"| adv["Advantage\nA_t = r + gamma·V(s') - V(s)"]
+    critic --> adv
+    adv -.->|"policy gradient"| actor
+    adv -.->|"minimize TD error"| critic
+
+    class st io
+    class actor train
+    class critic train
+    class env frozen
+    class adv mathOp
 ```
-State s_t
-  |
-  +----> [Actor: pi(a|s)]    -> action a_t -> environment
-  |
-  +----> [Critic: V(s)]      -> value estimate
-              |
-         [Advantage: A_t = r_t + gamma*V(s_{t+1}) - V(s_t)]
-              |
-         [Update actor using A_t as baseline]
-         [Update critic to minimize TD error]
+
+The critic's value estimate converts the noisy Monte Carlo return into a
+low-variance advantage A_t, which the actor uses as its update signal. This
+variance reduction is why actor-critic learns far more stably than REINFORCE.
+
+### Exploration Schedule (Epsilon Decay)
+
+```mermaid
+xychart-beta
+    title "Epsilon-greedy exploration schedule (decay 0.995 per episode)"
+    x-axis "Episode" [0, 100, 200, 300, 400, 500, 600, 700, 800, 900]
+    y-axis "Epsilon — P(random action)" 0 --> 1
+    line [1.0, 0.61, 0.37, 0.22, 0.13, 0.08, 0.05, 0.03, 0.02, 0.01]
 ```
+
+Epsilon starts at 1.0 (pure exploration) and decays geometrically toward a 0.01
+floor, so the agent explores aggressively early and exploits its learned
+Q-values late. Decaying too fast starves the agent of exploration before it has
+learned anything — a common cause of an agent that plateaus at a poor policy.
 
 ---
 
@@ -527,6 +608,21 @@ DQN uses the argmax over a discrete set of Q-values to select actions, which is 
 
 **Q: How do you debug an RL agent that is not learning?**
 Start with sanity checks in order: (1) Verify rewards are being received — log mean episode reward; if it stays at initialization value, the environment or reward signal is broken. (2) Check Q-value scale — predicted Q-values should roughly match the discounted return (for gamma=0.99 and reward=1 per step, Q should approach ~100). If Q diverges to thousands, use reward normalization or reduce learning rate. (3) Verify exploration — log the fraction of random vs greedy actions (epsilon value); if epsilon is decayed too fast, the agent stops exploring before learning. (4) Reduce the problem — test on a simpler environment (CartPole before Atari) to isolate algorithmic bugs from hyperparameter issues. (5) Monitor the loss curve — a non-decreasing loss (not converging to zero) suggests the target network is not stabilizing training.
+
+**Q: What is the difference between SARSA and Q-learning, and what does the cliff-walking example reveal?**
+SARSA is on-policy and Q-learning is off-policy, so on the classic cliff-walking gridworld SARSA learns a safer path while Q-learning learns the optimal but riskier one. SARSA updates toward the action the behavior policy actually takes next — Q(s,a) += alpha * [r + gamma * Q(s', a') - Q(s,a)], where a' is the epsilon-greedy action — whereas Q-learning updates toward the greedy maximum r + gamma * max_a' Q(s', a'). In cliff-walking the optimal route hugs the cliff edge; because SARSA accounts for the epsilon-greedy chance of stepping off, it prefers a longer path away from the edge, while Q-learning follows the edge and falls more often during training. As epsilon decays to zero both converge to the same optimal policy — the gap is a behavior-versus-target-policy artifact, not a difference in the optimum.
+
+**Q: What is the difference between Monte Carlo and temporal-difference (TD) learning?**
+Monte Carlo waits until an episode ends and updates toward the actual return, while temporal-difference learning bootstraps and updates after every step using its own value estimate. MC is unbiased (it uses the real observed return) but high variance and requires episodes to terminate; TD is biased (its target r + gamma * V(s') depends on an imperfect V) but low variance and works online in continuing tasks. TD(lambda) interpolates between the two using eligibility traces. Q-learning and SARSA are TD methods; REINFORCE is a Monte Carlo method — which is precisely why REINFORCE suffers from notoriously high gradient variance.
+
+**Q: What is the "deadly triad" in reinforcement learning?**
+The deadly triad is the combination of function approximation, bootstrapping, and off-policy training, which together can make value estimates diverge. Each ingredient is individually safe, but combining all three — as DQN does — removes the convergence guarantees that tabular Q-learning enjoys. Function approximation ties states together through shared parameters, so one update perturbs others; bootstrapping makes the target depend on those same moving estimates; off-policy means the update distribution does not match the policy being evaluated. This is why DQN needs stabilizers — a target network, experience replay, and reward clipping — to counteract the divergence the triad predicts.
+
+**Q: What is Generalized Advantage Estimation (GAE) and what does its lambda parameter control?**
+GAE estimates the advantage as an exponentially weighted average of n-step TD errors, and its lambda parameter trades bias against variance. The estimator is A_t = sum_{l>=0} (gamma * lambda)^l * delta_{t+l}, where delta_t = r_t + gamma * V(s_{t+1}) - V(s_t) is the one-step TD error. lambda=0 collapses to the one-step advantage (low variance, high bias from an imperfect value function); lambda=1 collapses to the Monte Carlo advantage (unbiased but high variance). PPO typically uses lambda=0.95 with gamma=0.99, capturing most of the variance reduction while accepting only a small bias.
+
+**Q: Why must the discount factor gamma be less than 1, and how do you choose it?**
+A discount factor below 1 keeps the infinite-horizon return finite and expresses a preference for sooner rewards; it is usually set between 0.95 and 0.99. For a continuing task, sum of gamma^t * r_t converges only when gamma < 1 — gamma=1 is valid only for episodes guaranteed to terminate. The effective planning horizon is roughly 1/(1 - gamma): gamma=0.99 looks about 100 steps ahead, gamma=0.9 only about 10. Set gamma high when rewards are delayed (Go, long-horizon control) and lower when the task is myopic or long-horizon credit assignment destabilizes learning; note that raising gamma also inflates Q-value magnitudes, which interacts with reward scaling.
 
 ---
 

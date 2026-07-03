@@ -96,76 +96,201 @@ LDA (Latent Dirichlet Allocation): each document is a mixture of topics; each to
 
 ## 5. Architecture Diagrams
 
+### End-to-End Classical NLP Pipeline
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    raw([Raw text]) --> norm["Normalize\nlowercase · NFKC · strip noise"]
+    norm --> tok["Tokenize\nwhitespace · regex · subword"]
+    tok --> lem["Stem / Lemmatize\n(optional)"]
+    subgraph rep["  Represent as numbers  "]
+        bow["Bag of Words / TF-IDF\nsparse, high-dim"]
+        emb["Embeddings\nWord2Vec · GloVe · FastText"]
+    end
+    lem --> bow
+    lem --> emb
+    subgraph mdl["  Model  "]
+        clf["Classifier / sequence model\nNB · LR · TextCNN · BiLSTM+CRF"]
+    end
+    bow --> clf
+    emb --> clf
+    clf --> task([Task output\nclass · tags · topics])
+
+    class raw,task io
+    class norm,tok,lem mathOp
+    class bow,emb train
+    class clf base
+```
+
+Every classical NLP system is the same spine: normalize text, turn it into numbers (sparse counts or dense embeddings), then feed a model. The representation choice (§4.2) — not the classifier — usually decides quality.
+
+### Classic NLP Task Map
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    nlp([NLP task]) --> cls["Classification\nsentiment · spam · intent"]
+    nlp --> seq["Sequence labeling\nNER · POS · chunking"]
+    nlp --> s2s["Sequence-to-sequence\ntranslation · summarization"]
+    nlp --> topic["Topic modeling\nLDA · clustering"]
+    nlp --> ret["Retrieval / ranking\nBM25 · dense · hybrid"]
+
+    cls --> mcls["LR+TF-IDF · TextCNN · BERT"]
+    seq --> mseq["BiLSTM+CRF · BERT-NER"]
+    s2s --> ms2s["seq2seq+attention · T5"]
+    topic --> mtopic["LDA · NMF"]
+    ret --> mret["BM25 + SBERT + RRF"]
+
+    class nlp io
+    class cls,seq,s2s,topic,ret req
+    class mcls,mseq,ms2s,mtopic,mret base
+```
+
+The task shape dictates the model family: whole-input labels want a classifier, per-token labels want a sequence model with structured output (CRF), and generation wants an encoder-decoder. Picking the wrong family is the most common design mistake.
+
 ### TF-IDF + Logistic Regression Pipeline
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    raw([Raw text]) --> pre["Tokenize → lowercase\n→ remove stopwords"]
+    pre --> tfidf["TF-IDF Vectorizer\nfit on TRAIN corpus only"]
+    tfidf -->|"sparse n_docs × vocab"| lr["LogisticRegression"]
+    lr --> out([Class probabilities])
+
+    class raw,out io
+    class pre mathOp
+    class tfidf train
+    class lr base
 ```
-Raw Text
-   |
-   v
-[Tokenize -> Lowercase -> Remove stopwords]
-   |
-   v
-[TF-IDF Vectorizer]   <-- fit on train corpus
-   |  sparse matrix (n_docs x vocab_size)
-   v
-[LogisticRegression]
-   |
-   v
-Class Probabilities
-```
+
+The production baseline: fast, interpretable, CPU-only. The one rule that must not break is fitting the vectorizer on the training split only — fitting on the full corpus leaks test vocabulary into IDF weights (see Pitfall 1).
 
 ### Word2Vec Skip-gram Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    inp([Input word\none-hot · V-dim]) --> W["Embedding matrix W\nV × 300 — learned"]
+    W --> vec([Word vector\n300-dim])
+    vec --> Wo["Output matrix W'\n300 × V — learned"]
+    Wo --> sm["Softmax over vocabulary"]
+    sm --> ctx([Predicted context words])
+
+    class inp,vec,ctx io
+    class W,Wo train
+    class sm mathOp
 ```
-Input word (one-hot, V-dim)
-   |
-   v
-[Embedding matrix W: V x 300]  <-- weights we learn
-   |
-   v
-Word vector (300-dim)
-   |
-   v
-[Output matrix W': 300 x V]
-   |
-   v
-Softmax over vocabulary -> predict context words
-```
+
+Skip-gram predicts context from a center word; the learned embedding matrix W is the actual product — the softmax head is discarded after training. This is why the distributional hypothesis (§3) yields geometry where similar-context words sit close.
 
 ### BiLSTM + CRF for NER
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    toks([Tokens: Apple · is · in · NYC]) --> emb["Embedding layer\n300d per token"]
+    emb --> fwd["LSTM forward →"]
+    emb --> bwd["LSTM backward ←"]
+    fwd --> cat["Concat fwd + bwd\n512d hidden per token"]
+    bwd --> cat
+    cat --> lin["Linear → per-token tag scores"]
+    lin --> crf["CRF layer\nenforces valid BIO transitions"]
+    crf --> tags([B-ORG · O · O · B-LOC])
+
+    class toks,tags io
+    class emb mathOp
+    class fwd,bwd,lin train
+    class cat mathOp
+    class crf base
 ```
-Tokens:    ["Apple"  "is"   "in"   "NYC"]
-              |        |       |      |
-[Embedding layer: 300d per token]
-              |        |       |      |
-[BiLSTM]  ->  ->  ->  ->  ->  ->  ->  (forward)
-          <-  <-  <-  <-  <-  <-  <-  (backward)
-              |        |       |      |
-         [Concatenate fwd + bwd hidden: 512d]
-              |        |       |      |
-         [Linear -> tag scores]
-              |        |       |      |
-         [CRF layer: enforces valid BIO transitions]
-              |        |       |      |
-          B-ORG       O       O    B-LOC
-```
+
+The BiLSTM gives each token full-sentence context (forward + backward passes concatenated); the CRF then scores whole label sequences with Viterbi so it cannot emit illegal transitions like I-LOC after B-PER (§3, Pitfall 4).
 
 ### TextCNN Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    sent([Sentence\nw1..w5 · 300d each]) --> emb["Embedding matrix\nn_words × 300"]
+    emb --> conv["Conv1D filters\nsizes 2,3,4 → feature maps"]
+    conv --> pool["MaxPool over time\nscalar per filter"]
+    pool --> cat["Concatenate pooled features"]
+    cat --> head["Dropout 0.5 → Dense → Softmax"]
+    head --> out([Class probabilities])
+
+    class sent,out io
+    class emb train
+    class conv train
+    class pool mathOp
+    class cat mathOp
+    class head base
 ```
-Sentence: [w1, w2, w3, w4, w5]   (each word = 300d embedding)
-   |
-[Embedding matrix: n_words x 300]
-   |
-[Conv1D filters: size 2,3,4 x 300 -> feature maps]
-   |
-[MaxPool over time -> scalar per filter]
-   |
-[Concatenate all pooled features]
-   |
-[Dropout 0.5 -> Dense -> Softmax]
+
+Filters of width 2/3/4 act as learnable n-gram detectors; max-pool-over-time keeps each filter's strongest activation regardless of position, making the model position-invariant to phrases like "highly recommend".
+
+### Model Selection — Data vs Latency Tradeoff
+
+```mermaid
+quadrantChart
+    title Classical NLP model selection
+    x-axis Little labeled data --> Much labeled data
+    y-axis Low latency / cost --> High latency / cost
+    quadrant-1 Much data · heavy compute
+    quadrant-2 Little data · heavy compute
+    quadrant-3 Little data · cheap
+    quadrant-4 Much data · cheap
+    "Naive Bayes": [0.15, 0.12]
+    "LR + TF-IDF": [0.30, 0.18]
+    "TextCNN": [0.55, 0.50]
+    "BiLSTM + Attn": [0.65, 0.72]
+    "BERT fine-tuned": [0.85, 0.90]
 ```
+
+The lower-left "cheap, small-data" quadrant is where classical NLP dominates — Naive Bayes and LR+TF-IDF win under 10K labels and sub-millisecond latency. BERT only pays off in the upper-right, with abundant labels and GPU budget (§4.3, §9).
 
 ---
 
@@ -518,6 +643,12 @@ A gensim Word2Vec model trained on 1B tokens with 300d vectors and vocabulary 50
 
 ## 12. Interview Questions with Answers
 
+**Q: Why does removing stop words hurt sentiment analysis but help topic modeling?**
+Stop word removal strips negation words like "not" and "never" that flip sentiment polarity, so "not good" collapses to "good". Those same words carry no topical signal, so removing them helps LDA and search by concentrating on content words. The rule: keep stop words (especially negations) for polarity tasks, remove them for topic modeling and information retrieval. This single preprocessing toggle can swing sentiment accuracy by 5-10 points.
+
+**Q: Why can fitting TF-IDF on the full dataset before the train/test split inflate accuracy?**
+Because IDF weights computed over the whole corpus leak test-document term frequencies into training, so the model quietly memorizes test-set vocabulary instead of generalizing. The symptom is a large train-to-production gap: one spam classifier showed 97% test accuracy that dropped to 71% in production. The fix is to call `fit_transform` only on the training split and `transform` (never `fit`) on validation and test, ideally wrapped in an sklearn Pipeline so leakage is structurally impossible.
+
 **Q: What is TF-IDF and why is it better than raw term frequency?**
 TF-IDF (Term Frequency * Inverse Document Frequency) weights each term by how often it appears in a document relative to how common it is across all documents. Raw TF heavily weights common words like "the" and "is" which carry no discriminative signal. IDF penalizes words that appear in many documents, so domain-specific rare terms get higher weight. Practically, sublinear_tf=True (log normalization) further reduces the gap between frequent and rare terms within a document.
 
@@ -565,6 +696,12 @@ Sentence embeddings represent an entire sentence as a single fixed-length vector
 
 **Q: What is BLEU and what are its most significant weaknesses?**
 BLEU (Bilingual Evaluation Understudy) measures the geometric mean of modified n-gram precision (n=1 to 4) between a hypothesis and one or more reference translations, multiplied by a brevity penalty to penalize short outputs. Modified precision clips each n-gram count by its maximum occurrence in any reference, preventing trivial repetition. Weaknesses: BLEU is a corpus-level metric that correlates poorly with human judgment at the sentence level; it penalizes valid paraphrases not matching any reference (a correct translation using "automobile" when the reference says "car" scores zero for that bigram); it rewards n-gram overlap regardless of grammatical coherence; and it is computed differently across implementations (smoothing methods vary). ROUGE-L is preferred for summarization (recall-oriented, based on longest common subsequence). BERTScore is preferred when semantic equivalence matters over lexical matching. See [nlp_evaluation_and_metrics.md](nlp_evaluation_and_metrics.md) for full derivations.
+
+**Q: What is the vanishing gradient problem in RNNs and how do LSTMs address it?**
+Gradients shrink multiplicatively through many time steps, so tokens far back in the sequence receive almost no learning signal and long-range dependencies never get learned. A plain RNN multiplies the same weight matrix at every step, so errors decay (or explode) exponentially with sequence length. LSTMs add a gated cell state with an additive update path — the cell carries information forward with minimal attenuation, and input/forget/output gates learn what to keep or discard. This is why LSTMs and GRUs handle sequences of 100+ tokens where vanilla RNNs fail past ~10.
+
+**Q: Why does a BiLSTM read the sequence in both directions, and when can you NOT use it?**
+A BiLSTM runs one LSTM left-to-right and a second right-to-left and concatenates their hidden states, so every token's representation sees both its left and right context. That bidirectional view is critical for NER and POS tagging, where a word's role often depends on what follows it. You cannot use a BiLSTM for autoregressive generation or streaming, because the backward pass peeks at future tokens the model is supposed to predict, which is information leakage at inference. For generation tasks use a unidirectional (causal) LSTM or a decoder; reserve bidirectional encoders for labeling and classification where the full input is available up front.
 
 ---
 

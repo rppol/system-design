@@ -87,83 +87,208 @@ Two-stage least squares: (1) regress T on Z to get T_hat, (2) regress Y on T_hat
 
 ## 5. Architecture Diagrams
 
+### Confounding — Why Naive ML Fails
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    U["Confounder U\nsickness level (unobserved)"]
+    T["T · treatment\nhospital admission"]
+    Y["Y · outcome\ndeath"]
+    U --> T
+    U --> Y
+    T -->|"causal effect we want"| Y
+
+    class U lossN
+    class T req
+    class Y io
 ```
-Confounding — Why Naive ML Fails
-==================================
 
-  Naive: observe P(Y | T)
+U opens a backdoor path T ← U → Y, so the observed P(Y|T=1) is inflated by sickness — sicker people are both admitted and more likely to die. The causal P(Y|do(T=1)) differs from P(Y|T=1) precisely because the U → T edge is unblocked.
 
-  Confounder U
-      /      \
-     v        v
-     T ------> Y
+### Backdoor Adjustment
 
-  U causes both T and Y.
-  P(Y|T=1) != P(Y|do(T=1)) because U is unblocked.
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Example: P(hospital_death | admitted=1) > P(hospital_death | admitted=0)
-  Does hospital admission cause death? No — sicker people are admitted.
-  U = sickness level confounds T (admission) and Y (death).
+    X["X · measured covariates\nadjust on ALL confounders"]
+    T["T · treatment"]
+    Y["Y · outcome"]
+    X --> T
+    X --> Y
+    T -->|"do(T): backdoor blocked"| Y
 
-
-Backdoor Adjustment
-====================
-
-  X (covariates) blocks the backdoor path U -> T:
-
-  X -> T -> Y    (causal path)
-  X -> Y         (direct path, if any)
-  X blocks U's influence when X includes all confounders
-
-  P(Y|do(T)) = sum_x P(Y|T, X=x) P(X=x)  [adjustment formula]
-
-
-Propensity Score Matching
-===========================
-
-  All units                 Treated (T=1)  Control (T=0)
-  X1, X2, X3 ------->      e(x) = 0.7     e(x) = 0.69  <- matched pair
-  Logistic Regression       e(x) = 0.3     e(x) = 0.31  <- matched pair
-     |                      e(x) = 0.9     (no match)   <- trimmed
-  Propensity e(x)
-     |
-  Match on e(x) (within caliper 0.05)
-     |
-  ATT = mean(Y_treated - Y_matched_control)
-
-
-Uplift Modeling — T-Learner
-=============================
-
-  Training data split by treatment:
-
-  Treated (T=1)         Control (T=0)
-  X -> Y                X -> Y
-  Train mu_1(x)         Train mu_0(x)
-
-  CATE(x) = mu_1(x) - mu_0(x)
-
-  Targeting:
-  CATE > threshold  -> treat (persuadables)
-  CATE ~ 0          -> skip (sure things or lost causes)
-  CATE < 0          -> do not treat (sleeping dogs)
-
-
-Double ML Pipeline
-===================
-
-  [Step 1: Nuisance estimation via cross-fitting (K=5 folds)]
-    Fold 1: train on folds 2-5, predict fold 1 outcomes -> Y_hat
-    ...repeat for all folds -> full out-of-sample Y_hat, T_hat
-
-  [Step 2: Residualize]
-    Y_tilde = Y - Y_hat   (outcome residual)
-    T_tilde = T - T_hat   (treatment residual)
-
-  [Step 3: Final regression]
-    theta = regression(Y_tilde ~ T_tilde)
-    -> ATE estimate with valid confidence intervals
+    class X base
+    class T req
+    class Y io
 ```
+
+Conditioning on X (when X contains every confounder) blocks the backdoor path X → T, so the adjustment formula P(Y|do(T)) = sum_x P(Y|T, X=x) P(X=x) recovers the causal effect. If any confounder is missing from X, the backdoor stays open and the estimate is biased.
+
+### Potential Outcomes — The Fundamental Problem
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    unit(["Unit i · covariates X_i"])
+    unit --> w1["World 1 · treated\nY_i(1) observed if T=1"]
+    unit --> w0["World 0 · control\nY_i(0) observed if T=0"]
+    w1 --> ite(("τ_i = Y_i(1) − Y_i(0)"))
+    w0 --> ite
+    ite --> miss["Only ONE world is observed\nthe other is the missing counterfactual"]
+
+    class unit io
+    class w1 train
+    class w0 frozen
+    class ite mathOp
+    class miss lossN
+```
+
+For each unit we observe exactly one potential outcome; the individual effect τ_i is never directly observable. Every causal method — randomization, matching, DiD, IV — is a strategy for filling in the missing counterfactual world.
+
+### Propensity Score Matching
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    X(["All units · X1, X2, X3"])
+    X --> PS["Propensity model\ne(x) = P(T=1 given X)"]
+    PS --> treated["Treated · e = 0.70, 0.30, 0.90"]
+    PS --> control["Control · e = 0.69, 0.31"]
+    treated --> match{"match within\ncaliper 0.05?"}
+    control --> match
+    match -->|"yes"| pairs["Matched pairs\n0.70↔0.69, 0.30↔0.31"]
+    match -->|"no · e=0.90"| trim["Trimmed · no overlap"]
+    pairs --> att(("ATT = mean\nY_treated − Y_matched_control"))
+
+    class X io
+    class PS train
+    class treated req
+    class control base
+    class match mathOp
+    class pairs train
+    class trim lossN
+    class att mathOp
+```
+
+Each treated unit is matched to a control unit of near-identical propensity; unmatched treated units (e = 0.90, no comparable control) are trimmed to enforce overlap. The ATT is the mean outcome difference across matched pairs.
+
+### Uplift Modeling — T-Learner
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    data(["Training data · X, T, Y"])
+    data --> split{"split by\ntreatment T"}
+    split -->|"T=1"| mu1["Train μ₁(x)\non treated"]
+    split -->|"T=0"| mu0["Train μ₀(x)\non control"]
+    mu1 --> cate(("CATE(x) = μ₁(x) − μ₀(x)"))
+    mu0 --> cate
+    cate --> target{"targeting\nrule"}
+    target -->|"CATE > τ"| persuade["Persuadables → treat"]
+    target -->|"CATE ≈ 0"| skip["Sure-things / lost-causes → skip"]
+    target -->|"CATE < 0"| dogs["Sleeping-dogs → never treat"]
+
+    class data io
+    class split mathOp
+    class mu1 train
+    class mu0 train
+    class cate mathOp
+    class target mathOp
+    class persuade req
+    class skip base
+    class dogs lossN
+```
+
+The T-learner fits one outcome model per treatment arm and takes their difference as the CATE. Targeting then treats only persuadables (CATE > threshold) and spares sleeping-dogs, whose response to treatment is negative.
+
+### Uplift Segments — Who To Target
+
+```mermaid
+quadrantChart
+    title Uplift segments by baseline vs treated response
+    x-axis "Low baseline conversion" --> "High baseline conversion"
+    y-axis "Low response if treated" --> "High response if treated"
+    quadrant-1 Sure things - skip
+    quadrant-2 Persuadables - TARGET
+    quadrant-3 Lost causes - skip
+    quadrant-4 Sleeping dogs - avoid
+    Ideal email target: [0.25, 0.82]
+    Always converts: [0.80, 0.85]
+    Never converts: [0.20, 0.20]
+    Annoyed by email: [0.82, 0.25]
+```
+
+CATE = P(buy | treated) − P(buy | control), so persuadables (low baseline, high treated response) sit top-left and are the only profitable target; sleeping-dogs (high baseline, suppressed by the email) sit bottom-right with a negative effect and must be excluded.
+
+### Double ML Pipeline
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph cf["Step 1 · cross-fit (K=5 folds)"]
+        Xa(["X, T, Y"])
+        Xa --> ym["Outcome model\nE(Y given X) → Yhat"]
+        Xa --> tm["Treatment model\nE(T given X) → That"]
+    end
+    ym --> ry(("Y_res = Y − Yhat"))
+    tm --> rt(("T_res = T − That"))
+    ry --> reg["θ = regress\nY_res on T_res"]
+    rt --> reg
+    reg --> ate(["ATE = θ\nwith valid CI"])
+
+    class Xa io
+    class ym train
+    class tm train
+    class ry mathOp
+    class rt mathOp
+    class reg train
+    class ate io
+```
+
+Cross-fitting produces out-of-sample residuals so the flexible nuisance models cannot leak into the final estimate; regressing the outcome residual on the treatment residual yields a debiased ATE (Neyman orthogonality), valid even when the nuisance models are regularized.
 
 ---
 
@@ -551,6 +676,24 @@ This is a classic DiD or synthetic control problem. If the change was rolled out
 
 **Q: What is the difference between correlation, prediction, and causation in ML systems?**
 Correlation: statistical association, X and Y tend to move together. Prediction: use X to minimize expected loss on Y (P(Y|X)). Causation: changing X causes Y to change (P(Y|do(X))). A predictive model can be highly accurate based on spurious correlations that do not generalize under intervention. Example: a model predicting ICU mortality might learn that fewer medications predict survival — because terminal patients stop receiving medications before death. This correlation is anti-causal and useless for decision-making. Causal models encode the mechanism, not the correlation, and remain valid under interventions and distribution shifts that change the correlation structure.
+
+**Q: Why can't you include a post-treatment variable as a covariate in a causal model?**
+Post-treatment variables are affected by the treatment, so conditioning on them opens collider bias or blocks part of the causal effect you are trying to measure. Adjusting for a mediator (a variable on the causal path T → M → Y) removes the indirect effect and understates the total effect; conditioning on a common consequence of T and Y (a collider) induces a spurious association even when none existed. The classic production failure is including "discount_used_last_90_days" in a discount-uplift model — a variable determined by past treatment — which creates a self-reinforcing feedback loop. Rule: only use covariates measured strictly before treatment assignment; apply hard temporal cutoffs to every feature.
+
+**Q: What is the positivity (overlap) assumption and what happens when it is violated?**
+Positivity requires 0 < P(T=1|X=x) < 1 for every covariate value, so each subgroup contains both treated and control units. When it is violated — some segment almost never receives treatment (e(x) near 0) or always does (e(x) near 1) — the causal effect is not identified there because there is no comparable counterfactual group. IPW weights for those units explode (a unit with e(x)=0.01 gets weight 100x), a handful of observations dominate the estimate, and matching simply finds no partner. Always plot the propensity histograms for treated and control, trim units outside [0.05, 0.95], and report the trimming fraction and its sensitivity.
+
+**Q: How does the S-learner differ from the T-learner, and when does the S-learner fail?**
+The S-learner fits one model with treatment as an extra feature, while the T-learner fits separate treated and control models and subtracts them. The S-learner fails when the treatment effect is weak relative to the covariates: a tree-based or heavily regularized model can down-weight the treatment feature entirely, collapsing every CATE estimate toward zero. This bit a marketing team whose 2% lift vanished because the single GBM found demographics more predictive than the binary treatment flag. Prefer the T-learner or X-learner with tree models, and use the R-learner (linear treatment, nonlinear covariates) when you need the treatment term protected from regularization.
+
+**Q: How do you run a sensitivity analysis for unmeasured confounding?**
+Sensitivity analysis quantifies how strong an unmeasured confounder would have to be to overturn your estimate, using Rosenbaum bounds or the E-value. The E-value reports the minimum association (on the risk-ratio scale) that a hidden confounder must have with both treatment and outcome to fully explain away the observed effect — a large E-value means the finding is robust, a small one means a modest unobserved variable could nullify it. This matters because unconfoundedness is untestable from data alone; a media company's "15% watch-time lift" from observational data collapsed to 3% in an RCT because high-intent viewers were the hidden confounder. Report the E-value alongside every observational estimate and label it "suggestive" until an experiment confirms it.
+
+**Q: When would you use difference-in-differences instead of propensity score matching?**
+Use difference-in-differences when you have before/after (panel) data on treated and control groups and the unobserved confounders are time-invariant. DiD subtracts each group's own pre-period level, so any fixed unmeasured difference between groups cancels out — something matching, which needs all confounders measured, cannot do. The cost is the parallel-trends assumption: absent treatment, the two groups must have moved together, which you check by plotting pre-treatment trends or testing event-study leads. Choose matching when confounding is cross-sectional and well-measured; choose DiD (or synthetic control if only one treated unit exists) when a policy or feature rolled out at a known time to some units but not others.
+
+**Q: What is a doubly robust estimator and why is it 'doubly' robust?**
+A doubly robust estimator combines an outcome model and a propensity model, and stays consistent if either one — not necessarily both — is correctly specified. The AIPW (augmented IPW) and DR-learner estimators add an outcome-model correction term to the IPW estimate, so a mistake in the propensity model is cancelled when the outcome model is right, and vice versa. This gives you two independent chances to avoid bias, which is valuable when you are unsure which nuisance model to trust. Use it as the default over plain IPW whenever both models are available; the only cost is slightly higher variance and the need to cross-fit both nuisance models to preserve valid inference.
 
 ---
 

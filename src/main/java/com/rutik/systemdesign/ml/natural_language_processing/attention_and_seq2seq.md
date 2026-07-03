@@ -89,53 +89,130 @@ Key insight: Attention doesn't just solve the bottleneck problem — it fundamen
 
 ## 5. Architecture Diagrams
 
-### Bahdanau Attention Flow
+### Additive (Bahdanau) vs Dot-Product (Luong) Attention
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph bah["Bahdanau — additive energy"]
+        bh(["h_i\nencoder state"]) --> bw1["W1 · h_i"]
+        bs(["s_t\ndecoder state"]) --> bw2["W2 · s_t"]
+        bw1 --> badd((" + "))
+        bw2 --> badd
+        badd --> btanh["tanh"]
+        btanh --> bv["v^T projection"]
+        bv --> be(["e_ti energy"])
+    end
+    subgraph luo["Luong — dot-product energy"]
+        lh(["h_i\nencoder state"]) --> ldot(("dot"))
+        ls(["s_t\ndecoder state"]) --> ldot
+        ldot --> le(["e_ti energy"])
+    end
+
+    class bh,bs,be,lh,ls,le io
+    class bw1,bw2,bv train
+    class btanh,badd,ldot mathOp
 ```
-Encoder (BiLSTM):
-  Input: [x1, x2, x3, x4]
-  States: [h1, h2, h3, h4]   (forward + backward concatenated)
 
-Decoder at step t=1:
-  State: s_0 (initialized from encoder final state)
+Additive attention pushes both states through learned projections and a tanh before scoring, so it handles differing encoder/decoder dimensions and stays numerically stable; dot-product attention has zero parameters — just h_i · s_t — making it faster but requiring matched dimensions and sqrt(d_k) scaling at high dimension.
 
-  Alignment scores:
-    e_{1,1} = v^T · tanh(W_1·h1 + W_2·s_0)
-    e_{1,2} = v^T · tanh(W_1·h2 + W_2·s_0)
-    e_{1,3} = v^T · tanh(W_1·h3 + W_2·s_0)
-    e_{1,4} = v^T · tanh(W_1·h4 + W_2·s_0)
+### RNN Encoder-Decoder with Attention
 
-  Attention weights:
-    [α_{1,1}, α_{1,2}, α_{1,3}, α_{1,4}] = softmax([e_{1,1}...e_{1,4}])
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Context vector:
-    c_1 = α_{1,1}·h1 + α_{1,2}·h2 + α_{1,3}·h3 + α_{1,4}·h4
+    subgraph enc["Encoder (BiLSTM)"]
+        h1(["h1"])
+        h2(["h2"])
+        h3(["h3"])
+        h4(["h4"])
+    end
+    st(["s_t-1\ndecoder state"]) --> align["Alignment scores\ne_ti = score(h_i, s_t-1)"]
+    h1 --> align
+    h2 --> align
+    h3 --> align
+    h4 --> align
+    align --> sm["softmax → weights a_ti"]
+    sm --> ctx((" Σ a·h "))
+    h1 --> ctx
+    h2 --> ctx
+    h3 --> ctx
+    h4 --> ctx
+    ctx --> cvec(["context c_t"])
+    cvec --> dec["Decoder LSTM\ns_t = f(s_t-1, y_t-1, c_t)"]
+    dec --> yt(["y_t"])
 
-  Decoder output:
-    s_1 = LSTM(s_0, [y_0; c_1])   (concat input embedding with context)
-    y_1 = softmax(W_o · tanh(W_c · [s_1; c_1]))
+    class h1,h2,h3,h4,st,cvec,yt io
+    class dec base
+    class align,sm,ctx mathOp
 ```
+
+The decoder never consumes a single fixed vector: at each step it scores every encoder state against s_t-1, softmaxes into weights, and reads a fresh context vector c_t = Σ a·h. This soft alignment is what removes the fixed-length bottleneck that plagued plain seq2seq.
 
 ### Encoder-Decoder Transformer (seq2seq)
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    src(["Source: The cat sat"]) --> encblk["Encoder ×N\nbidirectional self-attn + FFN"]
+    encblk --> mem(["Encoder memory\nh_1 ... h_n"])
+    tgt(["Target: BOS Le chat"]) --> decself["Decoder self-attn\ncausal (left-to-right)"]
+    decself --> cross["Cross-attention\nQ = decoder, K/V = encoder"]
+    mem --> cross
+    cross --> decffn["Decoder FFN"]
+    decffn --> logits["Output projection → logits"]
+    logits --> pred(["Predict: assis"])
+
+    class src,tgt,mem,pred io
+    class encblk,decself,decffn base
+    class cross mathOp
+    class logits train
 ```
-Source: "The cat sat"               Target: "<bos> Le chat"
-    |                                          |
-[Encoder: N transformer blocks]         [Decoder: N transformer blocks]
-  [Self-attention: bidirectional]         [Causal self-attention: left-to-right]
-  [FFN]                                   [Cross-attention: Q=decoder, K/V=encoder]
-    |                                     [FFN]
-    v                                          |
-Encoder outputs: [h_1, h_2, h_3]         Decoder outputs
-                     |                         |
-                     +----> Cross-attention <---+
-                           (K, V from encoder;
-                            Q from decoder)
-                                |
-                           Output logits
-                                |
-                           "assis" predicted
+
+Cross-attention is the bridge: the decoder's queries read the encoder's key/value memory, so every generated token can look back at the full source. The causal mask in the decoder's self-attention is what keeps generation strictly autoregressive.
+
+### Attention Weight Heatmap (Alignment Concept)
+
 ```
+Cross-attention alignment: rows = target (French), cols = source (English)
+Cell shade proportional to attention weight a_{t,i}; each row softmaxes to 1.0
+
+                The     cat     sat     on      the     mat
+   Le           ████    ····    ····    ····    ░░░░    ····
+   chat         ····    ████    ····    ····    ····    ····
+   assis        ····    ····    ████    ····    ····    ····
+   sur          ····    ····    ····    ████    ····    ····
+   le           ░░░░    ····    ····    ····    ████    ····
+   tapis        ····    ····    ····    ····    ····    ████
+
+   ████ high weight (~0.8)    ░░░░ small leak (~0.1)    ···· near zero
+```
+
+For translation the learned alignment is near-diagonal — each French word attends mostly to its English counterpart — which is exactly what an attention visualization exposes. Off-diagonal heat appears only where the two languages reorder words, and near-uniform rows are the tell-tale sign of a failed (collapsed) alignment.
 
 ### Beam Search Tree (width=3, length=4)
 
@@ -750,6 +827,15 @@ Standard beam search finds multiple high-probability sequences, but they tend to
 
 **Q: What is the role of the sinusoidal positional encoding in seq2seq transformers and how does it enable extrapolation?**
 Sinusoidal positional encoding adds a fixed encoding PE(pos, 2i) = sin(pos/10000^(2i/d)) and PE(pos, 2i+1) = cos(pos/10000^(2i/d)) to each position's embedding. The key property: PE(pos+k) can be expressed as a linear function of PE(pos) — specifically, a 2D rotation matrix with angle k/10000^(2i/d). This means relative position differences are representable as linear transformations, making it easier for the attention mechanism to learn position-relative patterns. Unlike learned absolute encodings, sinusoidal encodings can be computed for any position at inference, enabling limited length extrapolation. However, extrapolation beyond training length still degrades significantly because the model learns attention patterns for the positions seen during training. Modern solutions (RoPE, ALiBi) provide much better extrapolation.
+
+**Q: Why does dot-product attention need sqrt(d_k) scaling but additive attention does not?**
+Additive attention passes the summed projections through a tanh, which bounds the pre-softmax energies, so it stays stable at high dimension without any explicit scaling. The dot product h_i · s_t, by contrast, is a sum of d_k element-wise products whose variance grows linearly with d_k — at d_k=512 the standard deviation is ~22, pushing softmax into a near-one-hot regime where gradients vanish for all non-maximum keys. Dividing by sqrt(d_k) rescales that variance back to ~1 regardless of dimension. This is precisely why Bahdanau's additive form was numerically robust before the scaling trick existed, and why the transformer's *scaled* dot-product attention was needed to make the cheaper multiplicative form usable at d_model=512.
+
+**Q: In an encoder-decoder transformer, why is the encoder run once but the decoder run autoregressively?**
+The encoder output (the memory) depends only on the fixed source sequence, so it is computed once and cached, while the decoder must run step by step because each token conditions on the previously generated one. During inference you encode the source a single time, then loop the decoder: at step t it attends over the cached encoder memory (unchanged) plus its own tokens 1..t-1. This asymmetry drives two production optimizations — pre-compute and cache the encoder memory per input, and use a KV cache for the decoder's self-attention so each step is O(1) in past length rather than O(t). Recomputing the encoder every decode step is a common and costly beginner mistake.
+
+**Q: What is local attention in the Luong formulation and when is it preferable to global attention?**
+Local attention predicts an alignment center p_t and attends only to a window [p_t - D, p_t + D] around it, cutting cost from O(source length) to O(window) per decoder step. Global attention re-scores every source position at every decoder step, which is wasteful when the alignment is roughly monotonic and the relevant source region is narrow. Local attention shines in speech recognition and character-level translation, where the output tracks the input left-to-right and the useful context is a small neighborhood — Listen-Attend-Spell used a ±10-frame window and outperformed global attention. The tradeoff: if p_t is mispredicted, the true aligned position can fall outside the window and be lost, so local attention is risky for tasks with long-range reordering (e.g., English↔Japanese).
 
 ---
 

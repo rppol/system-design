@@ -73,101 +73,128 @@ Key insight: a 4x reduction in model size via quantization produces a 3x speedup
 
 ### Latency Budget Decomposition (P99 = 100ms)
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client([Client request]) -->|"network 8ms"| gw["API gateway\nauth · routing · rate-limit\n2ms"]
+    gw --> feat["Feature fetch\nRedis pipeline 6ms\n+ computed 1ms"]
+    feat --> inf["Model inference\nLightGBM 12ms\n+ DNN embed 18ms"]
+    inf --> post["Post-processing\nrules 3ms · serialize 2ms"]
+    post -->|"network 9ms"| resp([Response])
+    resp --> total["Total P99 = 65ms\nbudget 80ms → 35ms headroom"]
+
+    class client,resp io
+    class gw req
+    class feat io
+    class inf mathOp
+    class post req
+    class total lossN
 ```
-COMPLETE REQUEST PATH (P99 BUDGET = 100ms)
-                                          Budget    Actual
-                                          ───────   ──────
-CLIENT ──[network]──────────────────────>  10ms      8ms
-API GATEWAY (auth, routing, rate limit)     3ms      2ms
-                                          ───────   ──────
-FEATURE FETCH
-  └── Redis pipeline GET (12 keys)         8ms      6ms
-  └── Computed features (user context)     2ms      1ms
-                                          ───────   ──────
-MODEL INFERENCE
-  └── LightGBM (150 trees, 150 features)  15ms      12ms
-  └── DNN embedding lookup               20ms      18ms
-                                          ───────   ──────
-POST-PROCESSING
-  └── Business rules, diversity           4ms       3ms
-  └── Response serialization              3ms       2ms
-                                          ───────   ──────
-RESPONSE ──[network]──────────────────>  10ms       9ms
-API gateway overhead                      5ms       4ms
-                                          ───────   ──────
-TOTAL                                    80ms      65ms
-HEADROOM                                 20ms      35ms
-```
+
+Total latency is the sum of stage latencies, so per Amdahl's Law you optimize the largest stage first — here model inference (30ms of 65ms). Each stage must meet its own P99 budget; none can borrow slack from another at the tail.
 
 ### Model Cascade Architecture
 
-```
-REQUEST (1000 QPS)
-        │
-        ▼
-┌─────────────────────────────────────────┐
-│  TIER 1: FAST MODEL (LR / shallow GBT) │
-│  Latency: 2ms │ Cost: $0.001/req        │
-│  100% of requests handled here          │
-└──────────────────────┬──────────────────┘
-                       │
-           ┌───────────┴────────────┐
-           │ High confidence?       │
-           │ (score > 0.95 or       │
-           │  score < 0.05)         │
-           └────────┬──────────────┘
-                    │
-            YES (80%)        NO (20%)
-             │                │
-             ▼                ▼
-         SERVE            ┌───────────────────────────┐
-         RESULT           │ TIER 2: RICH MODEL (DNN)  │
-                          │ Latency: 45ms              │
-                          │ Cost: $0.01/req             │
-                          │ 20% of requests             │
-                          └───────────┬───────────────┘
-                                      │
-                                      ▼
-                                  SERVE RESULT
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-EFFECTIVE AVERAGE COST = 0.8 * $0.001 + 0.2 * $0.01 = $0.00280/req
-COMPARED TO DNN-ONLY: $0.01/req
-SAVINGS: 72%
-AVERAGE LATENCY = 0.8 * 2ms + 0.2 * (2ms + 45ms) = 11ms (vs 45ms DNN-only)
+    req([Request · 1000 QPS]) --> t1["Tier 1 · fast model\nLR / shallow GBT\n2ms · $0.001/req"]
+    t1 --> conf{"Confident?\nscore ≥ 0.95 or ≤ 0.05"}
+    conf -->|"yes · 80%"| serve1(["Serve Tier-1 result"])
+    conf -->|"no · 20%"| t2["Tier 2 · rich model\nDNN · 45ms · $0.01/req"]
+    t2 --> serve2(["Serve Tier-2 result"])
+
+    class req io
+    class t1 base
+    class conf req
+    class t2 train
+    class serve1,serve2 io
 ```
+
+Routing only the uncertain 20% to the DNN gives an effective cost of 0.8·$0.001 + 0.2·$0.01 = $0.0028/req (72% cheaper than DNN-only) and an average latency of 0.8·2ms + 0.2·47ms ≈ 11ms (versus 45ms for DNN-only), while keeping the expensive model's quality on the hard cases.
 
 ### Dynamic Batching
 
-```
-INCOMING REQUESTS (variable rate)
-  req1 (t=0ms)   ──┐
-  req2 (t=1ms)   ──┤
-  req3 (t=2ms)   ──┤──> BATCH QUEUE ──┐
-  req4 (t=3ms)   ──┤                  │
-  req5 (t=4ms)   ──┘                  │
-                                       │ FIRE BATCH WHEN:
-                                       │ batch_size >= 32 OR
-                                       │ wait_time >= 5ms
-                                       ▼
-                               ┌──────────────┐
-                               │  GPU MODEL   │
-                               │  INFERENCE   │
-                               │  (batch=5,   │
-                               │   latency=   │
-                               │   15ms)      │
-                               └──────┬───────┘
-                                      │
-                               RETURN RESULTS
-                               (each req gets its result)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-TRADEOFF:
-  Without batching: 1 req * 15ms = 15ms, GPU utilization 5%
-  With batching:    5 req * 15ms = 75ms processing, but:
-    - req1 waits 5ms (batch timeout) + 15ms inference = 20ms total
-    - req5 waits 0ms + 15ms = 15ms total (still within budget)
-    - GPU utilization 25% (5x improvement)
-    - Throughput: 5 req / 20ms = 250 req/s vs 67 req/s without batching
+    r1([req1]) --> q["Batch queue"]
+    r2([req2]) --> q
+    r3([req3]) --> q
+    q --> fire{"batch ≥ 32\nOR wait ≥ 5ms?"}
+    fire -->|"no"| q
+    fire -->|"yes"| gpu["GPU model inference\nbatch=5 · 15ms"]
+    gpu --> ret(["Return results\neach req gets its own"])
+
+    class r1,r2,r3,ret io
+    class q mathOp
+    class fire req
+    class gpu train
 ```
+
+Firing on size-or-timeout keeps the tail bounded — the oldest request waits at most max_wait (5ms) before its batch fires. Batching lifts GPU utilization from ~5% to ~25% and throughput from 67 to 250 req/s, at the cost of ~5ms added wait on the earliest arrivals.
+
+### Prediction Caching Path
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    req([Request\nentity_id + features + model_ver]) --> key["Build cache key\nSHA256(id : feature_hash : model_ver)"]
+    key --> look{"Cache hit?"}
+    look -->|"yes ~30%"| hit(["Serve cached score\n~1ms · no inference"])
+    look -->|"no"| model["Run model inference"]
+    model --> store["Write to Redis\nTTL matched to feature drift"]
+    store --> out(["Serve fresh score"])
+
+    class req,hit,out io
+    class key mathOp
+    class look req
+    class model train
+    class store base
+```
+
+Folding feature_hash and model_ver into the key means stale features or a new model version naturally miss the cache — the fix for the poisoning failure where a user's risk spikes but a cached low-risk score keeps being served.
+
+### Batching Tradeoff: Throughput vs Latency
+
+```mermaid
+xychart-beta
+    title "Batching by max_wait_ms: throughput gain (bar) vs added P99 latency (line)"
+    x-axis "max_wait_ms" [0, 2, 5, 10, 20]
+    y-axis "multiplier (x)  /  added ms" 0 --> 25
+    bar [1, 4, 7, 11, 15]
+    line [0, 2, 5, 10, 20]
+```
+
+Throughput gain (bars) saturates past roughly 5ms while added P99 latency (line) keeps climbing almost 1:1 with max_wait. That divergence is why max_wait should be capped near 20% of the P99 budget — beyond that you buy latency without buying throughput.
 
 ---
 
@@ -809,8 +836,14 @@ result = compute_break_even(InfrastructureCostModel(
 **Q: How do you decompose a P99 latency budget for an ML serving system?**
 Start by measuring the actual P99 end-to-end in production, then attribute it to each stage: network (client to server), API gateway overhead, feature fetch (Redis), model inference, post-processing, response serialization, and return network. Use distributed tracing (OpenTelemetry, Jaeger) or stage-level metrics to get per-stage P99. Allocate budget proportionally to each stage's flexibility — model inference is most flexible (optimization levers include quantization, distillation, cascade), feature fetch is moderately flexible (Redis batching, connection pooling), and network is mostly fixed. A typical budget for P99 = 100ms: network (20ms), feature fetch (15ms), model inference (40ms), post-processing (10ms), overhead (15ms).
 
+**Q: Why is P99 tail latency, not average latency, the metric that matters for ML serving?**
+P99 is what matters because one user request usually fans out into many parallel model calls, and the slowest of them determines the user-perceived latency. With 100 parallel calls, the request finishes at the max of 100 draws, so a 1-in-100 tail event becomes near-certain for every request — an effect the average completely hides. A system with a great mean (20ms) but a fat P99 (300ms) will feel slow to most users under fan-out. Always set SLAs and optimize against P99/P99.9, and provision capacity for the tail rather than the mean.
+
 **Q: What is dynamic batching and how does it improve GPU throughput?**
 Dynamic batching groups multiple incoming requests into a single batch for GPU inference. A GPU is a massively parallel processor — running inference on a batch of 32 takes almost the same time as running inference on 1 request, because all 32 inputs can be processed in parallel across GPU cores. Without batching, GPU utilization is typically 2-5% for a single request. With batching, it reaches 50-80%. The tradeoff: each request must wait for the batch to fill (max_wait_ms) or for max_batch_size requests to accumulate. Setting max_wait_ms = 5ms and max_batch_size = 32 typically increases throughput by 5-10x with a P99 latency increase of < 5ms.
+
+**Q: Why can dynamic batching increase latency instead of reducing it at low QPS?**
+At low QPS, requests arrive slower than the batch fills, so each one waits the full max_wait timeout yet still forms only a tiny batch. You pay the wait cost but capture almost none of the throughput benefit, because the GPU stays underutilized regardless of the extra wait. Batching only pays off when the arrival rate is high enough to fill batches before the timeout expires. Mitigate by making max_wait adaptive to load, or by disabling batching below a QPS threshold where single-request inference already meets the SLA.
 
 **Q: Explain the model cascade pattern and when it applies.**
 A model cascade routes requests through models of increasing complexity and cost, stopping as soon as a model is confident enough. Tier 1 is a cheap, fast model (logistic regression or shallow GBT, 2ms, $0.001/req). If its score exceeds a high-confidence threshold (e.g., 0.90) or falls below a low-confidence threshold (e.g., 0.10), the result is served. For uncertain scores (middle region), the request escalates to Tier 2 (expensive DNN, 50ms, $0.01/req). In practice, if 80% of requests are handled by Tier 1, the average cost is $0.001*0.8 + $0.01*0.2 = $0.0028 (72% cheaper than DNN-only), and average latency is 0.8*2ms + 0.2*52ms = 12ms (vs 50ms). Applies to: fraud detection, ad quality scoring, content moderation.
@@ -847,6 +880,21 @@ Latency is the time for a single request to complete — the user's perceived wa
 
 **Q: How do you design an inference system that degrades gracefully under load?**
 Implement four levels of degradation: (1) full quality — serve the expensive DNN model with all features; normal operation under 80% capacity. (2) cascade mode — route more traffic to the cheap Tier 1 model by relaxing confidence thresholds; activate above 80% CPU/GPU utilization. (3) simplified features — skip slow-to-fetch features (e.g., graph-based features requiring database joins); use cached or simplified feature values; activate above 90% utilization. (4) fallback — serve a non-ML rule-based response (popular items, trending content); activate when all model servers report errors or P99 > 2x SLA. Each level should be monitored separately. Graceful degradation must be tested in load tests before it is needed in production; an untested fallback path is likely broken.
+
+**Q: What is model warmup and why is the first request after deployment slow?**
+Model warmup is sending synthetic requests to a freshly loaded model so one-time lazy costs are paid before real traffic arrives. The first real request otherwise triggers CUDA context initialization, cuDNN autotuning, JIT or graph compilation (TorchScript, XLA, a TensorRT engine build), and page-faulting weights into memory — often 10-100x slower than steady state. This shows up as a P99 spike right after every deploy or autoscale event. Warm up during the readiness probe and do not mark the pod healthy until warmup completes.
+
+**Q: How do you choose the optimal batch size for a GPU model?**
+Increase batch size until throughput saturates (the GPU becomes compute-bound) or per-request latency exceeds the P99 budget, then back off one step. At small batches the model is memory-bandwidth and kernel-launch-overhead bound, so throughput scales almost linearly with batch size; past the roofline knee, larger batches add latency without adding throughput. Sweep batch sizes offline and plot both throughput and P99 latency against batch size. Pick the knee of the throughput curve that still fits the latency budget.
+
+**Q: What is operator (kernel) fusion and how does it reduce inference latency?**
+Operator fusion merges several small operations — for example matmul, bias add, and activation — into a single GPU or CPU kernel, cutting memory round-trips. Many DNN ops are memory-bandwidth-bound rather than compute-bound, and each separate kernel reads and writes activations to HBM; fusion keeps the intermediates in registers or shared memory. TensorRT, ONNX Runtime, and torch.compile apply fusion automatically, typically yielding 1.3-2x speedup. Enable graph optimization and fusion in the inference engine before attempting to hand-optimize kernels.
+
+**Q: What is the difference between structured and unstructured pruning for inference speedup?**
+Unstructured pruning zeros individual weights and needs sparse-matrix hardware to actually speed up, while structured pruning removes whole channels, filters, or attention heads and speeds up on any hardware. Unstructured pruning achieves higher compression (2-10x) but a dense kernel still processes the zeros unless the runtime exploits sparsity, which is rare in practice; structured pruning (2-4x) produces a genuinely smaller dense model that every GPU and CPU runs faster. For a latency win on commodity hardware, prefer structured pruning. Reserve unstructured pruning for memory savings or sparsity-aware accelerators.
+
+**Q: What is request coalescing (single-flight) and when does it help?**
+Request coalescing deduplicates concurrent identical requests so the model runs once and the single result is fanned out to all waiting callers. It differs from caching, which stores past results — coalescing collapses in-flight duplicates that a cache would otherwise all treat as misses. It shines during a thundering herd, such as when a popular item's cache entry expires and thousands of requests for it arrive at once. Combine it with caching so a cache stampede triggers one recompute instead of thousands of parallel inferences.
 
 ---
 

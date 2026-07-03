@@ -91,72 +91,128 @@ Key insight: The bottleneck is almost never model accuracy — it is latency, th
 
 ### Single-Model REST Serving
 
-```
-Client
-  |
-  | HTTP POST /predict  (JSON: {"features": [...]})
-  v
-+------------------+
-|  Load Balancer   |  (nginx, AWS ALB, GCP GLB)
-+------------------+
-      |       |
-      v       v
-+----------+ +----------+
-| Serving  | | Serving  |  (FastAPI / TorchServe replicas)
-| Instance | | Instance |
-+----------+ +----------+
-      |
-      v
-+------------------+
-| Model Artifact   |  (S3, GCS, NFS — loaded at startup)
-| Store            |
-+------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client\nHTTP POST /predict"]) --> lb["Load Balancer\nnginx / ALB / GLB"]
+    lb --> s1["Serving Instance 1\nFastAPI / TorchServe"]
+    lb --> s2["Serving Instance 2\nFastAPI / TorchServe"]
+    s1 --> store["Model Artifact Store\nS3 / GCS / NFS"]
+    s2 --> store
+    store -.->|"loaded at startup"| s1
+    store -.->|"loaded at startup"| s2
+
+    class client io
+    class lb req
+    class s1,s2 mathOp
+    class store base
 ```
 
-### Batching Flow in Dynamic Batching
+*Stateless serving replicas sit behind a load balancer and each loads the same model artifact once at startup — this is what lets you scale out horizontally by just adding pods.*
 
-```
-Request 1 ──┐
-Request 2 ──┤ --> [Request Queue] --> Batcher --> [Batch of N] --> Model --> Results
-Request 3 ──┤                          ^
-   ...       |                         |
-Request N ──┘             max_batch_size=32 OR max_wait_ms=5ms
+### Request Lifecycle with Dynamic Batching
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    r1(["Request 1"]) --> q["Request Queue"]
+    r2(["Request 2"]) --> q
+    r3(["Request N"]) --> q
+    q --> batch{"max_batch_size=32\nOR max_wait_ms=5ms?"}
+    batch -->|"batch ready"| model["Model\nsingle GPU kernel launch"]
+    model --> post["Postprocess\nsoftmax / decode / format"]
+    post --> resp(["Predictions\n+ latency_ms"])
+
+    class r1,r2,r3,resp io
+    class q req
+    class batch,post mathOp
+    class model base
 ```
 
-### A/B Testing / Canary Deployment
+*The batcher holds requests until either the size or the wait-time bound trips, then runs one combined kernel; the response only leaves after postprocessing, so `max_wait_ms` is pure added latency you trade for throughput.*
 
+### Deployment Strategies: Canary vs Shadow vs Blue-Green
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    traffic(["Live Traffic 100%"]) --> router{"Deployment\nstrategy"}
+
+    router -->|"Canary"| canV1["v1 stable\nserves 95%"]
+    router -->|"Canary"| canV2["v2 candidate\nserves 5%"]
+
+    router -->|"Shadow"| shV1["v1 serves users\n100%"]
+    router -->|"Shadow"| shV2["v2 shadow\nlogged, not served"]
+
+    router -->|"Blue-Green"| blue["Blue v1\nactive"]
+    router -->|"Blue-Green"| green["Green v2\nidle, warmed"]
+
+    canV2 --> metrics["Compare metrics\nlatency / accuracy / KPI"]
+    shV2 --> metrics
+    green --> metrics
+    metrics --> decide{"Promote or\nrollback?"}
+
+    class traffic io
+    class router,decide mathOp
+    class canV1,shV1,blue base
+    class canV2,shV2,green train
+    class metrics req
 ```
-Incoming Traffic (100%)
-        |
-        v
-  +------------+
-  |  Router    |  (5% → Model v2,  95% → Model v1)
-  +------------+
-      |       |
-      v       v
-  +-------+ +-------+
-  | v1    | | v2    |
-  | (95%) | | (5%)  |
-  +-------+ +-------+
-      |       |
-      v       v
-  Metrics collection → compare accuracy, latency, business KPIs
-```
+
+*All three route or duplicate traffic to a candidate model, but differ in blast radius: canary exposes a small slice of users, shadow exposes none (predictions are only logged), and blue-green flips everyone at once with instant rollback.*
 
 ### ONNX Inference Pipeline
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Training
+        pt["PyTorch Model"] -->|"torch.onnx.export()"| onnx["model.onnx"]
+    end
+    subgraph Serving
+        inp(["Input Tensor"]) --> sess["ONNXRuntime Session\nCUDA / CPU provider"]
+        sess --> outp(["Output Tensor"])
+        outp --> post2["Postprocess"]
+        post2 --> resp2(["Response"])
+    end
+    onnx -.->|"load at startup"| sess
+
+    class inp,outp,resp2 io
+    class pt frozen
+    class onnx base
+    class sess mathOp
+    class post2 train
 ```
-Training
-  PyTorch Model
-       |
-       | torch.onnx.export()
-       v
-  model.onnx  ──────────────────────────────────────┐
-                                                     |
-Serving                                              v
-  Input Tensor → ONNXRuntime Session → Output Tensor → Postprocess → Response
-                    (CUDAExecutionProvider or CPUExecutionProvider)
-```
+
+*Export once at training time to a framework-neutral graph, then serve it through ONNXRuntime with a GPU or CPU execution provider — the same `.onnx` artifact runs anywhere, decoupling the training framework from the serving runtime.*
 
 ---
 
@@ -454,6 +510,27 @@ TorchServe loads a model archive (.mar file) containing the serialized model and
 
 **Q: What is shadow mode serving and when do you use it?**
 Shadow mode runs a candidate model on live traffic alongside the production model, but only the production model's response is returned to users. The candidate's predictions are logged and compared offline. This is used when the model update is high-risk (medical, financial), when labeling is slow, or when you want to validate model behavior at real traffic distribution before any user is affected. It doubles inference cost during the shadow period.
+
+**Q: Your model runs in 2ms but P99 latency is 45ms — where is the time going?**
+The time is almost certainly in serialization, not inference. A 500-feature JSON array can take 40ms to deserialize in Python, dwarfing the 2ms model call, so profile the whole request lifecycle (deserialization, feature assembly, inference, serialization) before touching the model. Switching from JSON to gRPC with Protobuf typically drops deserialization to ~1ms; connection reuse and batching remove the rest.
+
+**Q: What is the difference between a liveness (`/health`) and a readiness (`/ready`) probe, and why does confusing them cause deploy outages?**
+Liveness answers "is the process alive?" and readiness answers "can it serve traffic yet?". If you only implement liveness, Kubernetes routes traffic to a pod the moment the process starts — before the model is downloaded and loaded — producing seconds of 500 errors on every deploy. The readiness endpoint must return 503 until the model session is initialized so the load balancer holds traffic until the pod is genuinely ready.
+
+**Q: How do you set `max_batch_size` and `max_wait_ms` for dynamic batching?**
+Derive them from your latency budget, not from defaults. `max_wait_ms` is worst-case latency you add to every request while it waits for a batch to fill, so set it to a fraction of your P99 budget (e.g., 5ms of a 50ms SLA); `max_batch_size` should be the largest batch the GPU runs before per-request latency starts climbing. Measure the latency-vs-batch curve for your model and hardware, then pick the knee.
+
+**Q: Why must a serving instance be stateless, and what breaks if it is not?**
+Stateless instances can be freely added or removed behind a load balancer, which is what makes horizontal scaling work. If an instance holds per-user state (a session cache, an accumulating counter) in local memory, requests must be pinned to one pod via sticky sessions, scaling and failover break, and predictions become non-reproducible. Push shared state to an external store (feature store, Redis) and keep the loaded model weights the only in-process state.
+
+**Q: How do you autoscale GPU-backed model servers, and why is it harder than autoscaling CPU services?**
+GPU autoscaling is harder because pods have 300–500ms+ cold starts and GPUs are expensive, so reactive scaling lags demand. Scale on a leading signal — queue depth or in-flight batch size — rather than CPU%, which is meaningless for GPU work. Keep a warm buffer of pre-initialized pods so a traffic spike does not hit cold CUDA-context initialization, and set conservative scale-down to avoid thrashing pods up and down.
+
+**Q: What is the difference between blue-green and canary deployment for models?**
+Blue-green keeps two full environments and flips 100% of traffic from the old (blue) to the new (green) at once after validating green, giving instant rollback by flipping back. Canary instead shifts traffic gradually (5% → 25% → 100%), limiting blast radius and letting you watch metrics at each step, but exposing some users to a bad model before you catch it. Blue-green optimizes for fast, clean cutover; canary optimizes for early detection on real traffic.
+
+**Q: When and why would you use server-sent events (SSE) or streaming for model serving?**
+Use streaming for generative models so users see tokens as they are produced instead of waiting for the full response. It does not make inference faster, but it slashes perceived latency — time-to-first-token is what users feel, so a 3-second completion can feel instant. Streaming also enables natural backpressure: a client that stops reading signals the server to abort and reclaim resources, which is essential for LLM chat interfaces.
 
 ---
 

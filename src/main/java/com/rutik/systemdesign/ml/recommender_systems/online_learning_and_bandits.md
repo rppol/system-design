@@ -88,23 +88,19 @@ CUSUM change detection: detect abrupt reward distribution shifts; reset arm stat
 
 ### 5.1 Multi-Armed Bandit Reward Distribution
 
+```mermaid
+xychart-beta
+    title "Per-arm CTR — true rates unknown to the algorithm"
+    x-axis "Arm" ["action", "documentary", "comedy", "new (5 pulls)"]
+    y-axis "CTR (%)" 0 --> 9
+    bar [8, 4, 5, 3]
 ```
-            CTR Distribution per Arm (unknown to algorithm)
 
- Arm 1 (action movie):  ████████ 8% true CTR  <-- optimal
- Arm 2 (documentary):   ████     4% true CTR
- Arm 3 (comedy):        █████    5% true CTR
- Arm 4 (unknown new):   ???      ??% true CTR  <-- must explore
-
-Algorithm must discover this ranking through:
-  Exploit: show arm 1 (if already known)
-  Explore: show arm 4 (even though uncertain)
-
-UCB at t=100 (arm 4 shown only 5 times):
-  UCB_4 = 0.03 (empirical mean) + sqrt(2 * ln(100) / 5) = 0.03 + 1.36 = 1.39
-  UCB_1 = 0.08 + sqrt(2 * ln(100) / 40) = 0.08 + 0.48 = 0.56
-  --> UCB selects arm 4 (high uncertainty makes it attractive)
-```
+Arm 4's 3% is a lucky estimate from only 5 pulls, so its confidence bound is wide.
+At t=100, UCB_4 = 0.03 + sqrt(2·ln(100)/5) = 0.03 + 1.36 = 1.39 versus
+UCB_1 = 0.08 + sqrt(2·ln(100)/40) = 0.08 + 0.48 = 0.56 — optimism under uncertainty
+makes UCB select arm 4 despite its lower empirical mean, because exploiting arm 1
+alone would never reveal whether arm 4 is actually the best.
 
 ### 5.2 Thompson Sampling Beta Distributions
 
@@ -151,27 +147,82 @@ Note: A_i^{-1} must be computed at each step
 
 ### 5.4 Real-Time Feature Pipeline
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ur(["User Request"]) --> k["Kafka · user_events"]
+    k --> flink["Flink Stream Processor\nlast_5_clicks, session, device\n+ segment / geo lookup"]
+    flink --> x(["Feature Vector x"])
+    x --> model["Bandit Model\nLinUCB / Thompson"]
+    model --> rec(["Recommended Item"])
+    rec --> imp["Impression Log → Kafka"]
+    imp --> reward["Reward\nclick / conversion within 1h"]
+    reward -.->|"update A_i, b_i, alpha_i, beta_i"| model
+
+    class ur,x,rec io
+    class k,imp base
+    class flink mathOp
+    class model train
+    class reward lossN
 ```
-User Request
-     |
-[Kafka Topic: user_events]
-     |
-[Flink Stream Processor]
-     |-- Compute features: last_5_clicks, session_duration, device
-     |-- Lookup: user segment, geo
-     |
-[Feature Vector x]
-     |
-[Bandit Model (LinUCB / Thompson)]
-     |
-[Recommended Item]
-     |
-[Impression Log -> Kafka]
-     |
-[Reward Computation: click/conversion within 1h]
-     |
-[Model Update: A_i, b_i, alpha_i, beta_i]
+
+The dotted edge closes the online-learning loop: every impression is logged, its
+reward attributed within a 1-hour window, and the arm statistics updated so the next
+request reflects the newest evidence — no offline retraining cycle.
+
+### 5.5 Explore-Exploit Loop — Three Selection Rules
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ctx(["context / arm stats"]) --> sel{"selection rule"}
+    sel -->|"epsilon-greedy · random w.p. eps, else best"| a["chosen arm a"]
+    sel -->|"UCB · max mean + conf bound"| a
+    sel -->|"Thompson · sample Beta, pick max"| a
+    a --> show(["show item · observe reward r"])
+    show --> upd["update arm a\nn, reward, Beta or A,b"]
+    upd -.->|"next request"| ctx
+
+    class ctx,show io
+    class sel req
+    class a base
+    class upd train
 ```
+
+All three algorithms share the same select-observe-update loop; they differ only in
+the selection rule. Epsilon-greedy explores uniformly at random, UCB explores by
+optimism (mean plus a confidence bonus), and Thompson explores by sampling each arm's
+posterior — the last two focus exploration on genuinely uncertain arms.
+
+### 5.6 Regret Growth — Linear vs Sublinear
+
+```mermaid
+xychart-beta
+    title "Cumulative regret vs time — eps-greedy (linear) vs UCB/Thompson (sublinear)"
+    x-axis "Time step t (thousands)" [1, 2, 4, 6, 8, 10]
+    y-axis "Cumulative regret (clicks lost)" 0 --> 300
+    line [30, 60, 120, 180, 240, 300]
+    line [40, 60, 85, 100, 112, 122]
+```
+
+The upper line is fixed-epsilon exploration: it keeps sampling bad arms at a constant
+rate, so regret grows linearly, O(T). The lower line is UCB / Thompson Sampling, which
+concentrate exploration on uncertain arms and achieve O(K log T) regret — the curve
+flattens once the optimal arm is confidently identified.
 
 ---
 
@@ -625,6 +676,18 @@ At initialization, all arms have Beta(1, 1) — uniform distribution over [0, 1]
 
 **Q: How would you monitor a bandit algorithm in production?**
 Key metrics to monitor: (1) arm selection rate — which arms are selected at what frequency; if one arm dominates (>90% of selections) too early, the algorithm may be over-exploiting; (2) exploration rate — fraction of requests where the selected arm is not the current greedy choice; should be 5-20% early, decreasing over time; (3) cumulative reward rate — rolling 1-hour CTR; alert if it drops more than 15% from the 7-day baseline; (4) arm update lag — time from reward observation to model update; should be < 5 minutes for news recommendation; (5) regret vs. oracle — periodically sample traffic with the current best arm (oracle) to estimate true regret; (6) Beta posterior width — for Thompson Sampling, track std(Beta(alpha, beta)) per arm; if width stops decreasing, the arm is receiving insufficient traffic to update. Alert on: uniform arm selection persisting too long (UCB not exploring efficiently), a single arm dominating with implausibly high reward (reward attribution bug), arm statistics exceeding memory limits.
+
+**Q: How do you handle delayed rewards, such as a purchase that happens days after the recommendation?**
+Buffer each impression with its arm and timestamp, and attribute the reward when it arrives within a defined attribution window before updating the arm. Standard UCB and Thompson Sampling assume immediate feedback; if you update the arm at impression time with reward=0 (no immediate click) and never fold in the later conversion, arms that drive delayed conversions are systematically undervalued. The fix is a pending-reward buffer with TTL equal to the attribution window (e.g., 1 hour for clicks, 24 hours or 7 days for purchases): keep every (arm, timestamp) pair, and when a reward event arrives, credit all arms within the window. This decouples the decision time from the reward time so the posterior reflects true long-horizon value, not just instant clicks.
+
+**Q: How do you apply Thompson Sampling to continuous rewards like watch time?**
+Use Gaussian Thompson Sampling that maintains a mean and variance per arm, or discretize the reward to binary; the Beta-Bernoulli form only works for 0/1 rewards. A common failure is adding raw continuous values (session minutes, 0-120) into the Beta alpha parameter as if they were click counts — alpha explodes into the millions within days, the Beta distribution collapses to near-zero variance, and exploration stops entirely. Two correct options: (1) model each arm's reward as a Gaussian with an updating posterior over its mean (Normal-Inverse-Gamma conjugate prior), sampling from that posterior to select arms; or (2) threshold the continuous signal into a success indicator (watch > 50% = 1) and keep the Beta-Bernoulli machinery. Gaussian TS preserves more information; binarization is simpler and often good enough.
+
+**Q: Why should exploration impressions be tagged and excluded from offline model training?**
+Because exploration deliberately shows low-quality arms, so an offline model trained on that traffic learns to score bad items highly unless the impressions are tagged out or IPW-corrected. The bandit's exploration is a feature, not noise — it intentionally samples uncertain and often poor arms to gather information. If those impressions flow unlabeled into the offline batch training set, the model sees bad items receiving impressions and infers they are good, corrupting its scores. Fix: attach an "exploration" flag to every impression the bandit chose non-greedily; either exclude those rows from offline training, or keep them but reweight by inverse propensity (1 / P(arm shown)) so the training distribution matches an unbiased exploitation policy. This separation between the online exploration log and the offline training corpus is essential whenever a bandit and a batch model coexist.
+
+**Q: What is the difference between disjoint and hybrid LinUCB?**
+Disjoint LinUCB learns a separate parameter vector per arm, while hybrid LinUCB adds shared parameters across arms so arms can borrow strength from common features. In the disjoint model each arm i has its own (A_i, b_i) and theta_i, so an arm learns only from its own pulls — fine when arms are unrelated but wasteful when many arms share structure (e.g., all news articles respond similarly to a "user likes sports" feature). Hybrid LinUCB adds a shared coefficient vector beta over features common to all arms, plus the per-arm theta_i for arm-specific effects; the reward model becomes r = z.T beta + x.T theta_i. The shared component means data from one arm improves estimates for all arms through beta, which accelerates learning across a large or churning arm set, at the cost of a more complex update (the original Yahoo! news paper used the hybrid form for exactly this reason).
 
 ---
 

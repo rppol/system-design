@@ -16,96 +16,78 @@ Constraints:
 
 ## Architecture Overview
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph FE["Feature Engineering - Spark, offline"]
+        LOG(["Impression logs\nKafka to S3"]) --> JOIN["Click join\n30-min attribution"]
+        JOIN --> HASH["Feature hashing\nuser/ad 2^24, cross 2^20"]
+        HASH --> SAMP["Downsample 99% negatives\n+ correction q"]
+        SAMP --> TD[("Training data\n1B/day")]
+    end
+    subgraph TR["DeepFM Training - daily/hourly"]
+        EMB["Embedding lookup\ndim 16"] --> FM["FM 2nd-order\nO(k×d)"]
+        EMB --> DEEP["Deep MLP\n400-400-400-1"]
+        FM --> SUM((" + "))
+        DEEP --> SUM
+        SUM --> SIG["sigmoid to CTR"]
+    end
+    subgraph CAL["Calibration"]
+        PLATT["Platt scaling\nsigmoid(a*s + b)"] --> REL["Reliability + Brier + ECE"]
+    end
+    subgraph SV["Serving - P99 under 10ms"]
+        REQ(["Auction: user + 10-100 ads"]) --> FS["Feature server\nGo / C++"]
+        FS --> RED[("Redis Cluster\n200GB emb, 20 shards")]
+        RED --> INF["ONNX + TensorRT GPU\nbatch up to 100"]
+        INF --> CALS["Apply Platt scalar"]
+        CALS --> RANK(["effective_cpc = bid × CTR"])
+    end
+    subgraph MON["Monitoring"]
+        MO["Pred vs actual CTR\nratio 0.95-1.05 + NE"]
+    end
+    TD --> EMB
+    SIG --> PLATT
+    REL --> INF
+    RANK --> MO
+
+    class LOG,REQ,RANK io
+    class JOIN,HASH,SAMP,FS,CALS,SUM mathOp
+    class TD,RED base
+    class EMB,FM,DEEP,SIG,PLATT train
+    class REL,MO lossN
+    class INF frozen
 ```
-  FEATURE ENGINEERING & TRAINING DATA (offline, Spark)
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  Impression logs (Kafka → Parquet on S3)                        │
-  │  + Click join (30-min delay for click attribution)              │
-  │       │                                                          │
-  │       v                                                          │
-  │  Spark ETL:                                                      │
-  │  - Feature hashing: user_id → 2^24 buckets (16M)               │
-  │  - Feature hashing: ad_id  → 2^24 buckets (16M)                │
-  │  - Feature hashing: publisher_id → 2^20 (1M)                   │
-  │  - Cross features: user_interest × ad_category → 2^20          │
-  │  - Dense: user_age_bucket, ad_price, hour_of_day               │
-  │       │                                                          │
-  │       v                                                          │
-  │  Training data: 1B examples/day (libSVM or Parquet format)      │
-  │  Sample weights: decay older examples                            │
-  │  Negative downsampling: subsample 99% of non-clicks             │
-  │  (with calibration correction factor q = 1/subsample_rate)      │
-  └──────────────────────────────────────────────────────────────────┘
 
-  MODEL TRAINING (PyTorch, daily/hourly)
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  DeepFM Architecture:                                            │
-  │                                                                  │
-  │  Inputs: sparse IDs → Embedding Lookup (dim=16)                 │
-  │          dense features (normalized)                             │
-  │                                                                  │
-  │  FM Component:                                                   │
-  │  - 2nd-order interactions: <v_i, v_j> for all pairs i,j         │
-  │  - Computed efficiently: 0.5*(||sum(v)||^2 - sum(||v||^2))       │
-  │  - O(k*d) not O(d^2) — critical for 100+ embedding fields       │
-  │                                                                  │
-  │  Deep Component:                                                 │
-  │  - Concat all embeddings + dense: ~1600-dim input               │
-  │  - MLP: 400 → 400 → 400 → 1                                     │
-  │  - BatchNorm + ReLU + Dropout(0.2)                               │
-  │                                                                  │
-  │  Output: sigmoid(fm_output + deep_output) → CTR probability      │
-  │                                                                  │
-  │  Optimizer: Adagrad (lr=0.01) for sparse features               │
-  │             Adam (lr=0.001) for dense/MLP parameters            │
-  │  Mixed optimizer via parameter groups                             │
-  └──────────────────────────────────────────────────────────────────┘
+Offline Spark builds hashed, negatively-downsampled training data; DeepFM sums a Factorization-Machine interaction term and a deep MLP into a sigmoid CTR; Platt scaling calibrates it, and the serving path scores every auction from Redis-resident embeddings in under 10ms.
 
-  CALIBRATION
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  Raw model output → Platt Scaling (logistic regression)         │
-  │  Calibration set: 5M held-out impressions                       │
-  │  Platt parameters (a, b): sigmoid(a * raw_score + b)            │
-  │                                                                  │
-  │  Evaluation: reliability diagram, Brier score, ECE              │
-  │  Recalibrate if ECE > 2% or any bucket deviates >3%             │
-  └──────────────────────────────────────────────────────────────────┘
-
-  SERVING (<10ms P99)
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  Auction Request: user_id, ad_ids (10-100), context             │
-  │       │                                                          │
-  │       v                                                          │
-  │  Feature Server (Go/C++)                                        │
-  │  - Compute feature hashes in microseconds                       │
-  │  - Batch embedding lookup: Redis Cluster                        │
-  │    (embedding table: 200GB+, sharded across 20 nodes)           │
-  │  - Dense features computed inline                               │
-  │  (feature computation: 1-3ms)                                   │
-  │       │                                                          │
-  │       v                                                          │
-  │  ONNX Inference Server (C++, TensorRT on GPU)                   │
-  │  - Batch all ads in auction together: batch_size up to 100      │
-  │  - MLP inference only (embeddings already fetched)              │
-  │  - FM computation on GPU                                        │
-  │  (inference: 2-5ms for batch of 100)                            │
-  │       │                                                          │
-  │       v                                                          │
-  │  Calibration: apply Platt scaling (microseconds)                │
-  │       │                                                          │
-  │       v                                                          │
-  │  Response: CTR scores for each ad in auction                    │
-  │  Auction: effective_cpc = bid * CTR → rank ads                  │
-  └──────────────────────────────────────────────────────────────────┘
-
-  MONITORING
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  Per-hour: predicted CTR vs actual CTR                          │
-  │  Calibration alert: ratio > 1.05 or < 0.95                      │
-  │  NE (Normalized Entropy) vs baseline logistic regression         │
-  │  Logloss improvement: >1% NE improvement over baseline = good   │
-  └──────────────────────────────────────────────────────────────────┘
+```mermaid
+sankey-beta
+Daily impressions,Clicks,1
+Daily impressions,Non-clicks,99
+Clicks,Training set,1
+Non-clicks,Kept 1% sample,1
+Non-clicks,Discarded,98
+Kept 1% sample,Training set,1
 ```
+
+At ~1% CTR, 99% of examples are negatives; subsampling keeps just 1-in-100 of them, shrinking 865TB/day of raw logs to ~8.7TB — and a q-correction restores the calibration that the skew would otherwise destroy.
+
+```mermaid
+xychart-beta
+    title "Serving latency budget - ~5ms P50 within the 10ms SLA"
+    x-axis ["Network+LB", "Feature hash", "Redis GET", "GPU infer", "Platt", "Serialize"]
+    y-axis "Milliseconds" 0 --> 3.5
+    bar [1, 0.1, 2, 3, 0.1, 0.5]
+```
+
+Redis embedding fetch (2ms) and GPU inference (3ms) dominate while feature hashing and Platt calibration are sub-millisecond, summing to ~5ms P50 and ~8ms P99 under the 10ms budget.
 
 ---
 

@@ -56,49 +56,204 @@ Key insight: gating is the critical innovation. By multiplying information by va
 
 ## 5. Architecture Diagrams
 
+**Vanilla RNN unrolled over time:**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    h0(["h0"]) --> c1["RNN"]
+    x1(["x1"]) --> c1
+    c1 -->|"h1"| c2["RNN"]
+    x2(["x2"]) --> c2
+    c2 -->|"h2"| c3["RNN"]
+    x3(["x3"]) --> c3
+    c3 -->|"..."| cT["RNN"]
+    xT(["xT"]) --> cT
+    cT --> hT(["hT"])
+    c1 --> y1(["y1"])
+    c2 --> y2(["y2"])
+    c3 --> y3(["y3"])
+    cT --> yT(["yT"])
+
+    class h0,x1,x2,x3,xT,hT,y1,y2,y3,yT io
+    class c1,c2,c3,cT train
 ```
-Vanilla RNN Unrolled:
-  x1      x2      x3      x4      xT
-  |       |       |       |       |
-  v       v       v       v       v
-h0 -> [RNN] -> [RNN] -> [RNN] -> [RNN] -> hT
-        |        |        |        |
-        y1       y2       y3       yT
 
-Gradient flows backward through T multiplication steps.
-After T=100 steps: gradient magnitude ~(spectral_norm_Whh)^100
+Parameters are shared across every step; the hidden state h is the only channel
+carrying the past forward. During BPTT the gradient flows back through all T of
+these cells, so the per-step multiply by W_hh compounds T times.
 
-LSTM Cell at time t:
-  x_t ----+-----+-----+-----+
-  h_{t-1} |     |     |     |
-           |     |     |     |
-           v     v     v     v
-          [f_t] [i_t] [g_t] [o_t]     <- sigmoid/tanh gates
-      forget input candid output
-           |     |     |     |
-           v     v     v     v
-c_{t-1} x f_t + i_t x g_t -> c_t      <- cell state update (addition!)
-                                |
-                            tanh(c_t) x o_t -> h_t
+**LSTM cell — gate and cell-state flow:**
 
-Key: cell state c_t is updated by ADDITION, not multiplication -> gradient highway
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-GRU Cell at time t:
-  x_t, h_{t-1}
-        |
-       [r_t = sigmoid(W_r * [h_{t-1}, x_t])]   <- reset gate
-       [z_t = sigmoid(W_z * [h_{t-1}, x_t])]   <- update gate
-       [n_t = tanh(W_n * [r_t * h_{t-1}, x_t])] <- candidate
-        |
-  h_t = (1 - z_t) * h_{t-1} + z_t * n_t        <- interpolate old and new
+    xt(["x_t"]) --> cat["concat(x_t, h_prev)"]
+    hp(["h_prev"]) --> cat
+    cat --> f["f_t = sigmoid · forget"]
+    cat --> i["i_t = sigmoid · input"]
+    cat --> g["g_t = tanh · candidate"]
+    cat --> o["o_t = sigmoid · output"]
+    cp(["c_prev"]) --> mf(("×"))
+    f --> mf
+    i --> mi(("×"))
+    g --> mi
+    mf --> ac(("+"))
+    mi --> ac
+    ac --> ct(["c_t"])
+    ct --> th["tanh(c_t)"]
+    th --> mo(("×"))
+    o --> mo
+    mo --> ht(["h_t"])
 
-Bidirectional LSTM:
-  x1  ->  x2  ->  x3  ->  x4   (forward LSTM)
-      h_f1    h_f2    h_f3  h_f4
-  x1  <-  x2  <-  x3  <-  x4   (backward LSTM)
-      h_b1    h_b2    h_b3  h_b4
-  output_t = concat(h_ft, h_bt)  # 2x hidden size per position
+    class xt,hp,cp,ct,ht io
+    class f,i,g,o train
+    class cat,mf,mi,ac,th,mo mathOp
 ```
+
+The cell state c_t is updated by ADDITION (the orange `+` node), not multiplication.
+That additive path is the gradient highway: when the forget gate f_t is near 1, the
+gradient of the loss w.r.t. c_{t-1} passes through unshrunk, letting LSTMs remember
+hundreds of steps.
+
+**GRU cell — merged gates, no separate cell state:**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    xt(["x_t"]) --> r["r_t = sigmoid · reset"]
+    hp(["h_prev"]) --> r
+    xt --> z["z_t = sigmoid · update"]
+    hp --> z
+    r --> rm(("×"))
+    hp --> rm
+    rm --> n["n_t = tanh · candidate"]
+    xt --> n
+    n --> interp["h_t = (1-z)·h_prev + z·n"]
+    z --> interp
+    hp --> interp
+    interp --> ht(["h_t"])
+
+    class xt,hp,ht io
+    class r,z,n train
+    class rm,interp mathOp
+```
+
+GRU merges forget and input into a single update gate z and drops the separate cell
+state; h_t simply interpolates the old state and the new candidate, giving roughly
+2/3 the parameters of an LSTM.
+
+**Bidirectional LSTM — two directions concatenated:**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph fw["Forward LSTM (left to right)"]
+        hf1["h_f1"] --> hf2["h_f2"] --> hf3["h_f3"] --> hf4["h_f4"]
+    end
+    subgraph bw["Backward LSTM (right to left)"]
+        hb4["h_b4"] --> hb3["h_b3"] --> hb2["h_b2"] --> hb1["h_b1"]
+    end
+    x1(["x1"]) --> hf1
+    x2(["x2"]) --> hf2
+    x3(["x3"]) --> hf3
+    x4(["x4"]) --> hf4
+    x1 --> hb1
+    x2 --> hb2
+    x3 --> hb3
+    x4 --> hb4
+    hf1 --> o1(("concat"))
+    hb1 --> o1
+    hf4 --> o4(("concat"))
+    hb4 --> o4
+    o1 --> out1(["out_1 = 2×hidden"])
+    o4 --> out4(["out_4 = 2×hidden"])
+
+    class x1,x2,x3,x4,out1,out4 io
+    class hf1,hf2,hf3,hf4,hb1,hb2,hb3,hb4 train
+    class o1,o4 mathOp
+```
+
+Two LSTMs read the sequence in opposite directions and their per-position states are
+concatenated (2× hidden). The backward pass needs the whole sequence up front, which
+is exactly why bidirectional models cannot be used for streaming.
+
+**Vanishing gradient over timesteps:**
+
+```mermaid
+xychart-beta
+    title "Vanilla RNN gradient magnitude vanishes over timesteps (factor 0.9/step)"
+    x-axis ["t=0", "t=5", "t=10", "t=20", "t=30", "t=50", "t=75", "t=100"]
+    y-axis "Gradient magnitude (relative)" 0 --> 1
+    line [1.0, 0.59, 0.35, 0.12, 0.04, 0.005, 0.0004, 0.00003]
+```
+
+With a per-step gradient factor of 0.9 the magnitude decays as 0.9^t — effectively
+zero by ~30 steps (0.9^100 ≈ 2.7e-5). This is why vanilla RNNs cannot learn
+long-range dependencies and why the LSTM's additive cell-state path was needed.
+
+**Seq2seq with attention:**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    src(["source tokens"]) --> e1["enc h1"]
+    src --> e2["enc h2"]
+    src --> e3["enc h3"]
+    e1 --> att["attention\nsoftmax over enc states"]
+    e2 --> att
+    e3 --> att
+    dprev(["decoder h_prev"]) --> att
+    att --> ctx(("Σ α·enc"))
+    ctx --> dec["Decoder LSTM step"]
+    dprev --> dec
+    dec --> yt(["y_t"])
+    dec -.->|"h_t to next step"| att
+
+    class src,dprev,yt io
+    class e1,e2,e3,dec train
+    class att,ctx mathOp
+```
+
+Attention lets the decoder recompute a weighted context over all encoder states at
+every step, removing the fixed-size context-vector bottleneck of plain seq2seq. The
+dotted edge is the recurrence: the decoder's hidden state feeds the next step's
+attention.
 
 ---
 
@@ -411,6 +566,21 @@ Pass `None` as the initial hidden state (h_0, c_0) to `nn.LSTM` or explicitly cr
 
 **Q: What are the tradeoffs between a deep stacked LSTM and a wide single-layer LSTM?**
 A stacked LSTM (multiple layers) learns hierarchical representations: lower layers capture local patterns, higher layers capture abstract semantics — analogous to deep CNNs. A single wide LSTM has all representational capacity at one level. Empirically, 2-4 LSTM layers outperform 1 very wide layer for complex tasks. Beyond 4 layers, training becomes unstable without careful initialization and learning rate tuning. Dropout between layers (not on the last layer) is essential for regularization in stacked LSTMs. Typical hidden_size=256-512 per layer; dropout_between_layers=0.2-0.5.
+
+**Q: Why do exploding gradients, not vanishing gradients, cause NaN loss in RNN training?**
+When the recurrent weight's spectral norm exceeds 1, gradients grow exponentially through timesteps and overflow to NaN, whereas vanishing gradients merely stall learning without crashing. A 3-layer LSTM over 500 steps can amplify gradients 1500-fold, so a single large update sends weights to inf and the next forward pass returns NaN. The fix is gradient clipping (`clip_grad_norm_`, max_norm=1.0), which caps the global gradient norm while preserving its direction; vanishing is instead addressed architecturally by gating.
+
+**Q: Why does BatchNorm not work well in RNNs, and what normalization is used instead?**
+BatchNorm computes statistics over the batch at each timestep, but sequence lengths vary and per-timestep batch statistics are noisy and undefined for late timesteps that few sequences reach. LayerNorm is used instead: it normalizes across the feature dimension within a single example, so it is independent of batch size and sequence position and behaves identically at train and inference. This is why LayerNorm became the default in recurrent and transformer sequence models.
+
+**Q: Where should dropout be applied in a stacked LSTM, and why not on the recurrent connections?**
+Dropout should be applied between stacked LSTM layers, not on the hidden-to-hidden recurrent path, because randomly zeroing recurrent activations erases the very memory the cell is trying to carry across timesteps. PyTorch's `nn.LSTM(dropout=p)` correctly applies dropout only between layers (and is a no-op when num_layers=1). If you need recurrent regularization, use variational dropout, which applies the same dropout mask at every timestep rather than a fresh one each step.
+
+**Q: What is the difference between the hidden state h_t and the cell state c_t in an LSTM?**
+The cell state c_t is the long-term memory that flows along the additive gradient highway, while the hidden state h_t is the tanh-squashed view of c_t exposed to the next layer. The output gate decides how much of c_t becomes h_t at each step, so c_t can hold information that is not currently exposed to the output. Vanilla RNNs and GRUs have only one state vector; the separate cell state is exactly what lets LSTMs preserve information across very long spans.
+
+**Q: What problem does the fixed context vector in a plain (no-attention) seq2seq model create?**
+A plain seq2seq compresses the entire input into one fixed-size context vector (the encoder's final hidden state), so long inputs lose information as everything is squeezed through that bottleneck. Translation quality degrades sharply beyond ~30 words because early tokens are overwritten in the summary. Attention removes the bottleneck by letting the decoder attend to all encoder states directly at each step, which is what enabled accurate translation of 100+ word sentences.
 
 ---
 

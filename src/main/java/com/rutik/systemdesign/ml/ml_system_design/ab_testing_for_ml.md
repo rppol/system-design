@@ -75,93 +75,67 @@ Why it matters: offline metrics (AUC, NDCG) often do not predict online business
 
 ### A/B Test Infrastructure for ML
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    in([Incoming request\nuser_id, context]) --> assign["Assignment\nhash(user_id) mod 100\npinned in cookie / service"]
+    assign --> bucket{"bucket in 0–49 ?"}
+    bucket -->|"yes · control"| ctrl["Control · Model A\n(current)"]
+    bucket -->|"no · treatment"| treat["Treatment · Model B\n(candidate)"]
+    ctrl --> pred(["Predictions → response"])
+    treat --> pred
+    pred --> log["Event logging\nuser_id · variant ·\nscore · outcome · timestamp"]
+    log --> metrics["Metrics computation\nCTR / rev-per-user ·\nz-test · 95% CI"]
+    metrics --> sig["Significance decision\np < alpha AND lift > MDE"]
+
+    class in,pred io
+    class assign,bucket req
+    class ctrl base
+    class treat train
+    class log io
+    class metrics mathOp
+    class sig lossN
 ```
-INCOMING REQUEST (user_id, context)
-           │
-           ▼
-┌─────────────────────────┐
-│   EXPERIMENT ASSIGNMENT │
-│   - Hash(user_id) % 100 │
-│   - 0-49: control       │
-│   - 50-99: treatment    │
-│   - Stored in cookie /  │
-│     assignment service  │
-└─────────┬───────────────┘
-          │ assignment
-          ▼
-  ┌───────┴────────┐
-  │                │
-  ▼                ▼
-CONTROL          TREATMENT
-MODEL A          MODEL B
-(current)        (candidate)
-  │                │
-  ▼                ▼
-PREDICTIONS     PREDICTIONS
-  │                │
-  ├────────────────┤
-  ▼                ▼
-RESPONSE         RESPONSE
-  │                │
-  └────────────────┘
-           │
-           ▼
-┌─────────────────────────┐
-│   EVENT LOGGING         │
-│   - user_id             │
-│   - experiment_id       │
-│   - variant (A or B)    │
-│   - prediction score    │
-│   - outcome (click etc) │
-│   - timestamp           │
-└─────────────────────────┘
-           │
-           ▼
-┌─────────────────────────┐
-│   METRICS COMPUTATION   │
-│   - CTR per variant     │
-│   - Revenue per user    │
-│   - Statistical test    │
-│   - Confidence interval │
-└─────────────────────────┘
-```
+
+The randomization unit is hashed once and pinned, so a user always hits the same model and cannot leak across variants. Every exposure (not just conversions) is logged, and that single event stream feeds both the ML metric and the significance test.
 
 ### Interleaving for Ranking Experiments
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ureq([User request]) --> merger["Interleaving merger\n(team-draft)"]
+    ctrlr["Control ranking\nA, B, C, D, E"] --> merger
+    treatr["Treatment ranking\nB, D, A, F, C"] --> merger
+    merger --> shown(["Shown to user\nB, A, D, C\nposition hides the model"])
+    shown --> clk["User clicks item D"]
+    clk --> attr["D was placed by treatment\n→ +1 treatment"]
+    attr --> agg["Aggregate over queries\nTreatment 63% · Control 37%"]
+    agg --> win["Treatment ranks better\n~100x more sensitive than A/B"]
+
+    class ureq,shown io
+    class ctrlr,treatr req
+    class merger mathOp
+    class clk io
+    class attr,agg mathOp
+    class win lossN
 ```
-USER REQUEST
-     │
-     ▼
-┌─────────────────────────────────────────┐
-│  INTERLEAVING MERGER                    │
-│                                         │
-│  Control ranking: [A, B, C, D, E, ...]  │
-│  Treatment ranking: [B, D, A, F, C, ...]│
-│                                         │
-│  Interleaved (team draft):              │
-│  Round 1: Treatment picks B (pos 1)     │
-│  Round 2: Control picks A (pos 2)       │
-│  Round 3: Treatment picks D (pos 3)     │
-│  Round 4: Control picks C (pos 4)       │
-│  ...                                    │
-│                                         │
-│  Shown to user: [B, A, D, C, ...]       │
-│  (positions don't reveal which model)   │
-└──────────────────────┬──────────────────┘
-                       │
-                       ▼
-              USER CLICKS ITEM D
-                       │
-                       ▼
-              D was picked by treatment
-              -> score 1 point for treatment
-                       │
-                       ▼
-           AGGREGATE ACROSS QUERIES:
-           Treatment wins: 63%
-           Control wins: 37%
-           -> Treatment is better
-```
+
+Both models' items compete at every position inside one merged list, so position bias cancels out. A single interleaved query yields far more signal than an A/B test of the same query — roughly 100x fewer impressions for the same statistical power.
 
 ### Sample Size Determination
 
@@ -182,6 +156,62 @@ SAMPLE SIZE CALCULATION INPUTS:
   At 10,000 unique users/day:
   Required experiment duration = 312,160 / 10,000 = 32 days
 ```
+
+### Sequential Testing (SPRT): Peek Without Penalty
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    data([New batch of\nobservations]) --> lr["Likelihood ratio\nΛ = L1 / L0"]
+    lr --> cmp{"Λ vs boundaries A, B"}
+    cmp -->|"Λ ≥ B"| h1["Stop · accept H1\n(treatment wins)"]
+    cmp -->|"Λ ≤ A"| h0["Stop · accept H0\n(no effect)"]
+    cmp -->|"between A and B"| cont["Continue · collect more"]
+    cont --> data
+
+    class data io
+    class lr mathOp
+    class cmp req
+    class h1 train
+    class h0 base
+    class cont frozen
+```
+
+The boundaries A and B are pre-computed from the target alpha and power, so the test can be checked after every batch and still hold its false-positive rate — the fix for the "peeked on day 5, stopped at p = 0.04" pitfall.
+
+### CUPED: Variance Reduction Flow
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x([Pre-exp covariate X\ne.g. last week's revenue]) --> theta["θ = Cov(Y,X) / Var(X)"]
+    y([Post-exp metric Y\nthis week's revenue]) --> adj["Y_cuped = Y − θ·(X − E(X))"]
+    theta --> adj
+    adj --> out(["Adjusted metric\n30–60% lower variance"])
+    out --> dur["Same power in\n40–70% of the runtime"]
+
+    class x,y io
+    class theta mathOp
+    class adj mathOp
+    class out io
+    class dur lossN
+```
+
+CUPED subtracts the part of each user's metric that a pre-experiment covariate already explains, shrinking variance without shifting the expected value. A 0.7 correlation between X and Y cuts variance ~49%, roughly halving the required sample size.
 
 ---
 
@@ -670,8 +700,14 @@ def apply_cuped(
 **Q: How do you determine how long to run an A/B test?**
 Pre-calculate the required sample size before starting the experiment using the two-proportion z-test (for proportions) or t-test formula (for continuous). Inputs: baseline rate, minimum detectable effect (MDE), significance level (alpha = 0.05), and desired power (80%). Example: CTR = 5%, MDE = 0.5% absolute, alpha = 0.05, power = 80% → ~156K users per variant. If daily unique users = 50K per variant, run for 156K/50K = 3.2 days minimum. Add a buffer for novelty effects (at least 1 full week to account for day-of-week patterns). Never stop early unless using a sequentially valid test.
 
+**Q: What is a sequential test (SPRT), and how does it let you stop an A/B test early without inflating the false positive rate?**
+A sequential probability ratio test evaluates the accumulated evidence after every batch and stops only when the likelihood ratio crosses a pre-set boundary. Unlike a fixed-horizon test — where peeking and stopping at the first p < 0.05 inflates the Type I error to 20-30% — the SPRT boundaries are constructed so that continuous monitoring keeps the overall alpha at target. The tradeoff is a slightly larger maximum sample size in exchange for the ability to stop early when the effect is strong. Use always-valid inference (SPRT, mSPRT, or a Bayesian sequential test) whenever the team will look at results before the planned end.
+
 **Q: What is the difference between statistical significance and practical significance?**
 Statistical significance (p < alpha) means the observed effect is unlikely to have occurred by chance — the probability of observing this or a larger effect under the null hypothesis is less than alpha. Practical significance means the effect size is large enough to matter for the business. A CTR improvement of 0.01% may be statistically significant (p = 0.001) with 10 million users, but practically negligible — the engineering cost of deploying the model exceeds the revenue benefit. Always report both the p-value and the effect size with confidence interval. Make deployment decisions based on practical significance, not just statistical significance.
+
+**Q: What are guardrail metrics, and why do you track them in every experiment?**
+Guardrail metrics are safety metrics — latency, error rate, crash rate, unsubscribe rate — that must not regress even when the primary metric improves. A model that lifts CTR but adds 40ms of P99 latency or increases opt-outs is usually a net loss, and the primary metric alone would hide that harm. Monitor guardrails continuously throughout the experiment, not just at the end, so a harmful test can be halted early. Define them up front with explicit regression thresholds and alert on them for the whole run.
 
 **Q: What is sample ratio mismatch (SRM) and how do you detect it?**
 SRM occurs when the actual allocation of users across experiment variants differs from the planned allocation. For a 50/50 experiment, if 51.8% of observations are in the control group, the randomization or logging is broken. SRM invalidates all metric analysis because the groups may differ on user characteristics, not just the treatment. Detection: run a chi-square goodness-of-fit test on observed group sizes vs expected. If p < 0.01 (using a conservative threshold), flag the experiment for investigation before computing any metrics. Common causes: client-side experiment logic with browser bugs, bot traffic assigned to one group, logging pipeline failures.
@@ -711,6 +747,9 @@ A holdback experiment maintains a permanent control group (e.g., 5% of users) th
 
 **Q: How do you design an experiment when SUTVA is violated (social network interference)?**
 SUTVA violation means one user's treatment affects another user's outcomes through social interactions. Standard randomization produces biased estimates. Solutions: (1) cluster randomization — assign all members of a social cluster (friend group, household) to the same variant; this eliminates within-cluster interference but requires many more clusters for sufficient power; (2) geographic randomization — assign geographic regions (cities, countries) to variants instead of individual users; assumes no cross-region interference; (3) ego network randomization — assign egos (focal users) and their entire alters (friends) to the same variant; (4) bias correction — model the interference explicitly and correct for it using causal inference methods (e.g., Manski's linear-in-means model). At minimum, acknowledge SUTVA violation in the analysis and bound the bias direction.
+
+**Q: What is a ramp-up (staged rollout), and why do you ramp treatment traffic gradually instead of going straight to 50/50?**
+A ramp-up gradually raises the treatment's traffic share — for example 1% then 5% then 20% then 50% — so a catastrophic bug is caught on a small blast radius before full exposure. The early 1% phase is a safety check on guardrails (errors, latency, crashes), not a statistical-power check; once the treatment is stable you ramp to the allocation your sample-size calculation requires. Beware of analyzing across ramp phases: mixing populations from different allocations biases the estimate, so start the formal measurement window only after reaching the final allocation. Keep the ramp (risk mitigation) conceptually separate from the measurement window (statistical power).
 
 ---
 

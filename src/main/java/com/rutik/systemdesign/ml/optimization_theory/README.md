@@ -93,35 +93,104 @@ Adam (beta1=0.9, beta2=0.999, eps=1e-8):
   theta = theta - lr * m_hat / (sqrt(v_hat) + eps)
 ```
 
+### Adam Update Flow
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph moments["Moment estimates"]
+        m["m = beta1*m + (1-beta1)*g\n1st moment (momentum)"]
+        v["v = beta2*v + (1-beta2)*g^2\n2nd moment (RMSProp)"]
+    end
+    subgraph bc["Bias correction — early-step fix"]
+        mhat["m_hat = m / (1 - beta1^t)"]
+        vhat["v_hat = v / (1 - beta2^t)"]
+    end
+    g([gradient g]) --> m
+    g --> v
+    m --> mhat
+    v --> vhat
+    mhat --> upd["theta -= lr * m_hat / (sqrt(v_hat) + eps)"]
+    vhat --> upd
+    upd --> out([updated theta])
+
+    class g,out io
+    class m,v,mhat,vhat mathOp
+    class upd train
+```
+
+Each optimizer step feeds the gradient g into two exponential moving averages —
+the first moment m (momentum, beta1=0.9) and the second moment v (RMSProp's
+squared-gradient scale, beta2=0.999). Both are initialised to 0, so bias
+correction divides by (1 - beta^t) to undo the early-step shrinkage — at t=1 that
+rescales m by 1/0.1 and v by 1/0.001. The final node is the per-parameter
+adaptive update theta -= lr * m_hat / (sqrt(v_hat) + eps).
+
+### Optimizer Convergence Trajectories
+
+```mermaid
+xychart-beta
+    title "Optimizer convergence — training loss vs step"
+    x-axis "Training step" [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+    y-axis "Training loss" 0 --> 5
+    line [5.0, 4.4, 3.9, 3.5, 3.2, 2.95, 2.75, 2.6, 2.5, 2.42, 2.38]
+    line [5.0, 3.9, 3.1, 2.55, 2.15, 1.9, 1.72, 1.6, 1.52, 1.47, 1.44]
+    line [5.0, 3.6, 2.7, 2.1, 1.7, 1.45, 1.3, 1.2, 1.14, 1.1, 1.08]
+    line [5.0, 3.2, 2.2, 1.6, 1.25, 1.05, 0.92, 0.85, 0.81, 0.79, 0.78]
+```
+
+All four optimizers start at loss 5.0 (arbitrary units). Top to bottom at step
+100: plain SGD is slowest (~2.38), momentum accelerates the descent, RMSProp's
+per-parameter scaling is faster still, and Adam (momentum + RMSProp) reaches the
+lowest loss (~0.78) fastest. This ordering is why Adam is the default for
+transformers (Section 4.2), while SGD's slower, flatter path can generalise
+better for vision (Section 7).
+
 ### Learning Rate Schedule Shapes
 
+```mermaid
+xychart-beta
+    title "Learning-rate schedules — lr vs training step"
+    x-axis "Training progress (% of steps)" [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+    y-axis "Learning rate (×1e-4)" 0 --> 3.2
+    line [3.0, 3.0, 3.0, 1.5, 1.5, 1.5, 0.75, 0.75, 0.75, 0.37, 0.37]
+    line [3.0, 2.93, 2.74, 2.44, 2.07, 1.65, 1.23, 0.86, 0.56, 0.37, 0.3]
+    line [0, 3.0, 2.92, 2.68, 2.33, 1.89, 1.42, 0.98, 0.62, 0.38, 0.3]
 ```
-Loss
- |
- |  Step decay:               Cosine annealing:       Warmup + cosine:
- |  lr_0 ___                  lr_0  .                  lr_0        .
- |       |   |__              lr_m   .  .            lr_min  .  .    .
- |       |      |__                   .  .  . . .           |  .        .
- |  0    step   step  epoch   0     T/2      T       0   W      T
-```
+
+Step decay (the staircase) holds the rate flat then cuts it by gamma at fixed
+intervals; cosine annealing decays smoothly from lr_max=3e-4 to lr_min=3e-5;
+warmup+cosine (the curve that starts at 0) ramps linearly over the first ~10% of
+steps before the same cosine decay. The warmup segment is what prevents Adam
+diverging at step 0, when the second moment v is still near 0 and the
+bias-corrected step size would otherwise explode (Section 10, Pitfall 2).
 
 ### Convex vs Non-Convex Loss Landscape
 
+```mermaid
+xychart-beta
+    title "Convex vs non-convex loss landscape (1-D slice)"
+    x-axis "Parameter theta" [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5]
+    y-axis "Loss" 0 --> 4.5
+    line [4.25, 2.9, 1.85, 1.1, 0.65, 0.5, 0.65, 1.1, 1.85, 2.9, 4.25]
+    line [3.8, 2.3, 3.0, 2.75, 2.65, 2.6, 2.5, 1.6, 0.7, 0.4, 1.5]
 ```
-Convex (logistic regression):         Non-convex (neural network):
 
-Loss                                   Loss
-  |                                      |    _      _
-  |      .                               |   / \    / \
-  |    .   .                             |  /   .  /   .
-  |  .       .                           | /     ..     \___
-  |.           .                         |/
-  |___________                           |____________________
-              theta                                          theta
-
-  One global minimum.                   Many local minima, saddle points,
-  GD always converges.                  and plateaus. SGD noise helps.
-```
+The convex curve (logistic regression) is a single bowl with one global minimum
+at theta=0 — gradient descent always reaches it. The non-convex curve (a neural
+network slice) has a shallow local minimum near theta=-4, a flat plateau around
+theta=-1 to 1, and the true global minimum near theta=4; first-order methods can
+stall in the local minimum or crawl across the plateau, and it is SGD's
+mini-batch noise that perturbs parameters out of them (Section 2 key insight,
+Section 3).
 
 ---
 
@@ -468,6 +537,27 @@ Newton's method computes the parameter update as theta = theta - H^{-1} * g wher
 
 **Q: What is the effect of batch size on optimization and generalization?**
 Larger batch sizes produce lower-variance gradient estimates, allowing larger learning rates and faster wall-clock convergence. However, large batches tend to find sharper minima with worse generalization (the "generalization gap" for large batches, Keskar et al. 2017). Empirically, linear scaling rule: when batch size is multiplied by k, multiply lr by k (with warmup). Small batches (16-32) regularize implicitly through gradient noise and often find flatter minima, but are slower due to GPU underutilization. GPT-3 used batch size 3.2M tokens — large batch enabled by learning rate scaling.
+
+**Q: How do you diagnose whether a learning rate is too high or too low?**
+A learning rate that is too high shows a loss that diverges, oscillates, or spikes to NaN, while one that is too low shows a loss that decreases painfully slowly or plateaus early. A useful quantitative check is the ratio of the update norm to the parameter norm, which should sit near 1e-3 per step — much larger means the lr is too high, much smaller means it is too low. Loss curves are the first signal: a jagged or rising training loss almost always means lower the lr, and a smooth but nearly flat loss means raise it. The LR range test automates finding the sweet spot between these two regimes.
+
+**Q: What is the difference between classical momentum and Nesterov accelerated gradient (NAG)?**
+Both accumulate a velocity vector, but Nesterov evaluates the gradient at the looked-ahead position theta + beta*v rather than at the current theta. This lookahead lets NAG anticipate where momentum is carrying the parameters and correct sooner, damping overshoot and giving a provably better rate on smooth convex problems (O(1/t^2) vs O(1/t)). In practice the gain over plain momentum is modest for deep nets, but NAG is a cheap drop-in exposed as the `nesterov=True` flag in SGD. Classical momentum uses v = beta*v - lr*g(theta); Nesterov uses v = beta*v - lr*g(theta + beta*v).
+
+**Q: Why is cosine annealing usually preferred over step decay for learning-rate schedules?**
+Cosine annealing decays the lr smoothly from lr_max to lr_min following a half-cosine curve, avoiding the abrupt discontinuities of step decay. Step decay holds the lr constant then divides it by gamma (often 10x) at fixed epochs, so the model oscillates in one region until each drop, and the drop schedule adds extra hyperparameters to tune. Cosine keeps a large useful lr early for exploration and eases into small steps near convergence with only two parameters (lr_max, lr_min). It is the de facto standard for transformer pretraining, usually paired with linear warmup.
+
+**Q: Why does Adagrad's learning rate decay to zero, and how do RMSProp and Adam fix it?**
+Adagrad accumulates the sum of all past squared gradients in its denominator, so the effective learning rate only ever shrinks and eventually decays to zero. RMSProp replaces the cumulative sum with an exponential moving average (beta2=0.999), so the denominator reflects recent gradients and stays bounded; Adam builds on RMSProp's EMA second moment and adds a momentum first moment plus bias correction. Adagrad's decaying behavior is actually desirable for sparse features like word embeddings, where rarely-updated parameters keep larger effective steps, but it is fatal for dense deep networks that stall before convergence.
+
+**Q: What do Adam's beta1 and beta2 hyperparameters control, and when would you lower beta2?**
+beta1 controls the decay of the first-moment (momentum) EMA and beta2 controls the decay of the second-moment (squared-gradient) EMA. The default beta2=0.999 averages over roughly the last 1/(1-beta2)=1000 gradients — very smooth but slow to react to changing gradient statistics. Lowering beta2 to 0.95 or 0.98, as GPT-3 and Chinchilla did, makes the variance estimate more responsive and improves stability for large-batch LLM training where statistics shift quickly. Lowering beta1 makes updates react faster but noisier and is rarely changed from 0.9.
+
+**Q: How does the learning-rate range test (LR finder) work?**
+Start at a tiny lr such as 1e-7 and increase it geometrically each mini-batch while recording the loss, then plot loss versus lr. The loss stays flat while lr is too small, drops steeply through the useful range, then diverges once lr is too large, so you pick a maximum lr slightly below the point of steepest descent (often about 10x below the minimum-loss lr). Introduced by Leslie Smith in 2017, it replaces a blind grid search over lr with a single short sweep of a few hundred steps. For one-cycle training, the chosen value becomes the peak lr.
+
+**Q: How does gradient accumulation affect the effective batch size, and what must you watch out for?**
+Gradient accumulation sums gradients over K micro-batches before a single optimizer step, so the effective batch size becomes micro_batch * K times the number of GPUs. It lets you simulate a large batch that would not fit in memory, at the cost of K forward/backward passes per update. The key gotcha is loss scaling — you must divide each micro-batch loss by K (or average the gradients), otherwise the accumulated gradient is K times too large and the effective learning rate is silently inflated. A second gotcha is that LR schedules must be defined in optimizer steps, not forward passes, or the warmup length is off by a factor of K.
 
 ---
 

@@ -104,94 +104,149 @@ Key insight: the most important design decision is often not the model architect
 
 ### Complete ML System Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ev([Event stream]) --> stream["Stream processor\nFlink / Kafka"]
+    db([DB snapshots]) --> batch["Batch processor\nSpark / Hive"]
+    logs([Logs]) --> batch
+    stream --> fs["Feature store\nonline Redis (2-10ms)\noffline S3 / Hive (batch)"]
+    batch --> fs
+    fs --> tp["Training pipeline\nvalidate, join, train, gate"]
+    fs --> serve["Serving layer\nfetch, infer, post-process, cache"]
+    tp --> reg["Model registry — MLflow\nversions, lineage, artifacts"]
+    reg --> serve
+    serve --> mon["Monitoring\ndrift, perf metrics, alerting"]
+    mon -.->|"retrain trigger"| tp
+
+    class ev,db,logs io
+    class stream,batch mathOp
+    class fs base
+    class tp train
+    class serve req
+    class reg frozen
+    class mon lossN
 ```
-                          DATA SOURCES
-           ┌──────────────────────────────────────┐
-           │  Event Stream  │  DB Snapshots  │ Logs│
-           └──────┬─────────────────┬─────────────┘
-                  │                 │
-         ┌────────▼────────┐ ┌──────▼──────────┐
-         │  Stream Processor│ │  Batch Processor │
-         │  (Flink/Kafka)  │ │  (Spark/Hive)   │
-         └────────┬────────┘ └──────┬──────────┘
-                  │                 │
-           ┌──────▼─────────────────▼──────┐
-           │         FEATURE STORE          │
-           │  Online (Redis, <10ms read)    │
-           │  Offline (S3/Hive, batch)      │
-           └──────┬─────────────────┬───────┘
-                  │                 │
-         ┌────────▼────────┐ ┌──────▼──────────┐
-         │ TRAINING PIPELINE│ │  SERVING LAYER  │
-         │  - Data validation│ │  - Feature fetch │
-         │  - Feature join  │ │  - Model inference│
-         │  - Model train   │ │  - Post-process  │
-         │  - Validation gate│ │  - Cache layer  │
-         └────────┬────────┘ └──────┬──────────┘
-                  │                 │
-         ┌────────▼────────┐ ┌──────▼──────────┐
-         │  MODEL REGISTRY │ │   MONITORING     │
-         │  (MLflow)       │ │  - Data drift    │
-         │  - Versioning   │ │  - Perf metrics  │
-         │  - Lineage      │ │  - Alerting      │
-         │  - Artifacts    │ │  - Retraining    │
-         └─────────────────┘ └─────────────────┘
-```
+
+The trained model is the smallest box in the system: raw events fan into a streaming and a batch path, both land in the feature store, and that single store feeds training and serving so the two paths compute identical features.
 
 ### Two-Stage Retrieval + Ranking
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    rq([User request\nuser_id, item_id, context]) --> ret["Retrieval — Stage 1\ntwo-tower + FAISS ANN\nlatency ~10ms"]
+    ret -->|"top-1000 candidates"| rank["Ranking — Stage 2\nLightGBM / DNN, rich features\nlatency ~20ms"]
+    rank -->|"scored top-50"| biz["Business logic\ndiversity, price floors, policy\nlatency ~5ms"]
+    biz --> resp([Final response])
+
+    class rq req
+    class ret base
+    class rank train
+    class biz mathOp
+    class resp io
 ```
-  USER REQUEST (item_id, user_id, context)
-         │
-         ▼
-  ┌──────────────┐
-  │  RETRIEVAL   │  Two-tower model + FAISS ANN
-  │  Stage 1     │  Latency: <10ms
-  │              │  Output: Top-1000 candidates
-  └──────┬───────┘
-         │ 1000 candidates
-         ▼
-  ┌──────────────┐
-  │   RANKING    │  LightGBM / DNN with rich features
-  │   Stage 2    │  Latency: <20ms
-  │              │  Output: Scored + ranked top-50
-  └──────┬───────┘
-         │ top-50 items
-         ▼
-  ┌──────────────┐
-  │  BUSINESS    │  Diversity, price floors, policy rules
-  │   LOGIC      │  Latency: <5ms
-  └──────┬───────┘
-         │ final results
-         ▼
-      RESPONSE
-```
+
+Retrieval casts a cheap wide net over millions of items (optimize recall); ranking spends an expensive model on only ~1000 survivors (optimize precision). Splitting the work is what keeps the whole path inside a sub-40ms budget.
 
 ### Model Cascade Pattern
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    rq([Request]) --> cheap["Cheap model — LR / GBT\ncost 0.001/req, 2ms"]
+    cheap --> dec{"Confidence over 0.95?"}
+    dec -->|"yes — 80% of traffic"| out1([Serve cheap result])
+    dec -->|"no — 20% of traffic"| exp["Expensive model — DNN\nfull feature set, 0.01/req, 50ms"]
+    exp --> out2([Serve expensive result])
+
+    class rq io
+    class cheap base
+    class dec mathOp
+    class exp train
+    class out1,out2 io
 ```
-  REQUEST
-    │
-    ▼
-┌───────────────────────┐
-│  CHEAP MODEL (LR/GBT) │  Cost: $0.001/req, 2ms latency
-│  Confidence threshold │
-└──────┬────────────────┘
-       │
-  ┌────▼────┐
-  │High conf│──YES──> Serve result (80% of requests)
-  │  >0.95? │
-  └────┬────┘
-       │ NO (20% of requests)
-       ▼
-┌───────────────────────┐
-│  EXPENSIVE MODEL (DNN)│  Cost: $0.01/req, 50ms latency
-│  Full feature set     │
-└──────┬────────────────┘
-       │
-       ▼
-  Serve result
+
+Only the uncertain ~20% of traffic pays for the expensive model, so a cascade cuts serving cost 4-5x versus running the DNN on everything — provided the confidence gate is well calibrated.
+
+### The 6-Step Design Framework as a Funnel
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    s1["1. Clarify requirements\nscale, latency, accuracy, data"] --> s2["2. Problem formulation\ntask type, objective, metric"]
+    s2 --> s3["3. Data & features\nsources, computation, feature store"]
+    s3 --> s4["4. Model selection & training\narchitecture, validation gate"]
+    s4 --> s5["5. Serving & inference\nonline/offline, caching, latency budget"]
+    s5 --> s6["6. Monitoring & iteration\ndrift, degradation, retrain triggers"]
+    s6 -.->|"new signal / drift"| s3
+
+    class s1 req
+    class s2 base
+    class s3 io
+    class s4 train
+    class s5 mathOp
+    class s6 lossN
 ```
+
+Every step is justified by the one above it: you never pick a model (step 4) before the latency budget and data size are known (steps 1 and 3). The dotted edge is the feedback loop — monitoring feeds fresh signal back into features and retraining.
+
+### Training-Serving Skew — How It Happens
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    hist([Historical table]) --> tf["Training feature\nSpark SQL window"]
+    live([Live event data]) --> sf["Serving feature\nPython function"]
+    tf -.->|"subtly different logic"| sf
+    tf --> model["Model trained on\ntraining-time values"]
+    sf --> pred["Model served on\nserving-time values"]
+    model --> skew["Train-serve skew\noffline AUC stays high\nprod CTR drops ~15%"]
+    pred --> skew
+
+    class hist,live io
+    class tf,sf mathOp
+    class model train
+    class pred req
+    class skew lossN
+```
+
+One logical feature is computed by two code paths that drift apart over time; the model looks healthy offline yet degrades in production. The fix is a single shared feature definition (a library or feature store) materialized identically to both paths.
 
 ---
 
@@ -449,13 +504,31 @@ Three trigger types: (1) Scheduled — retrain weekly or daily regardless of per
 Position bias is the tendency for users to click on items shown in higher positions regardless of their actual quality. A model trained on click data will learn to recommend items that were shown prominently, creating a self-reinforcing loop. Corrections: (1) Inverse propensity weighting — downweight clicks at high positions by the probability of being shown there. (2) Position-aware features — include the position as a feature during training and set it to a fixed value (e.g., position=1) at serving time. (3) Randomization — occasionally shuffle results to collect unbiased click data. (4) Counterfactual evaluation — estimate what CTR would be if all items were shown at the same position.
 
 **Q: How do you design a model serving system that handles 100,000 QPS with P99 < 100ms?**
-Key components: (1) Load-balanced prediction servers behind an API gateway, auto-scaling based on CPU utilization; (2) Feature cache (Redis) to avoid recomputing static features on every request — cache user features with 60-second TTL; (3) Model server with batching enabled (max_batch=32, max_wait=5ms) to amortize GPU cost; (4) Two-stage architecture so only a cheap retrieval model handles full QPS and the expensive ranking model handles fewer requests; (5) Circuit breakers to fall back to a simpler model when latency spikes; (6) Canary deployments to catch latency regressions before they affect all traffic.
+Scale horizontally with a two-stage architecture, aggressive feature caching, request batching, and autoscaling so only the cheap model sees full QPS. Key components: (1) Load-balanced prediction servers behind an API gateway, auto-scaling based on CPU utilization; (2) Feature cache (Redis) to avoid recomputing static features on every request — cache user features with 60-second TTL; (3) Model server with batching enabled (max_batch=32, max_wait=5ms) to amortize GPU cost; (4) Two-stage architecture so only a cheap retrieval model handles full QPS and the expensive ranking model handles fewer requests; (5) Circuit breakers to fall back to a simpler model when latency spikes; (6) Canary deployments to catch latency regressions before they affect all traffic.
 
 **Q: What is the difference between batch features and real-time features in a feature store?**
 Batch features are computed over historical data using Spark or Hive jobs, written to the offline store (S3/Hive), and synced to the online store (Redis) on a schedule (hourly or daily). They include aggregates like "user's average purchase value over the last 30 days." Real-time features are computed from streaming events using Flink or Kafka Streams and written directly to the online store, providing sub-minute freshness. They include signals like "number of page views in the last 5 minutes." The feature store serves both at request time; the serving latency is dominated by the online store read (<10ms for Redis) not the feature type.
 
 **Q: How do you evaluate a recommendation model before deploying it?**
 Offline evaluation: compute ranking metrics (NDCG@10, MAP, Recall@K) on a held-out test set with temporal splitting (train on days 1-28, test on days 29-30). Validate that the model beats the baseline by a statistically significant margin. Check for feature leakage by examining feature importance and removing suspicious features. Latency evaluation: benchmark P50/P99 serving latency on production-representative hardware and traffic patterns. Shadow evaluation: deploy the model in shadow mode (receiving traffic but not affecting users) and compare its rankings against the production model without affecting users. A/B test: run a controlled experiment with 5% of traffic, measure primary business metric (CTR, revenue), and require statistical significance (p < 0.05) before full rollout.
+
+**Q: What is label leakage, and how is it different from training-serving skew?**
+Label leakage is training on a feature that would not be available at prediction time, inflating offline metrics while production collapses. Skew is a value mismatch for a feature that IS available at serving; leakage is using a feature that is simply not knowable yet. Classic example: a fraud model with "account_closed_within_7_days" scores 99% AUC offline and 55% in production. Fix: enforce point-in-time correctness and audit every feature for whether it is actually observable at inference time.
+
+**Q: When does a model cascade reduce cost, and what is the main risk?**
+A cascade runs a cheap model on all traffic and escalates only low-confidence cases to an expensive model, cutting cost 4-5x. It works when the cheap model is confidently correct on the easy majority (typically ~80% of requests) so the DNN only sees the hard ~20%. The main risk is a miscalibrated confidence gate: if the cheap model is overconfident on hard cases, those never escalate and quality drops silently. Calibrate the threshold on held-out data and monitor the escalation rate.
+
+**Q: Why use multi-task learning in a recommender, and what is negative transfer?**
+Multi-task learning trains one shared backbone to predict several objectives (CTR, CVR, dwell time) at once, improving data efficiency and preventing over-optimizing one metric. Auxiliary tasks let data-poor objectives borrow signal from related ones. Negative transfer is the failure mode where conflicting task gradients degrade the shared representation so no task is served well. Mitigate with task-specific heads, uncertainty-based task weighting, or gradient surgery.
+
+**Q: How do you decompose a P99 latency budget across an ML serving pipeline?**
+Assign each stage a slice of the total budget — network, feature fetch, retrieval, ranking, post-processing — and keep headroom for tail latency. For a 100ms P99 budget a typical split is 10ms network, 8ms feature fetch, 12ms retrieval, 18ms ranking, 4ms post-processing, leaving ~35ms for GC pauses and tail effects. Measure each stage independently so a regression is attributable to one component rather than the whole request.
+
+**Q: What should an ML system do when the model or feature store is unavailable?**
+Fall back to a simpler strategy — popularity ranking, cached features, or a rule-based default — rather than failing the request. Wrap the hot path in bounded-timeout calls and circuit breakers; serve cached or default feature values when the store is slow. A slightly worse prediction is almost always better than a hard failure on the serving path, so design graceful degradation at every layer from the design phase.
+
+**Q: What is the Lambda architecture for feature computation, and when do you need a speed layer?**
+Lambda architecture pairs a batch layer that recomputes complete features from history with a speed layer that adds fresh real-time features, merged at serving time. The batch layer (Spark/Hive) is accurate but stale; the speed layer (Flink/Kafka Streams) provides sub-minute freshness for signals like "page views in the last 5 minutes." You need the speed layer when recent events materially change predictions — breaking news, live sessions, fast-moving fraud — and can skip it when hourly or daily freshness is enough.
 
 ---
 

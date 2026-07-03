@@ -71,85 +71,156 @@ SAM (Segment Anything Model, Meta 2023) is a promptable segmentation model train
 
 ### U-Net Architecture
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 40, 'rankSpacing': 50}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x([Input 572×572×1]) --> e1["Enc Conv3×3 ×2\n→ 64 ch"]
+    e1 --> e2["Enc Conv3×3 ×2\n→ 128 ch"]
+    e2 --> e3["Enc Conv3×3 ×2\n→ 256 ch"]
+    e3 --> e4["Enc Conv3×3 ×2\n→ 512 ch"]
+    e4 --> bott["Bottleneck\n28×28×1024"]
+    bott --> d4["Dec Upsample + Concat\n→ 512 ch"]
+    d4 --> d3["Dec Upsample + Concat\n→ 256 ch"]
+    d3 --> d2["Dec Upsample + Concat\n→ 128 ch"]
+    d2 --> d1["Dec Upsample + Concat\n→ 64 ch"]
+    d1 --> out([Conv1×1 → num_classes])
+    e1 -.->|"skip concat"| d1
+    e2 -.->|"skip concat"| d2
+    e3 -.->|"skip concat"| d3
+    e4 -.->|"skip concat"| d4
+
+    class x,out io
+    class e1,e2,e3,e4 train
+    class bott base
+    class d1,d2,d3,d4 mathOp
 ```
-Encoder (Contracting Path)           Decoder (Expanding Path)
-                                      skip connections (concat)
-Input (572x572x1)
-  |
-[Conv 3x3] × 2 → 570x570x64 ─────────────────────────────┐
-[MaxPool 2x2]   → 285x285x64                              │
-  |                                                        │
-[Conv 3x3] × 2 → 281x281x128 ───────────────────────┐    │
-[MaxPool 2x2]   → 140x140x128                        │    │
-  |                                                   │    │
-[Conv 3x3] × 2 → 136x136x256 ──────────────────┐    │    │
-[MaxPool 2x2]   →  68x68x256                   │    │    │
-  |                                             │    │    │
-[Conv 3x3] × 2 →  64x64x512 ──────────────┐   │    │    │
-[MaxPool 2x2]   →  32x32x512              │   │    │    │
-  |                                        │   │    │    │
-[Conv 3x3] × 2 →  28x28x1024 (bottleneck) │   │    │    │
-  |                                        │   │    │    │
-[Upsample + Concat] ← ─────────────────── ┘   │    │    │
-[Conv 3x3] × 2 →  52x52x512                   │    │    │
-  |                                             │    │    │
-[Upsample + Concat] ← ─────────────────────── ┘    │    │
-[Conv 3x3] × 2 → 100x100x256                        │    │
-  |                                                   │    │
-[Upsample + Concat] ← ─────────────────────────────┘    │
-[Conv 3x3] × 2 → 196x196x128                             │
-  |                                                        │
-[Upsample + Concat] ← ────────────────────────────────── ┘
-[Conv 3x3] × 2 → 388x388x64
-  |
-[Conv 1x1] → 388x388x num_classes
-```
+
+The dotted skip connections are the whole point: each encoder stage feeds its
+high-resolution features straight into the matching decoder stage, restoring the
+edge detail that downsampling destroyed.
 
 ### DeepLab v3+ Architecture
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 40, 'rankSpacing': 50}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    img([Input image]) --> bb["ResNet-50 / Xception backbone"]
+    bb --> enc([Encoder features\nstride 16 · dilated conv])
+    subgraph aspp["ASPP · Atrous Spatial Pyramid Pooling"]
+        a1["1×1 conv"]
+        a2["3×3 conv · d=6"]
+        a3["3×3 conv · d=12"]
+        a4["3×3 conv · d=18"]
+        a5["Global Avg Pool"]
+    end
+    enc --> a1
+    enc --> a2
+    enc --> a3
+    enc --> a4
+    enc --> a5
+    a1 --> cat["Concat + 1×1 conv → 256 ch"]
+    a2 --> cat
+    a3 --> cat
+    a4 --> cat
+    a5 --> cat
+    cat --> up1["4× Upsample"]
+    up1 --> lowcat["Concat stride-4 low-level features"]
+    lowcat --> dec["3×3 conv + 1×1 conv → num_classes"]
+    dec --> up2([4× Upsample → full-res output])
+
+    class img,enc,up2 io
+    class bb,a1,a2,a3,a4,a5,cat,dec train
+    class up1,lowcat mathOp
 ```
-Input Image
-     |
-[ResNet-50 / Xception Backbone]
-     |
-  Encoder features (stride 16 or 8 with dilated convolutions)
-     |
-  ┌──┴──────────────────────────────────────────────────┐
-  │  ASPP (Atrous Spatial Pyramid Pooling)               │
-  │  ┌──────────────┬────────────┬─────────┬──────────┐ │
-  │  │ 1x1 conv     │ 3x3 d=6   │ 3x3 d=12│ 3x3 d=18 │ │
-  │  │ GlobalAvgPool│            │          │           │ │
-  │  └──────────────┴────────────┴─────────┴──────────┘ │
-  │  [Concat + 1x1 conv → 256 channels]                  │
-  └──────────────────────────────────────────────────────┘
-     |
-  [4× Upsample]
-     |
-  [Concat with stride-4 encoder features (low-level detail)]
-     |
-  [3x3 conv + 1x1 conv → num_classes]
-     |
-  [4× Upsample → full resolution output]
-```
+
+ASPP runs four parallel dilated convolutions plus global pooling to capture context
+at rates 6/12/18 without downsampling, then fuses low-level detail before upsampling
+— dilation buys a large receptive field while keeping boundaries sharp.
 
 ### Mask R-CNN Additional Mask Branch
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    roi([RoI Align · 14×14×C per RoI]) --> heads["Existing Faster R-CNN heads\nclass + box"]
+    roi --> m1["Mask Head NEW\nConv3×3 ×4 → 14×14×256"]
+    m1 --> m2["Deconv2×2 stride 2 → 28×28"]
+    m2 --> m3["Conv1×1 → 28×28×num_cls\none mask per class"]
+    m3 --> outp([Binary mask for predicted class\n28×28 → upsample to RoI size])
+
+    class roi,outp io
+    class heads,m1,m2,m3 train
 ```
-Faster R-CNN RoI Align output (14x14xC per RoI)
-     |
-┌────┴─────────────────────────────┐
-│  Existing Faster R-CNN heads     │  (class + box predictions)
-└──────────────────────────────────┘
-     |
-┌────┴─────────────────────────────┐
-│  Mask Head (NEW)                  │
-│  [Conv 3x3] × 4  → 14x14x256    │
-│  [Deconv 2x2 stride 2] → 28x28  │
-│  [Conv 1x1] → 28x28 x num_cls   │  (one mask per class)
-└──────────────────────────────────┘
-     |
-  Binary mask for predicted class: 28x28 → upsample to RoI size
+
+Mask R-CNN adds a third parallel head on top of Faster R-CNN's class and box heads;
+the mask branch predicts a 28×28 mask per class and only the predicted class's mask
+is used, which is why RoI Align's sub-pixel accuracy matters here.
+
+### Semantic vs Instance vs Panoptic
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    img([Input image]) --> sem["Semantic\nclass per pixel\nall cars share one label"]
+    img --> inst["Instance\nunique mask per object\ntwo cars = two masks"]
+    img --> pan["Panoptic\nthings get instance masks +\nstuff gets semantic labels"]
+    sem --> sm([metric: mIoU])
+    inst --> im([metric: mask AP])
+    pan --> pm([metric: PQ])
+
+    class img,sm,im,pm io
+    class sem,inst,pan base
 ```
+
+Semantic labels every pixel but cannot tell two cars apart; instance separates
+objects but ignores background "stuff"; panoptic unifies both and is scored by
+Panoptic Quality.
+
+### Semantic Model Accuracy
+
+```mermaid
+xychart-beta
+    title "Cityscapes mIoU by Semantic Segmentation Model"
+    x-axis ["FCN", "DeepLab v3+", "SegFormer", "Mask2Former"]
+    y-axis "mIoU (%)" 0 --> 100
+    bar [65.3, 82.1, 84.0, 84.3]
+```
+
+From the §4 table: FCN's fully convolutional baseline at 65.3% climbed to 84%+ once
+ASPP (DeepLab) and transformers (SegFormer, Mask2Former) added multi-scale global
+context.
 
 ---
 
@@ -516,6 +587,12 @@ Tversky loss generalizes Dice: Tversky = TP / (TP + alpha*FP + beta*FN). When al
 
 **Q: What is the standard pipeline to train a semantic segmentation model on a new domain?**
 Start from a backbone pretrained on ImageNet (ResNet-50, MiT-B2). If a segmentation model pretrained on ADE20K or Cityscapes exists, load it and replace the final classification head. Fine-tune with a low learning rate for the backbone (1e-4) and higher for the head (1e-3). Use combined CE + Dice loss with label smoothing 0.1. Apply Albumentations augmentations synchronized across image and mask. Train with output stride 16 for efficiency; switch to 8 for final evaluation. Evaluate with mIoU per class and overall; examine confusion matrix to identify commonly confused class pairs.
+
+**Q: What is the difference between transposed convolution and bilinear upsampling, and which avoids checkerboard artifacts?**
+Transposed convolution learns its upsampling kernel while bilinear upsampling is fixed, so only transposed convolution can produce checkerboard artifacts. Those artifacts appear when the transposed-conv kernel size is not divisible by the stride (for example kernel 3 with stride 2), causing uneven overlap in the output. The common fixes are to use kernel 2 with stride 2, or to bilinearly upsample and then apply a 3x3 convolution (or PixelShuffle). Bilinear upsampling is cheaper and artifact-free but cannot learn task-specific detail.
+
+**Q: Why is sliding-window inference used for large images in segmentation?**
+Sliding-window inference runs the model on overlapping crops of a large image and stitches the outputs, because a single full-resolution forward pass often exceeds GPU memory. A typical setup uses 50% overlap and averages predictions in the overlapping regions to avoid seams and inconsistent patch boundaries. It trades extra compute — each pixel is processed several times — for bounded memory, and is standard for gigapixel pathology slides and large satellite scenes.
 
 ---
 

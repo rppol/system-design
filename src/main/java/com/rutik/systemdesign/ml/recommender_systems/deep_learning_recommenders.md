@@ -85,72 +85,116 @@ Optimized for commodity hardware with massive embedding table sharding
 
 ### 5.1 Two-Tower Architecture
 
-```
-         USER FEATURES                      ITEM FEATURES
-  [user_id, age, country,           [item_id, category, price,
-   last_10_items, device]            title_embedding, brand]
-         |                                      |
-   +-----v-----+                        +------v------+
-   |  Embed     |                        |   Embed     |
-   |  Layer     |                        |   Layer     |
-   +-----+------+                        +------+------+
-         |  (concat all embeddings)             |
-   +-----v-----+                        +------v------+
-   |   MLP     |                        |    MLP      |
-   | 512->256  |                        |  512->256   |
-   | ->256     |                        |  ->256      |
-   +-----+-----+                        +------+------+
-         |                                     |
-    user_vec (256)    dot product         item_vec (256)
-         |_________________||___________________|
-                            |
-                         score
-                (in-batch softmax for training)
-                (ANN search for serving)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    uf(["User features\nuser_id, age, last_10_items, device"]) --> ue["Embed layer"]
+    ue --> umlp["User MLP\n512 -> 256 -> 256"]
+    umlp --> uv(["user_vec (256)\nL2-normalized"])
+    itf(["Item features\nitem_id, category, price, title_emb"]) --> ie["Embed layer"]
+    ie --> imlp["Item MLP\n512 -> 256 -> 256"]
+    imlp --> iv(["item_vec (256)\nL2-normalized"])
+    uv --> dot(("dot"))
+    iv --> dot
+    dot --> score(["score\nin-batch softmax (train)\nANN search (serve)"])
+
+    class uf,itf,uv,iv,score io
+    class ue,ie,umlp,imlp train
+    class dot mathOp
 ```
 
 ### 5.2 Wide & Deep Architecture
 
-```
- Sparse Features          Dense Features       All Features
- (user, item IDs,         (price, age,         (both sparse+dense)
-  category crosses)        click rate)          as raw + crossed
-       |                       |                      |
-  [Cross Features]        [Embedding]           [Wide Linear]
-       |                       |
-  [Deep MLP: 1024->512->256]   |
-       |_______________________|
-                |
-          Concatenate
-                |
-         [Output Layer]
-         sigmoid -> CTR
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    sf(["Sparse features\nuser, item IDs"]) --> cross["Cross features\nuser_country × item_category"]
+    cross --> wide["Wide linear\nFTRL, lr=0.01\nmemorizes rare crosses"]
+    sf --> emb["Embedding layer"]
+    df(["Dense features\nprice, age, click rate"]) --> emb
+    emb --> deep["Deep MLP\n1024 -> 512 -> 256\nAdam, lr=0.001"]
+    wide --> sum(("+"))
+    deep --> sum
+    sum --> sig["Sigmoid"]
+    sig --> ctr(["CTR probability"])
+
+    class sf,df,ctr io
+    class emb,wide,deep train
+    class cross,sum,sig mathOp
 ```
 
 ### 5.3 SASRec Sequential Model
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    seq(["Item sequence\nitem_1 .. item_N (N=50, padded)"]) --> emb["Item embeddings\n+ positional encoding"]
+    emb --> attn["Causal self-attention\nmulti-head (h=2)\nposition i attends 1..i"]
+    attn --> ffn["Feed-forward\nd -> 4d -> d"]
+    ffn --> outp(["Output at position N\npredicts item N+1"])
+    outp --> dot(("dot"))
+    ie(["All item embeddings"]) --> dot
+    dot --> topk(["Softmax / Top-K"])
+
+    class seq,outp,ie,topk io
+    class emb,attn,ffn train
+    class dot mathOp
 ```
-Item Sequence: [item_1, item_2, ..., item_N]  (N=50, padded)
-                    |
-              [Item Embeddings]  (N x d)
-                    |
-            [Positional Encoding]
-                    |
-        +───────────────────────+
-        |  Self-Attention Layer  |   (causal: position i attends only to 1..i)
-        |  Multi-head (h=2)      |
-        +───────────────────────+
-                    |
-        +───────────────────────+
-        |  Feed-Forward (d->4d->d) |
-        +───────────────────────+
-                    |
-        [Output at position N]   (predicts item N+1)
-                    |
-              [Dot product with all item embeddings]
-                    |
-              [Softmax / Top-K]
+
+### 5.4 DLRM Feature Interaction
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    df(["Dense features\nprice, age, click rate"]) --> bmlp["Bottom MLP"]
+    sf(["Sparse features\nuser_id, item_id, category"]) --> emb["Embedding tables\n(sharded across GPUs)"]
+    bmlp --> inter["Pairwise dot interaction\nupper triangle of all vector pairs"]
+    emb --> inter
+    inter --> concat(("concat"))
+    bmlp --> concat
+    concat --> tmlp["Top MLP"]
+    tmlp --> ctr(["CTR probability"])
+
+    class df,sf,ctr io
+    class bmlp,emb,tmlp train
+    class inter,concat mathOp
 ```
+
+DLRM keeps dense features in a bottom MLP and sparse IDs in sharded embedding
+tables, then computes explicit pairwise dot products between every vector pair —
+a more interpretable, hardware-friendly interaction than the learned crosses in DeepFM.
 
 ---
 
@@ -590,6 +634,9 @@ When using in-batch negatives, popular items appear as negatives for many users 
 
 **Q: How would you design a two-tower model to handle new items (item cold start)?**
 Design the item tower to operate purely on content features — no item ID embedding (or use it only as a residual when available). The item tower takes: category embedding, text embedding (from pre-trained language model), numerical features (price, rating). At serving time, new items can immediately receive a vector from the content-only item tower without needing interaction history. As interactions accumulate, a fine-tuning step or online update adds the item ID embedding as a correction term. This is the "content-based initialization → collaborative refinement" pattern used at platforms with high item turnover (news, e-commerce).
+
+**Why does a two-tower model cap accuracy compared to a single-tower cross-attention ranker?**
+The two towers never interact until the final dot product, so the model cannot learn fine-grained user-item feature crosses that a cross-attention ranker captures. This "late interaction" is exactly the property that makes item vectors precomputable and ANN-searchable, but it forfeits expressiveness — the score is just a dot product of two independently computed vectors. That is why production stacks use two-tower for cheap high-recall retrieval (top-500) and then a heavier cross-feature ranker (Wide & Deep, DLRM) to re-score those candidates for the final ordering.
 
 ---
 

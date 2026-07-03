@@ -54,51 +54,35 @@ Mental model: decompose ETA into three sub-problems — each with a different al
 
 ## 3. High-Level Architecture
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    APP(["Client / Driver App"]) --> GW["ETA Request Gateway\nGeoDNS to regional cluster"]
+    GW --> FA["Feature Assembly Service\nroute segments · time · weather\nevents · driver position"]
+    RT["Real-Time Traffic Store\nRedis · segment speeds\nupdated 30s · read < 3ms"] --> FA
+    BF["Batch Feature Store\nS3 + DynamoDB\nhistorical speeds · road class"] --> FA
+    FA --> MODEL["ETA Model Serving\nLightGBM p50 + p90\ntrip duration · pickup · uncertainty"]
+    MODEL --> AGG["Response Aggregation\np50 = trip + pickup\np90 = p90_trip + p90_pickup\nuncertainty band"]
+    AGG --> CLIENT(["Client App\nshow p50"])
+    AGG --> DRIVER(["Driver App\nuse p90"])
+    AGG --> DISPATCH(["Dispatch System\np50 + uncertainty"])
+
+    class APP,CLIENT,DRIVER,DISPATCH io
+    class GW req
+    class FA,AGG mathOp
+    class RT,BF base
+    class MODEL train
 ```
-Client App / Driver App
-          |
-          v
-+---------------------+
-| ETA Request Gateway |
-| (GeoDNS routing to  |
-|  regional cluster)  |
-+-----+---------------+
-      |
-      v
-+---------------------+      +-------------------------+
-| Feature Assembly    |      | Real-Time Traffic Store |
-| Service             |<-----|  (Redis Cluster)        |
-|                     |      | - road segment speeds   |
-| - route segments    |      | - updated every 30s     |
-| - time of day       |      | - p99 read < 3ms        |
-| - weather condition |      +-------------------------+
-| - event calendar    |
-| - driver position   |      +-------------------------+
-| - historical        |<-----|  Batch Feature Store    |
-|   segment stats     |      |  (S3 + DynamoDB)        |
-+-----+---------------+      | - historical speed      |
-      |                      |   distributions         |
-      v                      | - segment type, road    |
-+---------------------+      |   class, lane count     |
-| ETA Model Serving   |      +-------------------------+
-| (LightGBM p50+p90)  |
-| - trip duration     |
-| - pickup wait       |
-| - uncertainty       |
-+-----+---------------+
-      |
-      v
-+-----+------------------------------+
-| Response Aggregation               |
-| - p50 ETA = trip_dur + pickup_wait |
-| - p90 ETA = p90_trip + p90_pickup  |
-| - uncertainty band                 |
-| - last-updated timestamp           |
-+-----+------------------------------+
-      |
-   Client App      Driver App      Dispatch System
-   (show p50)      (use p90)      (use p50 + uncertainty)
-```
+
+*Feature assembly fuses a real-time traffic path (Redis, 30s-fresh) with a batch historical path (S3/DynamoDB); the quantile model then emits p50 and p90, and aggregation fans the same prediction out to three consumers that each read a different quantile.*
 
 **Data flow:** client request → feature assembly (route segments + real-time traffic + batch features) → LightGBM inference (p50, p90 per segment) → aggregation → response.
 
@@ -207,6 +191,33 @@ def predict_eta_with_uncertainty(
     }
 ```
 
+The end-to-end ETA is assembled from two independent sub-models, each emitting its own quantiles:
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SEG["Segment travel time\nLightGBM quantile\np50 + p90"] --> SUM((" + "))
+    PICK["Pickup wait\nqueuing + supply model\np50 + p90"] --> SUM
+    SUM --> P50(["p50 ETA\nrider display"])
+    SUM --> P90(["p90 ETA\ndriver commitment"])
+    SUM --> BAND(["uncertainty band\np90 - p50"])
+
+    class SEG train
+    class PICK base
+    class SUM mathOp
+    class P50,P90,BAND io
+```
+
+*Trip duration and pickup wait are modeled separately — a trained quantile GBDT and a statistical queuing model — and summed per quantile. Carrying p50 and p90 through the whole pipeline is what lets the rider see an attractive median while the driver commits to an achievable 90th-percentile time.*
+
 ### 4.3 Real-Time Traffic Feature Pipeline (Flink)
 
 ```python
@@ -311,6 +322,16 @@ Traffic changes rapidly at events (concerts, sports games). 2-minute staleness m
 | LightGBM (mean) | 92s | 84% | 3ms | 25 min |
 | LightGBM (quantile p50/p90) | 92s / — | 89% | 6ms | 50 min |
 | GNN (graph neural) | 75s | 91% | 45ms CPU | 6 hours |
+
+```mermaid
+xychart-beta
+    title "Trip-duration MAE (seconds) by algorithm - lower is better; SLO 90s"
+    x-axis ["Hist. avg", "Linear", "LGBM mean", "LGBM quantile", "GNN"]
+    y-axis "MAE (seconds)" 0 --> 150
+    bar [140, 110, 92, 92, 75]
+```
+
+*The GNN is the accuracy leader at 75s MAE but costs 45ms CPU inference — over the 50ms model budget without GPUs. LightGBM (92s) clears the 90s SLO at 3–6ms, so it serves p50/p90 today while the GNN stays a research track for long-trip accuracy.*
 
 ---
 

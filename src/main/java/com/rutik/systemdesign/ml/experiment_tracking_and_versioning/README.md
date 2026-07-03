@@ -72,60 +72,150 @@ Open-source, git-native. Tracks data files and pipeline stages (not experiments 
 
 ## 5. Architecture Diagrams
 
+**MLflow tracking architecture — where params, metrics, and artifacts flow**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    script(["Training script\nmlflow.start_run()"]) --> params["log_params\nlr, batch, seed"]
+    script --> metrics["log_metrics\nloss, AUC per step"]
+    script --> artifacts["log_artifact\nweights, plots, code"]
+    params --> server[["Tracking Server\nPostgres backend"]]
+    metrics --> server
+    artifacts --> store[["Artifact Store\nS3 / GCS"]]
+    server --> ui(["MLflow UI :5000\ncompare runs, curves"])
+    server --> registry["Model Registry\ngated promotion"]
+    store --> registry
+
+    class script io
+    class params,metrics,artifacts mathOp
+    class server,store base
+    class ui req
+    class registry frozen
 ```
-MLflow Architecture
 
-Training Script                  MLflow Tracking Server
-+------------------+             +------------------------+
-| mlflow.start_run |  HTTP/gRPC  |  Experiments DB        |
-| log_param(k, v)  |  -------->  |  (SQLite / PostgreSQL) |
-| log_metric(k, v) |             |                        |
-| log_artifact(f)  |             |  Artifact Store        |
-+------------------+             |  (S3 / GCS / local FS) |
-                                 +------------------------+
-                                          |
-                                 MLflow UI (port 5000)
-                                 (compare runs, view charts)
+A run streams small key-value params and time-series metrics to the SQL tracking
+server, and large files (weights, plots) to the object store; the registry links
+the winning run's artifact to a gated deployment stage. Use PostgreSQL, not SQLite,
+so concurrent runs do not collide on the write lock.
 
+**Hyperparameter sweep loop — optimizer suggests, agents train, poor trials pruned**
 
-W&B Sweep Architecture
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-                 W&B Server (Bayesian Optimizer)
-                 +----------------------------+
-                 | Surrogate model            |
-                 | (past run results)         |
-                 | Next config suggestion     |
-                 +---+------------------------+
-                     |           ^
-              get_config()       | log_metrics()
-                     |           |
-              Agent Process 1   Agent Process 2   Agent Process N
-              (training job)    (training job)    (training job)
-              wandb.init()       wandb.init()      wandb.init()
+    opt["Bayesian optimizer\nTPE surrogate model"] -->|"suggest config"| a1(["Agent 1\nwandb.init()"])
+    opt -->|"suggest config"| a2(["Agent 2"])
+    opt -->|"suggest config"| aN(["Agent N"])
+    a1 -.->|"report val metric"| opt
+    a2 -.-> opt
+    aN -.-> opt
+    a1 --> prune{"worse than median\nat this step?"}
+    prune -->|"yes"| kill["prune trial\nfree the GPU"]
+    prune -->|"no"| cont["train next epoch"]
 
-
-DVC Pipeline DAG
-
-dvc.yaml defines:
-  extract:
-    cmd: python extract.py
-    deps: [raw_data/]
-    outs: [processed/]
-
-  featurize:
-    cmd: python featurize.py
-    deps: [processed/]
-    outs: [features/]
-
-  train:
-    cmd: python train.py
-    deps: [features/, src/train.py]
-    outs: [models/model.pkl]
-    metrics: [metrics.json]
-
-dvc repro: runs only stages whose deps changed (content-hash check)
-dvc push/pull: sync data artifacts with remote storage (S3)
+    class a1,a2,aN train
+    class opt mathOp
+    class prune req
+    class kill lossN
+    class cont io
 ```
+
+The optimizer fits a surrogate over past results and hands each parallel agent a
+promising config (dotted arrows carry the reported metric back). A pruner
+(MedianPruner / Hyperband) kills any trial already worse than the median, cutting
+GPU hours 40-60% for the same number of useful trials.
+
+**DVC pipeline DAG — content-addressed, incremental reruns**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    raw(["raw_data/"]) --> extract["extract\npython extract.py"]
+    extract --> processed(["processed/"])
+    processed --> featurize["featurize\npython featurize.py"]
+    featurize --> features(["features/"])
+    features --> train["train\npython train.py"]
+    src(["src/train.py"]) --> train
+    train --> model(["models/model.pkl"])
+    train --> metrics(["metrics.json"])
+
+    class raw,processed,features,src,metrics io
+    class extract,featurize mathOp
+    class train train
+    class model base
+```
+
+`dvc repro` walks this DAG and reruns only stages whose input content hash changed;
+`dvc push`/`pull` sync the actual data blobs with S3 while git tracks only the small
+`.dvc` pointers.
+
+**Model Registry lifecycle — the gate between experimentation and deployment**
+
+```mermaid
+stateDiagram-v2
+    [*] --> None: register model version
+    None --> Staging: offline metric gate passes
+    Staging --> Production: human approval + shadow eval
+    Staging --> Archived: rejected
+    Production --> Archived: superseded by new version
+    Production --> Staging: demote for retest
+    Archived --> [*]
+```
+
+A model enters the registry linked to one run, then transitions through gated
+stages. Promotion to Production is a metadata change, so rollback is instant: the
+previous version stays Archived and can be re-promoted without a redeploy.
+
+**Reproducibility chain — the four axes that must all be pinned**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    code(["git commit SHA\ntraining code"]) --> run["Experiment run\nlogged in MLflow"]
+    data(["DVC data hash\ndataset version"]) --> run
+    seeds(["random seeds\nPython/NumPy/CUDA"]) --> run
+    env(["env lockfile\nCUDA + lib versions"]) --> run
+    run --> q{"reproducible?"}
+    q -->|"checkout SHA, dvc pull, rerun"| exact(["metrics within\nfloating-point variance"])
+
+    class code,data,seeds,env io
+    class run base
+    class q mathOp
+    class exact train
+```
+
+Reproducibility fails the moment any one axis is unpinned; teams usually log
+hyperparameters but forget the data hash and the seeds, which are the two most
+common sources of "it worked last Tuesday."
 
 ---
 
@@ -529,6 +619,30 @@ DVCLive is DVC's built-in metric logging library that writes metrics to files (m
 
 **Q: How do you compare two MLflow runs programmatically to select the best model?**
 Use the MLflow tracking client: `MlflowClient().search_runs(experiment_ids=["1"], filter_string="metrics.val_accuracy > 0.90", order_by=["metrics.val_accuracy DESC"], max_results=10)`. This returns Run objects with params, metrics, and artifact URIs. Best practice for model selection pipelines: (1) filter by minimum quality threshold (val_accuracy > 0.90), (2) sort by primary metric (val_accuracy), (3) apply secondary filter if needed (training_time < 4 hours), (4) fetch the best run's artifact URI and register it to the Model Registry. Automate this in a CI/CD step that runs after the sweep completes.
+
+**Why must hyperparameters be logged at run start rather than at run end?**
+Logging at run start means a mid-training crash still leaves a complete parameter record you can reproduce from. If you log the config only on the last line of the training loop, a job that dies at epoch 5 leaves an orphan run with metrics but no idea which learning rate or batch size produced them — the record is useless. Capture params, dataset version, git SHA, and environment before the first forward pass; treat run-start logging as the commit that makes the run recoverable.
+
+**Why is SQLite a poor tracking backend for a team running concurrent experiments?**
+SQLite serializes writes behind a single file lock, so concurrent runs collide and block, and a distributed sweep will throw "database is locked" errors. It is fine for a single-user local prototype but does not survive multiple agents logging metrics simultaneously. Use PostgreSQL (or MySQL) as the MLflow backend store for any team or parallel-HPO setup, with an S3/GCS artifact store alongside it. The switch is a one-line `--backend-store-uri` change and removes the entire class of concurrency failures.
+
+**Why should model checkpoints never be written to a single shared path like models/best_model.pt?**
+A shared flat path is overwritten by every run, so after a sweep only the last run's weights survive — not the best run's. This is the classic "weekend sweep of 50 runs and the good model is gone" incident. Always key artifact paths by run ID, e.g. `s3://bucket/models/{run_id}/best_model.pt`; MLflow's `log_artifact()` and W&B's `log_artifact()` do this isolation automatically, which is the main reason to log through the tracker rather than saving files by hand.
+
+**Why does inconsistent metric naming across runs make experiments impossible to compare?**
+Comparison and search queries key on exact metric names, so `val_loss` in one run and `validation_loss` in another never line up on the same axis. Schema drift in metric names silently fragments a dashboard: half your runs plot on one chart and half vanish. Enforce a fixed metric vocabulary (a shared logging helper or constants module) so every run reports `val_loss`, `val_accuracy`, `train_loss` under identical keys — the same discipline applies to param names used in `search_runs()` filters.
+
+**How do early-stopping pruners like MedianPruner and Hyperband reduce hyperparameter-search cost?**
+They kill trials that are already worse than the median at a given step, freeing GPU budget for promising configs instead of running every trial to completion. In a 200-trial Optuna study where 60% of configs are clearly bad by epoch 5, running them for the full 50 epochs wastes most of the budget for zero information gain. `MedianPruner(n_startup_trials=5, n_warmup_steps=5)` or Hyperband typically prunes 40-60% of trials, roughly halving GPU hours for the same set of useful results — pruning requires reporting an intermediate value each step via `trial.report()`.
+
+**Why does random search outperform grid search in high-dimensional hyperparameter spaces?**
+Random search spends its budget across the few hyperparameters that actually matter, instead of wasting it re-sampling unimportant dimensions on a rigid grid. Bergstra and Bengio showed that in a 10-dimensional space random search finds a config within 5% of optimal in about 60 trials, while grid search would need on the order of 10,000. Grid search is only viable for 1-2 hyperparameters; beyond that its cost is O(N^k) and it repeatedly evaluates the same value of an irrelevant dimension. For anything larger, use random search as a floor and Bayesian optimization for sample efficiency.
+
+**What is population-based training (PBT) and when is it preferable to Bayesian optimization?**
+PBT trains a population of models in parallel, periodically copying the best performers' weights and perturbing their hyperparameters mid-run. Unlike Bayesian optimization, which picks a fixed config per trial and trains it to completion, PBT adapts hyperparameters online — so it can discover schedules (e.g. a decaying learning rate or entropy coefficient) rather than a single static value. It shines for RL and long training runs where the optimal hyperparameter changes over the course of training, at the cost of higher orchestration complexity (Ray Tune PBT).
+
+**How do nested runs keep a large hyperparameter sweep organized in MLflow?**
+A parent run represents the whole sweep and each trial is a nested child run, so the UI groups configs together instead of scattering 200 sibling runs across the experiment list. Start the parent with `mlflow.start_run(run_name="hpo_study")` and each trial with `mlflow.start_run(nested=True)`; the parent can then hold aggregate tags and the best hyperparameters, while children hold per-trial params and metrics. This mirrors how Optuna studies map onto MLflow and makes sweep-level comparison a single click.
 
 ---
 

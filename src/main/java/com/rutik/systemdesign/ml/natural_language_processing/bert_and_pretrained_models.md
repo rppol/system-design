@@ -92,49 +92,124 @@ Final input embedding = token_embed + segment_embed + position_embed
 
 ### WordPiece Tokenization Flow
 
-```
-Raw text: "unhappiness"
-   |
-   v
-[WordPiece Tokenizer]
-   |
-   v
-["un", "##happ", "##iness"]
-   |
-   v
-[Lookup in 30K vocab] --> token IDs: [2379, 12199, 7985]
-   |
-   v
-[Embedding layer: shape (30522, 768)] --> embeddings
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    raw(["Raw text: unhappiness"]) --> tok["WordPiece tokenizer"]
+    tok --> pieces(["Subwords\nun · ##happ · ##iness"])
+    pieces --> lookup["Vocab lookup\n~30K WordPiece vocab"]
+    lookup --> ids(["Token IDs\n2379 · 12199 · 7985"])
+    ids --> embl["Embedding table\n(30522 × 768)"]
+    embl --> emb(["Token embeddings"])
+
+    class raw,pieces,ids,emb io
+    class tok,lookup mathOp
+    class embl base
 ```
 
-### Fine-Tuning for NER (Token Classification)
+The `##` prefix marks a continuation subword; every piece indexes one row of the 30522×768 embedding table, so an out-of-vocabulary word never becomes UNK — it decomposes into known pieces the model has already learned.
 
-```
-Input: [CLS] Apple is in NYC [SEP]
-          |     |   |  |   |    |
-       [BERT 12-layer bidirectional transformer]
-          |     |   |  |   |    |
-       h_CLS  h_1  h_2 h_3 h_4  h_SEP
-                |   |  |   |
-            [Linear(768, num_labels)]
-                |   |  |   |
-              O   O  O  B-LOC   (BIO labels)
+### BERT Encoder Stack
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    tokE(["Token emb"]) --> sum
+    segE(["Segment emb"]) --> sum
+    posE(["Position emb"]) --> sum
+    sum((" + ")) --> emb["Input embeddings\n(batch, seq_len, 768)"]
+    emb --> L1["Encoder layer 1\nmulti-head self-attn + FFN"]
+    L1 --> L2["Encoder layer 2\nmulti-head self-attn + FFN"]
+    L2 --> Ld["... 12 layers (base) / 24 (large)"]
+    Ld --> L12["Encoder layer N"]
+    L12 --> hcls(["h_CLS\nsequence summary"])
+    L12 --> htok(["h_1 ... h_n\nper-token vectors"])
+
+    class tokE,segE,posE,emb,hcls,htok io
+    class sum mathOp
+    class L1,L2,Ld,L12 base
 ```
 
-### Fine-Tuning for Extractive QA
+Every layer applies bidirectional self-attention, so each output vector already carries context from both sides — the architectural break from GPT's causal stack, and the reason h_CLS can serve as a whole-sequence summary after fine-tuning.
 
+### MLM + NSP Pretraining
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    inp(["Sentence pair, 15% masked\n(CLS) the (MASK) sat (SEP) on the mat (SEP)"]) --> enc["BERT encoder\n12 bidirectional layers"]
+    enc --> hcls(["h_CLS"])
+    enc --> hmask(["h at masked position"])
+    hcls --> nsp["NSP head\nLinear → softmax"]
+    hmask --> mlm["MLM head\nLinear + GELU + LayerNorm → vocab"]
+    nsp --> nspOut(["IsNext / NotNext"])
+    mlm --> mlmOut(["Predict masked token: cat"])
+    nspOut --> nspLoss["NSP loss\nbinary cross-entropy"]
+    mlmOut --> mlmLoss["MLM loss\ncross-entropy over masked 15%"]
+
+    class inp,hcls,hmask,nspOut,mlmOut io
+    class enc base
+    class nsp,mlm train
+    class nspLoss,mlmLoss lossN
 ```
-Input: [CLS] question tokens [SEP] passage tokens [SEP]
-                                      |
-                          [BERT outputs: h_i for each token]
-                                      |
-                     [Two linear layers: start_logits, end_logits]
-                                      |
-                          argmax(start_logits), argmax(end_logits)
-                                      |
-                          Extract span from passage
+
+Both objectives train jointly from a single forward pass: MLM predicts the masked tokens from bidirectional context, while NSP classifies coherence from h_CLS. RoBERTa later deleted the NSP branch entirely, keeping only the MLM loss — and scored higher.
+
+### Fine-Tuning Heads
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    inp(["Input tokens\nCLS ... SEP"]) --> bert["Pretrained BERT\nshared encoder"]
+    bert --> hcls(["h_CLS"])
+    bert --> htok(["h_1 ... h_n\nper-token"])
+    hcls --> clshead["Classification head\nLinear(768→C) → softmax"]
+    clshead --> clsOut(["class label"])
+    htok --> nerhead["Token-classification head\nLinear(768→labels)"]
+    nerhead --> nerOut(["BIO tags: O O B-LOC ..."])
+    htok --> qahead["QA span head\ntwo Linear → start / end logits"]
+    qahead --> qaOut(["answer span (start, end)"])
+    hcls --> simhead["Similarity head\nLinear on CLS of pair A · SEP · B"]
+    simhead --> simOut(["similarity score"])
+
+    class inp,hcls,htok,clsOut,nerOut,qaOut,simOut io
+    class bert base
+    class clshead,nerhead,qahead,simhead train
 ```
+
+One shared encoder feeds four interchangeable heads: classification and similarity read h_CLS, while NER and extractive QA read every per-token vector. The heads are tiny — the bulk of the parameters and knowledge live in the shared BERT below them.
 
 ---
 
@@ -596,6 +671,18 @@ ALBERT shares the same weight matrices across all 12 (or 24) transformer layers 
 
 **Q: Why does BERT require separate segment embeddings and what happens if you remove them?**
 BERT's segment embeddings (0 for sentence A, 1 for sentence B) are the only signal distinguishing the two input sequences in tasks like question answering (question vs passage) or NLI (premise vs hypothesis). Without segment embeddings, the model must rely only on the `[SEP]` token position to distinguish sequences — which is insufficient when sequences have variable lengths. Removing segment embeddings drops SQuAD performance by ~2 F1 points and NLI accuracy by 1-3%. Modern models (RoBERTa, DeBERTa) retain segment embeddings but make them optional in single-sentence tasks. ModernBERT uses no segment embeddings, relying instead on the `[SEP]` token and positional encoding differences — viable because RoPE encodes absolute positions relative to the beginning of the full combined sequence.
+
+**Q: Why can BERT not be used for autoregressive text generation?**
+BERT uses bidirectional self-attention with no causal mask, so every position already sees future tokens — there is no left-to-right factorization to generate from. Autoregressive generation requires that predicting token t depends only on tokens 1..t-1; BERT's full attention matrix violates this by letting position t attend to t+1, t+2, and so on. If you tried to generate with BERT, it would need the tokens it is supposed to be producing. This is the fundamental encoder-vs-decoder split: BERT is trained to *understand* a complete sequence, while GPT's causal mask makes it a *generator*. Practical guidance: use encoder models for classification, tagging, retrieval, and extractive QA; use decoder-only models when the output is free-form text.
+
+**Q: Does BERT's MLM compute loss over all tokens or only the masked ones?**
+MLM computes loss only on the ~15% masked positions, not all tokens — the other 85% are pure context inputs that receive no gradient signal. This is why MLM is sample-inefficient: each sequence yields learning signal from only a small fraction of its tokens, so BERT needs many epochs over large corpora. ELECTRA and DeBERTa-v3 fix this with Replaced Token Detection (RTD): a generator corrupts some tokens and the main model classifies *every* token as original-or-replaced, extracting a signal from 100% of positions. RTD reaches comparable quality with 4x less compute, which is the core reason DeBERTa-v3 outperforms MLM-trained encoders at equal size.
+
+**Q: What is RoBERTa's dynamic masking and why does it beat static masking?**
+Dynamic masking re-samples which tokens are masked every time a sequence is fed to the model, instead of masking once during preprocessing as original BERT did. Original BERT masked each sequence a fixed number of times (it duplicated the data 10x with different masks), so a given sequence saw at most 10 mask patterns across all of training. Dynamic masking generates a fresh mask on every epoch, so the model never sees the exact same masked input twice, which acts as data augmentation and prevents overfitting to specific mask placements. Combined with removing NSP, larger batches, and 10x more data, dynamic masking was part of RoBERTa's recipe that lifted GLUE from 79.6 to 86.4 without any architecture change.
+
+**Q: Why is BERT fine-tuning unstable across random seeds on small datasets, and how do you stabilize it?**
+Fine-tuning instability comes from the tiny training set, the aggressive Adam learning rate, and a randomly initialized task head, which together let some seeds diverge to near-random performance. On datasets under a few thousand examples, a fraction of seeds "fail" — the pretrained weights get disrupted early and the model never recovers, producing a bimodal accuracy distribution across runs. Four stabilizers: (1) use a lower learning rate (2e-5) with warmup over the first 10% of steps; (2) train longer with early stopping rather than a fixed small epoch count; (3) use bias-correction in Adam (the original BERT code omitted it, worsening instability); (4) run 3-5 seeds and keep the best on a held-out validation set. Mosbach et al. (2021) showed these changes turn a bimodal seed distribution into a tight, reliable one.
 
 ---
 

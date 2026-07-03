@@ -72,60 +72,112 @@ Key insight: learning rate is the single most important hyperparameter. A correc
 
 ## 5. Architecture Diagrams
 
-```
-Complete Training Loop Flow:
-                      +-----------+
-  Training Data  -->  | DataLoader| --> batches (x, y)
-                      +-----------+
-                            |
-                   [model.train()]
-                            |
-                   [optimizer.zero_grad()]      <- STEP 1: clear gradients
-                            |
-                   [Forward Pass: y_hat = model(x)]
-                            |
-                   [Loss = criterion(y_hat, y)]
-                            |
-                   [loss.backward()]             <- STEP 2: compute gradients
-                            |
-                   [clip_grad_norm_(max_norm=1)] <- STEP 3: clip (optional)
-                            |
-                   [optimizer.step()]            <- STEP 4: update parameters
-                            |
-                   [scheduler.step()]            <- STEP 5: update LR
-                            |
-                        (repeat)
-                            |
-              [Validation loop: model.eval() + torch.no_grad()]
-                            |
-              [Early stopping check: val_loss improved?]
+### Complete Training Loop — One Iteration as a Cycle
 
-Learning Rate Schedule (Warmup + Cosine Decay):
-LR
-^
-|          /\
-|         /  \
-|        /    \__________
-|       /                \
-|      /                  \___
-|     /                        \____
-|----/                               \----
-+-------------------------------------------> Training Steps
-   warmup    peak            cosine decay   final_lr
-   (5-10%    (lr_max)        (most of       (lr_min, e.g. 0)
-   of steps)                 training)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 40, 'rankSpacing': 45}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Mixed Precision Training:
-  FP16 weights + FP16 activations  <-- forward/backward (fast, low memory)
-        |
-  [GradScaler: multiply loss by scale_factor (e.g., 2^16)]
-        |
-  FP32 master weights               <-- optimizer update (precise)
-        |
-  [GradScaler: unscale, check for inf/nan, skip step if found]
-        |
-  FP16 weights for next forward pass
+    data(["DataLoader batch · x, y"]) --> zg["1 · optimizer.zero_grad()\nclear old gradients"]
+    zg --> fwd["2 · forward: y_hat = model(x)"]
+    fwd --> loss["3 · loss = criterion(y_hat, y)"]
+    loss --> bwd["4 · loss.backward()\ncompute gradients"]
+    bwd --> clip["5 · clip_grad_norm_(max_norm=1.0)"]
+    clip --> ostep["6 · optimizer.step()\nupdate parameters"]
+    ostep --> sstep["7 · scheduler.step()\nadvance LR"]
+    sstep -->|"next batch"| data
+    sstep --> val["validate: model.eval() + no_grad"]
+    val --> es{"val_loss improved?"}
+    es -->|"no · patience exceeded"| stop(["early stop · restore best"])
+    es -->|"yes"| data
+
+    class data,stop io
+    class zg,clip,sstep mathOp
+    class fwd,ostep train
+    class loss,bwd lossN
+    class val frozen
+    class es req
 ```
+
+The seven numbered steps must run in exactly this order every iteration: `zero_grad`
+before `backward` (else stale gradients accumulate) and `optimizer.step()` before
+`scheduler.step()`. The loop repeats per batch; a validation pass then feeds the
+early-stopping check that either continues training or restores the best checkpoint.
+
+### Learning Rate Schedule — Linear Warmup + Cosine Decay
+
+```mermaid
+xychart-beta
+    title "Learning Rate Schedule — Linear Warmup (5%) then Cosine Decay to 0"
+    x-axis "Training progress (% of total steps)" 0 --> 100
+    y-axis "Learning rate (fraction of peak)" 0 --> 1
+    line [0, 1.0, 0.99, 0.97, 0.94, 0.90, 0.84, 0.77, 0.70, 0.62, 0.54, 0.46, 0.38, 0.30, 0.22, 0.16, 0.11, 0.06, 0.03, 0.01, 0]
+```
+
+The LR ramps linearly from 0 to peak over the first 5% of steps (warmup protects
+cold, poorly-initialized parameters), then follows `0.5·(1 + cos(π·progress))` down
+to 0 across the remaining 95%. This is the GPT-3 and BERT fine-tuning recipe: warmup
+over roughly 5% of steps, cosine decay to a small final LR.
+
+### Mixed Precision Training — FP16 Compute, FP32 Master Weights
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 40, 'rankSpacing': 50}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x(["input batch"]) --> fwd["FP16 forward + loss\nautocast · ~50% memory, 1.5-2x faster"]
+    fwd --> scale["GradScaler: loss × 2^16\nscale up to avoid fp16 underflow"]
+    scale --> bwd["FP16 backward\nscaled gradients"]
+    bwd --> unscale["GradScaler.unscale_\ndivide grads by 2^16, then clip"]
+    unscale --> chk{"inf / nan in grads?"}
+    chk -->|"yes"| skip["skip optimizer.step\nhalve scale factor"]
+    chk -->|"no"| mstep["FP32 master weights\noptimizer.step — precise update"]
+    mstep --> upd["GradScaler.update\nadjust scale factor"]
+    skip --> upd
+    upd -->|"cast weights to FP16"| fwd
+
+    class x,fwd,bwd io
+    class scale,unscale,upd,chk mathOp
+    class mstep train
+    class skip lossN
+```
+
+Fast fp16 matmuls run the forward/backward pass while a precise fp32 master copy
+takes the optimizer step. `GradScaler` multiplies the loss by 2^16 so small
+gradients do not underflow fp16, then unscales before clipping; if any gradient is
+inf/nan the step is skipped and the scale factor is halved. bfloat16 has the fp32
+exponent range, so it skips the scaling dance entirely.
+
+### Gradient Clipping — Taming Norm Spikes
+
+```mermaid
+xychart-beta
+    title "Gradient Norm Before vs After Clipping (max_norm = 1.0)"
+    x-axis "Training step" 1 --> 12
+    y-axis "Gradient L2 norm" 0 --> 6
+    line [0.8, 1.4, 0.9, 3.2, 0.75, 0.85, 5.1, 0.9, 0.7, 2.1, 0.8, 0.95]
+    line [0.8, 1.0, 0.9, 1.0, 0.75, 0.85, 1.0, 0.9, 0.7, 1.0, 0.8, 0.95]
+```
+
+The upper spiky line is the raw gradient norm; the lower line is the norm after
+`clip_grad_norm_(max_norm=1.0)`, which rescales any step whose norm exceeds 1.0 back
+down to 1.0. Healthy training sits in the stable 0.6-1.0 band; without clipping the
+occasional spike to 3-5 (or 142, as in the failed run in the case study) destabilizes
+or diverges the optimizer.
 
 ---
 
@@ -579,6 +631,30 @@ Early stopping terminates training when validation loss has not improved by more
 
 **Q: How do you implement gradient checkpointing and what is the tradeoff?**
 Gradient checkpointing (`torch.utils.checkpoint.checkpoint`) trades memory for compute. Instead of storing all intermediate activations during the forward pass (needed for backward), only selected "checkpoint" activations are stored. During backward, the missing intermediate activations are recomputed from the nearest checkpoint. This reduces activation memory by ~sqrt(N) for a model with N layers (storing every sqrt(N)-th activation). The cost is ~33% more forward compute (one extra partial forward pass during backward). Use gradient checkpointing when training very deep models or large batch sizes that would otherwise OOM. In Transformers, it is applied per-layer: `nn.utils.checkpoint.checkpoint(layer, x)`.
+
+**Q: Why is gradient clipping used and what problem does it solve?**
+Gradient clipping caps the gradient norm before the optimizer step to prevent exploding gradients from destabilizing or diverging training. `clip_grad_norm_(max_norm=1.0)` computes the global L2 norm across all parameters and, if it exceeds max_norm, rescales every gradient by `max_norm / total_norm` so the update direction is preserved but its magnitude is bounded. Exploding gradients are common in RNNs (long backprop chains), Transformers early in training, and any run with a loss spike — a single step with norm 142 (vs a healthy 0.6-1.0) can push parameters into a bad region from which recovery is slow or impossible. max_norm=1.0 is the standard default for Transformers; clip-by-value is a cruder alternative that distorts the update direction.
+
+**Q: How do you debug a training run that suddenly produces NaN loss?**
+Check for fp16 gradient overflow, division by zero (e.g., in normalization), log or sqrt of non-positive numbers, and an overly high learning rate. Systematic steps: (1) enable `torch.autograd.set_detect_anomaly(True)` to locate the offending op; (2) log the gradient norm each step — a spike to inf just before the NaN points to overflow, fixed by GradScaler (fp16) or switching to bfloat16; (3) reduce the LR or add warmup if the loss explodes early; (4) inspect the data for NaN/inf inputs or labels; (5) verify loss functions guard against log(0) with an eps. fp16 without a GradScaler is the single most common cause — gradients overflow the fp16 max of 65504 and become inf, then NaN propagates to every parameter.
+
+**Q: Why should you exclude bias and normalization parameters from weight decay?**
+Weight decay should penalize weight matrices, not bias terms or BatchNorm/LayerNorm scale and shift parameters, which need freedom to represent any value. Decaying a BatchNorm gamma toward zero fights the layer's job of rescaling normalized activations, and decaying biases shifts the function for no regularization benefit. In practice you build two parameter groups — one with weight_decay for tensors with ndim >= 2 (weight matrices), one with weight_decay=0.0 for 1D params (bias, norm gamma/beta). Skipping this degraded ImageNet validation accuracy by ~1.5% in one production run; it is standard in every modern recipe (GPT, ViT, ResNet).
+
+**Q: How do you diagnose overfitting during training?**
+Overfitting shows as a widening gap between a still-decreasing training loss and a rising or plateaued validation loss. Monitor both curves every epoch: while they track together the model is still learning generalizable structure; once train loss keeps dropping but val loss turns upward, the model is memorizing training noise. Remedies in order of typical impact: more or stronger data augmentation, weight decay, dropout, early stopping (restore the best-val checkpoint), and reducing model capacity. A large train-val gap with high train accuracy signals overfitting; both metrics being poor signals underfitting (need more capacity, longer training, or a higher LR).
+
+**Q: Does early stopping replace regularization like weight decay and dropout?**
+No — early stopping and explicit regularization are complementary; early stopping limits how long you fit, while weight decay and dropout shape what you fit. Early stopping is a form of implicit regularization (it caps the effective number of optimization steps, keeping weights closer to their small initialization), but it does not constrain the model's capacity at any given step. Weight decay penalizes large weights throughout training and dropout forces redundant representations — both change the loss landscape, not just where you stop on it. Production recipes use all three together: weight decay 1e-4 to 1e-2, dropout 0.1-0.5, and early stopping with patience 10 as a compute-saving safety net.
+
+**Q: Why does data augmentation improve generalization?**
+Augmentation synthesizes new label-preserving training examples (crops, flips, color jitter, mixup), enlarging the effective dataset and teaching invariances. A model that sees each image at many crops, flips, and lighting conditions cannot memorize pixel-exact patterns, so it learns features that transfer to unseen data — directly reducing the train-val gap. Augmentations must be label-preserving: a horizontal flip is fine for natural images but wrong for a digit 6/9 or text. Apply it only to the training set, never to validation or test; mixup/CutMix additionally soften labels, which regularizes like label smoothing.
+
+**Q: When should you use bfloat16 instead of float16 for training?**
+Prefer bfloat16 on Ampere or newer GPUs because it shares fp32's 8-bit exponent range, avoiding the gradient overflow/underflow that forces fp16 to use a GradScaler. float16 has only 5 exponent bits (max ~65504, min normal ~6e-5), so small gradients underflow to zero and large ones overflow to inf — the reason GradScaler multiplies the loss by 2^16. bfloat16 trades mantissa precision (7 bits vs fp16's 10) for that wider range; the lower precision is harmless because SGD tolerates gradient noise. Use fp16 + GradScaler only on older hardware (V100/T4) that lacks bf16 support; on A100/H100 bf16 is the default for LLM and large-model training.
+
+**Q: How do you make training reproducible and resume correctly from a checkpoint?**
+Seed all RNGs (Python, NumPy, torch, CUDA), set deterministic algorithms, and save the optimizer, scheduler, scaler, and RNG state alongside the model weights. A checkpoint with only `model.state_dict()` loses the Adam first/second moments, the LR scheduler step count, and the GradScaler scale factor — resuming without them restarts warmup and re-accumulates optimizer momentum, adding ~500 wasted steps and a visible loss bump. Full determinism also needs `torch.use_deterministic_algorithms(True)`, fixed DataLoader worker seeds (`worker_init_fn`), and `cudnn.deterministic=True` (which can cost throughput). Exact bit-reproducibility across different GPU counts or library versions is generally unachievable — save enough state to resume seamlessly rather than to reproduce byte-for-byte.
 
 ---
 

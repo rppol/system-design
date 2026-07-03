@@ -148,72 +148,110 @@ Leaf-wise: asymmetric trees, faster bias reduction, higher overfitting risk on s
 
 ### XGBoost Split Finding (Approximate)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    fv(["Feature f values\nv1..vN for N samples"]) --> sketch["Quantile sketch\nweighted by Hessian h"]
+    sketch --> cand(["Candidate splits\nq1..qk, k~255, k much smaller than N"])
+    cand --> gain["For each q: GL,HL = sum over f_i less than q\nGain = GL^2/(HL+λ) + GR^2/(HR+λ) − G^2/(H+λ) − γ"]
+    gain --> best(["q* = argmax Gain\nover all splits and features"])
+
+    class fv,cand,best io
+    class sketch mathOp
+    class gain lossN
 ```
-Feature f values for N samples: [v1, v2, ..., vN]
-                |
-    Sort and compute quantile sketches
-                |
-    Select candidate split points: [q1, q2, ..., qk] (k << N, typically k=255)
-                |
-    For each candidate split point q:
-        G_L = Σ g_i for samples with f_i < q
-        H_L = Σ h_i for samples with f_i < q
-        G_R = G_total - G_L
-        H_R = H_total - H_L
-        Gain(q) = G_L^2/(H_L+λ) + G_R^2/(H_R+λ) - G_total^2/(H_total+λ) - γ
-                |
-    Select q* = argmax Gain(q) over all candidate splits and features
-```
+
+Caption: instead of testing every one of N raw values, XGBoost proposes ~255 Hessian-weighted quantile candidates per feature, then scores each with the regularised gain formula — turning O(N) split search into O(k).
 
 ### LightGBM Histogram Building
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    raw(["Continuous feature\n0.1, 2.3, 5.7, 1.2, ..."]) --> bin["Bin into 256 buckets\ndiscretize once per feature"]
+    bin --> idx(["Bin indices\n0, 5, 12, 2, ..."])
+    idx --> acc["Per leaf: accumulate g_i, h_i\ninto 256 histogram bins"]
+    acc --> scan["Scan bins left to right\nO(256) per feature vs O(N) exact"]
+    acc --> sub["Histogram subtraction\nright child = parent − left\ncompute ONE child only"]
+    scan --> best(["Best split threshold"])
+    sub --> best
+
+    class raw,idx,best io
+    class bin,acc,scan,sub mathOp
 ```
-Feature f values (continuous): [0.1, 2.3, 5.7, 1.2, 0.8, ...]
-                |
-    Bin into 256 buckets (discretise once per feature per dataset)
-    Bin values: [0, 5, 12, 2, 1, ...]
-                |
-    For each leaf's samples, accumulate (g_i, h_i) into histogram bins:
-    Bin[k] = Σ_{i: bin(f_i)=k} (g_i, h_i)
-                |
-    Scan histogram left-to-right to find best split threshold
-    O(256) operations per feature (vs O(N) for exact)
-                |
-    Histogram subtraction: child_right_hist = parent_hist - child_left_hist
-    → Only need to compute ONE child histogram explicitly
-```
+
+Caption: binning collapses the continuous feature to 256 integer buckets once, so every subsequent split scan costs O(256) not O(N); the subtraction trick means only the smaller child's histogram is built — the sibling is the parent minus it.
 
 ### Training Time on 100K rows, 100 features, binary classification (approximate)
 
+```mermaid
+xychart-beta
+    title "CPU training time — 100K rows, 100 features, binary (lower = faster)"
+    x-axis ["sklearn exact", "sklearn Hist", "XGBoost hist", "LightGBM", "CatBoost"]
+    y-axis "Seconds (8-core CPU)" 0 --> 130
+    bar [120, 8, 10, 3, 8]
 ```
-Method                      CPU (8-core)   GPU           Memory
-----------------------------------------------------------------
-sklearn GBDT (exact)        ~120s          N/A           ~300MB
-sklearn HistGBT             ~8s            N/A           ~300MB
-XGBoost (tree_method=hist)  ~10s           ~0.3s         ~500MB
-LightGBM (default)          ~3s            ~0.3s         ~300MB
-CatBoost                    ~8s            ~0.5s         ~500MB
-```
+
+Caption: histogram methods (sklearn Hist, XGBoost hist, LightGBM, CatBoost) collapse a two-minute exact fit to single-digit seconds; LightGBM's GOSS + leaf-wise growth make it the fastest at ~3s.
+
+| Method | CPU (8-core) | GPU | Memory |
+|--------|-------------|-----|--------|
+| sklearn GBDT (exact) | ~120s | N/A | ~300MB |
+| sklearn HistGBT | ~8s | N/A | ~300MB |
+| XGBoost (tree_method=hist) | ~10s | ~0.3s | ~500MB |
+| LightGBM (default) | ~3s | ~0.3s | ~300MB |
+| CatBoost | ~8s | ~0.5s | ~500MB |
 
 ### Level-Wise vs Leaf-Wise Tree Growth Comparison
 
-```
-Training data: 1000 samples
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-LEVEL-WISE (XGBoost depth=3):
-  Depth 0: 1 node  (1000 samples)
-  Depth 1: 2 nodes (500 each)
-  Depth 2: 4 nodes (250 each)
-  Depth 3: 8 nodes (125 each)  → 8 leaves, balanced
+    subgraph LW["Level-wise (XGBoost) — balanced, all leaves at depth expand"]
+        r1(["root 1000"]) --> la["L 500"]
+        r1 --> ra["R 500"]
+        la --> ll["LL 250"]
+        la --> lr["LR 250"]
+        ra --> rl["RL 250"]
+        ra --> rr["RR 250"]
+    end
 
-LEAF-WISE (LightGBM num_leaves=8):
-  Round 1: split root (gain=0.95) → node A (800) + node B (200)
-  Round 2: split A (gain=0.82) → node C (500) + node D (300) + B (200)
-  Round 3: split C (gain=0.74) → ...
-  Result: 8 leaves, UNBALANCED — some very deep, some shallow
-  → Faster training loss reduction, higher overfit risk on small data
-  → min_child_samples prevents very small leaves
+    subgraph LF["Leaf-wise (LightGBM) — best-first, only highest-gain leaf splits"]
+        r2(["root 1000"]) --> na["A 800\ngain .95"]
+        r2 --> nb["B 200"]
+        na --> nc["C 500\ngain .82"]
+        na --> nd["D 300"]
+        nc --> ne["E 320\ngain .74"]
+        nc --> nf["F 180"]
+    end
+
+    class r1,r2 io
+    class la,ra,ll,lr,rl,rr train
+    class na,nb,nc,nd,ne,nf base
 ```
+
+Caption: level-wise grows every leaf at a depth (symmetric 8-leaf tree); leaf-wise repeatedly splits only the single highest-gain leaf, so branch B stays shallow while A→C→E deepens — faster loss reduction but higher overfit risk, which `min_child_samples` and `num_leaves` bound.
 
 ---
 
@@ -754,6 +792,15 @@ EFB bundles mutually exclusive sparse features — features that rarely have non
 **Q: What is the difference between level-wise and leaf-wise tree growth, and when does leaf-wise cause problems?**
 Level-wise growth expands all leaf nodes at the current depth before going deeper — producing balanced trees. Leaf-wise growth always expands the single leaf with the highest potential gain, producing asymmetric trees that can become very deep in some branches. Leaf-wise converges faster to low training loss (fewer rounds for the same training accuracy) but produces more complex, harder-to-regularise trees. Problems arise on small datasets (< 5K rows) where leaf-wise can create very deep branches with few samples per leaf — classic overfitting. Fix: set min_child_samples (minimum leaf size) high (20-50 for small data) and keep num_leaves moderate. On large datasets leaf-wise is safe and beneficial.
 
+**Q: What is the difference between min_child_weight in XGBoost and min_child_samples in LightGBM?**
+min_child_weight is a minimum sum of Hessians in a leaf, not a count of samples. In XGBoost, each sample contributes h_i to a leaf, and for log loss h_i = p_i(1-p_i), so confident predictions contribute almost nothing — a leaf can hold many confident samples yet still fall below min_child_weight and be pruned. LightGBM's min_child_samples is a literal integer count of rows in the leaf. The trap: setting min_child_weight=20 does NOT mean "at least 20 samples"; it can mean far more samples if they are confidently predicted, or as few as one if a sample has a large Hessian. Tune min_child_weight in the 1-10 range for XGBoost and min_child_samples in the 20-100 range for LightGBM, and never assume they are interchangeable.
+
+**Q: Why does lowering learning_rate require raising n_estimators, and what is the practical rule?**
+learning_rate shrinks each tree's contribution, so a smaller step size needs more trees to reach the same cumulative fit. Halving learning_rate roughly doubles the number of trees needed to converge — learning_rate=0.02 may need 2000+ rounds where learning_rate=0.1 converges in ~400. The practical rule: set learning_rate=0.05 with n_estimators=2000 and early stopping for most work, and only drop to 0.01-0.02 for final competition models where the extra 5-10x training time buys a small accuracy gain. Never lower learning_rate without also raising the n_estimators ceiling, or the model stops before converging and silently underfits.
+
+**Q: What is the difference between tree_method=hist, exact, and approx in XGBoost?**
+hist bins each feature into ~256 buckets and scans histograms, exact evaluates every candidate split on sorted raw values, and approx uses per-tree quantile sketches. exact is O(N log N) per feature and finds the truly optimal split but is impractical beyond ~10K rows; hist trades a negligible accuracy loss for a 10-50x speedup and is the recommended default for all dataset sizes; approx sits between them and was largely superseded by hist. Since XGBoost 2.0, hist is the unified method for both CPU and GPU (device="cuda"), so hist is the right choice unless you have a small dataset where exact's marginal accuracy is worth the cost.
+
 **Q: How does CatBoost's ordered boosting differ from standard GBDT and why does it matter for categorical features?**
 Standard target encoding for categoricals (mean target per category) uses the entire training set, including the current sample, to compute the encoding — this leaks target information into the feature. CatBoost's ordered boosting processes samples in a random permutation; when computing the target statistic for sample i, it uses only the preceding samples in the permutation (not sample i itself), preventing leakage. This is why CatBoost's categorical handling is more robust than simple target encoding and why its offline AUC is more honest — it does not overestimate generalisation due to leakage.
 
@@ -780,6 +827,15 @@ XGBoost learns a default direction (left or right branch) for missing values at 
 
 **Q: How would you compare XGBoost and LightGBM on a 1 billion row dataset?**
 At this scale: (1) LightGBM wins on CPU training due to GOSS (only evaluates ~28% of samples per round) and EFB; estimated 3-5x speedup over XGBoost; (2) GPU training is competitive: both achieve similar throughput on GPU; LightGBM requires custom compilation for GPU while XGBoost GPU support is built-in with device="cuda"; (3) Distributed training: XGBoost Dask integration is more mature and production-tested at this scale (used by companies like Uber and Lyft); LightGBM MPI requires more infrastructure setup; (4) Memory: LightGBM's histogram binning uses int16 per bin vs float32 in XGBoost, roughly 50% lower memory per feature. For a 1B row Kaggle-style dataset: LightGBM with GPU + Dask is recommended; for a multi-node production cluster: XGBoost + Dask is more battle-tested.
+
+**Q: What is the difference between gamma (min_split_gain) and reg_lambda in XGBoost?**
+gamma is the minimum loss reduction required to make a split, while reg_lambda is an L2 penalty on leaf weights. gamma acts as pre-pruning: a candidate split is only accepted if its gain exceeds gamma, so raising gamma produces fewer, higher-quality splits and shallower trees. reg_lambda instead shrinks every leaf's optimal weight toward zero via the -G/(H+λ) formula, dampening the magnitude of predictions without changing tree structure. They are complementary regularisers: gamma controls how many splits happen (structure), reg_lambda controls how large the outputs are (magnitude). For an overfitting model, increase gamma to 1-5 and reg_lambda to 5-10 rather than relying on either alone.
+
+**Q: What do colsample_bytree, colsample_bylevel, and colsample_bynode do, and how do they combine?**
+They are feature-subsampling ratios applied at three different granularities, and they multiply. colsample_bytree=0.8 samples 80% of features once per tree; colsample_bylevel=0.8 samples 80% of the remaining features at each new depth level; colsample_bynode=0.8 samples 80% again at each split node. With all three at 0.8, a single split sees 0.8 × 0.8 × 0.8 = 51% of features. Feature subsampling decorrelates trees (the random-forest intuition inside boosting) and speeds training. Start by tuning colsample_bytree in the 0.5-1.0 range; only reach for bylevel/bynode on very high-dimensional data where extra decorrelation helps.
+
+**Q: Why is native categorical handling better than one-hot encoding for high-cardinality features in LightGBM?**
+Native handling finds the optimal partition of categories into left/right at each split, whereas one-hot forces one binary axis-aligned split per category. One-hot on a 100-category feature creates 100 sparse columns, and each tree split can only isolate a single category (is_city_NYC yes/no), so capturing "NYC or LA or Chicago go left" needs several stacked splits and deep trees. LightGBM sorts categories by their gradient statistics and finds the best subset boundary in one split (exhaustive up to a threshold, then Fisher's optimal ordering), so it expresses multi-category groupings in a single node. Cast the column to pandas category dtype; do not one-hot high-cardinality categoricals, which explodes feature count, defeats EFB, and produces weaker trees.
 
 **Q: What is the DART boosting type in LightGBM and XGBoost?**
 DART (Dropouts meet Multiple Additive Regression Trees) applies the dropout regularisation idea from neural networks to GBDT. At each round, a random subset of existing trees is dropped (their predictions are removed from the ensemble) and the new tree fits the residuals as if those trees never existed. After training, the dropped trees are restored and the new tree's contribution is scaled. DART reduces overfitting by preventing any single tree from having disproportionate influence. It typically achieves 0.1-0.5% better AUC than standard GBDT at the cost of: (1) No early stopping support (dropping affects optimal stopping criterion); (2) Slower inference (DART model cannot use the sequential optimisation tricks); (3) Longer training. Use DART for competitions where marginal accuracy gains justify the cost; stick to gbdt for production.

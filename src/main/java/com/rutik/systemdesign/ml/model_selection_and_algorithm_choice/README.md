@@ -67,50 +67,71 @@ Why it matters: wrong algorithm choice is not caught by offline metrics during d
 
 ### 4.2 Data-Size vs Model-Complexity Regimes
 
+```mermaid
+quadrantChart
+    title Data size vs model complexity — where each class wins
+    x-axis Fewer rows --> More rows
+    y-axis Lower complexity --> Higher complexity
+    quadrant-1 Deep learning territory
+    quadrant-2 Overfitting risk
+    quadrant-3 Baselines rule
+    quadrant-4 Room to add complexity
+    Heuristic: [0.08, 0.08]
+    Linear model: [0.28, 0.24]
+    GBDT: [0.6, 0.55]
+    Deep learning: [0.9, 0.9]
 ```
-Complexity
-   ^
-DL |                                              *  (>10M rows, unstructured)
-   |
-GBDT|                        * * * * (100k–10M rows, tabular)
-   |
-Linear|   * * (1k–100k rows, tabular, regulated)
-   |
-Heuristic|* (<1k rows, cold start)
-   +----------------------------------------------> # Training Examples
-         1k    10k    100k    1M     10M    100M
-```
+
+The winning model class tracks the diagonal: heuristics and linear models for
+small or regulated data, GBDT through the tabular mid-range, deep learning only
+once data is large and unstructured. Anything landing in the top-left
+"overfitting risk" quadrant (complex model, little data) is exactly the mistake
+§6.1 demonstrates.
 
 Below 10k rows for tabular data: regularized linear or shallow tree ensembles beat deep networks in almost every controlled experiment. The reason is variance: deep networks have enormous parameter counts relative to data, leading to high generalization error.
 
 ### 4.3 Constraint-Driven Elimination
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Problem defined"]) --> lat{"Latency < 5ms?"}
+    lat -->|yes| fast["Linear model · decision tree · precomputed lookup"]
+    lat -->|no| interp{"Interpretability / regulatory?"}
+    interp -->|yes| score["Logistic + WOE scorecard · GAM"]
+    interp -->|no| tab{"Structured tabular?"}
+    tab -->|yes| gbdt["LightGBM primary candidate"]
+    tab -->|no| unstr{"Unstructured text / image / audio?"}
+    unstr -->|yes| dl["Pretrained DL backbone + fine-tune"]
+    unstr -->|no| seq{"Sequential / temporal?"}
+    seq -->|yes| tsm["Temporal models · TFT · LSTM · N-BEATS"]
+    seq -->|no| hybrid["Hybrid · feature engineering + GBDT"]
+
+    class start io
+    class lat req
+    class interp req
+    class tab req
+    class unstr req
+    class seq req
+    class fast base
+    class score base
+    class gbdt base
+    class dl base
+    class tsm base
+    class hybrid base
 ```
-START: Problem defined
-        |
-        v
-Latency constraint < 5ms? --> YES --> Linear model, decision tree, or pre-computed lookup
-        |
-        NO
-        v
-Interpretability / regulatory requirement? --> YES --> Logistic + WOE scorecard or GAM
-        |
-        NO
-        v
-Structured tabular data? --> YES --> LightGBM as primary candidate
-        |
-        NO
-        v
-Unstructured (text / image / audio)? --> YES --> Pretrained DL backbone + fine-tune
-        |
-        NO
-        v
-Sequential / temporal? --> YES --> Temporal models (TFT, LSTM, N-BEATS)
-        |
-        NO (mixture)
-        v
-Hybrid: feature engineering + GBDT or embedding + GBDT
-```
+
+Constraints eliminate whole algorithm classes before accuracy is ever measured:
+a hard latency or regulatory bound routes you to a linear model long before you
+compare AUCs. Follow the first branch whose answer is "yes".
 
 ### 4.4 Ensemble Strategy Selection
 
@@ -128,35 +149,43 @@ Hybrid: feature engineering + GBDT or embedding + GBDT
 
 ### Model Selection Decision Flow
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pf(["Problem framing\nobjective · metric · constraint"]) --> cc["Constraint check\nlatency · interpretability · regulatory"]
+    pf --> da["Data audit\nvolume · label quality · feature types"]
+    pf --> bl["Baseline\nlogistic / ridge / heuristic"]
+    cc --> sl["Algorithm shortlist\nconstraints eliminate classes"]
+    da --> sl
+    bl --> sl
+    sl --> cv["Cross-validation\nselect + tune on held-out folds"]
+    cv --> cal["Calibration check\nreliability diagram · ECE"]
+    cal --> ab["Shadow / A-B test\nonline metric vs business target"]
+    ab --> prod(["Production"])
+
+    class pf io
+    class prod io
+    class cc req
+    class da base
+    class bl train
+    class sl mathOp
+    class cv train
+    class cal mathOp
+    class ab lossN
 ```
-+----------------------------------------------------------+
-|                  Problem Framing                         |
-|  (objective, target metric, business constraint)         |
-+---------------------------+------------------------------+
-                            |
-            +---------------+---------------+
-            |               |               |
-     Constraint check  Data audit     Baseline establishment
-     (latency,         (volume,       (logistic/ridge/
-      interpretability  label quality, heuristic)
-      regulatory)       feature types)
-            |               |               |
-            +-------+-------+-------+-------+
-                            |
-                   Algorithm shortlist
-              (constraint eliminates classes)
-                            |
-                    Cross-validation
-              (select + tune on held-out folds)
-                            |
-                  Calibration check
-              (reliability diagram, ECE)
-                            |
-                   Shadow / A/B test
-              (online metric vs business target)
-                            |
-                       Production
-```
+
+Selection is a funnel: framing feeds three parallel audits (constraint, data,
+baseline) that converge on a shortlist, then each survivor must clear
+cross-validation, calibration, and an online test before production. Constraints
+prune the shortlist before any accuracy number is compared.
 
 ### Data-Regime Model Map
 
@@ -338,19 +367,28 @@ def latency_budget_check(
 
 ### Accuracy vs Interpretability Frontier
 
+```mermaid
+quadrantChart
+    title Accuracy vs interpretability frontier
+    x-axis Less interpretable --> More interpretable
+    y-axis Lower accuracy --> Higher accuracy
+    quadrant-1 Ideal but rare
+    quadrant-2 Black-box performers
+    quadrant-3 Avoid
+    quadrant-4 Simple baselines
+    Logistic regression: [0.9, 0.32]
+    Decision tree: [0.78, 0.5]
+    SVM RBF: [0.28, 0.6]
+    Random forest: [0.52, 0.74]
+    LightGBM: [0.36, 0.85]
+    Neural nets: [0.12, 0.88]
+    Two-tower retrieval: [0.16, 0.8]
 ```
-Accuracy
-   ^
-High|        Random Forest     LightGBM     Neural Nets
-    |                 \          |         /
-    |                  Two-tower (rec.)
-    |
-Med |    Decision Tree    SVM
-    |
-Low |  Logistic Regression  Linear Regression
-    +------------------------------------------------> Interpretability
-     High                Medium                Low
-```
+
+The frontier runs from bottom-right (logistic regression: fully interpretable,
+modest accuracy) to top-left (neural nets: top accuracy, black-box).
+Monotonic-constraint GBDT and SHAP-explained models are the tools that pull
+points toward the rare top-right "ideal" corner.
 
 ---
 
@@ -468,6 +506,18 @@ Feature importance (gain, split count) measures global contribution across all t
 
 **When does an ensemble of diverse algorithms beat any single algorithm, and when does it not?**
 Ensembles of diverse algorithms beat any single algorithm when the models make different errors — their decision boundaries or residual patterns are uncorrelated. Stacking a LightGBM, a logistic regression, and a neural network gives a diverse ensemble because their inductive biases differ. The meta-learner learns when to trust each. This fails when models are highly correlated (all three GBDTs with different seeds) — you add inference cost without reducing error. At inference time, ensembles multiply latency by the number of base models unless parallelized. The practical decision: use ensembles for offline/batch settings or when the accuracy gain is large enough to justify the serving overhead; use a single best model for latency-sensitive serving.
+
+**Why does a gradient-boosted tree that scored well in cross-validation predict poorly on inputs outside the training range, and does switching algorithms fix it?**
+Tree models cannot extrapolate — they output a constant beyond the range of the training data, so a feature that drifts above its historical maximum is clipped to the last-seen leaf value. Random-split cross-validation hides this because train and test share the same feature ranges. If deployment sees genuinely out-of-range inputs (inflation-adjusted prices, growing user counts, sensors in a new regime), a parametric model — a linear/GLM component, or a tree on a differenced or ratio feature — extrapolates along its fitted trend where a GBDT flatlines. The fix is usually feature engineering (model the ratio or growth rate, not the raw level) plus a linear term, not simply swapping the tree for a neural network, which also extrapolates poorly.
+
+**How does severe class imbalance (99:1) change your algorithm and metric choice?**
+Change the metric first: use PR-AUC or recall at a fixed precision rather than accuracy, because a model that always predicts the majority class scores 99% accuracy while catching zero positives. For the algorithm, GBDT with class weights (scale_pos_weight) or focal loss usually beats resampling; SMOTE and random oversampling help on small data but can synthesize unrealistic minority points that inflate offline metrics. Calibrate afterward, since reweighting and resampling both distort predicted probabilities — fit Platt or isotonic scaling on an unresampled validation set. Reframe as anomaly detection (Isolation Forest) only when positives are so rare or heterogeneous that they behave more like outliers than a learnable class.
+
+**How do you choose an encoding approach for high-cardinality categorical features with 100k+ unique values?**
+Match the encoding to the model class: CatBoost's ordered target encoding for GBDT, hashing for linear models, and learned embeddings for deep networks. Naive one-hot encoding explodes dimensionality and memory, and plain mean/target encoding leaks the label unless computed out-of-fold. For tabular GBDT, CatBoost handles high cardinality natively with ordered boosting that avoids target leakage, while LightGBM supports native categorical splits up to a cardinality limit beyond which hashing or frequency encoding is needed. When the ID itself is the dominant signal (user_id, item_id in recommendation), embeddings in a two-tower or DLRM model beat any tabular encoding because they learn a dense representation that generalizes across related IDs.
+
+**What does the No Free Lunch theorem imply for model selection in practice?**
+No single algorithm is best across all possible problems — averaged over every conceivable data distribution, all learners perform equally. In practice this does not license trying everything blindly: real data is not drawn uniformly from all distributions, so algorithms whose inductive bias matches the structure of the problem (GBDT for tabular business data, CNNs for images) dominate on those problems. The practical takeaway is that model selection is an empirical search for the inductive bias that fits your specific problem, which is why you benchmark a small shortlist under a shared harness rather than trusting a universal "best" algorithm. It also justifies always keeping a strong baseline, because the theorem guarantees no complex model is universally safe.
 
 ---
 

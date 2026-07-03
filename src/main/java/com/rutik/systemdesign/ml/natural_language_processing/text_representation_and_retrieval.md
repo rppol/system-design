@@ -88,97 +88,127 @@ Key insight: Dense retrieval does not outperform BM25 on all queries. For querie
 
 ## 5. Architecture Diagrams
 
-### BM25 Inverted Index
+### BM25 Inverted Index and Retrieval Flow
 
-```
-Corpus:
-  doc1: "python programming tutorial"
-  doc2: "java programming guide"
-  doc3: "python data science"
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Inverted Index:
-  "python"      -> [(doc1, tf=1), (doc3, tf=1)]
-  "programming" -> [(doc1, tf=1), (doc2, tf=1)]
-  "tutorial"    -> [(doc1, tf=1)]
-  "java"        -> [(doc2, tf=1)]
-  "guide"       -> [(doc2, tf=1)]
-  "data"        -> [(doc3, tf=1)]
-  "science"     -> [(doc3, tf=1)]
+    Q(["Query: 'python programming'"]) --> TOK["Tokenize + lowercase"]
+    TOK --> T1["term: python"]
+    TOK --> T2["term: programming"]
+    T1 --> P1["Posting list\ndoc1 tf=1 · doc3 tf=1"]
+    T2 --> P2["Posting list\ndoc1 tf=1 · doc2 tf=1"]
+    P1 --> MRG(("merge"))
+    P2 --> MRG
+    MRG --> CAND["Candidates: doc1, doc2, doc3"]
+    CAND --> SCORE["BM25 score\nIDF × TF_sat per term"]
+    SCORE --> RANK(["Ranked: doc1 > doc3 > doc2"])
 
-Query: "python programming"
-  -> Fetch posting lists for "python" and "programming"
-  -> Merge: doc1 matches both, doc2 matches "programming", doc3 matches "python"
-  -> Score each doc with BM25
-  -> Rank: doc1 (highest), then doc3, doc2
-```
-
-### Sentence-BERT (Bi-Encoder) Architecture
-
-```
-                   Query: "python tutorial"
-                              |
-                   [BERT Encoder (shared weights)]
-                              |
-                   [Mean Pool over tokens]
-                              |
-                   query_embed: (768,)
-
-                   Document: "python programming guide"
-                              |
-                   [BERT Encoder (same weights)]
-                              |
-                   [Mean Pool over tokens]
-                              |
-                   doc_embed: (768,)
-
-                   similarity = cosine(query_embed, doc_embed)
-
-Pre-index time:  Encode all documents -> store in FAISS index
-Query time:      Encode query -> FAISS nearest neighbor search
-                 (no pair-wise BERT inference needed)
+    class Q,RANK io
+    class T1,T2 req
+    class P1,P2 base
+    class TOK,CAND frozen
+    class MRG,SCORE mathOp
 ```
 
-### ColBERT Late Interaction
+Each query term looks up its posting list in the inverted index; the lists are merged into a candidate set, scored with BM25, and ranked — doc1 wins because it matches both query terms while doc2 and doc3 match only one.
 
+### Bi-Encoder vs Cross-Encoder
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph BE["Bi-Encoder — precompute + ANN search"]
+        BQ(["Query"]) --> BQE["BERT encoder"]
+        BD(["Document"]) --> BDE["BERT encoder (shared weights)"]
+        BQE --> BQP["mean pool: q_emb (768d)"]
+        BDE --> BDP["mean pool: d_emb (768d)"]
+        BQP --> BCOS(("cosine"))
+        BDP --> BCOS
+        BCOS --> BS(["similarity score"])
+    end
+    subgraph CE["Cross-Encoder — joint, rerank only"]
+        CQD(["query + SEP + doc, concatenated"]) --> CENC["BERT encoder (full attention)"]
+        CENC --> CCLS["classifier head"]
+        CCLS --> CS(["relevance score"])
+    end
+
+    class BQ,BD,BS,CQD,CS io
+    class BQE,BDE,CENC frozen
+    class BQP,BDP,CCLS,BCOS mathOp
 ```
-Query: "python tutorial for beginners"
-  -> [BERT encoder] -> token embeddings: Q = (q_len, 128)
-  -> (4 tokens after CLS)  q1, q2, q3, q4
 
-Document: "learn python from scratch"
-  -> [BERT encoder] -> token embeddings: D = (d_len, 128)
-  -> d1, d2, d3, d4
+The bi-encoder embeds query and document independently, so document vectors are precomputed once and searched with ANN — O(1) inference per query. The cross-encoder concatenates the pair for one joint forward pass, capturing full query↔document token interaction (higher quality) but precomputing nothing, so it is only affordable as a reranker over a short candidate list.
 
-MaxSim score:
-  For each query token q_i:
-    max_j(cosine(q_i, d_j))   <- best match in document
+### ColBERT Late Interaction (MaxSim)
 
-  score(Q, D) = sum_i max_j(cosine(q_i, d_j))
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-This captures: "python" in query matches "python" in doc;
-               "tutorial" matches "scratch" (learning synonym);
-               "beginners" matches "learn" (related concept)
+    Q(["Query tokens\nq1 q2 q3 q4"]) --> QE["BERT + linear\nQ = (q_len, 128)"]
+    D(["Doc tokens\nd1 d2 d3 d4"]) --> DE["BERT + linear\nD = (d_len, 128)"]
+    QE --> MS["MaxSim\nfor each q_i take max_j cos(q_i, d_j)"]
+    DE --> MS
+    MS --> SUM(("sum over q_i"))
+    SUM --> SC(["score(Q, D)"])
+
+    class Q,D,SC io
+    class QE,DE frozen
+    class MS,SUM mathOp
 ```
 
-### Hybrid Retrieval Pipeline
+ColBERT keeps one vector per token instead of pooling. MaxSim matches each query token to its single best-matching document token and sums those maxima — so "beginners" can match "learn" and "tutorial" can match "scratch" even without exact lexical overlap, which a single pooled vector could not express.
 
+### Hybrid Retrieval Pipeline (RRF + rerank)
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q(["Query: 'how to implement binary search'"]) --> BM["BM25 retrieval\ninverted index"]
+    Q --> DN["Dense retrieval\nFAISS ANN"]
+    BM --> BMT["top-1000 docs"]
+    DN --> DNT["top-1000 docs"]
+    BMT --> RRF["RRF fusion\nscore = 1/(60+rank_bm25) + 1/(60+rank_dense)"]
+    DNT --> RRF
+    RRF --> FUSED["top-1000 fused"]
+    FUSED --> XE["Cross-encoder rerank\nquery + doc read jointly"]
+    XE --> OUT(["top-10 results"])
+
+    class Q,OUT io
+    class BM,DN base
+    class BMT,DNT,FUSED frozen
+    class RRF,XE mathOp
 ```
-Query: "how to implement binary search"
-         |                          |
-    [BM25 retrieval]         [Dense retrieval]
-         |                          |
-    top-1000 docs              top-1000 docs
-         |                          |
-              [RRF Fusion]
-         score(d) = 1/(60+rank_BM25) + 1/(60+rank_dense)
-                          |
-                    top-1000 fused
-                          |
-              [Cross-encoder reranker]
-               (BERT reads query + doc together)
-                          |
-                     top-10 results
-```
+
+BM25 and dense retrieval run in parallel, each returning top-1000; RRF fuses them by rank alone (no score calibration needed since the two score scales are incompatible), and a cross-encoder reranks the fused pool down to the final 10.
 
 ---
 
@@ -768,6 +798,21 @@ BM25 score for term t in document d given query Q: `score(Q,D) = Σ_{t∈Q} IDF(
 
 **Q: When does BM25 outperform dense retrieval?**
 BM25 outperforms dense retrieval for three query types: (1) Rare proper nouns and identifiers — "TSMC N3P process technology" contains model-specific jargon that a general-purpose dense encoder likely maps to a poor representation since it wasn't in training data; BM25 exact-matches the exact term in documents. (2) Numeric and code search — "Python 3.11.2 release notes" or "`torch.nn.functional.scaled_dot_product_attention`" benefit from exact character-level matching. (3) Adversarial out-of-distribution queries — for queries with deliberately unusual vocabulary, the dense encoder's generalization is a liability. The MS MARCO benchmark shows BM25 outperforms BGE-large by 3-5 NDCG@10 points on the FIQA (financial QA) and Quora duplicate-questions subsets, where vocabulary overlap is high and keyword precision matters.
+
+**Q: Why must the tokenizer be identical at BM25 index time and query time?**
+A tokenizer mismatch between indexing and querying silently reduces recall with no error, because a query term tokenized differently never matches its indexed form. If the index keeps stopwords but the query pipeline strips them (or one lowercases and the other does not, or one stems), the two token streams diverge and BM25 scores documents inconsistently — a document that truly contains the query phrase may not match on some terms. The failure is invisible: no exception is raised, results are just quietly worse. The fix is to route index and query text through a single shared tokenization function, and to version it so a change forces a full reindex.
+
+**Q: Why does directly summing BM25 and cosine similarity scores produce poor rankings?**
+BM25 scores are unbounded (commonly 0 to 30+) while cosine similarity is bounded to [-1, 1], so a raw sum lets BM25 dominate and drowns out the dense signal. The two systems produce scores on completely different, uncalibrated scales that vary per query, so neither min-max nor z-score normalization is reliable across queries. This is exactly why Reciprocal Rank Fusion is preferred: RRF discards the raw scores and fuses on rank position alone (`1/(k+rank)`), which is scale-free and needs no per-query calibration. If you must combine scores directly, normalize each to [0,1] on a validation set and tune the blend weight alpha — but RRF usually matches or beats that with zero tuning.
+
+**Q: What is the recall@K ceiling in a retrieve-then-rerank pipeline?**
+A reranker can only reorder candidates the first-stage retriever surfaced, so first-stage recall@K is a hard ceiling on final quality. If BM25 recall@100 is 0.80, then 20% of relevant documents never enter the reranker's input and no cross-encoder — however powerful — can recover them. This makes first-stage recall@100 the single most important metric to monitor: a drop there caps the whole system even when reranker quality is unchanged. Practical levers are widening K (retrieve top-500 instead of top-100), adding a parallel retriever (hybrid BM25 + dense) to cover each other's blind spots, and alerting on recall@100 in production separately from end-to-end NDCG.
+
+**Q: What do the BM25 parameters k1 and b control, and how should you tune them?**
+k1 controls term-frequency saturation (higher k1 means repeated terms keep adding weight for longer) and b controls length-normalization strength (b=0 disables it, b=1 applies full normalization). Defaults are k1=1.2 and b=0.75, empirically strong across TREC benchmarks. Raise k1 for corpora where genuine repetition signals relevance — regulatory or legal text repeats "compliance", "disclosure" heavily, so the enterprise case study bumped k1 to 1.5 to avoid over-saturating those terms. Lower b when document lengths are uniform (length penalty adds noise), raise it toward 1 when short and long documents are mixed and long ones are unfairly dominating. Tune both on a labeled validation set via grid search against NDCG@10.
+
+**Q: Why does a general-purpose embedding model underperform on legal or medical retrieval, and how do you fix it?**
+General-purpose sentence encoders were trained on everyday English, so specialized jargon falls outside their training distribution and maps to poor, undifferentiated vectors. Terms like "indemnification", "hereinafter", or "myocardial infarction" were rarely or never seen with their domain meaning, so the encoder cannot place them in a useful region of embedding space — general-purpose SBERT models drop 5-15 NDCG points on legal, medical, and code corpora. The primary fix is domain fine-tuning: build in-domain (query, relevant-doc) pairs and continue training with a contrastive or cosine-similarity loss, which typically recovers most of the gap in a few epochs. As a complement, keep BM25 in a hybrid setup so rare in-domain terms are still matched by exact lexical overlap even before fine-tuning lands.
 
 **Q: Explain Sentence-BERT training objective and why it differs from standard BERT.**
 Standard BERT fine-tuned on NLI uses a three-class classification head on `[CLS]` of the concatenated pair [A, SEP, B]. This requires running BERT on every pair at inference time — for finding the most similar sentence among 10K candidates, you need 10K forward passes. Sentence-BERT (Reimers & Gurevych, 2019) solves this by training a siamese network: two BERT encoders with shared weights, each processing one sentence independently, then a mean-pooled representation is compared via cosine similarity. Training uses NLI pairs: entailment → high similarity target (label 1), contradiction → low similarity target (label 0). The key advantage: pre-compute and store all document embeddings offline; for a new query, one BERT forward pass + cosine search over stored embeddings. The price: quality slightly below cross-encoder because the pair is not jointly processed. In practice, SBERT MRR@10 on MS MARCO is ~35 vs cross-encoder ~37.

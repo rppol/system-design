@@ -64,47 +64,37 @@ Why this system exists: LTV drives decisions worth tens to hundreds of millions 
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SRC([Data Sources\nTransactions · Events · CRM · Marketing]) --> FP["Feature Pipeline\nSpark · RFM · behavioral · attribution"]
+    FP --> FS["Feature Store\noffline S3/Hive · online Redis"]
+    FS --> TRN["Training Pipeline\nweekly/monthly · survival labels · LightGBM Cox"]
+    FS --> BATCH["Batch Scoring\nnightly · Spark predict"]
+    FS --> RT["Real-Time API\nday-0 scoring · Redis lookup"]
+    TRN --> REG["Model Registry\nMLflow"]
+    REG -.-> BATCH
+    REG -.-> RT
+    BATCH --> PS["Predictions Store\nPostgres + Redis"]
+    RT --> PS
+    PS --> DC([Downstream Consumers\nBid mgmt · Retention · Forecasting])
+
+    class SRC,DC io
+    class FP,FS base
+    class TRN train
+    class BATCH,RT mathOp
+    class REG frozen
+    class PS req
 ```
-                         ┌──────────────────────────────────────────┐
-                         │            DATA SOURCES                  │
-                         │  Transactions │ Events │ CRM │ Marketing │
-                         └──────────────┬───────────────────────────┘
-                                        │
-                         ┌──────────────▼───────────────────────────┐
-                         │         FEATURE PIPELINE                 │
-                         │  Spark jobs (RFM, behavioral sequences,  │
-                         │  channel attribution, product usage)     │
-                         │  → Feature Store (offline: S3/Hive,      │
-                         │    online: Redis)                        │
-                         └──────────────┬───────────────────────────┘
-                                        │
-              ┌─────────────────────────┼─────────────────────────┐
-              │                         │                         │
-   ┌──────────▼──────────┐  ┌──────────▼──────────┐  ┌──────────▼──────────┐
-   │  TRAINING PIPELINE  │  │  BATCH SCORING       │  │  REAL-TIME API      │
-   │  (weekly/monthly)   │  │  (nightly)           │  │  (day-0 scoring)    │
-   │                     │  │                      │  │                     │
-   │  - Cohort split     │  │  - Spark read        │  │  - Feature lookup   │
-   │  - Survival label   │  │    feature store     │  │    (Redis <1ms)     │
-   │    construction     │  │  - Model.predict()   │  │  - Model.predict()  │
-   │  - BG/NBD baseline  │  │  - Write to          │  │  - Return P25/P75   │
-   │  - LightGBM Cox     │  │    predictions DB    │  │    + point estimate │
-   │  - Calibration      │  └──────────┬──────────┘  └──────────┬──────────┘
-   └──────────┬──────────┘             │                         │
-              │                        └────────────┬────────────┘
-              │                                     │
-   ┌──────────▼──────────┐             ┌────────────▼────────────┐
-   │   MODEL REGISTRY    │             │   PREDICTIONS STORE     │
-   │   (MLflow)          │             │   (Postgres + Redis)    │
-   └─────────────────────┘             └────────────┬────────────┘
-                                                    │
-                                       ┌────────────▼────────────┐
-                                       │   DOWNSTREAM CONSUMERS  │
-                                       │  Marketing bid mgmt     │
-                                       │  Retention targeting    │
-                                       │  Revenue forecasting    │
-                                       └─────────────────────────┘
-```
+
+Nightly batch scoring and the day-0 real-time API both read one shared feature store and load the same registered model; predictions land in a Postgres+Redis store that the marketing bid-management, retention, and revenue-forecasting consumers all read from.
 
 **Component inventory:**
 - Feature pipeline: Spark on EMR, daily runs.
@@ -340,6 +330,30 @@ def compute_ltv_estimate(
     return {"ltv_12m": ltv_point, "ltv_12m_p25": ltv_p25, "ltv_12m_p75": ltv_p75}
 ```
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SURV["Survival curve\nP(active at t) · Cox"] --> MUL(("×"))
+    SPEND["Gamma-Gamma\nexpected spend per active period"] --> MUL
+    DISC["Discount factor\n1 / (1+r)^t"] --> MUL
+    MUL --> SUM["Σ over future periods t"]
+    SUM --> POINT([LTV point estimate])
+    POINT --> BAND([P25 / P75 band])
+
+    class SURV,SPEND train
+    class DISC,MUL,SUM mathOp
+    class POINT,BAND io
+```
+
+LTV is the discounted sum over future periods of expected spend while active times the probability of still being active at each horizon; the point estimate drives bid caps and the P25/P75 band sizes downside risk for product decisions.
+
 ### 4.5 Cohort-Based Validation
 
 Random hold-out is invalid for LTV models because customers from the same cohort are correlated (they experience the same macro conditions — economic shocks, product changes). Always validate on future cohorts.
@@ -390,6 +404,16 @@ class CohortTimeSeriesSplit(BaseCrossValidator):
 | DeepHit (deep survival) | 0.83 | 36 | Low | Yes |
 
 Use LightGBM Cox for production. The BG/NBD baseline is retained as a sanity check and as the model for new customers who lack behavioral history (day-0 LTV). DeepHit shows marginal gain (+1pp AUC) at the cost of 4× training time and no SHAP support — not worth it. See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/README.md).
+
+```mermaid
+xychart-beta
+    title "12-Month AUC-ROC by LTV Modeling Approach"
+    x-axis ["Last-value", "BG/NBD", "LightGBM Cox", "DeepHit"]
+    y-axis "AUC-ROC (12m)" 0.6 --> 0.9
+    bar [0.67, 0.74, 0.82, 0.83]
+```
+
+LightGBM Cox (0.82) is the production choice: DeepHit's +1pp (0.83) does not justify 4x training time and no SHAP support, while BG/NBD (0.74) is retained only as the day-0 cold-start baseline for customers with no behavioral history.
 
 **Decision 2: 12-month vs lifetime horizon**
 

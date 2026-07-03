@@ -80,78 +80,164 @@ Key insight: The best forecasting model is not the most complex one — it is th
 
 ### STL Decomposition
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    y(["y_t\nobserved series"]) --> stl["STL Decomposition\nLOESS smoothing"]
+    stl --> T(["Trend T_t\nlong-range direction"])
+    stl --> S(["Seasonality S_t\nweekly / yearly cycles"])
+    stl --> R(["Residual R_t\nnoise + anomalies"])
+    T --> sum(("+"))
+    S --> sum
+    R --> sum
+    sum --> yhat(["y_t = T_t + S_t + R_t"])
+
+    class y,T,S,R,yhat io
+    class stl,sum mathOp
 ```
-Original Series y_t
-      |
-      v
-[STL Decomposition]
-      |
-      +--------> Trend (T_t)       -- long-range direction (linear, polynomial)
-      |
-      +--------> Seasonality (S_t) -- repeating pattern (weekly, yearly)
-      |
-      +--------> Residual (R_t)    -- noise, anomalies, unexplained variance
-      |
-  y_t = T_t + S_t + R_t   (additive)
-  y_t = T_t * S_t * R_t   (multiplicative; use when variance scales with level)
-```
+
+Additive decomposition sums the three components; switch to multiplicative
+(`y_t = T_t × S_t × R_t`) when the seasonal swing grows with the series level.
 
 ### ARIMA Model
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    y(["y_t\noriginal series"]) --> diff["Difference d times\nremove trend"]
+    diff --> stat(["y'_t\nstationary series"])
+    stat --> ar["AR(p)\nphi·y'_(t-1 .. t-p)"]
+    stat --> ma["MA(q)\ntheta·e_(t-1 .. t-q)"]
+    ar --> comb(("+"))
+    ma --> comb
+    comb --> inv["Invert differencing"]
+    inv --> fc(["y_hat_t\nforecast"])
+
+    class y,stat,fc io
+    class ar,ma train
+    class diff,comb,inv mathOp
 ```
-Original series y_t  -->  [Difference d times]  -->  Stationary series y'_t
-                                                              |
-                              +---------------------------------+
-                              |
-                     AR(p): y'_t = phi_1*y'_{t-1} + ... + phi_p*y'_{t-p}
-                              +
-                     MA(q): ... + theta_1*e_{t-1} + ... + theta_q*e_{t-q} + e_t
-                              |
-                     [Invert differencing to get y_hat_t]
-```
+
+Differencing makes the series stationary so the AR and MA terms can be estimated;
+the fit is then inverted (integrated) back to the original scale — the "I" in ARIMA.
 
 ### Prophet Additive Model
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    g["g(t) trend\npiecewise + auto changepoints"] --> sum(("+"))
+    s["s(t) seasonality\nFourier: yearly N=10, weekly N=3"] --> sum
+    h["h(t) holidays\nuser calendar"] --> sum
+    eps["epsilon\nGaussian noise"] --> sum
+    sum --> y(["y(t) forecast"])
+
+    class g,s,h,eps base
+    class sum mathOp
+    class y io
 ```
-y(t) = g(t) + s(t) + h(t) + epsilon
 
-g(t):  piecewise linear or logistic growth trend
-         changepoints automatically detected (or manually specified)
-
-s(t):  Fourier series seasonality
-         yearly: N=10 Fourier terms
-         weekly: N=3 Fourier terms
-
-h(t):  holiday effect (user-provided calendar)
-
-epsilon: Gaussian noise
-```
+Prophet is a structural model: trend, multi-period seasonality, and holidays are
+fit as separate additive terms, which is why each component stays independently
+interpretable and tunable.
 
 ### PyTorch LSTM Forecaster
 
-```
-Input: (batch, seq_len=168, features=8)
-          |
-     [LSTM: hidden=256, layers=2, dropout=0.2]
-          |
-     Last hidden state: (batch, 256)
-          |
-     [Linear: 256 -> forecast_horizon=24]
-          |
-     Output: (batch, 24)  -- next 24 hours
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    inp(["Input\n(batch, seq=168, feat=8)"]) --> lstm["LSTM\nhidden=256, layers=2, dropout=0.2"]
+    lstm --> last(["Last hidden state\n(batch, 256)"])
+    last --> fc["Linear\n256 -> horizon=24"]
+    fc --> out(["Forecast\n(batch, 24) — next 24 hours"])
+
+    class inp,last,out io
+    class lstm,fc train
 ```
 
-### Walk-Forward Validation
+A single direct-multi-output head emits all 24 steps at once (MIMO strategy),
+avoiding the error accumulation of recursively feeding each prediction back as input.
 
+### Backtesting — Rolling-Origin (Walk-Forward) Split
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    t1["Fold 1 train\nweeks 1-52"] --> v1(["val\nweeks 53-56"])
+    t2["Fold 2 train\nweeks 1-56"] --> v2(["val\nweeks 57-60"])
+    t3["Fold 3 train\nweeks 1-60"] --> v3(["val\nweeks 61-64"])
+    v1 -.->|"roll origin forward"| t2
+    v2 -.->|"roll origin forward"| t3
+
+    class t1,t2,t3 train
+    class v1,v2,v3 base
 ```
-|<-- train -->|<-val->|                      fold 1
-|<--- train ---->|<-val->|                   fold 2
-|<----- train ----->|<-val->|               fold 3
-|<------- train ------->|<-val->|           fold 4
-                                  ^
-                          val window slides forward
-                          Never use future data to train
+
+The training origin expands each fold and validation always sits strictly after
+the training window, so future data never leaks into the fit — this is what makes
+the estimated error match production behavior.
+
+### ACF / PACF — Reading AR and MA Order
+
+```mermaid
+xychart-beta
+    title "ACF — AR(2): gradual geometric decay, no sharp cutoff"
+    x-axis "Lag" [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    y-axis "Autocorrelation" 0 --> 1.0
+    bar [0.85, 0.72, 0.6, 0.5, 0.41, 0.34, 0.28, 0.23, 0.19, 0.15]
 ```
+
+```mermaid
+xychart-beta
+    title "PACF — AR(2): significant spikes at lags 1-2, then cuts off"
+    x-axis "Lag" [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    y-axis "Partial autocorrelation" -0.2 --> 1.0
+    bar [0.85, 0.45, 0.05, -0.03, 0.02, -0.01, 0.02, -0.02, 0.01, 0.0]
+```
+
+For an AR(p) process the PACF cuts off sharply after lag p while the ACF decays
+slowly; for an MA(q) process the mirror holds (ACF cuts off after q, PACF decays).
+The PACF's drop to near-zero after lag 2 here identifies an AR(2) term.
 
 ---
 
@@ -595,6 +681,27 @@ LSTM hidden states can accumulate large magnitudes across long sequences, causin
 
 **Q: What are Fourier features and why are they used for seasonality encoding?**
 Fourier features represent periodic patterns as sums of sine and cosine functions at specific frequencies. For a weekly period of 7 days, Fourier features are sin(2*pi*t/7), cos(2*pi*t/7), sin(4*pi*t/7), cos(4*pi*t/7), etc. Using K pairs captures the first K harmonics of the pattern. Advantages over one-hot day-of-week encoding: (1) smooth — Sunday and Monday are adjacent in Fourier space; (2) compact — K=3 pairs (6 features) vs 7 one-hot features; (3) handles any period (not just integer periods). Prophet uses Fourier features internally for both weekly and yearly seasonality.
+
+**Why does shuffling or random train/test splitting produce misleadingly optimistic results on a time series?**
+Random splitting leaks future information into training because future observations land in the training set and are used to predict the past. Temporal autocorrelation means a shuffled test point is nearly identical to a neighboring training point, so the model appears to generalize when it is really memorizing. This is why development MAPE of 8% can jump to 31% live. Always split chronologically and validate with walk-forward folds, never with KFold or a random split.
+
+**Why is MAPE a poor metric for series that contain zeros, and what should you use instead?**
+MAPE divides absolute error by the actual value, so it becomes undefined or infinite whenever an actual is zero. Intermittent-demand series (many zero-sales weeks) therefore produce NaN or infinity under MAPE, and MAPE is also asymmetric — it penalizes over-forecasts more lightly than under-forecasts. Use SMAPE (bounded 0-200%), MAE, or MASE/RMSSE, which scale error by a naive seasonal baseline and stay well-defined even when actuals hit zero.
+
+**Why must you scale features before training an LSTM but not before fitting ARIMA?**
+LSTMs need scaled inputs because large-magnitude values saturate activations and make gradients vanish or explode during backpropagation through time. Raw sales in the range 0-100,000 push hidden-state gradients toward zero, and the network fails to learn. Fit a MinMaxScaler or StandardScaler on the training window only, apply it to validation and test, and inverse-transform predictions. ARIMA operates on the raw series directly because its coefficients are estimated by linear least-squares, which is scale-invariant.
+
+**How do you avoid target leakage when engineering rolling-window features?**
+Shift the target by one step before computing any rolling statistic so each feature is built only from strictly past values. A `rolling_mean(7)` computed without a `shift(1)` includes the current timestep's own value, letting the model peek at the label it is trying to predict. The same applies to lag features: never compute t+7 lags from the full series before the train/test split, or test samples inherit their own future.
+
+**What is the difference between ARIMA and exponential smoothing (ETS)?**
+ARIMA models the autocorrelation of the differenced series, while ETS models level, trend, and seasonality as exponentially weighted moving averages. ARIMA is more flexible for series with complex autocorrelation structure but requires stationarity and careful (p,d,q) selection; ETS (Holt-Winters) is simpler, needs no stationarity assumption, and often wins on short seasonal business series. In practice they are complementary — the M-competitions show ETS and ARIMA trading wins by series type, which is why ensembling both is common.
+
+**How does DeepAR produce probabilistic forecasts instead of single point estimates?**
+DeepAR outputs the parameters of a likelihood (Gaussian or negative binomial) at each step rather than a single value, then samples forward to build prediction intervals. It trains a single global LSTM across thousands of related series by maximizing the log-likelihood of the observed values under the predicted distribution. At inference it draws many sample paths through the autoregressive decoder and reads off quantiles (P10/P50/P90), which is what makes it suitable for inventory decisions at a target service level.
+
+**What is the difference between an expanding-window and a sliding-window backtest?**
+An expanding window keeps all history and grows the training set each fold, while a sliding window holds a fixed-length recent window and drops the oldest data. Expanding windows maximize data and suit stable processes; sliding windows adapt faster to drift and structural breaks because stale pre-break data is discarded. Choose sliding for regimes that change (post-COVID retail, evolving markets) and expanding when the data-generating process is stationary and every extra observation helps.
 
 ---
 

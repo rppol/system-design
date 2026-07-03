@@ -92,70 +92,135 @@ Key insight: data leakage is the most dangerous feature engineering mistake — 
 
 ### sklearn Pipeline (prevents leakage)
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph ct["ColumnTransformer — fit on train only"]
+        num["Numeric pipeline\nSimpleImputer(median)\n→ StandardScaler"]
+        cat["Categorical pipeline\nSimpleImputer(most_frequent)\n→ OneHotEncoder(handle_unknown='ignore')"]
+    end
+    data([Training data\nX_train, y_train]) --> num
+    data --> cat
+    num --> sel["(Optional) SelectFromModel / RFECV"]
+    cat --> sel
+    sel --> est["Estimator\nLogisticRegression / XGBoost"]
+
+    class data io
+    class num,cat mathOp
+    class sel train
+    class est base
 ```
-Training data (X_train, y_train)
-          |
-          v
-  ColumnTransformer
-  +------------------+---------------------------+
-  | Numeric pipeline |  Categorical pipeline      |
-  | SimpleImputer    |  SimpleImputer(strategy=   |
-  |   (median)       |    "most_frequent")        |
-  | StandardScaler   |  OneHotEncoder(handle_     |
-  |                  |    unknown="ignore")        |
-  +------------------+---------------------------+
-          |
-          v
-  (Optional) SelectFromModel / RFECV
-          |
-          v
-  Estimator (LogisticRegression, XGBoost, etc.)
-          |
-          v
-  pipeline.fit(X_train, y_train)      <-- only training data sees fit()
-  pipeline.predict(X_test)            <-- test data only sees transform()
-```
+
+Every transformer is fitted only inside `pipeline.fit(X_train, y_train)`; at inference `pipeline.predict(X_test)` calls `transform` alone, so test-set statistics never leak into the fitted imputers, scalers, or encoders. Wrapping the whole chain in one Pipeline object enforces this mechanically rather than by discipline.
 
 ### Target Encoding with Out-of-Fold (prevents leakage)
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    tr([Training data · 5 folds]) --> fit["On the other 4 folds:\ncompute mean(target) per category"]
+    fit --> apply["Encode held-out fold k\nwith those means"]
+    apply --> loop{"All 5 folds encoded?"}
+    loop -->|"no — next fold"| fit
+    loop -->|"yes"| test["Test set: encode using\nfull-train mean(target)"]
+
+    class tr io
+    class fit mathOp
+    class apply train
+    class loop req
+    class test base
 ```
-Training fold (4/5 of train)
-    |
-    v
-Compute mean(target) per category
-    |
-    v
-Apply to validation fold (1/5 of train)   <-- never seen during encoding fit
-    |
-    v
-Repeat for all 5 folds
-    |
-    v
-Final test set: encode using full train set mean(target)
-```
+
+Each fold k is encoded using target statistics computed from the other folds only, so a row's own label never influences its own encoded value — that is what prevents the target from leaking into the feature. The held-out test set can safely use the full-train category means because it played no part in fitting.
 
 ### Feature Store Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    src([Raw sources · DB, events, APIs]) --> compute["Offline batch pipeline\ne.g. 30-day rolling avg spend"]
+    compute --> off["Offline Store · parquet\ntraining data"]
+    compute --> on["Online Store · Redis/DDB\nlow-latency serving sub-5ms"]
+    reg["Feature Registry\nname, version, owner"] -.-> off
+    reg -.-> on
+    off --> tj["Training jobs\nbatch fetch"]
+    on --> ps["Prediction service\npoint lookup by entity_id"]
+
+    class src io
+    class compute mathOp
+    class off,on,reg base
+    class tj train
+    class ps req
 ```
-Raw data sources (DB, events, APIs)
-          |
-    [Offline pipeline — batch]
-          |
-          v
-    Feature computation
-    (e.g., 30-day rolling avg spend)
-          |
-          v
-    Feature Store
-    +---------------------------+
-    | Feature Registry          |  <-- metadata: name, version, owner
-    | Offline Store (parquet)   |  <-- training data
-    | Online Store (Redis/DDB)  |  <-- low-latency serving (<5ms)
-    +---------------------------+
-          |                |
-     Training jobs     Prediction service
-     (batch fetch)     (point lookup by entity_id)
+
+One feature computation feeds two stores that share definitions from the registry: the offline (parquet) store serves batch training, and the online (Redis/DDB) store serves sub-5ms point lookups at inference. Computing the feature once for both paths is what guarantees train/serve consistency and avoids training-serving skew.
+
+### Feature Selection — Cost vs Interaction-Awareness Tradeoff
+
+```mermaid
+quadrantChart
+    title Feature selection strategy tradeoff
+    x-axis "Low compute cost" --> "High compute cost"
+    y-axis "Ignores interactions" --> "Interaction-aware"
+    quadrant-1 "Reliable but costly"
+    quadrant-2 "Reliable + cheap"
+    quadrant-3 "Fast, interaction-blind"
+    quadrant-4 "Costly, still blind"
+    "Filter (corr / MI)": [0.15, 0.15]
+    "Embedded (L1 / tree)": [0.35, 0.6]
+    "Permutation importance": [0.55, 0.72]
+    "Wrapper (RFE / RFECV)": [0.9, 0.85]
 ```
+
+Filter methods are cheap but rank features one at a time, missing interactions (bottom-left); wrapper methods like RFECV retrain the model on every subset, so they capture interactions but cost O(n_features × cv_folds) fits (top-right). The practical recipe is to move up-left: use embedded L1 or tree importance for a fast first cut, then RFECV to fine-tune the surviving subset.
+
+### Choosing a Categorical Encoder by Cardinality
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start([Categorical feature]) --> q1{"Ordered categories?"}
+    q1 -->|"yes"| ord["Ordinal encoding\nmap to ranked ints"]
+    q1 -->|"no"| q2{"Cardinality < 15?"}
+    q2 -->|"yes"| oh["One-hot encoding"]
+    q2 -->|"no"| q3{"Neural model + 1M+ IDs?"}
+    q3 -->|"yes"| emb["Embedding layer\ndense learned vector"]
+    q3 -->|"no"| te["Target encoding (OOF)\nor hashing trick"]
+
+    class start io
+    class q1,q2,q3 req
+    class ord,oh,emb,te train
+```
+
+Cardinality drives the choice: low-cardinality nominal columns get one-hot, ordered columns get ordinal, and high-cardinality columns get out-of-fold target encoding (or the hashing trick), with learned embeddings reserved for neural models over huge ID spaces. Reaching for one-hot on a 12,000-value zip_code is the classic mistake this tree avoids.
 
 ---
 
@@ -551,6 +616,27 @@ Set `handle_unknown="ignore"` in sklearn's `OneHotEncoder`. Unseen categories pr
 
 **Q: What are polynomial features and when are they risky?**
 Polynomial features create all combinations of input features up to a specified degree (e.g., degree=2 adds x1^2, x2^2, x1*x2 for every pair). They allow linear models to fit non-linear decision boundaries. Risks: with d features and degree=2, output is O(d^2) features — 100 input features become ~5,000; with degree=3, ~170,000. This dramatically increases overfitting risk and training time. Prefer tree-based models (which find interactions natively) or domain-driven manual interaction features over automated polynomial expansion above degree=2.
+
+**Q: Why don't tree-based models require feature scaling?**
+Tree-based models split on feature thresholds, so they are invariant to any monotonic rescaling — scaling changes nothing about which split points are chosen. A decision tree asks "is age > 30?"; whether age is stored as raw years or standardized z-scores, the same rows fall on each side, so random forests, gradient boosting, and XGBoost see identical trees. Distance-based and gradient-based models (k-NN, SVM, logistic/linear regression, neural nets, PCA) do need scaling because a large-range feature dominates the distance metric or the gradient. Scaling tree inputs is harmless but wasted effort.
+
+**Q: When should you use a log transform versus Box-Cox versus Yeo-Johnson?**
+Use log1p for right-skewed non-negative data, Box-Cox when all values are strictly positive, and Yeo-Johnson when the feature contains zeros or negatives. Plain `np.log` produces `-inf` at zero and `nan` on negatives, so `log1p(x) = log(1 + x)` is the safe default for counts and amounts. Box-Cox searches for the power parameter lambda that best normalizes strictly-positive data, and Yeo-Johnson extends that same optimization to the whole real line — making it the most general choice when signs are mixed.
+
+**Q: What is the difference between fit, transform, and fit_transform, and why does it matter for leakage?**
+`fit` learns parameters (mean, std, category means, IQR) from data, `transform` applies them, and `fit_transform` does both in one call — and you must call fit only on the training set. Calling `fit_transform` on the test set (or on the full dataset before splitting) lets test statistics leak into your features, inflating validation scores that then collapse in production. The safe pattern is `scaler.fit_transform(X_train)` followed by `scaler.transform(X_test)`, best enforced by wrapping every transformer in a sklearn Pipeline.
+
+**Q: What is the difference between normalization and standardization?**
+Normalization (min-max scaling) rescales features to a fixed bounded range such as [0, 1], while standardization (z-score) centers to zero mean and unit variance with an unbounded range. Normalization is preferred when a model expects bounded inputs (neural-net activations, image pixels) but a single extreme outlier compresses all other values toward zero. Standardization suits roughly Gaussian features and algorithms that assume centered data (PCA, logistic regression), and RobustScaler (median/IQR) is the outlier-resistant middle ground.
+
+**Q: What is the hashing trick and when do you use it?**
+The hashing trick maps categories to a fixed number of buckets via a hash function, giving constant memory regardless of cardinality. Because it is stateless — no fitted vocabulary to store — it handles previously unseen categories automatically and works in streaming or online-learning settings where the category set grows over time. The cost is collisions: two distinct categories can hash to the same bucket and become indistinguishable, so you size the bucket count to trade memory against collision rate, and you lose the interpretability that named one-hot columns provide.
+
+**Q: How do you encode cyclical features like hour of day or month?**
+Encode cyclical features with paired sine and cosine transforms so that the values wrap around — hour 23 sits right next to hour 0. Raw integer encoding tells the model that hour 23 and hour 0 are 23 units apart when they are actually one hour apart, distorting any distance- or gradient-based model. Mapping each value to `(sin(2*pi*x / period), cos(2*pi*x / period))` places it on a circle so adjacent times are adjacent in feature space; the same trick applies to day-of-week, month, and compass bearing.
+
+**Q: How do you detect and handle multicollinearity among features?**
+Detect multicollinearity with a correlation matrix or the Variance Inflation Factor (VIF), then drop or combine features with |correlation| > 0.95 or VIF > 10. Highly correlated inputs make linear-model coefficients unstable and hard to interpret — the model cannot attribute effect between two features that move together — even though predictive accuracy may be unaffected. Tree-based models are far more robust to it, but for interpretability and coefficient stability you remove one of each redundant pair or replace the group with a PCA component or a domain-derived ratio feature.
 
 ---
 

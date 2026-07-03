@@ -18,11 +18,11 @@ Key insight: the majority of ML failures are not algorithm failures — they are
 
 ## What This Section Covers
 
-Thirty-six modules organized across eight learning phases take you from linear algebra through production MLOps. Six topics contain deep-dive sub-files (27 sub-files total), and `case_studies/cross_cutting/` contains five shared-primitive files, all following the same 14-section template used throughout this repository. Twenty-two end-to-end case studies — each covering a real-world ML system — demonstrate how individual concepts combine into full system designs. A dedicated algorithm-selection module (#33) consolidates the "which algorithm, when and why" rationale referenced by every case study. The section is structured so it can be read sequentially as a learning curriculum or used as a reference when preparing for a specific interview topic.
+Forty modules organized across eight learning phases take you from linear algebra through production MLOps. Nine topics contain deep-dive sub-files (36 sub-files total), and `case_studies/cross_cutting/` contains five shared-primitive files, all following the same 14-section template used throughout this repository. Twenty-two end-to-end case studies — each covering a real-world ML system — demonstrate how individual concepts combine into full system designs. A dedicated algorithm-selection module (#33) consolidates the "which algorithm, when and why" rationale referenced by every case study. The section is structured so it can be read sequentially as a learning curriculum or used as a reference when preparing for a specific interview topic.
 
 ---
 
-## All Topics (36 Modules)
+## All Topics (40 Modules)
 
 | # | Topic | Key Concepts | Phase | Difficulty |
 |---|-------|-------------|-------|------------|
@@ -62,12 +62,16 @@ Thirty-six modules organized across eight learning phases take you from linear a
 | 34 | [Active Learning and Weak Supervision](active_learning_and_weak_supervision/README.md) | Uncertainty/diversity sampling, query-by-committee, BALD, Snorkel labeling functions, label model, weak supervision, data-centric AI | 5 — ML Systems & Infrastructure | Advanced |
 | 35 | [Adversarial ML and Robustness](adversarial_ml_and_robustness/README.md) | Evasion (FGSM/PGD/C&W), data poisoning, backdoors, model extraction, membership inference, adversarial training, randomized smoothing | 7 — Advanced Topics | Advanced |
 | 36 | [Uncertainty Quantification and Conformal Prediction](uncertainty_quantification_and_conformal_prediction/README.md) | Aleatoric vs epistemic uncertainty, MC dropout, deep ensembles, calibration (ECE), conformal prediction sets/intervals, CQR | 7 — Advanced Topics | Advanced |
+| 37 | [Interpretability and Explainability](interpretability_and_explainability/README.md) | SHAP (KernelSHAP/TreeSHAP), LIME, integrated gradients, Grad-CAM, permutation importance, PDP/ICE, counterfactuals | 7 — Advanced Topics | Advanced |
+| 38 | [Privacy-Preserving ML](privacy_preserving_ml/README.md) | Differential privacy, DP-SGD, federated learning (FedAvg), secure aggregation, PATE, membership inference | 7 — Advanced Topics | Advanced |
+| 39 | [Multi-Task and Multi-Objective Learning](multi_task_and_multi_objective_learning/README.md) | Shared-bottom, MMoE, PLE, uncertainty weighting, PCGrad, Pareto optimization, multi-objective ranking | 4 — Domain Specializations | Advanced |
+| 40 | [Anomaly Detection](anomaly_detection/README.md) | Isolation Forest, One-Class SVM, LOF, autoencoders, EVT thresholds, streaming detection, PR-AUC evaluation | 4 — Domain Specializations | Intermediate |
 
 ---
 
 ## Sub-Files Index
 
-Twenty-seven deep-dive sub-files provide topic-level detail beyond what a single README can cover. Each follows the full 14-section template with a minimum of 15 interview Q&As.
+Thirty-six deep-dive sub-files provide topic-level detail beyond what a single README can cover. Each follows the full 14-section template with a minimum of 15 interview Q&As.
 
 ### supervised_learning/ (4 sub-files)
 
@@ -106,7 +110,7 @@ Twenty-seven deep-dive sub-files provide topic-level detail beyond what a single
 | [content_and_hybrid.md](recommender_systems/content_and_hybrid.md) | Content-Based and Hybrid | TF-IDF features, item embeddings, hybrid architectures, cold-start, exploration-exploitation |
 | [online_learning_and_bandits.md](recommender_systems/online_learning_and_bandits.md) | Online Learning and Bandits | Multi-armed bandits, epsilon-greedy, UCB, Thompson sampling, contextual bandits, LinUCB |
 
-### natural_language_processing/ (5 sub-files)
+### natural_language_processing/ (11 sub-files)
 
 | File | Topic | Key Concepts |
 |------|-------|-------------|
@@ -115,6 +119,12 @@ Twenty-seven deep-dive sub-files provide topic-level detail beyond what a single
 | [text_representation_and_retrieval.md](natural_language_processing/text_representation_and_retrieval.md) | Text Representation and Retrieval | BM25 derivation, inverted index, Sentence-BERT, FAISS, ColBERT, RRF hybrid search |
 | [nlp_evaluation_and_metrics.md](natural_language_processing/nlp_evaluation_and_metrics.md) | NLP Evaluation and Metrics | BLEU, ROUGE, METEOR, BERTScore, entity-level F1, ECE, text augmentation |
 | [tokenization_deep_dive.md](natural_language_processing/tokenization_deep_dive.md) | Tokenization Deep Dive | BPE, WordPiece, Unigram LM, SentencePiece, byte-level BPE, vocabulary sizing, fertility, train/inference parity |
+| [word_embeddings.md](natural_language_processing/word_embeddings.md) | Word Embeddings | word2vec (skip-gram/CBOW/negative sampling), GloVe, fastText subword, analogies, embedding bias |
+| [sequence_labeling_and_crf.md](natural_language_processing/sequence_labeling_and_crf.md) | Sequence Labeling and CRFs | HMM, MEMM (label bias), linear-chain CRF, Viterbi, forward-backward, BiLSTM-CRF, BIO tagging |
+| [text_classification.md](natural_language_processing/text_classification.md) | Text Classification | Naive Bayes, logistic regression, linear SVM, fastText, TextCNN, multi-label, class imbalance |
+| [topic_modeling.md](natural_language_processing/topic_modeling.md) | Topic Modeling | LSA, pLSA, LDA (Gibbs/variational), NMF, coherence metrics, BERTopic |
+| [language_modeling.md](natural_language_processing/language_modeling.md) | Language Modeling | n-gram LMs, Kneser-Ney smoothing, backoff/interpolation, perplexity, neural LMs, transformer bridge |
+| [syntactic_parsing.md](natural_language_processing/syntactic_parsing.md) | Syntactic Parsing | CFG/PCFG, CKY, dependency parsing (transition- and graph-based), Eisner, UAS/LAS |
 
 ### ml_system_design/ (5 sub-files)
 
@@ -125,6 +135,24 @@ Twenty-seven deep-dive sub-files provide topic-level detail beyond what a single
 | [training_pipeline_design.md](ml_system_design/training_pipeline_design.md) | Training Pipeline Design | DAG orchestration, Airflow, Kubeflow, data versioning, reproducibility, resource scheduling |
 | [ab_testing_for_ml.md](ml_system_design/ab_testing_for_ml.md) | A/B Testing for ML | Treatment/control design, minimum detectable effect, p-values, Bonferroni, interleaving, switchback |
 | [latency_and_throughput_optimization.md](ml_system_design/latency_and_throughput_optimization.md) | Latency and Throughput Optimization | Batching strategies, caching predictions, model cascades, early exit, p99 vs p50, SLO budgeting |
+
+### unsupervised_learning/ (1 sub-file)
+
+| File | Topic | Key Concepts |
+|------|-------|-------------|
+| [gaussian_mixtures_and_em.md](unsupervised_learning/gaussian_mixtures_and_em.md) | Gaussian Mixtures and EM | GMM latent-variable model, EM derivation (ELBO/Jensen), responsibilities, covariance types, BIC/AIC, k-means as hard-EM limit |
+
+### model_evaluation_and_selection/ (1 sub-file)
+
+| File | Topic | Key Concepts |
+|------|-------|-------------|
+| [automl_and_nas.md](model_evaluation_and_selection/automl_and_nas.md) | AutoML and NAS | AutoML frameworks, multi-fidelity HPO (Successive Halving/ASHA/Hyperband/BOHB), NAS (DARTS/ENAS/one-shot), hardware-aware search |
+
+### active_learning_and_weak_supervision/ (1 sub-file)
+
+| File | Topic | Key Concepts |
+|------|-------|-------------|
+| [semi_supervised_learning.md](active_learning_and_weak_supervision/semi_supervised_learning.md) | Semi-Supervised Learning | SSL assumptions, pseudo-labeling, consistency regularization, FixMatch/MixMatch, label propagation, co-training, UDA |
 
 ### case_studies/cross_cutting/ (5 shared-primitive files)
 
@@ -186,9 +214,9 @@ Phase 1 — Mathematical Foundations
 Phase 2 — Classical ML
   supervised_learning  -->  [sub-files: linear_models, svms, decision_trees, bayesian_methods]
   ensemble_methods     -->  [sub-files: random_forests, gradient_boosting, xgboost_lightgbm, stacking]
-  unsupervised_learning
+  unsupervised_learning  -->  [sub-file: gaussian_mixtures_and_em]
   feature_engineering
-  model_evaluation_and_selection
+  model_evaluation_and_selection  -->  [sub-file: automl_and_nas]
         |
         v
 Phase 3 — Deep Learning Foundations
@@ -203,9 +231,12 @@ Phase 4 — Domain Specializations
   computer_vision      -->  [sub-files: object_detection, image_segmentation, vision_transformers, self_supervised_vision]
   natural_language_processing  -->  [sub-files: bert_and_pretrained_models, attention_and_seq2seq,
                                text_representation_and_retrieval, nlp_evaluation_and_metrics,
-                               tokenization_deep_dive]
+                               tokenization_deep_dive, word_embeddings, sequence_labeling_and_crf,
+                               text_classification, topic_modeling, language_modeling, syntactic_parsing]
   recommender_systems  -->  [sub-files: collaborative_filtering, deep_learning_recommenders,
                              retrieval_and_ranking, content_and_hybrid, online_learning_and_bandits]
+  multi_task_and_multi_objective_learning
+  anomaly_detection
   time_series_forecasting
   reinforcement_learning
         |
@@ -217,7 +248,7 @@ Phase 5 — ML Systems & Infrastructure
   distributed_training
   experiment_tracking_and_versioning
   gpu_and_hardware_optimization
-  active_learning_and_weak_supervision
+  active_learning_and_weak_supervision  -->  [sub-file: semi_supervised_learning]
         |
         v
 Phase 6 — Production ML
@@ -232,6 +263,8 @@ Phase 7 — Advanced Topics
   self_supervised_and_contrastive_learning
   causal_inference_and_ml
   adversarial_ml_and_robustness
+  privacy_preserving_ml
+  interpretability_and_explainability
   uncertainty_quantification_and_conformal_prediction
         |
         v

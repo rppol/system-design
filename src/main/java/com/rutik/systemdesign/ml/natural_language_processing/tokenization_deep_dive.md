@@ -76,41 +76,115 @@ SentencePiece treats input as a raw Unicode stream including spaces (encoded as 
 
 ## 5. Architecture Diagrams
 
-### BPE training (merge loop)
+### BPE Training — the Merge Loop
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start([Corpus words as char\nsequences + end-of-word]) --> count["Count all adjacent\nsymbol pairs"]
+    count --> pick["Pick the single\nMOST FREQUENT pair"]
+    pick --> merge["Merge that pair into\none new symbol"]
+    merge --> chk{"Target vocab\nsize reached?"}
+    chk -->|no| count
+    chk -->|yes| done([Ordered merge list\n= the learned model])
+
+    class start,done io
+    class count,pick,merge mathOp
+    class chk base
 ```
-Corpus words (as char sequences, with end-of-word marker </w>):
-   l o w </w>        (×5)
-   l o w e r </w>    (×2)
-   n e w e s t </w>  (×6)
-   w i d e s t </w>  (×3)
 
-Step 1: count adjacent pairs -> ("e","s") appears 6+3 = 9 times (most frequent)
-        merge -> "es"
-Step 2: ("es","t") = 9 -> merge -> "est"
-Step 3: ("l","o") = 7 -> merge -> "lo"
-        ... continue until vocab_size reached ...
+Worked trace on corpus `low×5, lower×2, newest×6, widest×3`: `("e","s")` appears 9 times → merge `es`; then `("es","t")`=9 → `est`; then `("l","o")`=7 → `lo`; and so on. The merges are recorded in order — that ordered list is the entire BPE model.
 
-Learned merges (ordered):  es, est, lo, low, ...
-Vocabulary = base chars + every merged piece
+### Applying a Tokenizer at Inference
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    inp(["input: lowest"]) --> norm["Normalize\nNFKC · optional lowercase"]
+    norm --> pretok["Pre-tokenize\nsplit on whitespace"]
+    pretok --> bpe["BPE: apply merges in\nlearned order → low·est"]
+    pretok --> wp["WordPiece: greedy\nlongest match → low·##est"]
+    pretok --> uni["Unigram: Viterbi best\nsegmentation → low·est"]
+    bpe --> ids([Map pieces → IDs\ne.g. 3204, 395])
+    wp --> ids
+    uni --> ids
+
+    class inp,ids io
+    class norm,pretok mathOp
+    class bpe train
+    class wp train
+    class uni train
 ```
 
-### Applying a tokenizer at inference
+Normalization and pre-tokenization are frozen with the tokenizer and run before any segmentation. The three algorithms then diverge on HOW they segment — replay ranked merges (BPE), greedy longest-match with `##` markers (WordPiece), or most-probable Viterbi split (Unigram) — but all end at the same integer IDs.
 
+### The Three Algorithm Families — Build Direction
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    corpus([Training corpus]) --> bu["Bottom-up: start from\ncharacters, MERGE upward"]
+    corpus --> td["Top-down: start from\nhuge vocab, PRUNE downward"]
+    bu --> bpe["BPE\nmerge most frequent pair"]
+    bu --> wp["WordPiece\nmerge max-likelihood pair"]
+    td --> uni["Unigram LM\nremove least-useful pieces (EM)"]
+    bpe --> vocab([Frozen vocabulary\n+ merge rules / probabilities])
+    wp --> vocab
+    uni --> vocab
+
+    class corpus,vocab io
+    class bu,td mathOp
+    class bpe,wp train
+    class uni train
 ```
-"lowest"
-   |
-[normalize: NFKC, (optional) lowercase]
-   |
-[pre-tokenize: split on whitespace -> ["lowest"]]
-   |
-[subword segmentation]
-   BPE:       apply merges in learned order -> "low" + "est"
-   WordPiece: greedy longest prefix in vocab -> "low" + "##est"
-   Unigram:   Viterbi best segmentation     -> "low" + "est"
-   |
-[map pieces -> IDs]  e.g. [3204, 395]
+
+BPE and WordPiece both grow the vocabulary bottom-up by merging (differing only in the merge criterion — frequency vs likelihood ratio), while Unigram starts with a huge candidate set and prunes it top-down. Same goal, opposite directions (§4.1).
+
+### Vocabulary-Size Tradeoff
+
+```mermaid
+xychart-beta
+    title "Vocab size: sequence length falls, embedding table grows"
+    x-axis "Vocabulary size" ["16k", "32k", "50k", "100k", "250k"]
+    y-axis "Relative cost (0-100)" 0 --> 100
+    line [100, 72, 58, 44, 30]
+    line [18, 34, 50, 72, 100]
 ```
+
+The two curves cross: the descending line is sequence length (fewer, longer tokens as vocab grows → less attention compute), the ascending line is the embedding + output-softmax table size (grows linearly with vocab). Monolingual models settle near 32k-50k; heavily multilingual ones push to 100k-250k to keep fertility low (§4.1, §8).
+
+### Fertility Tax Across Languages
+
+```mermaid
+xychart-beta
+    title "Tokens per word for an English-trained BPE tokenizer"
+    x-axis ["English", "Spanish", "Russian", "Hindi", "Thai", "Burmese"]
+    y-axis "Tokens per word" 0 --> 4
+    bar [1.1, 1.4, 1.9, 2.5, 3.1, 3.8]
+```
+
+A tokenizer whose merges were learned mostly on English has few multi-character pieces for other scripts, so the same meaning fragments into 2-4x more tokens — directly raising latency, cost, and effective context loss for under-represented languages (§7).
 
 ---
 
@@ -417,6 +491,12 @@ model.resize_token_embeddings(len(tok))
 
 ## 12. Interview Questions with Answers
 
+**Q: Why must BPE apply its merges in the exact order they were learned, and what breaks if you do not?**
+Merge rank is priority: applying merges out of order produces different, wrong token boundaries for the same text, so the ordered merge list is part of the model artifact and must ship with it. BPE encoding repeatedly applies the highest-ranked (earliest-learned) applicable merge, so `es` before `est` before `lo` is not arbitrary — it reconstructs the training-time segmentation. If you ship a reordered or truncated merge file, identical input yields different IDs and the model silently degrades, with no crash to alert you.
+
+**Q: Why can two tokenizers with the same vocabulary size still produce different token counts on the same text?**
+Because the segmentation algorithm and the specific pieces kept differ, so a BPE, WordPiece, and Unigram tokenizer of equal vocab size split the same string into different numbers of pieces. Vocab size only bounds the table; which 32k pieces you keep depends on frequency (BPE), likelihood ratio (WordPiece), or likelihood-pruning (Unigram), and how you segment depends on ranked-merge replay vs greedy-longest-match vs Viterbi. This is why you must measure fertility with the actual tokenizer rather than assuming equal-vocab tokenizers cost the same.
+
 **Q: Why do modern models use subword tokenization instead of word-level?**
 Word-level tokenization forces an enormous vocabulary and still cannot represent unseen words, mapping them to a single `<UNK>` token that destroys information. Subword tokenization caps the vocabulary (typically 30k-100k) while guaranteeing any input is representable by falling back to smaller pieces or bytes. It also shares parameters across morphologically related words ("run", "running", "runner" share the "run" piece), which improves generalization and handles rare/novel strings gracefully.
 
@@ -464,6 +544,12 @@ Always run the actual model tokenizer: `len(tokenizer.encode(text))`. Character-
 
 **Q: Why is whitespace and newline handling important for code models?**
 Code is dense with repeated whitespace (indentation, blank lines). A tokenizer that spends one token per space or per `\n    ` inflates every file by 20-40%, wasting context and compute. Code-oriented tokenizers add tokens for common indentation runs and language patterns, dramatically lowering fertility on source files and improving effective context length.
+
+**Q: What is the difference between WordPiece's greedy longest-match and Unigram's Viterbi at inference?**
+WordPiece greedily takes the longest vocabulary prefix at each position, while Unigram runs Viterbi to find the globally most probable segmentation. The greedy match is a fast local choice that never backtracks, so it can make a locally-optimal cut that leaves a worse overall split; Viterbi instead weighs whole-word piece-probability products and may prefer a shorter first piece when the total is more likely. This is also why Unigram can sample alternative segmentations (subword regularization) whereas greedy WordPiece cannot.
+
+**Q: Why does character-level tokenization eliminate OOV but is rarely used for large models?**
+Character tokenization has no OOV because its tiny alphabet covers everything, but it produces very long sequences where each token carries little meaning. Those long sequences make attention cost, which is quadratic in length, explode, and they force the model to learn word composition from scratch. A 10-character word becomes 10 tokens instead of 1-2 subwords, so context windows fill far faster and training is slower to converge. Subword tokenization is the practical middle ground — bounded vocabulary, no hard OOV via byte fallback, and moderate sequence length — which is why nearly all transformers use it.
 
 ---
 

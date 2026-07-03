@@ -71,102 +71,139 @@ DINOv2 pretrains ViT using self-supervised learning (see self_supervised_vision.
 
 ### ViT End-to-End Pipeline
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph enc["Transformer encoder block × 12 (pre-norm)"]
+        res0((" split ")) --> ln1["LayerNorm"]
+        ln1 --> mhsa["Multi-head self-attention\n12 heads · d_k=64"]
+        mhsa --> add1((" + "))
+        res0 --> add1
+        add1 --> ln2["LayerNorm"]
+        ln2 --> mlp["MLP 768 → 3072 → 768 · GELU"]
+        mlp --> add2((" + "))
+        add1 --> add2
+    end
+    img([Input image\n224×224×3]) --> tok["Patch embed + CLS + position\n197 tokens × 768"]
+    tok --> res0
+    add2 --> pick["Take CLS token → R^768"]
+    pick --> head["MLP classification head"]
+    head --> logits([num_classes logits])
+
+    class img,logits io
+    class tok,pick mathOp
+    class ln1,ln2,mhsa,mlp train
+    class res0,add1,add2 mathOp
+    class head train
 ```
-Input Image: 224 × 224 × 3
-    |
-[Split into P×P patches]   P=16
-    |
-196 patches, each 16×16×3 = 768 raw values
-    |
-[Linear Projection]  W ∈ R^(768 × D)
-    |
-196 patch embeddings, each ∈ R^D   (D=768 for ViT-B)
-    |
-[Prepend CLS token]  +1 token
-    |
-197 tokens ∈ R^D
-    |
-[Add Learnable Position Embeddings]  PE ∈ R^(197 × D)
-    |
-[Transformer Encoder] × L layers   (L=12 for ViT-B)
-  ┌─────────────────────────────────────────────────┐
-  │  LayerNorm                                       │
-  │  Multi-Head Self-Attention (12 heads, d_k=64)   │
-  │  + Residual                                      │
-  │  LayerNorm                                       │
-  │  MLP (D → 4D → D, GELU activation)              │
-  │  + Residual                                      │
-  └─────────────────────────────────────────────────┘
-    |
-Output: 197 tokens ∈ R^D
-    |
-[Take CLS token]   → R^D = R^768
-    |
-[MLP Classification Head]
-    |
-num_classes logits
+
+*The image becomes a 197-token sequence, every token attends to every other from the first layer, and the CLS token's final vector drives classification. The two `+` circles are the pre-norm residual adds — `x + MHSA(LN(x))` then `y + MLP(LN(y))` — which keep gradients flowing through the 12-block stack.*
+
+### Patch, CLS, and Position Embedding
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    img([Image 224×224×3]) --> grid["14×14 grid\n196 patches of 16×16"]
+    grid --> flat["Flatten each patch\n→ 768 values"]
+    flat --> proj["Linear projection\nW: 768×768"]
+    proj --> pe["196 patch embeddings"]
+    cls["CLS token\n(learnable)"] --> cat(("concat"))
+    pe --> cat
+    cat --> seq["197 tokens × 768"]
+    pos["Position embeddings\n197×768 (learnable)"] --> add((" + "))
+    seq --> add
+    add --> out([To transformer encoder])
+
+    class img,out io
+    class grid,flat,proj,pe mathOp
+    class cls,pos train
+    class cat,add mathOp
+    class seq io
 ```
+
+*Self-attention is permutation-invariant, so without the added position embeddings the 196 patches would be an unordered set and the model could not tell top from bottom. The learnable CLS token (green) is prepended before the encoder and later read out as the whole-image representation.*
 
 ### Swin Transformer Hierarchical Design
 
-```
-Input (224 × 224)
-    |
-Stage 1: Patch Partition (4×4) → 56×56 tokens, C=96
-    |
-[Swin Transformer Block × 2]    (window self-attn + shifted window attn)
-    |
-Stage 2: Patch Merging (2×2) → 28×28 tokens, C=192
-    |
-[Swin Transformer Block × 2]
-    |
-Stage 3: Patch Merging (2×2) → 14×14 tokens, C=384
-    |
-[Swin Transformer Block × 6]
-    |
-Stage 4: Patch Merging (2×2) → 7×7 tokens, C=768
-    |
-[Swin Transformer Block × 2]
-    |
-For classification: GlobalAvgPool → Linear → num_classes
-For detection/segmentation: FPN on {Stage1, Stage2, Stage3, Stage4} outputs
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Swin Window Attention (W-MSA):
-  Tokens partitioned into 7×7 non-overlapping windows
-  Self-attention computed locally within each window
-  → Complexity: O(n · W²) not O(n²)  where W=7, n=HW
+    subgraph s1["Stage 1"]
+        p1["Patch partition 4×4\n56×56 tokens · C=96"] --> b1["Swin block × 2\nW-MSA + SW-MSA"]
+    end
+    subgraph s2["Stage 2"]
+        m2["Patch merging 2×2\n28×28 tokens · C=192"] --> b2["Swin block × 2"]
+    end
+    subgraph s3["Stage 3"]
+        m3["Patch merging 2×2\n14×14 tokens · C=384"] --> b3["Swin block × 6"]
+    end
+    subgraph s4["Stage 4"]
+        m4["Patch merging 2×2\n7×7 tokens · C=768"] --> b4["Swin block × 2"]
+    end
+    img([Input 224×224]) --> p1
+    b1 --> m2
+    b2 --> m3
+    b3 --> m4
+    b4 --> clshead["Classification\nGlobalAvgPool → Linear"]
+    b4 --> fpn["Detection / segmentation\nFPN over 4 stage outputs"]
 
-Shifted Window Attention (SW-MSA):
-  Windows shifted by (W/2, W/2) to enable cross-window connections
-  Alternates with W-MSA every other block
+    class img io
+    class p1,m2,m3,m4 mathOp
+    class b1,b2,b3,b4 train
+    class clshead,fpn io
 ```
+
+*Patch merging halves spatial resolution and doubles channels each stage, so Swin emits the same 4-scale feature pyramid as a ResNet — which is why detection and segmentation heads plug straight in. Attention is computed inside fixed 7×7 windows (W-MSA), cutting cost from O(n²) to O(n·W²); alternate blocks shift the window grid by (W/2, W/2) so information crosses window boundaries.*
 
 ### CLIP Contrastive Pretraining
 
-```
-Image Encoder (ViT or ResNet)     Text Encoder (Transformer)
-        |                                    |
-   image features (I_f)           text features (T_f)
-        |                                    |
-   [Linear projection] → d_emb   [Linear projection] → d_emb
-        |                                    |
-        └──────────── Cosine Similarity ─────┘
-                              |
-          ┌───────────────────┴───────────────────┐
-          │  Similarity Matrix (batch_size × batch_size)   │
-          │  Diagonal = matching pairs (maximize)           │
-          │  Off-diagonal = non-matching (minimize)         │
-          └────────────────────────────────────────────────┘
-                              |
-             InfoNCE / NT-Xent contrastive loss
-             (symmetric: image-to-text + text-to-image)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Zero-shot inference:
-  Image → image_emb
-  ["a photo of a cat", "a photo of a dog", ...] → text_embs
-  scores = image_emb @ text_embs.T
-  pred   = argmax(scores)
+    img([Image]) --> ie["Image encoder\n(ViT)"]
+    txt(["Text: a photo of a cat"]) --> te["Text encoder\n(Transformer)"]
+    ie --> ip["Linear projection → d_emb"]
+    te --> tp["Linear projection → d_emb"]
+    ip --> sim["Cosine similarity matrix\nB × B"]
+    tp --> sim
+    sim --> loss["Symmetric InfoNCE loss\ndiagonal = matching pair (maximize)\noff-diagonal = mismatch (minimize)"]
+
+    class img,txt io
+    class ie,te,ip,tp train
+    class sim mathOp
+    class loss lossN
 ```
+
+*Training aligns the image and text embedding spaces so matching pairs land on the diagonal of the batch similarity matrix. At inference, zero-shot classification embeds the image once, embeds each class prompt ("a photo of a [class]"), and takes the argmax cosine similarity — no labeled fine-tuning required.*
 
 ---
 
@@ -516,6 +553,15 @@ CNN feature maps can be visualized with Grad-CAM: compute gradients of the targe
 
 **Q: What tradeoffs exist between patch size 16×16 vs 8×8 in ViT?**
 Patch size 16×16 on 224×224 input gives 196 tokens — manageable attention cost (O(196²) per head). Patch size 8×8 gives 784 tokens — 16× more expensive attention. Smaller patches provide finer spatial resolution, which improves performance on dense prediction tasks and on images with small objects. ViT-B/8 outperforms ViT-B/16 on ImageNet by ~2% top-1 but requires 4× more computation and memory. For classification, 16×16 is standard. For segmentation and detection where spatial precision matters, 8×8 or Swin's hierarchical approach is preferred.
+
+**Q: Why do Vision Transformers require more training data than CNNs?**
+Vision Transformers lack the spatial inductive biases — locality and translation equivariance — that CNNs bake into their architecture, so they must learn those patterns from data instead. A convolution kernel hard-codes that nearby pixels are related and that a feature detector should behave identically everywhere in the image; ViT starts with none of this and can attend from any patch to any other from the first layer, giving more flexibility but no built-in priors. Trained from scratch on ImageNet-1k, ViT trails a comparable ResNet by several points; the advantage only appears once pretraining reaches ImageNet-21k (14M) or JFT (300M+) scale. In practice, always start from a strong pretrained checkpoint rather than training ViT from scratch on under 1M images.
+
+**Q: Can you replace the CLS token with global average pooling, and does it matter?**
+Yes, global average pooling over all patch tokens is a drop-in alternative to the CLS token and often gives marginally better accuracy. The original ViT used a BERT-style CLS token, but ablations show that mean-pooling the final patch tokens works about as well or slightly better, provided the head learning rate is tuned separately (GAP prefers a lower head LR). DINOv2 and several modern ViTs pool patch tokens rather than relying on a CLS token. The tradeoff: the CLS token gives one natural aggregation point for attention-map visualization, while GAP spreads the signal across all tokens and can be more robust when the CLS token attends to background clutter.
+
+**Q: How do Vision Transformers scale with more data and parameters compared to CNNs?**
+ViTs keep gaining accuracy as data and model size grow, while CNNs hit diminishing returns — ViT-H/14 pretrained on JFT-3B reaches 88.6% ImageNet top-1. This favorable scaling is the core reason ViT displaced CNNs at the high end: doubling parameters and data yields a predictable gain that does not plateau as early as the ResNet/EfficientNet families. The flip side is data hunger in the low regime — the same architecture that scales beautifully to billions of images is worse than a ResNet on 100k. Choose ViT when you can supply scale (data, compute, or a large pretrained checkpoint); choose a CNN when you cannot.
 
 ---
 

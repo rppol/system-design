@@ -16,86 +16,80 @@ Constraints:
 
 ## Architecture Overview
 
-```
-  Transaction Event
-        │
-        v
-  ┌─────────────────────────────────────────────┐
-  │  RULE ENGINE (<1ms)                         │
-  │  - Blocklist check (stolen cards/devices)   │
-  │  - Allowlist (verified merchants, own ATMs) │
-  │  - Hard rules: amount > $10K, new country   │
-  │  BLOCK / ALLOW / PASS-THROUGH               │
-  └────────────────┬────────────────────────────┘
-                   │ PASS-THROUGH (~60% of TXs)
-                   v
-  ┌─────────────────────────────────────────────┐
-  │  FEATURE COMPUTATION (5-10ms)               │
-  │                                             │
-  │  Real-time features (from event):           │
-  │  - tx_amount, merchant_category, hour       │
-  │  - device_fingerprint, ip_country           │
-  │                                             │
-  │  Aggregated features (from Redis):          │
-  │  - spend_velocity_1h / 24h / 7d            │
-  │  - tx_count_1h (new card: <3 = suspicious)  │
-  │  - new_merchant_flag (first time at merch)  │
-  │  - failed_attempts_15min                    │
-  │                                             │
-  │  Graph features (precomputed, cached):      │
-  │  - shared_device_with_known_fraud           │
-  │  - card_device_association_age_days         │
-  └────────────────┬────────────────────────────┘
-                   │
-                   v
-  ┌─────────────────────────────────────────────┐
-  │  ML MODEL (XGBoost, 10-15ms)                │
-  │  Output: fraud_probability [0.0, 1.0]       │
-  │                                             │
-  │  Threshold routing:                         │
-  │  score > 0.85 → AUTO BLOCK                  │
-  │  score 0.40-0.85 → HUMAN REVIEW QUEUE       │
-  │  score < 0.40 → AUTO APPROVE                │
-  └────────────────┬────────────────────────────┘
-                   │
-         ┌─────────┼──────────┐
-         v         v          v
-    AUTO        HUMAN      AUTO
-    BLOCK       REVIEW     APPROVE
-                QUEUE
-                   │
-                   v
-     ┌─────────────────────────┐
-     │  ANALYST DASHBOARD      │
-     │  - Reason codes         │
-     │  - SHAP explanations    │
-     │  - Review → label       │
-     └────────────┬────────────┘
-                  │ Labeled feedback
-                  v
-     ┌─────────────────────────┐
-     │  TRAINING PIPELINE      │  (Flink + Kafka + Spark)
-     │  Daily/hourly retrain   │
-     │  → MLflow registry      │
-     │  → Shadow deploy → A/B  │
-     └─────────────────────────┘
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Streaming Feature Computation (Flink):
-  ┌──────────────────────────────────────────────────────────┐
-  │  Kafka (tx events)                                       │
-  │       │                                                  │
-  │       v                                                  │
-  │  Flink Job (sliding windows)                             │
-  │  - [card_id, 1h]  → sum(amount), count(tx)              │
-  │  - [card_id, 24h] → sum(amount), distinct merchants      │
-  │  - [device_id, 1h] → count(cards_used)                  │
-  │       │                                                  │
-  │       v                                                  │
-  │  Redis (atomic INCR + EXPIRE)                            │
-  │  Key: feat:{card_id}:{window}:{metric}                   │
-  │  TTL: window_size + 10min buffer                         │
-  └──────────────────────────────────────────────────────────┘
+    TX(["Transaction event"]) --> RULE{"Rule engine (sub-1ms): blocklist / allowlist / hard rules"}
+    RULE -->|"blocklist hit"| BLK1["Block"]
+    RULE -->|"allowlist hit"| APP1["Approve"]
+    RULE -->|"pass-through ~60%"| FEAT["Feature computation (5-10ms): real-time + Redis aggregates + graph"]
+    FEAT --> MODEL["XGBoost model (10-15ms): fraud_probability 0.0-1.0"]
+    MODEL --> ROUTE{"Threshold routing"}
+    ROUTE -->|"score over 0.85"| BLK["Auto block"]
+    ROUTE -->|"0.40 to 0.85"| REV["Human review queue"]
+    ROUTE -->|"score under 0.40"| APP["Auto approve"]
+    REV --> DASH["Analyst dashboard: reason codes + SHAP"]
+    DASH -->|"labeled feedback"| TRAIN["Training pipeline (Flink + Kafka + Spark): daily/hourly retrain to MLflow"]
+    TRAIN -.-> MODEL
+
+    class TX io
+    class RULE,ROUTE mathOp
+    class BLK1,BLK lossN
+    class APP1,APP io
+    class FEAT,REV req
+    class MODEL,TRAIN train
+    class DASH base
 ```
+
+The rule engine resolves roughly 40% of transactions deterministically in sub-1ms; the remaining ~60% get windowed features and an XGBoost score that routes into auto-block, human review, or auto-approve. Analyst-confirmed labels feed the retraining loop (dotted).
+
+```mermaid
+sankey-beta
+
+Transactions,Rule engine,1000
+Rule engine,Allowlist approve,250
+Rule engine,Blocklist block,150
+Rule engine,ML model,600
+ML model,Auto approve,575
+ML model,Human review,20
+ML model,Auto block,5
+```
+
+Representative disposition of 1,000 transactions: the rule engine clears ~40% (allow + block) and passes ~60% to the model, which auto-blocks about 0.5% and sends about 2% to human review — consistent with the score-distribution guardrails.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    K(["Kafka: tx events"]) --> FL["Flink job: sliding windows"]
+    FL --> W1["card_id 1h: sum(amount), count(tx)"]
+    FL --> W2["card_id 24h: sum(amount), distinct merchants"]
+    FL --> W3["device_id 1h: count(cards used)"]
+    W1 --> RD["Redis: atomic INCR + EXPIRE, key feat:card:window:metric"]
+    W2 --> RD
+    W3 --> RD
+    RD --> SC(["Feature read at scoring (sub-1ms)"])
+
+    class K,SC io
+    class FL mathOp
+    class W1,W2,W3 req
+    class RD base
+```
+
+Spend-velocity aggregates are computed off the critical path: Flink maintains per-card and per-device sliding windows with exactly-once semantics and writes them to Redis, so scoring only does a sub-1ms GET instead of a live aggregation.
 
 ---
 

@@ -15,80 +15,89 @@ Constraints:
 
 ## Architecture Overview
 
-```
-  User Query: "red running shoes size 10"
-        │
-        v
-  ┌─────────────────────────────────────────────────────────────────┐
-  │  QUERY UNDERSTANDING (10ms)                                     │
-  │                                                                 │
-  │  ┌─────────────┐  ┌──────────────┐  ┌───────────────────────┐  │
-  │  │ Spell Check │  │ Query Intent │  │ Query Expansion       │  │
-  │  │ (symspell)  │  │ Classifier   │  │ (BERT synonym gen)    │  │
-  │  │ "sheos"     │  │ navigational │  │ "shoes" → "footwear,  │  │
-  │  │ → "shoes"   │  │ transactional│  │ sneakers, trainers"   │  │
-  │  │ <1ms        │  │ informational│  │ top-5 synonyms        │  │
-  │  └─────────────┘  └──────────────┘  └───────────────────────┘  │
-  │                                                                 │
-  │  Output: normalized_query, intent, expanded_terms              │
-  └────────────────────────────┬────────────────────────────────────┘
-                               │
-                               v
-  ┌─────────────────────────────────────────────────────────────────┐
-  │  RETRIEVAL / CANDIDATE GENERATION (25ms)                        │
-  │                                                                 │
-  │  ┌──────────────────┐    ┌──────────────────────────────────┐   │
-  │  │  BM25 (Lexical)  │    │  Dense Retrieval (Semantic)      │   │
-  │  │  ElasticSearch   │    │  Two-Tower: query encoder +      │   │
-  │  │  top-1000        │    │  item encoder, FAISS IVF index   │   │
-  │  │  inverted index  │    │  top-500                         │   │
-  │  │  + filters       │    │  (BERT-mini, 66M params)         │   │
-  │  └────────┬─────────┘    └──────────────┬───────────────────┘   │
-  │           │                             │                        │
-  │           └──────────────┬──────────────┘                        │
-  │                          v                                       │
-  │              RRF Fusion (Reciprocal Rank)                        │
-  │              top-500 candidates                                  │
-  └────────────────────────────┬────────────────────────────────────┘
-                               │
-                               v
-  ┌─────────────────────────────────────────────────────────────────┐
-  │  LEARNING TO RANK (40ms)                                        │
-  │                                                                 │
-  │  LambdaMART (XGBoost + LambdaRank gradients)                   │
-  │  500 features per (query, product) pair:                        │
-  │  - Query-product: BM25 score, dense score, exact match          │
-  │  - Product: CTR_7d, conversion_rate, avg_rating, review_count   │
-  │  - User: user_category_affinity, price_sensitivity              │
-  │  - Context: device_type, hour_of_day, session_depth             │
-  │  - Cross: price_vs_user_avg, category_match                     │
-  │                                                                 │
-  │  Output: 20 ranked products                                     │
-  └────────────────────────────┬────────────────────────────────────┘
-                               │
-                               v
-  ┌─────────────────────────────────────────────────────────────────┐
-  │  BUSINESS RE-RANKING (5ms)                                      │
-  │  - Personalization boost (user history affinity)                │
-  │  - Inventory rules (out-of-stock demotion)                      │
-  │  - Margin rules (promoted products +0.02 score boost)           │
-  │  - Brand diversity (max 3 per brand in top-10)                  │
-  └────────────────────────────┬────────────────────────────────────┘
-                               │
-                               v
-                     Top-20 products returned
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  TRAINING PIPELINE (offline, daily):
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  Click logs (Kafka) → Spark ETL → Position Bias Correction       │
-  │  → LTR training data (query, product, relevance_label)           │
-  │  → LambdaMART training → MLflow → A/B deploy                    │
-  │                                                                  │
-  │  Label construction:                                             │
-  │  purchase = 3, add_to_cart = 2, long_click (>30s) = 1, click = 0.5 │
-  │  Position bias: multiply by IPW = 1/P(click|position)           │
-  └──────────────────────────────────────────────────────────────────┘
+    Q(["User query: red running shoes size 10"])
+
+    subgraph QU["Query understanding (10ms)"]
+        SP["Spell check (symspell)"]
+        IN["Intent classifier: nav / txn / info"]
+        EX["Query expansion (BERT synonyms)"]
+    end
+
+    subgraph RETR["Retrieval / candidate generation (25ms)"]
+        BM["BM25 lexical (ElasticSearch): top-1000"]
+        DE["Dense retrieval (Two-Tower + FAISS): top-500"]
+        RRF(("RRF fusion"))
+        BM --> RRF
+        DE --> RRF
+    end
+
+    subgraph TRAIN["Training pipeline (offline, daily)"]
+        CL["Click logs (Kafka)"] --> ETL["Spark ETL + position-bias correction (IPW)"]
+        ETL --> LBL["LTR training data: query, product, relevance"]
+        LBL --> MART["LambdaMART training"]
+        MART --> MLF["MLflow, A/B deploy"]
+    end
+
+    Q --> QU
+    QU --> RETR
+    RETR --> LTR["LambdaMART LTR (40ms): 500 features to 20 ranked"]
+    LTR --> BR["Business re-ranking (5ms): personalization + inventory + margin + brand diversity"]
+    BR --> OUT(["Top-20 products"])
+    MLF -.-> LTR
+
+    class Q,OUT io
+    class SP,IN,EX req
+    class BM,DE frozen
+    class RRF,LTR,BR mathOp
+    class CL,ETL,LBL req
+    class MART train
+    class MLF base
 ```
+
+Query understanding normalizes intent and expands terms; hybrid retrieval fuses BM25 and dense candidates via RRF; LambdaMART ranks 500 candidates on 500 features; a business layer applies inventory, margin, and diversity rules. The offline pipeline debiases click logs (IPW) before retraining and deploying the ranker (dotted).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q(["Normalized query"]) --> BM["BM25 (ElasticSearch): inverted index, top-1000"]
+    Q --> DE["Dense (Two-Tower + FAISS): nprobe=64, top-500"]
+    BM --> RRF(("RRF"))
+    DE --> RRF
+    RRF --> C(["Top-500 fused candidates"])
+
+    class Q,C io
+    class BM,DE frozen
+    class RRF mathOp
+```
+
+BM25 catches rare exact terms while dense retrieval captures semantics; Reciprocal Rank Fusion merges both ranked lists with no weight tuning, yielding 500 robust candidates for the ranker.
+
+```mermaid
+xychart-beta
+    title "Click-through rate by result position (position bias)"
+    x-axis ["Pos 1", "Pos 2", "Pos 3", "Pos 4", "Pos 5", "Pos 6", "Pos 7", "Pos 8", "Pos 9", "Pos 10"]
+    y-axis "Relative CTR" 0 --> 0.35
+    bar [0.30, 0.18, 0.12, 0.08, 0.055, 0.04, 0.03, 0.025, 0.02, 0.018]
+```
+
+Position 1 draws roughly 5x the clicks of position 5 regardless of true relevance, so training on raw clicks merely replicates the current ranking. IPW re-weights each click by 1/P(examined|position) to strip out this bias before training the ranker.
 
 ---
 

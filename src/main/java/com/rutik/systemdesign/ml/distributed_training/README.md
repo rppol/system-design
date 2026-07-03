@@ -68,38 +68,104 @@ DP × TP × PP: data parallel across super-nodes, tensor parallel within a node,
 
 ## 5. Architecture Diagrams
 
+### Three ways to split the work: data vs tensor vs pipeline parallel
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph DP["Data parallel — split the batch"]
+        dp0["GPU0\nfull model\nbatch shard 0"]
+        dp1["GPU1\nfull model\nbatch shard 1"]
+        dp0 <-->|"AllReduce grads"| dp1
+    end
+    subgraph TP["Tensor parallel — split each layer"]
+        tp0["GPU0\nW columns 0..k/2"]
+        tp1["GPU1\nW columns k/2..k"]
+        tp0 <-->|"AllReduce per layer"| tp1
+    end
+    subgraph PP["Pipeline parallel — split the layers"]
+        pp0["GPU0\nlayers 0..15"] --> pp1["GPU1\nlayers 16..31"]
+    end
+
+    class dp0,dp1 train
+    class tp0,tp1 mathOp
+    class pp0,pp1 base
 ```
-DDP: Data Parallel (2 nodes x 4 GPUs = 8 processes)
 
-Node 0                              Node 1
-+--GPU0---+ +--GPU1---+            +--GPU4---+ +--GPU5---+
-| Model   | | Model   |            | Model   | | Model   |
-| copy    | | copy    |            | copy    | | copy    |
-| batch_0 | | batch_1 |            | batch_4 | | batch_5 |
-+----+----+ +----+----+            +----+----+ +----+----+
-     |           |     AllReduce        |           |
-     +-----------+------(NCCL)----------+-----------+
-                  (sum gradients across all 8 GPUs)
-                  (broadcast averaged gradient back)
-                  Each GPU applies identical update
+Data parallel replicates the whole model and only syncs gradients (one AllReduce per step); tensor parallel splits a single weight matrix and syncs inside every layer (needs NVLink); pipeline parallel splits the layer stack and passes activations between stages. 3D parallelism combines all three: TP inside a node, PP across nodes, DP across replica groups.
 
+### DDP: data-parallel training with gradient AllReduce
 
-FSDP: Fully Sharded Data Parallel (4 GPUs, simplified)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-     GPU 0        GPU 1        GPU 2        GPU 3
-  +--------+   +--------+   +--------+   +--------+
-  | Param  |   | Param  |   | Param  |   | Param  |
-  | shard0 |   | shard1 |   | shard2 |   | shard3 |
-  | Grad   |   | Grad   |   | Grad   |   | Grad   |
-  | shard0 |   | shard1 |   | shard2 |   | shard3 |
-  | Optim  |   | Optim  |   | Optim  |   | Optim  |
-  | shard0 |   | shard1 |   | shard2 |   | shard3 |
-  +---+----+   +---+----+   +---+----+   +---+----+
-      |             |             |             |
-  AllGather before forward pass (gather full param tensor)
-  ReduceScatter after backward (scatter reduced gradients)
+    subgraph N0["Node 0"]
+        g0["GPU0\ncopy · batch_0"]
+        g1["GPU1\ncopy · batch_1"]
+    end
+    subgraph N1["Node 1"]
+        g4["GPU4\ncopy · batch_4"]
+        g5["GPU5\ncopy · batch_5"]
+    end
+    g0 --> ar(("AllReduce\nsum grads · NCCL"))
+    g1 --> ar
+    g4 --> ar
+    g5 --> ar
+    ar --> upd["Averaged gradient\nbroadcast to every GPU\nidentical update applied"]
 
+    class g0,g1,g4,g5 train
+    class ar mathOp
+    class upd base
+```
 
+Every GPU holds a full model copy and a different data shard; after the backward pass NCCL AllReduce sums and averages gradients across all 8 GPUs, then each GPU applies the identical update — which is why all copies stay in lockstep with no master bottleneck.
+
+### FSDP / ZeRO-3: shard params, grads, and optimizer state
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph shards["Persistent shards — 1/N per GPU"]
+        s0["GPU0\nparam+grad+optim\nshard 0"]
+        s1["GPU1\nshard 1"]
+        s2["GPU2\nshard 2"]
+        s3["GPU3\nshard 3"]
+    end
+    shards -->|"AllGather (pre-forward)"| full["Full param tensor\nfor current layer\nfreed after use"]
+    full --> fwd["Forward + backward\non local micro-batch"]
+    fwd -->|"ReduceScatter (post-backward)"| shards
+
+    class s0,s1,s2,s3 train
+    class full mathOp
+    class fwd base
+```
+
+Each rank permanently holds only 1/N of parameters, gradients, and optimizer state (~10M/N bytes total). Before a layer runs, AllGather transiently materializes its full weights, which are freed right after; after backward, ReduceScatter distributes reduced gradients back to shards — trading roughly 2× the communication of DDP for a linear cut in per-GPU memory.
+
+### Pipeline parallelism: 1F1B schedule and the bubble
+
+```
 Pipeline Parallelism (4 stages, 4 micro-batches, 1F1B schedule)
 
 Stage 0 [F1][F2][F3][F4][B4][B3][B2][B1]
@@ -109,6 +175,34 @@ Stage 3                [F1][F2][F3][F4][B4][B3][B2][B1]
                                     ^--- steady state: all stages active
 F=forward, B=backward, pipeline bubble at start/end
 ```
+
+Each stage owns a slice of layers; the horizontal offset is the fill/drain "bubble" where a stage sits idle waiting for its first micro-batch — bubble fraction is (p−1)/m for p stages and m micro-batches, which is why more micro-batches amortize the idle time. (Kept as ASCII because the exact per-stage offsets carry the meaning.)
+
+### DDP scaling efficiency: ideal vs measured
+
+```mermaid
+xychart-beta
+    title "DDP scaling: ideal linear (line) vs measured throughput (bars)"
+    x-axis "Number of GPUs" [1, 8, 16, 32, 64]
+    y-axis "Throughput (x single-GPU)" 0 --> 64
+    bar [1, 7.6, 14.8, 28.5, 54]
+    line [1, 8, 16, 32, 64]
+```
+
+The straight line is perfect linear scaling; the bars are realistic measured throughput. The gap widens with scale because AllReduce communication grows with GPU count — the reason well-tuned DDP lands at ~90-95% efficiency and why communication, not compute, is the scaling bottleneck.
+
+### Per-GPU memory by sharding strategy (7B model)
+
+```mermaid
+xychart-beta
+    title "Per-GPU memory, 7B model, Adam mixed precision, 8-way sharding"
+    x-axis "Strategy" ["DDP", "ZeRO-1", "ZeRO-2", "ZeRO-3 / FSDP"]
+    y-axis "GB per GPU" 0 --> 120
+    bar [112, 40, 26, 14]
+    line [80, 80, 80, 80]
+```
+
+DDP replicates all ~16 bytes/param (params + grads + fp32 master + Adam m/v) = 112 GB, which does not fit under the 80 GB A100 ceiling (the flat line); ZeRO-1 shards optimizer state, ZeRO-2 adds gradients, and ZeRO-3/FSDP shards everything down to ~14 GB — each stage trading more communication for less resident memory.
 
 ---
 
@@ -443,6 +537,30 @@ MFU = (actual FLOP/s achieved) / (peak theoretical FLOP/s of hardware). For an A
 
 **Q: What is gradient checkpointing and when should you use it?**
 Gradient checkpointing (also called activation recomputation) trades compute for memory: instead of storing all intermediate activations in memory during the forward pass, only a subset of "checkpoint" tensors are stored. During the backward pass, the omitted activations are recomputed from the nearest checkpoint. This reduces activation memory from O(layers × batch × sequence × hidden) to O(sqrt(layers) × batch × sequence × hidden) with optimal placement — roughly a 33-40% reduction in activation memory for transformers. Use it when VRAM is the bottleneck (not compute) — it adds approximately 33% extra compute (one extra forward pass per layer) but reduces peak memory enough to increase batch size or train a larger model.
+
+**Q: Why is communication, not compute, the bottleneck in distributed training?**
+Because GPU compute has scaled roughly 100× in a decade while network bandwidth scaled only about 10×, so synchronizing gradients now dominates each step. Every synchronous step must move gradient tensors between GPUs — over NVLink (600 GB/s) intra-node or InfiniBand (400 Gb/s) inter-node — and this AllReduce time does not shrink as you add compute; it grows with model size and GPU count. That is why the highest-leverage optimizations reduce communication *volume* (mixed precision halves gradient bytes, FSDP/ZeRO shard state, gradient compression), and why techniques that overlap communication with the backward pass (gradient bucketing, `overlap_comm`) matter as much as raw FLOP/s. Adding nodes to a communication-bound job makes it slower, not faster.
+
+**Q: What is the difference between synchronous and asynchronous distributed training?**
+Synchronous training waits for all workers to finish the backward pass before syncing gradients, so every replica stays identical. Asynchronous training lets each worker update a shared parameter server without waiting, at the risk of stale gradients. Synchronous DDP is the production standard because the gradient every GPU applies is the exact average across all GPUs, giving deterministic, reproducible convergence — its weakness is that the slowest worker gates every step. The asynchronous parameter-server pattern removes that wait and tolerates heterogeneous hardware, but a worker computing on weights that are several updates old injects stale gradients that destabilize convergence, so it is rarely used for modern large-model training.
+
+**Q: What is a straggler in synchronous training and how do you mitigate it?**
+A straggler is the slowest worker in a synchronous step; because AllReduce waits for everyone, one slow GPU stalls the entire cluster. Causes include an unbalanced data shard (one rank gets larger samples), a thermally throttled or faulty GPU, contended data loading, or a slow network link on one node. Mitigations: use `DistributedSampler(drop_last=True)` so every rank processes equal-size batches, pin data-loader workers and prefetch to hide I/O, monitor per-rank GPU utilization (uneven utilization is the tell), and enable backup/elastic workers where the framework supports them. In practice, most stragglers trace back to data skew or a single degraded node, so per-rank profiling is the first diagnostic step.
+
+**Q: What causes a NCCL hang or timeout, and how do you debug it?**
+A NCCL hang is usually a collective mismatch — one rank calls a different collective, shape, or dtype than the others, so all ranks block forever waiting to rendezvous. Common triggers: a conditional code path that skips an AllReduce on some ranks (e.g., an early `continue` in the loop), uneven batch counts across ranks (fix with `drop_last=True`), or `find_unused_parameters=False` when the model actually has unused parameters. Debug by setting `NCCL_DEBUG=INFO` to see which collective and transport each rank reached, `TORCH_DISTRIBUTED_DEBUG=DETAIL` to catch shape/param mismatches, and check that every rank executes the same number of forward/backward passes. Timeouts also appear when one rank crashes silently — inspect all rank logs, not just rank 0.
+
+**Q: Why is Ring-AllReduce bandwidth-optimal, and how does its cost scale with GPU count?**
+Ring-AllReduce moves each gradient chunk around a logical ring so the total data each GPU sends is ~2×(N−1)/N of the gradient size — nearly constant and independent of N. It runs in two phases: ReduceScatter (each GPU accumulates one chunk as it travels the ring) then AllGather (each GPU broadcasts its finished chunk), each taking N−1 steps of size M/N. The key property is that per-GPU bandwidth does not blow up as you add GPUs — unlike a naive scheme where a parameter server's ingress scales with N — which is why NCCL uses ring (and tree/hierarchical variants) to keep AllReduce time bounded at scale. Latency still grows with N (more hops), so very large clusters use hierarchical topology-aware collectives.
+
+**Q: How does FP16 mixed-precision training use a GradScaler and FP32 master weights?**
+FP16 training keeps an FP32 master copy of the weights and multiplies the loss by a scale factor so small gradients do not underflow to zero in FP16. The forward and backward passes run in FP16 for speed and memory, but FP16's narrow range (5 exponent bits) means tiny gradient values round to zero — the `GradScaler` multiplies the loss by a large factor (e.g., 2^16) before backward, unscales the gradients before the optimizer step, and dynamically halves the scale if it detects inf/NaN. The optimizer updates the FP32 master weights (so small updates are not lost to FP16 rounding), which are then cast back to FP16 for the next step. BF16 avoids all of this because its FP32-equivalent exponent range does not underflow — which is why BF16 needs no GradScaler on A100/H100.
+
+**Q: What is the difference between weak scaling and strong scaling?**
+Weak scaling grows the total problem with the GPU count so work per GPU stays fixed (e.g., keep local batch constant, global batch grows with N); strong scaling keeps the problem fixed and adds GPUs to finish it faster. Distributed training is almost always weak scaling: you add GPUs to process a larger global batch per step, then apply the linear scaling rule to the learning rate. Strong scaling — splitting a fixed batch across more GPUs — hits diminishing returns quickly because per-GPU compute shrinks while communication stays constant, so the communication-to-compute ratio worsens. Understanding which regime you are in tells you whether adding GPUs will actually speed up your run.
+
+**Q: What is ZeRO-Infinity and what is the tradeoff of CPU/NVMe offloading?**
+ZeRO-Infinity extends ZeRO-3 by offloading parameter and optimizer shards to CPU RAM and NVMe SSD, enabling near-unlimited model size at the cost of speed. When even ZeRO-3's 1/N GPU footprint is too large, ZeRO-Infinity stages shards on host memory and disk, streaming them to the GPU just in time for each layer. This lets a small GPU cluster train trillion-parameter models, but throughput drops sharply because PCIe (~32 GB/s) and NVMe are far slower than NVLink (600 GB/s) — the data movement becomes the bottleneck. Use it only for research or capacity-constrained runs where fitting the model at all matters more than training speed; for production, keep state on the GPU (`offload_optimizer: none`) whenever it fits.
 
 ---
 

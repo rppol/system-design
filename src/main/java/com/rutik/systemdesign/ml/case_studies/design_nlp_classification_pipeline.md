@@ -64,51 +64,53 @@ Why this system exists: Content moderation, support ticket routing, document tag
 
 ## 3. High-Level Architecture
 
-```
-  ┌────────────────────────────────────────────────────────────────┐
-  │                  DOCUMENT INGESTION                            │
-  │  Kafka topic: raw_documents (500/sec)                         │
-  └──────────────────────────────┬─────────────────────────────────┘
-                                 │
-  ┌──────────────────────────────▼─────────────────────────────────┐
-  │                PREPROCESSING SERVICE                           │
-  │  - Language detection (langdetect, 0.5ms)                     │
-  │  - Text normalization (lowercasing, HTML strip, emoji → text) │
-  │  - Tokenization (HuggingFace tokenizer)                       │
-  └──────────────────────────────┬─────────────────────────────────┘
-                                 │
-              ┌──────────────────┼──────────────────┐
-              │                  │                  │
-  ┌───────────▼─────────┐  ┌─────▼────────┐  ┌──────▼───────────┐
-  │  TIER-1: TF-IDF+LR  │  │ TIER-2:      │  │  TIER-3: LLM     │
-  │  (< 5ms, all docs)  │  │ DistilBERT   │  │  few-shot        │
-  │                     │  │ (< 25ms,     │  │  (rare/novel     │
-  │  High-confidence    │  │  ambiguous)  │  │   categories)    │
-  │  → direct to output │  │              │  │                  │
-  └────────────────┬────┘  └──────┬───────┘  └──────────────────┘
-                   │              │
-  ┌────────────────▼──────────────▼───────────────────────────────┐
-  │              CASCADE ROUTER                                   │
-  │  if tier-1 confidence > 0.90: route to output                │
-  │  elif tier-2 confidence > 0.75: route to output              │
-  │  elif confidence in [0.5, 0.75]: human review queue         │
-  │  else: route to LLM tier-3                                   │
-  └──────────────────────────────┬─────────────────────────────────┘
-                                 │
-  ┌──────────────────────────────▼─────────────────────────────────┐
-  │           PREDICTION STORE + AUDIT LOG                        │
-  │  (doc_id, label, confidence, model_tier, timestamp)           │
-  └───────────┬────────────────────────────────────────────────────┘
-              │
-  ┌───────────▼────────────────┐  ┌──────────────────────────────┐
-  │  DOWNSTREAM CONSUMERS      │  │  ACTIVE LEARNING PIPELINE    │
-  │  Content routing           │  │  - Embed all docs (nightly)  │
-  │  Alert triggers            │  │  - Select uncertain/diverse  │
-  │  Analytics dashboards      │  │    samples for labeling      │
-  └────────────────────────────┘  └──────────────────────────────┘
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ING([Document Ingestion\nKafka raw_documents · 500/sec]) --> PRE["Preprocessing\nlang detect · normalize · tokenize"]
+    PRE --> T1["Tier-1: TF-IDF + LR\n~5ms · all docs"]
+    PRE --> T2["Tier-2: DistilBERT\n~25ms · ambiguous"]
+    PRE --> T3["Tier-3: LLM few-shot\nrare / novel categories"]
+    T1 --> ROUTE{"Cascade router\nconfidence thresholds"}
+    T2 --> ROUTE
+    T3 --> ROUTE
+    ROUTE --> STORE["Prediction Store + Audit Log\ndoc_id · label · confidence · tier"]
+    STORE --> DOWN([Downstream\nrouting · alerts · dashboards])
+    STORE --> AL["Active Learning\nembed · select uncertain/diverse"]
+    AL -.-> T2
+
+    class ING,DOWN io
+    class PRE,STORE base
+    class T1 frozen
+    class T2 train
+    class T3 mathOp
+    class ROUTE req
+    class AL train
 ```
 
+Every document is tokenized once, then a confidence-gated cascade router sends it to the cheapest tier that can classify it confidently — most exit at TF-IDF+LR, ambiguous cases escalate to DistilBERT, novel categories fall through to the LLM — while the active-learning loop feeds fresh labels back into the DistilBERT tier.
+
 **Data flow:** Every document enters Tier-1. 70% exit at Tier-1 with high-confidence prediction. 25% escalate to Tier-2. 3% go to human review. 2% go to LLM Tier-3 for novel categories.
+
+```mermaid
+sankey-beta
+Ingested,Tier-1,100
+Tier-1,Output,70
+Tier-1,Escalated,30
+Escalated,Tier-2,25
+Escalated,Human review,3
+Escalated,Tier-3 LLM,2
+Tier-2,Output,25
+```
+
+Per 100 documents, 70 resolve at the cheap Tier-1 model and only 30 escalate — 25 to DistilBERT, 3 to human review, 2 to the LLM — which is why the cascade delivers near-BERT accuracy at roughly a fifth of all-BERT serving cost.
 
 ---
 
@@ -358,6 +360,35 @@ def hybrid_active_learning(
 
 After fine-tuning DistilBERT, distill it into a smaller student model for production serving. This reduces p99 latency from 25ms to 8ms while preserving 97% of accuracy.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    TEACH["Teacher logits\nfine-tuned DistilBERT"] --> SOFTT(("÷ T"))
+    STUD["Student logits\n2-layer model"] --> SOFTS(("÷ T"))
+    SOFTT --> KL["Soft loss\nKL divergence · × T²"]
+    SOFTS --> KL
+    STUD --> CE["Hard loss\ncross-entropy vs labels"]
+    LAB([True labels]) --> CE
+    KL --> COMB["α · soft + (1−α) · hard"]
+    CE --> COMB
+    COMB --> OUT([Distillation loss])
+
+    class TEACH frozen
+    class STUD train
+    class LAB io
+    class SOFTT,SOFTS mathOp
+    class KL,CE,COMB,OUT lossN
+```
+
+The student learns from two signals: temperature-softened teacher probabilities via a KL term (scaled by T squared) and the true labels via cross-entropy, blended by alpha=0.7 — the soft targets carry inter-class similarity that hard labels alone cannot convey.
+
 ```python
 import torch
 import torch.nn.functional as F
@@ -406,6 +437,16 @@ class DistillationLoss(nn.Module):
 | GPT-4 (few-shot, 5 examples) | 0.85 | 1,200ms | None (inference cost) | None |
 
 The cascade (TF-IDF+LR → DistilBERT → LLM) achieves 0.89 macro F1 at 8ms average latency and < 25ms p99. This beats any single-model approach on the accuracy × latency Pareto front. See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/README.md).
+
+```mermaid
+xychart-beta
+    title "Macro F1 by Model and Cascade"
+    x-axis ["TF-IDF+LR", "DistilBERT", "BERT-base", "GPT-4 few-shot", "Cascade"]
+    y-axis "Macro F1" 0.8 --> 0.92
+    bar [0.82, 0.88, 0.90, 0.85, 0.89]
+```
+
+The cascade reaches 0.89 macro F1 — within 1pp of BERT-base (0.90) — at 8ms average latency, beating every single model on the accuracy-versus-latency frontier.
 
 **Decision 2: Hard routing thresholds vs soft ensemble**
 

@@ -90,39 +90,158 @@ Key insight: more labels are not the goal — more *informative* labels are. Act
 
 ## 5. Architecture Diagrams
 
-### Active learning loop
+### Pool-based active learning loop
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    seed(["small seed\nlabeled set"])
+    fit["train model"]
+    score["score the UNLABELED pool\nacquisition function"]
+    select["select top-k\nuncertainty × diversity"]
+    human["human labels those k\nthe only expensive step"]
+    add["add to labeled set"]
+    done(["budget spent /\naccuracy target hit"])
+
+    seed --> fit --> score --> select --> human --> add
+    add -->|"repeat"| fit
+    add --> done
+
+    class seed,done io
+    class fit train
+    class score,select mathOp
+    class human lossN
+    class add base
 ```
-small seed labeled set
-       |
-   train model
-       |
-   score the UNLABELED pool with an acquisition function
-       |
-   select top-k most informative (uncertainty x diversity)
-       |
-   human labels those k    <-- the only expensive step
-       |
-   add to labeled set ----> (repeat until budget spent or accuracy target hit)
+
+The loop concentrates the one expensive step (human labeling, red) on the top-k most
+informative points rather than a random sample. Everything else — training, scoring,
+selection — is cheap and repeated until the label budget or accuracy target is hit.
+
+### Acquisition functions — which point to query next
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    root{"which point\nto query next?"}
+    unc["Uncertainty\nnear the boundary"]
+    dis["Disagreement\nepistemic uncertainty"]
+    div["Diversity\ncover feature space"]
+    hyb["Hybrid · BADGE\nuncertainty × diversity"]
+    lc(["least confidence\n1 − max p"])
+    mg(["margin\np1 − p2"])
+    en(["entropy\n−Σ p log p"])
+    qbc(["query-by-committee\nensemble disagrees"])
+    bald(["BALD\nmutual information"])
+    cs(["core-set\nfarthest-point"])
+
+    root --> unc --> lc
+    unc --> mg
+    unc --> en
+    root --> dis --> qbc
+    dis --> bald
+    root --> div --> cs
+    root --> hyb
+
+    class root req
+    class unc,dis,div,hyb base
+    class lc,mg,en,qbc,bald,cs io
 ```
+
+Uncertainty strategies pick points near the boundary; disagreement strategies (QBC,
+BALD) target *epistemic* uncertainty an ensemble can resolve; diversity/core-set
+covers the space. Batch active learning uses the hybrid branch (BADGE) — multiply
+uncertainty by diversity so a batch is informative *and* non-redundant.
+
+### Label efficiency — active learning reaches the target with fewer labels
+
+```mermaid
+xychart-beta
+    title "Accuracy vs labels acquired: active vs random"
+    x-axis "Labels acquired" [200, 500, 1000, 2000, 5000]
+    y-axis "Accuracy (%)" 50 --> 90
+    line [60, 72, 80, 85, 86]
+    line [58, 64, 70, 76, 85]
+```
+
+The upper curve (active learning) reaches ~85% accuracy at ~2,000 labels; the lower
+curve (random sampling) needs ~5,000 for the same accuracy — the 2-5x label saving
+active learning delivers by spending budget at the boundary instead of everywhere.
 
 ### Weak supervision pipeline (Snorkel-style)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    data(["unlabeled data"])
+    lf1["LF 1 · pattern / regex"]
+    lf2["LF 2 · gazetteer lookup"]
+    lfn["LF N · off-the-shelf model"]
+    mat["label matrix n×m\n−1 = abstain"]
+    lm["Label Model\nlearns per-LF accuracy\n+ correlations · denoise"]
+    prob["probabilistic labels"]
+    down["downstream model\nnoise-aware loss\ngeneralizes beyond LF coverage"]
+    prod(["production model"])
+
+    data --> lf1 --> mat
+    data --> lf2 --> mat
+    data --> lfn --> mat
+    mat --> lm --> prob --> down --> prod
+
+    class data,prod io
+    class lf1,lf2,lfn train
+    class mat,prob mathOp
+    class lm base
+    class down train
 ```
-unlabeled data
-   |
-[Labeling Function 1]  -> noisy labels (with abstains)
-[Labeling Function 2]  -> noisy labels
-[Labeling Function N]  -> noisy labels
-   |  (LF outputs form an n x m label matrix; -1 = abstain)
-[Label Model]  estimates each LF's accuracy + correlations,
-   |           denoises and combines -> probabilistic labels
-   v
-[Downstream model]  trained on probabilistic labels (noise-aware loss)
-   |               generalizes beyond LF coverage
-   v
-production model
+
+Each labeling function emits noisy, abstaining votes into an n×m matrix; the label
+model denoises them by learning each LF's accuracy and correlations (not a plain
+majority vote). The downstream model trains on the resulting probabilistic labels so
+it *generalizes beyond* the LFs' coverage.
+
+### Labeling-function portfolio — coverage vs accuracy
+
+```mermaid
+quadrantChart
+    title LF portfolio: coverage vs accuracy
+    x-axis Low coverage --> High coverage
+    y-axis Low accuracy --> High accuracy
+    quadrant-1 Ideal keep
+    quadrant-2 Precise but narrow
+    quadrant-3 Drop
+    quadrant-4 Prune or fix
+    "Refund regex": [0.25, 0.9]
+    "Gazetteer ORG": [0.7, 0.85]
+    "Broad keyword": [0.6, 0.55]
+    "Zero-shot voter": [0.8, 0.72]
 ```
+
+An LF is judged on two axes: how much it covers and how accurate it is where it fires.
+High-coverage high-accuracy functions are ideal; low-coverage high-accuracy ones are
+precise but narrow (still useful); high-coverage low-accuracy functions inject noise
+and should be pruned or fixed.
 
 ---
 
@@ -402,6 +521,9 @@ Active learning targets the high cost of labeled data by letting the model choos
 **Q: What are the main acquisition functions and how do they differ?**
 Uncertainty-based: least confidence (`1 - max p`), margin sampling (`p_top1 - p_top2`, smaller = more ambiguous), and entropy (uses the whole distribution). Disagreement-based: query-by-committee picks points where an ensemble disagrees, and BALD picks points of maximum mutual information (Bayesian). Diversity-based: core-set methods pick points that best cover the feature space regardless of uncertainty. In practice, batch active learning uses hybrids (e.g. BADGE) that multiply uncertainty by diversity so a batch is both informative and non-redundant.
 
+**Q: What is stream-based active learning and when is it preferable to pool-based?**
+Stream-based active learning decides label-or-not for each incoming example on the fly, rather than scoring a fixed pool. Because it sees examples one at a time and cannot rank the whole dataset, it uses a threshold or a query-probability on the acquisition score to accept or discard each item as it arrives. Prefer it over pool-based when data arrives as a stream and you cannot store or repeatedly rescore a large pool — online systems, edge devices, or storage-constrained settings — accepting that its per-example decisions are less globally optimal than pool ranking.
+
 **Q: Why can't you evaluate an active-learning model on the examples it queried?**
 Because those examples were selected *because the model was uncertain about them* — they are the hardest, most boundary-heavy points, not a representative sample of real traffic. Measuring accuracy on them understates true performance and is biased by the acquisition policy. You must keep a separate, randomly sampled i.i.d. test set for evaluation and never test on the queries.
 
@@ -417,8 +539,14 @@ Majority vote treats every labeling function as an equally-reliable, independent
 **Q: Why train a downstream model on weak labels instead of just using the label model's output?**
 The label model only labels examples that at least one labeling function covers, and only as well as the functions allow. Training a downstream model (e.g. BERT) on the probabilistic labels lets it *generalize beyond LF coverage* — it learns the underlying features and can label examples no function fired on, smoothing over individual LF noise. This generalization is the whole point: LFs are a means to a training set, not the final classifier.
 
+**Q: Why train on soft probabilistic weak labels instead of hard-thresholding them to 0/1 first?**
+Hard-thresholding weak labels to 0/1 discards the label model's confidence and forces the downstream model to treat a 0.55 label exactly like a 0.99 one. Weak supervision produces *probabilistic* labels precisely because the sources disagree; collapsing a 0.55 to a hard 1 injects overconfident noise the downstream model then fits as if it were certain. Train with a noise-aware/soft-label loss (e.g. cross-entropy against the probabilistic target) so uncertain examples contribute less gradient and the model naturally down-weights the label model's borderline calls.
+
 **Q: What metrics describe a labeling function's quality?**
 Coverage (the fraction of examples it labels rather than abstains on), empirical accuracy where it fires (measured on a small dev set), and its conflict/overlap with other functions. A high-coverage low-accuracy function injects noise; a low-coverage high-accuracy function is a precise but narrow signal. You want a portfolio of functions that together cover the data while the label model resolves their conflicts; track all three and prune functions that are high-coverage but near-chance.
+
+**Q: What is distant supervision and how does it generate weak labels?**
+Distant supervision aligns unlabeled text to an external knowledge base to generate noisy labels automatically, without any hand-annotation. The classic use is relation extraction: if a KB says two entities are related, every sentence mentioning both entities is heuristically labeled with that relation — cheap coverage at the cost of noise (many such sentences do not actually express the relation). In practice it becomes one labeling function among several (e.g. billing-code or SNOMED/ICD lookups for medical text), and a label model denoises it against the other sources rather than trusting it outright.
 
 **Q: What is the feedback-loop/bias risk in active learning?**
 Because the model selects its own labeling targets based on its current uncertainty, it can systematically ignore regions where it is *confidently wrong* (low uncertainty, high error), entrenching blind spots and never discovering an entire under-represented class. The labeled set also becomes non-representative of the data distribution. Mitigate by mixing in random/diverse samples each round, monitoring the labeled distribution against the unlabeled pool, and never reusing the queried set as a test set.
@@ -428,6 +556,9 @@ Active learning's uncertainty-based acquisition *is* an uncertainty estimate, an
 
 **Q: What is pseudo-labeling and what is its main risk?**
 Pseudo-labeling (self-training) uses the current model's confident predictions on unlabeled data as if they were true labels, adds them to training, and repeats. Its main risk is confirmation bias: the model reinforces its own mistakes, since wrong-but-confident pseudo-labels get baked in and amplified each round. Mitigations include high confidence thresholds, calibration before thresholding, only adding a limited number per round, and consistency regularization (FixMatch) that ties pseudo-labels to agreement across augmentations.
+
+**Q: What is consistency regularization (e.g. FixMatch) and how does it use unlabeled data?**
+Consistency regularization enforces that a model gives the same prediction to two augmentations of the same unlabeled input, turning unlabeled data into a training signal. FixMatch operationalizes this: it takes a *weakly* augmented view, keeps its prediction as a pseudo-label only when confidence exceeds a threshold, then trains the model to match that pseudo-label on a *strongly* augmented view of the same image. It combines pseudo-labeling with consistency, and the confidence gate plus strong augmentation are what keep it from collapsing into the confirmation bias that plagues naive self-training.
 
 **Q: You have 200 labeled examples and 2 million unlabeled. How do you build a production NER model?**
 Bootstrap with weak supervision: write gazetteer LFs (known entity lists), pattern LFs (capitalization plus trigger words), and use an off-the-shelf NER as one noisy voter; denoise with a label model to get probabilistic labels over a large slice of the 2M. Train a BERT-CRF on those weak labels so it generalizes beyond the gazetteers. Then run active learning: have the model flag its most uncertain sentences, have a human gold-label a few hundred (entity-level), fold them in, and iterate. Keep a separate randomly-sampled gold test set throughout.

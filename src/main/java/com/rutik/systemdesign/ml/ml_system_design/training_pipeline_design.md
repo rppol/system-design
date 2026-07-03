@@ -75,86 +75,128 @@ Key insight: the validation gates between steps are more important than the trai
 
 ## 5. Architecture Diagrams
 
-### Complete Training Pipeline DAG
+### Training Pipeline DAG — Build Phase
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    trigger([Trigger\nscheduled / drift / performance]) --> dv["Step 1 · Data validation\nschema, null rate, PSI, row count"]
+    dv --> dvgate{"All data checks pass?"}
+    dvgate -->|"fail"| halt1["Halt + alert\nnever train on bad data"]
+    dvgate -->|"pass"| fc["Step 2 · Feature computation\npoint-in-time join, train/val/test split"]
+    fc --> mt["Step 3 · Model training\nOptuna HPO 50 trials, log to MLflow"]
+    mt --> gate["Step 4 · Validation gate\nAUC, beats-prod, latency, fairness"]
+    gate -->|"fail"| halt2["Halt + alert\nprod model unchanged"]
+    gate -->|"pass"| reg["Step 5 · Registration\nMLflow registry + lineage"]
+    reg --> model([Registered model version\nready to deploy])
+
+    class trigger,model io
+    class dv,fc,dvgate mathOp
+    class mt train
+    class gate lossN
+    class halt1,halt2 frozen
+    class reg base
 ```
-TRIGGER
-  (scheduled / drift / performance)
-           │
-           ▼
-┌─────────────────────────────────┐
-│   STEP 1: DATA VALIDATION       │
-│   - Schema check                │
-│   - Null rate check (< 5%)     │
-│   - Distribution check (PSI)   │
-│   - Row count sanity            │
-│   GATE: fail if any check fails │
-└─────────────┬───────────────────┘
-              │ validated data snapshot (DVC tag)
-              ▼
-┌─────────────────────────────────┐
-│   STEP 2: FEATURE COMPUTATION   │
-│   - Spark batch feature join    │
-│   - Point-in-time correct join  │
-│   - Feature normalization       │
-│   - Train/val/test split        │
-│   GATE: feature count check     │
-└─────────────┬───────────────────┘
-              │ feature dataset (S3 path)
-              ▼
-┌─────────────────────────────────┐
-│   STEP 3: MODEL TRAINING        │
-│   - HPO with Optuna (50 trials) │
-│   - Train with best params      │
-│   - Log to MLflow               │
-│   GATE: training loss converged │
-└─────────────┬───────────────────┘
-              │ model artifact (MLflow run ID)
-              ▼
-┌─────────────────────────────────┐
-│   STEP 4: MODEL VALIDATION      │
-│   - AUC > 0.78 (threshold)      │
-│   - Improvement vs production   │
-│     model > 0.5% (t-test p<.05) │
-│   - Inference latency < 20ms    │
-│   - Fairness check across groups│
-│   GATE: all checks must pass    │
-└─────────────┬───────────────────┘
-              │ validated model
-              ▼
-┌─────────────────────────────────┐
-│   STEP 5: MODEL REGISTRATION    │
-│   - Register in MLflow registry │
-│   - Tag with data version,      │
-│     code version, metrics       │
-│   - Lineage metadata written    │
-└─────────────┬───────────────────┘
-              │ registered model version
-              ▼
-┌─────────────────────────────────┐
-│   STEP 6: SHADOW DEPLOYMENT     │
-│   - Deploy to shadow serving    │
-│   - Receive 100% traffic but    │
-│     do not serve predictions    │
-│   - Compare predictions vs prod │
-│   GATE: correlation with prod   │
-│         > 0.7, latency within   │
-│         SLA                     │
-└─────────────┬───────────────────┘
-              │ shadow validation passed
-              ▼
-┌─────────────────────────────────┐
-│   STEP 7: CANARY DEPLOYMENT     │
-│   - Serve 5% of traffic         │
-│   - Monitor business metric     │
-│     for 2 hours                 │
-│   GATE: metric not degraded     │
-│         by > 1%                 │
-└─────────────┬───────────────────┘
-              │ canary passed
-              ▼
-         FULL ROLLOUT (100%)
+
+Every step is a gate: a failure halts the run loudly rather than passing a degraded model downstream. The build phase ends at a registered, validated artifact — deployment is a separate flow (progressive-deployment diagram below).
+
+### Validation Gate — Four Checks (all must pass)
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    cand([Candidate model\n+ held-out test set]) --> g1["Gate 1 · offline AUC at least 0.78"]
+    cand --> g2["Gate 2 · beats prod\nWilcoxon p under 0.05, +0.5% AUC"]
+    cand --> g3["Gate 3 · P99 latency at most 20ms"]
+    cand --> g4["Gate 4 · fairness gap at most 10%"]
+    g1 --> allpass{"ALL four gates pass?"}
+    g2 --> allpass
+    g3 --> allpass
+    g4 --> allpass
+    allpass -->|"yes"| promote([Register + promote\nto staging])
+    allpass -->|"no"| reject["Reject + alert\nprod model keeps serving"]
+
+    class cand,promote io
+    class g1,g2,g3,g4 mathOp
+    class allpass lossN
+    class reject frozen
 ```
+
+The gate is a logical AND: a strong average AUC does not compensate for a failed latency or fairness check. Thresholds are fixed before the first run so they cannot be rationalized to fit the model you happen to get.
+
+### Progressive Deployment — Shadow to Canary to Rollout
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    reg([Registered model]) --> shadow["Shadow deploy\n100% traffic, predictions not served"]
+    shadow --> scorr{"Spearman corr at least 0.7\nand latency within SLA?"}
+    scorr -->|"no"| rb1["Rollback\nkeep prod model"]
+    scorr -->|"yes"| canary["Canary 5% traffic\nmonitor business metric 2h"]
+    canary --> cgate{"Metric not degraded\nby more than 1%?"}
+    cgate -->|"no"| rb2["Auto-rollback\nrevert to prod alias"]
+    cgate -->|"yes"| full([Full rollout 100%])
+
+    class reg,full io
+    class shadow,canary mathOp
+    class scorr,cgate mathOp
+    class rb1,rb2 lossN
+```
+
+Deployment is staged so each step limits blast radius: shadow proves correctness and latency under real load with zero user impact, canary risks only 5% of traffic, and either gate can auto-rollback before a full rollout.
+
+### Retraining Trigger Decision
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    perf([Business metric drop]) --> eval{"Any trigger condition met?"}
+    drift([Feature PSI over 0.2]) --> eval
+    vol([New labeled examples]) --> eval
+    sched([Days since last train]) --> eval
+    eval -->|"performance · high"| t1["Retrain now\nurgency high"]
+    eval -->|"drift · high"| t1
+    eval -->|"volume · medium"| t2["Queue retrain\nurgency medium"]
+    eval -->|"scheduled · low"| t3["Routine retrain\nurgency low"]
+    eval -->|"none"| noop([No retraining])
+
+    class perf,drift,vol,sched io
+    class eval mathOp
+    class t1 lossN
+    class t2 train
+    class t3 base
+    class noop frozen
+```
+
+When several conditions fire at once the evaluator returns the single highest-priority trigger (performance and drift outrank volume and schedule), so one urgent signal is never masked by a routine one.
 
 ### Data Versioning Strategy
 
@@ -751,6 +793,30 @@ An orchestration tool (Airflow, Kubeflow, Prefect) defines and executes the pipe
 
 **Q: How do you optimize training pipeline speed without sacrificing correctness?**
 Speed optimizations at each stage: (1) data loading — use Parquet with predicate pushdown and column pruning; only load the columns used in training; use date partition filters to avoid full scans; (2) feature computation — cache intermediate Spark DataFrames; repartition to match cluster parallelism (200-400 partitions for standard clusters); (3) model training — use GPU training for deep models; for LightGBM, use `device="gpu"` and increase `num_leaves` per GPU core; (4) HPO — use Optuna's TPE sampler with pruning (stop bad trials early); parallelize trials across cluster nodes with Ray Tune; set a time budget rather than a fixed trial count; (5) validation — benchmark latency in parallel with computing offline metrics. Never sacrifice correctness for speed: temporal splitting and point-in-time joins must remain correct even if slower.
+
+**Q: Why can re-running a pipeline with the same random seed still produce a slightly different model?**
+Non-determinism leaks in through GPU floating-point atomics, non-deterministic data ordering, and library or hardware version differences — a fixed seed alone does not guarantee bit-identical models. GPU reductions accumulate in a nondeterministic order, multi-threaded data loaders can shuffle differently, and CUDA/cuDNN version changes alter kernel selection. For true reproducibility, pin library versions, enable deterministic flags (`torch.use_deterministic_algorithms(True)`, `cudnn.deterministic=True`), fix the data load order, and record the full environment in the run metadata. In practice, target functionally identical models within a metric tolerance rather than bit-identical, and gate on that tolerance.
+
+**Q: What is the difference between shadow deployment, canary deployment, and an A/B test?**
+Shadow runs the new model on live traffic but serves none of its predictions; canary serves a small slice like 5% and watches metrics; an A/B test splits traffic to measure a significant metric difference. Shadow validates that the model produces valid predictions and meets latency under real load with zero user risk. Canary limits blast radius and enables fast automated rollback the moment a business metric drops. An A/B test is a controlled experiment run long enough to reach statistical significance, and is the final arbiter of whether the new model is genuinely better. A mature pipeline runs them in sequence: shadow, then canary, then A/B, then full rollout.
+
+**Q: How do you prevent a retraining storm when several triggers fire at once?**
+Debounce and coalesce triggers: enforce a minimum interval between runs, deduplicate concurrent triggers, and execute only the single highest-priority one. Without this, a performance drop, a drift alert, and the daily schedule can all fire within minutes and launch three overlapping training jobs that contend for the same GPUs and registry slots. Use a lock or single-flight scheduler so only one run per model executes at a time and queue the rest. Rank triggers (performance > drift > volume > scheduled) and log why each run started so a later investigation can see the cause.
+
+**Q: How do you handle late-arriving labels in a training pipeline?**
+Wait for a label maturity window before treating an example as labeled, and reprocess earlier partitions once their labels have settled. Many labels arrive with delay — a purchase attributed to a click hours later, a chargeback weeks later. Training too early on immature labels teaches the model that eventual positives are negatives, biasing it toward under-prediction. Define a maturity horizon per label type (for example, 7 days for conversions), include only examples whose window has closed, and backfill or relabel older partitions as late labels land. Track label completeness per partition and alert if it stalls.
+
+**Q: How do you roll back a model that has already reached 100% production traffic?**
+Keep the previous version registered and warm and repoint the serving production alias back to it — rollback should be a config change, not a retrain. The model registry (MLflow) tags each version with a stage, so rollback is demoting the bad version and promoting the last-known-good one, which the serving layer picks up via its alias. Automate this behind the canary metric guard so rollback fires without a human in the loop. Keep the previous model's artifact and its feature and code version pins available so the rollback is exact. Test the rollback path regularly — an untested rollback fails exactly when you need it.
+
+**Q: How do you backfill training data when a feature definition changes?**
+Recompute the changed feature over the full historical raw data with the new logic, register it as a new feature version, and regenerate the training set from the backfilled snapshots. Changing a feature's computation is equivalent to changing the model's input distribution, so the current model stays pinned to the old feature version while the new model trains on the backfilled one. Emit timestamped snapshots and never copy the current value across past dates, which is point-in-time leakage. Validate the backfill by comparing a sample of backfilled historical values against what the live path would have produced. Because backfilling large histories is expensive, scope it to the date range the training window actually needs.
+
+**Q: How do you control the cost of an automated training pipeline?**
+Use spot or preemptible instances with checkpointing, cap the HPO trial budget, and cache feature datasets so retrains reuse work instead of recomputing it. Training and HPO dominate pipeline cost; spot instances cut compute 60-90% but can be reclaimed, so checkpoint frequently and resume from the last checkpoint. Bound Optuna with a wall-clock time budget and pruning rather than a large fixed trial count. Reuse the validated feature dataset across trials and across nearby runs. Right-size the cluster to the data volume, and prefer warm-start or window retraining for frequent cadences where full retraining's cost is not justified.
+
+**Q: When should you use window (rolling-window) retraining instead of full retraining on all history?**
+Use window retraining when recent data best reflects current behavior and full-history training is too slow or dilutes recent signal with stale patterns. A rolling window (for example, the last 90 days) adapts faster to trend shifts and trains more cheaply, but it can forget long-term seasonal patterns and rare events. Full retraining maximizes data utilization and captures long-term structure at higher compute cost. Choose window retraining for high-churn, non-stationary domains like trending items or news, and full retraining when long-term structure matters, such as credit risk or strong seasonality. A common hybrid keeps a long window with time-decay weighting so recent data counts more without discarding history.
 
 ---
 

@@ -15,104 +15,74 @@ Constraints:
 
 ## Architecture Overview
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Data["Data Pipeline"]
+        UP(["Seller upload (S3)"]) --> VAL["Validate\ncorrupt, small, NSFW"]
+        VAL --> PRE["Ray preprocess\nresize 224 + normalize"]
+        PRE --> DS[("DVC dataset\n10M + 1M/day")]
+    end
+    subgraph Train["Training - 8x A100 DDP"]
+        P1["Phase 1\nfreeze backbone, 5 ep"] --> P2["Phase 2\nunfreeze all, 20 ep"]
+        P2 --> MLF[("MLflow\nbest val model")]
+    end
+    subgraph Export["Export and Optimize"]
+        ONX["ONNX opset 17"] --> TRT["TensorRT FP16/INT8\n8000 img/s per GPU"]
+    end
+    subgraph Serve["Serving - 100K QPS, P99 under 50ms"]
+        LB["NGINX load balancer"] --> GW["FastAPI gateway"]
+        GW --> CACHE{"Redis MD5 cache\n40% hit, 7d TTL"}
+        CACHE -->|hit| RESP(["category + top5"])
+        CACHE -->|miss| TS["TorchServe 20 GPU\nbatch 64 / 5ms delay"]
+        TS --> RESP
+    end
+    subgraph Mon["Monitoring and Drift"]
+        DRIFT["KS test channel mean/std\n+ confidence-drift alert"]
+    end
+    DS --> P1
+    MLF --> ONX
+    TRT --> TS
+    RESP --> DRIFT
+
+    class UP,RESP io
+    class VAL,PRE,GW,LB mathOp
+    class DS,MLF base
+    class P1,P2 train
+    class ONX,TRT,TS frozen
+    class CACHE req
+    class DRIFT lossN
 ```
-  DATA PIPELINE
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  Seller Upload (S3)                                              │
-  │       │                                                          │
-  │       v                                                          │
-  │  Image Validation (PIL check: corrupt, too small <64px, NSFW)   │
-  │       │                                                          │
-  │       v                                                          │
-  │  Preprocessing Worker (Ray, 500 workers)                         │
-  │  - Resize to 224x224 (EfficientNet input)                        │
-  │  - Normalize: mean=[0.485,0.456,0.406] std=[0.229,0.224,0.225]  │
-  │  - Store preprocessed in S3 + metadata in PostgreSQL             │
-  │       │                                                          │
-  │  Training Data (DVC versioned):                                  │
-  │  - 10M labeled images (historical)                               │
-  │  - 1M new/day                                                    │
-  │  - 70% train / 15% val / 15% test split (stratified by category) │
-  └──────────────────────────────────────────────────────────────────┘
 
-  TRAINING PIPELINE (weekly full retrain + nightly fine-tune)
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  Training Cluster: 8x A100 (80GB) GPUs                          │
-  │                                                                  │
-  │  EfficientNet-B3 (pretrained ImageNet-21k)                       │
-  │  - Replace final classifier: 1536 → 1000 classes                │
-  │  - Phase 1 (5 epochs): freeze backbone, train classifier only    │
-  │  - Phase 2 (20 epochs): unfreeze all, lower LR (1e-4 → 1e-5)   │
-  │                                                                  │
-  │  Distributed Training (PyTorch DDP):                            │
-  │  - 8 GPUs, effective batch size 256 (32/GPU)                    │
-  │  - Mixed precision: BF16 (A100 native)                          │
-  │  - Gradient accumulation: 4 steps (effective batch 1024)        │
-  │                                                                  │
-  │  Schedule: WarmupCosineAnnealing                                 │
-  │  - Warmup: 5 epochs, LR 1e-6 → 1e-4                            │
-  │  - Cosine decay: 20 epochs, 1e-4 → 1e-6                        │
-  │                                                                  │
-  │  Regularization:                                                 │
-  │  - Label smoothing epsilon=0.1                                   │
-  │  - Mixup alpha=0.2 (blend two training images + labels)          │
-  │  - Dropout 0.3 before classifier head                            │
-  │                                                                  │
-  │  Checkpoints → MLflow → Best val accuracy model selected         │
-  └──────────────────────────────────────────────────────────────────┘
+Five stages flow top-to-bottom: a DVC-versioned dataset feeds two-phase fine-tuning; the best MLflow checkpoint is exported to ONNX/TensorRT and served behind an MD5 cache that absorbs ~40% of the 100K QPS, and every response streams into drift monitoring.
 
-  EXPORT & OPTIMIZATION
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  PyTorch model                                                   │
-  │       │                                                          │
-  │       ├──> ONNX export (opset 17)                               │
-  │       │         │                                                │
-  │       │         v                                                │
-  │       │    TensorRT optimization (FP16, INT8 calibration)        │
-  │       │    Throughput: ~8000 images/sec per GPU                  │
-  │       │                                                          │
-  │       └──> ONNX Runtime (CPU, for non-GPU nodes)                │
-  │            Throughput: ~200 images/sec per vCPU                  │
-  └──────────────────────────────────────────────────────────────────┘
-
-  SERVING INFRASTRUCTURE (100K QPS, <50ms P99)
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  Load Balancer (NGINX)                                           │
-  │       │                                                          │
-  │       v                                                          │
-  │  API Gateway (FastAPI, async)                                    │
-  │  - Image URL → download + decode (S3 presigned URL or base64)   │
-  │  - MD5 hash → Redis cache lookup (TTL 7 days)                   │
-  │  - Cache HIT (~40% of requests): return cached result           │
-  │  - Cache MISS: forward to TorchServe                            │
-  │       │                                                          │
-  │       v                                                          │
-  │  TorchServe Cluster (20 GPU nodes, K8s HPA)                     │
-  │  - Workers per GPU: 4 (concurrent model instances)              │
-  │  - Dynamic batching: max_batch=64, max_delay=5ms                │
-  │  - Model version A/B routing (shadow mode for new models)        │
-  │       │                                                          │
-  │       v                                                          │
-  │  Response: {category_id, category_name, confidence, top5}       │
-  └──────────────────────────────────────────────────────────────────┘
-
-  MONITORING & DRIFT DETECTION
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  Per-request metrics → Kafka → Flink → Prometheus/Grafana        │
-  │                                                                  │
-  │  Accuracy monitoring:                                            │
-  │  - 100 images/day human-labeled by QA team                      │
-  │  - Expected accuracy 95%; alert if <92% over 3 consecutive days  │
-  │                                                                  │
-  │  Distribution drift (pixel-level):                              │
-  │  - Track channel mean/std per hour                               │
-  │  - KS test vs baseline distribution; p<0.05 → alert             │
-  │                                                                  │
-  │  Confidence drift:                                               │
-  │  - Track fraction of predictions with confidence <0.5           │
-  │  - Spike (>2x baseline) indicates OOD data or model issue        │
-  └──────────────────────────────────────────────────────────────────┘
+```mermaid
+sankey-beta
+Incoming 100K QPS,Redis cache hit,40
+Incoming 100K QPS,Cache miss,60
+Redis cache hit,Cached response,40
+Cache miss,TorchServe GPU,60
+TorchServe GPU,GPU response,60
 ```
+
+The MD5 cache serves ~40% of requests directly, cutting effective GPU-bound traffic from 100K to 60K QPS — the single biggest lever for hitting both the latency and the cost budget.
+
+```mermaid
+xychart-beta
+    title "P50 latency budget - 33ms of the 50ms P99 SLA"
+    x-axis ["Network", "Preprocess", "Redis", "Batch wait", "GPU infer", "Serialize"]
+    y-axis "Milliseconds" 0 --> 16
+    bar [5, 5, 1, 5, 15, 2]
+```
+
+GPU inference (15ms) plus the three 5ms stages dominate; the components sum to 33ms P50, leaving 17ms of tail-latency headroom under the 50ms P99 budget.
 
 ---
 

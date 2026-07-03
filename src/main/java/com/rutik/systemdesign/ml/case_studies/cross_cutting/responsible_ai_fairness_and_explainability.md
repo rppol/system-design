@@ -49,16 +49,28 @@ Why it matters: in credit, employment, housing, and healthcare — all regulated
 
 ### 4.2 Bias Mitigation Strategies
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    data(["Training data"]) --> pre["Pre-processing\nreweighing, resampling,\nDI removal, augmentation"]
+    pre --> tr["In-processing\nadversarial debiasing,\nfairness constraints,\nprejudice remover"]
+    tr --> post["Post-processing\nthreshold adjust, reject option,\nper-group calibration"]
+    post --> out(["Fairer predictions"])
+
+    class data,out io
+    class pre mathOp
+    class tr train
+    class post req
 ```
-Pre-processing        In-processing           Post-processing
-(training data)       (training algorithm)    (model output)
-      |                       |                      |
-Reweighing         Adversarial debiasing    Threshold adjustment
-Resampling         Fairness constraints     Reject option
-Disparate impact   (Lagrangian)             Calibration per group
-removal            Prejudice remover
-Data augmentation  Fairness-aware boosting
-```
+
+Bias mitigation can enter at three points in the lifecycle — the data before training, the loss during training, or the scores after training — and the three stages compose.
 
 | Strategy | How it works | Pros | Cons |
 |---|---|---|---|
@@ -86,38 +98,49 @@ Data augmentation  Fairness-aware boosting
 
 ### Fairness Audit Pipeline
 
-```
-+-------------------+      +--------------------+      +--------------------+
-| Model Predictions | -->  | Protected Attribute| -->  | Fairness Metrics   |
-| + True Labels     |      | Extraction         |      | (DP diff, EO diff, |
-|                   |      | (age, gender, race,|      |  Predictive Parity)|
-+-------------------+      | geo proxy, etc.)   |      +--------------------+
-                           +--------------------+               |
-                                                                v
-                                                    +--------------------+
-                                                    | Alert: diff > 0.05 |
-                                                    | (threshold for     |
-                                                    | regulatory review) |
-                                                    +--------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pred(["Predictions\n+ true labels"]) --> ext["Protected attribute\nextraction\nage, gender, geo proxy"]
+    ext --> metrics["Fairness metrics\nDP diff, EO diff,\npredictive parity"]
+    metrics --> gate{"any diff\nabove 0.05 ?"}
+    gate -->|"yes"| alert["Alert:\nregulatory review"]
+    gate -->|"no"| ok(["Pass audit"])
+
+    class pred,ok io
+    class ext,metrics mathOp
+    class gate req
+    class alert lossN
 ```
 
 ### SHAP Value Explanation Stack
 
-```
-Model (any: GBDT, DNN, LogReg)
-         |
-         v
-SHAP Explainer (TreeExplainer for GBDT — exact; KernelExplainer — approx)
-         |
-         v
-shap_values[i] = contribution of feature i to prediction
-         |
-    +----+----+
-    |         |
-Global      Local
-(mean abs   (waterfall
- SHAP bar   chart for
- chart)     one example)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    model["Model\nGBDT / DNN / LogReg"] --> exp["SHAP explainer\nTreeExplainer (exact)\nKernelExplainer (approx)"]
+    exp --> sv["Per-feature\ncontributions"]
+    sv --> g["Global\nmean abs SHAP\nbar chart"]
+    sv --> l["Local\nwaterfall for\none example"]
+
+    class model frozen
+    class exp mathOp
+    class sv io
+    class g,l req
 ```
 
 ---
@@ -325,16 +348,20 @@ def generate_adverse_action_explanation(
 
 ### Accuracy vs Fairness
 
-```
-High                  XGBoost (no fairness)
-Accuracy          
-                   XGBoost + reweighing
-                XGBoost + threshold adj.
-               Adversarial debiasing
-              Fairness-constrained logistic
-Low  
-     Poor                         Perfect
-                 Fairness
+```mermaid
+quadrantChart
+    title Accuracy vs fairness tradeoff
+    x-axis "Poorer fairness" --> "Better fairness"
+    y-axis "Lower accuracy" --> "Higher accuracy"
+    quadrant-1 "Fair and accurate"
+    quadrant-2 "Accurate but unfair"
+    quadrant-3 "Poor on both"
+    quadrant-4 "Fair but less accurate"
+    "XGBoost (no fairness)": [0.2, 0.92]
+    "XGBoost + reweighing": [0.5, 0.82]
+    "XGBoost + threshold adj": [0.6, 0.85]
+    "Adversarial debiasing": [0.78, 0.72]
+    "Fairness-constrained LR": [0.86, 0.6]
 ```
 
 There is a fundamental accuracy-fairness tradeoff: any constraint on model behavior that wasn't present in unconstrained optimization must reduce or maintain (never improve) accuracy on the unconstrained metric. The size of the tradeoff depends on the metric pair chosen: demographic parity typically costs more accuracy than equalized odds when base rates differ.

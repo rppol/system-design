@@ -109,81 +109,90 @@ Original features + OOF predictions + feature×OOF interactions as meta-features
 
 ### K-Fold Stacking Architecture (5-fold, 3 base models)
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    data(["Training data\nN=1000, 5 folds"]) --> loop{"For each fold k\nhold out fold k"}
+    loop --> train["Fit base models\non the other 4 folds (800)"]
+    train --> pred["Predict the held-out\nfold k (200)"]
+    pred --> oof(["OOF matrix 1000 × 3\nrow i predicted by a model\nthat never saw sample i"])
+    oof --> meta["Meta-learner\nLogReg C=0.1"]
+    meta --> out(["Final prediction"])
+    data -.-> retrain["Test time: retrain each\nbase model on ALL 1000"]
+    retrain -.-> meta
+
+    class data,oof,out io
+    class loop mathOp
+    class train,retrain,meta train
+    class pred base
 ```
-Training Data (N=1000 rows)
-         |
-    Split into 5 folds
-         |
-+--------+---------+--------+---------+---------+
-|        |         |        |         |         |
-Fold1   Fold2    Fold3    Fold4     Fold5
-(200)   (200)    (200)    (200)     (200)
 
-For each fold k:
-  Train base models on remaining 4 folds
-  Predict on fold k
-
-After 5 rounds → OOF predictions matrix:
-  Row i: [base1_pred_i, base2_pred_i, base3_pred_i]  (3 columns)
-  (each pred_i from a model that never saw sample i)
-
-Meta-learner training:
-  Input:  OOF predictions matrix (1000 × 3)
-  Target: original labels y (1000,)
-  Model:  LogisticRegression(C=0.1)
-
-Test time:
-  Retrain each base model on ALL training data
-  Generate test predictions from each base model
-  Meta-learner predicts from [base1_test, base2_test, base3_test]
-```
+Caption: the loop guarantees every training row's meta-feature comes from a base model that never saw it (out-of-fold), so the meta-learner trains on honest, generalisation-quality predictions; the dotted path shows test time uses base models refit on all 1000 rows.
 
 ### Blending Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    data(["Training data\nN=1000"]) --> split{"80 / 20 split"}
+    split --> base["Train set (800)\nfit base models once"]
+    split --> hold(["Blend set (200)\nheld out"])
+    base --> bp["Predict on the 200 holdout\nblend_preds 200 × 3"]
+    hold --> bp
+    bp --> meta["Meta-learner\nLogReg"]
+    meta --> out(["Test prediction\nbase models trained on 800"])
+
+    class data,hold,out io
+    class split mathOp
+    class base,meta train
+    class bp base
 ```
-Training Data (N=1000 rows)
-         |
-    80/20 split
-         |
-+--------+--------+
-|                 |
-Train set        Blending set
-(800 rows)       (200 rows) ← holdout
 
-Train base models on 800 rows
-Predict on 200 holdout rows → blend_preds (200 × 3 matrix)
-
-Meta-learner trains on:
-  Input:  blend_preds (200 × 3)
-  Target: labels of 200 holdout rows
-
-Test time:
-  Base models (trained on 800) predict on test set
-  Meta-learner predicts from base model test predictions
-```
+Caption: blending trains each base model once on 80% of data and builds meta-features from a single 20% holdout — simpler and K× cheaper than K-fold stacking, but it discards that 20% from base-model training, so OOF quality is slightly lower.
 
 ### Multi-Level Stacking
 
-```
-Level 0 (raw features)
-    |
-+---+---+---+
-|   |   |   |
-M1  M2  M3  (base models: RF, XGB, LGB)
-    |
-OOF predictions (N × 3)
-    |
-Level 1 meta-learner (LogReg or small LGB)
-    |
-Level 1 OOF predictions (N × 1)
-    |
-Level 2 meta-learner (LogReg)
-    |
-Final prediction
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Note: Each level adds one more round of K-fold CV
-      Level 2 trains on Level 1's OOF predictions
+    feat(["Level 0\nraw features"]) --> m1["RF"]
+    feat --> m2["XGB"]
+    feat --> m3["LGB"]
+    m1 --> oof1(["Level-1 OOF\nN × 3"])
+    m2 --> oof1
+    m3 --> oof1
+    oof1 --> meta1["Level-1 meta\nLogReg or small LGB"]
+    meta1 --> oof2(["Level-2 OOF\nN × 1"])
+    oof2 --> meta2["Level-2 meta\nLogReg"]
+    meta2 --> out(["Final prediction"])
+
+    class feat,oof1,oof2,out io
+    class m1,m2,m3 base
+    class meta1,meta2 train
 ```
+
+Caption: each level trains on the OOF predictions of the level below via its own round of K-fold CV; level-2 typically adds 0.1-0.5% AUC over level-1, level-3 adds under 0.1%, so two levels is the economic ceiling outside competitions.
 
 ---
 
@@ -551,15 +560,23 @@ The winning solution (BellKor's Pragmatic Chaos) used a 3-tier ensemble of 107 d
 
 ### Number of Stacking Levels (Typical AUC on tabular data)
 
+```mermaid
+xychart-beta
+    title "Typical AUC by ensemble level (tabular data)"
+    x-axis ["Best single", "Simple avg", "Level-1 stack", "Level-2 stack", "Level-3 stack"]
+    y-axis "AUC" 0.875 --> 0.900
+    bar [0.880, 0.887, 0.894, 0.897, 0.898]
 ```
-Levels          AUC (typical)    Training Cost
------------------------------------------------
-Best single     0.880            1x
-Simple average  0.887            3x
-Level 1 stack   0.894            18x  (5 folds × 3 models + meta)
-Level 2 stack   0.897            90x+
-Level 3 stack   0.898            450x+
-```
+
+Caption: the jump from best-single to level-1 stacking captures most of the gain (0.880 to 0.894); each further level flattens toward a ceiling while training cost keeps multiplying — the visual argument for stopping at level 2.
+
+| Ensemble | AUC (typical) | Training cost |
+|----------|--------------|---------------|
+| Best single | 0.880 | 1x |
+| Simple average | 0.887 | 3x |
+| Level-1 stack | 0.894 | 18x (5 folds × 3 models + meta) |
+| Level-2 stack | 0.897 | 90x+ |
+| Level-3 stack | 0.898 | 450x+ |
 
 Beyond level 2, each level adds marginal gain at exponential compute cost.
 
@@ -724,6 +741,15 @@ Stacking trains a meta-learner on the predictions of base models, learning optim
 **Q: Why is data leakage the most critical pitfall in stacking and how do OOF predictions prevent it?**
 If base models are trained on all training data and used to predict on that same training data to create meta-features, the meta-learner sees "memorised" predictions. High-capacity models like XGBoost have near-zero training error, so their predictions on training data are almost perfect — a signal that does not exist at test time. The meta-learner then learns "trust whichever model predicts most confidently" based on training-set confidence, which does not generalise. OOF (out-of-fold) predictions fix this: each training sample is predicted by a base model that never saw it during training, producing honest predictions that reflect true generalisation quality. The meta-learner learns from signals that will also exist at test time.
 
+**Q: Why must all base models use the same fold splits when generating OOF predictions?**
+Because meta-features must be aligned: row i's OOF prediction from every base model must come from a fold where row i was held out. If base models use different fold assignments, then for a given row one model's prediction is honest (out-of-fold) while another's is in-fold and memorised — the meta-learner trains on a mix of leaked and clean signals per row and its learned weights become meaningless. Fix: create one StratifiedKFold (or KFold) split object with a fixed random_state and reuse the exact same tr_idx/val_idx for every base model. This is why sklearn's StackingClassifier uses a single internal cv object shared across all estimators.
+
+**Q: Should you use predicted probabilities or hard class labels as meta-features in stacking?**
+Use predicted probabilities (predict_proba), not hard 0/1 labels. Probabilities carry each base model's confidence, which is exactly the signal the meta-learner needs to arbitrate between models; collapsing to hard labels discards that confidence and typically costs 0.3-1% AUC. sklearn exposes this as stack_method="predict_proba" (the default when the estimator supports it). The one caveat: with many classes, predict_proba adds one column per class per model, so the meta-feature space grows — keep the meta-learner regularised to match.
+
+**Q: Can a stacking ensemble perform worse than its best single base model, and why?**
+Yes — stacking can underperform the best base model when the meta-learner overfits the meta-feature space or when the base models are highly correlated. Common causes: too little data for reliable OOF estimates (< 2000 samples), a too-complex meta-learner (deep LightGBM instead of regularised LogReg), passthrough features that let the meta-learner overfit the original dimensions, or leakage that inflates offline AUC but collapses on the test set. The fix is a simple heavily regularised meta-learner (LogReg C=0.1), diverse-but-not-correlated base models, and honest OOF predictions; if stacking still loses, ship the single model.
+
 **Q: When should you use blending instead of K-fold stacking?**
 Blending is preferred when: (1) training is very expensive — blending trains each base model once; stacking trains K times; (2) quick prototyping — blending is simpler to implement correctly; (3) the holdout set is naturally defined (e.g., time series: last month is the blending set, prior months are training). Stacking is preferred when: data is limited and you cannot afford to throw away 20-30% as a blending holdout; when you want OOF predictions to serve as regularised features for the meta-learner. In production, stacking is almost always worth the implementation cost if the AUC gain justifies serving and retraining complexity.
 
@@ -759,6 +785,12 @@ Production stacking with daily retraining introduces several engineering constra
 
 **Q: What are the typical Kaggle patterns for stacking in top finishes?**
 Top-10 Kaggle finishes on tabular data typically follow this pattern: (1) 3-5 diverse base models — LightGBM (primary), XGBoost, CatBoost, Random Forest, neural network; (2) 5-fold OOF generation with the same fold splits for all models; (3) Simple meta-learner — Logistic Regression or Ridge for regression; (4) Optionally include original features (passthrough) if the meta-learner can handle the dimensionality; (5) Two levels at most — the marginal gain of a third level rarely justifies the complexity in 4-6 week competitions. The stacking typically provides 0.5-1.5% AUC gain. Beyond this, additional gains come from feature engineering and model tuning, not from adding more stacking levels.
+
+**Q: How many CV folds should you use for OOF generation, and what is the tradeoff?**
+Use 5 folds as the default; increase to 10 for smaller datasets. More folds mean each base model trains on a larger fraction (K-1)/K of the data — 90% at 10-fold vs 80% at 5-fold — producing OOF predictions closer to the full-data model, but at proportionally higher compute (10x vs 5x base training runs). For large datasets (> 100K rows) 5 folds is plenty and cheaper; for small datasets (5-50K) 10 folds squeezes out more training data per fold and reduces OOF variance. Always use StratifiedKFold for classification so class balance is preserved across folds, and TimeSeriesSplit for temporal data.
+
+**Q: How does stacking differ from bagging and boosting?**
+Stacking combines different model families with a learned meta-learner, while bagging and boosting build many instances of the same base learner with a fixed combination rule. Bagging (e.g. Random Forest) trains models in parallel on bootstrap samples and averages them to reduce variance; boosting (e.g. XGBoost) trains models sequentially, each correcting the previous residuals, to reduce bias. Stacking is heterogeneous and learns the combination weights from OOF predictions, so it exploits complementary strengths across algorithm families. In practice stacking sits on top of bagging/boosting models — a Random Forest and an XGBoost can both be base models feeding a stacked meta-learner.
 
 **Q: What is the connection between stacking and Bayesian Model Combination?**
 Stacking can be seen as an empirical approximation to Bayesian Model Averaging (BMA). BMA computes the posterior probability of each model given the data: P(model_k | data) ∝ P(data | model_k) * P(model_k), then weights predictions by these posteriors. Stacking approximates this by learning the combination weights discriminatively from OOF predictions. Key differences: BMA requires a proper probabilistic model for each base model (strong assumption); stacking is non-parametric and directly optimises the combination. In practice stacking outperforms BMA on most ML tasks because BMA assumes models are correct probabilistic models of the data, which tree ensembles are not. The meta-learner in stacking can be seen as approximating the posterior model weights using OOF cross-validation evidence.

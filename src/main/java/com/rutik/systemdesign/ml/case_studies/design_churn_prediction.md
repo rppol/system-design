@@ -57,38 +57,33 @@ Mental model: think of churn as a funnel — many customers are at mild risk (ch
 
 ## 3. High-Level Architecture
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    RAW(["Raw Event Store\nKafka + S3\nsubscriptions · sessions\ntickets · payments"]) --> FP["Feature Pipeline\nSpark, daily 06:00\nRFM · PIT join · validation"]
+    FP --> FS["Feature Store\noffline S3/BQ snapshots\nonline Redis current values"]
+    FS --> SCORE["Scoring Engine\nLightGBM batch\n5M customers in ~20 min"]
+    SCORE --> CDB["Churn Score DB\nDynamoDB · TTL 48h"]
+    SCORE --> SHAP["SHAP Engine\ntop-4 factors\nper customer"]
+    CDB --> MKT["Marketing Operations Platform\nranked top 100k + uplift filter\n+ SHAP personalization"]
+    SHAP --> MKT
+
+    class RAW io
+    class FP,SHAP mathOp
+    class SCORE train
+    class FS,CDB base
+    class MKT req
 ```
-+------------------+    +---------------------+    +------------------+
-| Raw Event Store  |    |  Feature Pipeline   |    |  Feature Store   |
-| (Kafka + S3)     | -> | (Spark, daily 06:00)|    | (Offline: S3/BQ) |
-| - subscriptions  |    | - RFM computation   | -> | - Historical     |
-| - sessions       |    | - PIT join          |    |   snapshots      |
-| - support tickets|    | - Validation        |    | (Online: Redis)  |
-| - payment events |    +---------------------+    | - Current values |
-+------------------+                               +--------+---------+
-                                                            |
-                                                    +-------v---------+
-                                                    |  Scoring Engine |
-                                                    | (LightGBM batch)|
-                                                    | 5M customers    |
-                                                    | in ~20 minutes  |
-                                                    +-------+---------+
-                                                            |
-                                              +-------------+------------+
-                                              |                          |
-                                     +--------v---------+    +-----------v------+
-                                     | Churn Score DB   |    | SHAP Engine      |
-                                     | (DynamoDB)       |    | (Top-4 factors   |
-                                     | TTL: 48h         |    |  per customer)   |
-                                     +--------+---------+    +-----------+------+
-                                              |                          |
-                                     +--------v--------------------------v------+
-                                     |     Marketing Operations Platform       |
-                                     | - Ranked list: top 100k by score        |
-                                     | - Uplift filter: intervention-likely     |
-                                     | - SHAP explanations for personalization  |
-                                     +------------------------------------------+
-```
+
+*The daily batch spine: raw events become PIT-safe features, a single LightGBM pass scores all 5M customers, and the SHAP engine attaches per-customer reasons before both feed the marketing platform.*
 
 **Component inventory:**
 - **Feature pipeline:** Spark DAG on EMR; computes 150 features from raw event tables; enforces PIT join (see [Feature Store](./cross_cutting/feature_store_and_point_in_time_correctness.md)).
@@ -260,6 +255,34 @@ class TLearner:
 # This prioritizes customers who are both at risk AND responsive to intervention
 ```
 
+The two-step targeting filter turns model scores into a budgeted contact list:
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ALL(["5M scored customers"]) --> F1{"churn prob\n> threshold_p?"}
+    F1 -->|"no · low risk"| STAY["Sure thing\nwould stay anyway\nno contact"]
+    F1 -->|"yes"| F2{"uplift score\n> threshold_u?"}
+    F2 -->|"no · zero uplift"| LOST["Lost cause\nchurns regardless\noffer wasted"]
+    F2 -->|"yes · persuadable"| TARGET["Intervention target\nrank by churn_prob × uplift\ncontact within budget"]
+
+    class ALL io
+    class F1,F2 mathOp
+    class STAY frozen
+    class LOST lossN
+    class TARGET req
+```
+
+*Churn probability alone cannot separate the red "lost cause" set from the teal "persuadable" set — only the uplift gate does. Spending the fixed 100k/day budget on the teal path is what converts AUC into retained revenue.*
+
 ---
 
 ## 5. Design Decisions & Tradeoffs
@@ -287,6 +310,16 @@ Calibration is re-fitted monthly on the prior 30-day labeled cohort (30-day chur
 | LightGBM (no calibration) | 0.84 | 0.18 | 12 min | 0.3ms/customer | Medium (SHAP) |
 | LightGBM + isotonic | 0.84 | 0.05 | 13 min | 0.3ms/customer | Medium (SHAP) |
 | Neural net (MLP 3-layer) | 0.845 | 0.09 | 95 min | 2ms/customer | Low |
+
+```mermaid
+xychart-beta
+    title "Calibration error (ECE) by approach - lower is better"
+    x-axis ["LogReg", "LGBM no-cal", "LGBM+isotonic", "MLP 3-layer"]
+    y-axis "Expected Calibration Error" 0 --> 0.20
+    bar [0.06, 0.18, 0.05, 0.09]
+```
+
+*AUC across these models is nearly flat (0.79–0.845), but raw LightGBM is badly miscalibrated (ECE 0.18) — far above the 0.08 budget-allocation ceiling. Isotonic regression fixes calibration (0.05) at no AUC cost, which is why the shipped model is LightGBM + isotonic rather than the marginally more accurate MLP.*
 
 ---
 

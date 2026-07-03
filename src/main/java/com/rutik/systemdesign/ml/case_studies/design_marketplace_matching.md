@@ -8,6 +8,31 @@
 
 Mental model: the marketplace is a bipartite matching problem. On the left: riders (known demand, known destinations). On the right: drivers (known positions, unknown future positions). An ML system predicts the values on the edges (trip quality, expected revenue, driver availability probability). A combinatorial solver finds the assignment that maximizes total edge value across all concurrent matches. The ML and optimization components are cleanly separated — each solvable independently.
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    D["1 · Demand forecast\ntime-series regression\nLightGBM · 12% MAPE"] --> RATIO((" S/D "))
+    S["2 · Supply forecast\nmulti-output regression\nLightGBM · 15% MAPE"] --> RATIO
+    RATIO --> SCORE["3 · Match scoring\nLambdaRank GBDT\n0.3ms per pair"]
+    SCORE --> OPT["4 · Assignment optimization\nHungarian / Auction\ncombinatorial — NOT ML"]
+    OPT --> OUT(["global optimal dispatch"])
+
+    class D,S,SCORE train
+    class RATIO mathOp
+    class OPT frozen
+    class OUT io
+```
+
+*The four sub-problems, color-separated: three learned models (green) feed a purple combinatorial solver that is deliberately not ML. Reaching for an RL policy at the assignment step — or ARIMA per-zone at the forecasting step — is the classic mismatch this decomposition avoids.*
+
 ---
 
 ## 1. Requirements Clarification
@@ -53,53 +78,37 @@ Mental model: the marketplace is a bipartite matching problem. On the left: ride
 
 ## 3. High-Level Architecture
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    RIDER(["Rider App\nride request"]) --> BUS["Event Bus · Kafka\nrequests · driver GPS 5s\ntrip completions"]
+    DRIVER(["Driver App\nGPS stream"]) --> BUS
+    BUS --> DEMAND["Demand Forecaster\nLightGBM · 15min horizon\nper geo-zone"]
+    BUS --> SUPPLY["Supply State Manager\nreal-time driver position\navailability · ETA to zone"]
+    subgraph ME["Matching Engine"]
+        CAND["Candidate Gen\nnearby drivers < 5km\nright tier"] --> SCORER["Match Scorer · GBDT\ntrip value per pair\npickup ETA × demand"]
+        SCORER --> OPT["Assignment Optimizer\ngreedy + Hungarian/LP\nglobal optimum across reqs"]
+    end
+    DEMAND --> SCORER
+    SUPPLY --> CAND
+    OPT --> DISPATCH["Dispatch Service\nnotify driver · start timer\nupdate supply"]
+
+    class RIDER,DRIVER io
+    class BUS,SUPPLY base
+    class DEMAND,SCORER train
+    class CAND,OPT mathOp
+    class DISPATCH req
 ```
-+------------------+          +-------------------+
-|  Rider App       |          |  Driver App       |
-| (ride request)   |          | (GPS stream)      |
-+--------+---------+          +--------+----------+
-         |                             |
-         v                             v
-+--------+-----------------------------+----------+
-|              Event Bus (Kafka)                  |
-| - ride_request_events                           |
-| - driver_location_events (1 update/5s)          |
-| - trip_completed_events                         |
-+--------+-----------------------------------+----+
-         |                                   |
-         v                                   v
-+--------+---------+           +-------------+-----------+
-| Demand Forecaster|           | Supply State Manager    |
-| (LightGBM MSTF)  |           | - real-time driver pos. |
-| - 15min horizon  |           | - availability status   |
-| - per geo-zone   |           | - ETA to zone centroid  |
-+--------+---------+           +-------------+-----------+
-         |                                   |
-         v                                   v
-+--------+-----------------------------------+---------+
-|              Matching Engine                        |
-| +------------------+  +------------------------+   |
-| | Candidate Gen.   |  | Match Scorer (GBDT)    |   |
-| | - nearby drivers |->| - trip value per pair  |   |
-| | - within 5km     |  | - pickup ETA × demand  |   |
-| | - right tier     |  | - driver pref. match   |   |
-| +------------------+  +--------+---------------+   |
-|                                 |                   |
-|                     +-----------v-----------+       |
-|                     | Assignment Optimizer   |       |
-|                     | (greedy + LP fallback) |       |
-|                     | - global optimum across|       |
-|                     |   all concurrent reqs  |       |
-|                     +-----------+-----------+       |
-+------------------------------------+----------------+
-                                     |
-                          +----------v----------+
-                          | Dispatch Service    |
-                          | - notify driver     |
-                          | - start trip timer  |
-                          | - update supply     |
-                          +---------------------+
-```
+
+*Rider and driver events land on one Kafka bus; the demand forecaster supplies market context and the supply manager supplies the candidate set, which the GBDT scorer prices per pair before the combinatorial optimizer picks the globally best assignment — three learned models feeding one non-ML solver.*
 
 **Data flow:** ride request → Kafka → demand forecaster (context) + supply state (available drivers) → candidate generation (drivers within 5km) → match scorer (GBDT: value per pair) → assignment optimizer (globally optimal assignment) → dispatch service (notify driver).
 
@@ -496,3 +505,13 @@ Surge pricing is determined by the supply-demand ratio output from the demand an
 
 **How do you measure and improve driver utilization?**
 Driver utilization = (time spent driving with a passenger) / (total time online). Target: 70% utilization. Measurement: computed per driver-day from trip start/end timestamps and driver online/offline events. Improvement levers: (1) pre-positioning — move idle drivers toward anticipated demand zones before the demand materializes; (2) match scoring that accounts for post-trip position — favor matches that leave drivers in high-demand zones after the trip (factor "distance to nearest high-demand zone after this trip" into match score); (3) destination preference — allow drivers to filter preferred destination zones (reduces long-distance deadhead); (4) trip batching — for delivery platforms, batch multiple stops for one driver (not applicable for ride-hailing where passengers board simultaneously). Measured impact of each lever: pre-positioning +3% utilization, match scoring for post-trip position +2%, destination preference +1% (but reduces driver flexibility, so capped).
+
+```mermaid
+xychart-beta
+    title "Driver utilization gain by lever (percentage points)"
+    x-axis ["Pre-positioning", "Post-trip scoring", "Dest. preference"]
+    y-axis "Utilization gain (pp)" 0 --> 4
+    bar [3, 2, 1]
+```
+
+*Pre-positioning idle drivers toward forecast demand is the single largest lever (+3pp) — a long-horizon decision the greedy matcher cannot make, and the strongest argument for the RL pre-positioning research track. The three levers are additive toward the 70% utilization target.*

@@ -83,39 +83,60 @@ P(y=k | x) = exp(w_k^T x) / sum_j exp(w_j^T x)
 
 ### 5.1 Linear Regression — Forward Pass and Loss
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x(["x = feature vector"]) --> lin["ŷ = wᵀx + b\n(dot product + bias)"]
+    lin --> loss["L = (y − ŷ)²\nsquared error"]
+    loss -.->|"∂L/∂w = −2(y − ŷ)·x"| upd["w ← w − lr · ∂L/∂w"]
+    upd -.-> lin
+
+    class x io
+    class lin mathOp
+    class loss lossN
+    class upd train
 ```
-Input x = [x1, x2, ..., xd]
-        |
-        v  (dot product + bias)
-    w^T x + b = y_hat (scalar)
-        |
-        v  (squared error)
-    L = (y - y_hat)^2
-        |
-        v  (gradient)
-    dL/dw = -2(y - y_hat) * x
-        |
-        v  (weight update)
-    w <- w - lr * dL/dw
-```
+
+Solid arrows are the forward pass (predict then score); dotted arrows are the
+backward pass — the gradient flows out of the loss and updates w, which feeds the
+next forward pass. The whole loop is one gradient-descent step.
 
 ### 5.2 Logistic Regression — Sigmoid and Cross-Entropy
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x(["x = feature vector"]) --> z["z = wᵀx + b\nlogit / log-odds"]
+    z --> p["p = σ(z) = 1 / (1 + e^−z)\nprobability in 0..1"]
+    p --> loss["L = −(y·log p + (1−y)·log(1−p))\ncross-entropy"]
+    loss -.->|"∂L/∂w = (p − y)·x"| upd["w ← w − lr · (p − y)·x"]
+    upd -.-> z
+
+    class x io
+    class z,p mathOp
+    class loss lossN
+    class upd train
 ```
-Input x = [x1, x2, ..., xd]
-        |
-        v  (linear combination)
-    z = w^T x + b    (logit / log-odds)
-        |
-        v  (sigmoid activation)
-    p = 1 / (1 + exp(-z))     (probability, range 0..1)
-        |
-        v  (cross-entropy loss)
-    L = -[y * log(p) + (1-y) * log(1-p)]
-        |
-        v  (gradient — surprisingly clean)
-    dL/dw = (p - y) * x
-```
+
+The sigmoid is the only extra step over linear regression, yet the gradient
+collapses to the same clean form — prediction error (p − y) times the input x. The
+dotted return edge shows that update feeding the next logit computation.
 
 ### 5.3 Regularization Effect on Coefficients
 
@@ -145,6 +166,93 @@ Loss landscape:               Loss landscape:
     clear minimum                   elongated valley
                                  many near-optimal w vectors
 ```
+
+### 5.5 The Sigmoid Curve — Logit to Probability
+
+```mermaid
+xychart-beta
+    title "Logistic sigmoid: squashing the logit z into a probability"
+    x-axis "logit  z = wᵀx + b" [-6, -4, -2, 0, 2, 4, 6]
+    y-axis "P(y=1) = sigma(z)" 0 --> 1
+    line [0.002, 0.018, 0.119, 0.5, 0.881, 0.982, 0.998]
+```
+
+The S-curve is why a positive coefficient does not raise probability linearly: near
+z=0 the slope is steepest (a unit change moves p a lot), but out in the tails the
+curve saturates and the same unit change barely moves p. This is the geometric root
+of Pitfall 3 — coefficients are linear in log-odds, not in probability.
+
+### 5.6 Lasso Regularization Path — Feature Selection in Action
+
+```mermaid
+xychart-beta
+    title "Lasso path: coefficients collapse to zero one by one as alpha grows"
+    x-axis "alpha (regularization strength, log scale)" [0.001, 0.01, 0.1, 1, 10]
+    y-axis "coefficient magnitude |w|" 0 --> 12
+    line [12.0, 11.2, 8.5, 3.1, 0.0]
+    line [4.0, 2.1, 0.4, 0.0, 0.0]
+    line [1.5, 0.3, 0.0, 0.0, 0.0]
+```
+
+Each line is one feature's |coefficient| as alpha increases. The noise features (the
+two lower lines) hit exactly zero first; the strong signal (top line) survives
+longest before it too is zeroed. That staircase-to-zero is Lasso's automatic feature
+selection — the last feature to drop is the most important.
+
+### 5.7 Choosing a Regularizer — Sparsity vs Correlation-Robustness
+
+```mermaid
+quadrantChart
+    title Regularization method selection
+    x-axis "Poor on correlated features" --> "Robust to correlation"
+    y-axis "Dense weights" --> "Sparse (feature selection)"
+    quadrant-1 "Sparse + correlation-robust"
+    quadrant-2 "Sparse but unstable on correlation"
+    quadrant-3 "Dense, no correlation fix"
+    quadrant-4 "Dense, correlation-robust"
+    OLS: [0.15, 0.12]
+    Lasso: [0.28, 0.85]
+    Ridge: [0.85, 0.18]
+    ElasticNet: [0.82, 0.82]
+```
+
+Ridge shrinks all weights and tolerates correlated features but never zeroes them;
+Lasso zeroes weights but picks arbitrarily among a correlated group; ElasticNet lands
+top-right — sparse and correlation-robust — which is why it is the default when you
+want feature selection but suspect correlation.
+
+### 5.8 Multinomial (Softmax) Regression — K Weight Vectors
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x(["x = feature vector"]) --> z1["z₁ = w₁ᵀx + b₁"]
+    x --> z2["z₂ = w₂ᵀx + b₂"]
+    x --> z3["z₃ = w₃ᵀx + b₃"]
+    z1 --> sm(("softmax"))
+    z2 --> sm
+    z3 --> sm
+    sm --> p1(["P(y=1)"])
+    sm --> p2(["P(y=2)"])
+    sm --> p3(["P(y=3)"])
+
+    class x,p1,p2,p3 io
+    class z1,z2,z3 mathOp
+    class sm mathOp
+```
+
+Binary logistic regression has one weight vector and a sigmoid; multinomial
+regression learns one weight vector per class and replaces the sigmoid with a
+softmax that normalizes the K logits into probabilities summing to 1. Sigmoid is
+exactly the K=2 special case of this diagram.
 
 ---
 

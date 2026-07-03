@@ -73,53 +73,107 @@ A neural network is, mechanically, a sequence of matrix multiplications and nonl
 
 ### Matrix Multiplication Shape Flow
 
-```
-Input:    X (batch=32, features=784)
-Weight:   W (features=784, hidden=256)
-Bias:     b (hidden=256)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Forward pass:
-  X @ W + b -> H (32, 256)
-  H shape = (batch, hidden)
+    X(["X (32×784)\nbatch × features"]) --> MM["X @ W\ncontract 784"]
+    W["W (784×256)\nfeatures × hidden"] --> MM
+    MM --> ADD(("+ b"))
+    b["b (256)\nbias"] --> ADD
+    ADD --> H(["H (32×256)\nbatch × hidden"])
 
-Gradient of loss L w.r.t. W:
-  dL/dW = X^T @ dL/dH    shape: (784, 256)
-  dL/dX = dL/dH @ W^T    shape: (32, 784)
-  dL/db = sum(dL/dH, axis=0)  shape: (256,)
+    class X,H io
+    class W,b train
+    class MM,ADD mathOp
 ```
+
+The shared inner dimension (784) contracts away; the batch axis (32) and the layer's
+output width (256) survive, so `H` is (32×256). The backward pass reuses exactly these
+shapes: `dL/dW = X^T @ dL/dH` is (784×256), `dL/dX = dL/dH @ W^T` is (32×784), and
+`dL/db = sum(dL/dH, axis=0)` collapses the batch axis to (256,).
 
 ### SVD Rank-k Approximation
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["A (m×n)\nany matrix"]) --> SVD["SVD\nA = U Σ V^T"]
+    SVD --> U["U (m×m)\nleft vectors"]
+    SVD --> S["Σ (m×n)\nsingular values ↓"]
+    SVD --> Vt["V^T (n×n)\nright vectors"]
+    U --> TR["keep top-k\ncolumns / values / rows"]
+    S --> TR
+    Vt --> TR
+    TR --> Ak(["A_k (m×n)\nU_k Σ_k V_k^T\nmin Frobenius error"])
+
+    class A,Ak io
+    class SVD,TR mathOp
+    class U,S,Vt base
 ```
-Original matrix A (m x n):
-  A  =  U    Sigma    V^T
-     (m x m)(m x n)(n x n)
 
-Rank-k approximation A_k:
-  Keep only top-k columns of U, top-k singular values, top-k rows of V^T
+SVD factors any m×n matrix into `U Σ V^T`; keeping only the top-k columns of U, top-k
+singular values, and top-k rows of V^T yields the rank-k matrix `A_k` that minimizes the
+Frobenius-norm reconstruction error `||A - A_k||_F`.
 
-  A_k = U[:,0:k]  @  diag(sigma[0:k])  @  V^T[0:k,:]
-       (m x k)         (k x k)             (k x n)
-
-Energy retained = sum(sigma[0:k]^2) / sum(sigma^2)
+```mermaid
+xychart-beta
+    title "SVD low-rank approximation: cumulative energy retained vs rank k"
+    x-axis "rank k (top-k singular values kept)" [1, 2, 4, 8, 16, 32, 64]
+    y-axis "energy retained (%)" 0 --> 100
+    line [42, 58, 72, 84, 92, 96, 99]
 ```
+
+Energy retained = `sum(sigma[0:k]^2) / sum(sigma^2)`. Because singular values decay
+steeply (the Netflix rating matrix's top 50 factors captured most signal), a small k
+already retains most of the energy; the curve flattening marks where extra components
+add mostly noise rather than structure.
 
 ### Backpropagation Chain Rule
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req      fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    a1(["a_1"]) --> z2["z_2 = W_2·a_1 + b_2"]
+    z2 --> a2["a_2 = relu(z_2)"]
+    a2 --> z3["z_3 = W_3·a_2 + b_3"]
+    z3 --> L(["Loss L"])
+
+    L -.->|"∂L/∂z_3"| z3
+    z3 -.->|"W_3^T · ∂L/∂z_3"| a2
+    a2 -.->|"⊙ (z_2 > 0)"| z2
+    z2 -.->|"∂L/∂a_1"| a1
+
+    class a1 io
+    class z2,z3,a2 mathOp
+    class L lossN
 ```
-Loss L
-  |
-  v
-z_3 = W_3 @ a_2 + b_3    dL/dW_3 = dL/dz_3 @ a_2^T
-  |
-  v  (relu)
-a_2 = relu(z_2)           dL/dz_2 = dL/da_2 * (z_2 > 0)
-  |
-  v
-z_2 = W_2 @ a_1 + b_2    dL/dW_2 = dL/dz_2 @ a_1^T
-  |
-  ... (chain continues)
-```
+
+Solid arrows are the forward pass; dotted arrows are the backward pass carrying gradients
+via the chain rule. Each dotted edge multiplies the upstream gradient by one local
+Jacobian (`W_3^T` for a linear layer, the mask `z_2 > 0` for relu). Reverse-mode autodiff
+walks these dotted edges exactly once — cheap because the loss is a scalar, so every
+intermediate gradient is a vector rather than a full Jacobian matrix.
 
 ---
 
@@ -190,6 +244,19 @@ def pca_via_svd(X: np.ndarray, n_components: int) -> np.ndarray:
     X_reduced = X_centered @ components    # (n_samples, n_components)
     return X_reduced
 ```
+
+```mermaid
+xychart-beta
+    title "PCA scree plot: variance explained per principal component"
+    x-axis "principal component" [PC1, PC2, PC3, PC4, PC5, PC6, PC7, PC8, PC9, PC10]
+    y-axis "variance explained (%)" 0 --> 30
+    bar [24, 17, 12, 9, 7, 5, 4, 3, 2.5, 2]
+```
+
+Eigenvalues sorted descending give each component's share of variance; the sum of the
+first k bars equals the `explained_variance_ratio[:n_components].sum()` that `pca_via_eigen`
+prints. The "elbow" (here around PC3-PC4) is a common cutoff — for 784-dimensional MNIST
+digits, roughly 50 components recover about 85% of the variance.
 
 ### SVD for Recommendation Systems (Latent Factor Model)
 
@@ -389,6 +456,27 @@ The Frobenius norm of a matrix A is ||A||_F = sqrt(sum_{i,j} A_{ij}^2) = sqrt(tr
 
 **Q: How does the condition number of a matrix affect numerical stability?**
 The condition number kappa(A) = sigma_max / sigma_min (ratio of largest to smallest singular value). A high condition number (ill-conditioned matrix) means small perturbations in the input cause large changes in the output — numerical errors are amplified. In linear systems Ax = b with high kappa(A), even double-precision arithmetic may give wrong answers. Feature scaling (normalizing inputs) reduces the condition number of the data matrix X, which is why standardization improves the convergence of gradient descent.
+
+**Q: What does an eigenvector geometrically represent, and what does its eigenvalue tell you?**
+An eigenvector is a direction that a matrix only stretches or shrinks, never rotates, and its eigenvalue is that stretch factor. Formally A v = lambda v, so applying A keeps v on the same line through the origin. Eigenvalues greater than 1 amplify that direction, values in (0,1) shrink it, and negative values flip it. In PCA the eigenvectors of the covariance matrix are the axes of maximum variance and the eigenvalues are the variance captured along each axis.
+
+**Q: Why are covariance matrices always symmetric and positive semi-definite?**
+Covariance matrices are symmetric because Cov(X,Y) equals Cov(Y,X), and positive semi-definite because no variance can be negative. Symmetry follows directly from the definition C_{ij} = E[(x_i - mu_i)(x_j - mu_j)] = C_{ji}. For PSD, any linear combination satisfies w^T C w = Var(w^T x) >= 0 for all w. This guarantees real, non-negative eigenvalues, which is exactly why `eigh` is valid for PCA and why the variance explained by each principal component is never negative.
+
+**Q: How does positive-definiteness of the Hessian relate to convexity?**
+A function is convex exactly when its Hessian is positive semi-definite everywhere, and strictly convex when it is positive definite. The Hessian encodes curvature, so PSD means the surface curves upward in every direction, making any local minimum global. A positive-definite Hessian at a critical point guarantees a strict local minimum, while an indefinite Hessian (mixed-sign eigenvalues) marks a saddle point. This is why linear and logistic regression have a single optimum, while deep networks with indefinite Hessians are dominated by saddle points rather than local minima.
+
+**Q: What does the determinant of a matrix tell you geometrically?**
+The determinant is the signed volume-scaling factor of the linear transformation the matrix represents. A determinant of 2 doubles areas and volumes; a negative sign means orientation was flipped (a reflection). A determinant of exactly zero means the transformation collapses space into a lower dimension, so the matrix is singular, non-invertible, and has at least one zero eigenvalue. It also equals the product of all the eigenvalues.
+
+**Q: Why do we standardize or normalize features before training?**
+Standardizing features puts them on a common scale so gradient descent converges faster and no single feature dominates distance-based methods. When features span very different ranges, the loss surface becomes elongated (high condition number) and gradient descent zig-zags slowly down a narrow valley. Subtracting the mean and dividing by the standard deviation makes the surface more spherical, so one learning rate works across all directions. It is also essential for KNN, SVM RBF kernels, and any L2-regularized model, whose penalty implicitly assumes comparable feature scales.
+
+**Q: What is the difference between a gradient and a Jacobian?**
+A gradient is the vector of partials of a scalar-valued function, while a Jacobian is the matrix of partials of a vector-valued function. For f: R^n -> R the gradient is n x 1 and equals the transpose of the 1 x n Jacobian, so the gradient is the single-output special case of a Jacobian. In backpropagation each layer contributes a Jacobian and reverse-mode autodiff multiplies them right-to-left; because the final loss is scalar, every accumulated quantity stays a vector (a gradient) rather than a full matrix, which is what makes backprop cheap.
+
+**Q: Why do repeated matrix multiplications cause vanishing or exploding gradients?**
+Repeatedly multiplying by the same weight matrix scales gradients by powers of its eigenvalues, so they explode when the spectral radius is above 1 and vanish when it is below 1. The backward pass of an RNN or deep net multiplies many Jacobians together, so if the largest singular value exceeds 1 gradients grow exponentially with depth, and if it is below 1 they decay to zero. This motivates gradient clipping, orthogonal initialization (singular values near 1), and gated architectures like LSTM and GRU. The governing quantity is the spectral radius, the largest eigenvalue magnitude.
 
 ---
 

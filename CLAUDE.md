@@ -244,3 +244,66 @@ import). GitHub renders mermaid fences natively. Both surfaces work without a bu
 colors `<marker>` arrowheads blue (they ignore `lineColor` themeVariable — SVG `<defs>`
 elements must be patched via `setAttribute`), and makes edge label backgrounds
 transparent. Do not add per-diagram workarounds; these are handled globally.
+
+---
+
+## Game / Reader / Q&A Compatibility (authoring contract — all files MUST comply)
+
+Every module README and deep-dive sub-file is consumed by the browser learning
+game in two ways: (1) `game/extract.py` parses its interview Q&As into the MCQ
+question bank, and (2) the game's reader renders its Markdown (including Mermaid)
+for the "dive deeper" content view. Content that violates this contract is
+silently dropped from the game or renders wrong. These rules are derived from
+`game/extract.py`, `game/app.js` (`renderMermaid`), `game/server.py`, and
+`game/CLAUDE.md` — do not contradict them.
+
+### What gets scanned
+
+- `extract.py` walks **every section** with no allowlist. A **new module dir +
+  `README.md`** and any **new deep-dive sub-file** (`<module>/<name>.md`) are
+  picked up automatically — sub-files are grouped under their parent directory's
+  module (so `ml/foo/README.md` and `ml/foo/bar.md` share the `ml/foo` topic).
+- **Excluded from Q&A extraction:** any path containing `case_studies/`, and all
+  `CLAUDE.md` files. Case studies are still **reachable in the reader** via
+  relative `.md` links (the `/content/` route serves any file) — so linking to a
+  case study from a module is fine; its Q&As just never enter the quiz bank.
+- The bank is committed static JSON. After editing ANY Q&A or adding content you
+  **must re-run `python3 game/extract.py`** and reload the reader (`readerCache`
+  is per-session). **Every new module directory MUST be added to
+  `STUDY_ORDER["<section>"]` in `game/app.js`** at its correct learning-path
+  position — a module absent from the array falls through the `indexOf === -1 →
+  9999` fallback and sorts to the very end, breaking the learning order. (New
+  deep-dive **sub-files** need no `STUDY_ORDER` entry — they group under their
+  parent module's existing position.)
+
+### Q&A format required for extraction (Section 12)
+
+- Q&As must sit under a heading matching `^##\s+.*interview\s+q` (case-insensitive)
+  — the canonical `## 12. Interview Questions with Answers` works.
+- Each **question line starts with `**`** and is one of: fully bold `**question?**`
+  (optional trailing `:`/`.`), a `**Qn:` / `**Q:` label, or an opening `**` that
+  wraps across lines. This is why the "bold the question" rule is load-bearing,
+  not cosmetic.
+- **The first sentence of the answer must be a self-contained direct answer of
+  15–220 characters.** Shorter or longer → the Q&A is silently dropped (it becomes
+  the MCQ's correct option). This is why the Q&A rule mandates "first sentence =
+  direct answer."
+- A topic needs enough sibling Q&As to build 3 distractors; the **15-Q&A floor**
+  guarantees this. Distractors are drawn from other answers' first sentences
+  (same module first, widening to the section), IDF-ranked — so keep first
+  sentences crisp and distinct.
+
+### Mermaid render rules (so diagrams draw in the reader)
+
+- The reader renders every ```` ```mermaid ```` fence via CDN `mermaid@11`
+  (flowchart, sequenceDiagram, stateDiagram-v2, xychart-beta, pie, quadrantChart,
+  timeline, sankey-beta). Offline → raw source shown, retried next open.
+- **Flowcharts: color ALL nodes or NONE.** The reader auto-tints an uncolored
+  flowchart from the One-Dark palette, but that auto-tint **bails entirely if even
+  one node carries an authored color** — mixed coloring renders flat gray. Either
+  apply the One-Dark `classDef` block (from `/mermaid-diagrams`) to every node, or
+  leave all nodes uncolored and let the reader tint them.
+- The reader surface is **pitch-black One-Dark in every theme** — never hand-set a
+  light background or theme-tinted colors inside a diagram.
+- Mermaid fences are valid **only** in study section files (`<section>/…`) — never
+  in CLAUDE.md, skills, or `game/` (see "Mermaid Diagrams" scope rule above).

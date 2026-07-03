@@ -100,65 +100,53 @@ n = number of samples, d = number of features, iter = number of iterations, n_sv
 
 ### 5.1 Supervised Learning Training Pipeline
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    rd([Raw labeled data\npairs x_i, y_i]) --> pp["Preprocessing\nimpute · encode · dedupe"]
+    pp --> fe["Feature engineering\nscale · interactions · selection"]
+    fe --> sp["Train / Val / Test split\n70 / 15 / 15"]
+    sp --> mt["Model training\nminimize L(y_hat, y)"]
+    sp -->|"validation set"| val["Hyperparameter tuning\nearly stopping"]
+    val -.->|"best config"| mt
+    mt --> ev["Evaluation\nF1 · AUC-ROC · RMSE on test"]
+    ev --> dep([Deployment\nserve · monitor drift])
+
+    class rd,dep io
+    class pp,fe,sp mathOp
+    class mt train
+    class val base
+    class ev lossN
 ```
-Raw Data
-    |
-    v
-+------------------+
-| Data Collection  |  (labeled examples: (x_i, y_i))
-+------------------+
-    |
-    v
-+------------------+
-| Preprocessing    |  impute missing, encode categoricals, remove duplicates
-+------------------+
-    |
-    v
-+------------------+
-| Feature Eng.     |  scaling, polynomial features, interactions, selection
-+------------------+
-    |
-    v
-+----------------------------+
-| Train / Val / Test Split   |  typically 70/15/15 or 80/10/10
-+----------------------------+
-    |           |
-    |      Validation set (hyperparameter tuning, early stopping)
-    v
-+------------------+
-| Model Training   |  minimize loss L(y_hat, y) over training set
-+------------------+
-    |
-    v
-+------------------+
-| Evaluation       |  accuracy, F1, AUC-ROC, RMSE on held-out test set
-+------------------+
-    |
-    v
-+------------------+
-| Deployment       |  serve predictions, monitor for drift
-+------------------+
-```
+
+The validation set (dotted path) never touches training loss directly — it only selects
+hyperparameters and triggers early stopping, keeping the test set untouched until the final
+evaluation. Fitting any preprocessing step on data before the split is the classic leakage bug.
 
 ### 5.2 Bias-Variance Decomposition
 
+```mermaid
+xychart-beta
+    title "Bias-Variance Tradeoff vs Model Complexity"
+    x-axis "Model complexity (simple to complex)" [1, 2, 3, 4, 5, 6, 7]
+    y-axis "Expected test error" 0 --> 50
+    line [40, 25, 15, 9, 5, 3, 2]
+    line [2, 3, 5, 9, 16, 26, 40]
+    line [47, 33, 25, 23, 26, 34, 47]
 ```
-Total Error
-    |
-    +--- Bias^2        (systematic error — model underfits)
-    |
-    +--- Variance      (sensitivity to training set — model overfits)
-    |
-    +--- Irreducible   (noise in labels — unavoidable)
 
-High Bias                          High Variance
-   |   _______________                |   /\    /\
-   |  /               \              |  /  \  /  \   training
-   | /                 \             | /    \/    \
-   |/___________________\____________|/____________\___
-                                      ^^^^
-                              test error >> train error
-```
+Three curves: Bias² (falling — complex models underfit less), Variance (rising — complex
+models memorize noise), and Total error = Bias² + Variance + irreducible noise (U-shaped).
+Generalization is best at the sweet spot near complexity 4 where the sum is minimized, not at
+either extreme.
 
 ### 5.3 Decision Boundary Shapes by Algorithm
 
@@ -173,6 +161,57 @@ Linear (LR, SVM linear)     SVM RBF / kernel         Decision Tree
                                                |        |         |        |
                                             f2<=2    f2>2      f1>5    f1<=5
 ```
+
+### 5.4 Algorithm Selection Decision Tree
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start{"Target type?"} -->|"continuous"| c1{"Interpretability\nrequired?"}
+    start -->|"discrete class"| d1{"Data size and type?"}
+    c1 -->|"yes"| lin["Linear Regression"]
+    c1 -->|"no"| gbr["Gradient Boosting\nRegressor"]
+    d1 -->|"small · high-dim text"| nb["Naive Bayes\nor linear SVM"]
+    d1 -->|"probability + calibration"| lr["Logistic Regression"]
+    d1 -->|"mixed types · missing values"| dt["Decision Tree"]
+    d1 -->|"large · accuracy first"| gb["Gradient Boosting"]
+
+    class start io
+    class c1,d1 req
+    class lin,gbr,nb,lr,dt,gb base
+```
+
+The first split is target type (regression vs classification); the second split is the dominant
+constraint (interpretability, data size, feature types). This mirrors the No Free Lunch theorem —
+there is no default algorithm, only the best fit for the constraint you land on.
+
+### 5.5 ML Model Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> DataCollection
+    DataCollection --> Training
+    Training --> Validation
+    Validation --> Training: below metric bar / tune
+    Validation --> Deployment: passes eval gate
+    Deployment --> Monitoring
+    Monitoring --> Monitoring: within drift bounds
+    Monitoring --> Retraining: PSI > 0.2 or concept drift
+    Retraining --> Training
+    Deployment --> [*]: model retired
+```
+
+The self-loop on Monitoring is the steady state; the escape to Retraining fires only when a drift
+signal (Population Stability Index above 0.2, or falling live metrics) breaks the i.i.d. assumption
+the model was trained under. Retraining re-enters the same Training → Validation gate.
 
 ---
 
@@ -369,6 +408,32 @@ def tune_with_cv(X_train: np.ndarray, y_train: np.ndarray) -> LogisticRegression
 | Ranking | NDCG, MRR | Search, recommendation |
 | Probability calibration | Brier score, log-loss | Risk scoring, click-through rate |
 
+### 8.3 Interpretability vs Predictive Power
+
+```mermaid
+quadrantChart
+    title Interpretability vs predictive power
+    x-axis "Low interpretability" --> "High interpretability"
+    y-axis "Lower accuracy ceiling" --> "Higher accuracy ceiling"
+    quadrant-1 "Powerful and clear (rare)"
+    quadrant-2 "Black-box accuracy"
+    quadrant-3 "Weak and opaque (avoid)"
+    quadrant-4 "Interpretable baselines"
+    Linear Regression: [0.9, 0.3]
+    Logistic Regression: [0.85, 0.45]
+    Decision Tree: [0.78, 0.5]
+    Naive Bayes: [0.72, 0.4]
+    k-NN: [0.25, 0.55]
+    SVM RBF: [0.32, 0.7]
+    Gradient Boosting: [0.35, 0.9]
+    Neural Network: [0.15, 0.92]
+```
+
+Regulated domains (credit, clinical) live on the right edge and accept a lower accuracy ceiling for
+auditability; accuracy-first products push to the top-left black-box corner. The empty top-right
+quadrant is why SHAP and surrogate models exist — to make black-box winners explainable after the
+fact.
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -466,6 +531,30 @@ Accuracy is useless here (99.9% by predicting all negatives). The right metrics 
 **Q: What is cross-validation and why is it necessary?**
 Cross-validation (CV) is a technique for estimating generalization performance using only the training set, by repeatedly splitting it into train and validation subsets. k-fold CV divides data into k equal parts, trains on k-1 folds, and evaluates on the held-out fold, rotating until every fold has served as validation. This is necessary because: a single train/val split is high variance (depends on which samples happened to land in each set), and it enables hyperparameter tuning without touching the held-out test set.
 
+**Q: Why must you scale features for SVM and k-NN but not for decision trees?**
+SVM and k-NN measure Euclidean distance, so a feature with a large numeric range dominates the distance and drowns out smaller-scale features. A price feature (0–100,000) swamps a ratio feature (0–1) unless both are standardized to comparable scales. Decision trees split on one feature at a time using threshold comparisons (is x > 3.5?), so absolute scale is irrelevant — monotonic rescaling never changes which split is chosen. Put a StandardScaler before SVM, k-NN, and any distance- or gradient-based model; skip it for tree-based models.
+
+**Q: When should you use ROC-AUC versus PR-AUC?**
+Use ROC-AUC when classes are roughly balanced; use PR-AUC when the positive class is rare and is the class you care about. ROC-AUC plots TPR vs FPR and is insensitive to class ratio, which makes it look deceptively good on imbalanced data because a huge true-negative count keeps FPR tiny. PR-AUC (precision vs recall) ignores true negatives entirely, so it exposes how much precision you sacrifice to catch the rare positives. For fraud, disease, and anomaly detection, PR-AUC is the more honest headline metric.
+
+**Q: How do you decide whether to optimize for precision or recall?**
+Optimize recall when a missed positive is the costly error (cancer screening, fraud) and precision when a false alarm is costly (flagging legitimate email as spam). Precision is, of the cases you flagged, how many were right; recall is, of the true positives, how many you caught. You trade one for the other by moving the decision threshold, so the choice follows the business cost ratio of false negatives to false positives. When both matter, optimize F1, or F-beta with beta tuned to that cost ratio.
+
+**Q: What is the difference between a discriminative and a generative model?**
+A discriminative model learns P(y | x) — the decision boundary — directly, while a generative model learns P(x | y) and P(y), then applies Bayes theorem to obtain P(y | x). Logistic regression, SVM, and trees are discriminative; Naive Bayes and LDA are generative. Generative models can synthesize new samples and often need less data, but discriminative models usually reach higher accuracy when data is plentiful because they optimize the quantity you actually care about. Choose generative for tiny datasets or when you need P(x); discriminative otherwise.
+
+**Q: What is the difference between parametric and non-parametric models?**
+A parametric model has a fixed number of parameters regardless of dataset size, while a non-parametric model's effective complexity grows with the data. Parametric examples include linear/logistic regression and Naive Bayes; non-parametric examples include k-NN, decision trees, and kernel SVM. Parametric models are compact and fast at inference but impose strong assumptions about the functional form, whereas non-parametric models are more flexible at the cost of higher memory or compute and greater overfitting risk on small data. The name is misleading — non-parametric means "unbounded parameters," not "no parameters."
+
+**Q: What is the difference between L1 and L2 regularization?**
+L1 (Lasso) drives some weights exactly to zero for automatic feature selection, while L2 (Ridge) shrinks weights smoothly toward zero without eliminating any. L1's corner-shaped constraint region makes sparse solutions likely, which is valuable in high dimensions where you want an interpretable subset of features. L2 handles correlated features more gracefully by sharing weight among them rather than arbitrarily picking one. Elastic Net combines both to get sparsity plus the stability of L2 under correlation.
+
+**Q: What is probability calibration and when does it matter?**
+Calibration means a predicted probability of 0.8 corresponds to an 80% empirical positive rate; a model can rank perfectly yet still be badly calibrated. It matters whenever the probability itself feeds a downstream decision — expected-value calculations, risk thresholds, or routing bands — rather than just a ranking. SVMs, naive Bayes, and boosted trees often output over-confident scores, whereas logistic regression is usually well-calibrated. Fix with Platt scaling (sigmoid) or isotonic regression on a held-out calibration set, and verify with a reliability diagram or Brier score.
+
+**Q: How do bagging and boosting differ in how they affect bias and variance?**
+Bagging (e.g., random forests) trains many models in parallel on bootstrap samples and averages them, which mainly reduces variance while leaving bias roughly unchanged. Boosting (e.g., XGBoost) trains models sequentially, each correcting the previous one's errors, which mainly reduces bias and can also reduce variance. So bagging is the cure for a high-variance, overfitting base learner (deep trees), while boosting builds a strong model from high-bias weak learners (shallow stumps). Boosting is more accurate but more prone to overfitting noisy labels unless regularized with learning rate and early stopping.
+
 ---
 
 ## 13. Best Practices
@@ -497,32 +586,36 @@ Cross-validation (CV) is a technique for estimating generalization performance u
 **Scenario:** A fintech company processes 50,000 card transactions per second across 120M customers. The fraud team needs a real-time scoring pipeline that flags transactions in under 15ms (p99) with AUC-ROC >= 0.97 while keeping false-positive rate under 0.3% to avoid blocking legitimate purchases. The dataset has 2.4B historical transactions with 0.08% fraud rate (severe class imbalance).
 
 **Architecture:**
-```
-Raw Transactions (Kafka, 50K TPS)
-         |
-         v
-Feature Service (Redis, p99 < 2ms)
-  - velocity: txn count last 1min/5min/1hr
-  - merchant risk score (precomputed)
-  - user behaviour embeddings (128d)
-         |
-         v
-sklearn Pipeline  ──────────────────────────────────
-  ColumnTransformer                                  |
-    - numeric: StandardScaler                        |
-    - categorical: OrdinalEncoder                    |
-    - sparse: TruncatedSVD (128d -> 32d)            |
-  BalancedRandomForest (n=500, SMOTE-aware)         |
-         |                                           |
-         v                                           v
-Threshold Calibrator            Explanation (SHAP values)
-(Platt Scaling)                  top-3 features per decision
-         |
-         v
-Decision Engine (< 15ms p99)
-  score < 0.3  -> approve
-  0.3 - 0.7   -> step-up auth
-  > 0.7        -> block + alert
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 60}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    kf([Raw transactions\nKafka · 50K TPS]) --> fs["Feature Service\nRedis · p99 < 2ms\nvelocity · merchant risk · 128d embeddings"]
+    subgraph pipe["sklearn Pipeline · p99 < 15ms"]
+        ct["ColumnTransformer\nStandardScaler · OrdinalEncoder\nTruncatedSVD 128 → 32"] --> rf["BalancedRandomForest\nn=500 · SMOTE-aware"]
+        rf --> cal["Threshold calibrator\nPlatt scaling"]
+    end
+    fs --> ct
+    rf --> shap["SHAP\ntop-3 features per decision"]
+    cal --> de{"Decision engine\nscore band?"}
+    de -->|"< 0.3"| ap([approve])
+    de -->|"0.3 – 0.7"| su([step-up auth])
+    de -->|"> 0.7"| bl([block + alert])
+
+    class kf,ap,su io
+    class fs base
+    class ct,cal,shap mathOp
+    class rf train
+    class de req
+    class bl lossN
 ```
 
 **Step-by-step implementation:**

@@ -117,92 +117,137 @@ If each voter (model) has accuracy > 0.5 and votes are independent, majority vot
 
 ### Ensemble Taxonomy
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    root["Ensemble Methods"]
+    root --> bag["Bagging\nreduce variance"]
+    root --> boost["Boosting\nreduce bias"]
+    root --> stack["Stacking\nlearn the combination"]
+    bag --> rf["Random Forest"]
+    bag --> et["Extra Trees"]
+    boost --> ada["AdaBoost"]
+    boost --> gbdt["GBDT"]
+    gbdt --> xgb["XGBoost"]
+    gbdt --> lgb["LightGBM"]
+    gbdt --> cat["CatBoost"]
+    stack --> kf["K-Fold Stacking"]
+    stack --> bl["Blending"]
+
+    class root base
+    class bag,boost,stack mathOp
+    class rf,et,ada,gbdt,xgb,lgb,cat,kf,bl train
 ```
-                        ENSEMBLE METHODS
-                               |
-            +------------------+------------------+
-            |                  |                  |
-         BAGGING            BOOSTING           STACKING
-            |                  |                  |
-     +------+------+    +------+------+    +------+------+
-     |             |    |             |    |             |
- Random        Extra   AdaBoost    GBDT   K-Fold     Blending
- Forest        Trees               |     Stacking
-                             +-----+-----+
-                             |           |
-                          XGBoost    LightGBM
-                                     CatBoost
-```
+
+The three families split by what they attack in the bias-variance decomposition: bagging (Random Forest, Extra Trees) drives down variance, boosting (AdaBoost, then the GBDT line — XGBoost, LightGBM, CatBoost) drives down bias, and stacking learns a meta-model over heterogeneous base learners.
 
 ### Bagging Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    D([Training Data D]) --> s1["Bootstrap sample 1"]
+    D --> s2["Bootstrap sample 2"]
+    D --> s3["Bootstrap sample B"]
+    s1 --> m1["Model 1"]
+    s2 --> m2["Model 2"]
+    s3 --> m3["Model B"]
+    m1 --> agg(("average / majority vote"))
+    m2 --> agg
+    m3 --> agg
+    agg --> out([Final Prediction])
+
+    class D,out io
+    class s1,s2,s3 req
+    class m1,m2,m3 train
+    class agg mathOp
 ```
-Training Data D
-      |
-      +----------+----------+----------+
-      |          |          |          |
-  Bootstrap1  Bootstrap2  Bootstrap3  ...Bootstrap_B
-      |          |          |          |
-  Model_1     Model_2     Model_3    Model_B
-      |          |          |          |
-  Pred_1      Pred_2      Pred_3     Pred_B
-      |          |          |          |
-      +----------+----------+----------+
-                        |
-              Average (regression) /
-              Majority vote (classification)
-                        |
-                 Final Prediction
-```
+
+Each model trains on its own bootstrap sample (n rows drawn with replacement), so the models are near-independent; averaging their predictions cancels their uncorrelated errors and reduces variance without touching bias.
 
 ### Boosting Architecture (Sequential)
 
-```
-Training Data D
-      |
-   Model_1  ---> Residuals_1
-                     |
-                  Model_2  ---> Residuals_2
-                                   |
-                                Model_3  ---> ...
-                                               |
-                                            Model_M
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Final: F(x) = lr*h_1(x) + lr*h_2(x) + ... + lr*h_M(x)
-       where lr = learning rate (shrinkage)
+    D([Training Data D]) --> m1["Model 1"]
+    m1 --> r1["residuals r1"]
+    r1 --> m2["Model 2"]
+    m2 --> r2["residuals r2"]
+    r2 --> m3["Model 3"]
+    m3 --> dots["..."]
+    dots --> mM["Model M"]
+    mM --> f["F(x) = lr·h1 + lr·h2 + ... + lr·hM"]
+
+    class D io
+    class m1,m2,m3,mM train
+    class r1,r2 lossN
+    class dots frozen
+    class f mathOp
 ```
+
+Boosting is sequential: each model fits the residual errors left by the running ensemble, so every round shaves off more bias. The shrinkage factor lr (learning rate) scales each tree's contribution; too many rounds without early stopping eventually fit noise and raise variance.
 
 ### K-Fold Stacking Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    tr([Training Data · N rows]) --> split["split into K folds"]
+    split --> loop["for each fold k:\ntrain base models on the other K-1 folds\npredict the held-out fold k"]
+    loop --> oof["out-of-fold predictions · N rows\n(new meta-features)"]
+    oof --> meta["train meta-learner on\nOOF predictions + labels"]
+    te([Test Data]) --> allbase["base models refit on ALL train\n→ averaged test predictions"]
+    allbase --> meta
+    meta --> final([Final Predictions])
+
+    class tr,te,final io
+    class split,loop frozen
+    class oof mathOp
+    class meta,allbase train
 ```
-Training Data (N rows)
-      |
-  Split into K folds
-      |
-  For each fold k:
-    Train base models on K-1 folds
-    Predict on fold k --> OOF predictions
-      |
-  OOF predictions (N rows) = new features
-      |
-  Train meta-learner on OOF predictions + original labels
-      |
-  Test Data:
-    Base models (trained on all train) --> Test predictions (averaged)
-    Meta-learner(test predictions) --> Final predictions
-```
+
+K-fold stacking generates leak-free meta-features: every training row is scored only by base models that never saw it, so the meta-learner learns from honest, generalization-quality predictions. At test time the base models (refit on all training data) score the test set and the meta-learner combines them.
 
 ### Training Time Comparison (100K rows, 100 features, binary classification)
 
+```mermaid
+xychart-beta
+    title "Training time on CPU — 100K rows, 100 features"
+    x-axis ["RF 500T", "XGBoost", "LightGBM", "CatBoost", "sklearn GBDT"]
+    y-axis "seconds (CPU)" 0 --> 120
+    bar [15, 10, 3, 8, 120]
 ```
-Algorithm              CPU Time    GPU Time    Memory
-----------------------------------------------------
-Random Forest (500T)   ~15s        ~5s         ~2GB
-XGBoost (500 rounds)   ~10s        ~0.3s       ~0.5GB
-LightGBM (500 rounds)  ~3s         ~0.3s       ~0.3GB
-CatBoost (500 iter)    ~8s         ~0.5s       ~0.5GB
-sklearn GBDT           ~120s       N/A         ~0.3GB
-```
+
+LightGBM (~3s) trains ~3x faster than XGBoost (~10s) and ~40x faster than sklearn's own GBDT (~120s). On GPU, XGBoost and LightGBM both collapse to ~0.3s; peak memory ranges from ~0.3GB (LightGBM, sklearn GBDT) to ~2GB (Random Forest).
 
 ---
 
@@ -217,6 +262,16 @@ Variance(average) = ρ*σ^2 + (1-ρ)*σ^2/B
 ```
 
 As B → ∞, variance approaches ρ*σ^2. Reducing correlation (diversity) reduces the floor; more trees reduce variance toward that floor.
+
+```mermaid
+xychart-beta
+    title "Bagging variance vs number of models B (rho=0.2, sigma^2=1)"
+    x-axis "number of base models B" [1, 2, 5, 10, 25, 50, 100, 300]
+    y-axis "ensemble variance" 0 --> 1.0
+    line [1.0, 0.6, 0.36, 0.28, 0.232, 0.216, 0.208, 0.203]
+```
+
+Ensemble variance ρσ² + (1-ρ)σ²/B falls steeply over the first few models, then flattens onto the correlation floor ρσ² = 0.2. Past ~50 models more trees barely help — only cutting pairwise correlation ρ (feature/data subsampling, algorithm diversity) lowers the floor itself. This is the mathematical root of the diminishing-returns effect discussed in §8.
 
 ### Quick comparison with sklearn
 
@@ -463,6 +518,15 @@ In production, base model drift can be masked by the ensemble's average. Track e
 **Q: What is the bias-variance tradeoff and how do bagging and boosting each address it?**
 Expected MSE decomposes into bias^2 + variance + irreducible noise. Bagging averages many high-variance, low-bias models (deep trees), which reduces variance proportional to (1-ρ)/B where ρ is pairwise correlation and B is the number of models; bias is unchanged. Boosting trains shallow (high-bias, low-variance) models sequentially, each correcting the previous model's errors, which reduces bias; it can increase variance if run too long (overfitting). Practical guidance: when your model underfits, try boosting; when it overfits, try bagging.
 
+**Q: Why can you keep adding trees to a Random Forest without overfitting, but adding boosting rounds eventually overfits?**
+Random Forest averages independently trained trees, so more trees only lower variance and never overfit; boosting fits residuals sequentially, so extra rounds eventually fit noise. Averaging is a variance-only operation — adding an uncorrelated tree can only shrink the ensemble variance term (1-ρ)σ²/B, so n_estimators is a "more is safe" knob for RF. Boosting is a bias-reduction loop where each tree corrects the running ensemble, so past the optimal round the model memorizes noise and validation loss climbs. This is exactly why RF needs no early stopping but XGBoost/LightGBM do.
+
+**Q: How do noisy labels and outliers affect bagging versus boosting differently?**
+Boosting is far more sensitive: it up-weights hard or mislabeled examples every round and can chase them, while bagging averages many trees and dilutes the influence of any single noisy point. AdaBoost's exponential loss is the worst offender — a mislabeled point gets exponentially growing weight and can dominate later rounds. Gradient boosting with a robust loss (Huber, or a capped/quantile loss) mitigates this. Practical guidance: on noisy-label data, prefer Random Forest or heavily regularized gradient boosting with subsampling and a robust loss, and clean obvious label errors before boosting.
+
+**Q: Why are raw probabilities from tree ensembles often miscalibrated, and how do you fix it?**
+Tree ensembles optimize impurity or ranking, not probability accuracy, so their scores are often miscalibrated and should be corrected with Platt scaling or isotonic regression before you threshold or soft-vote. Random Forest averages 0/1 leaf votes and is pulled toward the middle (rarely outputs near 0 or 1); boosting tends to push scores toward the extremes. Use `CalibratedClassifierCV` (method="isotonic" for large data, "sigmoid" for small) fit on a held-out set. Calibration matters most when a downstream decision uses a probability threshold or when you soft-vote across model families.
+
 **Q: Why does a random forest use sqrt(n_features) for classification but n_features/3 for regression?**
 Both choices de-correlate the trees by limiting which features each tree can split on at any node, which is the core mechanism for variance reduction. Classification uses sqrt because labels are categorical — each tree's optimal split set is smaller relative to the feature space. Regression uses n_features/3 empirically because continuous targets benefit from slightly more features to find good numeric splits. These are defaults; both should be tuned via OOB error or cross-validation for your specific dataset.
 
@@ -492,6 +556,21 @@ Soft voting averages predicted class probabilities then takes the argmax; hard v
 
 **Q: What are the diminishing returns of adding more models to an ensemble?**
 The variance reduction from averaging B models is σ^2*(ρ + (1-ρ)/B). Adding models reduces the second term but the floor ρ*σ^2 (from correlated errors) is not reducible. In practice: going from 1 to 3 diverse models yields most of the gain; 3 to 5 models gives modest additional gain; beyond 5 models with similar algorithms, improvement is marginal (typically < 0.1% AUC) while serving cost and maintenance complexity scale linearly. For stacking, the meta-learner's gains also plateau — a second stacking level typically adds 0.1-0.5% over the first; a third level is almost never worth it in production.
+
+**Q: What is the difference between Random Forest and Extra Trees, and when is Extra Trees preferable?**
+Extra Trees (Extremely Randomized Trees) picks split thresholds at random instead of searching for the best one, which adds a little bias, further reduces variance, and trains faster than Random Forest. It also uses the whole dataset per tree by default rather than bootstrap samples. The extra randomness de-correlates the trees more aggressively, so Extra Trees can outperform RF on noisy, high-variance problems and trains faster because it skips the exhaustive threshold search. Prefer it when RF is overfitting or training too slowly; prefer RF when you need the best single-split quality per node.
+
+**Q: What is the difference between bagging and pasting?**
+Bagging draws each model's training subset with replacement (bootstrap), while pasting samples without replacement. Bagging's bootstrap means each subset has ~63.2% unique rows and duplicates, which leaves ~36.8% out-of-bag for free validation; pasting has no OOB set because nothing is left out across the full dataset in the same way. Bagging generally gives slightly more diverse (less correlated) models due to resampling variety, so it is the more common default; pasting is used when data is plentiful and you want each model to see distinct rows.
+
+**Q: What is the tradeoff between LightGBM's leaf-wise growth and XGBoost's level-wise growth?**
+Leaf-wise growth (LightGBM) splits the highest-loss leaf, reaching lower loss faster but overfitting small data; level-wise growth (XGBoost) expands a whole depth at once, which is more balanced. Leaf-wise can produce deep, unbalanced trees, so LightGBM controls complexity primarily with `num_leaves` and `min_child_samples` rather than `max_depth`. On large datasets leaf-wise usually wins on both speed and accuracy; on small or noisy datasets cap `num_leaves` (e.g. 15–31) or it will overfit.
+
+**Q: What is DART in XGBoost and when does it help?**
+DART (Dropouts meet Multiple Additive Regression Trees) randomly drops a subset of already-built trees when computing each new tree, preventing later trees from over-specializing to the residuals of a few early trees. Standard GBDT suffers from "over-specialization" where trees added late in training only affect a handful of instances; DART's dropout spreads contribution more evenly across the ensemble. It can improve accuracy on some problems at the cost of slower convergence and an extra hyperparameter (`rate_drop`). Use it when a well-tuned GBDT plateaus and you suspect late trees are overfitting a narrow slice of the data.
+
+**Q: How do you set scale_pos_weight (XGBoost) or class_weight for imbalanced classification?**
+Set scale_pos_weight to the ratio of negative to positive examples (e.g. ~1000 for a 0.1% positive rate) so the minority class contributes proportionally to the gradient. In sklearn ensembles the equivalent is `class_weight="balanced"` (or `"balanced_subsample"` for Random Forest), which weights each class inversely to its frequency. These reweight the loss so the model stops predicting all-negative; combine with a metric that respects imbalance (PR-AUC / average precision, not accuracy) and tune the decision threshold afterward rather than leaving it at 0.5. For extreme imbalance, resampling (SMOTE on the training fold only) is an alternative or complement.
 
 ---
 

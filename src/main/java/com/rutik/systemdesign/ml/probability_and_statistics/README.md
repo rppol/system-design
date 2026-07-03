@@ -73,54 +73,99 @@ Maximum Likelihood Estimation (MLE) answers: given a dataset, what parameters ma
 
 ### Bayes Theorem in ML
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x([Data X]) --> lik["Likelihood\nP(X∣θ)"]
+    prior["Prior belief\nP(θ)"] --> post["Posterior\nP(θ∣X)"]
+    lik -->|"Bayes update"| post
+    post --> map["MAP estimate\nargmax P(θ∣X)"]
+    map --> reg["= argmax  log P(X∣θ) + log P(θ)\n= MLE loss + regularization"]
+
+    class x io
+    class prior base
+    class lik mathOp
+    class post io
+    class map mathOp
+    class reg lossN
 ```
-                    Prior
-                    P(theta)
-                       |
-                       v
-Data X -----> Likelihood P(X|theta) ----> Posterior P(theta|X)
-                       |                       |
-                       v                       v
-                   (update)              MAP estimate:
-                                         argmax P(theta|X)
-                                        = argmax log P(X|theta) + log P(theta)
-                                        = MLE loss + regularization
-```
+
+The prior belief P(θ) and the data-driven likelihood P(X∣θ) combine into the posterior
+P(θ∣X); taking its argmax gives the MAP estimate, whose two log terms are exactly the MLE
+loss plus a regularizer — the bridge this module keeps returning to.
 
 ### MLE vs MAP Connection to Loss Functions
 
-```
-Gaussian noise model (regression):
-  P(y|x, w) = N(y; w^T x, sigma^2)
-  log P(y|x, w) = -||y - w^T x||^2 / (2 sigma^2) + const
-  MLE = minimize MSE loss
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Categorical model (classification):
-  P(y|x, w) = Categorical(softmax(Wx))
-  log P(y|x, w) = log softmax(Wx)[y] = log predicted prob of true class
-  MLE = minimize cross-entropy loss
+    subgraph mle["MLE — maximize likelihood, no prior"]
+        gauss["Gaussian noise (regression)\nP(y∣x,w) = N(y; w^T x, σ²)"] --> mse["minimize\nMSE loss"]
+        cat["Categorical (classification)\nP(y∣x,w) = softmax(Wx)"] --> ce["minimize\ncross-entropy loss"]
+    end
+    prior["Gaussian prior on weights\nP(w) = N(0, σ_w² I)"]
+    mse --> map["MAP objective\nloss + λ·‖w‖²\nλ = σ² / σ_w²"]
+    ce --> map
+    prior -->|"add log prior"| map
 
-Adding L2 regularization:
-  MAP with Gaussian prior P(w) = N(0, sigma_w^2 I)
-  = minimize MSE/cross-entropy + (lambda) * ||w||_2^2
-  lambda = sigma^2 / sigma_w^2  (noise variance over prior variance)
+    class gauss,cat base
+    class mse,ce mathOp
+    class prior frozen
+    class map lossN
 ```
+
+Left path: with no prior, MLE reduces to plain MSE (Gaussian noise) or cross-entropy
+(categorical) loss. Adding a Gaussian prior on the weights turns MLE into MAP, which is the
+same loss plus an L2 penalty whose strength λ = σ² / σ_w² is the noise variance over the
+prior variance — a tighter prior (smaller σ_w²) means a larger λ.
 
 ### Hypothesis Test Decision Boundaries
 
+```mermaid
+xychart-beta
+    title "Two-tailed rejection regions (alpha = 0.05, critical z = +/- 1.96)"
+    x-axis "z (standardized test statistic)" [-3, -2, -1.96, -1, 0, 1, 1.96, 2, 3]
+    y-axis "density  phi(z)" 0 --> 0.45
+    bar [0.004, 0.054, 0.058, 0, 0, 0, 0.058, 0.054, 0.004]
+    line [0.004, 0.054, 0.058, 0.242, 0.399, 0.242, 0.058, 0.054, 0.004]
 ```
-Observed test statistic z
-          |
-     |----|----|----|----|----|
-    -3   -2   -1    0    1    2    3
-                               |
-                           z_alpha = 1.96  (for alpha=0.05, two-tailed)
 
-If |z| > 1.96: reject H0 (p-value < 0.05)
-If |z| < 1.96: fail to reject H0
+The line is the standard-normal density of the test statistic under H0; the shaded bars are
+the two rejection tails. With alpha = 0.05 two-tailed, each tail holds 2.5% of the mass, so
+you reject H0 whenever |z| > 1.96 (p-value < 0.05) and fail to reject inside the tails. The
+p-value is the tail mass at least as extreme as the observed z.
 
-p-value = P(|Z| >= |z_observed| | H0)
+### Central Limit Theorem — Sampling Distribution of the Mean
+
+```mermaid
+xychart-beta
+    title "Sampling distribution of the mean narrows as n grows (population sigma = 1)"
+    x-axis "sample mean" [-3, -2, -1, -0.5, 0, 0.5, 1, 2, 3]
+    y-axis "density of the sample mean" 0 --> 2.3
+    line [0.004, 0.054, 0.242, 0.352, 0.399, 0.352, 0.242, 0.054, 0.004]
+    line [0.000, 0.000, 0.073, 0.478, 0.892, 0.478, 0.073, 0.000, 0.000]
+    line [0.000, 0.000, 0.000, 0.051, 2.185, 0.051, 0.000, 0.000, 0.000]
 ```
+
+The three curves are the same population (sigma = 1) sampled at n = 1, 5, 30. By the CLT the
+sample mean has standard deviation sigma / sqrt(n), so the distribution sharpens from the
+wide n=1 curve (std 1.0) through n=5 (std ~ 0.45) to the tall n=30 spike (std ~ 0.18) — the
+N(mu, sigma^2/n) shrinkage from Section 3, and why larger batches give lower-variance
+gradient estimates.
 
 ---
 
@@ -429,6 +474,30 @@ The Beta(alpha, beta) distribution is supported on [0,1], making it a natural pr
 
 **Q: How do you design an A/B test to detect a 5% relative improvement in conversion rate?**
 First determine the baseline conversion rate (say p=0.10) and the minimum detectable effect (MDE = 5% relative = 0.005 absolute). Choose alpha=0.05 and power=0.80. Compute the required sample size: n = 2 * (z_alpha/2 + z_beta)^2 * p*(1-p) / delta^2 where delta=0.005; this gives approximately 28,000 per group. Run the test without peeking until the target n is reached. Report both p-value and 95% CI on the absolute difference; if CI lower bound > 0, the result is practically significant.
+
+**Q: What is the difference between MLE and MAP, and when do they coincide?**
+MLE maximizes P(data|theta) with no prior, while MAP maximizes P(theta|data) by adding a log-prior term, and they coincide when the prior is uniform. MAP = argmax [log P(data|theta) + log P(theta)], so a flat prior makes the prior term constant and MAP reduces to MLE. MAP also converges to MLE as data grows, because the likelihood scales with n while the fixed prior is eventually swamped. Practically, prefer MAP (regularization) with little data and a meaningful prior; MLE is fine once data dwarfs the number of parameters.
+
+**Q: Why do we maximize the log-likelihood instead of the likelihood directly?**
+We use the log-likelihood because log turns the product of per-sample probabilities into a sum that is numerically stable and easier to differentiate. Multiplying thousands of probabilities below 1 underflows to zero in floating point, whereas summing their logs does not. Because log is monotonic, the argmax is unchanged. Sums also differentiate term-by-term into the clean additive gradients SGD relies on, and they connect directly to cross-entropy and information measured in nats or bits.
+
+**Q: What is the difference between an unbiased estimator and a consistent estimator?**
+An unbiased estimator has expected value equal to the true parameter for any n, while a consistent estimator merely converges to it as n grows. The two are independent: the MLE variance (dividing by n) is biased downward yet still consistent, since its bias factor (n-1)/n tends to 1. Conversely an estimator can be unbiased but inconsistent if its variance never shrinks. In ML we usually value consistency and low variance over strict unbiasedness, which is the bias-variance tradeoff — a slightly biased, lower-variance estimator often generalizes better.
+
+**Q: What is the difference between a Type I and a Type II error?**
+A Type I error rejects a true null hypothesis (false positive), and a Type II error fails to reject a false null (false negative). Type I is controlled by the significance level alpha (typically 0.05); Type II is beta, and statistical power equals 1 - beta. The two trade off: lowering alpha to demand stronger evidence raises beta unless you increase the sample size. In an A/B test a Type I error ships a change that does nothing, while a Type II error misses a real improvement, so pick alpha and power based on which mistake is costlier.
+
+**Q: When does the Central Limit Theorem fail to apply?**
+The CLT fails when samples are not independent, when the underlying variance is infinite, or when n is too small for heavy-tailed data. Distributions with infinite variance such as the Cauchy never yield a Gaussian sample mean no matter how large n is. Strong dependence (time-series autocorrelation, repeated measurements on the same user) breaks the iid assumption, so the effective sample size is far below n. For very skewed or heavy-tailed data the n needed for a good Gaussian approximation can be thousands rather than the rule-of-thumb 30.
+
+**Q: What is the core difference between the frequentist and Bayesian interpretations of probability?**
+Frequentists see probability as long-run frequency with fixed unknown parameters, while Bayesians see it as degree of belief with parameters treated as random variables. A frequentist 95% confidence interval is a statement about the procedure across repeated experiments; a Bayesian 95% credible interval is a direct probability statement about the parameter given a prior. Frequentist methods need no prior but forbid probability claims about hypotheses; Bayesian methods require a prior but yield the intuitive P(hypothesis|data). MAP and L2 regularization are the Bayesian view showing up inside everyday ML.
+
+**Q: What is Jensen's inequality and where does it show up in ML?**
+Jensen's inequality states that for a convex function f, f(E[X]) <= E[f(X)], with the direction reversed for concave functions. Because log is concave, E[log X] <= log E[X], which is exactly the gap the ELBO (evidence lower bound) exploits to make variational inference and VAEs tractable. It also proves the arithmetic mean is at least the geometric mean and underlies the non-negativity of KL divergence. Whenever you swap an expectation with a nonlinear function, Jensen tells you which direction the resulting bias points.
+
+**Q: What is the exponential family and why is it important in ML?**
+The exponential family is a class of distributions writable as exp(eta^T T(x) - A(eta)), covering the Gaussian, Bernoulli, Poisson, and more. Members share convenient properties: sufficient statistics T(x) summarize the data, the log-partition A(eta) generates moments by differentiation, and each has a conjugate prior enabling closed-form Bayesian updates. Generalized linear models — linear, logistic, and Poisson regression — are exactly the exponential family paired with a link function. This shared structure is why so many classical models are fit with the same machinery.
 
 ---
 

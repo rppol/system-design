@@ -34,64 +34,54 @@ which is dangerous and erodes rider trust.
 
 ## Architecture Overview
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    cam(["Cameras 10x\n30 FPS, 8MP"])
+    lidar(["LiDARs 5x\n360, 128-beam, 10 Hz"])
+    radar(["Radars 2x\nlong-range, 10 Hz"])
+    camPipe["Camera Pipeline\nYOLOv8 per cam, BEV projection,\ntemporal fusion"]
+    lidarPipe["LiDAR Pipeline\nVoxelNet 3D, 0.1m voxel, 0-120m"]
+    radarPipe["Radar Pipeline\nclustering, Doppler velocity"]
+    fusion["Feature-Level Fusion\nshared BEV feature map (primary)"]
+    late["Late Fusion\nprediction ensemble,\nfallback if BEV fails"]
+    head["3D Object Detection Head\nclass, 3D bbox x,y,z,l,w,h,yaw,\nconfidence, uncertainty"]
+    tracker["Multi-Object Tracker\nKalman per track, Hungarian assign,\nlifecycle FSM"]
+    scene["Scene Representation\ntracked objects, occupancy grid,\nfree-space map"]
+    pred(["Prediction module"])
+    plan(["Planning module"])
+
+    cam --> camPipe
+    lidar --> lidarPipe
+    radar --> radarPipe
+    camPipe --> fusion
+    lidarPipe --> fusion
+    radarPipe --> fusion
+    camPipe --> late
+    lidarPipe --> late
+    radarPipe --> late
+    fusion --> head
+    late --> head
+    head --> tracker --> scene
+    scene --> pred
+    scene --> plan
+
+    class cam,lidar,radar,scene,pred,plan io
+    class camPipe,lidarPipe,radarPipe,fusion,tracker mathOp
+    class late frozen
+    class head train
 ```
-Physical Sensors on Vehicle
-+------------------------------------------------------------------+
-|  Cameras (10x)          LiDARs (5x)           Radars (2x)       |
-|  Front wide, front      Roof (360),            Front long-range  |
-|  narrow, side (4x),     Side rear (4x)         Rear long-range   |
-|  rear (2x), fisheye(2x)                                          |
-+------------------------------------------------------------------+
-         |                      |                      |
-         v (30 FPS)             v (10 Hz)              v (10 Hz)
-+----------------+    +------------------+    +------------------+
-| Camera Pipeline|    | LiDAR Pipeline   |    | Radar Pipeline   |
-| YOLOv8 per cam |    | VoxelNet 3D det. |    | Object velocity  |
-| BEV projection |    | Voxel: 0.1m res. |    | Clustering       |
-| Temporal fusion|    | Range: 0-120m    |    | Doppler vel.     |
-+----------------+    +------------------+    +------------------+
-         |                      |                      |
-         +----------+-----------+----------+-----------+
-                    |                      |
-                    v                      v
-         +--------------------+   +--------------------+
-         |   Feature-Level    |   |   Late Fusion      |
-         |   Fusion (BEV      |   |   (Prediction      |
-         |   Feature Map)     |   |    Ensemble)       |
-         |   Primary pipeline |   |   Fallback if      |
-         |                    |   |   BEV fails        |
-         +--------------------+   +--------------------+
-                    |
-                    v
-         +------------------------------+
-         |    3D Object Detection Head  |
-         |  - Class: vehicle, ped, cyc  |
-         |  - 3D bbox (x,y,z,l,w,h,yaw)|
-         |  - Confidence score          |
-         |  - Uncertainty estimate      |
-         +------------------------------+
-                    |
-                    v
-         +------------------------------+
-         |   Multi-Object Tracker       |
-         |  - Kalman filter per track   |
-         |  - Hungarian assignment      |
-         |  - Track lifecycle FSM       |
-         |    tentative->confirmed->del |
-         +------------------------------+
-                    |
-                    v
-         +------------------------------+
-         |   Scene Representation       |
-         |  - Tracked object list       |
-         |  - Occupancy grid            |
-         |  - Free space map            |
-         +------------------------------+
-                    |
-               [Prediction Module]
-               [Planning Module]
 
+Each sensor modality runs a dedicated pipeline; feature-level BEV fusion is the primary path (late fusion is the fallback if BEV fails), and the shared detection head feeds the tracker and scene representation consumed by prediction and planning.
 
+```
 Compute Architecture (NVIDIA Orin SoC):
   Camera preprocessing: ISP hardware block (no GPU)
   LiDAR: voxelization on CPU (multi-threaded), detection on GPU
@@ -152,6 +142,24 @@ Tracks transition through states to prevent ghost object alarms:
 
 This prevents the planning module from receiving flash detections (momentary sensor noise) that
 disappear on the next frame, which would trigger unnecessary emergency braking.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Tentative: first detection
+    Tentative --> Confirmed: detected in 3 of last 5 frames
+    Tentative --> Deleted: missed next frame
+    Confirmed --> Occluded: no detection 1-2 frames
+    Occluded --> Confirmed: re-detected
+    Confirmed --> Deleted: 3 consecutive misses
+    Occluded --> Deleted: 3 consecutive misses
+    Deleted --> [*]
+    note right of Confirmed
+        only Confirmed tracks are
+        reported to the planning module
+    end note
+```
+
+The lifecycle FSM is the gate between raw detections and planning: only Confirmed tracks reach the planner, so momentary Tentative noise is discarded and brief Occlusions are bridged by Kalman prediction rather than dropped.
 
 ### 5. Uncertainty Estimation via Deep Ensembles
 
@@ -731,6 +739,16 @@ Cloud infrastructure (training + simulation):
   Storage: 5PB S3 for training data + scenario archive
   Estimated cloud bill: $500K/month total platform
 ```
+
+```mermaid
+xychart-beta
+    title "Per-cycle latency budget on Orin SoC (ms, 100ms deadline)"
+    x-axis ["LiDAR voxel", "VoxelNet 3D", "Camera BEV", "Fusion+head", "Tracker"]
+    y-axis "milliseconds" 0 --> 35
+    bar [10, 25, 30, 15, 8]
+```
+
+The five stages sum to 88ms, leaving a 12ms margin under the 100ms (10 Hz) real-time deadline; camera BEV encoding and VoxelNet 3D detection dominate, so those are the first targets for INT8 quantization if a new sensor is added.
 
 ---
 

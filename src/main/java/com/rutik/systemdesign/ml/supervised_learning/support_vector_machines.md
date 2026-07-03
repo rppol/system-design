@@ -128,29 +128,80 @@ Better generalization (maybe)       May overfit noise
 
 ### 5.3 Kernel Trick — RBF Lifting to Feature Space
 
-```
-Original 2D space             RBF feature space (infinite-dim)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  o   o   x x                   +--+--+--+--+
-  o   x   o x        kernel     |  |  |  |  |
-  o o x x   x    ------------> phi(x) ...
-    o   o x x                 linear boundary in feature space
-                               = non-linear boundary in input space
-non-linearly separable         linearly separable
+    xin(["x, z in input space\n(non-separable in 2D)"]) --> K["K(x,z) = φ(x)·φ(z)\ncomputed directly, φ never formed"]
+    K --> dual["Dual SVM\nneeds only dot products K(xᵢ,xⱼ)"]
+    dual --> hsp["Linear separator in\nhigh-dim feature space"]
+    hsp --> bnd(["Non-linear boundary\nback in input space"])
+
+    class xin,bnd io
+    class K,dual mathOp
+    class hsp base
 ```
+
+The trick is that the dual objective touches the data only through dot products, so
+replacing xᵢᵀxⱼ with a kernel K implicitly lifts every point into a high- (even
+infinite-) dimensional space at O(d) cost — φ(x) is never actually computed. A plain
+hyperplane there is a curved boundary back in the original input space.
 
 ### 5.4 SMO Algorithm (Sequential Minimal Optimization)
 
-```
-While not converged:
-    1. Select alpha_i (violates KKT conditions most)
-    2. Select alpha_j (maximizes progress, heuristic)
-    3. Optimize over alpha_i, alpha_j analytically (2-variable QP has closed form)
-    4. Update b (bias)
-    5. Check KKT conditions for all points
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Advantage: avoids large matrix QP; each step is O(n) not O(n^2)
+    start(["Init: α = 0, b = 0"]) --> s1["Select αᵢ\nworst KKT violator"]
+    s1 --> s2["Select αⱼ\nmax-progress heuristic"]
+    s2 --> s3["Solve 2-variable QP\nanalytically (closed form)"]
+    s3 --> s4["Update bias b"]
+    s4 --> chk{"All KKT\nconditions met?"}
+    chk -->|"no"| s1
+    chk -->|"yes"| done(["Converged — support\nvectors are the αᵢ > 0"])
+
+    class start,done io
+    class s1,s2,s3,s4 mathOp
+    class chk lossN
 ```
+
+SMO never materializes the full n×n kernel matrix. It repeatedly picks the two most
+KKT-violating multipliers and solves that tiny 2-variable sub-problem in closed form,
+so each step is O(n) not O(n²) — the trick that made SVMs practical past a few hundred
+points.
+
+### 5.5 Soft-Margin Tradeoff — Choosing C (Bias–Variance)
+
+```mermaid
+xychart-beta
+    title "Soft-margin SVM: sweeping C trades margin width for training fit"
+    x-axis "C (log scale)" [0.01, 0.1, 1, 10, 100]
+    y-axis "error / normalized margin width" 0 --> 1
+    line [0.28, 0.15, 0.08, 0.03, 0.01]
+    line [0.30, 0.18, 0.12, 0.16, 0.24]
+    line [1.0, 0.72, 0.5, 0.32, 0.2]
+```
+
+Three curves versus C: training error (top-to-bottom monotone decrease), test error
+(the U-shaped middle curve), and normalized margin width (the falling curve). Large C
+drives training error toward zero but narrows the margin and overfits; small C keeps a
+wide margin but underfits. The U-shaped test error bottoms out at an intermediate C —
+which is exactly why C must be cross-validated, not maximized.
 
 ---
 

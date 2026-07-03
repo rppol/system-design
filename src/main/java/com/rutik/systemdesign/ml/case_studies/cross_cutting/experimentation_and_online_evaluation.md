@@ -73,38 +73,66 @@ Why it matters: without online evaluation, every ML improvement is a guess. Even
 
 ### Experimentation Platform Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    flags["Feature flags / config\nLaunchDarkly, Statsig, Eppo"] --> assign["Assignment service\nhash(user_id, experiment_id)"]
+    assign --> ctrl["Control group\nexisting model"]
+    assign --> treat["Treatment group\nnew model / feature"]
+    ctrl --> log["Logging layer\nKafka"]
+    treat --> log
+    log --> proc["Event processing\nFlink / Spark Streaming"]
+    proc --> metric["Metric computation\nOEC, guardrails,\nuser-level rollups"]
+    metric --> stat["Statistical engine\nt-test / Mann-Whitney /\nsequential"]
+    stat --> dash(["Dashboard\nship / rollback"])
+
+    class flags io
+    class assign,proc,metric,stat mathOp
+    class ctrl frozen
+    class treat train
+    class log base
+    class dash io
 ```
-+--------------------+       +---------------------+
-| Feature Flags      |       | Assignment Service  |
-| / Config Service   |  ---> | (hash(user_id,       |
-| (LaunchDarkly,     |       |  experiment_id)      |
-|  Statsig, Eppo)    |       |  -> treatment group) |
-+--------------------+       +----------+----------+
-                                        |
-                      +-----------+-----+
-                      |                 |
-              Control Group         Treatment Group
-              (existing model)      (new model / feature)
-                      |                 |
-              +-------+---------+-------+-------+
-              |                                 |
-       Logging Layer (Kafka)             Logging Layer
-              |                                 |
-              +-------+--+--+------------------+
-                      |
-             Event Processing Pipeline
-             (Flink / Spark Streaming)
-                      |
-             Metric Computation Layer
-             (daily rollup of OEC, guardrails,
-              user-level aggregations)
-                      |
-             Statistical Engine
-             (t-test / Mann-Whitney / sequential)
-                      |
-             Experiment Dashboard
-             (results + ship/rollback recommendation)
+
+A deterministic hash routes each user to one arm; both arms flow through a shared logging and metric pipeline so the two groups are measured identically.
+
+### A/B Experiment Lifecycle
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    plan(["Pre-specify OEC,\nguardrails, MDE"]) --> power["Power / sample size\nalpha, power, MDE"]
+    power --> assign["Hash assignment\nuser to group"]
+    assign --> srm{"SRM check\nday 1 ?"}
+    srm -->|"mismatch"| invalid["Invalidate\n& fix pipeline"]
+    srm -->|"balanced"| run["Run full duration\n(no peeking)"]
+    run --> cuped["Apply CUPED\nvariance reduction"]
+    cuped --> analyze["Analyze once\nt-test + CI"]
+    analyze --> guard{"guardrails\npass ?"}
+    guard -->|"no"| rollback["Rollback"]
+    guard -->|"yes"| ship(["Ship"])
+
+    class plan,ship io
+    class power,assign,run,cuped,analyze mathOp
+    class srm,guard req
+    class invalid,rollback lossN
 ```
+
+The plan is locked before any data is seen; SRM is checked on day 1, results are analyzed exactly once at the pre-committed horizon, and a guardrail breach overrides a winning primary metric.
 
 ### CUPED Variance Reduction
 
@@ -265,6 +293,16 @@ for _ in range(n_simulations):
 print(f"False positive rate with peeking: {false_positives / n_simulations:.1%}")
 # Result: ~26% false positive rate instead of 5%
 ```
+
+```mermaid
+xychart-beta
+    title "Peeking inflates the false-positive rate"
+    x-axis "Number of significance looks" [1, 2, 4, 7, 14]
+    y-axis "False positive rate (%)" 0 --> 30
+    bar [5, 11, 16, 21, 26]
+```
+
+One pre-specified look holds the nominal 5%; checking for significance daily across a 14-day test drives the true Type I error to roughly 26% — the reason sequential (always-valid) tests exist.
 
 ```python
 # CORRECT: sequential testing with mSPRT (mixture Sequential Probability Ratio Test)

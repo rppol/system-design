@@ -63,49 +63,75 @@ Why it matters: a model that was 0.88 AUC at deployment and is now 0.71 AUC in p
 
 ### Drift Monitoring Pipeline
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    serve["Production serving"] -->|"log features + preds\n(5-10% sample)"| flog["Feature log\nKafka / S3"]
+    flog --> engine["Drift computation engine\nSpark batch / Flink"]
+    engine --> checks["PSI per feature\nKS + chi-squared\nscore-distribution shift"]
+    checks --> dash["Monitoring dashboard\nGrafana"]
+    dash --> alert{"PSI over 0.2 or\nAUC drop ?"}
+    alert -->|"no"| ok(["Healthy"])
+    alert -->|"yes"| retrain["Retraining pipeline\nvalidate, train,\ntime-based holdout"]
+    retrain --> shadow["Champion / challenger\n7-day shadow"]
+    shadow --> promote(["Promote if challenger\nwithin 0.5pp AUC"])
+
+    class serve frozen
+    class flog base
+    class engine,checks,retrain mathOp
+    class dash,alert req
+    class ok,promote io
+    class shadow train
 ```
-Production Serving
-        |
-        | log feature values + predictions (sampled 5-10%)
-        v
-Feature Log (Kafka / S3)
-        |
-        v
-Drift Computation Engine (Spark batch / Flink streaming)
-        |
-        +----PSI per feature (vs training baseline)
-        +----KS test per numeric feature
-        +----Chi-squared per categorical feature
-        +----Score distribution shift (KS on model output)
-        |
-        v
-Monitoring Dashboard (Grafana / custom)
-        |
-        +----Alert: PSI > 0.2 for any feature (P1)
-        +----Alert: AUC < deployment AUC - 0.05 (P1, requires labels)
-        +----Alert: Score distribution KS p < 0.001 (P2)
-        +----Info: weekly calibration report (ECE)
-        |
-        v
-Retraining Pipeline (triggered by alert or schedule)
-        |
-        +---- Data validation (Great Expectations checks)
-        +---- Train on recent N-month window
-        +---- Evaluate on time-based holdout
-        +---- Champion/challenger shadow period (7 days)
-        +---- Promote if challenger AUC >= champion AUC - 0.005
+
+Input-distribution signals (PSI, KS) fire without labels; label-dependent AUC checks confirm the alert once outcomes arrive, and only a challenger that survives the shadow window is promoted.
+
+### Retraining Loop (State Machine)
+
+```mermaid
+stateDiagram-v2
+    [*] --> Monitoring
+    Monitoring --> Monitoring: PSI under 0.1 (stable)
+    Monitoring --> DriftDetected: PSI over 0.2 or AUC drop
+    DriftDetected --> Retraining: trigger challenger
+    Retraining --> Validation: time-based holdout eval
+    Validation --> Monitoring: challenger worse — reject
+    Validation --> Shadow: passes quality gate
+    Shadow --> Deployed: within 0.5pp for 7 days
+    Shadow --> Monitoring: regression found — reject
+    Deployed --> Monitoring: new champion serving
 ```
+
+The model spends most of its life in Monitoring; a drift alert drives it around the retrain-validate-shadow loop, and any failed gate returns it to Monitoring rather than shipping a regression.
 
 ### Label Latency and Retraining Cadence
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ev(["Event occurs"]) -->|"lag"| label(["Label available"])
+    label -->|"training time"| train["Train + validate"]
+    train -->|"shadow period"| deploy(["Deploy"])
+
+    class ev,label,deploy io
+    class train mathOp
 ```
-Event occurs      Label available    Train + validate    Deploy
-     |                  |                  |                |
-     +------ lag -------+--- training time -+-- shadow -----+
-                                                            |
-        Minimum retraining cadence = label lag + train time + shadow period
-        Example (fraud): 72h + 4h + 7d = ~10 days minimum between data cutoff and production
-```
+
+Minimum retraining cadence = label lag + train time + shadow period; for fraud that is 72h + 4h + 7d, roughly 10 days between data cutoff and production.
 
 ---
 

@@ -90,6 +90,42 @@ Full/max-depth trees are low-bias, high-variance. Random Forest exploits this: e
 
 ## 5. Architecture Diagrams
 
+### Full Random Forest Architecture (Bagging: Bootstrap + Aggregate)
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    D(["Training data\nN samples, p features"])
+    D --> B1["Bootstrap 1\n63.2% unique rows"]
+    D --> B2["Bootstrap 2\n63.2% unique rows"]
+    D --> BB["Bootstrap B\n63.2% unique rows"]
+    B1 --> T1["Tree 1\nsqrt p features per split"]
+    B2 --> T2["Tree 2\nsqrt p features per split"]
+    BB --> TB["Tree B\nsqrt p features per split"]
+    T1 --> P1(["Prediction 1"])
+    T2 --> P2(["Prediction 2"])
+    TB --> PB(["Prediction B"])
+    P1 --> AGG(("vote / mean"))
+    P2 --> AGG
+    PB --> AGG
+    AGG --> OUT(["Final prediction"])
+
+    class D,OUT io
+    class B1,B2,BB base
+    class T1,T2,TB train
+    class P1,P2,PB req
+    class AGG mathOp
+```
+
+Bagging in one picture: one dataset spawns B independent bootstrap samples (each ~63.2% unique rows), each grows a tree with per-split feature subsampling, and the B predictions are combined by majority vote (classification) or mean (regression). Because the trees never see each other, this whole fan-out is embarrassingly parallel.
+
 ### Bootstrap Sampling and OOB
 
 ```
@@ -109,19 +145,29 @@ OOB Error for sample i:
 
 ### Feature Subsampling at Each Node
 
-```
-Node with p=20 features, m=sqrt(20)≈4
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-All features: [f1, f2, f3, ..., f20]
-               |
-         Random sample 4: [f3, f7, f12, f19]
-               |
-         Find best split among only these 4 features
-               |
-         Split node on f12 (best of the 4)
+    ALL(["All p = 20 features"]) --> SAMP["Random subset\nm = sqrt 20 ≈ 4\nf3, f7, f12, f19"]
+    SAMP --> BEST{"Best split among\nonly these 4?"}
+    BEST --> SPLIT["Split node on f12"]
+    SPLIT --> NEXT["Next node:\nfresh independent draw"]
+    NEXT -.->|"repeat at every node"| SAMP
 
-Next node: Random sample 4 again (independent draw)
+    class ALL io
+    class SAMP,NEXT base
+    class BEST mathOp
+    class SPLIT train
 ```
+
+Each node re-draws a fresh random subset of `m ≈ sqrt(p)` candidate features before choosing its split. Restricting the candidates node-by-node — not just once per tree — is what forces different trees down different decision paths and de-correlates their errors.
 
 ### Full Random Forest Architecture
 
@@ -164,6 +210,45 @@ For each feature f:
 
 Normalise so all importances sum to 1
 ```
+
+### Isolation Forest — Path Length Isolates Anomalies
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    R(["Random split on\na random feature"]) --> Q{"Point isolated\nin its own leaf?"}
+    Q -->|"anomaly: yes after ~2 splits"| A["Short path length\n→ high anomaly score"]
+    Q -->|"normal point: no"| S2["Split again"]
+    S2 --> S3["... keep splitting ~10 levels"]
+    S3 --> B["Long path length\n→ low anomaly score"]
+
+    class R io
+    class Q mathOp
+    class S2,S3 base
+    class A lossN
+    class B train
+```
+
+Isolation Forest inverts the usual tree logic: instead of separating classes it counts how many random splits it takes to isolate a point. Anomalies sit in sparse regions and get carved off in only a few splits (short path → high score); normal points are buried among neighbours and need many splits (long path → low score).
+
+### OOB Error vs Number of Trees (Diminishing Returns)
+
+```mermaid
+xychart-beta
+    title "OOB error vs number of trees (diminishing returns)"
+    x-axis "Number of trees" [10, 50, 100, 200, 500, 1000]
+    y-axis "OOB error" 0.09 --> 0.15
+    line [0.145, 0.115, 0.103, 0.098, 0.097, 0.097]
+```
+
+Illustrative curve: OOB error falls steeply through the first ~100 trees, flattens by ~200–300, and is essentially at its floor by 500 — beyond which extra trees only cost compute. This is why 300–500 is the usual production range and more trees never hurt accuracy, only latency.
 
 ---
 
@@ -614,6 +699,12 @@ If you only bootstrap-sample training rows but allow each tree to see all featur
 **Q: What is the difference between MDI and permutation feature importance, and when should you use each?**
 MDI (Mean Decrease in Impurity) sums the weighted impurity reduction across all splits on a feature across all trees. It is computed during training, requires no additional data pass, and is fast. However, it is biased toward high-cardinality and continuous features because they offer more split opportunities. Permutation importance shuffles one feature's values on a held-out set and measures the drop in a chosen metric (AUC, F1, etc.). It is unbiased with respect to cardinality, directly interpretable in metric units, but requires a test set and is O(n_features) additional evaluation passes. Use MDI for quick exploration; always confirm feature selection decisions with permutation importance on a held-out set.
 
+**Q: Do you need to scale or standardize features before training a Random Forest?**
+No — Random Forests are invariant to any monotonic feature transformation, so scaling, standardizing, or normalizing has zero effect on the splits. Each split is a threshold test of the form "feature > t", and the same ordering of samples (and therefore the same candidate thresholds and impurity gains) is preserved under scaling, log, or rank transforms. This is a frequent interview trap: candidates apply StandardScaler out of habit as they would for logistic regression or SVMs, wasting a pipeline step and, worse, leaking test statistics if the scaler is fit on the full dataset. The only preprocessing RF genuinely needs is encoding categoricals and imputing NaNs (sklearn's implementation rejects NaN).
+
+**Q: Can a Random Forest regressor extrapolate beyond the range of target values seen in training?**
+No — a Random Forest regressor can never predict a value outside the min–max range of the training targets. Every prediction is an average of leaf values, and each leaf value is itself the mean of training targets that fell into it, so the ensemble output is bounded by the training target range. This makes RF unsuitable for trending time series or any problem where the target grows beyond historical values (e.g., forecasting revenue that is monotonically increasing). Gradient boosting shares this limitation; if extrapolation is required, use a linear or additive model, or detrend the target first and let RF model the residual.
+
 **Q: OOB error is said to approximate 3-fold CV. Why 3-fold specifically?**
 With 3-fold CV, each model trains on 2/3 (≈ 66.7%) of the data and validates on 1/3 (≈ 33.3%). The OOB holdout fraction is approximately 36.8% per tree (vs 33.3% for 3-fold), making the holdout sizes nearly identical. The analogy is not exact: in 3-fold CV the fold assignments are deterministic, whereas OOB sets are random per tree and overlap — the OOB estimate averages many slightly different holdout evaluations. This makes OOB slightly noisier than 3-fold CV but the bias is minimal. For a 500-tree forest the averaging over 500 different ~37% holdouts gives a stable estimate.
 
@@ -649,6 +740,15 @@ warm_start=True tells sklearn to reuse the already-fitted trees and add more rat
 
 **Q: What is Balanced Random Forest from imbalanced-learn and how does it differ from class_weight="balanced"?**
 BalancedRandomForestClassifier (imbalanced-learn) performs random undersampling of the majority class in each bootstrap sample to achieve 50/50 class balance before training each tree, rather than reweighting. This means each tree actually sees balanced class distributions rather than the original imbalance. The effect: trees are more sensitive to minority class patterns (they see equal representation), but each tree sees less majority-class data. In contrast, class_weight="balanced" keeps all majority samples but penalises misclassification of minority samples more. In practice, BalancedRF often achieves better recall on the minority class; class_weight preserves more AUC. Choose based on whether recall or AUC is your primary metric.
+
+**Q: Why are Random Forest predict_proba outputs often poorly calibrated, and how do you fix it?**
+Random Forest probabilities are averaged vote fractions across trees and tend to be biased toward the middle of the range, so they are often poorly calibrated for decision thresholds. Because each fully grown tree outputs near-0 or near-1 leaf probabilities and the forest averages many of these noisy votes, the ensemble rarely emits confident 0.0 or 1.0 scores and pushes extremes toward the center — the reliability curve is typically S-shaped. Fix it by wrapping the forest in CalibratedClassifierCV with method="isotonic" (needs enough data) or method="sigmoid" (Platt scaling, better for small sets), fit on a held-out calibration split. Calibration matters whenever you threshold on a probability or feed scores into expected-value calculations, not just rank.
+
+**Q: Why is Random Forest described as embarrassingly parallel, and does training scale linearly with cores?**
+Because each tree is trained independently on its own bootstrap sample with no communication between trees, so all B trees can be built simultaneously. Setting n_jobs=-1 dispatches tree construction across all cores via joblib, and training time scales close to linearly with core count until you hit memory bandwidth or the joblib dispatch overhead on very small trees. Prediction is equally parallel — each tree scores the sample independently before aggregation. This is a core advantage over gradient boosting, which is inherently sequential (each tree depends on the previous ensemble's residuals) and cannot parallelize across the boosting dimension.
+
+**Q: What does the max_samples parameter control and when would you reduce it below 1.0?**
+max_samples sets the number (or fraction) of rows drawn for each bootstrap sample, defaulting to N (the full training size, still with replacement). Reducing it below 1.0 trains each tree on fewer rows, which speeds up training on very large datasets, lowers memory per tree, and increases diversity between trees by making bootstraps overlap less. The tradeoff is that each tree sees less data so individual trees are weaker; on huge datasets (millions of rows) max_samples=0.3–0.5 often trains 2–3× faster with negligible accuracy loss. It only applies when bootstrap=True.
 
 ---
 

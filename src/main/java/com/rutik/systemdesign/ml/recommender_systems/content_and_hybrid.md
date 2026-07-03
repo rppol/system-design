@@ -82,50 +82,61 @@ Case-Based Reasoning (CBR): given a target item the user likes, find other items
 
 ### 5.1 Content-Based Filtering Pipeline
 
-```
-ITEM CATALOG
-  Item 1: [title, description, tags, category, price]
-  Item 2: [...]
-  ...
-       |
-  [TF-IDF Vectorizer / SBERT Encoder]
-       |
-  Item Vectors (N x D)   ---> stored in ANN index
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-USER HISTORY: [item_3 (liked), item_7 (liked), item_12 (disliked)]
-       |
-  Liked item vectors: [vec_3, vec_7]
-  Disliked item vectors: [vec_12]
-       |
-  User Profile = mean(vec_3, vec_7) - 0.5 * vec_12
-       |
-  Cosine similarity against all item vectors
-       |
-  Top-K recommendations
+    cat(["ITEM CATALOG\ntitle, tags, category, price"]) --> enc["TF-IDF / SBERT Encoder"]
+    enc --> iv["Item Vectors (N x D)\nstored in ANN index"]
+    hist(["USER HISTORY\nitem_3 liked · item_7 liked · item_12 disliked"]) --> prof["User Profile\nmean(vec_3, vec_7) - 0.5 · vec_12"]
+    iv --> sim(("cosine sim\nprofile vs items"))
+    prof --> sim
+    sim --> topk(["Top-K recommendations"])
+
+    class cat,hist,topk io
+    class enc train
+    class iv base
+    class prof,sim mathOp
 ```
+
+Items are encoded once into an ANN index; the user profile is the (recency-weighted)
+mean of liked item vectors minus a fraction of disliked ones, and recommendations are
+the items closest to that profile by cosine similarity.
 
 ### 5.2 Hybrid Switching Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    u(["User request"]) --> d{"n_interactions under 5?"}
+    d -->|"yes · cold"| cbf["Content-Based\nTF-IDF / SBERT"]
+    d -->|"no · warm"| cf["Collaborative Filtering\nALS / two-tower"]
+    cbf --> sel(("merge /\nselect"))
+    cf --> sel
+    sel --> rec(["Final recommendations"])
+
+    class u,rec io
+    class d req
+    class cbf,cf train
+    class sel mathOp
 ```
-User arrives with request
-         |
-  +------v------+
-  |  n_interactions  |
-  |  < 5?            |
-  +------+------+
-         |
-    Yes  |  No
-   +-----+    +------+
-   |           |
-   v           v
-[Content-Based]  [Collaborative Filtering]
-   |                   |
-   +-------+-----------+
-           |
-      [Merge / Select]
-           |
-      Final recommendations
-```
+
+The switch is a hard threshold on interaction count: sparse users route to CBF (which
+needs no history), warm users route to CF. It is simple and robust but transitions
+abruptly — a weighted hybrid smooths this by blending both scores.
 
 ### 5.3 LightGCN Propagation
 
@@ -148,26 +159,63 @@ Final embedding:
 
 ### 5.4 Session-Based GRU4Rec
 
-```
-Session: click1 -> click2 -> click3 -> click4 -> ? (predict next)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  [click1 embed]
-        |
-      [GRU]
-        | hidden state h1
-  [click2 embed]
-        |
-      [GRU]
-        | hidden state h2
-  [click3 embed]
-        |
-      [GRU]
-        | hidden state h3 = session representation
-        |
-  [Output layer: softmax over all items]
-        |
-  Predict click4
+    c1(["click1"]) --> e1["embed"]
+    c2(["click2"]) --> e2["embed"]
+    c3(["click3"]) --> e3["embed"]
+    e1 --> g1["GRU · h1"]
+    e2 --> g2["GRU · h2"]
+    e3 --> g3["GRU · h3\nsession rep"]
+    g1 --> g2 --> g3
+    g3 --> out["Softmax\nover all items"]
+    out --> pred(["Predict click4"])
+
+    class c1,c2,c3,pred io
+    class e1,e2,e3 base
+    class g1,g2,g3 train
+    class out mathOp
 ```
+
+The GRU threads a hidden state through the session: each click updates the state, and
+the final state h3 (a compressed summary of the whole session) drives a softmax over
+the catalog to predict the next click — no persistent user model required.
+
+### 5.5 Hybrid Strategies — Weighted vs Switching vs Cascade
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    sig(["user + item signals"]) --> w["WEIGHTED\nscore = a·CF + (1-a)·CBF\nblend at all times"]
+    sig --> s["SWITCHING\nif interactions under T: CBF\nelse: CF"]
+    sig --> c["CASCADE\nCBF generates candidates\nthen CF ranks them"]
+    w --> ow(["smooth, needs\nscore normalization"])
+    s --> os(["simple, abrupt\ntransition at T"])
+    c --> oc(["content safety net\n+ collaborative ranking"])
+
+    class sig req
+    class w,s,c train
+    class ow,os,oc io
+```
+
+All three consume the same CF and CBF signals but combine them differently: weighted
+blends every request, switching picks one model by interaction count, and cascade uses
+CBF for high-recall candidate generation then CF for precise ranking.
 
 ---
 
@@ -629,6 +677,12 @@ Graph-based CF (LightGCN, PinSage) propagates embeddings through multi-hop neigh
 
 **Q: Describe how you would build a session-based recommender for anonymous e-commerce users.**
 Problem: no user IDs, no long-term history — only the current session's click sequence. Solution: GRU4Rec or SASRec trained on session sequences. Training data: extract session sequences from click logs (session = events with < 30 min gap); target = next clicked item. Model input: item IDs of current session events; output: probability over all items. Feature augmentation: add item attributes (category, price bucket, brand) as item features to the embedding layer — improves cold-start for new items within sessions. Serving: session state stored in a client-side cookie or session store (Redis, TTL 30 min); each click updates the model input and triggers a new inference call. The stateless nature of session models is an advantage — no user database required.
+
+**Q: Why must CF and CBF scores be normalized before blending in a weighted hybrid?**
+Because CF and CBF produce scores on different scales, so adding them raw lets one signal silently dominate the blend. A matrix-factorization CF dot product might range over [-8, 12] while a cosine-similarity CBF score sits in [0, 1]; a naive score = alpha·CF + (1-alpha)·CBF is then governed almost entirely by CF regardless of alpha, because its magnitudes are an order larger. Fix: bring both to a common scale before blending — min-max or z-score normalization per request, or convert each to a rank/percentile and blend the ranks. Only after normalization does the alpha parameter actually control the relative contribution. This is the most common reason a "tuned" weighted hybrid behaves like pure CF in production.
+
+**Q: How does a feature-augmentation hybrid differ from a weighted hybrid?**
+A feature-augmentation hybrid feeds content features as inputs into a single model, whereas a weighted hybrid blends the scores of two separate models. In feature augmentation — the dominant production approach — the item tower of a two-tower model takes content features (text embeddings, category, price) alongside the item ID embedding, so one model learns to weigh behavioral and content signal jointly and end-to-end. A weighted hybrid instead trains an independent CF model and an independent CBF model, then linearly combines their outputs, requiring score normalization and a hand-tuned alpha. Feature augmentation is more powerful (interactions between content and behavior are learned, not assumed additive) and handles cold start naturally, since content features remain informative when ID embeddings are untrained; the tradeoff is less interpretability and a single model to retrain rather than two loosely coupled ones.
 
 ---
 

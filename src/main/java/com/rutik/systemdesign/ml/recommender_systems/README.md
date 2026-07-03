@@ -107,56 +107,33 @@ Epsilon-greedy, UCB, Thompson Sampling for explore-exploit in real-time recommen
 
 ### 5.1 Two-Stage Industrial RecSys Pipeline
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ureq([User Request]) --> fs["Feature Store\nuser features · context"]
+    fs --> ret["Retrieval / Candidate Generation\ntwo-tower + ANN · recall@100 ~95%\n10M items → ~500 candidates"]
+    ret --> rank["Ranking\nGBDT or DNN · cross features\nunder 20ms · 500 → top-50"]
+    rank --> rerank["Re-ranking\ndiversity (MMR) · freshness · business rules\n50 → top-10"]
+    rerank --> pres["Presentation Layer\nlayout · A/B tests"]
+    pres --> out([Final Recommendations · 10-50 items])
+
+    class ureq,out io
+    class fs base
+    class ret train
+    class rank train
+    class rerank mathOp
+    class pres req
 ```
-                          USER REQUEST
-                               |
-                    +----------v----------+
-                    |   Feature Store     |  <-- user features, context
-                    +----------+----------+
-                               |
-            +------------------v------------------+
-            |         RETRIEVAL LAYER             |
-            |                                     |
-            |  User Tower          Item Tower     |
-            |  [user_id, age,  ]   [item_id, cat] |
-            |  [history, ctx   ]   [price, text  ]|
-            |       |                    |        |
-            |   [Embed 256]         [Embed 256]   |
-            |       |                    |        |
-            |   user_vec            item_vecs     |
-            |       |_____ dot prod _____|        |
-            |                                     |
-            |   ANN Search (FAISS IVF)            |
-            |   returns top-500 candidates        |
-            |   recall@100 ~ 95%                  |
-            +------------------+------------------+
-                               |
-            +------------------v------------------+
-            |          RANKING LAYER              |
-            |                                     |
-            |  Input: user x candidate features   |
-            |  Model: GBDT or DNN                 |
-            |  Features: cross, historical, ctx   |
-            |  Output: score per candidate        |
-            |  Latency budget: <20ms              |
-            |  Returns top-50                     |
-            +------------------+------------------+
-                               |
-            +------------------v------------------+
-            |         RE-RANKING LAYER            |
-            |                                     |
-            |  Diversity (MMR)                    |
-            |  Freshness boost                    |
-            |  Business rules (sponsored items)   |
-            |  Deduplication                      |
-            |  Returns top-10 to present          |
-            +------------------+------------------+
-                               |
-                    +----------v----------+
-                    |  PRESENTATION LAYER |
-                    |  Layout, A/B tests  |
-                    +---------------------+
-```
+
+The corpus narrows by orders of magnitude at each stage: 10M items to ~500 candidates (recall-optimized retrieval), to top-50 (precision-optimized ranking), to the top-10 actually shown (list-level re-ranking). Per-item compute rises left to right as the candidate set shrinks, which is exactly why a heavy model can afford to score 500 items but never 10M.
 
 ### 5.2 User-Item Interaction Matrix
 
@@ -170,6 +147,56 @@ User4  [  ?      2      4      ?      ?  ]
 ? = unobserved (99%+ of cells in real systems)
 Goal: predict all ? and return top-K per user
 ```
+
+### 5.3 Two-Tower Retrieval Architecture
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    uf(["User features\nid · age · history · context"]) --> ut["User Tower\nMLP → 256d"]
+    itf(["Item features\nid · category · price · text"]) --> it["Item Tower\nMLP → 256d"]
+    ut --> uv(["user_vec\ncomputed online"])
+    it --> iv(["item_vecs\nprecomputed offline"])
+    uv --> dot(("dot\nproduct"))
+    iv --> dot
+    dot --> ann["ANN Search\nFAISS IVF · top-500"]
+    ann --> cand([Candidates → Ranking])
+
+    class uf,itf,uv,iv,cand io
+    class ut train
+    class it train
+    class dot mathOp
+    class ann base
+```
+
+The two towers embed users and items independently, so every item vector is precomputed offline and indexed; at request time only the user vector is computed online, and an ANN search over the item index returns the top candidates by dot product in a few milliseconds. Independence is the whole trick — a cross-encoder that mixes user and item features would need one forward pass per item and cannot be pre-indexed.
+
+### 5.4 Retrieval Index Tradeoffs
+
+```mermaid
+quadrantChart
+    title ANN retrieval methods — throughput vs recall
+    x-axis Low Throughput --> High Throughput
+    y-axis Lower Recall --> Higher Recall
+    quadrant-1 Fast and accurate
+    quadrant-2 Accurate but slow
+    quadrant-3 Weak on both
+    quadrant-4 Fast but lossy
+    Brute-force: [0.08, 0.98]
+    FAISS IVF: [0.72, 0.72]
+    FAISS HNSW: [0.66, 0.9]
+    ScaNN: [0.92, 0.82]
+```
+
+Brute-force dot product is exact (100% recall) but O(N) and slow; approximate indexes trade a few points of recall for orders-of-magnitude throughput. HNSW leans toward recall, ScaNN toward throughput, and IVF is the memory-cheap, easily sharded middle ground — pick the corner that matches your recall SLA and memory budget.
 
 ---
 
@@ -425,6 +452,27 @@ First, pre-compute item embeddings offline (batch job, runs nightly or streaming
 
 **Q: Describe the SASRec model for sequential recommendation.**
 SASRec (Self-Attentive Sequential Recommendation, 2018) applies the Transformer self-attention mechanism to a user's sequence of recently interacted items. The input is the last N items (N = 50 typical), each represented by a learned embedding. Positional encodings capture order. Multiple self-attention blocks let the model learn which past interactions are most predictive of the next action. Causal masking ensures position i can only attend to positions 1..i. The output at the last position predicts the next item. SASRec outperforms GRU4Rec and vanilla MF on most sequential recommendation benchmarks.
+
+**Q: Why can a model with higher offline NDCG perform worse in a live A/B test?**
+Offline metrics reward predicting logged historical clicks, but those logs were biased by the previous model's exposure and by position bias, so fitting them better does not guarantee better live behavior. The offline label distribution is a consequence of what the old system chose to show; a model that ranks those same items well may be memorizing the old policy rather than improving user satisfaction. Gate model promotion on offline metrics but make the ship decision on an online A/B test with a long-term holdback group.
+
+**Q: Why must recommender evaluation use a temporal train/test split rather than a random split?**
+A random split leaks future interactions into training, letting the model see a user's later clicks while predicting their earlier ones, which inflates offline metrics that then collapse online. Real serving only ever has past data to predict the future, so evaluation must mirror that by training on interactions before a cutoff time T and testing on interactions after T. Random splits routinely show large NDCG gains that translate to zero online CTR lift.
+
+**Q: How do you stop a two-tower retrieval model from only recommending popular items?**
+Apply a logQ correction: subtract the log of each item's sampling probability from the in-batch softmax logits so frequently sampled head items are penalized in the denominator. In-batch negative sampling draws negatives in proportion to popularity, which biases the model toward blockbusters; the correction restores an approximately unbiased softmax. Complement it with popularity discounting at scoring time (divide the score by log(1 + interaction_count)) and a small exploration budget to keep the long tail visible.
+
+**Q: What is the difference between pointwise, pairwise, and listwise learning-to-rank?**
+Pointwise predicts an absolute relevance score per item, pairwise learns which of two items should rank higher, and listwise optimizes a metric defined over the whole ranked list. Pointwise (logistic regression on click) is simplest and fully parallel but ignores relative order; pairwise (RankNet, LambdaRank, BPR) directly targets ordering; listwise (ListNet, LambdaMART) aligns best with NDCG but costs more to train. Most production rankers use pairwise or LambdaMART because ordering, not absolute score, drives the ranking metric.
+
+**Q: How do you choose between FAISS IVF, HNSW, and ScaNN for the retrieval index?**
+Pick IVF for the lowest memory and easy sharding, HNSW for the highest recall at higher memory cost, and ScaNN for the best throughput-recall tradeoff via anisotropic quantization. IVF partitions vectors into clusters and probes a few, trading recall for speed through the nprobe knob; HNSW builds a navigable small-world graph that reaches ~98% recall but stores many edges per node; ScaNN's learned quantization tops throughput benchmarks at ~95-97% recall. Match the choice to your memory budget, catalog size, and recall SLA rather than defaulting to one.
+
+**Q: Why is re-ranking a separate stage from ranking?**
+Re-ranking applies list-level objectives — diversity, freshness, and business rules — that a per-item ranking score cannot express because they depend on the other items already selected. The ranker scores each candidate independently for relevance; only after you have a ranked list can you enforce that no genre dominates (MMR), that sponsored items get placement, or that a just-purchased item is suppressed. Keeping it separate also lets business rules change without retraining the ranking model.
+
+**Q: Why do production ranking models predict multiple objectives at once instead of just click probability?**
+A multi-task model predicts several signals — click, watch time, like, share — through shared layers because optimizing click alone rewards clickbait and ignores long-term satisfaction. Clicks are cheap and abundant but weakly correlated with value; adding watch-time or conversion heads lets the final score blend engagement with quality, and the shared representation regularizes the sparser objectives. YouTube's ranker famously predicts expected watch time rather than click-through to avoid promoting misleading thumbnails.
 
 ---
 

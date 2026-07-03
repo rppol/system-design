@@ -94,28 +94,76 @@ Key insight: the test set must remain completely unseen until final evaluation. 
 
 ### Train / Validation / Test Hierarchy
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    D(["Full labeled dataset"]) --> TP["80% Training pool"]
+    D --> TS["20% Test set\nLOCKED — touch once at the end"]
+    TP --> CV["5-fold cross-validation\nrotate the validation fold"]
+    CV --> MS["mean CV score\nmodel-selection criterion"]
+    MS --> RT["Retrain best model\non the full 80%"]
+    RT --> EV["Evaluate once\non the 20% test set"]
+    TS -.->|"unlocked only here"| EV
+    EV --> FM(["Final reported metric"])
+
+    class D,FM io
+    class TS frozen
+    class TP,CV,RT train
+    class MS mathOp
+    class EV lossN
 ```
-Full labeled dataset
-        |
-        +-----------------------------+
-        |                             |
-  80% Training pool             20% Test set  <-- LOCKED. Touch once at the very end.
-        |
-  Cross-validation (5-fold):
-  +------+------+------+------+------+
-  |  T   |  T   |  T   |  T   |  V  |   fold 1: train on 1-4, validate on 5
-  |  T   |  T   |  T   |  V   |  T  |   fold 2: train on 1-3, 5, validate on 4
-  |  T   |  T   |  V   |  T   |  T  |   fold 3: ...
-  |  T   |  V   |  T   |  T   |  T  |   fold 4: ...
-  |  V   |  T   |  T   |  T   |  T  |   fold 5: ...
-  +------+------+------+------+------+
-        |
-  mean CV score = model selection criterion
-        |
-  Retrain best model on full 80%
-        |
-  Evaluate once on 20% test set --> final reported metric
+
+The 20% test set (purple, locked) stays untouched until the single final evaluation; every model-selection decision runs off the mean CV score, so the test estimate remains unbiased.
+
 ```
+5-fold rotation — each row validates on a different slice (T = train, V = validate):
+
+  fold 1:  T  T  T  T  V     validate on slice 5, train on 1-4
+  fold 2:  T  T  T  V  T     validate on slice 4, train on 1-3,5
+  fold 3:  T  T  V  T  T
+  fold 4:  T  V  T  T  T
+  fold 5:  V  T  T  T  T     every fold uses a fresh validation slice
+```
+
+### k-Fold and Nested Cross-Validation
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    IN(["Training data"]) --> OUT{"Outer loop\nk_outer folds"}
+    OUT --> OTr["Outer-train\nk-1 folds"]
+    OUT --> OTe["Outer-test\n1 fold — held out"]
+    OTr --> INN{"Inner loop\nk_inner folds"}
+    INN --> HP["Search hyperparameters\nGrid / Optuna"]
+    HP --> BP["Best params\nby inner CV score"]
+    BP --> RF["Refit on the\nfull outer-train"]
+    RF --> SC["Score once on\nthe outer-test"]
+    OTe -.->|"revealed once per outer fold"| SC
+    SC --> AGG(["Mean outer score\nunbiased generalization estimate"])
+
+    class IN,AGG io
+    class OUT,INN req
+    class OTr,HP,RF train
+    class OTe frozen
+    class BP mathOp
+    class SC lossN
+```
+
+Nested CV separates tuning from evaluation: the inner loop picks hyperparameters while the outer test fold is scored exactly once, so the reported number is not inflated by reusing the selection data — the trap behind Pitfall 2.
 
 ### TimeSeriesSplit (No Future Leakage)
 
@@ -129,22 +177,71 @@ Split 3:  [Train: t1-t7]           [Val: t8]
 NEVER: [Train: t1, t3, t5, t7]  [Val: t2, t4, t6, t8]  <-- future data in train
 ```
 
+Random k-fold leaks future rows into training; TimeSeriesSplit always trains on the past and validates on the future, which is why the financial example's CV AUC falls from an optimistic 0.79 to a realistic 0.61 (live was 0.59).
+
+### ROC and Precision-Recall Curves
+
+```mermaid
+xychart-beta
+    title "ROC Curve — TPR vs FPR"
+    x-axis "False Positive Rate" 0 --> 1
+    y-axis "True Positive Rate" 0 --> 1
+    line [0, 0.45, 0.65, 0.78, 0.86, 0.91, 0.94, 0.96, 0.98, 0.99, 1.0]
+    line [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+```
+
+The upper curve is the model; the straight diagonal is the random baseline (AUC-ROC = 0.5). AUC-ROC is the area under the model curve — the probability it ranks a random positive above a random negative — and the curve bowing toward the top-left is what a high AUC looks like.
+
+```mermaid
+xychart-beta
+    title "Precision-Recall Curve (5% positive prevalence)"
+    x-axis "Recall" 0 --> 1
+    y-axis "Precision" 0 --> 1
+    line [1.0, 0.97, 0.93, 0.88, 0.82, 0.75, 0.66, 0.55, 0.42, 0.25, 0.05]
+    line [0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05]
+```
+
+Precision starts near 1.0 and decays toward the positive prevalence (the flat line at 0.05). The model curve staying high as recall grows is exactly what a large AUC-PR measures — the reason AUC-PR is preferred over AUC-ROC below 5% positives.
+
+### Precision / Recall vs Decision Threshold
+
+```mermaid
+xychart-beta
+    title "Precision and Recall vs Decision Threshold"
+    x-axis "Decision threshold" 0 --> 1
+    y-axis "Precision / Recall" 0 --> 1
+    line [0.10, 0.20, 0.34, 0.48, 0.60, 0.71, 0.80, 0.87, 0.93, 0.97, 1.0]
+    line [1.0, 0.99, 0.97, 0.93, 0.88, 0.80, 0.68, 0.53, 0.36, 0.18, 0.0]
+```
+
+The rising line is precision, the falling line is recall: raising the threshold trades recall away for precision. To meet the case study's regulatory 90%-recall constraint you slide left to a low threshold and read off the precision there — exactly how the loan-default operating point is chosen.
+
+### Bias-Variance Tradeoff
+
+```mermaid
+xychart-beta
+    title "Bias-Variance Tradeoff — Error vs Model Complexity"
+    x-axis "Model complexity: simple to complex" 1 --> 10
+    y-axis "Error" 0 --> 1
+    line [0.80, 0.55, 0.38, 0.26, 0.18, 0.13, 0.10, 0.08, 0.07, 0.06]
+    line [0.05, 0.07, 0.10, 0.14, 0.20, 0.28, 0.38, 0.50, 0.64, 0.80]
+    line [0.90, 0.67, 0.53, 0.45, 0.43, 0.46, 0.53, 0.63, 0.76, 0.91]
+```
+
+Bias (the falling line) shrinks and variance (the rising line) grows with complexity, so total error (the U-shaped line) bottoms out at moderate complexity. A low training and low CV score together sit on the left (underfit, high bias); a high training but low CV score sits on the right (overfit, high variance).
+
 ### Reliability Diagram (Calibration)
 
+```mermaid
+xychart-beta
+    title "Reliability Diagram — Calibration"
+    x-axis "Mean predicted probability" 0 --> 1
+    y-axis "Observed frequency" 0 --> 1
+    line [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    line [0.03, 0.11, 0.19, 0.27, 0.35, 0.43, 0.50, 0.55, 0.58, 0.60, 0.62]
 ```
-Predicted probability (x-axis)
-1.0 |                              /  <- perfect calibration (diagonal)
-    |                          /
-0.8 |                      / *        * = well-calibrated model
-    |                  /     *
-0.6 |              /
-    |          /  *  *                * = overconfident model (sigmoid shape)
-0.4 |      /    *
-    |  /  *
-0.2 |/  *
-    +--+--+--+--+--+--+--+--+--+---> Fraction of positives (y-axis)
-   0.0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0
-```
+
+The diagonal is perfect calibration; the lower curve is an overconfident model — where it predicts 0.9 the event actually occurs only ~0.6 of the time (the churn-model failure in Pitfall 4). The vertical gap between the two lines is the calibration error that Platt scaling or isotonic regression removes.
 
 ---
 
@@ -592,6 +689,24 @@ Standard choice is k=5 or k=10. Higher k (10) gives a lower-bias estimate (each 
 
 **Q: What is MAPE and what are its limitations for regression evaluation?**
 MAPE (Mean Absolute Percentage Error) = `mean(|actual - predicted| / |actual|) * 100`. Limitations: (1) undefined when actual = 0 (division by zero), (2) asymmetric — over-prediction and under-prediction of the same magnitude give different errors, (3) heavy penalty for small actuals (predicting 2 when actual is 1 gives 100% error). Better alternatives: sMAPE (symmetric MAPE), MASE (mean absolute scaled error, relative to naïve forecast), RMSSE. Use MAPE only when actuals are reliably > 0 and interpretability in percentage terms is required.
+
+**Q: Why can accuracy be dangerously misleading on imbalanced datasets?**
+On imbalanced data, accuracy is dominated by the majority class: predicting all-negative on 1% positives yields 99% accuracy with zero recall. This is the accuracy paradox — the metric rewards ignoring the minority class, which is usually the class you actually care about (fraud, disease, churn). Use precision, recall, F1, AUC-PR, or balanced accuracy instead, and always inspect the confusion matrix so majority-class dominance is visible. Set the decision threshold from the precision-recall tradeoff rather than the default 0.5.
+
+**Q: What is the difference between macro, micro, and weighted F1?**
+Macro-F1 averages per-class F1 equally, micro-F1 pools all TP/FP/FN globally, and weighted-F1 averages per-class F1 weighted by each class's support. Macro-F1 treats every class as equally important, so rare classes count as much as frequent ones — use it when minority-class performance matters. Micro-F1 aggregates counts across classes, so it is dominated by frequent classes and equals accuracy in single-label multiclass problems. Weighted-F1 is a compromise that weights each class's F1 by its number of true instances. For imbalanced multiclass problems where the rare classes matter, report macro-F1; if you only care about overall correctness, micro-F1 suffices.
+
+**Q: What is the difference between calibration and discrimination?**
+Discrimination is the ability to rank positives above negatives (measured by AUC); calibration is whether predicted probabilities match observed frequencies. A model can discriminate perfectly yet be badly calibrated: multiplying every well-ranked score by 0.5 leaves AUC unchanged but makes probabilities systematically too low. Conversely a calibrated model can have poor discrimination — predicting the base rate for everyone is perfectly calibrated but useless for ranking. AUC and ranking metrics measure discrimination; reliability diagrams, ECE, and the Brier score's calibration term measure calibration. You need both whenever probabilities drive expected-value decisions.
+
+**Q: What is nested cross-validation and when is it necessary?**
+Nested CV wraps hyperparameter tuning in an inner loop inside an outer CV loop, so the reported score is never computed on data used to pick hyperparameters. Single-level CV that both tunes hyperparameters and reports the winning score is optimistically biased — the same folds chose the config and graded it. The inner loop (e.g., 5-fold) selects hyperparameters on each outer training split, then the untouched outer test fold evaluates it; the outer scores estimate generalization of the whole tuning procedure. It is necessary when the model space is large or n is small, where tuning bias is significant. Cost is k_outer × k_inner fits, so reserve it for final unbiased estimates, not routine iteration.
+
+**Q: When must you use GroupKFold instead of StratifiedKFold?**
+Use GroupKFold when rows share a group identity (same patient, user, or device) that must not appear in both the train and validation folds. If multiple rows come from the same entity and that entity lands in both splits, the model can memorize entity-specific signal and leak it, inflating CV scores that then collapse in production on unseen entities. GroupKFold guarantees all rows of a group stay together in one fold. Common cases: multiple visits per patient, multiple sessions per user, augmented copies of the same image. Use StratifiedGroupKFold when the label is also imbalanced and you need both grouping and stratification.
+
+**Q: How do you build a bootstrap confidence interval for a metric, and why bother?**
+Resample the test set with replacement many times (say 1,000), recompute the metric each time, and take the 2.5th and 97.5th percentiles as a 95% interval. A single point estimate like AUC 0.84 hides sampling noise; the bootstrap CI quantifies how much that number would move on a different test sample of the same size. It is non-parametric and works for any metric (AUC, F1, calibration error) without distributional assumptions. Narrow intervals justify claiming one model beats another; overlapping intervals mean the difference may be noise. For paired model comparison, bootstrap the difference in metrics on the same resampled indices to respect the correlation.
 
 ---
 

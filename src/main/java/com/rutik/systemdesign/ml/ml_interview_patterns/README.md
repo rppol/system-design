@@ -187,90 +187,203 @@ Monitoring:
 
 ## 5. Architecture Diagrams
 
+### ML System — End-to-End Architecture
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph src["Data Sources"]
+        s1(["User logs · Item catalog · Labels"])
+    end
+    subgraph pipe["Data Pipeline"]
+        p1["Ingestion\nKafka / Kinesis"] --> p2["ETL\nSpark / dbt"] --> fs[["Feature Store"]]
+    end
+    subgraph off["Offline Training"]
+        t1["Train\nGPU cluster"] --> t2["Eval\nholdout set"] --> t3[["Model Registry\nMLflow"]]
+    end
+    subgraph on["Online Serving"]
+        o1["Feature retrieval\n<5ms"] --> o2["Inference\n<20ms"] --> o3["Response\n<50ms"]
+    end
+    subgraph mon["Monitoring"]
+        m1["Feature drift PSI · Model AUC\nPrediction drift KS · business KPIs"]
+    end
+    s1 --> p1
+    fs --> t1
+    fs --> o1
+    t3 --> o2
+    o3 --> m1
+    m1 -->|"PSI > 0.2 → retrain"| t1
+
+    class s1 io
+    class p1 base
+    class p2 base
+    class fs base
+    class t1 train
+    class t2 mathOp
+    class t3 frozen
+    class o1 req
+    class o2 req
+    class o3 req
+    class m1 lossN
 ```
-ML System — End-to-End Architecture
-======================================
 
-  [Data Sources]
-  User logs | Item catalog | External APIs | Labels
-        |
-  [Data Pipeline]
-  Ingestion (Kafka/Kinesis) -> ETL (Spark/DBT) -> Feature Store
-        |                                               |
-  [Offline Training]                           [Online Serving]
-  Training data prep                           Feature retrieval (<5ms)
-  -> Model training (GPU cluster)              -> Model inference (<20ms)
-  -> Evaluation (holdout set)                  -> Post-processing
-  -> Model registry (MLflow)                   -> Response (<50ms total)
-        |
-  [Deployment]
-  Shadow mode -> Canary (5%) -> Full rollout
-  A/B testing: control vs. treatment model
-        |
-  [Monitoring]
-  Feature drift (PSI daily)
-  Model AUC (weekly on labeled sample)
-  Prediction drift (KS test daily)
-  Business metrics (CTR, conversion) real-time
-        |
-  [Retraining Trigger]
-  Schedule (weekly) OR drift alert (PSI > 0.2)
+The feature store is the seam that eliminates training-serving skew: the same feature definitions feed both offline training and online serving. Monitoring closes the loop — a PSI breach on any top feature triggers retraining.
 
+### Bias-Variance Decomposition
 
-Bias-Variance Decomposition
-============================
-
-  Total Error = Bias^2 + Variance + Irreducible Noise
-
-  High Bias (Underfitting):         High Variance (Overfitting):
-  Training loss: high               Training loss: very low
-  Val loss:      high               Val loss: high (gap from train)
-  Fix: larger model, more features  Fix: regularization, more data
-       less regularization               dropout, early stopping
-       feature engineering               simpler model
-
-  Bias-Variance Tradeoff:
-  Model Complexity --->
-  Error |
-        |    Total Error
-        |  \/
-        |  /\ Variance
-        |\/  \____
-        |/Bias     ----
-        |_____________ model complexity
-             optimal
-
-
-Precision-Recall Tradeoff
-===========================
-
-  Threshold 0.9:   High precision (0.95), Low recall (0.30)  <- conservative
-  Threshold 0.5:   Medium precision (0.80), Medium recall (0.70) <- balanced
-  Threshold 0.2:   Low precision (0.60), High recall (0.90) <- aggressive
-
-  F_beta = (1 + beta^2) * P * R / (beta^2 * P + R)
-  beta > 1: recall matters more (medical diagnosis)
-  beta < 1: precision matters more (spam detection)
-  beta = 1: F1, balanced
-
-
-Cascade Model — Latency vs Accuracy
-=====================================
-
-  All Candidates (10M items)
-        |
-  Fast Model (LR, BM25): <1ms
-  Top-1000 candidates
-        |
-  Medium Model (GBT, two-tower): <10ms
-  Top-100 candidates
-        |
-  Slow Model (cross-encoder, LLM re-ranker): <50ms
-  Top-10 results
-        |
-  Business Rules / Diversity Filter
-  Final ranked list
+```mermaid
+xychart-beta
+    title "Bias-variance tradeoff vs model complexity"
+    x-axis "Model complexity →" [1, 2, 3, 4, 5, 6, 7]
+    y-axis "Error" 0 --> 13
+    line [9, 6, 4, 3, 2.5, 2.2, 2]
+    line [1, 1.5, 2, 3, 4.5, 6.5, 9]
+    line [11, 8.5, 7, 7, 8, 9.7, 12]
 ```
+
+Total error = Bias² + Variance + irreducible noise. The falling line is bias² (shrinks as the model grows), the rising line is variance (grows with complexity), and the U-shaped line is total error — minimized at intermediate complexity. High bias (underfit) shows high train AND val loss; high variance (overfit) shows low train loss but a large train-val gap.
+
+### Precision-Recall vs Threshold
+
+```mermaid
+xychart-beta
+    title "Precision and recall across decision thresholds"
+    x-axis "Decision threshold →" [0.2, 0.35, 0.5, 0.65, 0.8, 0.9]
+    y-axis "Rate" 0 --> 1
+    line [0.60, 0.70, 0.80, 0.88, 0.93, 0.95]
+    line [0.90, 0.80, 0.70, 0.55, 0.40, 0.30]
+```
+
+The rising line is precision, the falling line is recall: raising the threshold buys precision at the cost of recall. Pick the operating point with F_beta = (1 + beta²)·P·R / (beta²·P + R) — beta > 1 weights recall (medical diagnosis), beta < 1 weights precision (spam), beta = 1 is F1.
+
+### Cascade Model — Latency vs Accuracy
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    all(["All candidates · 10M items"])
+    all --> fast["Fast model · LR / BM25\n<1ms"]
+    fast --> k1["Top-1000"]
+    k1 --> med["Medium model · GBT / two-tower\n<10ms"]
+    med --> k2["Top-100"]
+    k2 --> slow["Slow model · cross-encoder / LLM\n<50ms"]
+    slow --> k3["Top-10"]
+    k3 --> rules["Business rules / diversity filter"]
+    rules --> out(["Final ranked list"])
+
+    class all io
+    class fast train
+    class k1 base
+    class med train
+    class k2 base
+    class slow train
+    class k3 base
+    class rules mathOp
+    class out io
+```
+
+Each stage shrinks the candidate set so the expensive model only ever scores a short list: the 10M → 1000 fast filter runs in <1ms, and the <50ms cross-encoder never sees more than 100 items. This is how retrieval-then-rank keeps p99 latency inside budget while preserving top-end accuracy.
+
+### The 6-Step ML Design Framework
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    s1["1 · Clarify Requirements\nscale, latency, metric"]
+    s2["2 · Problem Formulation\ntask, label, eval split"]
+    s3["3 · Data & Features\nsources, leakage, imbalance"]
+    s4["4 · Model Architecture\nbaseline → complex"]
+    s5["5 · Serving & Infra\nlatency budget, A/B"]
+    s6["6 · Monitoring & Iteration\ndrift, retraining"]
+    s1 --> s2 --> s3 --> s4 --> s5 --> s6
+    s6 -.->|"new labels / drift"| s3
+
+    class s1 req
+    class s2 io
+    class s3 base
+    class s4 train
+    class s5 mathOp
+    class s6 lossN
+```
+
+The order is the grading rubric: candidates who skip step 1 or step 6 fail on judgment, not knowledge. Requirements and metrics come before any model, and the dotted arrow shows production feedback flowing back into data and features.
+
+### Debugging a Degraded Production Model
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Prod AUC degraded"])
+    start --> q1{"feature PSI > 0.2\nor schema change?"}
+    q1 -->|"yes"| fixdata["Data / pipeline issue\nfix inputs, backfill feature"]
+    q1 -->|"no"| q2{"train-val gap\nlarge on refresh?"}
+    q2 -->|"yes"| overfit["High variance\nregularize, add data"]
+    q2 -->|"no"| q3{"prediction dist\nshifted (KS)?"}
+    q3 -->|"yes"| drift["Concept drift\nretrain on recent data"]
+    q3 -->|"no"| q4{"label delay or\nleakage suspected?"}
+    q4 -->|"yes"| leak["Audit features\ntemporal cutoff, remove leaks"]
+    q4 -->|"no"| rollback["Rollback to prior model\ninvestigate offline"]
+
+    class start io
+    class q1 mathOp
+    class q2 mathOp
+    class q3 mathOp
+    class q4 mathOp
+    class fixdata base
+    class overfit train
+    class drift lossN
+    class leak lossN
+    class rollback frozen
+```
+
+Diagnose before you retrain: a silently broken feature pipeline (all-zeros after a schema change) is the most common cause and is fixed at the data layer, not the model. If the cause is unclear and the regression is severe, roll back first and investigate with zero production pressure.
+
+### Model-Selection Tradeoff Space
+
+```mermaid
+quadrantChart
+    title Model choice by interpretability vs predictive power
+    x-axis "Low interpretability" --> "High interpretability"
+    y-axis "Low predictive power" --> "High predictive power"
+    quadrant-1 Ideal - rare
+    quadrant-2 Deep nets - high power low transparency
+    quadrant-3 Avoid
+    quadrant-4 Linear / rules baseline
+    Deep NN DLRM: [0.20, 0.85]
+    GBT XGBoost: [0.55, 0.80]
+    Logistic Regression: [0.85, 0.45]
+    Rule-based: [0.90, 0.25]
+```
+
+Move up the y-axis (more power) and you usually lose interpretability (leftward): GBT is the pragmatic middle, logistic regression and rules trade accuracy for transparency required in regulated domains. Start bottom-right (baseline) and only climb when the accuracy gain justifies the loss of explainability and the added serving cost.
 
 ---
 
@@ -653,6 +766,24 @@ Use a combination: (1) Qini/AUUC curve: sort users by predicted CATE/uplift scor
 
 **Q: Describe the ML interview failure modes you have seen and how to avoid them.**
 The most common failure modes: (1) Jumping to model architecture without clarifying requirements — fix: spend the first 5 minutes asking business-context questions. (2) No baseline — fix: always propose logistic regression or rule-based system before neural networks, and explain why you would upgrade. (3) No monitoring plan — fix: always end with "and here is how I would monitor this in production." (4) Optimizing a metric that does not match business value — fix: ask what the business cares about before defining the ML objective. (5) Ignoring the data problem — fix: spend 10 minutes on data sources, labeling strategy, and class imbalance before discussing models. (6) Stating solutions without tradeoffs — fix: for every design choice, name the alternative and explain the tradeoff. Interviewers explicitly probe these gaps. Structured preparation: practice 5 end-to-end ML design problems per week using the 6-step framework, out loud, in 45 minutes.
+
+**Q: What is training-serving skew and how do you prevent it?**
+Training-serving skew is when a feature is computed differently at training and serving time, so offline metrics look strong but online performance collapses. A classic case: a CTR model trained on "user's last 10 clicked items" computed one way in the batch job, but the serving code bucketed timestamps differently and missed the most recent click — offline AUC 0.84, online lift 0.3% instead of the expected 3%. It is the single most common production failure because the two code paths drift independently over time. Fix it with a shared feature-computation library used by both training and serving, or a feature store with point-in-time-correct retrieval, and log serving-time feature values to compare distributions against training.
+
+**Q: Why is AUC-PR preferred over AUC-ROC for imbalanced classification?**
+AUC-ROC can look deceptively high on imbalanced data because it rewards ranking the abundant negatives correctly, while AUC-PR focuses on performance on the rare positive class. With a 1% positive rate, a model can achieve 0.9 ROC-AUC while being nearly useless for catching positives, because the false-positive-rate denominator is dominated by the huge negative pool and barely moves. Precision-recall curves put precision (which depends directly on how many of your positive predictions are right) on the y-axis, exposing exactly the failure that matters. Report AUC-PR or F-beta for fraud, churn, and anomaly problems, and never report plain accuracy for imbalanced tasks.
+
+**Q: What is model calibration and when does it matter more than accuracy?**
+Calibration means predicted probabilities match observed frequencies — a 0.7 prediction should be correct about 70% of the time — and it matters whenever the probability itself drives a decision. Ranking-only use cases tolerate miscalibration, but expected-value decisions (bidding, thresholding on cost, medical risk, insurance pricing) break if a "0.8" really means 0.5. Measure it with Expected Calibration Error; ECE above 0.05 signals a problem, and boosted trees plus imbalanced data are common offenders. Fix with Platt scaling (a logistic fit on a held-out set) or isotonic regression (nonparametric, needs more data), and re-check calibration after every retrain.
+
+**Q: How do you choose the decision threshold for a classifier in production?**
+Do not default to 0.5; tune the threshold on a business cost function or an explicit precision/recall constraint using a validation set. The optimal cutoff maximizes expected value — for fraud, minimize cost = FP × review_cost + FN × loss_per_miss, which for a $2 review and $200 loss pushes the threshold far below 0.5 to favor recall. Alternatively, hold precision at a business SLA (say 85%) and maximize recall subject to it, or vice versa. Calibrate probabilities first, then set the threshold, and revisit it whenever the class prior or cost structure shifts — the model can stay fixed while the threshold recovers most of the value.
+
+**Q: How do you compute the sample size needed for an A/B test?**
+Sample size depends on the baseline conversion rate, the minimum detectable effect, the significance level alpha, and the power (1 − beta). Smaller effects, rarer baselines, and higher power all demand more traffic — a two-proportion z-test size grows roughly with the inverse square of the effect you want to detect, so halving the MDE quadruples the required users per arm. Compute it before launching, not after, so you avoid an underpowered test that cannot reach significance no matter how long it runs. In practice, plug baseline rate, MDE, alpha=0.05, power=0.80 into a standard formula or calculator and confirm the traffic and test duration are feasible for the business.
+
+**Q: When is a problem NOT a good fit for machine learning?**
+Avoid ML when a simple deterministic rule suffices, labeled data is too scarce, the decision must be fully explainable, or the maintenance cost exceeds the business benefit. Rule-based logic beats a model for well-specified deterministic behavior and is far easier to debug and audit; with under ~100 labeled examples for a complex task, there is nothing to learn from. Some regulated decisions legally require full explainability that a black-box model cannot provide, and sometimes the faster fix is an engineering change — a data-pipeline bug — not a model. Interviewers deliberately probe this: knowing when not to use ML is a stronger signal of seniority than reaching for a transformer on question one.
 
 ---
 

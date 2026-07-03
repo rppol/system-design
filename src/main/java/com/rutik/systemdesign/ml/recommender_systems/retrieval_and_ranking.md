@@ -74,71 +74,55 @@ Key insight for position bias: measured CTR is not a clean signal of item releva
 
 ### 5.1 Full Retrieval-Ranking-Reranking Pipeline
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ureq(["USER REQUEST\nuser_id, context"]) --> ff["FEATURE FETCH\nuser features (Redis) + context"]
+    ff --> s1["Source 1 · Two-Tower ANN\n500 cand · recall@100 ~95%"]
+    ff --> s2["Source 2 · Item-Item CF\n200 cand · from recent items"]
+    ff --> s3["Source 3 · Trending\n100 cand"]
+    s1 --> mg(("merge +\ndedup ~700"))
+    s2 --> mg
+    s3 --> mg
+    mg --> rank["RANKING\nLightGBM / Wide+Deep\ncross + quality + history feats\nunder 15ms · top-50 scored"]
+    rank --> rr["RE-RANKING\nMMR diversity + freshness\n+ business rules + dedup"]
+    rr --> fin(["FINAL top-10"])
+
+    class ureq,fin req
+    class ff io
+    class s1,s2,s3 base
+    class mg mathOp
+    class rank train
+    class rr frozen
 ```
-        USER REQUEST (user_id, context)
-                    |
-        +-----------v-----------+
-        |    FEATURE FETCH      |
-        |  User features: Redis  |
-        |  Context: request      |
-        +-----------+-----------+
-                    |
-        +-----------v-----------+
-        |    RETRIEVAL STAGE    |
-        |                       |
-        |  Source 1: Two-Tower  |  500 candidates, recall@100 ~95%
-        |  Source 2: Item-Item  |  200 candidates (based on recent)
-        |  Source 3: Trending   |  100 candidates
-        |                       |
-        |  Merge + Deduplicate  |  ~700 unique candidates
-        |  Score: retrieval_score|
-        +-----------+-----------+
-                    |
-        +-----------v-----------+
-        |     RANKING STAGE     |
-        |                       |
-        |  Features per candidate:|
-        |  - user x item cross  |
-        |  - item quality score |
-        |  - user-item history  |
-        |  - context (time, geo)|
-        |                       |
-        |  Model: LightGBM or   |
-        |  Wide & Deep          |
-        |  Latency: <15ms       |
-        |  Output: top-50 scored|
-        +-----------+-----------+
-                    |
-        +-----------v-----------+
-        |    RE-RANKING STAGE   |
-        |                       |
-        |  Diversity (MMR)      |
-        |  Freshness boost      |
-        |  Business rules       |
-        |  Deduplication        |
-        |                       |
-        |  Output: top-10       |
-        +-----------+-----------+
-                    |
-              FINAL RESULTS
-```
+
+Each stage narrows the set and raises model cost: three retrieval sources fan out
+to ~700 cheap candidates, a heavy ranker scores them, and re-ranking applies
+diversity and business rules to the final 10.
 
 ### 5.2 Position Bias Effect
 
+```mermaid
+xychart-beta
+    title "Position Bias — measured CTR by rank for identical-quality items"
+    x-axis "Rank position" [1, 2, 3, 5, 10]
+    y-axis "Observed CTR (%)" 0 --> 9
+    bar [8, 4.5, 3, 1.5, 0.8]
 ```
-Position:   1       2       3       5       10
-CTR:        8%      4.5%    3%      1.5%    0.8%
 
-True quality:  All items of identical quality = 2% CTR if shown at position 5
-
-Naive model trained on raw clicks:
-  Learns: "position 1 items are 10x better than position 10 items"
-  Result: always recommends items that were historically at position 1
-
-Debiased model (IPW):
-  Upweights click at position 10 by factor 10 (relative to position 1)
-  Learns true item quality independent of historical exposure position
-```
+The bars are the *same* items shown at different positions — position 1 draws ~10x
+the clicks of position 10 purely from exposure, not quality. A naive model trained on
+raw clicks learns "position 1 items are 10x better" and keeps recommending whatever
+was historically ranked first. IPW debiasing upweights a click at position 10 by ~10x
+(relative to position 1), recovering true item quality independent of exposure
+position.
 
 ### 5.3 LambdaMART Gradient Illustration
 
@@ -158,6 +142,68 @@ LambdaRank gradient for pair (B, C):
   Large |delta_NDCG| + large sigmoid = large gradient correction
   Items that matter most for NDCG get the largest corrections
 ```
+
+### 5.4 Learning-to-Rank Families — Pointwise vs Pairwise vs Listwise
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    cand(["Candidate set\nper user"]) --> pw["POINTWISE\nscore each item alone\nBCE on click / no-click"]
+    cand --> pr["PAIRWISE\nrank i above j per pair\nBPR / RankNet"]
+    cand --> lw["LISTWISE\noptimize whole ordering\nLambdaMART · NDCG-weighted"]
+    pw --> opw(["ignores list context\nsimplest, fastest"])
+    pr --> opr(["local order correct\nno list-level metric"])
+    lw --> olw(["best NDCG\nhardest to train"])
+
+    class cand req
+    class pw,pr,lw train
+    class opw,opr,olw io
+```
+
+The same candidate set feeds three loss families that differ in how much ranking
+context each gradient sees: pointwise scores items in isolation, pairwise enforces
+relative order on pairs, and listwise bakes the list-level metric (NDCG) directly
+into the gradient.
+
+### 5.5 ANN Retrieval — Two-Tower Query over an IVF Index
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    uf(["user features"]) --> ut["User Tower\nMLP → 256-d q"]
+    ut --> q(["query vector q"])
+    subgraph offline["Offline · precomputed"]
+        items(["10M item vectors"]) --> km["K-means\nn_lists centroids"]
+        km --> ivf["IVF index\nitem → nearest centroid"]
+    end
+    q --> probe["find nprobe\nnearest centroids"]
+    ivf --> probe
+    probe --> scan["scan only those cells\ndot-product top-k"]
+    scan --> out(["~500 candidates\nrecall@100 ~95% · under 10ms"])
+
+    class uf,q,items,out io
+    class ut train
+    class km,scan mathOp
+    class ivf,probe base
+```
+
+ANN skips the 10M-item brute-force scan: the item vectors are clustered offline into
+`n_lists` centroids, and at query time only the `nprobe` closest cells are scanned —
+trading a few percent recall for a ~100x latency win.
 
 ---
 
@@ -594,6 +640,15 @@ Feature leakage occurs when a training feature was computed using information th
 
 **Q: What metrics do you monitor in production for a retrieval-ranking system?**
 Retrieval metrics: recall@100 (sample-tested against brute force weekly), candidate set size distribution, retrieval latency p50/p95/p99. Ranking metrics: NDCG@10 on offline test set (run daily), ranking model inference latency. End-to-end metrics: CTR by position (watch for position 1/position 2 ratio — should be stable), session engagement rate, conversion rate, return rate. Health metrics: candidate diversity (unique categories in retrieved set), item coverage (unique items recommended across all users in 24h), long-tail item exposure fraction (items with < 1000 total clicks). Alert thresholds: if recall@100 drops more than 3% week-over-week (IVF index staleness), if CTR at any position drops more than 10% day-over-day (potential ranking bug), if catalog coverage drops more than 15% (feedback loop forming).
+
+**Q: When would you choose a GBDT ranker over a neural ranker, and vice versa?**
+Default to GBDT (LightGBM/XGBoost) for tabular features under a tight latency budget; use a neural ranker only when dense embedding interactions dominate. GBDT scores 1000 candidates in ~2ms, handles mixed feature types natively, gives interpretable feature importances, and trains fast — it is the industry-standard baseline. A neural ranker (Wide & Deep, DeepFM) wins when you have rich dense features (item/user embeddings) and complex non-linear feature interactions that trees approximate poorly, and when training data is abundant (>100M labeled examples). In practice teams start with GBDT, then ensemble or replace with a neural ranker only after GBDT saturates; the neural ranker's 20-50ms batched-GPU latency must still fit the SLA.
+
+**Q: What is the difference between retrieval recall and ranking NDCG, and why optimize them separately?**
+Recall measures whether the good items reach the ranker; NDCG measures whether the ranker orders the items it received correctly. Recall@100 is a set-membership metric (did the ground-truth item land in the candidate set?), so a retrieval miss is unrecoverable — no downstream ranker can rank an item it never sees. NDCG@10 is an ordering metric conditioned on the candidates already retrieved. They are optimized separately because the objectives conflict: retrieval trades precision for speed and breadth (accept irrelevant items to avoid missing relevant ones), while ranking spends its precision budget on ordering. Jointly training end-to-end tends to degrade both; the clean division of labor is why the cascade works.
+
+**Q: How would you A/B test a change to the retrieval stage without ranking changes masking the effect?**
+Hold the ranking and re-ranking stages fixed, vary only the retrieval stage, and measure both offline recall@100 and downstream online CTR on the identical ranker. If you change retrieval and ranking together, a CTR delta cannot be attributed. First run an offline recall@100 comparison against brute-force ground truth to confirm the new retrieval improves candidate quality; then run the online A/B with the ranker frozen so any engagement lift is causally the retrieval change. Watch a guardrail: a retrieval change that raises recall but shifts the candidate distribution can still hurt online metrics if the frozen ranker was trained on the old distribution (train-serve skew) — so also monitor the fraction of ranked items coming from the new source.
 
 ---
 

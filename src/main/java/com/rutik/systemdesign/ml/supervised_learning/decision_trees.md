@@ -103,25 +103,31 @@ where n_t = samples reaching node t, n = total samples. Normalized to sum to 1.
 
 ### 5.1 Decision Tree Structure
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    root{"feature_1 ≤ 3.5?\nn=1000 · depth 0"}
+    root -->|yes| n1{"feature_2 ≤ 0.8?\nn=600"}
+    root -->|no| n2{"feature_3 ≤ 7.2?\nn=400"}
+    n1 -->|yes| l1(["LEAF · class 0\nn=420"])
+    n1 -->|no| n3{"feature_4 ≤ 2.1?\nn=180"}
+    n2 -->|yes| l2(["LEAF · class 1"])
+    n2 -->|no| l3(["LEAF · class 1"])
+    n3 -->|yes| l4(["LEAF · class 0"])
+    n3 -->|no| l5(["LEAF · class 1"])
+
+    class root,n1,n2,n3 req
+    class l1,l2,l3,l4,l5 io
 ```
-                    [feature_1 <= 3.5?]          <- root node (depth 0)
-                    n_samples=1000
-                   /               \
-                Yes                 No
-               /                     \
-    [feature_2 <= 0.8?]           [feature_3 <= 7.2?]    <- depth 1
-    n_samples=600                 n_samples=400
-        /      \                     /      \
-      Yes       No                 Yes       No
-       |         |                  |         |
-   [LEAF]    [feature_4<=2.1?]  [LEAF]     [LEAF]    <- depth 2
-   class=0    n_samples=180     class=1    class=1
-   n=420          /    \
-               Yes      No
-                |        |
-             [LEAF]   [LEAF]   <- depth 3
-             class=0  class=1
-```
+
+Each internal node (teal) tests one feature against a threshold and routes samples left (yes) or right (no); each leaf (blue) emits a prediction — the majority class of the training samples that reach it. Depth is the primary regularizer: deeper trees carve finer rectangular regions and eventually memorize the training set.
 
 ### 5.2 Gini Impurity Visualization
 
@@ -133,6 +139,19 @@ Pure node (all class A)     Mixed node (50/50)         Impure but not 50/50
  Gini = 1 - (1^2) = 0.0     Gini = 1 - (0.5^2+0.5^2)  Gini = 1-(0.57^2+0.43^2)
                                    = 0.50               = 0.49
 ```
+
+**Gini vs entropy as a node's class balance shifts** — both are zero at a pure node and peak at 50/50:
+
+```mermaid
+xychart-beta
+    title "Impurity vs class-1 proportion — pure at the ends, maximal at a 50/50 split"
+    x-axis "proportion of class 1 in the node" [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    y-axis "impurity" 0 --> 1.0
+    line [0, 0.47, 0.72, 0.88, 0.97, 1.0, 0.97, 0.88, 0.72, 0.47, 0]
+    line [0, 0.18, 0.32, 0.42, 0.48, 0.5, 0.48, 0.42, 0.32, 0.18, 0]
+```
+
+The upper curve peaking at 1.0 is entropy; the lower curve peaking at 0.5 is Gini. CART chooses the threshold that most reduces the weighted average of whichever curve you pick, pushing child nodes toward the pure ends. Because the two curves are nearly proportional, Gini and entropy produce almost identical trees.
 
 ### 5.3 Effect of max_depth on Decision Boundary
 
@@ -150,23 +169,62 @@ High bias                   Good generalization       Memorized training data
 
 ### 5.4 Cost-Complexity Pruning Path
 
+```mermaid
+xychart-beta
+    title "Cost-complexity pruning — test accuracy peaks at a moderate alpha"
+    x-axis "ccp_alpha (larger = more pruning)" [0.0, 0.01, 0.10]
+    y-axis "accuracy" 0.6 --> 1.0
+    line [1.0, 0.97, 0.88]
+    line [0.73, 0.91, 0.85]
 ```
-alpha = 0.0          alpha = 0.01         alpha = 0.10
-(full tree)          (lightly pruned)     (heavily pruned)
 
-depth=10             depth=6              depth=2
-n_leaves=50          n_leaves=18          n_leaves=4
-train_acc=1.00       train_acc=0.97       train_acc=0.88
-test_acc=0.73        test_acc=0.91        test_acc=0.85
+The line falling monotonically from 1.00 is training accuracy; the line that rises to 0.91 then dips to 0.85 is test accuracy. The full tree (alpha=0, depth 10, 50 leaves) memorizes the training set; heavy pruning (alpha=0.10, depth 2, 4 leaves) underfits. The optimal alpha=0.01 (depth 6, 18 leaves), chosen by cross-validation, closes the train/test gap and maximizes test accuracy.
 
-                          ^^^
-                     optimal alpha
-               (select via cross-validation)
+### 5.5 Train vs Test Accuracy Across max_depth
+
+```mermaid
+xychart-beta
+    title "A single tree overfits — train accuracy climbs while test accuracy turns over"
+    x-axis "max_depth" [1, 2, 4, 6, 8, 12, 20]
+    y-axis "accuracy" 0.6 --> 1.0
+    line [0.72, 0.80, 0.88, 0.93, 0.97, 0.99, 1.0]
+    line [0.71, 0.79, 0.86, 0.90, 0.89, 0.82, 0.75]
 ```
+
+The line reaching 1.0 is training accuracy — an unconstrained tree eventually places one leaf per sample and memorizes the data. The line that peaks near depth 6 (~0.90) then falls to ~0.75 is test accuracy; the widening vertical gap is variance. The sweet spot (depth 4–8 here) minimizes that gap — beyond it, extra depth only fits noise.
 
 ---
 
 ## 6. How It Works — Detailed Mechanics
+
+**How CART builds a node** — greedy best-split search, then recurse:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    node([node with n samples]) --> stop{"stopping rule hit?\nmax_depth · min_samples · pure"}
+    stop -->|yes| leaf(["make LEAF: mean / majority class"])
+    stop -->|no| scan["for each feature: sort n values,\nscan the n-1 candidate thresholds"]
+    scan --> score["score each split by weighted\nchild impurity (Gini / entropy / MSE)"]
+    score --> best["pick the split with the\nlargest impurity decrease"]
+    best --> part["partition into left / right children"]
+    part --> recurse["recurse on each child"]
+    recurse --> node
+
+    class node,leaf io
+    class stop req
+    class scan,score,best mathOp
+    class part,recurse train
+```
+
+At every node CART tries all features and all thresholds, keeps the single split that most reduces child impurity, then recurses — a greedy procedure that is locally optimal but not globally optimal (the optimal-tree problem is NP-hard). The loop exits only when a stopping rule fires, which is why setting max_depth and min_samples_leaf is what actually bounds tree growth.
 
 ### 6.1 Decision Tree Training and Evaluation
 

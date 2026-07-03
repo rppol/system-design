@@ -135,31 +135,33 @@ Rule of thumb: η=0.05 with early stopping and max M=2000 is a good default
 
 ### Gradient Boosting Sequential Training
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    F0(["F0 = mean y\ninitial constant guess"]) --> R1["Residuals\nr = y − F0"]
+    R1 --> T1["Fit Tree 1\nto the residuals"]
+    T1 --> U1["F1 = F0 + η · Tree1"]
+    U1 --> R2["New residuals\nr = y − F1"]
+    R2 --> T2["Fit Tree 2\nto the NEW residuals"]
+    T2 --> U2["F2 = F1 + η · Tree2"]
+    U2 --> DOTS["... repeat M rounds"]
+    DOTS --> FM(["FM = F0 + η · Σ Tree_m"])
+
+    class F0,FM io
+    class R1,R2 lossN
+    class T1,T2 train
+    class U1,U2 mathOp
+    class DOTS base
 ```
-F_0 = mean(y)  [initial prediction for all samples]
-  |
-  v
-Compute residuals: r_i = y_i - F_0(x_i)
-  |
-  v
-Fit Tree_1 to predict residuals
-  |
-  v
-F_1(x) = F_0(x) + η * Tree_1(x)
-  |
-  v
-Compute new residuals: r_i = y_i - F_1(x_i)
-  |
-  v
-Fit Tree_2 to predict NEW residuals
-  |
-  v
-F_2(x) = F_1(x) + η * Tree_2(x)
-  |
-  ... (repeat M times)
-  v
-F_M(x) = F_0(x) + η * Σ_{m=1}^{M} Tree_m(x)
-```
+
+Each tree is trained not on the labels but on the current residuals (the red nodes — the negative gradient of the loss). The ensemble adds a shrunken slice `η · Tree_m` of each correction, so the prediction crawls toward the target one small step at a time. Unlike bagging, the trees are strictly sequential: Tree 2 cannot start until F1 exists.
 
 ### Loss Functions and Their Pseudo-Residuals
 
@@ -183,21 +185,29 @@ Ranking:
 
 ### Stochastic Gradient Boosting with Subsampling
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    D(["Training data\nN rows"]) --> SUB["Random subsample\nsubsample · N rows\nno replacement"]
+    SUB --> FIT["Fit tree on\nthis subsample only"]
+    FIT --> APP["Apply tree to\nALL N rows"]
+    APP --> UPD["Update all rows\nF ← F + η · h_m"]
+    UPD -.->|"next round"| SUB
+
+    class D io
+    class SUB base
+    class FIT train
+    class APP,UPD mathOp
 ```
-Training Data (N rows)
-       |
-       v  [each round]
-  Random subsample: pick subsample*N rows without replacement
-       |
-       v
-  Fit tree on this subsample
-       |
-       v
-  Apply tree to ALL N rows to get predictions
-       |
-       v
-  Update F(x) for all N rows: F_m(x) = F_{m-1}(x) + η*h_m(x)
-```
+
+Each round fits its tree on a fresh random fraction (typically 0.8) of the rows drawn without replacement, then applies that tree to every row to update predictions. The per-round randomness de-correlates trees and acts as regularization — the same intuition as stochastic gradient descent injecting noise into each step.
 
 ### Regularisation Knobs and Their Effects
 
@@ -212,6 +222,31 @@ Shrinkage:     η=0.01         ...    η=0.1          η=0.5
 Subsample:     0.5            ...    0.8            1.0
 Min leaf:      min_child_w=10 ...    min_child_w=1
 ```
+
+### Learning Rate vs n_estimators Tradeoff
+
+```mermaid
+xychart-beta
+    title "Validation AUC: small learning rate + more trees generalises better"
+    x-axis "learning rate / trees" ["0.5 / 50", "0.1 / 200", "0.05 / 500", "0.01 / 2000"]
+    y-axis "Validation AUC" 0.88 --> 0.95
+    bar [0.91, 0.93, 0.94, 0.94]
+```
+
+Shrinkage and tree count trade off directly. A big step (η=0.5) with few trees overshoots and overfits; halving the rate and multiplying the tree count buys better generalization — up to a plateau where more trees stop helping. This is why the recipe is "set η small, set n_estimators high, and let early stopping pick the count."
+
+### Train vs Validation Loss — Why Early Stopping Exists
+
+```mermaid
+xychart-beta
+    title "Train vs validation loss — early stopping halts at the val minimum"
+    x-axis "Boosting rounds" [50, 100, 200, 300, 400, 500]
+    y-axis "Log loss (deviance)" 0.20 --> 0.52
+    line [0.48, 0.40, 0.32, 0.27, 0.24, 0.22]
+    line [0.50, 0.43, 0.36, 0.37, 0.40, 0.44]
+```
+
+The lower line (train loss) falls monotonically toward zero as trees keep memorizing; the upper line (validation loss) bottoms out around round 200 and then rises as the model overfits. Early stopping monitors that upper curve and halts at its minimum — the extra 300 rounds only hurt.
 
 ---
 
@@ -649,6 +684,12 @@ Shrinkage scales each tree's contribution by η: F_m(x) = F_{m-1}(x) + η*h_m(x)
 **Q: What is the difference between AdaBoost and gradient boosting?**
 AdaBoost updates a sample weight distribution after each round: misclassified samples receive higher weight so subsequent learners focus on them. It uses a fixed exponential loss and typically uses stumps (max_depth=1). Gradient boosting fits the negative gradient of any differentiable loss using standard (unweighted) trees at each step. Key differences: (1) Loss function — AdaBoost is locked to exponential loss; GBDT accepts any differentiable loss; (2) Noise sensitivity — exponential loss amplifies outlier weights exponentially, making AdaBoost brittle to label noise; GBDT with Huber loss is robust; (3) Flexibility — GBDT subsumes AdaBoost (AdaBoost is a special case with exponential loss and stagewise additive modelling).
 
+**Q: Why does gradient boosting overfit as you add trees, while Random Forest does not?**
+Because boosting fits trees sequentially to the current residuals, so each extra tree keeps chasing the remaining errors — including noise — and validation loss eventually rises. Random Forest instead grows independent trees on separate bootstrap samples and averages them, so adding trees only reduces variance toward the correlation floor and never increases overfitting. The practical consequence is that n_estimators is a critical, must-tune hyperparameter for boosting (via early stopping) but is merely "set it high enough" for Random Forest. This is the single most important behavioral difference between the two ensembles.
+
+**Q: Do you need to scale features or one-hot encode categoricals before gradient boosting?**
+No feature scaling is needed — like all tree ensembles, gradient boosting is invariant to monotonic transforms, so standardizing or normalizing changes nothing. Categorical handling depends on the library: sklearn's GradientBoostingClassifier needs numeric encoding (ordinal or target encoding, not one-hot, which explodes dimensionality and starves splits), whereas LightGBM and CatBoost accept categoricals natively and CatBoost's ordered target statistics avoid the leakage that naive target encoding introduces. One-hot encoding a high-cardinality categorical is a common mistake that both slows training and weakens splits.
+
 **Q: How does stochastic gradient boosting work and what problem does it solve?**
 Stochastic gradient boosting (subsample < 1.0) trains each tree on a random fraction of the training rows drawn without replacement. This introduces variance into the boosting process: each tree sees a different subset of the data, reducing correlation between trees and acting as a form of regularisation. The mechanism is analogous to the stochastic in stochastic gradient descent — introducing noise into the gradient estimate can help escape local optima and reduce overfitting. Typical value: subsample=0.8 (train each tree on 80% of rows). Column subsampling (colsample_bytree, colsample_bylevel) adds feature-level randomness, similar to Random Forest's max_features.
 
@@ -681,6 +722,9 @@ Prefer HistGradientBoostingClassifier (HGBT) almost always for datasets > 10K ro
 
 **Q: What is the deviance in gradient boosting and how is it different from the loss?**
 In sklearn's GradientBoostingClassifier, deviance refers to the per-sample negative log-likelihood — it is used as the training and validation loss metric displayed during training. For binary classification with log loss: deviance_i = -[y_i * log(p_i) + (1-y_i) * log(1-p_i)]. The term "deviance" comes from generalised linear model terminology where it measures goodness of fit. It is equivalent to cross-entropy loss and is the same quantity minimised by logistic regression. In the staged_deviance_ attribute, sklearn stores the training and test deviance per round — useful for plotting learning curves and diagnosing overfitting without re-running staged_predict_proba.
+
+**Q: What is the difference between level-wise (depth-wise) and leaf-wise tree growth in gradient boosting?**
+Level-wise growth (XGBoost's default) expands every node at a depth before going deeper, while leaf-wise growth (LightGBM's default) always splits the leaf with the highest loss reduction. Level-wise keeps trees balanced; leaf-wise produces deeper, asymmetric trees. Leaf-wise converges faster and often reaches lower loss for the same number of leaves because it always chases the biggest available gain, but it overfits more easily on small datasets — which is why LightGBM exposes num_leaves and min_child_samples as the primary guards rather than max_depth. Level-wise is more conservative and easier to regularize with a simple depth cap. CatBoost takes a third path: symmetric (oblivious) trees that use the same split across an entire level for very fast inference.
 
 ---
 

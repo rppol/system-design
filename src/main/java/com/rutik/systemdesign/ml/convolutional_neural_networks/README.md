@@ -71,47 +71,153 @@ Depthwise separable = depthwise (one filter per input channel: K^2 * C_in * H * 
 
 ## 5. Architecture Diagrams
 
+**Standard CNN pipeline (conv/pool feature-map flow):**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    inp(["Input 224×224×3"]) --> stem["Conv 7×7 s2, 64 · stem → 112×112×64"]
+    stem --> pool["MaxPool 3×3 s2 → 56×56×64"]
+    pool --> s1["Stage 1 · 64ch · edges → 56×56"]
+    s1 --> s2["Stage 2 s2 · 128ch · shapes → 28×28"]
+    s2 --> s3["Stage 3 s2 · 256ch · parts → 14×14"]
+    s3 --> s4["Stage 4 s2 · 512ch · semantics → 7×7"]
+    s4 --> gap["Global Avg Pool → 512"]
+    gap --> fc["Linear 512 to num_classes"]
+    fc --> out(["class logits"])
+
+    class inp,out io
+    class stem,s1,s2,s3,s4,fc train
+    class pool,gap mathOp
 ```
-Standard CNN Pipeline:
-Input (224x224x3)
-    |
-[Conv 7x7, stride 2, 64 filters] -> (112x112x64)   <- stem
-    |
-[MaxPool 3x3, stride 2]          -> (56x56x64)
-    |
-[Stage 1: 3x3 conv blocks, 64ch] -> (56x56x64)     <- early features: edges
-    |
-[Stage 2: stride 2, 128ch]       -> (28x28x128)    <- mid features: shapes
-    |
-[Stage 3: stride 2, 256ch]       -> (14x14x256)    <- high features: parts
-    |
-[Stage 4: stride 2, 512ch]       -> (7x7x512)      <- semantic features
-    |
-[Global Average Pooling]          -> (512,)
-    |
-[Linear(512, num_classes)]        -> (num_classes,)
 
-ResNet Residual Block (BasicBlock, ResNet-18/34):
-  x -----> [Conv 3x3] -> [BN] -> [ReLU] -> [Conv 3x3] -> [BN] -> (+) -> [ReLU] -> out
-  |                                                                 ^
-  +------------------------------------------------ identity ------+
+The feature map flows top-down: spatial size falls (224 → 7) while channel depth
+rises (3 → 512), trading resolution for semantic richness before global average
+pooling collapses each map to a single number.
 
-ResNet Bottleneck Block (ResNet-50/101/152):
-  x -> [Conv 1x1, reduce] -> [BN] -> [ReLU]
-     -> [Conv 3x3]         -> [BN] -> [ReLU]
-     -> [Conv 1x1, expand] -> [BN]
-     -> (+ skip) -> [ReLU]
+**ResNet residual block (BasicBlock, ResNet-18/34):**
 
-Depthwise Separable Conv (MobileNet):
-  Input (H x W x Cin)
-      |
-  [Depthwise Conv: one 3x3 per channel] -> (H x W x Cin)   <- spatial features
-      |
-  [Pointwise Conv: 1x1, Cout filters]   -> (H x W x Cout)  <- channel mixing
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Params: 3*3*Cin + Cin*Cout  vs  3*3*Cin*Cout standard
-  Ratio:  1/Cout + 1/9  (8-9x fewer params for typical Cout)
+    x(["x"]) --> c1["Conv 3×3"]
+    c1 --> b1["BN"]
+    b1 --> r1["ReLU"]
+    r1 --> c2["Conv 3×3"]
+    c2 --> b2["BN"]
+    b2 --> add(("+"))
+    x -->|"identity"| add
+    add --> r2["ReLU"]
+    r2 --> out(["out"])
+
+    class x,out io
+    class c1,c2,b1,b2 train
+    class r1,r2,add mathOp
 ```
+
+The identity edge lets the block learn a residual F(x); when F(x)=0 the block is a
+no-op, so gradients reach early layers straight through the addition node without
+passing through any nonlinearity.
+
+**ResNet bottleneck block (ResNet-50/101/152):**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x(["x"]) --> c1["Conv 1×1 reduce"]
+    c1 --> r1["BN + ReLU"]
+    r1 --> c2["Conv 3×3"]
+    c2 --> r2["BN + ReLU"]
+    r2 --> c3["Conv 1×1 expand"]
+    c3 --> b3["BN"]
+    b3 --> add(("+"))
+    x -->|"skip / 1×1 proj"| add
+    add --> r3["ReLU"]
+    r3 --> out(["out"])
+
+    class x,out io
+    class c1,c2,c3,b3 train
+    class r1,r2,r3,add mathOp
+```
+
+The 1×1 reduce/expand sandwich cuts the cost of the middle 3×3 conv; the skip is a
+learned 1×1 projection whenever channel count or stride changes, otherwise a plain
+identity.
+
+**Depthwise separable convolution (MobileNet):**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    inp(["H×W×Cin"]) --> dw["Depthwise 3×3\none filter per channel"]
+    dw --> pw["Pointwise 1×1\nCout filters · channel mixing"]
+    pw --> bn["BN + ReLU6"]
+    bn --> out(["H×W×Cout"])
+
+    class inp,out io
+    class dw,pw train
+    class bn mathOp
+```
+
+Depthwise handles per-channel spatial filtering; pointwise mixes channels —
+splitting the two is what makes MobileNet ~8-9× cheaper: cost is `3·3·Cin + Cin·Cout`
+versus `3·3·Cin·Cout` for a standard conv (ratio `1/Cout + 1/9`).
+
+**Feature-map size shrinks stage by stage:**
+
+```mermaid
+xychart-beta
+    title "Spatial resolution shrinks through the network (ResNet-50)"
+    x-axis ["Input", "Stem", "Pool", "Stage1", "Stage2", "Stage3", "Stage4"]
+    y-axis "Feature-map side (px)" 0 --> 224
+    bar [224, 112, 56, 56, 28, 14, 7]
+```
+
+Each stride-2 op halves the side length; by Stage 4 a 224px image is a 7px map — a
+32× spatial reduction that concentrates each neuron's receptive field on the whole
+scene.
+
+**Receptive field grows with depth:**
+
+```mermaid
+xychart-beta
+    title "Receptive field grows with depth (ResNet-50 stem + early blocks)"
+    x-axis ["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"]
+    y-axis "Receptive field (px)" 0 --> 90
+    line [7, 11, 19, 27, 35, 51, 67, 83]
+```
+
+Running the receptive-field recurrence over the example layers `[(7,2),(3,2),(3,1),
+(3,1),(3,2),(3,1),(3,1),(3,2)]` grows RF from 7px to 83px — late neurons "see" most
+of the input, which is why deep layers can make object-level decisions.
 
 ---
 
@@ -419,6 +525,21 @@ Each neuron in a convolutional layer only connects to a small local region (the 
 
 **Q: How do you handle class imbalance in image classification with CNNs?**
 Three main strategies: (1) Weighted loss — set per-class weights inversely proportional to class frequency in `nn.CrossEntropyLoss(weight=class_weights)`. (2) Oversampling — use `WeightedRandomSampler` in PyTorch DataLoader to sample rare classes more frequently. (3) Data augmentation — apply heavier augmentation to minority classes. For severe imbalance (>100:1), combine weighted loss with oversampling. Evaluation metric matters: accuracy is misleading for imbalanced datasets; use macro-F1, precision-recall AUC, or per-class recall.
+
+**Q: Why do you set `bias=False` in convolution layers that are immediately followed by BatchNorm?**
+BatchNorm subtracts the batch mean, which cancels any constant bias the preceding convolution adds, making that bias a redundant parameter. The BN layer has its own learnable shift (beta) that fully absorbs the offset role, so keeping a conv bias just wastes parameters and adds a no-op term to the gradient. This is why every reference ResNet/EfficientNet implementation uses `bias=False` on conv layers that feed a normalization layer; only convs with no following BN keep their bias.
+
+**Q: What goes wrong when you use BatchNorm with a batch size of 1, and what should you use instead?**
+BatchNorm with batch size 1 has undefined variance (dividing by n-1=0) and silently produces NaN activations, so training loss becomes NaN immediately. This bites teams training on large images (4K medical scans) where only one sample fits in memory. The fix is a normalization that does not depend on the batch dimension: GroupNorm (num_groups=32) or InstanceNorm, both of which compute statistics within a single sample and behave identically at any batch size.
+
+**Q: Why does forgetting to apply the training-time normalization at inference cause a catastrophic accuracy drop?**
+The model learned to expect normalized inputs, so raw pixel values are wildly out of distribution and accuracy can collapse from 76% to 35%. A ResNet trained on ImageNet-normalized tensors (mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]) has calibrated its first-layer filters to that input scale; feeding [0,255] or even [0,1] tensors shifts every activation far outside the trained range. Always apply the exact same Resize/CenterCrop/Normalize transform at inference that was used in training.
+
+**Q: What does a 1x1 convolution actually compute, and why is it useful?**
+A 1x1 convolution mixes information across channels at each spatial location, acting as a per-pixel fully connected layer over the channel dimension. It changes channel count without touching spatial extent, which is why ResNet bottlenecks use it to cheaply reduce channels before an expensive 3x3 conv and expand them afterward. It also adds a nonlinearity (via the following ReLU) and underpins pointwise convs in MobileNet and channel projections in skip connections.
+
+**Q: What are dilated (atrous) convolutions and when would you use them?**
+Dilated convolutions insert gaps between kernel taps to enlarge the receptive field without adding parameters or reducing spatial resolution. A 3x3 kernel with dilation 2 covers a 5x5 region but still uses only 9 weights, so stacking dilated convs grows the receptive field exponentially while keeping full-resolution feature maps. This is essential for dense prediction tasks like semantic segmentation (DeepLab), where downsampling would destroy the pixel-level detail the output needs.
 
 ---
 

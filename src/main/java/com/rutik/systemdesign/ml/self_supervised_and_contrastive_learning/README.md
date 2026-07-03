@@ -82,80 +82,190 @@ Where sim is cosine similarity, tau is temperature (0.07–0.2), and the 2N deno
 
 ## 5. Architecture Diagrams
 
+### Contrastive Learning (SimCLR / NT-Xent)
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x(["input x"]) --> a1["augment
+view 1"]
+    x --> a2["augment
+view 2"]
+    a1 --> f1["encoder f
+shared weights"]
+    a2 --> f2["encoder f
+shared weights"]
+    f1 --> g1["projector g
+2-layer MLP (discarded)"]
+    f2 --> g2["projector g
+2-layer MLP (discarded)"]
+    g1 --> z1(["z_i — 128-d"])
+    g2 --> z2(["z_j — 128-d"])
+    z1 --> loss["NT-Xent / InfoNCE
+pull (z_i, z_j)
+push 2(N-1) negatives"]
+    z2 --> loss
+
+    class x,z1,z2 io
+    class a1,a2 base
+    class f1,f2,g1,g2 train
+    class loss lossN
 ```
-Contrastive Learning (SimCLR-style)
-=====================================
 
-  Input x
-    |
-  [Augmentation 1]    [Augmentation 2]
-    |                       |
-  View x_i              View x_j
-    |                       |
-  Encoder f(.)           Encoder f(.)    <- shared weights
-    |                       |
-  h_i [D]               h_j [D]
-    |                       |
-  Projector g(.)         Projector g(.)  <- MLP, 2 layers, 128-dim output
-    |                       |
-  z_i [128]             z_j [128]
-         \               /
-          [InfoNCE Loss]
-           positive pair (z_i, z_j) vs
-           2(N-1) negatives from batch
+Two augmentations of one image become a positive pair; every other view in the batch is a negative. The projector is trained only to satisfy the invariance objective and is thrown away afterward — downstream tasks use the encoder output h, not z.
 
+### BERT — Masked Language Modeling
 
-BERT Masked Language Modeling
-===============================
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Input:   "The cat sat on the [MASK] ."
-             |    |   |   |    |       |
-           tok1 tok2 tok3 tok4 [M]   tok6
+    inp(["The cat sat on the [MASK] ."]) --> tok["tokenize +
+mask 15% of tokens"]
+    tok --> enc["Transformer
+bidirectional self-attention"]
+    enc --> hm["hidden state at
+masked position"]
+    hm --> head["softmax over vocab"]
+    head --> pred(["predict: mat"])
+    pred --> loss["cross-entropy
+masked positions only"]
 
-  Transformer (bidirectional self-attention)
-             |    |   |   |    |       |
-           h1   h2  h3  h4   h5     h6
-
-  Loss: cross-entropy at masked position only
-  Predict: "mat" at position 5
-
-
-BYOL (No Negatives)
-=====================
-
-  Online Network:                  Target Network:
-    x --[aug]--> f_o ---> g_o         x --[aug]--> f_t
-                   \                          |
-                    q_o (predictor)        z_t (stop-grad)
-                         \                   |
-                          MSE( q_o(z_o), z_t )
-
-  Target network: exponential moving average of online network
-    theta_t = m * theta_t + (1-m) * theta_o   (m = 0.996)
-
-  Asymmetry (predictor on online only) + EMA prevents collapse.
-
-
-Graph Contrastive Learning (GraphCL)
-======================================
-
-  Original Graph G
-     /           \
-  [Aug 1]       [Aug 2]
-  (edge drop)  (attr mask)
-     |               |
-  View G1        View G2
-     |               |
-  GNN Encoder    GNN Encoder   <- shared
-     |               |
-  h_G1           h_G2          <- graph-level pooling
-     |               |
-  Projector      Projector
-     |               |
-  z_G1           z_G2
-         \       /
-       NT-Xent loss
+    class inp,pred io
+    class tok,hm,head mathOp
+    class enc train
+    class loss lossN
 ```
+
+Only the masked positions contribute to the loss, forcing the model to infer each hidden token from bidirectional context. The 80/10/10 masking mix (mask / random / unchanged) reduces the train/inference mismatch caused by the [MASK] token never appearing at fine-tuning time.
+
+### BYOL — No Negatives (Predictor + EMA Target)
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x(["input x"]) --> av1["augment 1"]
+    x --> av2["augment 2"]
+    av1 --> fo["online encoder f_o"]
+    fo --> go["online projector g_o"]
+    go --> qo["online predictor q_o"]
+    av2 --> ft["target encoder f_t
+EMA, stop-grad"]
+    ft --> zt["target projector z_t
+stop-grad"]
+    qo --> loss["MSE
+q_o(z_o) vs z_t
+(no negatives)"]
+    zt --> loss
+    loss -.->|"backprop"| fo
+    fo -.->|"EMA m=0.996"| ft
+
+    class x io
+    class av1,av2 base
+    class fo,go,qo train
+    class ft,zt frozen
+    class loss lossN
+```
+
+The predictor sits on the online branch only, and gradients never flow through the EMA target (stop-grad). This asymmetry plus the slow-moving target gives the online network a stable but non-trivial thing to predict, so BYOL avoids collapse without a single negative.
+
+### SimSiam — Stop-Gradient, No Momentum Encoder
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x(["input x"]) --> a1["augment 1"]
+    x --> a2["augment 2"]
+    a1 --> f1["encoder f
+shared weights"]
+    a2 --> f2["encoder f
+shared weights"]
+    f1 --> p1["projector"]
+    f2 --> p2["projector"]
+    p1 --> pred["predictor h"]
+    p2 --> sg["stop-gradient"]
+    pred --> loss["neg cosine
+h(z1) vs stopgrad(z2)"]
+    sg --> loss
+
+    class x io
+    class a1,a2 base
+    class f1,f2,p1,p2,pred train
+    class sg frozen
+    class loss lossN
+```
+
+SimSiam drops BYOL's momentum encoder entirely — collapse is prevented by the predictor plus a stop-gradient on the sibling branch alone. Ablations show removing either the predictor or the stop-gradient collapses the encoder to a constant.
+
+### Graph Contrastive Learning (GraphCL)
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    gG(["original graph G"]) --> a1["augment 1
+edge drop"]
+    gG --> a2["augment 2
+attribute mask"]
+    a1 --> e1["GNN encoder
+shared"]
+    a2 --> e2["GNN encoder
+shared"]
+    e1 --> p1["graph pool
++ projector"]
+    e2 --> p2["graph pool
++ projector"]
+    p1 --> z1(["z_G1"])
+    p2 --> z2(["z_G2"])
+    z1 --> loss["NT-Xent
+at graph level"]
+    z2 --> loss
+
+    class gG,z1,z2 io
+    class a1,a2 base
+    class e1,e2,p1,p2 train
+    class loss lossN
+```
+
+GraphCL builds two augmented views of one graph and applies SimCLR's contrastive loss on graph-level embeddings. Augmentation choice is domain-critical: subgraph sampling and attribute masking preserve molecular chemistry, while edge dropout suits social graphs.
 
 ---
 
@@ -578,6 +688,25 @@ SimCSE (Simple Contrastive Learning of Sentence Embeddings) creates positive pai
 
 **Q: Why do we need a projector in SimCLR and why is it discarded after pretraining?**
 The projector (MLP head mapping encoder output to lower-dimensional z) serves two purposes: (1) it absorbs the invariance objective — the contrastive loss forces z to be invariant to augmentations. If this invariance were imposed directly on the encoder, the encoder would lose discriminative information needed for downstream tasks. The projector acts as a "sacrifice layer" that becomes maximally invariant. (2) It prevents the encoder from collapsing — the encoder only needs to encode enough information for the projector to succeed, not be perfectly invariant itself. Empirically, using h (encoder output) instead of z (projector output) for linear evaluation improves accuracy by 10+ points.
+
+**Q: What is the false-negative problem in contrastive learning and how do you mitigate it?**
+It is when two samples of the same class land in the batch as a negative pair, so the loss wrongly pushes apart embeddings that should be close. InfoNCE treats every other in-batch sample as a negative, but with few classes or very large batches many "negatives" are actually same-class, injecting label noise that caps representation quality. Mitigations: use supervised contrastive loss (SupCon) when labels exist to pull same-class samples together, raise the temperature slightly to soften penalties, apply debiased contrastive loss, or filter obvious false negatives above a similarity threshold.
+
+**Q: Why is the stop-gradient essential in SimSiam, and how does it differ from BYOL?**
+Without the stop-gradient both branches minimize the loss by collapsing to a constant vector, so it is the single mechanism that keeps SimSiam from degenerating. SimSiam uses a predictor on one branch and a stop-gradient on the other, with shared encoder weights, no momentum encoder, and no negatives. BYOL adds an EMA target network; SimSiam's ablations show the EMA is optional but the stop-gradient is not — remove it and linear accuracy crashes to near-random within a few epochs. The predictor plus stop-gradient together create the asymmetry that yields a non-trivial optimization target.
+
+**Q: Why can masked image modeling (MAE) mask 75% of patches while BERT masks only 15% of tokens?**
+Because images are spatially redundant, even with 75% of patches hidden the visible ones give enough context, whereas language is information-dense and 15% is already a hard task. A masked pixel patch is highly predictable from its neighbors, so a low masking ratio makes the pretext task trivial (copy adjacent patches); MAE needs aggressive 75% masking to force semantic understanding, and it also makes the encoder cheap by processing only visible patches. Text tokens carry far more information per unit, so masking 40%+ removes too much context and the model falls back on local statistics.
+
+**Q: What is the difference between generative (masked/autoregressive) SSL and contrastive SSL?**
+Generative SSL reconstructs or predicts raw data (masked or next tokens), while contrastive SSL learns by pulling augmented views together and pushing others apart in embedding space. Generative methods (BERT MLM, GPT, MAE) need no negatives and directly model the data distribution, which suits language and dense reconstruction; contrastive methods (SimCLR, MoCo) optimize an instance-discrimination objective and depend heavily on augmentation design and negatives. Non-contrastive methods (BYOL, DINO, SimSiam) sit in between — no negatives and no reconstruction, relying on architectural asymmetry to avoid collapse.
+
+**Q: How does DINO avoid representation collapse without negative pairs?**
+DINO uses self-distillation with centering and sharpening on the teacher outputs, which together prevent both constant collapse and uniform collapse. A student network matches the softmax output of an EMA teacher across multi-crop views. Centering (subtract a running mean of teacher outputs) stops any one dimension from dominating, while sharpening (a low teacher temperature) stops the output distribution from becoming uniform — the two forces balance each other. This yields emergent object-segmentation attention maps in vision transformers with no labels and no negatives.
+
+**Q: What is dimensional collapse and how do Barlow Twins and VICReg prevent it?**
+Dimensional collapse is when embeddings span only a low-dimensional subspace, wasting model capacity even though the vectors are not all identical. Unlike full collapse to a constant, the embeddings still vary but become redundant across dimensions. Barlow Twins pushes the cross-correlation matrix of the two views toward the identity — diagonal ones enforce invariance and off-diagonal zeros enforce decorrelation — so dimensions carry non-redundant information. VICReg makes this explicit with three terms: variance (keep each dimension's std above a floor), invariance (match views), and covariance (decorrelate dimensions). Neither method needs negatives or a momentum encoder.
+
 
 ---
 

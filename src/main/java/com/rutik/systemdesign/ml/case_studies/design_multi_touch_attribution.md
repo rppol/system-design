@@ -61,55 +61,36 @@ Why this system exists: Marketing teams allocate budgets across channels (paid s
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    EVT([Event Collection\nImpressions · Clicks · Site · Conversions]) --> IDR["Identity Resolution\ndeterministic + probabilistic device graph"]
+    IDR --> PATH["Path Construction\nSpark daily · lookback · dedup · label"]
+    PATH --> RULE["Rule-Based\nfirst / last / linear / time-decay"]
+    PATH --> MARK["Markov Chain\ntransition matrix + removal effects"]
+    PATH --> SHAP["Shapley Value\nMonte Carlo approx"]
+    RULE --> STORE["Attribution Store\nParquet / BigQuery"]
+    MARK --> STORE
+    SHAP --> STORE
+    STORE --> BI([BI / Tableau])
+    STORE --> BID([Bid Optimization])
+    STORE --> INC([Incrementality Testing])
+
+    class EVT,BI,BID,INC io
+    class IDR,PATH base
+    class RULE frozen
+    class MARK,SHAP mathOp
+    class STORE req
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        EVENT COLLECTION                         │
-│  Ad Impressions  │  Clicks  │  Site Events  │  Conversions      │
-│  (DSP pixels)    │ (UTM)    │ (GA4 / Segment) │ (order system)  │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────────┐
-│                  IDENTITY RESOLUTION                            │
-│  Device graph (probabilistic) + deterministic ID matching      │
-│  → Unified customer journey (user_id, cookie, device stitched) │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────────┐
-│               PATH CONSTRUCTION (Spark, daily)                  │
-│  - Apply lookback window (30 days)                              │
-│  - Deduplicate impressions within same channel × 1hr window     │
-│  - Attach conversion label + revenue to each path               │
-│  - Partition: converting paths / non-converting paths           │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-         ┌─────────────────┼─────────────────┐
-         │                 │                 │
-┌────────▼───────┐  ┌──────▼──────┐  ┌──────▼──────┐
-│  RULE-BASED    │  │  MARKOV     │  │  SHAPLEY    │
-│  ATTRIBUTION   │  │  CHAIN      │  │  VALUE      │
-│  (baseline)    │  │  MODEL      │  │  APPROX     │
-│  first-touch   │  │             │  │  (Monte     │
-│  last-touch    │  │  Transition │  │   Carlo)    │
-│  linear        │  │  matrix +   │  │             │
-│  time-decay    │  │  removal    │  └──────┬──────┘
-└────────┬───────┘  │  effects    │         │
-         │          └──────┬──────┘         │
-         └────────────┬────┘                │
-                      └──────────┬──────────┘
-                                 │
-                    ┌────────────▼────────────┐
-                    │  ATTRIBUTION STORE      │
-                    │  (Parquet / BigQuery)   │
-                    └────────────┬────────────┘
-                                 │
-           ┌─────────────────────┼──────────────────────┐
-           │                     │                      │
-  ┌────────▼────────┐  ┌─────────▼─────────┐  ┌────────▼────────┐
-  │  BI / Tableau   │  │  Bid Optimization │  │  Incrementality │
-  │  dashboards     │  │  (ad platform     │  │  Testing        │
-  │                 │  │  API feeds)       │  │  validation     │
-  └─────────────────┘  └───────────────────┘  └─────────────────┘
-```
+
+Stitched customer journeys fan out to three attribution models in parallel — rule-based baselines plus data-driven Markov and Shapley — whose outputs land in a shared store feeding BI dashboards, automated bid optimization, and geo-holdout incrementality validation.
 
 **Component inventory:**
 - Event collection: pixel-based impression tracking + UTM parameter parsing for clicks.
@@ -205,6 +186,33 @@ def build_conversion_paths(
 ### 4.2 Markov Chain Attribution
 
 The Markov model computes a transition probability matrix over channel states, then estimates each channel's contribution using the *removal effect*: what fraction of conversions would be lost if this channel were removed from all paths?
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    START([Start]) --> DISP["Display"]
+    START --> SRCH["Paid Search"]
+    DISP --> SRCH
+    DISP --> RETG["Retargeting"]
+    SRCH --> RETG
+    SRCH --> CONV([Conversion])
+    RETG --> CONV
+    RETG --> NULL([Null · no conversion])
+    DISP --> NULL
+
+    class START,CONV io
+    class DISP,SRCH,RETG req
+    class NULL frozen
+```
+
+The Markov model treats channels as states on the walk from Start to Conversion or Null; a channel's removal effect is the drop in reachable Conversion probability when its node is deleted and its inflow is redirected to Null.
 
 ```python
 import numpy as np
@@ -540,6 +548,16 @@ Including ad impressions (view-through) in paths dramatically inflates display/v
 ## 9. Common Pitfalls & War Stories
 
 **Pitfall 1: Retargeting attribution inflation.** A retail company's last-touch model attributed 42% of revenue to retargeting. They ran a geo holdout test and found retargeting's true incrementality was 9%. Root cause: retargeting pixels fire after a user views a product (already high intent), so retargeting gets "credit" for conversions that were inevitable. The Markov model reduced retargeting attribution to 18%, but the true value was 9%. The company reallocated $4M annually from retargeting to upper-funnel channels, improving blended ROAS by 31%.
+
+```mermaid
+xychart-beta
+    title "Retargeting Credit: Attribution Method vs Truth"
+    x-axis ["Last-touch", "Markov", "True incrementality"]
+    y-axis "Share of conversions (%)" 0 --> 45
+    bar [42, 18, 9]
+```
+
+Last-touch hands retargeting 42% of conversions and Markov 18%, but the geo-holdout measures only 9% true incrementality — the bottom-funnel over-attribution that drove the $4M reallocation in the war story above.
 
 **Pitfall 2: Tracking loss after iOS 14.5.** Apple's App Tracking Transparency (ATT) framework in 2021 caused mobile attribution rates to drop 40–60% for apps without first-party login. A gaming company's attribution system reported a 35% decrease in conversions from paid social overnight — in reality, conversions were flat, but the tracking coverage changed. They failed to adjust their Markov model for the changed path coverage, causing systematic under-attribution of iOS channels for 3 months before the root cause was identified.
 

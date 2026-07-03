@@ -35,63 +35,85 @@ understand Kubernetes internals.
 
 ## Architecture Overview
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph interaction["Interaction Layer"]
+        sdk["Python SDK\npip install mlplatform"]
+        cli["CLI\nmlp train / deploy / features"]
+        ui["Web UI\ncatalog, experiments, cost"]
+    end
+    fs["Feature Store\noffline Hive+Spark / online Redis\nfeature registry + lineage"]
+    tp["Training Platform\nK8s + Volcano scheduler,\nKubeflow + Argo, MLflow tracking"]
+    si["Serving Infra\nModel Registry (MLflow),\nTorchServe / TF Serving / sklearn,\nA/B router + shadow"]
+    cp["Control Plane\njob priority queue, quotas per team,\ncost tracking, health monitoring"]
+    infra["Infrastructure\nK8s 100 nodes, 200 A100 + 500 CPU cores,\nS3 artifacts, Redis, Hive metastore"]
+
+    interaction --> fs
+    interaction --> tp
+    interaction --> si
+    fs --> cp
+    tp --> cp
+    si --> cp
+    cp --> infra
+
+    class sdk,cli,ui io
+    class fs base
+    class tp train
+    class si mathOp
+    class cp req
+    class infra frozen
 ```
-ML Engineer Interaction Layer
-+-----------------------------------------------------+
-|  Python SDK (pip install mlplatform)                |
-|  CLI (mlp train, mlp deploy, mlp features get)      |
-|  Web UI (model catalog, experiment browser, cost)   |
-+-----------------------------------------------------+
-         |                  |                  |
-         v                  v                  v
-+----------------+  +----------------+  +----------------+
-|  Feature Store |  | Training Plat. |  | Serving Infra. |
-|                |  |                |  |                |
-| Offline Store  |  | Job Scheduler  |  | Model Registry |
-| (Hive + Spark) |  | (K8s + Volcano)|  | (MLflow)       |
-| Online Store   |  |                |  |                |
-| (Redis Cluster)|  | Kubeflow Pipes |  | TorchServe     |
-|                |  | + Argo WF      |  | TF Serving     |
-| Feature Reg.   |  |                |  | Custom sklearn |
-| (schema +      |  | Experiment     |  |                |
-|  lineage)      |  | Tracking       |  | A/B Router     |
-|                |  | (MLflow)       |  | Shadow Mode    |
-+----------------+  +----------------+  +----------------+
-         |                  |                  |
-         +------------------+------------------+
-                            |
-              +----------------------------+
-              |    Control Plane           |
-              |  - Job priority queue      |
-              |  - Resource quotas/team    |
-              |  - Cost tracking           |
-              |  - Health monitoring       |
-              +----------------------------+
-                            |
-              +----------------------------+
-              |    Infrastructure          |
-              |  Kubernetes (100 nodes)    |
-              |  GPU: 200 A100s (training) |
-              |  CPU: 500 cores (serving)  |
-              |  Storage: S3 (artifacts)   |
-              |  Redis Cluster (online FS) |
-              |  Hive Metastore (offline)  |
-              +----------------------------+
 
+One SDK/CLI/UI surface fronts three pillars — feature store, training platform, and serving — coordinated by a control plane (quotas, cost, health) that runs everything over shared Kubernetes and GPU infrastructure.
 
-Data Flow — Feature Pipeline:
-  Production DB (CDC) --> Kafka --> Flink --> Feature Store (offline + online)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Data Flow — Training:
-  Feature Store (offline, Parquet) --> Training Job (GPU) --> MLflow artifact --> Registry
+    cdc(["Production DB\n(CDC)"])
+    kafka["Kafka"]
+    flink["Flink"]
+    fstore["Feature Store\noffline + online"]
+    job["Training Job\n(GPU)"]
+    art["MLflow artifact"]
+    reg["Model Registry"]
+    ureq(["User request"])
+    gw["API Gateway"]
+    ab["A/B Router"]
+    ms["Model Server"]
+    infer(["Inference\nresponse"])
 
-Data Flow — Serving:
-  User Request --> API Gateway --> A/B Router --> Model Server --> Feature Store (online) --> Inference
+    cdc --> kafka --> flink --> fstore
+    fstore --> job --> art --> reg
+    ureq --> gw --> ab --> ms
+    ms --> fstore
+    reg --> ms
+    ms --> infer
 
-  Model Server calls Feature Store inline:
-  [Request: user_id=123] -> [Online FS: user_embedding, user_history] -> [Inference] -> [Response]
+    class cdc,ureq,infer io
+    class kafka,flink,gw,ab,ms mathOp
+    class fstore base
+    class job,art train
+    class reg base
+```
 
+Three data flows meet at the feature store: a CDC stream materializes features, training reads them offline to produce a registered model, and serving reads the same definitions online inside the model server — one computation path, so no train/serve skew.
 
+```
 Platform SDK Flow:
   from mlplatform import FeatureStore, Trainer, ModelRegistry, Deployer
 
@@ -172,6 +194,34 @@ plane API. Supported strategies:
 - Shadow mode: 100% traffic to current model; new model receives copies of all requests but
   responses are discarded. Used for integration testing without user impact.
 - Blue-green: full traffic switch with instant rollback capability.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    new(["New model\nversion"])
+    shadow["Shadow mode\n100% mirrored traffic,\nresponses discarded"]
+    canary["Canary\n5% traffic, 1h+,\nerror and p99 watched"]
+    full["Full rollout\n100% traffic"]
+    rollback(["Auto rollback"])
+    prod(["Production"])
+
+    new --> shadow --> canary
+    canary -->|"pass"| full --> prod
+    canary -->|"error over 1% or p99 up 20ms"| rollback
+
+    class new,rollback,prod io
+    class shadow,canary mathOp
+    class full train
+```
+
+Every promotion walks the same guarded path: shadow mode proves integration safety, then a 5% canary auto-rolls-back if error rate exceeds 1% or P99 latency rises 20ms over one hour, before full rollout to Production.
 
 ---
 

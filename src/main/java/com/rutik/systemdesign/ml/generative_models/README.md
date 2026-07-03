@@ -74,62 +74,145 @@ Key insight: the field has converged on diffusion models for image generation du
 
 ## 5. Architecture Diagrams
 
+### VAE
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x(["x (real image)"]) --> enc["Encoder CNN/MLP"]
+    enc --> mu["mu"]
+    enc --> lv["log_var"]
+    mu --> rp(("z = mu + sigma·eps"))
+    lv --> rp
+    eps["eps ~ N(0, I)"] --> rp
+    rp --> z(["z (latent)"])
+    z --> dec["Decoder CNN/MLP"]
+    dec --> xhat(["x_hat (reconstruction)"])
+    x --> recon["Recon(x, x_hat)"]
+    xhat --> recon
+    mu --> kl["beta · KL(N(mu,sigma) || N(0,I))"]
+    lv --> kl
+
+    class x,z,xhat io
+    class enc,dec train
+    class mu,lv,rp mathOp
+    class eps frozen
+    class recon,kl lossN
 ```
-VAE Architecture:
-  x (real image)
-      |
-  [Encoder: CNN/MLP]
-      |
-  [mu, log_var]       <- encoder outputs mean and log-variance
-      |
-  [Reparameterize: z = mu + eps * exp(0.5 * log_var)]
-  eps ~ N(0, I)       <- random noise, fixed during backward pass
-      |
-  [Decoder: CNN/MLP]
-      |
-  x_hat (reconstruction)
-      |
-  Loss = Recon(x, x_hat) + beta * KL(N(mu, sigma) || N(0, I))
 
-Latent Space:
-  [concept A] --- interpolation path --- [concept B]
-  z_interp = t * z_a + (1-t) * z_b, t in [0,1]
-  Because latent space is continuous Gaussian: smooth interpolation works
+The encoder emits (mu, log_var); the reparameterization trick z = mu + sigma·eps (sigma = exp(0.5·log_var)) keeps eps a fixed, no-gradient noise draw so gradients still flow through mu and sigma. The objective sums reconstruction against beta·KL toward the N(0, I) prior. Because that KL keeps the latent space a continuous Gaussian, linear interpolation z_interp = (1-t)·z_a + t·z_b for t in [0, 1] decodes to smooth intermediate images.
 
-GAN Architecture:
-  z ~ N(0,I) -> [Generator G] -> x_fake
-                                      |
-  x_real ------> [Discriminator D] <--+
-                      |
-              D(x_real) -> 1 (real)
-              D(x_fake) -> 0 (fake)
+### GAN
 
-  Generator loss:    L_G = -E[log D(G(z))]        (minimize chance D detects fake)
-  Discriminator loss: L_D = -E[log D(x)] - E[log(1 - D(G(z)))]  (maximize detection)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Diffusion (DDPM) Forward + Reverse:
-Forward (add noise, fixed, no parameters):
-  x_0 (real) -> x_1 (slight noise) -> x_2 -> ... -> x_T (pure noise)
-  q(x_t | x_0) = N(x_t; sqrt(alpha_bar_t) * x_0, (1 - alpha_bar_t) * I)
+    z(["z ~ N(0, I)"]) --> G["Generator G"]
+    G --> fake(["x_fake"])
+    real(["x_real"]) --> D["Discriminator D"]
+    fake --> D
+    D --> dec{"D(x): real vs fake"}
+    dec --> lg["L_G = -E(log D(G(z)))"]
+    dec --> ld["L_D = -E(log D(x)) - E(log(1 - D(G(z))))"]
+    lg -.->|"gradient"| G
+    ld -.->|"gradient"| D
 
-Reverse (learned denoising):
-  x_T (noise) -> [U-Net + t embedding] -> predicted_noise
-              -> x_{T-1} = denoise(x_T, predicted_noise)
-              -> ... -> x_0 (generated image)
-
-U-Net for Diffusion:
-  Encoder path: [Conv] -> [ResBlock + Attn] -> [Downsample] -> ... (extract features)
-  Bottleneck:   [ResBlock + Attn] (global context)
-  Decoder path: [Upsample] -> [ResBlock + Attn + skip from encoder] -> ...
-  Conditioning: timestep t is embedded and added to each ResBlock
-                text prompt conditioning via cross-attention (CLIP encoder)
-
-Classifier-Free Guidance (CFG):
-  epsilon_guided = epsilon_uncond + scale * (epsilon_cond - epsilon_uncond)
-  scale=1: no guidance (creative, diverse)
-  scale=7.5: standard (quality/diversity balance)
-  scale=15+: high fidelity to prompt (less diverse, possible artifacts)
+    class z,fake,real io
+    class G,D train
+    class dec mathOp
+    class lg,ld lossN
 ```
+
+Generator G turns noise into x_fake; discriminator D scores real vs fake and the two networks train against opposed losses (dotted arrows are the gradient signals flowing back to each network). At equilibrium D(x) = 0.5 everywhere and G matches the data distribution.
+
+### Diffusion (DDPM) — Forward and Reverse
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x0(["x_0 (real)"]) -->|"add noise"| x1(["x_1"])
+    x1 -->|"add noise"| xt(["x_t"])
+    xt -->|"add noise"| xT(["x_T (pure noise)"])
+    xT -.->|"denoise"| unet["U-Net + t embedding"]
+    unet -.-> eps(("predict epsilon"))
+    eps -.->|"denoise step"| xprev(["x_(t-1)"])
+    xprev -.-> x0gen(["x_0 (generated)"])
+
+    class x0,x1,xt,xT,xprev,x0gen io
+    class unet train
+    class eps mathOp
+```
+
+The forward process (solid) is parameter-free noise addition over T=1000 steps and admits the one-step closed form q(x_t | x_0) = N(sqrt(alpha_bar_t)·x_0, (1 - alpha_bar_t)·I). The reverse process (dotted) is learned: the U-Net predicts the noise epsilon at each (x_t, t), and iterating the denoise step from x_T ~ N(0, I) recovers x_0.
+
+### U-Net (Diffusion Backbone)
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    xt(["x_t"]) --> e1["Enc: Conv + ResBlock/Attn"]
+    e1 --> d1["Downsample /2"]
+    d1 --> e2["Enc: ResBlock/Attn"]
+    e2 --> d2["Downsample /2"]
+    d2 --> bn["Bottleneck: ResBlock + Attn"]
+    bn --> u2["Upsample x2"]
+    u2 --> dec2["Dec: ResBlock/Attn"]
+    dec2 --> u1["Upsample x2"]
+    u1 --> dec1["Dec: ResBlock/Attn"]
+    dec1 --> out(["predicted noise"])
+    e2 -.->|"skip"| dec2
+    e1 -.->|"skip"| dec1
+    temb["t embedding"] --> e1
+    temb --> bn
+    temb --> dec1
+
+    class xt,out io
+    class e1,e2,bn,dec2,dec1 train
+    class d1,d2,u1,u2 mathOp
+    class temb req
+```
+
+The encoder downsamples to a global-context bottleneck, then the decoder upsamples back; dotted skip connections carry fine spatial detail from each encoder level to the matching decoder level. The timestep embedding t is added at every ResBlock so the network knows the noise level, and text prompts condition it via cross-attention (CLIP/T5 encoder). Classifier-free guidance then extrapolates the two noise predictions per step, epsilon_guided = epsilon_uncond + scale·(epsilon_cond - epsilon_uncond): scale=1 gives no guidance (diverse), scale=7.5 is the standard quality/diversity balance, and scale=15+ maximizes prompt fidelity at the cost of diversity and possible artifacts.
+
+### Diffusion Noise Schedule
+
+```mermaid
+xychart-beta
+    title "DDPM linear noise schedule: alpha_bar_t vs timestep t (T=1000, beta 1e-4 to 0.02)"
+    x-axis "timestep t" [0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
+    y-axis "alpha_bar_t (signal retained)" 0 --> 1
+    line [1.00, 0.90, 0.66, 0.40, 0.20, 0.08, 0.03, 0.01, 0.00, 0.00, 0.00]
+```
+
+alpha_bar_t is the fraction of original signal surviving at step t: x_t = sqrt(alpha_bar_t)·x_0 + sqrt(1 - alpha_bar_t)·eps. Under the linear schedule the signal collapses fast — near-zero by t≈800 (images are almost pure noise) — which is exactly why cosine schedules (Nichol and Dhariwal 2021) spend more steps in the medium-noise regime where structure forms.
 
 ---
 
@@ -652,6 +735,27 @@ Symptoms: oscillating loss, mode collapse (D detects fakes trivially), loss of o
 
 **Q: What is latent space interpolation in VAEs and why does it work smoothly?**
 Latent space interpolation creates a sequence of images by linearly interpolating between two latent codes: z_interp = (1-t) * z_a + t * z_b for t in [0,1]. This produces smooth intermediate images that look like valid samples from the data distribution. It works because the VAE's KL regularization forces the latent space to be a well-structured Gaussian — every point in the space corresponds to a valid image, and nearby points correspond to similar images. This is in contrast to a standard autoencoder where the latent space has "holes" (points between encodings may decode to nonsense). Applications: face aging by interpolating along the age dimension, style transfer by mixing latent codes from two images.
+
+**Q: Why do VAEs produce blurry samples?**
+VAEs blur because the pixel-wise Gaussian/MSE reconstruction loss rewards predicting the per-pixel average over all plausible outputs, which smears fine detail. When multiple sharp reconstructions are consistent with a latent code, minimizing expected squared error drives the decoder to output their mean — a blurry compromise — whereas a GAN's discriminator penalizes any unrealistic average and forces sharpness. The Gaussian likelihood assumption and the KL pressure toward a limited-capacity latent also discard high-frequency information. Fixes include perceptual/LPIPS losses, an adversarial term (VAE-GAN), or discrete latents (VQ-VAE) that sidestep the averaging problem.
+
+**Q: What is the difference between FID and Inception Score, and why is FID preferred?**
+Inception Score scores only generated images, while FID compares generated and real feature distributions, so FID catches samples that miss the real distribution. IS feeds samples to Inception-v3 and rewards low-entropy per-image predictions (each image clearly one class) plus high marginal entropy (many classes represented) — but because it never looks at real data, a generator can score well while producing unrealistic images or missing modes. FID fits Gaussians to Inception features of ~50K real and ~50K generated images and measures their Frechet distance, penalizing both quality and diversity mismatches; lower is better and 0 means identical distributions. FID is the field standard because it correlates better with human judgment and is sensitive to mode dropping.
+
+**Q: Why are GANs harder to train than diffusion models?**
+GANs optimize a min-max adversarial game with no single loss to monitor, so the two networks can oscillate, collapse to a few modes, or have the discriminator saturate to zero gradient. There is no fixed target: the generator chases a moving discriminator, and equilibrium (D=0.5 everywhere) is a saddle point that gradient descent does not reliably reach. Diffusion models instead train on a stable, stationary regression objective — predict the noise added at a random timestep via MSE — which has a well-defined minimum and no adversary, giving smooth convergence. The tradeoff is inference cost: a GAN generates in one forward pass while diffusion needs 20-1000 denoising steps, so GANs remain preferred for real-time and video generation.
+
+**Q: Why can the DDPM forward process be computed in closed form, and why does it matter for training?**
+Because composing Gaussian noising steps stays Gaussian, x_t can be sampled directly from x_0 as sqrt(alpha_bar_t)*x_0 + sqrt(1-alpha_bar_t)*eps in one shot. Here alpha_bar_t is the cumulative product of (1-beta_s) up to t, so you never have to run the t-step Markov chain during training. This matters because it makes training cheap and parallel: for each image you sample a random timestep t, jump straight to x_t, and train the U-Net to predict the injected noise eps with MSE. Without the closed form you would need up to 1000 sequential steps per training example, making diffusion training infeasible.
+
+**Q: What happens to a VAE if you remove the KL term from the loss?**
+It degenerates into an ordinary autoencoder — the latent space loses its Gaussian structure, develops holes, and can no longer be sampled or interpolated to produce valid images. The KL(q(z|x) || N(0,I)) term is what pins every encoder distribution near the standard-Gaussian prior; without it the encoder places codes anywhere, so drawing z ~ N(0,I) at inference lands in untrained regions that decode to noise. The KL is therefore the regularizer that makes generation and smooth latent interpolation work. Too much KL causes the opposite failure — posterior collapse, where the decoder ignores z entirely — so the beta weight trades reconstruction fidelity against latent regularity.
+
+**Q: What is the role of the noise schedule in diffusion models and why prefer cosine over linear?**
+The noise schedule (the beta_t values) sets how fast signal is destroyed across timesteps, and the cosine schedule keeps more signal in the middle steps where image structure forms. Under DDPM's linear schedule (beta 1e-4 to 0.02), alpha_bar_t collapses to near zero by t≈800, so the final ~200 steps are almost pure noise and contribute little learning signal while wasting model capacity. The cosine schedule (Nichol & Dhariwal 2021) spreads the signal-to-noise decay more evenly, spending more steps in the medium-noise regime that governs global structure, which improves sample quality and log-likelihood. The schedule is fixed (not learned) and shared between the forward and reverse processes.
+
+**Q: How do autoregressive generative models differ from VAEs and diffusion models?**
+Autoregressive models (PixelCNN, GPT) factorize p(x) into a product of per-element conditionals and generate one token/pixel at a time, giving exact likelihoods but slow sequential sampling. VAEs and diffusion models instead use latent variables and optimize a bound (ELBO) or a denoising objective, sampling in one pass (VAE) or a fixed number of denoising steps (diffusion) rather than element by element. Autoregressive models give tractable exact likelihoods and back both LLMs and VQ-VAE priors, but generating a 256x256 image pixel-by-pixel is prohibitively slow, which is why images use latent or diffusion approaches. Hybrids exist: VQ-VAE encodes an image to a small grid of discrete codes, then an autoregressive Transformer models that much shorter sequence.
 
 ---
 

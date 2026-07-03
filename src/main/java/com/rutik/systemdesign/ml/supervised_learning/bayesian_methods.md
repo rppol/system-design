@@ -96,67 +96,107 @@ Laplace smoothing in Naive Bayes = using a Dirichlet(1, 1, ..., 1) prior (unifor
 
 ### 5.1 Naive Bayes Generative Model
 
-```
-Class prior P(y=k)
-    |
-    v
-Class label y (Spam / Not Spam)
-    |
-    +--------+--------+--------+
-    |        |        |        |
-    v        v        v        v
-P(x1|y)  P(x2|y)  P(x3|y)  P(xd|y)   <- NAIVE: each feature independent given y
-    |        |        |        |
-    v        v        v        v
-   x1       x2       x3       xd
-   (word1   (word2   (word3   (wordd
-  count)   count)   count)   count)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Observed: x = [x1, x2, ..., xd]
-Goal: P(y | x) proportional to P(y) * prod P(xj | y)
+    cp["Class prior P(y=k)"] --> y(["Class label y\nSpam / Not Spam"])
+    y --> l1["P(x1 | y)"]
+    y --> l2["P(x2 | y)"]
+    y --> l3["P(x3 | y)"]
+    y --> l4["P(xd | y)"]
+    l1 --> x1(["x1\nword1 count"])
+    l2 --> x2(["x2\nword2 count"])
+    l3 --> x3(["x3\nword3 count"])
+    l4 --> x4(["xd\nwordd count"])
+
+    class cp base
+    class y io
+    class l1,l2,l3,l4 mathOp
+    class x1,x2,x3,x4 io
 ```
+
+The fan-out is the "naive" assumption made visible: given the class y, every feature is generated
+independently, so P(x | y) factors into a product of per-feature terms. Inference reverses the
+arrows — observe x, then pick argmax_k P(y=k) · prod_j P(xj | y=k).
 
 ### 5.2 Bayesian Update (Prior → Posterior)
 
-```
-Prior P(theta)                  Likelihood P(x | theta)
-         |                              |
-         +-----------> Posterior P(theta | x) <-----------+
-                        = P(x | theta) * P(theta) / P(x)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-As more data arrives:
-    Prior_t+1 = Posterior_t
+    prior["Prior P(theta)"] --> comb((" × "))
+    lik(["Likelihood P(x | theta)\nnew data"]) --> comb
+    comb --> post["Posterior P(theta | x)\n∝ likelihood × prior"]
+    post -.->|"becomes prior at t+1"| prior
 
-Beta(1,1) uniform prior         Beta(3, 7) after 2 successes, 6 failures
-___________                           ___
-|         |                          /   \
-|         |                         /     \
-|_________|                        /       \
-0         1            0    0.3   0.5       1
+    class prior base
+    class lik io
+    class comb mathOp
+    class post train
 ```
+
+Belief updating is a loop: the posterior after seeing today's data becomes the prior for tomorrow.
+Because the update multiplies prior by likelihood, evidence accumulates — with enough data the
+likelihood dominates and the initial prior washes out.
+
+The Beta family shows this concretely. Starting from a flat Beta(1,1) prior and observing 2
+successes and 6 failures gives a Beta(3,7) posterior that has sharpened and shifted toward 0.25:
+
+```mermaid
+xychart-beta
+    title "Beta prior vs posterior density (2 successes, 6 failures)"
+    x-axis "theta (success probability)" [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    y-axis "density" 0 --> 3
+    line [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    line [0, 1.34, 2.64, 2.67, 1.88, 0.98, 0.37, 0.09, 0.01, 0, 0]
+```
+
+The flat line is the uninformative Beta(1,1) prior (every rate equally likely); the peaked line is
+the Beta(3,7) posterior, now concentrated near the observed 25% success rate. More data makes the
+peak taller and narrower — that narrowing is quantified uncertainty shrinking.
 
 ### 5.3 Text Classification Pipeline (Multinomial NB)
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    em(["Email text"]) --> tok["Tokenization\nfree · money · click · here"]
+    tok --> cv["CountVectorizer\nV = 50,000 words\ncount matrix (n_docs × V)"]
+    cv --> mnb["MultinomialNB(alpha=1.0)\nP(y=spam)=0.38\nP(free|spam)=0.042  P(free|ham)=0.003"]
+    mnb --> pred(["Prediction\nargmax_k of  log P(y=k) + Σ count_j · log P(word_j | y=k)"])
+
+    class em,pred io
+    class tok,cv mathOp
+    class mnb base
 ```
-Email text
-    |
-    v
-Tokenization: ["free", "money", "click", "here", ...]
-    |
-    v
-CountVectorizer (vocabulary size V, e.g., 50,000 words)
-    |--- term count matrix: shape (n_docs, V)
-    |
-    v
-MultinomialNB(alpha=1.0)  <- alpha = Laplace smoothing
-    |--- P(y=spam) = 0.38 (prior from training set)
-    |--- P("free" | spam) = 0.042
-    |--- P("free" | ham) = 0.003
-    |--- ...
-    |
-    v
-Prediction: argmax_k [log P(y=k) + sum_j count_j * log P(word_j | y=k)]
-```
+
+Prediction is a sparse dot product: only the words present in the email contribute to each class
+score, so scoring costs O(words in email), not O(vocabulary). alpha is the Laplace smoothing that
+keeps an unseen word from zeroing out the whole product.
 
 ### 5.4 Laplace Smoothing Effect
 
@@ -172,6 +212,35 @@ log(0) = -infinity                     log(0.0000182) = -10.9   (finite, usable)
 Entire document probability = 0
 (one unseen word kills everything)
 ```
+
+### 5.5 Choosing a Naive Bayes Variant
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ft{"Feature type?"} -->|"continuous"| g["GaussianNB\nlog-transform if skewed"]
+    ft -->|"counts / frequency"| ib{"Class imbalance?"}
+    ft -->|"binary present/absent"| b["BernoulliNB\nmodels feature absence too"]
+    ft -->|"categorical k-state"| cat["CategoricalNB"]
+    ib -->|"balanced"| m["MultinomialNB"]
+    ib -->|"skewed classes"| comp["ComplementNB"]
+
+    class ft io
+    class ib req
+    class g,b,cat,m,comp base
+```
+
+The first split is feature type; the second, for count features, is whether classes are balanced.
+This maps the §4.1 variant table onto a decision anyone can follow at model-selection time — the
+single most common mistake is feeding TF-IDF floats or continuous features into MultinomialNB.
 
 ---
 
@@ -627,6 +696,15 @@ Bayesian model selection uses the marginal likelihood P(data | model) = integral
 
 **Q: How does BayesianRidge regression differ from standard Ridge regression?**
 Standard Ridge (Ridge(alpha=1.0)) fixes the regularization strength alpha externally (chosen by cross-validation). BayesianRidge places a Gamma prior on both the precision of the noise (1/sigma^2) and the precision of the weights (1/alpha), then finds the MAP estimate for all parameters jointly using evidence maximization (type-II MLE / empirical Bayes). The result: alpha is learned from the data automatically — no cross-validation needed. BayesianRidge also provides posterior variance on the weights (enabling confidence intervals on predictions). It is especially useful when the training set is small (< 1000 samples) or when cross-validation is computationally expensive.
+
+**Q: Why is Naive Bayes computed in log space using the log-sum-exp trick?**
+Multiplying many small per-word probabilities underflows to zero in floating point, so NB sums log-probabilities instead of multiplying raw probabilities. A 200-word document multiplies 200 numbers each around 0.001, giving ~10^-600, which is below the float64 minimum (~10^-308) and rounds to exactly 0 — destroying the class comparison. Taking logs turns the product into a sum of finite negative numbers that never underflows. To recover the normalized probability P(y | x) from log-scores, apply the log-sum-exp trick (subtract the max log-score before exponentiating) for numerical stability.
+
+**Q: What is the difference between var_smoothing in GaussianNB and alpha smoothing in MultinomialNB?**
+They fix different failure modes: var_smoothing guards against zero-variance continuous features, while alpha guards against unseen words in count features. var_smoothing adds a tiny epsilon to feature variances so a zero-variance feature does not cause a divide-by-zero in the Gaussian PDF (default 1e-9, scaled by the largest feature variance). alpha adds pseudocounts to word counts so an unseen word does not force P=0 in the multinomial (default 1.0, a Bayesian Dirichlet prior). A common mistake is expecting alpha to help GaussianNB — it has no alpha parameter at all.
+
+**Q: Why does ComplementNB often outperform MultinomialNB on imbalanced text?**
+ComplementNB estimates each class's parameters from the complement of that class — all documents NOT in it — giving a far larger, more stable sample when the class itself is tiny. Standard MultinomialNB estimates P(word | class) from only the in-class documents, so a minority class with few examples yields noisy, count-starved likelihoods biased toward the majority. Using the complement also counteracts the tendency to assign long documents to text-heavy classes. On skewed 20-Newsgroups-style corpora, ComplementNB typically beats MultinomialNB by 1–3% accuracy.
 
 ---
 

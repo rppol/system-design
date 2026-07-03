@@ -56,6 +56,37 @@ Why it matters: every decision system that uses a probability threshold — inte
 | Fixed precision threshold | Min t where precision ≥ target | Intervention cost per action bounded (e.g., <5% false positive rate) |
 | Expected value threshold | Maximize E[value] = TP×gain - FP×cost over thresholds | Revenue-aware decisioning |
 
+The threshold is chosen by whichever business constraint binds first:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Calibrated probabilities"]) --> q1{"costs C(FP), C(FN)\nknown ?"}
+    q1 -->|"yes"| cost["Cost-minimizing t*\nC(FP) / (C(FP)+C(FN))"]
+    q1 -->|"no"| q2{"recall SLA\nrequired ?"}
+    q2 -->|"yes"| rec["Lowest t meeting\nrecall target"]
+    q2 -->|"no"| q3{"precision budget\nbounded ?"}
+    q3 -->|"yes"| prec["Lowest t meeting\nprecision target"]
+    q3 -->|"no"| fb["Maximize F-beta\non validation"]
+    cost --> dec(["Deploy threshold"])
+    rec --> dec
+    prec --> dec
+    fb --> dec
+
+    class start,dec io
+    class q1,q2,q3 req
+    class cost,rec,prec,fb mathOp
+```
+
+The default 0.5 is correct only when C(FP) = C(FN); every other case walks this tree to a cost- or SLA-driven cutoff.
+
 ### 4.3 Reliability Diagram (Calibration Curve) Interpretation
 
 ```
@@ -65,52 +96,60 @@ Underconfident:      curve bends above diagonal (predicted < actual)
 S-shaped:            overconfident in middle, underconfident at extremes
 ```
 
+```mermaid
+xychart-beta
+    title "Reliability diagram: overconfident model vs perfect calibration"
+    x-axis "Mean predicted probability" [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]
+    y-axis "Fraction of positives" 0 --> 1
+    line [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]
+    line [0.02, 0.06, 0.11, 0.18, 0.27, 0.38, 0.50, 0.63, 0.78, 0.90]
+```
+
+The straight line is perfect calibration; the lower curve is an overconfident model whose true positive rate sits below its stated probability in every bin — the gap that post-hoc calibration removes.
+
 ---
 
 ## 5. Architecture Diagrams
 
 ### Calibration Pipeline
 
-```
-Training Data
-     |
-     v
-Model Training (LightGBM / LogReg / DNN)
-     |
-     v
-Raw Scores on Held-Out Calibration Set
-     |
-     v
-[Platt Scaling | Isotonic Regression | Beta Cal]
-     |                Calibrator fitted on calibration set
-     v
-Calibrated Probabilities
-     |
-     +----------+-----------+
-     |                       |
-Reliability Diagram      ECE Metric
-(visual check)           (numeric SLA)
-     |
-     v
-Threshold Selection (cost matrix or F-beta optimization)
-     |
-     v
-Production Decision: score >= threshold → action
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    data(["Training data"]) --> fit["Model training\nLightGBM / LogReg / DNN"]
+    fit --> raw(["Raw scores on\nheld-out calibration set"])
+    raw --> cal["Calibrator\nPlatt / Isotonic / Beta\nfit on calibration set"]
+    cal --> prob(["Calibrated\nprobabilities"])
+    prob --> rel["Reliability diagram\n(visual check)"]
+    prob --> ece["ECE metric\n(numeric SLA)"]
+    rel --> thr["Threshold selection\ncost matrix or F-beta"]
+    ece --> thr
+    thr --> dec(["Production decision\nscore over threshold acts"])
+
+    class data,raw,prob,dec io
+    class fit train
+    class cal,thr mathOp
+    class rel,ece req
 ```
 
 ### Train/Calibrate/Test Data Split
 
+```mermaid
+pie showData
+    title Train / Calibrate / Test split
+    "Train — fit model" : 60
+    "Calibrate — fit calibrator" : 20
+    "Test — evaluate" : 20
 ```
-Full Dataset
-+-----------------------------------+
-|  60% Train  | 20% Calibrate | 20% Test |
-+-----------------------------------+
-      |               |                |
-   Fit model    Fit calibrator    Evaluate
-                on model scores   calibrated
-                (never seen by    model
-                  model)
-```
+
+Three disjoint slices: the calibrator is fit on data the model never saw during training, and the test slice is untouched by both — the split that prevents the calibrator from overfitting.
 
 ---
 

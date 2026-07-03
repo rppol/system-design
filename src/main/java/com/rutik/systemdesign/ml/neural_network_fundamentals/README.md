@@ -58,33 +58,105 @@ Key insight: the chain rule makes it possible to attribute the network's error t
 
 ## 5. Architecture Diagrams
 
+### Forward Pass — MLP Layer Stack
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x(["input x"]) --> L1["Linear 1\nz = W·x + b"]
+    L1 --> BN1["BatchNorm\nnormalize + gamma, beta"]
+    BN1 --> A1["GELU\na = f(z)"]
+    A1 --> D1["Dropout p=0.5"]
+    D1 --> L2["Linear 2"]
+    L2 --> BN2["BatchNorm"]
+    BN2 --> A2["GELU"]
+    A2 --> D2["Dropout"]
+    D2 --> LO["Linear · output head"]
+    LO --> y(["logits ŷ"])
+
+    class x,y io
+    class L1,L2,LO,BN1,BN2 train
+    class A1,A2,D1,D2 mathOp
 ```
-Input Layer       Hidden Layer 1    Hidden Layer 2    Output Layer
-    x1 ----w11----> h11 --w21----> h21 --w31----> y1
-    x2 --           |                |
-       \--w12----> h12 --w22----> h22 --w32----> y2
-    x3 --           |                |
-       \--w13----> h13 --w23----> h23
 
-Forward pass: left to right (compute predictions)
-Backward pass: right to left (compute gradients via chain rule)
+Forward pass runs left to right: each hidden block is Linear → BatchNorm → activation → Dropout, matching the `nn.Sequential` in §6. The original BatchNorm paper places normalization between the linear layer and the activation (Linear → BatchNorm → Activation, shown here); a debated alternative uses Linear → Activation → BatchNorm. Blue nodes are I/O tensors, green nodes hold trainable weights (Linear weights, BatchNorm gamma/beta), orange nodes are parameter-free ops.
 
-Neuron Detail:
-  inputs x1..xn
-      |
-      v
-  [Weighted Sum]  z = w1*x1 + w2*x2 + ... + wn*xn + b
-      |
-      v
-  [Activation]    a = ReLU(z)  (or GELU, Tanh, etc.)
-      |
-      v
-  output a (fed to next layer)
+### Backward Pass — Backpropagation Computation Graph
 
-Batch Normalization position in a layer:
-  Linear -> BatchNorm -> Activation  (original paper)
-  Linear -> Activation -> BatchNorm  (sometimes used, debated)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x(["x"]) --> z1["z1 = W1·x + b1"]
+    z1 --> a1["a1 = f(z1)"]
+    a1 --> z2["z2 = W2·a1 + b2"]
+    z2 --> yh(["ŷ softmax output"])
+    yh --> L(["Loss — cross-entropy"])
+    L -.->|"∂L/∂ŷ"| yh
+    yh -.->|"∂L/∂z2"| z2
+    z2 -.->|"∂L/∂a1"| a1
+    a1 -.->|"∂L/∂z1"| z1
+    z2 -.->|"∂L/∂W2"| W2["∂L/∂W2\nupdate W2"]
+    z1 -.->|"∂L/∂W1"| W1["∂L/∂W1\nupdate W1"]
+
+    class x,yh io
+    class z1,z2,a1 mathOp
+    class W1,W2 train
+    class L lossN
 ```
+
+Solid arrows are the forward pass (compute predictions, then loss); dotted arrows are the backward pass, where the chain rule telescopes ∂L/∂· from the red loss node back through every intermediate to each weight. Because the stored forward activations (a1, z1) are reused, the backward pass costs roughly the same compute as the forward pass.
+
+### BatchNorm — Train vs Eval Statistics
+
+```mermaid
+stateDiagram-v2
+    [*] --> Training : model.train()
+    Training --> Eval : model.eval()
+    Eval --> Training : model.train()
+
+    state Training {
+        [*] --> BatchStats
+        BatchStats : uses batch mean and var over dim=0
+        BatchStats --> UpdateRunning : after each batch
+        UpdateRunning : running = 0.9 × running + 0.1 × batch, an EMA
+    }
+
+    state Eval {
+        [*] --> RunningStats
+        RunningStats : uses stored running_mean and running_var, deterministic
+    }
+```
+
+`model.train()` makes BatchNorm normalize with the current mini-batch statistics and update its running averages (momentum 0.1 → each batch contributes 10%); `model.eval()` switches to the frozen running stats so a single input scores identically regardless of batch composition. Forgetting the switch is the war story in §10 (accuracy 94% → 71% at batch size 1).
+
+### Vanishing vs Exploding Gradients Across Depth
+
+```mermaid
+xychart-beta
+    title "Gradient magnitude vs depth: sigmoid vanishes, ReLU holds"
+    x-axis "Layers back from output" [1, 2, 3, 4, 5, 6, 7, 8]
+    y-axis "Relative gradient norm" 0 --> 1
+    line [1.0, 0.25, 0.0625, 0.0156, 0.0039, 0.001, 0.00024, 0.00006]
+    line [1.0, 1.0, 0.99, 1.0, 0.98, 1.0, 0.99, 1.0]
+```
+
+The steeply decaying curve is sigmoid: its gradient maxes at 0.25 per layer (§4), so the chain-rule product shrinks roughly 4× per layer and early layers stop learning. The flat curve near 1.0 is ReLU, whose gradient is exactly 1 for positive inputs, keeping the signal alive through deep stacks — the reason ReLU/GELU replaced sigmoid in hidden layers.
 
 ---
 
@@ -369,6 +441,24 @@ Dropout prevents co-adaptation: neurons cannot rely on specific other neurons al
 
 **Q: What is label smoothing and when would you use it?**
 Label smoothing replaces hard targets (0 or 1) with soft targets (epsilon/(K-1) for negatives, 1 - epsilon for the correct class, typically epsilon=0.1). It prevents the model from becoming overconfident, which would push logits to large magnitudes and hurt generalization. It is most useful when training data has label noise or when the task has inherent ambiguity. It was popularized by Inception-v3 and used in most modern image classifiers.
+
+**Q: Why do neural networks need nonlinear activation functions?**
+Without nonlinearities, stacking linear layers collapses to a single linear transformation, so the network can only represent linear functions no matter how deep. A composition of matrix multiplications W2(W1 x) equals (W2 W1) x — one effective weight matrix, so depth buys nothing. Nonlinear activations (ReLU, GELU, Tanh) let each layer bend the representation, enabling the network to approximate arbitrary continuous functions per the Universal Approximation Theorem. The output-layer activation is then chosen to match the task (softmax for classification, identity for regression) rather than omitted.
+
+**Q: What causes exploding gradients and how do you fix them?**
+Exploding gradients occur when repeated multiplication of large weights or Jacobians during backprop makes gradients grow exponentially, producing NaN losses. They are common in deep or recurrent networks with poor initialization or high learning rates. The standard fix is gradient clipping — rescale the gradient vector when its norm exceeds a threshold (`torch.nn.utils.clip_grad_norm_`, typical max-norm 1.0–5.0). Other mitigations: proper initialization (He/Xavier), normalization layers (BatchNorm/LayerNorm), lower learning rate, and residual connections. Monitoring the gradient norm per step catches the blow-up before it corrupts the weights.
+
+**Q: Why can a deeper network outperform a shallow but wider one with the same parameter count?**
+Depth lets a network compose features hierarchically, representing some functions with exponentially fewer parameters than any shallow network can. Each layer reuses lower-level features to build higher-level ones (edges → textures → parts → objects), giving compositional abstraction that a single wide layer cannot. Theory shows certain functions require exponential width to match what modest depth achieves. The catch is trainability: naive deep networks suffer vanishing/exploding gradients, which is why residual connections, normalization, and good initialization are needed to actually realize depth's advantage.
+
+**Q: Why do residual (skip) connections help train very deep networks?**
+A residual block computes y = x + F(x), giving gradients a direct identity path that bypasses the weight layers and prevents them from vanishing. By learning the residual F(x) rather than the full mapping, each block only has to model a small change, and the identity shortcut means the loss gradient reaches early layers even when F's Jacobian is tiny. This is what let ResNet train 100+ layer networks that previously degraded with depth. It also eases optimization: if a layer is unneeded, the block can drive F toward zero and pass its input through unchanged.
+
+**Q: How is softmax combined with cross-entropy made numerically stable?**
+Subtract the max logit before exponentiating (the log-sum-exp trick) and fuse softmax with the log so you never exponentiate large values that overflow. Raw softmax computes exp(logit), which overflows for a logit like 1000 and underflows for very negative ones; subtracting max(logits) shifts values so the largest exponent is exp(0)=1 without changing the result. Frameworks fuse the two operations — PyTorch's `nn.CrossEntropyLoss` takes raw logits and internally applies `log_softmax`, so you must not apply softmax yourself first. Doing softmax then log separately loses precision and can produce log(0) = -inf.
+
+**Q: Why do we shuffle the training data between epochs?**
+Shuffling breaks any ordering in the dataset so each mini-batch is a representative random sample, giving unbiased gradient estimates and more stable convergence. If data is sorted (all class-0 then all class-1, or strictly by time), consecutive batches are non-representative and the gradient oscillates, biasing SGD and slowing convergence. Reshuffling every epoch also decorrelates the sequence of updates so the model does not latch onto batch order. Exceptions: do not shuffle across the time boundary in sequence models where order is the signal, and keep validation deterministic for comparable metrics.
 
 ---
 

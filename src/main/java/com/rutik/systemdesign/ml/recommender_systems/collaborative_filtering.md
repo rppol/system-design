@@ -93,28 +93,32 @@ where i is observed, j is uniformly sampled unobserved. Gradient ascent via SGD 
 
 ## 5. Architecture Diagrams
 
-### 5.1 ALS Update Steps
+### 5.1 ALS Alternating Update Loop
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    init(["Init U, V — small random\nk latent factors"]) --> uu["User update — parallel over users\nA_u = Vᵀ·C_u·V + λI\nU_u = solve(A_u, b_u)"]
+    uu --> iu["Item update — parallel over items\nA_i = Uᵀ·C_i·U + λI\nV_i = solve(A_i, b_i)"]
+    iu --> conv{"Converged?\n~10-20 iterations"}
+    conv -->|"no"| uu
+    conv -->|"yes"| out(["Trained factors\nscore(u,i) = U_u · V_i"])
+
+    class init,out io
+    class uu train
+    class iu train
+    class conv mathOp
 ```
-Iteration t:
-  USER UPDATE (parallel over all users):
-  ┌──────────────────────────────────────────────────┐
-  │  For each user u:                                │
-  │    A_u = V.T @ diag(c_u) @ V + lambda * I       │
-  │    b_u = V.T @ diag(c_u) @ p_u                  │
-  │    U[u] = solve(A_u, b_u)   [k x k linear sys]  │
-  └──────────────────────────────────────────────────┘
 
-  ITEM UPDATE (parallel over all items):
-  ┌──────────────────────────────────────────────────┐
-  │  For each item i:                                │
-  │    A_i = U.T @ diag(c_i) @ U + lambda * I       │
-  │    b_i = U.T @ diag(c_i) @ p_i                  │
-  │    V[i] = solve(A_i, b_i)   [k x k linear sys]  │
-  └──────────────────────────────────────────────────┘
-
-  Repeat 10-20 iterations until convergence
-```
+ALS freezes one factor matrix and solves the other in closed form, then swaps: each user and each item update is an independent k×k linear solve, so the whole step parallelizes cleanly across Spark workers. Convergence typically takes 10-20 alternations, and pre-computing VᵀV (or UᵀU) once per half-step keeps every per-entity solve cheap.
 
 ### 5.2 Collaborative Filtering Similarity
 
@@ -126,20 +130,69 @@ User-Item Matrix R (sparse):
    u3  [  1   ?   ?   5   3 ]
    u4  [  ?   2   4   ?   ? ]
 
-User similarity (cosine between rows):
-   sim(u1, u3) = high if overlapping items rated similarly
-
-Item similarity (cosine between columns):
-   sim(i1, i3) = high if users who rated i1 gave similar ratings to i3
-
-Latent Factor Decomposition:
-   R ≈ U @ V.T
-       ┌────┐   ┌──────────────────┐
-  R =  │U·V'│ = │ u1_vec · i1_vec  │ ...
-       └────┘   └──────────────────┘
-   U: (n_users x k)   V: (n_items x k)
-   k = 128 typical
+User similarity = cosine between ROWS     -> sim(u1,u3) high if overlapping items rated alike
+Item similarity = cosine between COLUMNS  -> sim(i1,i3) high if raters of i1 rate i3 alike
+? = unobserved (99%+ of cells in real systems)
 ```
+
+The matrix keeps its ASCII form because row/column alignment is the point: user-user similarity compares rows, item-item similarity compares columns.
+
+### 5.3 Matrix Factorization — Latent Factors
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    R(["Sparse R\nusers × items · ~99% missing"]) --> mf["Matrix Factorization\nminimize Σ (R_ui - U_u·V_i)² + λ·regularization"]
+    mf --> U(["U — user factors\nusers × k"])
+    mf --> V(["V — item factors\nitems × k"])
+    U --> dot(("dot\nproduct"))
+    V --> dot
+    dot --> pred(["Predicted R_hat_ui\ntop-K unseen items per user"])
+
+    class R,U,V,pred io
+    class mf train
+    class dot mathOp
+```
+
+Factorization compresses the sparse matrix into two dense low-rank matrices whose product reconstructs it; each user and item becomes a k-dimensional vector (k = 50-200), and a predicted score is just the dot product of the two vectors. The latent dimensions emerge on their own — genre, mood, price sensitivity — none of them supplied as features.
+
+### 5.4 Cold-Start Routing
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    nu([New / sparse user]) --> n{"How many interactions?"}
+    n -->|"fewer than 3"| pop["Popularity fallback\ntop items in user's region"]
+    n -->|"3 to 10"| fold["ALS folding-in\n+ content-based genre priors"]
+    n -->|"more than 10"| full["Full ALS personalization\nlearned latent vector"]
+    ni([New item · no interactions]) --> content["Content-based vector\ntext · category · price"]
+    content --> full
+
+    class nu,ni io
+    class n mathOp
+    class pop base
+    class fold train
+    class full train
+    class content frozen
+```
+
+Cold start is a routing decision on interaction volume: too few signals fall back to popularity, a handful get a fast folding-in solve seeded by content priors, and rich histories earn full ALS personalization. New items enter through a content-based vector until enough collaborative signal accrues to place them in the learned factor space.
 
 ---
 
@@ -554,6 +607,18 @@ Design: split users randomly into control (current model) and treatment (new ALS
 
 **Q: Why does collaborative filtering suffer from popularity bias?**
 Popular items have more interactions and thus more evidence in the training data. Their latent factors are trained on thousands of data points while long-tail items are trained on tens. This makes popular items' factors more accurate and their dot product scores more extreme. At serving time, the model consistently ranks popular items higher. This creates a feedback loop: popular items get recommended more, receive more clicks, become more popular. Corrections: (1) downweight popular items in the confidence matrix (c_ui = 1 + alpha * log(1 + r_ui)); (2) apply re-ranking diversity constraints; (3) evaluate with coverage and novelty metrics alongside NDCG.
+
+**Q: Why does filling unobserved cells with zero and running SVD hurt implicit-feedback recommendations?**
+Zero-filling tells SVD that every unobserved pair is a confirmed negative rating, so the millions of zeros dominate the squared-error loss and the model is pulled toward predicting zero everywhere. Implicit feedback has no true negatives — a missing click may mean the user never saw the item — so treating absence as a hard zero is simply wrong. ALS fixes this with a binary preference plus confidence weighting, so unobserved cells are only weakly negative rather than strongly negative.
+
+**Q: Why apply a log transformation to raw interaction counts before ALS?**
+Raw counts let a song played 1000 times dominate the latent factors, so log1p compression makes the gap between 100 and 1000 plays far smaller than the gap between 1 and 2 plays. Power users and binge-listened items otherwise skew the confidence weights and collapse diversity toward a few heavy-tail items. The transform r = log(1 + count) preserves ordering while damping the tail, which is often more impactful than tuning n_factors or lambda.
+
+**Q: What is the difference between memory-based and model-based collaborative filtering?**
+Memory-based CF computes similarities directly from the interaction matrix at prediction time, while model-based CF learns a compact model — usually latent factors — offline and predicts from it. Memory-based (user-user, item-item) is simple and interpretable but scales poorly and needs the full matrix at serving; model-based (matrix factorization, ALS, BPR) compresses the matrix into low-rank factors that generalize better on sparse data and serve as O(k) dot products. Most large systems use model-based factors, often keeping item-item neighborhoods for the "similar items" rail.
+
+**Q: How does negative sampling work in BPR and why does the sampling strategy matter?**
+For each observed (user, item) pair BPR draws an unobserved item as a negative and trains the user to score the positive above it, so the sampler's distribution directly shapes what the model learns. Uniform sampling is cheap but wastes most updates on easy negatives the model already ranks low; popularity-based or dynamic hard-negative sampling speeds convergence and sharpens tail ranking, at the risk of drawing false negatives (items the user would actually like). Tune the sampler alongside the learning rate, and always exclude the user's known positives from the negative pool.
 
 ---
 

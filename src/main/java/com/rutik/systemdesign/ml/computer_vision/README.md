@@ -91,72 +91,157 @@ The core mental model:
 
 ### CNN Feature Hierarchy
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x([Input 224×224×3]) --> c1["Conv3×3 ×2 + pool\n112×112×64 · edges, gradients"]
+    c1 --> c2["Conv3×3 ×3 + pool\n56×56×128 · textures, corners"]
+    c2 --> c3["Conv3×3 ×4 + pool\n28×28×256 · parts: wheel, eye"]
+    c3 --> c4["Conv3×3 ×6 + pool\n14×14×512 · objects: car, face"]
+    c4 --> gap["GlobalAvgPool\n1×1×512"]
+    gap --> fc["FC + Softmax\nnum_classes"]
+    fc --> y([class label])
+
+    class x,y io
+    class c1,c2,c3,c4,fc train
+    class gap mathOp
 ```
-Input Image (224x224x3)
-        |
-   [Conv3x3 + BN + ReLU]  x2   → 112x112x64   (edges, gradients)
-        |
-   [MaxPool 2x2]
-        |
-   [Conv3x3 + BN + ReLU]  x3   → 56x56x128    (textures, corners)
-        |
-   [Conv3x3 + BN + ReLU]  x4   → 28x28x256    (parts: wheel, eye)
-        |
-   [Conv3x3 + BN + ReLU]  x6   → 14x14x512    (objects: car, face)
-        |
-   [GlobalAvgPool]              → 1x1x512
-        |
-   [FC + Softmax]               → num_classes
-```
+
+Each block shrinks spatial size and grows channel depth, so features climb from
+edges to textures to object parts to whole objects — the spatial hierarchy that
+gives CNNs their inductive bias.
 
 ### ResNet Residual Block
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x([x]) --> conv1["Conv3×3 + BN + ReLU"]
+    conv1 --> conv2["Conv3×3 + BN"]
+    x -->|"identity shortcut"| plus((" + "))
+    conv2 --> plus
+    plus --> relu["ReLU"]
+    relu --> out([output])
+
+    class x,out io
+    class conv1,conv2,relu train
+    class plus mathOp
 ```
-  x ──────────────────────────────┐
-  |                               |
-  [Conv 3x3, BN, ReLU]            |  (identity shortcut)
-  |                               |
-  [Conv 3x3, BN]                  |
-  |                               |
-  [+] ←───────────────────────────┘
-  |
-  [ReLU]
-  |
-  output
-```
+
+The block learns only the residual F(x); the identity shortcut lets gradients flow
+straight through the sum node, which is why 50–152 layer networks train without
+vanishing gradients.
 
 ### Transfer Learning Pipeline
 
-```
-Step 1: Pretrain on ImageNet (1.28M images, 1000 classes)
-┌────────────────────────────────────────────────────────┐
-│  Backbone (ResNet-50 / ViT-B/16)                       │
-│  Feature extractor — learns general visual patterns    │
-└────────────────────────────────────────────────────────┘
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 60}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Step 2: Replace classifier head
-┌────────────────────────────────────────────────────────┐
-│  Backbone (frozen or low LR)  →  New FC (num_classes)  │
-└────────────────────────────────────────────────────────┘
+    subgraph s1["Step 1 · Pretrain on ImageNet (1.28M imgs, 1000 cls)"]
+        bb["Backbone ResNet-50 / ViT-B/16\nlearns general visual patterns"]
+    end
+    subgraph s2["Step 2 · Replace classifier head"]
+        bbf["Backbone\nfrozen or low LR"] --> nh["New FC\nnum_classes"]
+    end
+    subgraph s3["Step 3 · Fine-tune on target dataset"]
+        lp["Linear probe\nfreeze backbone, train head only"]
+        ff["Full fine-tune\nunfreeze all, LR 1e-4"]
+        lld["Layer-wise LR decay\ndeeper layers get lower LR"]
+    end
+    s1 --> s2 --> s3
 
-Step 3: Fine-tune on target dataset
-  - Linear probe: freeze backbone, train head only (fast, few samples)
-  - Full fine-tune: unfreeze all, LR 1e-4 (more data, more gain)
-  - Layer-wise LR decay: deeper layers get lower LR (ViT best practice)
+    class bb base
+    class bbf frozen
+    class nh,ff,lp,lld train
 ```
+
+Reuse the frozen backbone's general features and only retrain the head — linear
+probing is the cheapest intervention, full fine-tuning at LR 1e-4 wins on larger
+target datasets.
 
 ### CV Task Progression
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    img([Input image]) --> cls["Classification\none label per whole image"]
+    img --> det["Detection\nbounding box + class per object"]
+    img --> seg["Segmentation\nlabel per pixel · semantic or instance"]
+
+    class img io
+    class cls,det,seg base
 ```
-Classification          Detection              Segmentation
-┌──────────────┐        ┌──────────────┐       ┌──────────────┐
-│              │        │  ┌──┐        │       │##############│
-│    [Cat]     │   →    │  │  │ Cat    │  →    │##  Cat  #####│
-│              │        │  └──┘        │       │##############│
-└──────────────┘        └──────────────┘       └──────────────┘
-  one label per           bounding box +         label per pixel
-  whole image             class per object        (semantic/instance)
+
+Granularity increases left to right: one label for the whole image, then a box per
+object, then a class for every pixel — each step is strictly harder and needs
+richer supervision.
+
+### ImageNet Accuracy by Architecture
+
+```mermaid
+xychart-beta
+    title "ImageNet Top-1 Accuracy by Architecture (2012–2022)"
+    x-axis ["AlexNet", "VGG-16", "ResNet-50", "EffNet-B7", "ViT-H/14", "ConvNeXt-XL"]
+    y-axis "Top-1 accuracy (%)" 0 --> 100
+    bar [63.3, 74.4, 76.1, 84.3, 88.6, 87.8]
 ```
+
+A decade of progress on the §4 classification table: AlexNet's 63.3% jumped to
+88.6% with ViT-H/14, while ConvNeXt shows a modernized CNN can nearly match a pure
+transformer.
+
+### CNN vs ViT — Data Efficiency and Scaling
+
+```mermaid
+quadrantChart
+    title CNN vs ViT tradeoff space
+    x-axis "Needs more data" --> "Data efficient"
+    y-axis "Diminishing returns" --> "Scales with compute"
+    quadrant-1 "Best of both"
+    quadrant-2 "Data-hungry but scales"
+    quadrant-3 "Limited"
+    quadrant-4 "Efficient, plateaus"
+    "ViT-B/16": [0.25, 0.85]
+    "ResNet-50": [0.8, 0.35]
+    "EfficientNet": [0.75, 0.45]
+    "ConvNeXt-XL": [0.7, 0.6]
+```
+
+CNNs sit on the right (strong inductive bias, data efficient) but scale less
+steeply; ViTs sit top-left (data-hungry yet near-log-linear with compute) — the
+core §8 tradeoff made spatial.
 
 ---
 
@@ -402,6 +487,24 @@ FID measures the quality and diversity of generated images by comparing the dist
 
 **Q: How do you deploy a computer vision model to production?**
 Standard pipeline: export model to TorchScript or ONNX for portability; optimize with TensorRT for NVIDIA GPUs (typically 2-4x faster than PyTorch eager); serve via Triton Inference Server for multi-model batching; implement preprocessing on GPU using DALI or torchvision GPU transforms; monitor latency (P50/P99), throughput (imgs/sec), and accuracy drift on production samples. ResNet-50 achieves ~4ms on V100 with TorchScript and ~2ms with TensorRT FP16.
+
+**Q: Why must you switch a model to eval mode before inference, and what breaks if you forget?**
+BatchNorm and Dropout behave differently in training versus evaluation mode, so forgetting to switch to eval mode makes inference depend on the batch and turn nondeterministic. In eval mode BatchNorm uses its fixed running mean and variance instead of per-batch statistics, and Dropout is disabled. If the model is left in train mode, a batch of size 1 produces degenerate BatchNorm normalization and accuracy collapses. Always call `model.eval()` and wrap scoring in `torch.no_grad()` before running inference.
+
+**Q: What is mixed-precision (AMP) training and what can go wrong?**
+Mixed-precision training runs most operations in FP16 or BF16 while keeping a master copy of weights in FP32, roughly halving memory and doubling throughput. PyTorch autocast plus a GradScaler handle the casting and loss scaling automatically. The classic failure is FP16 gradient underflow to zero — GradScaler multiplies the loss so small gradients stay representable, then unscales before the optimizer step. BF16 has a wider exponent range and usually needs no scaler; numerically sensitive ops like softmax and normalization stay in FP32.
+
+**Q: What is a 1x1 convolution used for?**
+A 1x1 convolution mixes information across channels at a single spatial location, acting as a per-pixel fully connected layer that changes channel depth cheaply. It is the workhorse of ResNet bottleneck blocks — shrink channels, run an expensive 3x3, then expand back — and of network-in-network designs. With a following ReLU it adds nonlinearity, and it cuts compute by reducing channels before costly spatial convolutions.
+
+**Q: Why use global average pooling instead of flatten plus a fully connected layer at the end of a CNN?**
+Global average pooling collapses each feature map to a single value, removing the huge parameter count of a flatten-plus-FC head and accepting variable input sizes. A flatten+FC on a 7x7x512 map needs millions of weights and overfits, whereas GAP has zero parameters and regularizes strongly. It also produces a fixed-length vector regardless of input resolution and improves localization (the basis of Class Activation Maps). The tradeoff is that it discards spatial layout.
+
+**Q: What is a depthwise separable convolution and why does MobileNet use it?**
+A depthwise separable convolution factors a standard convolution into a per-channel spatial filter followed by a 1x1 pointwise convolution, cutting compute roughly 8-9x for a 3x3 kernel. The depthwise step applies one filter per input channel; the pointwise step then mixes channels. This lets MobileNet and EfficientNet-Lite reach real-time latency on mobile CPUs with only a small accuracy tradeoff versus dense convolutions.
+
+**Q: What is Grad-CAM and what is it used for?**
+Grad-CAM produces a class-specific heatmap that highlights which image regions most influenced a CNN's prediction. It weights the final convolutional feature maps by the gradient of the target class score, then overlays the result on the input image. Engineers use it to debug whether the model attends to the object or the background, to build trust, and to catch spurious correlations like watermarks or dataset artifacts driving predictions.
 
 ---
 

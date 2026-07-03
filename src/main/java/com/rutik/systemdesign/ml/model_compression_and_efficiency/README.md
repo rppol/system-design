@@ -82,61 +82,131 @@ Key insight: Most neural network weights are redundant — studies show 50–90%
 
 ### PTQ Calibration and Quantization Flow
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    fp32(["Trained FP32 Model"]) --> calib["Calibration Pass\n100-1000 representative samples"]
+    calib --> stats["Record activation min/max\ncompute scale + zero_point"]
+    stats --> quant["Quantized INT8 Model\nweights INT8, scales stored FP32"]
+    quant --> out(["4x smaller, ~3x faster CPU\nunder 1% accuracy drop"])
+
+    class fp32 base
+    class calib req
+    class stats mathOp
+    class quant train
+    class out io
 ```
-Trained FP32 Model
-        |
-        | Collect activation statistics
-        v
-+-------------------+
-| Calibration Pass  |  (100-1000 representative samples)
-| - record min/max  |
-| - compute scale/  |
-|   zero_point      |
-+-------------------+
-        |
-        v
-+--------------------+
-| Quantized INT8     |  weights: INT8, activations: INT8
-| Model              |  scale factors stored as FP32
-+--------------------+
-        |
-        v
-  4x smaller, ~3x faster on CPU (VNNI instructions)
-  <1% accuracy drop for CNN/tabular models
+
+*PTQ never retrains — it just runs the frozen model over a small calibration set to learn each layer's activation range, which fixes the scale and zero_point that map FP32 to INT8.*
+
+### PTQ vs QAT Decision Flow
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    model(["Trained FP32 Model"]) --> choice{"PTQ accuracy\ndrop acceptable?"}
+
+    choice -->|"yes, PTQ"| ptqCal["Calibrate on\n100-1000 samples"]
+    ptqCal --> ptqOut(["INT8 model\nno retraining, drop 1-3%"])
+
+    choice -->|"no, QAT"| qatFake["Insert fake-quant nodes\nsimulate INT8 in forward"]
+    qatFake --> qatTrain["Fine-tune 5-10% of steps\nstraight-through estimator"]
+    qatTrain --> qatOut(["INT8 model\ndrop under 0.3%"])
+
+    class model base
+    class choice mathOp
+    class ptqCal,qatFake mathOp
+    class qatTrain train
+    class ptqOut,qatOut io
 ```
+
+*PTQ is a fast, no-retraining path that works when the accuracy hit is tolerable; QAT adds fake-quantization nodes and a fine-tune so the weights learn to absorb rounding error, buying back accuracy when PTQ falls short.*
 
 ### Knowledge Distillation Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    data(["Training Data"]) --> teacher["Teacher Model\nFP32, large, frozen"]
+    data --> student["Student Model\nsmall, trainable"]
+    teacher -->|"softmax / T"| soft["Soft Labels\ntemperature T=4"]
+    soft --> kl["KL Divergence Loss"]
+    student --> kl
+    data --> hard["Hard Labels"]
+    hard --> ce["Cross-Entropy Loss"]
+    student --> ce
+    kl --> total["Combined Loss\nalpha*CE + (1-alpha)*T^2*KL"]
+    ce --> total
+    total -.->|"backprop"| student
+
+    class data,hard io
+    class teacher frozen
+    class student train
+    class soft mathOp
+    class kl,ce,total lossN
 ```
-Training Data
-     |
-     +---> Teacher Model (FP32, large)  ---> Soft Labels (temperature T=4)
-     |                                                    |
-     +---> Student Model (small)        <----- KL divergence loss
-                    |
-                    +---> Hard Label Cross-Entropy loss
-                    |
-                    v
-              Combined Loss = alpha*CE + (1-alpha)*T^2*KL
-```
+
+*The student learns from two signals at once: the teacher's softened distribution (dark knowledge in the wrong-class probabilities) via KL, and the ground-truth hard labels via cross-entropy — the frozen teacher and the T^2 scaling keep the soft target stable and gradient-balanced.*
 
 ### Structured Pruning Flow
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    conv(["Conv layer\n64 filters"]) --> rank["Rank filters by\nL1 norm of weights"]
+    rank --> prune["Remove bottom 30%\nby magnitude"]
+    prune --> pruned["Pruned CNN\n45 filters, dense"]
+    pruned --> ft["Fine-tune 1-5 epochs\nrecover accuracy"]
+    ft --> final(["~30% fewer MACs\nsame hardware path"])
+
+    class conv io
+    class rank,prune mathOp
+    class pruned base
+    class ft train
+    class final io
 ```
-Original CNN: 64 filters in Conv layer
-        |
-        | Rank filters by L1 norm of weights
-        v
-Filter ranking: [f_3(0.9), f_1(0.8), ..., f_11(0.01), f_47(0.005)]
-        |
-        | Remove bottom 30% by magnitude
-        v
-Pruned CNN: 45 filters  (dense model, hardware-friendly)
-        |
-        | Fine-tune 1-5 epochs to recover accuracy
-        v
-  Final model: ~30% fewer MACs, same hardware path
+
+*Structured pruning removes whole filters (not scattered weights), so the result is a smaller dense model that runs faster on any hardware — the fine-tune step recovers the accuracy lost when the low-magnitude filters were dropped.*
+
+### Size vs Accuracy Tradeoff
+
+```mermaid
+xychart-beta
+    title "Compression Pareto: size reduction vs accuracy retained"
+    x-axis ["1x FP32", "1.4x Prune", "4x INT8", "8x INT4", "10x Distill", "40x Distill+INT4"]
+    y-axis "Accuracy retained (%)" 90 --> 100
+    line [100, 99.5, 99.3, 98, 97, 95]
 ```
+
+*Accuracy erodes as compression grows more aggressive, and the drop is non-linear — INT8 is nearly free while INT4 and stacked distillation-plus-quantization cost several points, so pick the least aggressive method that meets the memory and latency budget.*
 
 ---
 
@@ -450,6 +520,27 @@ QAT inserts fake quantization nodes: during the forward pass, activations and we
 
 **Q: Give concrete size and latency numbers for a compressed ResNet-50.**
 ResNet-50 FP32: ~98 MB model file, ~7ms inference on Intel Xeon CPU. After INT8 PTQ: ~25 MB (~4x smaller), ~2.5ms CPU inference (~2.8x faster). After TensorRT FP16 on V100 GPU: ~49 MB, ~1.5ms. After TensorRT INT8 on V100: ~25 MB, ~0.9ms (7.7x vs FP32 CPU). DistilResNet via knowledge distillation (18 layers vs 50): ~45 MB FP32, ~3.5ms CPU, with ~1.5% ImageNet top-1 accuracy drop vs full ResNet-50.
+
+**Q: You quantized to INT8 but inference is not any faster — why?**
+Because your model is memory-bandwidth-bound rather than compute-bound, or the runtime lacks INT8 kernels for your ops. Quantization guarantees a ~4x smaller model, but speedup only materializes when the hardware has INT8 SIMD paths (Intel VNNI, ARM NEON, GPU INT8 tensor cores) and the engine actually dispatches to them. If ops fall back to FP32 or dequantize on the fly, you pay conversion overhead with no speed benefit. Verify the backend (fbgemm/qnnpack/TensorRT) reports genuine INT8 execution, not a silent FP32 fallback.
+
+**Q: Why does pruning have an "accuracy cliff," and how do you avoid falling off it?**
+Removing weights past a threshold destroys learned representations faster than the remaining network can compensate, so accuracy drops sharply rather than gradually. Avoid it with gradual (iterative) pruning — raise the sparsity target slowly over training and fine-tune between steps — instead of one-shot pruning straight to the final ratio. A 40% structured prune that drops accuracy 8 points in one shot often recovers to under 1 point with 1–5 fine-tune epochs at a reduced learning rate.
+
+**Q: What is the difference between per-tensor and per-channel quantization scales, and when does it matter?**
+Per-tensor uses one scale and zero-point for the whole weight tensor; per-channel uses a separate scale per output channel. Per-channel matters when weight magnitudes vary widely across channels — a single tensor-wide scale is dominated by the largest channel and crushes the resolution of the smaller ones, hurting accuracy. It costs almost nothing (one extra scalar per channel) and is standard for weight quantization; activations are usually kept per-tensor because per-channel activation scales are expensive at runtime.
+
+**Q: In what order should you apply multiple compression techniques?**
+Distill first, then prune, then quantize last. Distillation produces a fundamentally smaller architecture, so doing it first means every later step operates on fewer parameters; pruning removes redundant structure from that smaller model; quantization is the cheapest, most mechanical step and goes last because a bit-width change composes cleanly on top. Fine-tune between aggressive steps and re-validate after each stage rather than only at the end.
+
+**Q: How do you choose a pruning sparsity target for a model?**
+Start low and increase until validation accuracy begins to drop, rather than guessing a number up front. Sparsity tolerance is model- and layer-dependent: over-parameterized layers (large FFNs) tolerate 50–90% while bottleneck layers tolerate far less, so per-layer or gradual sensitivity analysis beats one global ratio. For unstructured pruning, remember the practical floor — below ~50% sparsity, dense kernels are just as fast, so the sparsity must be high enough to pay for the sparse-kernel overhead.
+
+**Q: What is KV-cache quantization and why does it matter for LLM serving?**
+It stores the attention key/value cache in INT8 or INT4 instead of FP16, cutting the memory that grows linearly with sequence length and batch size. For long-context or high-concurrency serving the KV cache — not the weights — often dominates GPU memory, so quantizing it lets you fit more concurrent sequences or longer contexts on the same GPU. Keys are more sensitive than values, so mixed schemes (INT8 keys, INT4 values) are common; validate on long-context tasks because errors compound over the sequence.
+
+**Q: Can you run knowledge distillation without ground-truth labels?**
+Yes — the teacher's soft predictions serve as the training signal, so unlabeled data or the teacher's pseudo-labels are enough to distill. This is common when labels are scarce but unlabeled data is abundant: run the teacher over the unlabeled pool and train the student on those soft targets. Pure soft-label distillation can drift on the real task, so when labels do exist a combined loss (soft KL + hard cross-entropy) grounds the student and usually beats either signal alone.
 
 ---
 

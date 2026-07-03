@@ -76,68 +76,138 @@ Key insight: the roofline model tells you which optimizations matter. Plot a mod
 
 ## 5. Architecture Diagrams
 
+**A100 memory hierarchy — bandwidth drops ~1000x from on-chip SRAM to PCIe**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph SM["Streaming Multiprocessor (x108)"]
+        tc["Tensor Cores\n312 TFLOP/s BF16\ndims must be multiples of 8"]
+        reg(["Registers\n~65k per SM\nlowest latency"])
+        smem["Shared memory SRAM\n192 KB per SM, 19 TB/s"]
+    end
+    SM --> l2["L2 cache\n40 MB, ~4 TB/s"]
+    l2 --> hbm["HBM3 global memory\n80 GB, 2 TB/s, ~100 ns"]
+    hbm -->|"PCIe 16 GB/s"| cpu["CPU RAM\n~51 GB/s"]
+    cpu --> nvme["NVMe SSD\n7 GB/s, ~100 us"]
+
+    class tc mathOp
+    class reg,smem,l2 train
+    class hbm base
+    class cpu req
+    class nvme lossN
 ```
-A100 GPU Memory Hierarchy
 
-+-----------------------------------------------------------+
-|  A100 80GB SXM                                            |
-|                                                           |
-|  +-----------+ +-----------+ ... (108 SMs total)          |
-|  |    SM 0   | |    SM 1   |                              |
-|  | +-------+ | | +-------+ |                              |
-|  | |Tensor | | | |Tensor | |  <- 512 Tensor Cores total  |
-|  | |Cores  | | | |Cores  | |     (BF16: 312 TFLOP/s)     |
-|  | +-------+ | | +-------+ |                              |
-|  | Registers | | Registers |  <- ~65k per SM, fastest    |
-|  | Shared Mem| | Shared Mem|  <- 192 KB per SM (A100)    |
-|  +-----------+ +-----------+    19 TB/s, software-managed|
-|                                                           |
-|  L2 Cache: 40 MB                 ~4 TB/s bandwidth       |
-|                                                           |
-|  HBM3 (Global Memory): 80 GB    ~2 TB/s bandwidth        |
-|  (High Bandwidth Memory stacks)                          |
-+-----------------------------------------------------------+
-           | PCIe 4.0 (16 GB/s) or NVLink (600 GB/s)
-+-------------------+
-|   CPU + RAM       |
-|   ~51 GB/s DDR4   |
-+-------------------+
+Every optimization aims to keep data in the fast tiers: shared-memory SRAM moves
+data ~10x faster than HBM and ~1000x faster than the PCIe link to CPU RAM, so a
+host-device copy costs as much as thousands of on-chip operations.
 
+**A100 BF16 roofline — which side of the ridge an operation sits on**
 
-Roofline Model (A100 BF16)
-
-Peak Compute
-312 TFLOP/s |.............................................../ compute-bound
-            |                                         /
-            |                                     /
-            |                                 /
-            |                 Flash Attn  /
-            |                          /
-            |             Matmul   /
-            |                  /  ridge point: ~156 FLOP/byte
-            |              /
-2 TB/s HBM  |----------/  <-- memory-bound regime
-bandwidth   |        /
-equivalent  |    LayerNorm
-            |  ReLU
-            | Softmax
-            +-------------------------------------------> Arithmetic Intensity
-                                                          (FLOP / byte)
-            Operations left of ridge: bandwidth-limited
-            Operations right of ridge: compute-limited
-
-
-Gradient Checkpointing Memory Pattern
-
-Standard:    [L1 act][L2 act][L3 act][L4 act] ... [LN act]  forward
-             ALL activations kept in HBM
-             Peak memory: O(N * seq_len * hidden)
-
-Checkpointed: [L1 act]        [L5 act]         [L9 act]     forward
-              checkpoint      checkpoint         checkpoint
-              Recompute L2-L4 during backward from L1 checkpoint
-              Peak memory: O(sqrt(N) * seq_len * hidden)
+```mermaid
+xychart-beta
+    title "A100 BF16 roofline: achievable throughput vs arithmetic intensity"
+    x-axis "Arithmetic intensity (FLOP/byte)" [0, 39, 78, 117, 156, 234, 312]
+    y-axis "Achievable TFLOP/s" 0 --> 350
+    line [0, 78, 156, 234, 312, 312, 312]
 ```
+
+The sloped part is the 2 TB/s memory-bandwidth bound; the flat part is the 312
+TFLOP/s compute roof. Left of the ridge (~156 FLOP/byte) ops are memory-bound —
+ReLU, LayerNorm, softmax, and most LLM decoding — so only bandwidth (kernel
+fusion) helps; right of it, large matmuls are compute-bound and only more FLOP/s
+(Tensor Core alignment) helps.
+
+**Gradient checkpointing tradeoff — trade ~33% compute for a smaller memory peak**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph STD["Standard backprop"]
+        direction TB
+        s_fwd["Forward:\nstore every activation"] --> s_mem["Peak memory\nO(L x B x S x H)"]
+        s_mem --> s_bwd["Backward:\nno recompute"]
+    end
+    subgraph CKPT["Gradient checkpointing"]
+        direction TB
+        c_fwd["Forward:\nstore sqrt(L) checkpoints"] --> c_mem["Peak memory\nO(sqrt(L) x B x S x H)"]
+        c_mem --> c_bwd["Backward:\nrecompute segments\n+33% compute"]
+    end
+
+    class s_fwd,c_fwd mathOp
+    class s_mem lossN
+    class c_mem train
+    class s_bwd,c_bwd io
+```
+
+Standard backprop keeps every layer's activations in HBM (red peak); checkpointing
+keeps only ~sqrt(L) checkpoints and recomputes the rest during the backward pass,
+shrinking activation memory to O(sqrt(L)) at the cost of one extra partial forward.
+Worth it whenever memory, not compute, caps the batch size.
+
+**Kernel fusion — collapse three HBM round-trips into one**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph UF["Unfused: 3 HBM round-trips"]
+        direction LR
+        u0(["x in HBM"]) --> ur["ReLU\nread + write HBM"]
+        ur --> ud["Dropout\nread + write HBM"]
+        ud --> ul["LayerNorm\nread + write HBM"]
+        ul --> u1(["out"])
+    end
+    subgraph FU["Fused kernel: 1 HBM round-trip"]
+        direction LR
+        f0(["x in HBM"]) --> fk["Fused kernel\nReLU + Dropout + LayerNorm\nall in SRAM"]
+        fk --> f1(["out"])
+    end
+
+    class u0,u1,f0,f1 io
+    class ur,ud,ul lossN
+    class fk train
+```
+
+Each unfused elementwise op reads its input from HBM and writes its output back —
+three full round-trips for three ops. `torch.compile()` (and Flash Attention for
+attention) fuses them into a single kernel that reads once, does all the math in
+SRAM, and writes once, which is the entire win for memory-bound ops.
+
+**Throughput vs batch size — arithmetic intensity climbs, then the GPU saturates**
+
+```mermaid
+xychart-beta
+    title "Relative training throughput vs batch size (A100, fixed model)"
+    x-axis "Batch size" [8, 16, 32, 64, 128, 256]
+    y-axis "Throughput (samples/s, relative)" 0 --> 800
+    bar [100, 185, 330, 520, 650, 720]
+```
+
+Small batches are memory-bound and under-utilize Tensor Cores, so per-sample
+throughput is poor; larger batches raise arithmetic intensity (more work per memory
+access) and climb steeply — batch 256 is roughly 7x faster per sample than batch 8
+here — until the GPU becomes compute-bound and the curve plateaus.
 
 ---
 
@@ -610,6 +680,24 @@ MFU = (measured FLOP/s) / (peak hardware FLOP/s). Measured FLOP/s is estimated a
 
 **Q: How do you detect and fix GPU memory fragmentation in PyTorch?**
 PyTorch's caching allocator maintains a pool of freed tensors to avoid repeated CUDA allocation calls (cudaMalloc is slow, ~1-10 ms). Memory fragmentation occurs when many small tensors are allocated and freed in random order, leaving holes in the memory pool that cannot satisfy larger allocations — a cudaOutOfMemoryError at 70% "reported" memory usage is a classic fragmentation symptom. Detection: `torch.cuda.memory_stats()` shows `"fragmentation"` ratio. Fixes: (1) call `torch.cuda.empty_cache()` to release cached but freed memory back to CUDA (warning: this slows subsequent allocations); (2) use fixed-size tensor allocations across training steps (consistent batch size); (3) set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (PyTorch 2.1+) — new allocator strategy that handles fragmentation much better by using expandable memory segments.
+
+**Why does BF16 not require loss scaling while FP16 does?**
+BF16 keeps FP32's 8-bit exponent range, so small gradients do not underflow the way they do in FP16. FP16 has only 5 exponent bits and overflows above 65,504, which forces GradScaler to multiply the loss up before backward and divide the gradients back down — extra machinery that can still diverge. BF16 trades mantissa bits (7 vs FP16's 10) for that dynamic range, which matters far more for training stability on large models. Use BF16 on Ampere/Hopper/Ada (A100, H100, RTX 30/40); fall back to FP16 only on Volta/Turing (V100, T4) where BF16 hardware is absent.
+
+**Why can in-place operations like x.relu_() break autograd?**
+An in-place op overwrites a tensor value that the backward pass still needs, so autograd raises a version-counter error or computes wrong gradients. Many gradients are functions of the layer's output (ReLU's gradient needs the sign of its input/output), and mutating that buffer destroys the information. In-place ops (`add_`, `mul_`, `relu_`) are safe only on leaf tensors or tensors not part of the autograd graph — for example post-processing under `torch.no_grad()`. For training, prefer `torch.compile()`, which fuses the elementwise chain and reclaims the memory without the correctness risk.
+
+**Why does a validation loop OOM when the training loop does not?**
+Appending model outputs that still carry their autograd graph accumulates activation memory across every batch, and nothing is ever freed. Each stored `outputs` tensor keeps its `grad_fn`, which pins the whole forward graph in HBM, so a loop that concatenates predictions blows up even though a single training step fits. Wrap evaluation in `torch.no_grad()` (or `inference_mode()`) to stop graph construction, and move results off-GPU immediately with `.cpu()`. This is the single most common eval-time OOM and it never surfaces during training because the graph is discarded each step.
+
+**Why can use_reentrant=True gradient checkpointing silently disable torch.compile?**
+The reentrant checkpoint implementation cannot be traced by TorchDynamo, so the compiler hits the checkpoint boundary and falls back to slow eager mode — losing every fusion benefit with no error. It also requires inputs to have `requires_grad=True`, which is easy to violate. Always pass `use_reentrant=False`; the non-reentrant path is compatible with `torch.compile`, does not need the requires_grad hack, and is the documented default going forward. The failure is silent, so verify by checking that compiled speedups actually appear in the profiler.
+
+**How much extra memory does Adam consume versus SGD, and why does it dominate for large models?**
+Adam stores two FP32 moment buffers per parameter (8 bytes) versus SGD-momentum's single buffer (4 bytes), so optimizer state alone is 8x the parameter count in bytes. For a 7B-parameter model that is 56 GB just for Adam's m and v tensors — more than the parameters (14 GB in BF16) and gradients (28 GB in FP32) combined. This is why full fine-tuning of large models needs sharding (FSDP/ZeRO) or 8-bit optimizers (bitsandbytes), which quantize the moments and cut optimizer memory ~4x. Always budget optimizer state, not just weights, when sizing a GPU.
+
+**How do you confirm the DataLoader is the training bottleneck rather than the GPU?**
+If GPU utilization sits below 80% while a CPU core is pegged at 100%, the data pipeline — not the GPU — is the limit. Do not guess: benchmark the loader in isolation (iterate N batches, measure samples/sec) and compare against the GPU's step time; if the loader is slower, the GPU is starving between batches. The fix is parallel prefetch (`num_workers=4`, `pin_memory=True`, `persistent_workers=True`, `prefetch_factor=2`) plus `non_blocking=True` transfers, which routinely lifts utilization from ~65% to >90% with zero extra hardware. Adding GPUs before checking this just doubles the cost of a CPU-bound job.
 
 ---
 

@@ -75,41 +75,37 @@ Why it matters: feature stores solve three painful production problems: (1) trai
 
 ### Feature Store End-to-End Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    kafka([Event stream\nKafka]) --> stream["Stream processor · Flink\nfreshness under 60s"]
+    cdc([DB snapshots\nCDC]) --> batch["Batch processor · Spark\nfreshness hours"]
+    api([Third-party APIs]) --> batch
+
+    stream -->|"real-time features"| online["Online store · Redis\nP99 under 5ms, TTL per feature"]
+    batch -->|"batch features"| offline["Offline store · S3 + Delta\npoint-in-time history, by date"]
+    offline -.->|"materialize"| online
+
+    online --> serveapi["get_online_features\nserving path"]
+    offline --> trainapi["get_historical_features\ntraining path"]
+
+    serveapi --> model([Model serving\nrequest time])
+    trainapi --> trainp([Training pipeline\noffline batch])
+
+    class kafka,cdc,api,model,trainp io
+    class stream,batch mathOp
+    class online,offline base
+    class serveapi,trainapi req
 ```
-DATA SOURCES
-  ├── Event Stream (Kafka)      ├── Database Snapshots (CDC)   ├── Third-party APIs
-  │                             │                               │
-  ▼                             ▼                               ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                     FEATURE COMPUTATION LAYER                     │
-│  ┌──────────────────┐     ┌──────────────────────────────────┐   │
-│  │  Stream Processor │     │     Batch Processor               │   │
-│  │  (Flink/Kafka)   │     │     (Spark on EMR / Dataproc)    │   │
-│  │  Freshness: <60s │     │     Freshness: hours             │   │
-│  └────────┬─────────┘     └────────────────┬─────────────────┘   │
-└───────────│────────────────────────────────│────────────────────-┘
-            │ real-time features              │ batch features
-            ▼                                ▼
-┌──────────────────────────┐  ┌───────────────────────────────────┐
-│     ONLINE STORE         │  │         OFFLINE STORE              │
-│  (Redis Cluster)         │  │  (S3 + Delta Lake / Hive)         │
-│  Read latency: <5ms P99  │  │  Read latency: minutes            │
-│  TTL per feature         │  │  Point-in-time correct history    │
-│  Capacity: hot features  │  │  Partitioned by date              │
-└──────────┬───────────────┘  └──────────┬────────────────────────┘
-           │                             │
-           ▼                             ▼
-┌────────────────────────────────────────────────────────────────┐
-│                    FEATURE SERVING API                          │
-│  online_features = store.get_online_features(entity_ids)       │
-│  training_data  = store.get_historical_features(entity_df,     │
-│                       feature_views, timestamp_col)            │
-└──────────────────────────────────────────────────────────────-─┘
-           │ serving                    │ training
-           ▼                            ▼
-   MODEL SERVING                  TRAINING PIPELINE
-   (request time)                 (offline batch job)
-```
+
+The online store keeps only the latest value per entity for sub-10ms serving; the offline store keeps the full timestamped history for training. The dotted materialize edge is the single sync path that keeps the two stores consistent.
 
 ### Point-in-Time Correct Training Data Join
 
@@ -137,28 +133,82 @@ RESULT:
   u2      │ v456    │ 2024-01-15 11:30:00 │ 0     │ (u2's most recent)
 ```
 
+The offline join must pick value=47 — the last snapshot computed strictly before the event; reading value=49 (computed after the event) leaks the future into training.
+
+### Point-in-Time Join Logic (ASOF)
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    label([Label event\nentity, event_time, y]) --> filt["Filter snapshots\nsame entity"]
+    filt --> win{"feature_time before event_time\nand within max_age window?"}
+    win -->|"no match"| deflt["Use registered default\ncold start"]
+    win -->|"matches"| pick["Pick latest feature_time\nas-of / ASOF join"]
+    pick --> row([Training row\nfeatures joined to label])
+    deflt --> row
+
+    class label,row io
+    class filt,win mathOp
+    class pick train
+    class deflt frozen
+```
+
+For each label row the join scans that entity's snapshots, keeps only those strictly before the event and inside the freshness window, and takes the most recent — an ASOF join. A no-match falls back to the feature's registered default, matching the serving-time imputation.
+
 ### Online Store Write Path (Lambda Architecture)
 
-```
-KAFKA TOPIC: user.events
-      │
-      ▼
-┌────────────────────────────────┐
-│  FLINK STREAMING JOB           │
-│  - Windowed aggregations       │
-│  - e.g., count(views, 1h)     │
-│  - Output: (user_id, feature)  │
-└────────────┬───────────────────┘
-             │ <60 second lag
-             ▼
-┌────────────────────────────────┐
-│  REDIS CLUSTER                 │
-│  SET user:u1:views_1h 23       │
-│  EXPIREAT [TTL = 2h]           │  <- TTL prevents stale data accumulation
-└────────────────────────────────┘
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    topic([Kafka topic\nuser.events]) --> flink["Flink streaming job\nwindowed count(views, 1h)"]
+    flink -->|"lag under 60s"| redis["Redis cluster\nSET user:u1:views_1h 23\nEXPIRE, TTL 2h"]
+
+    class topic io
+    class flink mathOp
+    class redis base
 ```
 
----
+Streaming aggregates land in Redis within ~60s. The TTL is set to twice the update interval so a stalled Flink job lets stale values expire instead of serving them silently.
+
+### Materialization: Offline to Online Sync
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    trigger([Schedule or batch-complete\nhourly]) --> read["Read latest snapshot\nfrom offline store, S3"]
+    read --> iter["Iterate entities\nbuild feature rows"]
+    iter --> write["Write to online store\nSET key ... EX ttl"]
+    write --> ttl{"TTL at least 2x\nmaterialize interval?"}
+    ttl -->|"yes"| fresh([Online store fresh\nserving reads latest])
+    ttl -->|"no, stale risk"| alert["Alert on cache miss\ndelayed job"]
+
+    class trigger,fresh io
+    class read,iter,write,ttl mathOp
+    class alert lossN
+```
+
+Materialization is the offline-to-online bridge: it reads the newest offline snapshot and writes each entity to Redis with a TTL of at least twice the schedule interval, so one delayed run does not surface as serving cache misses.
 
 ## 6. How It Works — Detailed Mechanics
 
@@ -617,6 +667,15 @@ Three test levels: (1) unit tests — verify feature computation logic produces 
 
 **Q: What is feature importance and how does it guide feature store investment?**
 Feature importance (from SHAP values or tree-based feature importance) measures how much each feature contributes to model predictions. It guides feature store investment by identifying: (1) high-importance features that justify real-time computation (if a feature ranks in the top 5 by importance, the latency to compute it matters; invest in streaming computation); (2) low-importance features that can be deprecated (features with near-zero importance add serving latency and storage cost without model benefit — remove them); (3) features worth improving freshness (if a batch feature is high-importance and involves time-sensitive data, upgrading to hourly or streaming computation may improve model quality). Re-run importance analysis quarterly as model architectures and data distributions evolve.
+
+**Q: Why not just query your production database directly for features at serving time instead of building a feature store?**
+Direct database queries work for one model but reintroduce training-serving skew and cannot reproduce point-in-time-correct history for training. The serving query and the training query become two code paths that drift apart over time, and the transactional database only holds current values — it cannot tell you what a feature was six months ago at the moment a label event occurred. A feature store centralizes the computation and stores timestamped snapshots so training and serving read the same definition, and it offloads read traffic to a dedicated low-latency store (Redis) instead of loading the production database on every prediction.
+
+**Q: How do you backfill a new feature so it has historical values for training?**
+Recompute the feature over historical raw data using the exact same logic as the online path, writing timestamped snapshots into the offline store. A newly defined feature has no history, but training a model on it needs a value as of each past label event, so run the batch computation (Spark or SQL) over the raw event history and emit one snapshot per entity per computation window with the correct feature_timestamp. Validate the backfill by spot-checking that a backfilled value for a past date matches what the streaming path would have produced. Never backfill by copying the current value across all past dates — that is point-in-time leakage.
+
+**Q: How do you verify the online and offline stores stay consistent?**
+Run a scheduled skew test that recomputes each feature via the offline path and compares it to the online-store value for the same entity and timestamp. Sample a set of entities, read their current online values from Redis, recompute the same features from the offline snapshot, and assert they match within a numerical tolerance, alerting if the mismatch rate exceeds a small threshold such as 0.1%. Because the two stores are written by different jobs (materialization versus streaming), silent divergence is common; the skew test is the single most valuable guardrail and should run both in CI and continuously in production.
 
 ---
 

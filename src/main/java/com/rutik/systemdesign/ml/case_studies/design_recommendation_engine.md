@@ -16,62 +16,87 @@ Constraints:
 
 ## Architecture Overview
 
-```
-                         OFFLINE PIPELINE (daily/hourly)
- ┌─────────────────────────────────────────────────────────────────┐
- │                                                                 │
- │  User Events (Kafka)                                            │
- │       │                                                         │
- │       v                                                         │
- │  Spark ETL  ──────────────────────────────────────────────────  │
- │       │              │                    │                     │
- │       v              v                    v                     │
- │  Interaction     Feature Store        Training Data             │
- │  Matrix (Hive)   (Hive offline)       (positive pairs +        │
- │       │                               negative samples)        │
- │       │                                    │                   │
- │       v                                    v                   │
- │  ALS Collab.    Two-Tower Model       LightGBM Ranker           │
- │  Filtering      (PyTorch, GPU)        (200 features)            │
- │       │               │                    │                   │
- │       v               v                    v                   │
- │  User/Item       User Embeddings      Model Registry            │
- │  Embeddings      Item Embeddings      (MLflow)                  │
- │  (256-dim)       (256-dim)                                      │
- │       └───────────────┘                                         │
- │               │                                                 │
- │               v                                                 │
- │         FAISS IVF Index                                         │
- │         (IVF4096,PQ32)                                          │
- └─────────────────────────────────────────────────────────────────┘
-                         ONLINE SERVING (<100ms)
- ┌─────────────────────────────────────────────────────────────────┐
- │                                                                 │
- │  Client Request (user_id, context)                              │
- │       │                                                         │
- │       v                                                         │
- │  API Gateway ──> Feature Server                                 │
- │       │          (Redis <10ms lookup)                           │
- │       │               │                                         │
- │       v               v                                         │
- │  Retrieval Stage  [Two-Tower Query Encoder]                     │
- │  (FAISS ANN)      user_embedding → top-K=500 candidates         │
- │       │           (25ms budget)                                 │
- │       │                                                         │
- │       v                                                         │
- │  Ranking Stage    [LightGBM Ranker]                             │
- │  500 candidates → 20 ranked items                               │
- │  (200 features, 30ms budget)                                    │
- │       │                                                         │
- │       v                                                         │
- │  Re-ranking       [Business Rules]                              │
- │  MMR diversity + freshness boost + geo/rating filters           │
- │  (5ms budget)                                                   │
- │       │                                                         │
- │       v                                                         │
- │  Response: top-10 video IDs + scores                            │
- └─────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    subgraph Offline["Offline Pipeline (daily / hourly)"]
+        EV(["User events (Kafka)"]) --> ETL["Spark ETL"]
+        ETL --> IM["Interaction matrix (Hive)"]
+        ETL --> FSO["Feature store (Hive offline)"]
+        ETL --> TDA["Training data: pos pairs + neg samples"]
+        IM --> ALS["ALS collaborative filtering"]
+        FSO --> TT["Two-Tower model (PyTorch, GPU)"]
+        TDA --> LGB["LightGBM ranker (200 features)"]
+        ALS --> EMB["User + item embeddings (256-dim)"]
+        TT --> EMB
+        LGB --> REG["Model registry (MLflow)"]
+        EMB --> FAISS["FAISS IVF index (IVF4096, PQ32)"]
+    end
+
+    subgraph Online["Online Serving (100ms P99)"]
+        REQ(["Client request: user_id + context"]) --> GW["API Gateway"]
+        GW --> FSV["Feature server (Redis, sub-10ms)"]
+        FSV --> RET["Retrieval: Two-Tower encoder + FAISS ANN, top-500 (25ms)"]
+        RET --> RANK["Ranking: LightGBM, 500 to 20 (30ms)"]
+        RANK --> RRN["Re-rank: MMR + freshness + rules (5ms)"]
+        RRN --> RESP(["Response: top-10 videos + scores"])
+    end
+
+    FAISS -.-> RET
+    REG -.-> RANK
+
+    class EV,REQ,RESP io
+    class ETL,IM,FSO,TDA frozen
+    class ALS,TT,LGB train
+    class EMB,FAISS,REG base
+    class GW,FSV req
+    class RET,RANK,RRN mathOp
+```
+
+Two planes share the learned artifacts: the offline pipeline trains ALS, the Two-Tower retriever, and the LightGBM ranker, then publishes the FAISS index and model registry (dotted edges) that the sub-100ms online path reads at serve time.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    C(["Catalog: 10M videos"]) --> R["Retrieval\nFAISS ANN (25ms)"]
+    R --> K(["500 candidates"])
+    K --> RK["Ranking\nLightGBM (30ms)"]
+    RK --> T(["20 ranked"])
+    T --> RRK["Re-rank\nMMR + rules (5ms)"]
+    RRK --> O(["Top-10 shown"])
+
+    class C,O io
+    class K,T base
+    class R,RK,RRK mathOp
+```
+
+Each stage narrows the candidate set by orders of magnitude — 10M to 500 to 20 to 10 — so progressively richer (and slower) models only ever score a shrinking shortlist within the 100ms budget.
+
+```mermaid
+xychart-beta
+    title "Online latency budget per stage (ms, within 100ms P99)"
+    x-axis ["Feature fetch", "Retrieval", "Ranking", "Re-rank"]
+    y-axis "Milliseconds" 0 --> 40
+    bar [10, 25, 30, 5]
+```
+
+Retrieval, ranking, and re-ranking consume about 60ms of the 100ms P99 budget; the remaining headroom absorbs feature lookup, network hops, and tail latency.
+
+```
   Feature Store
   ┌─────────────────────────────────────────────────────────────────┐
   │  Online (Redis)         │  Offline (Hive/S3)                   │
@@ -81,6 +106,8 @@ Constraints:
   │  TTL: 24h               │  - feature snapshots                 │
   └─────────────────────────────────────────────────────────────────┘
 ```
+
+The feature store is split by latency need: Redis serves online features with a 24h TTL for sub-10ms reads, while Hive/S3 holds the historical snapshots used for training — computed with identical logic to avoid training-serving skew.
 
 ---
 

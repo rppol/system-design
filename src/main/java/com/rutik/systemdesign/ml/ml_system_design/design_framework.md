@@ -82,23 +82,36 @@ Key insight: interviewers are not just evaluating your knowledge of ML algorithm
 
 ### Step 4 — Model Selection Decision Tree
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    root(["Design choices"]) --> d1{"Catalog over 1M items?"}
+    d1 -->|yes| d1y["Two-stage:\nretrieval (two-tower ANN) + ranking"]
+    d1 -->|no| d1n["Single-stage ranking model"]
+    root --> d2{"Training data over 10M examples?"}
+    d2 -->|yes| d2y["Deep model (DNN, transformer)"]
+    d2 -->|no| d2n["Gradient-boosted trees (LightGBM/XGBoost)"]
+    root --> d3{"Latency budget under 20ms?"}
+    d3 -->|yes| d3y["Logistic regression or shallow GBT"]
+    d3 -->|no| d3n["Deeper model acceptable"]
+    root --> d4{"Multiple objectives?"}
+    d4 -->|yes| d4y["Multi-task: shared backbone + task heads"]
+    d4 -->|no| d4n["Single-objective model"]
+
+    class root req
+    class d1,d2,d3,d4 mathOp
+    class d1y,d2y,d3y,d4y train
+    class d1n,d2n,d3n,d4n base
 ```
-Catalog size > 1M items?
-  YES -> Two-stage: retrieval (two-tower ANN) + ranking
-  NO  -> Single-stage ranking model
 
-Training data > 10M examples?
-  YES -> Deep model (DNN, transformer)
-  NO  -> Gradient-boosted tree (LightGBM, XGBoost)
-
-Latency budget < 20ms?
-  YES -> Logistic regression or shallow GBT
-  NO  -> Deeper model acceptable
-
-Multiple objectives?
-  YES -> Multi-task learning (shared backbone, task-specific heads)
-  NO  -> Single-objective model
-```
+The four axes are independent: each maps one stated requirement (catalog size, data size, latency, number of objectives) to a modeling choice, which is exactly why requirements (steps 1 and 3) must be gathered before a model is selected.
 
 ---
 
@@ -106,75 +119,69 @@ Multiple objectives?
 
 ### Complete Framework Applied to Video Recommendation
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    s1["Step 1 — Requirements\n100M DAU, 10K QPS, 10M videos\nP99 under 100ms\nNDCG@10 over 0.65 (baseline 0.52)"] --> s2["Step 2 — Problem formulation\ntwo-stage ranking\nlabel: watch time over 30s = positive\ncorrect position bias with IPW"]
+    s2 --> s3["Step 3 — Data & features\nuser + video embeddings (512d)\ncontext computed live\nsession views via Flink (~30s)\nRedis online, S3 offline"]
+    s3 --> s4["Step 4 — Model\nretrieval: two-tower + FAISS IVF\nrecall@500 over 0.85\nranking: LightGBM, 500 trees"]
+    s4 --> s5["Step 5 — Serving\nFAISS ~10ms, Redis ~5ms\nranking ~15ms, post-proc ~3ms\ntotal ~70ms P99 (budget 100ms)"]
+    s5 --> s6["Step 6 — Monitoring\nPSI hourly on top-20 features\nscore-distribution drift daily\nwatch time real-time\ndaily + drift-triggered retrain"]
+    s6 -.->|"drift / new signal"| s3
+
+    class s1 req
+    class s2 base
+    class s3 io
+    class s4 train
+    class s5 mathOp
+    class s6 lossN
 ```
-STEP 1: REQUIREMENTS
-  ┌───────────────────────────────────────────────────┐
-  │ Business: maximize weekly watch time               │
-  │ Scale: 100M DAU, 10K QPS, 10M videos              │
-  │ Latency: P99 < 100ms                              │
-  │ Accuracy: NDCG@10 > 0.65 (vs baseline 0.52)       │
-  │ Data: 5B clicks/day, labels available in 1 hour   │
-  └───────────────────────────────────────────────────┘
-                          │
-STEP 2: PROBLEM FORMULATION
-  ┌───────────────────────────────────────────────────┐
-  │ Task: two-stage ranking                           │
-  │ Label: watch_time > 30s = positive (binary)       │
-  │ Objective: cross-entropy on positive/negative     │
-  │ Metric: NDCG@10 (offline), watch time (online)   │
-  │ Position bias: use IPW during training            │
-  └───────────────────────────────────────────────────┘
-                          │
-STEP 3: DATA & FEATURES
-  ┌───────────────────────────────────────────────────┐
-  │ User features: embedding (512d), 7d genre history │
-  │ Video features: content embedding (512d), stats   │
-  │ Context: time of day, device type (computed live) │
-  │ Real-time: session views (Flink, <30s latency)   │
-  │ Feature store: Redis online, S3 offline           │
-  └───────────────────────────────────────────────────┘
-                          │
-STEP 4: MODEL
-  ┌───────────────────────────────────────────────────┐
-  │ Retrieval: two-tower, 512d embeddings, FAISS IVF  │
-  │   Output: top-500 candidates, recall@500 > 0.85  │
-  │ Ranking: LightGBM, 200 features, 500 trees        │
-  │   Output: watch_time probability score            │
-  │ Training: daily, 30 days history, temporal split  │
-  └───────────────────────────────────────────────────┘
-                          │
-STEP 5: SERVING
-  ┌───────────────────────────────────────────────────┐
-  │ Retrieval: FAISS server, <10ms P99                │
-  │ Feature fetch: Redis batch GET, <5ms              │
-  │ Ranking: LightGBM inference, <15ms                │
-  │ Post-process: diversity + ads, <3ms               │
-  │ Total: ~35ms P50, ~70ms P99 (budget: 100ms)      │
-  └───────────────────────────────────────────────────┘
-                          │
-STEP 6: MONITORING
-  ┌───────────────────────────────────────────────────┐
-  │ Feature drift: PSI hourly on top-20 features     │
-  │ Model output drift: score distribution daily      │
-  │ Business metric: watch time per session, real-time│
-  │ Retraining: daily scheduled + drift-triggered     │
-  └───────────────────────────────────────────────────┘
-```
+
+The six steps form a funnel: each box is constrained by the ones above it, and the dotted edge closes the loop — monitoring feeds drift and fresh labels back into features and retraining.
 
 ### Latency Budget Decomposition
 
+```mermaid
+xychart-beta
+    title "P99 latency budget: 100ms (63ms modeled, 37ms headroom)"
+    x-axis ["Network", "Gateway", "Feat fetch", "Retrieval", "Ranking", "Post-proc", "Serialize", "Headroom"]
+    y-axis "Milliseconds" 0 --> 40
+    bar [10, 3, 8, 12, 18, 4, 8, 37]
 ```
-P99 LATENCY BUDGET: 100ms
-├── Network (client to API gateway):       10ms
-├── API gateway + auth:                     3ms
-├── Feature fetch (Redis batch GET):        8ms
-├── Retrieval (FAISS ANN search):          12ms
-├── Ranking model inference:               18ms
-├── Post-processing (diversity, policy):    4ms
-├── Response serialization + network:       8ms
-└── Total modeled:                         63ms
-    Headroom:                              37ms
+
+Ranking (18ms) and retrieval (12ms) dominate the modeled spend; the deliberately large 37ms headroom absorbs GC pauses and tail effects so the P99 stays inside 100ms. State this decomposition before choosing a model — a model that does not fit its slice is not a valid option.
+
+### Offline vs Online Evaluation
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    model(["Candidate model"]) --> off["Offline evaluation\nheld-out test, temporal split\nNDCG@10, AUC, Recall@K\nno user impact"]
+    model --> shadow["Shadow mode\nreal traffic, predictions logged\nnot shown to users\ncatches skew + latency"]
+    shadow --> onl["Online A/B test\n5% traffic, real users\nCTR, watch time, revenue\np under 0.05 to ship"]
+    off -.->|"may not correlate:\ndrift, position bias"| onl
+
+    class model io
+    class off base
+    class shadow mathOp
+    class onl req
 ```
+
+Offline metrics gate cheaply but can mislead — training-data distribution shift and position bias break the offline-to-online correlation. Shadow mode bridges the two by validating scores, latency, and skew on real traffic before any user sees the new model.
 
 ---
 
@@ -707,6 +714,12 @@ Key questions: (1) How many labeled training examples exist? (10K vs 100M change
 
 **Q: How do you avoid data leakage in ML training pipelines?**
 Data leakage occurs when information from the future (relative to the prediction time) contaminates training examples. Common sources: (1) temporal leakage — using features computed after the label event (fix: point-in-time correct feature joins); (2) feature leakage — including features that are derived from or highly correlated with the label (fix: audit features for logical impossibility at prediction time); (3) test set contamination — preprocessing statistics (mean, std, vocabulary) computed on the full dataset including the test set (fix: fit preprocessors only on training fold); (4) group leakage — users or items appear in both train and test sets, inflating apparent generalization (fix: group-based train-test split). Temporal splitting is the most important safeguard: always train on earlier data and test on later data.
+
+**Q: Why does the retrieval stage optimize recall while the ranking stage optimizes precision?**
+Retrieval must not drop relevant items before ranking ever sees them, so it maximizes recall@K; ranking then reorders that small set for precision. Retrieval recall is a hard ceiling on the whole system — an item missed at retrieval can never be recovered by ranking downstream. In practice you set an explicit target (recall@500 > 0.90) and monitor retrieval recall separately from end-to-end NDCG, because a ranking gain is worthless if retrieval already threw the best item away.
+
+**Q: When is a single-stage ranking model the right choice over a two-stage retrieval + ranking design?**
+Use a single stage when the catalog is small enough to score every item — roughly under 10,000 — so you avoid a retrieval recall ceiling entirely. Two-stage adds a second model and serving stack and caps quality at retrieval recall, but it is unavoidable once the catalog reaches millions because you cannot score them all in the latency budget. Single-stage is simpler, has no recall cap, and iterates faster, so reach for two-stage only when catalog size forces ANN retrieval.
 
 ---
 

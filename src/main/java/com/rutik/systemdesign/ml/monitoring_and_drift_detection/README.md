@@ -70,67 +70,105 @@ Key insight: In production, you cannot assume the test set distribution persists
 
 ### Full Monitoring Pipeline
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    traffic([Production traffic]) --> serve["Serving layer\nFastAPI / TorchServe"]
+    serve -->|"log features, score, version"| log["Event log\nKafka topic / S3"]
+    log --> detect["Drift detector\nPSI · KS · Chi-squared"]
+    ref["Reference dataset\ntraining or healthy window"] --> detect
+    detect --> metrics["Metrics store\nPrometheus / InfluxDB"]
+    metrics --> alert["Alerting + dashboards\nPagerDuty · Slack · Grafana"]
+    alert -->|"drift confirmed"| retrain["Retraining pipeline\nre-evaluate + register"]
+    retrain -.->|"redeploy"| serve
+
+    class traffic io
+    class serve base
+    class log base
+    class ref frozen
+    class detect mathOp
+    class metrics base
+    class alert lossN
+    class retrain train
 ```
-Production Traffic
-        |
-        v
-+-------------------+
-|  Serving Layer    |  (FastAPI / TorchServe)
-+-------------------+
-        |
-        | Log every request: timestamp, input features,
-        | prediction score, model version
-        v
-+-------------------+
-|  Feature Store /  |  (Kafka topic, S3 event log)
-|  Event Log        |
-+-------------------+
-        |
-        v
-+-------------------+     +--------------------+
-|  Drift Detector   |<----|  Reference Dataset  |
-|  (PSI, KS tests)  |     |  (training window  |
-+-------------------+     |   or recent healthy|
-        |                  |   production)      |
-        |                  +--------------------+
-        v
-+-------------------+
-|  Metrics Store    |  (Prometheus, InfluxDB)
-+-------------------+
-        |
-        v
-+-------------------+
-|  Alerting         |  (PagerDuty, Slack)
-|  & Dashboards     |  (Grafana)
-+-------------------+
-        |
-        v (if drift confirmed)
-+-------------------+
-|  Retraining       |  (trigger pipeline, re-evaluate)
-|  Pipeline         |
-+-------------------+
+
+Every served request is logged, then compared against a fixed reference by the drift detector; confirmed drift flows through alerting into the retraining pipeline, whose new model redeploys back to the serving layer (dotted feedback edge).
+
+### Data Drift vs Concept Drift — Detection and Response
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    window([New production window]) --> qx{"Input P(X) shifted?\nPSI / KS"}
+    qx -->|"no"| qy1{"Performance\ndropped on labels?"}
+    qx -->|"yes"| qy2{"Performance\ndropped on labels?"}
+    qy1 -->|"no"| ok([No drift — keep serving])
+    qy1 -->|"yes"| concept["Concept drift\nP(Y|X) changed"]
+    qy2 -->|"no"| covariate["Covariate shift\nmodel still generalizes"]
+    qy2 -->|"yes"| both["Data + concept drift"]
+    concept --> retrain["Retrain on fresh labels"]
+    both --> retrain
+    covariate --> reweight["Importance weighting / watch"]
+
+    class window io
+    class qx,qy1,qy2 mathOp
+    class ok base
+    class concept,both lossN
+    class covariate req
+    class retrain,reweight train
 ```
+
+This 2×2 decision reads the two axes independently: input-distribution shift (detectable without labels) and performance drop (needs labels/proxy). Only the two red states — concept drift and combined drift — force retraining on fresh labels; pure covariate shift is reweighted or merely watched because a generalizing model still predicts well.
 
 ### PSI Computation Flow
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ref([Reference data\ntraining window]) --> bin["Bin into k buckets\nfrom reference quantiles"]
+    prod([Production window\ncurrent]) --> bin
+    bin --> pct["expected % vs actual %\nper bucket"]
+    pct --> formula["PSI = Σ (a − e) · ln(a / e)"]
+    formula --> out([PSI score])
+
+    class ref,prod,out io
+    class bin,pct,formula mathOp
 ```
-Reference Data (training)          Production Data (current window)
-        |                                   |
-        | Bin into k buckets                | Map to same buckets
-        v                                   v
- expected_pct[i] = count_i / N_ref   actual_pct[i] = count_i / N_prod
-        |                                   |
-        +-----------------------------------+
-                          |
-                          v
-          PSI = sum((actual_pct[i] - expected_pct[i])
-                    * ln(actual_pct[i] / expected_pct[i]))
-                          |
-                          v
-              PSI < 0.1: No change
-         0.1 <= PSI < 0.2: Monitor closely
-              PSI >= 0.2: Significant drift — alert
+
+Both distributions are mapped to the same reference-derived bin edges, converted to per-bucket proportions, then combined by the PSI formula into a single divergence score.
+
+### PSI Interpretation Bands
+
+```mermaid
+xychart-beta
+    title "Per-feature PSI vs alert bands (0.1 watch, 0.2 alert)"
+    x-axis ["age", "income", "device", "session", "geo"]
+    y-axis "PSI" 0 --> 0.5
+    bar [0.04, 0.12, 0.31, 0.08, 0.22]
 ```
+
+The two thresholds carve three zones: below 0.1 is stable (age, session), 0.1–0.2 is a watch band (income at 0.12), and ≥ 0.2 fires an alert (device 0.31, geo 0.22). On small windows where PSI binning is noisy, a KS-test p-value complements these bars as the drift signal.
 
 ---
 
@@ -488,6 +526,24 @@ SHAP-based drift monitoring computes SHAP values for a sample of production pred
 
 **Q: Describe a monitoring strategy for a model that does not return probabilities, only binary predictions.**
 Without probability scores, standard prediction distribution monitoring is limited. Strategies: (1) Monitor positive prediction rate (proportion of 1s) as a proxy for prediction distribution stability — sudden changes indicate drift. (2) Monitor input feature distributions (PSI, KS) as leading indicators. (3) If any confidence proxy is available (distance to decision boundary in SVMs, leaf sample counts in tree models), use it as a surrogate score distribution. (4) Pair with downstream outcome monitoring (actual label rates) as a lagging indicator. (5) Consider adding probability calibration to the model pipeline (Platt scaling, isotonic regression) to enable richer monitoring.
+
+**Q: Why does a KS test almost always report drift (p < 0.05) on large production windows?**
+Statistical power grows with sample size, so with millions of samples the KS test flags trivially small distribution differences as significant. The p-value answers "is there any difference at all," not "is the difference large enough to matter" — and at scale the answer is almost always yes. Pair KS with an effect-size threshold (KS statistic magnitude or PSI > 0.2) and cap the comparison window (subsample to ~10k) so alerts reflect operationally meaningful shifts, not sheer sample size.
+
+**Q: Does detecting data drift automatically mean you should retrain the model?**
+No — data drift is a leading indicator, not proof of degradation, so retrain only when performance actually drops and fresh labels exist. A model that learned the true causal relationship absorbs covariate shift with no accuracy loss, so retraining on every PSI breach wastes compute and risks a retraining storm on noise. Gate retraining on a measured performance drop (or sustained multi-feature drift) plus availability of correctly labeled recent data.
+
+**Q: Why should the reference distribution not be the raw training set?**
+The raw training set can contain historical corrections, backfills, or leakage that production never saw, making every comparison show artificial drift. A better reference is a recent healthy production window (7–14 days before a known-good deployment), which reflects what the model actually serves. Re-baseline the reference after each intentional retraining so drift is measured against the current normal, not a stale one.
+
+**Q: How do you monitor drift for high-cardinality categorical features like zip code or user_id?**
+Per-category chi-squared breaks down because most categories have near-zero expected counts, so aggregate rare levels or switch to a distribution-level metric. Options: bucket the long tail into an "other" group, hash into a fixed number of bins then run PSI or chi-squared, or track the out-of-vocabulary rate and top-k category share over time. For pure identifiers like user_id, distributional drift is meaningless — monitor derived features (frequency, recency) instead.
+
+**Q: What is multivariate drift and why can per-feature tests miss it?**
+Multivariate drift is a change in the joint distribution or correlations between features even when each feature's marginal looks stable. Two features can each pass univariate PSI while their relationship inverts (for example income and spend decouple), which a per-feature test never sees. Detect it with a multivariate test like Maximum Mean Discrepancy, or train a domain classifier to separate reference from production data — high classifier AUC signals joint drift.
+
+**Q: What is the difference between a sliding reference window and a fixed reference window?**
+A fixed reference is frozen at a known-good baseline, while a sliding reference continuously moves to recent production data. A fixed window detects cumulative long-term drift but grows increasingly stale; a sliding window adapts to gradual seasonal change but can silently boil the frog, normalizing slow degradation until it is severe. Production systems often run both: a fixed baseline for absolute drift and a short sliding window for sudden-shift detection.
 
 ---
 
