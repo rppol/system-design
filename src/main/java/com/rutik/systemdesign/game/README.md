@@ -11,6 +11,13 @@ reports weekly.
 > *discipline engine* targeting the four reasons daily learning fails: no nudge,
 > boredom, friction, and invisible progress.
 
+> **Pages-only as of 2026-07-03.** The game runs entirely as a static site on GitHub
+> Pages — there is no `server.py`, no `/api`, and no local scheduling stack anymore.
+> **`localStorage` (`sd_progress`) is the single source of truth** for streak, XP,
+> mastery, and the spaced-repetition schedule. Export a backup from the Progress
+> screen to move progress between browsers. (Some sections below still describe the
+> retired local stack; full doc rewrite is a later phase.)
+
 ### Modes & controls
 
 - **Suggested topic** — one big button starts the coach's pick for today (all sub-topics).
@@ -89,17 +96,23 @@ reports weekly.
 
 ## Quick start
 
+The game is a static site — serve the **repo root** (so the reader can fetch content
+at `../<section>/...`) with any static file server:
+
 ```bash
-cd src/main/java/com/rutik/systemdesign/game
-python3 server.py            # serves on http://127.0.0.1:8777
-# open http://127.0.0.1:8777/ in a browser
+cd /path/to/systemdesign          # the repo root, NOT the game dir
+python3 -m http.server 8901
+# open http://localhost:8901/src/main/java/com/rutik/systemdesign/game/index.html
 ```
 
-No `pip install`, no `npm`, no build step — Python 3 standard library only.
+No `pip install`, no `npm`, no build step. In production it deploys to GitHub Pages
+(`.github/workflows/pages.yml` runs `extract.py` + `build_graph.py` and publishes the
+whole repo root). Progress lives in the browser's `localStorage` only.
 
 Rebuild the question bank after editing any module's Q&A:
 
 ```bash
+cd src/main/java/com/rutik/systemdesign/game
 python3 extract.py           # re-reads all READMEs -> questions/<section>.json
 ```
 

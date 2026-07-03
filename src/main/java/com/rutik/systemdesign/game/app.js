@@ -1,9 +1,6 @@
-/* System Design Daily - 5-minute blitz. Vanilla JS, no build step. */
-
-// True when served as a static site (GitHub Pages); false on local server.py.
-// On GitHub Pages there is no /api/ — progress lives in localStorage only.
-const IS_STATIC = !["localhost", "127.0.0.1", "0.0.0.0"].includes(location.hostname)
-  && !location.hostname.match(/^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[01])\./);
+/* System Design Daily - 5-minute blitz. Vanilla JS, no build step.
+   Pages-only as of 2026-07-03: no server, no /api. localStorage sd_progress is
+   the single source of truth for all progress. */
 
 const QUESTIONS_PER_BLITZ = 10;
 const DAILY_XP_GOAL = 100;
@@ -61,13 +58,13 @@ const STUDY_ORDER = {
   ],
   java: [
     "java/core_language","java/strings_and_text","java/generics_and_type_system","java/exceptions_and_io",
-    "java/java8_features","java/java_streams","java/functional_programming","java/java9_to_21_features",
-    "java/jvm_internals",
+    "java/java8_features","java/java_time_datetime","java/java_streams","java/functional_programming","java/java9_to_21_features",
+    "java/jvm_internals","java/bytecode_and_classfile",
     "java/concurrency","java/collections_internals","java/design_patterns_in_java",
     "java/performance_and_tuning","java/java_memory_model",
     "java/java_interview_patterns","java/testing_junit_mockito","java/annotation_processing",
     "java/structured_concurrency_and_loom","java/foreign_function_and_memory_api","java/reactive_programming",
-    "java/networking_and_http_client","java/jdbc_and_database","java/grpc_protobuf","java/microservices_patterns",
+    "java/networking_and_http_client","java/jdbc_and_database","java/security_and_cryptography","java/grpc_protobuf","java/microservices_patterns",
   ],
   lld: [
     "lld/design_principles","lld/solid_principles",
@@ -88,10 +85,10 @@ const STUDY_ORDER = {
     "ml/linear_algebra_and_calculus","ml/probability_and_statistics","ml/optimization_theory","ml/information_theory",
     "ml/supervised_learning","ml/ensemble_methods","ml/unsupervised_learning","ml/feature_engineering","ml/model_evaluation_and_selection",
     "ml/neural_network_fundamentals","ml/convolutional_neural_networks","ml/recurrent_neural_networks","ml/training_deep_networks","ml/generative_models",
-    "ml/computer_vision","ml/natural_language_processing","ml/recommender_systems","ml/time_series_forecasting","ml/reinforcement_learning",
+    "ml/computer_vision","ml/natural_language_processing","ml/recommender_systems","ml/multi_task_and_multi_objective_learning","ml/time_series_forecasting","ml/anomaly_detection","ml/reinforcement_learning",
     "ml/ml_system_design","ml/data_pipelines_and_processing","ml/distributed_training","ml/experiment_tracking_and_versioning","ml/gpu_and_hardware_optimization","ml/active_learning_and_weak_supervision",
     "ml/model_serving_and_inference","ml/model_compression_and_efficiency","ml/monitoring_and_drift_detection","ml/mlops_and_ci_cd",
-    "ml/graph_neural_networks","ml/self_supervised_and_contrastive_learning","ml/causal_inference_and_ml","ml/adversarial_ml_and_robustness","ml/uncertainty_quantification_and_conformal_prediction",
+    "ml/graph_neural_networks","ml/self_supervised_and_contrastive_learning","ml/causal_inference_and_ml","ml/adversarial_ml_and_robustness","ml/privacy_preserving_ml","ml/interpretability_and_explainability","ml/uncertainty_quantification_and_conformal_prediction",
     "ml/ml_interview_patterns","ml/model_selection_and_algorithm_choice",
   ],
   python: [
@@ -106,9 +103,9 @@ const STUDY_ORDER = {
     "spring/ioc_container","spring/bean_lifecycle","spring/dependency_injection","spring/spring_configuration",
     "spring/spring_proxies","spring/spring_aop",
     "spring/spring_boot_autoconfiguration","spring/spring_boot_configuration","spring/spring_boot_actuator","spring/spring_modulith",
-    "spring/spring_mvc_architecture","spring/request_handling","spring/filters_and_interceptors","spring/spring_webflux","spring/spring_graphql","spring/validation_and_error_handling",
+    "spring/spring_mvc_architecture","spring/request_handling","spring/filters_and_interceptors","spring/spring_webflux","spring/spring_graphql","spring/spring_hateoas_rest_maturity","spring/spring_grpc","spring/validation_and_error_handling",
     "spring/spring_data_jpa","spring/spring_transactions","spring/spring_caching",
-    "spring/spring_security_architecture","spring/spring_security_jwt_oauth",
+    "spring/spring_security_architecture","spring/spring_security_jwt_oauth","spring/spring_session",
     "spring/spring_cloud_config","spring/spring_cloud_patterns","spring/spring_messaging","spring/spring_batch","spring/spring_events_and_scheduling","spring/spring_ai","spring/spring_integration",
     "spring/spring_testing","spring/spring_performance","spring/observability_and_tracing","spring/spring_native_graalvm",
   ],
@@ -312,7 +309,7 @@ document.addEventListener("mouseup", (e) => {
     }
     return;
   }
-  if (e.button === 3 && typeof state.screenBack === "function") vt(state.screenBack);
+  if (e.button === 3) history.back();              // outside the reader: walk the hash history
 });
 document.addEventListener("mousedown", (e) => {   // suppress browser history nav
   if (e.button === 3 || e.button === 4) e.preventDefault();
@@ -328,7 +325,34 @@ function shuffle(a) {
   return a;
 }
 
-async function apiGet(path, fallback, cache = "no-store") {
+// Deterministic hashing + PRNG for future date-seeded features (daily pick,
+// stable "shuffles" that survive a reload). cyrb53 -> 53-bit hash of a string;
+// mulberry32 -> fast seeded generator returning floats in [0, 1).
+function cyrb53(str, seed = 0) {
+  let h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
+}
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Fetch a static JSON file (question banks, index, graph); returns `fallback`
+// on any error. Pages serves these with normal caching; "default" lets a 304
+// revalidate the multi-MB banks instead of re-downloading them every boot.
+async function fetchJSON(path, fallback, cache = "no-store") {
   try { const r = await fetch(path, { cache }); if (!r.ok) throw 0; return await r.json(); }
   catch { return fallback; }
 }
@@ -356,6 +380,12 @@ const sfx = (() => {
     wrong() { tone(190, 0.22, "sawtooth", 0.05); },
     combo() { tone(880, 0.08); tone(1175, 0.1, "triangle", 0.05, 0.06); tone(1568, 0.12, "triangle", 0.05, 0.12); },
     finish() { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.2, "triangle", 0.06, i * 0.1)); },
+    // --- moment tones (0.5) ---
+    levelup() { [523, 659, 784, 988, 1319].forEach((f, i) => tone(f, 0.18, "triangle", 0.06, i * 0.07)); },
+    tier() { [523, 659, 784].forEach((f, i) => tone(f, 0.55, "sine", 0.05, i * 0.02)); },
+    gold() { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.7, "sine", 0.055, i * 0.03)); },
+    bell() { tone(1047, 1.3, "sine", 0.06); tone(2094, 1.1, "sine", 0.02, 0.01); },
+    chime() { tone(784, 0.4, "sine", 0.045); tone(1175, 0.5, "sine", 0.035, 0.06); },
     isOn: on,
     toggle() { const wasOn = on(); localStorage.setItem("sd_mute", wasOn ? "1" : "0"); return !wasOn; },
   };
@@ -408,58 +438,18 @@ function countUp(node, to) {
 }
 
 /* ---------- persistence ---------- */
-async function loadProgress() {
+// localStorage sd_progress is the single source of truth (Pages-only).
+function loadProgress() {
   const fill = (p) => { if (!p.reviews) p.reviews = {}; if (p.freezes == null) p.freezes = 2; if (!p.freezeUsedOn) p.freezeUsedOn = []; return p; };
-  if (!IS_STATIC) {
-    await flushPendingSessions();                  // replay sessions saved while the server was down
-    const p = await apiGet("/api/progress", null);
-    if (p) return fill(p);
-  }
   let ls = null;
   try { ls = JSON.parse(localStorage.getItem("sd_progress")); } catch { /* corrupt -> reseed */ }
   return ls ? fill(ls)
     : { streak: 0, longestStreak: 0, lastPlayed: null, totalXP: 0, sections: {}, history: [], reviews: {}, freezes: 2, freezeUsedOn: [] };
 }
 
-// Sessions that failed to POST are queued and replayed on next boot, so an
-// offline server never silently loses a play (which could burn a freeze or
-// reset the streak days later).
-async function postSession(session) {
-  const r = await fetch("/api/progress", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(session),
-  });
-  if (!r.ok) throw 0;
-  return r.json();
-}
-
-async function flushPendingSessions() {
-  let queue = [];
-  try { queue = JSON.parse(localStorage.getItem("sd_pending_sessions")) || []; } catch { }
-  if (!queue.length) return;
-  const remaining = [];
-  for (const s of queue) {
-    try { await postSession(s); } catch { remaining.push(s); }
-  }
-  localStorage.setItem("sd_pending_sessions", JSON.stringify(remaining));
-}
-
-async function saveSession(session) {
-  if (IS_STATIC) return saveSessionLocal(session);
-  try {
-    const data = await postSession(session);
-    state.progress = data.progress;
-    return { xp: data.xpEarned, freezeUsed: !!data.freezeUsed };
-  } catch {
-    let queue = [];
-    try { queue = JSON.parse(localStorage.getItem("sd_pending_sessions")) || []; } catch { }
-    queue.push(session);
-    localStorage.setItem("sd_pending_sessions", JSON.stringify(queue.slice(-30)));
-    return saveSessionLocal(session);              // optimistic local view until the replay lands
-  }
-}
-
-// SM-2-lite: mirrors schedule_review() in server.py exactly.
-function scheduleReview(rv, status, today) {
+// SM-2-lite spaced-repetition scheduler. `ms` (time-to-answer, optional) is
+// tracked as an EMA so future difficulty tuning has a per-question latency signal.
+function scheduleReview(rv, status, today, ms) {
   if (status === "correct") {
     rv.reps = (rv.reps || 0) + 1;
     rv.ease = Math.min(3.0, (rv.ease || 2.5) + 0.1);
@@ -471,14 +461,14 @@ function scheduleReview(rv, status, today) {
     rv.ease = Math.max(1.3, (rv.ease || 2.5) - (status === "wrong" ? 0.2 : 0.05));
     rv.interval = 1;
   }
+  if (ms > 0) rv.ms = rv.ms ? Math.round(0.7 * rv.ms + 0.3 * ms) : Math.round(ms);
   const due = new Date(today + "T00:00:00");
   due.setDate(due.getDate() + rv.interval);
   rv.due = due.toLocaleDateString("en-CA");
   return rv;
 }
 
-// Mirrors record_session's streak-freeze + SM-2 logic in server.py.
-// Used for static hosting (GitHub Pages) and as the offline server fallback.
+// Streak-freeze + SM-2 progress update. Writes localStorage sd_progress.
 function saveSessionLocal(session) {
   const p = state.progress;
   if (p.freezes == null) p.freezes = 2;
@@ -493,7 +483,7 @@ function saveSessionLocal(session) {
     if (res.id) {
       const rv = reviews[res.id] || { ease: 2.5, interval: 0, reps: 0, lapses: 0 };
       rv.section = res.section; rv.module = res.module;
-      scheduleReview(rv, res.status, session.date);
+      scheduleReview(rv, res.status, session.date, res.ms);
       reviews[res.id] = rv;
     }
   }
@@ -518,9 +508,9 @@ function saveSessionLocal(session) {
   p.totalXP = (p.totalXP || 0) + xp;
   (p.history = p.history || []).push({
     date: session.date, answered: (session.results || []).length, correct, xp,
-    section: session.section || "unknown",
+    section: session.section || "unknown", durationSec: session.durationSec || 0,
   });
-  p.history = p.history.slice(-365);               // same cap as server.py
+  p.history = p.history.slice(-365);               // rolling one-year history cap
   localStorage.setItem("sd_progress", JSON.stringify(p));
   return { xp, freezeUsed };
 }
@@ -621,6 +611,16 @@ function renderHome() {
   const streakLine = streak > 0
     ? `You're on a <b>${streak}-day</b> streak. Keep it alive.${freezeBit}`
     : `Start your streak today &mdash; just 5 minutes.${freezeBit}`;
+  // Resume card: a same-day snapshot of an interrupted blitz (above review).
+  const resume = resumeSummary();
+  const resumeCard = resume
+    ? `<button class="review-card resume" id="resumeBtn">
+         <div><div class="eyebrow">Unfinished blitz</div>
+         <h2>Resume your blitz</h2>
+         <p class="msg">${resume.done}/${resume.total} done${resume.combo >= 2 ? ` &middot; ${resume.combo}x combo alive` : ""}. Pick up where you left off.</p></div>
+         <span class="review-go">Resume &rarr;</span>
+       </button>`
+    : "";
   const due = dueReviews();
   const reviewCard = due.length
     ? `<button class="review-card" id="reviewBtn">
@@ -655,7 +655,6 @@ function renderHome() {
       </button>`;
   }).join("");
   const dateLine = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
-  state.screenBack = null;
   app.innerHTML = `
     <div class="hero">
       <div class="hero-row">${goalRing()}<div>
@@ -668,26 +667,28 @@ function renderHome() {
       <p class="msg">${esc(coachMsg || `${QUESTIONS_PER_BLITZ} questions pulled from your ${label(section)} notes.`)}</p>
       <button class="cta" id="startBtn">Start &mdash; ${QUESTIONS_PER_BLITZ} questions<small>~5 min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}</small></button>
     </div>
+    ${resumeCard}
     ${reviewCard}
     ${weakCard}
     ${rustyNote}
     <h2 class="section-h">Or pick a section &mdash; then choose sub-topics</h2>
     <div class="grid">${tiles}</div>`;
   el("#startBtn").addEventListener("click", () => startBlitz(section));
+  if (resume) el("#resumeBtn").addEventListener("click", resumeDeck);
   if (due.length) el("#reviewBtn").addEventListener("click", startReview);
   if (worst) el("#weakBtn").addEventListener("click", startWeakSpots);
   if (rusty) el("#rustyBtn").addEventListener("click", () => startBlitz(rusty.s));
   document.querySelectorAll(".tile").forEach((b) =>
-    b.addEventListener("click", () => openTopics(b.dataset.section)));
+    b.addEventListener("click", () => go("#/topics/" + b.dataset.section)));
   wireReveals();
 }
 
 /* ---------- bank loading / sub-topic picker ---------- */
 const bankCache = {};
 async function loadBank(section) {
-  // "default" lets the server's no-cache header drive revalidation (304s) —
-  // these files are multi-MB; no-store would re-download them on every boot.
-  if (!bankCache[section]) bankCache[section] = await apiGet(`questions/${section}.json`, null, "default");
+  // "default" cache lets a 304 revalidate these multi-MB files instead of
+  // re-downloading them on every boot.
+  if (!bankCache[section]) bankCache[section] = await fetchJSON(`questions/${section}.json`, null, "default");
   return bankCache[section];
 }
 
@@ -713,7 +714,6 @@ async function openTopics(section) {
     return;
   }
   const mods = modulesOf(bank);
-  state.screenBack = renderHome;
   const rows = mods.map((m) =>
     `<label class="modrow"><input type="checkbox" class="modcheck" value="${esc(m.module)}" checked />
        <span class="mname">${esc(m.name)}</span><span class="mcount">${m.count}</span></label>`).join("");
@@ -746,16 +746,32 @@ async function openTopics(section) {
     document.querySelectorAll(".modrow").forEach((r) =>
       (r.style.display = r.querySelector(".mname").textContent.toLowerCase().includes(f) ? "" : "none"));
   });
-  el("#backBtn").addEventListener("click", () => vt(renderHome));
+  el("#backBtn").addEventListener("click", () => go("#/home"));
   el("#startSel").addEventListener("click", () => startBlitz(section, selected()));
   updateCount();
   wireReveals();
 }
 
 /* ---------- deck building ---------- */
-function makeItem(q) {
-  const opts = shuffle([{ t: q.correct, ok: true }, ...q.distractors.map((d) => ({ t: d, ok: false }))]);
-  return { q, opts, status: "pending", boss: false };
+// Option "src" tags let a snapshot replay the exact arrangement: 0 = correct
+// answer, i+1 = distractors[i].
+function optionsFor(q) {
+  return [{ src: 0, t: q.correct, ok: true },
+    ...q.distractors.map((d, i) => ({ src: i + 1, t: d, ok: false }))];
+}
+// optOrder (from a resume snapshot) rebuilds the same option order without a
+// reshuffle; a stale/mismatched order falls back to a fresh shuffle.
+function makeItem(q, optOrder) {
+  const base = optionsFor(q);
+  let opts;
+  if (optOrder && optOrder.length === base.length) {
+    const bySrc = new Map(base.map((o) => [o.src, o]));
+    opts = optOrder.map((s) => bySrc.get(s));
+    if (opts.some((o) => !o)) opts = shuffle(base);
+  } else {
+    opts = shuffle(base);
+  }
+  return { q, opts, optOrder: opts.map((o) => o.src), status: "pending", boss: false };
 }
 
 // Quiz vs flashcard is a global, persisted preference toggled from the top bar.
@@ -777,6 +793,8 @@ function startDeck(questions, replayFn) {
   state.cursor = 0;
   state.combo = 0; state.maxCombo = 0; state.sessionXp = 0;
   state.replayFn = replayFn;
+  state.startedAt = Date.now();
+  setQuizHash(state.section);
   state.mode === "flash" ? renderCard() : renderQuestion();
 }
 
@@ -854,6 +872,91 @@ async function startWeakSpots() {
   startDeck(items.slice(0, QUESTIONS_PER_BLITZ), startWeakSpots);
 }
 
+/* ---------- session guard: pause / resume ---------- */
+// A live deck is snapshotted to localStorage after every answer/skip/grade so a
+// refresh (or navigating away) can resume the exact same blitz. optOrder makes
+// the option arrangement pixel-identical; queue/cursor/combo/XP restore progress.
+function saveDeckSnapshot() {
+  if (!state.inQuiz || !state.deck.length) return;
+  const snap = {
+    date: todayISO(), section: state.section, modules: state.modules, mode: state.mode,
+    items: state.deck.map((d) => ({ id: d.q.id, optOrder: d.optOrder, status: d.status, boss: d.boss })),
+    queue: state.queue, cursor: state.cursor,
+    combo: state.combo, maxCombo: state.maxCombo, sessionXp: state.sessionXp,
+    startedAt: state.startedAt,
+  };
+  try { localStorage.setItem("sd_active_deck", JSON.stringify(snap)); } catch { /* quota */ }
+}
+
+function readDeckSnapshot() {
+  let snap = null;
+  try { snap = JSON.parse(localStorage.getItem("sd_active_deck")); } catch { /* corrupt */ }
+  return snap && Array.isArray(snap.items) && snap.items.length ? snap : null;
+}
+
+function clearDeckSnapshot() { localStorage.removeItem("sd_active_deck"); }
+
+// Previous-day snapshots are discarded silently on boot — a resume must be same-day.
+function discardStaleDeck() {
+  const snap = readDeckSnapshot();
+  if (snap && snap.date !== todayISO()) clearDeckSnapshot();
+}
+
+function resumeSummary() {
+  const snap = readDeckSnapshot();
+  if (!snap || snap.date !== todayISO()) return null;
+  const DONE = ["correct", "wrong", "learned"];
+  const done = snap.items.filter((it) => DONE.includes(it.status)).length;
+  return { snap, done, total: snap.items.length, combo: snap.combo || 0 };
+}
+
+// Rebuild state.deck from a snapshot: re-fetch the bank(s), map ids -> questions,
+// restore the option order and per-item status, then render the current card.
+async function resumeDeck() {
+  const snap = readDeckSnapshot();
+  if (!snap) { renderHome(); return; }
+  app.innerHTML = `<div class="loading">Resuming your blitz&hellip;</div>`;
+  // Gather every bank the snapshot's questions live in (a review deck spans sections).
+  const sections = new Set();
+  const secOf = (id) => id.split("/")[0];
+  snap.items.forEach((it) => sections.add(secOf(it.id)));
+  const byId = new Map();
+  for (const sec of sections) {
+    const bank = await loadBank(sec);
+    if (bank) for (const q of bank) byId.set(q.id, q);
+  }
+  const deck = [], idxMap = new Map();
+  snap.items.forEach((it, oldIdx) => {
+    const q = byId.get(it.id);
+    if (!q) return;                                // orphaned question: drop gracefully
+    const item = makeItem(q, it.optOrder);
+    item.status = it.status; item.boss = !!it.boss;
+    idxMap.set(oldIdx, deck.length);
+    deck.push(item);
+  });
+  if (!deck.length) { clearDeckSnapshot(); renderHome(); return; }
+  const queue = (snap.queue || []).map((i) => idxMap.get(i)).filter((i) => i !== undefined);
+  if (!queue.length) { clearDeckSnapshot(); renderHome(); return; }
+  let cursor = 0;                                  // count surviving pre-cursor queue slots
+  for (let k = 0; k < (snap.cursor || 0) && k < (snap.queue || []).length; k++)
+    if (idxMap.has(snap.queue[k])) cursor++;
+  const DONE = ["correct", "wrong", "learned"];
+  while (cursor < queue.length && DONE.includes(deck[queue[cursor]].status)) cursor++;
+  state.mode = snap.mode === "flash" ? "flash" : "quiz";
+  state.deck = deck; state.queue = queue; state.cursor = cursor;
+  state.combo = snap.combo || 0; state.maxCombo = snap.maxCombo || 0;
+  state.sessionXp = snap.sessionXp || 0;
+  state.section = snap.section; state.modules = snap.modules || null;
+  state.startedAt = snap.startedAt || Date.now();
+  state.replayFn = snap.section === "review" ? startReview
+    : snap.section === "weakspots" ? startWeakSpots
+    : () => startBlitz(snap.section, snap.modules);
+  state.inQuiz = true;
+  setQuizHash(state.section);
+  if (cursor >= queue.length) { finish(); return; } // every card answered: go straight to results
+  state.mode === "flash" ? renderCard() : renderQuestion();
+}
+
 /* ---------- quiz ---------- */
 function isLastInQueue() { return state.cursor >= state.queue.length - 1; }
 
@@ -865,7 +968,7 @@ function renderQuestion() {
   const { q, opts } = item;
   const teach = item.status === "skipped";
   state.inQuiz = true; state.answered = false; state.curOptsLen = opts.length;
-  state.screenBack = null;                         // mouse-back never aborts a live deck
+  state.qShownAt = performance.now();
   const DONE = ["correct", "wrong", "learned"];
   const dots = state.deck.map((it, i) =>
     `<span class="dot ${DONE.includes(it.status) ? "done" : ""} ${it.boss ? "boss" : ""} ${i === idx ? "cur" : ""}"></span>`).join("");
@@ -880,7 +983,7 @@ function renderQuestion() {
   app.innerHTML = `
     <div class="qhead">
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)} <span class="diff d-${esc(q.difficulty)}">${esc(q.difficulty)}</span></span>
-      <span class="qright"><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dots}</span><span class="qnum">${state.cursor + 1}/${state.queue.length}</span></span>
+      <span class="qright"><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dots}</span><span class="qnum">${state.cursor + 1}/${state.queue.length}</span></span>
     </div>
     ${bossBanner}${teachBlock}
     <div class="qtext">${esc(q.question)} ${comboChip}</div>
@@ -896,6 +999,7 @@ function renderQuestion() {
     b.addEventListener("click", () => answer(parseInt(b.dataset.i, 10))));
   if (item.status === "pending") el("#skipBtn").addEventListener("click", skipQuestion);
   el("#nextBtn").addEventListener("click", nextQuestion);
+  el("#qpauseBtn").addEventListener("click", () => openPauseSheet(null));
   app.focus({ preventScroll: true });              // keep keyboard + SR context on the new question
 }
 
@@ -903,6 +1007,7 @@ function answer(i) {
   if (state.answered) return;
   state.answered = true;
   const item = state.deck[state.queue[state.cursor]];
+  item.ms = Math.max(0, Math.round(performance.now() - (state.qShownAt || performance.now())));
   const { q, opts } = item;
   const teach = item.status === "skipped";
   const optBtns = document.querySelectorAll(".opt");
@@ -939,6 +1044,7 @@ function answer(i) {
     el("#deeperBtn").addEventListener("click", () => openReader(q.module, q.moduleName));
   }
   el("#nextBtn").classList.add("show");
+  saveDeckSnapshot();
 }
 
 function skipQuestion() {
@@ -947,6 +1053,7 @@ function skipQuestion() {
   state.deck[idx].status = "skipped";
   state.queue.push(idx); // returns at the end in teach mode
   nextQuestion();
+  saveDeckSnapshot();                              // reflects the advanced cursor + re-queued skip
 }
 
 function nextQuestion() {
@@ -961,14 +1068,14 @@ function renderCard() {
   const item = state.deck[idx];
   const { q } = item;
   state.inQuiz = true; state.answered = false; state.curOptsLen = 0;
-  state.screenBack = null;
+  state.qShownAt = performance.now();
   const DONE = ["correct", "wrong", "learned"];
   const dots = state.deck.map((it, i) =>
     `<span class="dot ${DONE.includes(it.status) ? "done" : ""} ${i === idx ? "cur" : ""}"></span>`).join("");
   app.innerHTML = `
     <div class="qhead">
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)}</span>
-      <span class="qright"><span class="dots" role="img" aria-label="Card ${state.cursor + 1} of ${state.queue.length}">${dots}</span><span class="qnum">${state.cursor + 1}/${state.queue.length}</span></span>
+      <span class="qright"><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Card ${state.cursor + 1} of ${state.queue.length}">${dots}</span><span class="qnum">${state.cursor + 1}/${state.queue.length}</span></span>
     </div>
     <div class="flash-label">Flashcard &middot; recall it, then grade yourself</div>
     <div class="qtext">${esc(q.question)}</div>
@@ -978,6 +1085,7 @@ function renderCard() {
       <button class="next show" id="revealBtn">Reveal answer (Space)</button>
     </div>`;
   el("#revealBtn").addEventListener("click", revealCard);
+  el("#qpauseBtn").addEventListener("click", () => openPauseSheet(null));
   app.focus({ preventScroll: true });
 }
 
@@ -1004,30 +1112,41 @@ function revealCard() {
 function gradeCard(got) {
   if (!state.answered) return;
   const item = state.deck[state.queue[state.cursor]];
+  item.ms = Math.max(0, Math.round(performance.now() - (state.qShownAt || performance.now())));
   if (got) { item.status = "correct"; state.sessionXp += 10; sfx.correct(); floatXP(10, el("#gotBtn")); }
   else { item.status = "wrong"; sfx.wrong(); }
   state.cursor++;
   if (state.cursor < state.queue.length) renderCard();
   else finish();
+  saveDeckSnapshot();                              // guarded: no-op once finish() ends the deck
 }
 
-async function finish() {
+async function finish(opts = {}) {
   state.inQuiz = false;
+  clearDeckSnapshot();                             // the deck is resolved; no resume
   app.innerHTML = `<div class="loading">Saving your progress&hellip;</div>`;
-  const total = state.deck.length;
-  const correct = state.deck.filter((d) => d.status === "correct").length;
-  const learned = state.deck.filter((d) => d.status === "learned").length;
+  const DONE = ["correct", "wrong", "learned"];
+  // Early finish ("Finish now") records only attempted cards; a normal finish
+  // records the whole deck (every card has a terminal status by then).
+  const recorded = opts.early ? state.deck.filter((d) => DONE.includes(d.status)) : state.deck;
+  const total = recorded.length;
+  const correct = recorded.filter((d) => d.status === "correct").length;
+  const learned = recorded.filter((d) => d.status === "learned").length;
   const bonusXp = Math.max(0, state.sessionXp - correct * 10);
-  const results = state.deck.map((d) => ({ id: d.q.id, section: d.q.section, module: d.q.module, status: d.status }));
-  const { xp, freezeUsed } = await saveSession({ date: todayISO(), section: state.section, results, bonusXp });
+  const results = recorded.map((d) => ({ id: d.q.id, section: d.q.section, module: d.q.module, status: d.status, ms: d.ms || 0 }));
+  const durationSec = Math.max(0, Math.round((Date.now() - (state.startedAt || Date.now())) / 1000));
+  const pre = progressSnapshot();                  // for the moments engine (before the save)
+  const { xp, freezeUsed } = saveSessionLocal({ date: todayISO(), section: state.section, results, bonusXp, durationSec });
+  await queueMoments(pre, progressSnapshot());     // celebrate milestones before the results
   refreshStats();
-  const pct = Math.round((correct / total) * 100);
+  const pct = total ? Math.round((correct / total) * 100) : 0;
   const flawless = pct === 100 && total > 0;
   if (flawless) { confetti(); sfx.finish(); }
   const cheer = flawless ? "Flawless! " : pct >= 70 ? "Strong work. " : pct >= 40 ? "Good progress. " : "Every rep counts. ";
   announce(`Blitz finished. ${correct} of ${total} correct. ${xp} XP earned.`);
   const freezeNote = freezeUsed
     ? `<div class="freeze-saved">${ICON("snow", "i-snow")} Streak saved &mdash; 1 freeze used (${state.progress.freezes || 0} left)</div>` : "";
+  const backupNote = backupNudgeHTML();
   const extraBadges =
     (learned ? `<div class="badge"><div class="n">${learned}</div><div class="l">Learned</div></div>` : "") +
     (state.maxCombo >= 2 ? `<div class="badge"><div class="n">${state.maxCombo}&times;</div><div class="l">Best combo</div></div>` : "");
@@ -1043,7 +1162,6 @@ async function finish() {
       </div>`).join("")}
     </div>` : "";
   const R = 56, CIRC = +(2 * Math.PI * R).toFixed(1);
-  state.screenBack = renderHome;
   app.innerHTML = `
     <div class="result">
       <div class="score-wrap">
@@ -1058,7 +1176,7 @@ async function finish() {
         <div class="scorering">${correct}<small>/${total}</small></div>
       </div>
       <p class="sub">${cheer}${pct}% known${learned ? ` &middot; ${learned} learned` : ""}</p>
-      ${freezeNote}
+      ${freezeNote}${backupNote}
       <div class="badges">
         <div class="badge"><div class="n" id="xpCount">+0</div><div class="l">XP</div></div>
         ${extraBadges}
@@ -1077,13 +1195,175 @@ async function finish() {
     const f = el(".sr-fg");
     if (f) f.style.strokeDashoffset = (CIRC * (1 - correct / Math.max(1, total))).toFixed(1);
   });
-  el("#againBtn").addEventListener("click", () => (state.replayFn ? state.replayFn() : renderHome()));
-  el("#homeBtn").addEventListener("click", () => vt(renderHome));
-  el("#progBtn").addEventListener("click", () => vt(renderProgress));
+  el("#againBtn").addEventListener("click", () => (state.replayFn ? state.replayFn() : go("#/home")));
+  el("#homeBtn").addEventListener("click", () => go("#/home"));
+  el("#progBtn").addEventListener("click", () => go("#/progress"));
   document.querySelectorAll(".miss-deeper").forEach((b) =>
     b.addEventListener("click", () => { const m = misses[+b.dataset.k]; openReader(m.q.module, m.q.moduleName); }));
   wireReveals();
   app.focus({ preventScroll: true });
+}
+
+/* ---------- moments engine ---------- */
+// A moment is a full-screen glass overlay celebrating a milestone. Moments are
+// awaitable so finish() can play them one after another before the results.
+const TIER_RANK = { Bronze: 1, Silver: 2, Gold: 3 };
+const STREAK_MILES = [7, 14, 30, 50, 100];
+
+// Snapshot the milestone-bearing fields of progress so a before/after diff can
+// detect a level-up, tier promotion, streak milestone, cleared backlog, or goal.
+function progressSnapshot() {
+  const p = state.progress, tiers = {};
+  for (const s of Object.keys(p.sections || {})) tiers[s] = sectionTier(p.sections[s]);
+  return {
+    level: levelFromXP(p.totalXP), streak: p.streak || 0,
+    due: dueReviews().length, todaysXp: todaysXp(), tiers,
+    anyGold: Object.values(tiers).some((t) => t === "Gold"),
+  };
+}
+
+function moment({ tier = "", title, sub = "", icon = "" }) {
+  return new Promise((resolve) => {
+    const reduced = REDUCED();
+    const o = document.createElement("div");
+    o.className = "moment" + (tier ? " m-" + tier : "") + (reduced ? " reduced" : "");
+    o.setAttribute("role", "status");
+    o.innerHTML = `${reduced ? "" : `<span class="moment-burst"></span>`}
+      <div class="moment-card">
+        ${icon ? `<div class="moment-icon">${icon}</div>` : ""}
+        <div class="moment-title">${esc(title)}</div>
+        ${sub ? `<div class="moment-sub">${esc(sub)}</div>` : ""}
+      </div>`;
+    document.body.appendChild(o);
+    announce(title + (sub ? ". " + sub : ""));
+    let done = false;
+    const close = () => {
+      if (done) return; done = true;
+      clearTimeout(timer);
+      document.removeEventListener("keydown", onKey, true);
+      o.classList.add("out");
+      setTimeout(() => { o.remove(); resolve(); }, reduced ? 0 : 180);
+    };
+    const onKey = (e) => { e.preventDefault(); e.stopPropagation(); close(); };
+    o.addEventListener("click", close);
+    document.addEventListener("keydown", onKey, true);
+    const timer = setTimeout(close, 2500);
+  });
+}
+
+// Diff pre/post progress snapshots into an ordered moment list, then play them
+// sequentially. Later phases add more moment types; the diff shape stays.
+async function queueMoments(pre, post) {
+  const list = [];
+  if (post.level > pre.level)
+    list.push({ tier: "level", icon: ICON("bolt"), title: `Level ${post.level}`, sub: "New level reached.", play: () => sfx.levelup() });
+  let firstGold = post.anyGold && !pre.anyGold;
+  for (const s of Object.keys(post.tiers)) {
+    const before = TIER_RANK[pre.tiers[s]] || 0, after = TIER_RANK[post.tiers[s]] || 0;
+    if (after <= before) continue;
+    const t = post.tiers[s];
+    if (t === "Gold" && firstGold) {
+      firstGold = false;
+      list.push({ tier: "gold", icon: `<span class="moment-tier gold">Gold</span>`, title: "First Gold", sub: `${label(s)} is your first Gold-tier section.`, play: () => sfx.gold() });
+    } else {
+      list.push({ tier: t.toLowerCase(), icon: `<span class="moment-tier ${t.toLowerCase()}">${t}</span>`, title: `${t}: ${label(s)}`, sub: "Mastery tier promoted.", play: () => sfx.tier() });
+    }
+  }
+  const mile = STREAK_MILES.find((m) => pre.streak < m && post.streak >= m);
+  if (mile)
+    list.push({ tier: "streak", icon: ICON("flame", "i-flame"), title: `${mile}-day streak`, sub: "Consistency compounds.", play: () => sfx.finish() });
+  if (pre.due > 0 && post.due === 0)
+    list.push({ tier: "backlog", icon: ICON("clock"), title: "Backlog cleared", sub: "Nothing due. Your memory is current.", play: () => sfx.bell() });
+  if (pre.todaysXp < DAILY_XP_GOAL && post.todaysXp >= DAILY_XP_GOAL)
+    list.push({ tier: "goal", icon: ICON("bolt"), title: "Daily goal met", sub: `${DAILY_XP_GOAL} XP today.`, play: () => sfx.chime() });
+  for (const m of list) {
+    m.play?.();
+    await moment(m);
+  }
+}
+
+/* ---------- progress durability ---------- */
+// The whole game lives in this browser's localStorage — a backup is the only
+// safety net. Nudge on results every 25 sessions if no export in 30 days.
+function backupNudgeHTML() {
+  const n = (state.progress.history || []).length;
+  if (!(n > 0 && n % 25 === 0)) return "";
+  const last = localStorage.getItem("sd_last_export");
+  const recent = last && (Date.now() - new Date(last + "T00:00:00").getTime()) < 30 * 86400000;
+  if (recent) return "";
+  return `<div class="backup-note">Your progress lives in this browser. Export a backup from Progress.</div>`;
+}
+
+// Keys that make up a full save (future gauntlet/codex keys join this list).
+const BACKUP_KEYS = ["sd_progress", "sd_gauntlet"];
+
+function exportProgress() {
+  const blob = { version: 1, exportedAt: new Date().toISOString(), data: {} };
+  for (const k of BACKUP_KEYS) { const v = localStorage.getItem(k); if (v != null) blob.data[k] = v; }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(blob, null, 2)], { type: "application/json" }));
+  a.download = `sysdesign-daily-backup-${todayISO()}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  localStorage.setItem("sd_last_export", todayISO());
+  announce("Backup exported.");
+}
+
+function importProgress(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    let blob;
+    try { blob = JSON.parse(reader.result); } catch { alert("That file isn't a valid backup."); return; }
+    if (!blob || typeof blob !== "object" || !blob.data || typeof blob.data !== "object" || blob.data.sd_progress == null) {
+      alert("That file isn't a valid System Design Daily backup."); return;
+    }
+    if (!confirm("Import this backup? It replaces all current progress in this browser.")) return;
+    for (const k of BACKUP_KEYS) { if (blob.data[k] != null) localStorage.setItem(k, blob.data[k]); }
+    location.reload();
+  };
+  reader.readAsText(file);
+}
+
+/* ---------- session guard: pause sheet + guarded navigation ---------- */
+// Any attempt to leave a live blitz with at least one answered card raises this
+// glass confirm sheet. Zero answered -> leave silently, discard the snapshot.
+function answeredCount() {
+  const DONE = ["correct", "wrong", "learned"];
+  return state.deck.filter((d) => DONE.includes(d.status)).length;
+}
+
+// guardedNav(fn): run fn now if it's safe; otherwise open the pause sheet with
+// fn as the pending destination. Used by the router and the topbar nav handlers.
+function guardedNav(fn) {
+  if (!state.inQuiz) { fn(); return; }
+  if (answeredCount() === 0) { clearDeckSnapshot(); state.inQuiz = false; fn(); return; }
+  openPauseSheet(fn);
+}
+
+// pending: a function to run on leave (Pause & leave / Finish now). null -> Home.
+function openPauseSheet(pending) {
+  if (el("#pauseSheet")) return;
+  const leave = pending || (() => go("#/home"));
+  const done = answeredCount(), total = state.deck.length;
+  const o = document.createElement("div");
+  o.className = "pause-sheet"; o.id = "pauseSheet";
+  o.setAttribute("role", "dialog"); o.setAttribute("aria-label", "Pause this blitz");
+  o.innerHTML = `<div class="pause-card">
+      <h2>Pause this blitz?</h2>
+      <p>Your progress is saved &mdash; resume from Home. ${done}/${total} answered.</p>
+      <div class="pause-btns">
+        <button class="primary" id="pauseKeep">Keep playing</button>
+        <button class="ghost" id="pauseLeave">Pause &amp; leave</button>
+        <button class="ghost" id="pauseFinish">Finish now</button>
+      </div>
+    </div>`;
+  document.body.appendChild(o);
+  const closeSheet = () => { o.remove(); };
+  el("#pauseKeep").addEventListener("click", closeSheet);
+  el("#pauseLeave").addEventListener("click", () => { saveDeckSnapshot(); state.inQuiz = false; closeSheet(); leave(); });
+  el("#pauseFinish").addEventListener("click", () => { closeSheet(); finish({ early: true }); });
+  o.addEventListener("click", (e) => { if (e.target === o) closeSheet(); });
+  el("#pauseKeep").focus();
 }
 
 /* ---------- progress ---------- */
@@ -1116,7 +1396,6 @@ function heatmapHTML(history) {
 
 function renderProgress() {
   state.inQuiz = false;
-  state.screenBack = renderHome;
   refreshStats();
   const p = state.progress, secs = state.index.sections;
   const tiles = Object.keys(secs).sort().map((s) => {
@@ -1143,15 +1422,25 @@ function renderProgress() {
     ${heatmapHTML(p.history)}
     <h2 class="section-h">Mastery by section</h2>
     ${tiles}
+    <div class="backup-row">
+      <div class="backup-copy">Your progress lives only in this browser. Keep a backup.</div>
+      <div class="backup-actions">
+        <button class="ghost" id="exportBtn">Export backup</button>
+        <button class="ghost" id="importBtn">Import backup</button>
+        <input type="file" id="importFile" accept="application/json,.json" hidden />
+      </div>
+    </div>
     <div class="row" style="margin-top:18px"><button class="primary" id="backHome">Back to today</button></div>`;
-  el("#backHome").addEventListener("click", () => vt(renderHome));
+  el("#backHome").addEventListener("click", () => go("#/home"));
+  el("#exportBtn").addEventListener("click", exportProgress);
+  el("#importBtn").addEventListener("click", () => el("#importFile").click());
+  el("#importFile").addEventListener("change", (e) => { if (e.target.files[0]) importProgress(e.target.files[0]); });
   wireReveals();
 }
 
 /* ---------- study mode (pure reading) ---------- */
 function renderStudy() {
   state.inQuiz = false;
-  state.screenBack = renderHome;
   refreshStats();
   const secs = state.index.sections;
   let lastRead = null;
@@ -1172,9 +1461,9 @@ function renderStudy() {
     <h2 class="section-h">Pick a section to browse its topics</h2>
     <div class="grid">${tiles}</div>
     <div class="row" style="margin-top:18px"><button class="ghost" id="studyHome">&larr; Home</button></div>`;
-  document.querySelectorAll(".tile").forEach((b) => b.addEventListener("click", () => openStudySection(b.dataset.section)));
+  document.querySelectorAll(".tile").forEach((b) => b.addEventListener("click", () => go("#/study/" + b.dataset.section)));
   if (contCard) el("#contBtn").addEventListener("click", () => { reader.back = []; openReaderPath(lastRead.path, lastRead.title, null); });
-  el("#studyHome").addEventListener("click", () => vt(renderHome));
+  el("#studyHome").addEventListener("click", () => go("#/home"));
   wireReveals();
 }
 
@@ -1222,7 +1511,7 @@ async function openStudySection(section) {
   // v2: weighted prerequisite edges from graph/<section>.json (real repo
   // cross-links + lexical Q&A overlap). Pairs are undirected; orient each one
   // forward along the path order. Missing/failed file -> plain v1 path.
-  const graph = await apiGet(`graph/${section}.json`, null, "default");
+  const graph = await fetchJSON(`graph/${section}.json`, null, "default");
   const modIdx = new Map(mods.map((m, i) => [m.module, i]));
   const chords = [];
   let crossLinks = 0;
@@ -1239,7 +1528,6 @@ async function openStudySection(section) {
     if (c.lex) return;
     peers[c.from].add(c.to); peers[c.to].add(c.from);
   });
-  state.screenBack = renderStudy;
   const list = mods.map((m) => ({ path: `${m.module}/README.md`, title: m.name }));
   const files = (state.index && state.index.files) || {};
   // Practiced = any spaced-repetition entry from this module (real history only).
@@ -1569,7 +1857,7 @@ async function openStudySection(section) {
     reader.back = [];
     openReaderPath(list[idx].path, list[idx].title, { list, idx });
   });
-  el("#studyBack").addEventListener("click", () => vt(renderStudy));
+  el("#studyBack").addEventListener("click", () => go("#/study"));
   let rzT = 0;
   const onResize = () => {                         // debounced; self-removes once the screen is gone
     if (!document.body.contains(wrap)) { window.removeEventListener("resize", onResize); return; }
@@ -2687,6 +2975,14 @@ function wireReaderBody(body) {
 // Open any repo content file by path. Pushing onto the back-stack is the caller's
 // job (cross-links push; Back/Prev/Next do not), keeping history clean.
 async function openReaderPath(path, title, navCtx, frag) {
+  // Route history: first open pushes a #/reader entry (so browser Back closes the
+  // reader onto the underlying screen); navigating within the reader replaces it.
+  // _readerRouting is set when the router itself drove the open (don't re-write).
+  if (!state._readerRouting) {
+    const h = readerHash(path, frag);
+    if (document.body.classList.contains("reader-open")) history.replaceState(null, "", h);
+    else { state.underHash = location.hash || "#/home"; history.pushState(null, "", h); }
+  }
   reader.path = path;
   reader.nav = navCtx || null;
   reader.titleText = title || titleFromPath(path);
@@ -2754,7 +3050,7 @@ async function openReaderPath(path, title, navCtx, frag) {
   }
   try {
     if (readerCache[path] == null) {
-      const r = await fetch(IS_STATIC ? `../${path}` : `/content/${path}`, { cache: "no-store" });
+      const r = await fetch(`../${path}`, { cache: "no-store" });
       if (!r.ok) throw 0;
       readerCache[path] = await r.text();
     }
@@ -2773,7 +3069,7 @@ async function openReaderPath(path, title, navCtx, frag) {
     if (frag) { const t = main.querySelector("#" + CSS.escape(frag)); if (t) t.scrollIntoView({ block: "start" }); }
     localStorage.setItem("sd_last_read", JSON.stringify({ path, title: reader.titleText }));   // Study's "Continue reading"
   } catch {
-    const b = el("#readerBody"); if (b) b.innerHTML = `<div class="error">Couldn't load this page &mdash; is <code>server.py</code> running?</div>`;
+    const b = el("#readerBody"); if (b) b.innerHTML = `<div class="error">Couldn't load this page. Check your connection and try again.</div>`;
   }
 }
 
@@ -2783,16 +3079,105 @@ function openReader(module, moduleName) {
   return openReaderPath(`${module}/README.md`, moduleName, null);
 }
 
-function closeReader() {
+// Remove the reader overlay only; the underlying screen DOM is untouched.
+function closeReaderDom() {
   document.body.classList.remove("reader-open", "reader-full");
   const p = el("#reader"); if (p) p.remove();
   reader.path = null; reader.back = []; reader.nav = null;
+}
+
+// User-initiated close (X / Esc): drop the overlay and restore the underlying
+// screen's hash. (Browser Back is handled in the router, which calls closeReaderDom.)
+function closeReader() {
+  closeReaderDom();
+  if (location.hash.startsWith("#/reader")) history.replaceState(null, "", state.underHash || "#/home");
+}
+
+/* ---------- hash router ---------- */
+// Screens are hash routes so browser Back/Forward, refresh, and shareable URLs
+// all work without a build step. go() sets the hash; a single hashchange
+// listener resolves the route -> screen render. _navLock swallows the one
+// programmatic hash write we make when restoring the quiz hash on a blocked Back.
+// Reserved for later phases: #/gauntlet #/codex #/insights #/interview/<sec> #/debrief.
+let _navLock = false;
+
+const readerHash = (path, frag) => "#/reader/" + encodeURIComponent(path) + (frag ? "@" + frag : "");
+const quizRoute = (section) =>
+  section === "review" ? "#/quiz/review" : section === "weakspots" ? "#/quiz/weak" : "#/quiz/" + section;
+function setQuizHash(section) {
+  state.quizHash = quizRoute(section);
+  history.replaceState(null, "", state.quizHash);   // silent: no dispatch during play
+}
+
+// Navigate to a route (adds a history entry). The hashchange listener dispatches.
+function go(route) {
+  const r = route.startsWith("#") ? route : "#" + route;
+  if (location.hash === r) { onHashChange(); return; }   // same hash fires no event -> dispatch by hand
+  location.hash = r;
+}
+// Redirect without adding a history entry (fallbacks), then dispatch.
+function redirect(route) {
+  const r = route.startsWith("#") ? route : "#" + route;
+  history.replaceState(null, "", r);
+  onHashChange();
+}
+
+function onHashChange() {
+  if (_navLock) { _navLock = false; return; }       // swallow our own hash restore
+  const route = location.hash || "#/home";
+  const isReaderRoute = route.startsWith("#/reader/");
+
+  // Reader is an overlay: any non-reader route while it's open just closes it
+  // (Back-to-close); the underlying screen DOM is still mounted underneath.
+  if (document.body.classList.contains("reader-open") && !isReaderRoute) {
+    closeReaderDom();
+    return;
+  }
+  // Leaving a live blitz: 0 answered -> leave silently; else restore the quiz
+  // hash and raise the pause sheet with this route as the pending destination.
+  if (state.inQuiz && !route.startsWith("#/quiz") && !isReaderRoute) {
+    if (answeredCount() === 0) { clearDeckSnapshot(); state.inQuiz = false; }
+    else {
+      _navLock = true;
+      location.hash = state.quizHash || quizRoute(state.section);
+      openPauseSheet(() => go(route));
+      return;
+    }
+  }
+  vt(() => dispatch(route));
+}
+
+function dispatch(route) {
+  if (route.startsWith("#/reader/")) {
+    const enc = route.slice("#/reader/".length);
+    const at = enc.indexOf("@");
+    const path = decodeURIComponent(at >= 0 ? enc.slice(0, at) : enc);
+    const frag = at >= 0 ? enc.slice(at + 1) : null;
+    if (reader.path === path) return;               // already showing it
+    state._readerRouting = true;                    // suppress openReaderPath's own history write
+    if (!document.body.classList.contains("reader-open")) { state.underHash = "#/home"; renderHome(); }
+    openReaderPath(path, null, reader.nav || null, frag);
+    state._readerRouting = false;
+    return;
+  }
+  if (route.startsWith("#/quiz/")) {
+    if (state.inQuiz) return;                        // deck already live and rendered
+    const sec = route.slice("#/quiz/".length);       // a live deck can't survive refresh -> fall back
+    if (sec !== "review" && sec !== "weak" && state.index.sections[sec]) { redirect("#/topics/" + sec); return; }
+    redirect("#/home"); return;
+  }
+  if (route.startsWith("#/topics/")) { openTopics(route.slice("#/topics/".length)); return; }
+  if (route.startsWith("#/study/")) { openStudySection(route.slice("#/study/".length)); return; }
+  if (route === "#/study") { renderStudy(); return; }
+  if (route === "#/progress") { renderProgress(); return; }
+  renderHome();                                     // #/home and any unknown route
 }
 
 /* ---------- keyboard ---------- */
 document.addEventListener("keydown", (e) => {
   const typing = (e.target.tagName || "").toLowerCase() === "input";
   if (e.key === "Escape" && el("#helpOverlay")) { el("#helpOverlay").remove(); return; }
+  if (e.key === "Escape" && el("#pauseSheet")) { el("#pauseSheet").remove(); return; }
   if (e.key === "?" && !typing) { e.preventDefault(); toggleHelp(); return; }
   if (document.body.classList.contains("reader-open")) {
     if (e.key === "Escape") {                       // exit fullscreen first, then close
@@ -2856,17 +3241,17 @@ function syncModeBtn() {
 }
 
 async function boot() {
-  state.index = await apiGet("questions/index.json", null);
+  state.index = await fetchJSON("questions/index.json", null);
   if (!state.index) {
     app.innerHTML = `<div class="error">No question bank found. Run <code>python3 extract.py</code> then reload.</div>`;
     return;
   }
   el("#bankInfo").textContent = `${state.index.total} questions across ${Object.keys(state.index.sections).length} sections`;
-  state.progress = await loadProgress();
-  state.today = IS_STATIC ? {} : await apiGet("/api/today", {});
-  el("#navProgress").addEventListener("click", () => vt(renderProgress));
+  state.progress = loadProgress();
+  state.today = {};                                // reserved for the in-app coach (later phase)
+  el("#navProgress").addEventListener("click", () => guardedNav(() => go("#/progress")));
   const studyB = el("#navStudy");
-  if (studyB) studyB.addEventListener("click", () => vt(renderStudy));
+  if (studyB) studyB.addEventListener("click", () => guardedNav(() => go("#/study")));
   const helpB = el("#helpBtn");
   if (helpB) helpB.addEventListener("click", toggleHelp);
   restoreReaderWidth();
@@ -2885,7 +3270,22 @@ async function boot() {
     });
   }
   syncModeBtn();
-  renderHome();
+  discardStaleDeck();                              // drop a previous-day resume snapshot
+  registerServiceWorker();
+  window.addEventListener("hashchange", onHashChange);
+  // Normalize an empty hash to #/home (replace, not push) so the very first
+  // history entry carries a real route and Back never lands on a hashless URL.
+  if (!location.hash) history.replaceState(null, "", "#/home");
+  onHashChange();                                  // dispatch the initial route
+}
+
+// PWA: register the offline shell/bank cache. Only in secure contexts (https or
+// localhost); a file:// or plain-http origin has no serviceWorker and must not throw.
+function registerServiceWorker() {
+  const secure = location.protocol === "https:" ||
+    ["localhost", "127.0.0.1"].includes(location.hostname);
+  if (!secure || !navigator.serviceWorker) return;
+  try { navigator.serviceWorker.register("sw.js"); } catch { /* unsupported */ }
 }
 
 boot();

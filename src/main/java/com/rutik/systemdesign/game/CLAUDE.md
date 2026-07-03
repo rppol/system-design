@@ -15,7 +15,12 @@ The `game/` directory is an application, not study content — see
 
 ## Other invariants
 
-- Vanilla JS + CSS, no build step, no frameworks, stdlib-only `server.py`.
+- Vanilla JS + CSS, no build step, no frameworks, no external deps (the reader's
+  mermaid CDN import is the only exception).
+- **Pages-only (2026-07-03): `localStorage` `sd_progress` is the single source of
+  truth for all progress.** There is no server, no `/api`, no local scheduling
+  stack. The reader fetches content at `../<path>`; export/import from the Progress
+  screen moves progress between browsers.
 - All app colors flow from tokens in `:root` / `[data-theme=...]` blocks in
   `style.css`; themes are set via `data-theme` on `<html>` (`?theme=` URL
   param previews without persisting).

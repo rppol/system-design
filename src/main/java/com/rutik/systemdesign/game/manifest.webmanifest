@@ -1,0 +1,31 @@
+{
+  "name": "System Design Daily",
+  "short_name": "SD Daily",
+  "description": "A 5-minute daily system-design blitz built from your own notes.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#06070d",
+  "theme_color": "#06070d",
+  "icons": [
+    {
+      "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPSc1MTInIGhlaWdodD0nNTEyJyB2aWV3Qm94PScwIDAgNTEyIDUxMic+PHJlY3Qgd2lkdGg9JzUxMicgaGVpZ2h0PSc1MTInIHJ4PScxMTInIGZpbGw9JyMwNjA3MGQnLz48cmVjdCB4PScyOCcgeT0nMjgnIHdpZHRoPSc0NTYnIGhlaWdodD0nNDU2JyByeD0nOTAnIGZpbGw9J25vbmUnIHN0cm9rZT0nIzdjYWJmZicgc3Ryb2tlLXdpZHRoPScxMCcgb3BhY2l0eT0nMC40NScvPjx0ZXh0IHg9JzI1NicgeT0nMzMwJyBmb250LWZhbWlseT0ndWktbW9ub3NwYWNlLFNGTW9uby1SZWd1bGFyLE1lbmxvLENvbnNvbGFzLG1vbm9zcGFjZScgZm9udC1zaXplPScyMTAnIGZvbnQtd2VpZ2h0PSc4MDAnIGZpbGw9JyM3Y2FiZmYnIHRleHQtYW5jaG9yPSdtaWRkbGUnPlNEPC90ZXh0Pjwvc3ZnPg==",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPScxOTInIGhlaWdodD0nMTkyJyB2aWV3Qm94PScwIDAgMTkyIDE5Mic+PHJlY3Qgd2lkdGg9JzE5MicgaGVpZ2h0PScxOTInIGZpbGw9JyMwNjA3MGQnLz48dGV4dCB4PSc5NicgeT0nMTIwJyBmb250LWZhbWlseT0ndWktbW9ub3NwYWNlLFNGTW9uby1SZWd1bGFyLE1lbmxvLENvbnNvbGFzLG1vbm9zcGFjZScgZm9udC1zaXplPSc1NycgZm9udC13ZWlnaHQ9JzgwMCcgZmlsbD0nIzdjYWJmZicgdGV4dC1hbmNob3I9J21pZGRsZSc+U0Q8L3RleHQ+PC9zdmc+",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    },
+    {
+      "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPSc1MTInIGhlaWdodD0nNTEyJyB2aWV3Qm94PScwIDAgNTEyIDUxMic+PHJlY3Qgd2lkdGg9JzUxMicgaGVpZ2h0PSc1MTInIGZpbGw9JyMwNjA3MGQnLz48dGV4dCB4PScyNTYnIHk9JzMyMicgZm9udC1mYW1pbHk9J3VpLW1vbm9zcGFjZSxTRk1vbm8tUmVndWxhcixNZW5sbyxDb25zb2xhcyxtb25vc3BhY2UnIGZvbnQtc2l6ZT0nMTUzJyBmb250LXdlaWdodD0nODAwJyBmaWxsPScjN2NhYmZmJyB0ZXh0LWFuY2hvcj0nbWlkZGxlJz5TRDwvdGV4dD48L3N2Zz4=",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}
