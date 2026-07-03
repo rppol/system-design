@@ -100,18 +100,18 @@
    "lex": 0.2485
   },
   {
-   "a": "cs_fundamentals/linked_lists_stacks_and_queues",
-   "b": "cs_fundamentals/recursion_and_problem_solving_patterns",
-   "w": 0.3568,
-   "links": 1,
-   "lex": 0.2376
-  },
-  {
    "a": "cs_fundamentals/arrays_strings_and_hashing",
    "b": "cs_fundamentals/complexity_analysis_and_big_o",
    "w": 0.3568,
    "links": 2,
    "lex": 0.1796
+  },
+  {
+   "a": "cs_fundamentals/linked_lists_stacks_and_queues",
+   "b": "cs_fundamentals/recursion_and_problem_solving_patterns",
+   "w": 0.3568,
+   "links": 1,
+   "lex": 0.2376
   },
   {
    "a": "cs_fundamentals/arrays_strings_and_hashing",

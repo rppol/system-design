@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-07-02T16:44:27.134405+00:00",
-  "total": 5772,
+  "generatedAt": "2026-07-03T10:50:49.016139+00:00",
+  "total": 6514,
   "sections": {
     "backend": 424,
     "book": 127,
@@ -8,12 +8,12 @@
     "database": 379,
     "devops": 377,
     "hld": 195,
-    "java": 328,
+    "java": 418,
     "lld": 108,
     "llm": 1543,
-    "ml": 719,
+    "ml": 1271,
     "python": 597,
-    "spring": 430
+    "spring": 530
   },
   "files": {
     "backend/api_gateway_patterns": [
@@ -517,6 +517,9 @@
     "java/annotation_processing": [
       "README.md"
     ],
+    "java/bytecode_and_classfile": [
+      "README.md"
+    ],
     "java/collections_internals": [
       "README.md"
     ],
@@ -559,6 +562,9 @@
     "java/java_streams": [
       "README.md"
     ],
+    "java/java_time_datetime": [
+      "README.md"
+    ],
     "java/jdbc_and_database": [
       "README.md"
     ],
@@ -572,13 +578,18 @@
       "README.md"
     ],
     "java/performance_and_tuning": [
-      "README.md"
+      "README.md",
+      "jmx_and_management.md"
     ],
     "java/reactive_programming": [
       "README.md"
     ],
-    "java/strings_and_text": [
+    "java/security_and_cryptography": [
       "README.md"
+    ],
+    "java/strings_and_text": [
+      "README.md",
+      "regex_engine_and_redos.md"
     ],
     "java/structured_concurrency_and_loom": [
       "README.md"
@@ -961,9 +972,13 @@
       "README.md"
     ],
     "ml/active_learning_and_weak_supervision": [
-      "README.md"
+      "README.md",
+      "semi_supervised_learning.md"
     ],
     "ml/adversarial_ml_and_robustness": [
+      "README.md"
+    ],
+    "ml/anomaly_detection": [
       "README.md"
     ],
     "ml/causal_inference_and_ml": [
@@ -1010,6 +1025,9 @@
     "ml/information_theory": [
       "README.md"
     ],
+    "ml/interpretability_and_explainability": [
+      "README.md"
+    ],
     "ml/linear_algebra_and_calculus": [
       "README.md"
     ],
@@ -1031,7 +1049,8 @@
       "README.md"
     ],
     "ml/model_evaluation_and_selection": [
-      "README.md"
+      "README.md",
+      "automl_and_nas.md"
     ],
     "ml/model_selection_and_algorithm_choice": [
       "README.md"
@@ -1042,18 +1061,30 @@
     "ml/monitoring_and_drift_detection": [
       "README.md"
     ],
+    "ml/multi_task_and_multi_objective_learning": [
+      "README.md"
+    ],
     "ml/natural_language_processing": [
       "README.md",
       "attention_and_seq2seq.md",
       "bert_and_pretrained_models.md",
+      "language_modeling.md",
       "nlp_evaluation_and_metrics.md",
+      "sequence_labeling_and_crf.md",
+      "syntactic_parsing.md",
+      "text_classification.md",
       "text_representation_and_retrieval.md",
-      "tokenization_deep_dive.md"
+      "tokenization_deep_dive.md",
+      "topic_modeling.md",
+      "word_embeddings.md"
     ],
     "ml/neural_network_fundamentals": [
       "README.md"
     ],
     "ml/optimization_theory": [
+      "README.md"
+    ],
+    "ml/privacy_preserving_ml": [
       "README.md"
     ],
     "ml/probability_and_statistics": [
@@ -1093,7 +1124,8 @@
       "README.md"
     ],
     "ml/unsupervised_learning": [
-      "README.md"
+      "README.md",
+      "gaussian_mixtures_and_em.md"
     ],
     "python/async_patterns_and_pitfalls": [
       "README.md"
@@ -1239,7 +1271,8 @@
       "README.md"
     ],
     "spring/request_handling": [
-      "README.md"
+      "README.md",
+      "i18n_and_localization.md"
     ],
     "spring/spring_ai": [
       "README.md"
@@ -1280,6 +1313,12 @@
     "spring/spring_graphql": [
       "README.md"
     ],
+    "spring/spring_grpc": [
+      "README.md"
+    ],
+    "spring/spring_hateoas_rest_maturity": [
+      "README.md"
+    ],
     "spring/spring_integration": [
       "README.md"
     ],
@@ -1307,6 +1346,9 @@
     "spring/spring_security_jwt_oauth": [
       "README.md"
     ],
+    "spring/spring_session": [
+      "README.md"
+    ],
     "spring/spring_testing": [
       "README.md"
     ],
@@ -1314,7 +1356,8 @@
       "README.md"
     ],
     "spring/spring_webflux": [
-      "README.md"
+      "README.md",
+      "rsocket_reactive_messaging.md"
     ],
     "spring/validation_and_error_handling": [
       "README.md"

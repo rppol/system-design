@@ -1,9 +1,6 @@
-/* System Design Daily - 5-minute blitz. Vanilla JS, no build step. */
-
-// True when served as a static site (GitHub Pages); false on local server.py.
-// On GitHub Pages there is no /api/ — progress lives in localStorage only.
-const IS_STATIC = !["localhost", "127.0.0.1", "0.0.0.0"].includes(location.hostname)
-  && !location.hostname.match(/^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[01])\./);
+/* System Design Daily - 5-minute blitz. Vanilla JS, no build step.
+   Pages-only as of 2026-07-03: no server, no /api. localStorage sd_progress is
+   the single source of truth for all progress. */
 
 const QUESTIONS_PER_BLITZ = 10;
 const DAILY_XP_GOAL = 100;
@@ -61,13 +58,13 @@ const STUDY_ORDER = {
   ],
   java: [
     "java/core_language","java/strings_and_text","java/generics_and_type_system","java/exceptions_and_io",
-    "java/java8_features","java/java_streams","java/functional_programming","java/java9_to_21_features",
-    "java/jvm_internals",
+    "java/java8_features","java/java_time_datetime","java/java_streams","java/functional_programming","java/java9_to_21_features",
+    "java/jvm_internals","java/bytecode_and_classfile",
     "java/concurrency","java/collections_internals","java/design_patterns_in_java",
     "java/performance_and_tuning","java/java_memory_model",
     "java/java_interview_patterns","java/testing_junit_mockito","java/annotation_processing",
     "java/structured_concurrency_and_loom","java/foreign_function_and_memory_api","java/reactive_programming",
-    "java/networking_and_http_client","java/jdbc_and_database","java/grpc_protobuf","java/microservices_patterns",
+    "java/networking_and_http_client","java/jdbc_and_database","java/security_and_cryptography","java/grpc_protobuf","java/microservices_patterns",
   ],
   lld: [
     "lld/design_principles","lld/solid_principles",
@@ -88,10 +85,10 @@ const STUDY_ORDER = {
     "ml/linear_algebra_and_calculus","ml/probability_and_statistics","ml/optimization_theory","ml/information_theory",
     "ml/supervised_learning","ml/ensemble_methods","ml/unsupervised_learning","ml/feature_engineering","ml/model_evaluation_and_selection",
     "ml/neural_network_fundamentals","ml/convolutional_neural_networks","ml/recurrent_neural_networks","ml/training_deep_networks","ml/generative_models",
-    "ml/computer_vision","ml/natural_language_processing","ml/recommender_systems","ml/time_series_forecasting","ml/reinforcement_learning",
+    "ml/computer_vision","ml/natural_language_processing","ml/recommender_systems","ml/multi_task_and_multi_objective_learning","ml/time_series_forecasting","ml/anomaly_detection","ml/reinforcement_learning",
     "ml/ml_system_design","ml/data_pipelines_and_processing","ml/distributed_training","ml/experiment_tracking_and_versioning","ml/gpu_and_hardware_optimization","ml/active_learning_and_weak_supervision",
     "ml/model_serving_and_inference","ml/model_compression_and_efficiency","ml/monitoring_and_drift_detection","ml/mlops_and_ci_cd",
-    "ml/graph_neural_networks","ml/self_supervised_and_contrastive_learning","ml/causal_inference_and_ml","ml/adversarial_ml_and_robustness","ml/uncertainty_quantification_and_conformal_prediction",
+    "ml/graph_neural_networks","ml/self_supervised_and_contrastive_learning","ml/causal_inference_and_ml","ml/adversarial_ml_and_robustness","ml/privacy_preserving_ml","ml/interpretability_and_explainability","ml/uncertainty_quantification_and_conformal_prediction",
     "ml/ml_interview_patterns","ml/model_selection_and_algorithm_choice",
   ],
   python: [
@@ -106,9 +103,9 @@ const STUDY_ORDER = {
     "spring/ioc_container","spring/bean_lifecycle","spring/dependency_injection","spring/spring_configuration",
     "spring/spring_proxies","spring/spring_aop",
     "spring/spring_boot_autoconfiguration","spring/spring_boot_configuration","spring/spring_boot_actuator","spring/spring_modulith",
-    "spring/spring_mvc_architecture","spring/request_handling","spring/filters_and_interceptors","spring/spring_webflux","spring/spring_graphql","spring/validation_and_error_handling",
+    "spring/spring_mvc_architecture","spring/request_handling","spring/filters_and_interceptors","spring/spring_webflux","spring/spring_graphql","spring/spring_hateoas_rest_maturity","spring/spring_grpc","spring/validation_and_error_handling",
     "spring/spring_data_jpa","spring/spring_transactions","spring/spring_caching",
-    "spring/spring_security_architecture","spring/spring_security_jwt_oauth",
+    "spring/spring_security_architecture","spring/spring_security_jwt_oauth","spring/spring_session",
     "spring/spring_cloud_config","spring/spring_cloud_patterns","spring/spring_messaging","spring/spring_batch","spring/spring_events_and_scheduling","spring/spring_ai","spring/spring_integration",
     "spring/spring_testing","spring/spring_performance","spring/observability_and_tracing","spring/spring_native_graalvm",
   ],
@@ -177,6 +174,7 @@ const state = {
   deck: [], queue: [], cursor: 0, section: null, modules: null,
   combo: 0, maxCombo: 0, sessionXp: 0, inQuiz: false, answered: false,
   curOptsLen: 0, replayFn: null,
+  hard: false, awaitingConf: false, pendingPick: null,
 };
 
 /* ---------- helpers ---------- */
@@ -204,8 +202,12 @@ const REDUCED = () => window.matchMedia("(prefers-reduced-motion: reduce)").matc
 
 // Cross-fade between screens via the View Transitions API where available.
 function vt(fn) {
-  if (document.startViewTransition && !REDUCED()) document.startViewTransition(fn);
-  else fn();
+  if (document.startViewTransition && !REDUCED()) {
+    const t = document.startViewTransition(fn);
+    /* [C] rapid successive navigations skip a transition; the ready/finished
+       promises then reject with a benign AbortError — swallow it. */
+    t.ready?.catch(() => {}); t.finished?.catch(() => {});
+  } else fn();
 }
 
 /* ---------- ambient graphics: spotlight, parallax, scroll reveals ---------- */
@@ -312,13 +314,22 @@ document.addEventListener("mouseup", (e) => {
     }
     return;
   }
-  if (e.button === 3 && typeof state.screenBack === "function") vt(state.screenBack);
+  if (e.button === 3) history.back();              // outside the reader: walk the hash history
 });
 document.addEventListener("mousedown", (e) => {   // suppress browser history nav
   if (e.button === 3 || e.button === 4) e.preventDefault();
 });
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const label = (s) => SECTION_LABELS[s] || s;
+
+// Inline markdown for quiz surfaces: escape first, then render only `code` and
+// **bold** (the two constructs the *Md display variants use). Callers pass the
+// *Md field when present, falling back to the plain field.
+function qInline(t) {
+  return esc(t == null ? "" : t)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+}
 
 function shuffle(a) {
   for (let i = a.length - 1; i > 0; i--) {
@@ -328,7 +339,44 @@ function shuffle(a) {
   return a;
 }
 
-async function apiGet(path, fallback, cache = "no-store") {
+// Deterministic hashing + PRNG for future date-seeded features (daily pick,
+// stable "shuffles" that survive a reload). cyrb53 -> 53-bit hash of a string;
+// mulberry32 -> fast seeded generator returning floats in [0, 1).
+function cyrb53(str, seed = 0) {
+  let h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
+}
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+/* [C] Fisher-Yates with a string-seeded PRNG: the same seed always yields the
+   same order (the Gauntlet's frozen daily deck, Interviewer escalation). */
+function seededShuffle(arr, seedStr) {
+  const a = arr.slice(), rnd = mulberry32(cyrb53(String(seedStr)) >>> 0);
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// Fetch a static JSON file (question banks, index, graph); returns `fallback`
+// on any error. Pages serves these with normal caching; "default" lets a 304
+// revalidate the multi-MB banks instead of re-downloading them every boot.
+async function fetchJSON(path, fallback, cache = "no-store") {
   try { const r = await fetch(path, { cache }); if (!r.ok) throw 0; return await r.json(); }
   catch { return fallback; }
 }
@@ -356,6 +404,15 @@ const sfx = (() => {
     wrong() { tone(190, 0.22, "sawtooth", 0.05); },
     combo() { tone(880, 0.08); tone(1175, 0.1, "triangle", 0.05, 0.06); tone(1568, 0.12, "triangle", 0.05, 0.12); },
     finish() { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.2, "triangle", 0.06, i * 0.1)); },
+    // --- moment tones (0.5) ---
+    levelup() { [523, 659, 784, 988, 1319].forEach((f, i) => tone(f, 0.18, "triangle", 0.06, i * 0.07)); },
+    tier() { [523, 659, 784].forEach((f, i) => tone(f, 0.55, "sine", 0.05, i * 0.02)); },
+    gold() { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.7, "sine", 0.055, i * 0.03)); },
+    bell() { tone(1047, 1.3, "sine", 0.06); tone(2094, 1.1, "sine", 0.02, 0.01); },
+    chime() { tone(784, 0.4, "sine", 0.045); tone(1175, 0.5, "sine", 0.035, 0.06); },
+    /* [C] gauntlet wax-seal thud + codex card-flip */
+    seal() { tone(120, 0.3, "sawtooth", 0.06); tone(90, 0.4, "sine", 0.05, 0.05); tone(1568, 0.5, "sine", 0.03, 0.28); },
+    capture() { tone(660, 0.12, "triangle", 0.05); tone(990, 0.16, "triangle", 0.05, 0.08); tone(1320, 0.2, "sine", 0.04, 0.16); },
     isOn: on,
     toggle() { const wasOn = on(); localStorage.setItem("sd_mute", wasOn ? "1" : "0"); return !wasOn; },
   };
@@ -408,92 +465,85 @@ function countUp(node, to) {
 }
 
 /* ---------- persistence ---------- */
-async function loadProgress() {
-  const fill = (p) => { if (!p.reviews) p.reviews = {}; if (p.freezes == null) p.freezes = 2; if (!p.freezeUsedOn) p.freezeUsedOn = []; if (!p.awards) p.awards = {}; if (p.deepReads == null) p.deepReads = 0; return p; };  /* [C] awards + deepReads are additive persisted fields */
-  if (!IS_STATIC) {
-    await flushPendingSessions();                  // replay sessions saved while the server was down
-    const p = await apiGet("/api/progress", null);
-    if (p) return fill(p);
-  }
+// localStorage sd_progress is the single source of truth (Pages-only).
+function loadProgress() {
+  const fill = (p) => { if (!p.reviews) p.reviews = {}; if (p.freezes == null) p.freezes = 2; if (!p.freezeUsedOn) p.freezeUsedOn = []; if (!p.awards) p.awards = {}; if (p.deepReads == null) p.deepReads = 0; return p; };  /* [C] awards + deepReads backfill */
   let ls = null;
   try { ls = JSON.parse(localStorage.getItem("sd_progress")); } catch { /* corrupt -> reseed */ }
   return ls ? fill(ls)
-    : { streak: 0, longestStreak: 0, lastPlayed: null, totalXP: 0, sections: {}, history: [], reviews: {}, freezes: 2, freezeUsedOn: [] };
+    : { streak: 0, longestStreak: 0, lastPlayed: null, totalXP: 0, sections: {}, history: [], reviews: {}, freezes: 2, freezeUsedOn: [], awards: {}, deepReads: 0 };
 }
 
-// Sessions that failed to POST are queued and replayed on next boot, so an
-// offline server never silently loses a play (which could burn a freeze or
-// reset the streak days later).
-async function postSession(session) {
-  const r = await fetch("/api/progress", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(session),
-  });
-  if (!r.ok) throw 0;
-  return r.json();
-}
-
-async function flushPendingSessions() {
-  let queue = [];
-  try { queue = JSON.parse(localStorage.getItem("sd_pending_sessions")) || []; } catch { }
-  if (!queue.length) return;
-  const remaining = [];
-  for (const s of queue) {
-    try { await postSession(s); } catch { remaining.push(s); }
-  }
-  localStorage.setItem("sd_pending_sessions", JSON.stringify(remaining));
-}
-
-async function saveSession(session) {
-  if (IS_STATIC) return saveSessionLocal(session);
-  try {
-    const data = await postSession(session);
-    state.progress = data.progress;
-    return { xp: data.xpEarned, freezeUsed: !!data.freezeUsed };
-  } catch {
-    let queue = [];
-    try { queue = JSON.parse(localStorage.getItem("sd_pending_sessions")) || []; } catch { }
-    queue.push(session);
-    localStorage.setItem("sd_pending_sessions", JSON.stringify(queue.slice(-30)));
-    return saveSessionLocal(session);              // optimistic local view until the replay lands
-  }
-}
-
-// SM-2-lite: mirrors schedule_review() in server.py exactly.
-function scheduleReview(rv, status, today) {
+// SM-2-lite spaced-repetition scheduler. `ms` (time-to-answer, optional) is
+// tracked as an EMA so future difficulty tuning has a per-question latency signal.
+function scheduleReview(rv, status, today, ms, conf) {
   if (status === "correct") {
     rv.reps = (rv.reps || 0) + 1;
     rv.ease = Math.min(3.0, (rv.ease || 2.5) + 0.1);
     const r = rv.reps;
-    rv.interval = r === 1 ? 1 : r === 2 ? 3 : Math.max(1, Math.round((rv.interval || 1) * rv.ease));
+    // Desirable difficulty: a low-confidence (or slow) correct grows slower —
+    // the 0.75 factor applies only inside the growth branch (reps >= 3).
+    rv.interval = r === 1 ? 1 : r === 2 ? 3
+      : Math.max(1, Math.round((rv.interval || 1) * rv.ease * (conf === "low" ? 0.75 : 1)));
   } else {
     rv.reps = 0;
     rv.lapses = (rv.lapses || 0) + (status === "wrong" ? 1 : 0);
-    rv.ease = Math.max(1.3, (rv.ease || 2.5) - (status === "wrong" ? 0.2 : 0.05));
+    // Hypercorrection: a high-confidence miss cuts ease harder than a low one.
+    const drop = status === "wrong" ? (conf === "high" ? 0.3 : 0.2) : 0.05;
+    rv.ease = Math.max(1.3, (rv.ease || 2.5) - drop);
     rv.interval = 1;
   }
+  if (ms > 0) rv.ms = rv.ms ? Math.round(0.7 * rv.ms + 0.3 * ms) : Math.round(ms);
   const due = new Date(today + "T00:00:00");
   due.setDate(due.getDate() + rv.interval);
   rv.due = due.toLocaleDateString("en-CA");
   return rv;
 }
 
-// Mirrors record_session's streak-freeze + SM-2 logic in server.py.
-// Used for static hosting (GitHub Pages) and as the offline server fallback.
+// Median of the stored per-question answer-time EMAs across all reviews with
+// telemetry — the reference "typical" latency for the slowness signal below.
+function medianReviewMs() {
+  const arr = Object.values(state.progress.reviews || {}).map((r) => r.ms).filter((m) => m > 0).sort((a, b) => a - b);
+  return arr.length ? arr[arr.length >> 1] : 0;
+}
+
+// 0..1 "hard for you" score from spaced-repetition telemetry, or null when a
+// question has no review record yet. Combines lapses (0.5), inverse ease (0.3),
+// and slowness vs the typical answer time (0.2).
+function personalDifficulty(q, rv, medMs) {
+  if (!rv) return null;
+  const lapses = Math.min(1, (rv.lapses || 0) / 3);
+  const invEase = Math.min(1, Math.max(0, (3.0 - (rv.ease || 2.5)) / 1.7));   // ease 1.3..3.0 -> 1..0
+  const slow = medMs && rv.ms && rv.ms > 2 * medMs ? 1 : 0;
+  return Math.min(1, 0.5 * lapses + 0.3 * invEase + 0.2 * slow);
+}
+
+// Streak-freeze + SM-2 progress update. Writes localStorage sd_progress.
 function saveSessionLocal(session) {
   const p = state.progress;
   if (p.freezes == null) p.freezes = 2;
   if (!p.freezeUsedOn) p.freezeUsedOn = [];
   const reviews = (p.reviews = p.reviews || {});
+  // Session median of correct-answer times: a much-slower-than-typical correct
+  // schedules like a low-confidence one (A6 slow-correct desirable difficulty).
+  const cms = (session.results || []).filter((r) => r.status === "correct" && r.ms > 0).map((r) => r.ms).sort((a, b) => a - b);
+  const medCorrect = cms.length ? cms[cms.length >> 1] : 0;
   let correct = 0;
   for (const res of session.results || []) {
     const sec = (p.sections[res.section] = p.sections[res.section] || { seen: 0, correct: 0 });
     sec.seen += 1;
     sec.lastPlayed = session.date;
     if (res.status === "correct") { sec.correct += 1; correct += 1; }
+    // Confidence calibration tallies (A4) — only first-attempt picks carry conf.
+    if (res.conf === "high") { sec.sureSeen = (sec.sureSeen || 0) + 1; if (res.status === "correct") sec.sureCorrect = (sec.sureCorrect || 0) + 1; }
+    else if (res.conf === "low") { sec.unsureSeen = (sec.unsureSeen || 0) + 1; if (res.status === "correct") sec.unsureCorrect = (sec.unsureCorrect || 0) + 1; }
     if (res.id) {
       const rv = reviews[res.id] || { ease: 2.5, interval: 0, reps: 0, lapses: 0 };
       rv.section = res.section; rv.module = res.module;
-      scheduleReview(rv, res.status, session.date);
+      // Slow correct -> schedule like low confidence; never double-shrink.
+      let eff = res.conf;
+      if (res.status === "correct" && medCorrect && res.ms > 2 * medCorrect) eff = "low";
+      scheduleReview(rv, res.status, session.date, res.ms, eff);
       reviews[res.id] = rv;
     }
   }
@@ -518,9 +568,9 @@ function saveSessionLocal(session) {
   p.totalXP = (p.totalXP || 0) + xp;
   (p.history = p.history || []).push({
     date: session.date, answered: (session.results || []).length, correct, xp,
-    section: session.section || "unknown",
+    section: session.section || "unknown", durationSec: session.durationSec || 0,
   });
-  p.history = p.history.slice(-365);               // same cap as server.py
+  p.history = p.history.slice(-365);               // rolling one-year history cap
   localStorage.setItem("sd_progress", JSON.stringify(p));
   return { xp, freezeUsed };
 }
@@ -621,6 +671,16 @@ function renderHome() {
   const streakLine = streak > 0
     ? `You're on a <b>${streak}-day</b> streak. Keep it alive.${freezeBit}`
     : `Start your streak today &mdash; just 5 minutes.${freezeBit}`;
+  // Resume card: a same-day snapshot of an interrupted blitz (above review).
+  const resume = resumeSummary();
+  const resumeCard = resume
+    ? `<button class="review-card resume" id="resumeBtn">
+         <div><div class="eyebrow">Unfinished blitz</div>
+         <h2>Resume your blitz</h2>
+         <p class="msg">${resume.done}/${resume.total} done${resume.combo >= 2 ? ` &middot; ${resume.combo}x combo alive` : ""}. Pick up where you left off.</p></div>
+         <span class="review-go">Resume &rarr;</span>
+       </button>`
+    : "";
   const due = dueReviews();
   const reviewCard = due.length
     ? `<button class="review-card" id="reviewBtn">
@@ -656,7 +716,6 @@ function renderHome() {
       </button>`;
   }).join("");
   const dateLine = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
-  state.screenBack = null;
   app.innerHTML = `
     <div class="hero">
       <div class="hero-row">${goalRing()}<div>
@@ -671,6 +730,7 @@ function renderHome() {
       <p class="msg">${esc(coachMsg || `${QUESTIONS_PER_BLITZ} questions pulled from your ${label(section)} notes.`)}</p>
       <button class="cta" id="startBtn">Start &mdash; ${QUESTIONS_PER_BLITZ} questions<small>~5 min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}</small></button>
     </div>
+    ${resumeCard}
     ${reviewCard}
     ${weakCard}
     ${rustyNote}
@@ -681,23 +741,44 @@ function renderHome() {
     <div class="grid">${tiles}</div>`;
   el("#startBtn").addEventListener("click", () => startBlitz(section));
   /* [C] gauntlet + codex entry points */
-  const gauntBtn = el("#gauntBtn"); if (gauntBtn) gauntBtn.addEventListener("click", () => c_go("#/gauntlet"));
-  const codexLink = el("#codexLink"); if (codexLink) codexLink.addEventListener("click", () => c_go("#/codex"));
+  const gauntBtn = el("#gauntBtn"); if (gauntBtn) gauntBtn.addEventListener("click", () => go("#/gauntlet"));
+  el("#codexLink").addEventListener("click", () => go("#/codex"));
+  if (resume) el("#resumeBtn").addEventListener("click", resumeDeck);
   if (due.length) el("#reviewBtn").addEventListener("click", startReview);
   if (worst) el("#weakBtn").addEventListener("click", startWeakSpots);
   if (rusty) el("#rustyBtn").addEventListener("click", () => startBlitz(rusty.s));
   document.querySelectorAll(".tile").forEach((b) =>
-    b.addEventListener("click", () => openTopics(b.dataset.section)));
+    b.addEventListener("click", () => go("#/topics/" + b.dataset.section)));
   wireReveals();
 }
 
 /* ---------- bank loading / sub-topic picker ---------- */
 const bankCache = {};
 async function loadBank(section) {
-  // "default" lets the server's no-cache header drive revalidation (304s) —
-  // these files are multi-MB; no-store would re-download them on every boot.
-  if (!bankCache[section]) bankCache[section] = await apiGet(`questions/${section}.json`, null, "default");
+  // "default" cache lets a 304 revalidate these multi-MB files instead of
+  // re-downloading them on every boot.
+  if (!bankCache[section]) bankCache[section] = await fetchJSON(`questions/${section}.json`, null, "default");
   return bankCache[section];
+}
+
+// id -> question map per section, built lazily from the cached bank. Lets a
+// picked distractor be traced back to the question its answer came from (A2).
+const _bankById = {};
+function bankById(section) {
+  const bank = bankCache[section];
+  if (!bank) return null;
+  if (!_bankById[section] || _bankById[section].size !== bank.length)
+    _bankById[section] = new Map(bank.map((q) => [q.id, q]));
+  return _bankById[section];
+}
+// The question whose answer became this (wrong) option, or null if the id is no
+// longer in the bank. distractorIds are aligned with distractors and same-section.
+function distractorSource(q, opt) {
+  if (!opt || opt.src <= 0) return null;             // src 0 = the correct answer
+  const id = (q.distractorIds || [])[opt.src - 1];
+  if (!id) return null;
+  const byId = bankById(q.section);
+  return (byId && byId.get(id)) || null;
 }
 
 function modulesOf(bank) {
@@ -722,7 +803,6 @@ async function openTopics(section) {
     return;
   }
   const mods = modulesOf(bank);
-  state.screenBack = renderHome;
   const rows = mods.map((m) =>
     `<label class="modrow"><input type="checkbox" class="modcheck" value="${esc(m.module)}" checked />
        <span class="mname">${esc(m.name)}</span><span class="mcount">${m.count}</span></label>`).join("");
@@ -755,16 +835,32 @@ async function openTopics(section) {
     document.querySelectorAll(".modrow").forEach((r) =>
       (r.style.display = r.querySelector(".mname").textContent.toLowerCase().includes(f) ? "" : "none"));
   });
-  el("#backBtn").addEventListener("click", () => vt(renderHome));
+  el("#backBtn").addEventListener("click", () => go("#/home"));
   el("#startSel").addEventListener("click", () => startBlitz(section, selected()));
   updateCount();
   wireReveals();
 }
 
 /* ---------- deck building ---------- */
-function makeItem(q) {
-  const opts = shuffle([{ t: q.correct, ok: true }, ...q.distractors.map((d) => ({ t: d, ok: false }))]);
-  return { q, opts, status: "pending", boss: false };
+// Option "src" tags let a snapshot replay the exact arrangement: 0 = correct
+// answer, i+1 = distractors[i].
+function optionsFor(q) {
+  return [{ src: 0, t: q.correct, ok: true },
+    ...q.distractors.map((d, i) => ({ src: i + 1, t: d, ok: false }))];
+}
+// optOrder (from a resume snapshot) rebuilds the same option order without a
+// reshuffle; a stale/mismatched order falls back to a fresh shuffle.
+function makeItem(q, optOrder) {
+  const base = optionsFor(q);
+  let opts;
+  if (optOrder && optOrder.length === base.length) {
+    const bySrc = new Map(base.map((o) => [o.src, o]));
+    opts = optOrder.map((s) => bySrc.get(s));
+    if (opts.some((o) => !o)) opts = shuffle(base);
+  } else {
+    opts = shuffle(base);
+  }
+  return { q, opts, optOrder: opts.map((o) => o.src), status: "pending", boss: false };
 }
 
 // Quiz vs flashcard is a global, persisted preference toggled from the top bar.
@@ -772,25 +868,39 @@ function deckMode() { return localStorage.getItem("sd_mode") === "flash" ? "flas
 
 function startDeck(questions, replayFn, opts = {}) {
   state.mode = deckMode();
-  if (opts.interview) state.mode = "quiz";       // [C] interviewer needs the MCQ engine, not flashcards
-  state.deckOpts = opts;                          // [C]
+  if (opts.keepOrder) state.mode = "quiz";       // [C] gauntlet/interview always run the MCQ engine
+  state.hard = !!opts.hard;
+  state.awaitingConf = false;
+  state._medMs = medianReviewMs();
   const items = questions.map(makeItem);
   if (opts.keepOrder) {
-    state.deck = items;                           // [C] gauntlet/interview: the recipe IS the arc — no shuffle, no boss partition
+    state.deck = items;                          // [C] the recipe IS the arc — no shuffle, no boss partition
   } else if (state.mode === "flash") {
     state.deck = shuffle(items);                 // no boss ordering for self-grade cards
+  } else if (state.hard) {
+    state.deck = shuffle(items);                 // recall-first review: plain shuffle, no boss
   } else {
-    // boss round: advanced-difficulty questions go last and are worth 2x
-    const normal = items.filter((it) => it.q.difficulty !== "advanced");
-    const boss = items.filter((it) => it.q.difficulty === "advanced");
+    // Boss round: the hardest questions go last (2x XP). "Hardest" = calibrated
+    // personal difficulty >= 0.55, or advanced-tagged when there's no telemetry
+    // yet. Capped at the 3 hardest so a deck can't be all-boss.
+    const reviews = state.progress.reviews || {};
+    const scored = items.map((it) => {
+      const pd = personalDifficulty(it.q, reviews[it.q.id], state._medMs);
+      return { it, boss: (pd != null && pd >= 0.55) || (pd == null && it.q.difficulty === "advanced"), rank: pd == null ? -1 : pd };
+    });
+    const bossSet = new Set(scored.filter((s) => s.boss).sort((a, b) => b.rank - a.rank).slice(0, 3).map((s) => s.it));
+    const normal = items.filter((it) => !bossSet.has(it));
+    const boss = items.filter((it) => bossSet.has(it));
     boss.forEach((it) => (it.boss = true));
     state.deck = [...normal, ...boss];
   }
   state.queue = state.deck.map((_, i) => i);
   state.cursor = 0;
   state.combo = 0; state.maxCombo = 0; state.sessionXp = 0;
-  state.sessSeq = []; state.sessMaxInterval = 0; state.sessRestored = false;   // [C] per-session award tracking
+  state.sessSeq = []; state.sessMaxInterval = 0; state.sessRestored = false;   // [C] ledger award tracking
   state.replayFn = replayFn;
+  state.startedAt = Date.now();
+  setQuizHash(state.section);
   state.mode === "flash" ? renderCard() : renderQuestion();
 }
 
@@ -828,7 +938,7 @@ async function startReview() {
   }
   if (!items.length) { renderHome(); return; }
   state.section = "review"; state.modules = null;
-  startDeck(items.slice(0, QUESTIONS_PER_BLITZ), startReview);
+  startDeck(items.slice(0, QUESTIONS_PER_BLITZ), startReview, { hard: true });
 }
 
 /* ---------- weak spots ---------- */
@@ -865,7 +975,110 @@ async function startWeakSpots() {
   shuffle(filler).forEach((q) => { if (items.length < QUESTIONS_PER_BLITZ) add(q); });
   if (!items.length) { renderHome(); return; }
   state.section = "weakspots"; state.modules = null;
-  startDeck(items.slice(0, QUESTIONS_PER_BLITZ), startWeakSpots);
+  startDeck(items.slice(0, QUESTIONS_PER_BLITZ), startWeakSpots, { hard: true });
+}
+
+/* ---------- session guard: pause / resume ---------- */
+// A live deck is snapshotted to localStorage after every answer/skip/grade so a
+// refresh (or navigating away) can resume the exact same blitz. optOrder makes
+// the option arrangement pixel-identical; queue/cursor/combo/XP restore progress.
+function saveDeckSnapshot() {
+  if (!state.inQuiz || !state.deck.length) return;
+  if (state.section === "interview") return;       // [C] an interview can't pause — leaving reschedules it
+  const snap = {
+    date: todayISO(), section: state.section, modules: state.modules, mode: state.mode, hard: state.hard,
+    items: state.deck.map((d) => ({
+      id: d.q.id, optOrder: d.optOrder, status: d.status, boss: d.boss,
+      retry: d.retry, retried: d.retried, redeemed: d.redeemed, taught: d.taught, revealed: d.revealed, conf: d.conf, picked: d.picked,
+    })),
+    queue: state.queue, cursor: state.cursor,
+    combo: state.combo, maxCombo: state.maxCombo, sessionXp: state.sessionXp,
+    startedAt: state.startedAt,
+  };
+  try { localStorage.setItem("sd_active_deck", JSON.stringify(snap)); } catch { /* quota */ }
+}
+
+function readDeckSnapshot() {
+  let snap = null;
+  try { snap = JSON.parse(localStorage.getItem("sd_active_deck")); } catch { /* corrupt */ }
+  return snap && Array.isArray(snap.items) && snap.items.length ? snap : null;
+}
+
+function clearDeckSnapshot() { localStorage.removeItem("sd_active_deck"); }
+
+// Previous-day snapshots are discarded silently on boot — a resume must be same-day.
+function discardStaleDeck() {
+  const snap = readDeckSnapshot();
+  if (snap && snap.date !== todayISO()) clearDeckSnapshot();
+}
+
+function resumeSummary() {
+  const snap = readDeckSnapshot();
+  if (!snap || snap.date !== todayISO()) return null;
+  const DONE = ["correct", "wrong", "learned"];
+  const done = snap.items.filter((it) => DONE.includes(it.status)).length;
+  return { snap, done, total: snap.items.length, combo: snap.combo || 0 };
+}
+
+// Rebuild state.deck from a snapshot: re-fetch the bank(s), map ids -> questions,
+// restore the option order and per-item status, then render the current card.
+async function resumeDeck() {
+  const snap = readDeckSnapshot();
+  if (!snap) { renderHome(); return; }
+  app.innerHTML = `<div class="loading">Resuming your blitz&hellip;</div>`;
+  // Gather every bank the snapshot's questions live in (a review deck spans sections).
+  const sections = new Set();
+  const secOf = (id) => id.split("/")[0];
+  snap.items.forEach((it) => sections.add(secOf(it.id)));
+  const byId = new Map();
+  for (const sec of sections) {
+    const bank = await loadBank(sec);
+    if (bank) for (const q of bank) byId.set(q.id, q);
+  }
+  const deck = [], idxMap = new Map();
+  snap.items.forEach((it, oldIdx) => {
+    const q = byId.get(it.id);
+    if (!q) return;                                // orphaned question: drop gracefully
+    const item = makeItem(q, it.optOrder);
+    item.status = it.status; item.boss = !!it.boss;
+    item.retry = !!it.retry; item.retried = !!it.retried; item.redeemed = !!it.redeemed;
+    item.taught = !!it.taught; item.revealed = !!it.revealed;
+    if (it.conf) item.conf = it.conf;
+    if (it.picked != null) { item.picked = it.picked; item.pickedOpt = item.opts[it.picked]; }
+    idxMap.set(oldIdx, deck.length);
+    deck.push(item);
+  });
+  if (!deck.length) { clearDeckSnapshot(); renderHome(); return; }
+  const queue = (snap.queue || []).map((i) => idxMap.get(i)).filter((i) => i !== undefined);
+  if (!queue.length) { clearDeckSnapshot(); renderHome(); return; }
+  let cursor = 0;                                  // count surviving pre-cursor queue slots
+  for (let k = 0; k < (snap.cursor || 0) && k < (snap.queue || []).length; k++)
+    if (idxMap.has(snap.queue[k])) cursor++;
+  const DONE = ["correct", "wrong", "learned"];
+  // A pending redemption re-test (wrong + retry) and a skipped teach/test slot
+  // aren't "resolved" even though the item carries a terminal-ish status, so the
+  // leading-skip must stop on them.
+  const resolved = (it) => it.status !== "skipped" && !(it.status === "wrong" && it.retry && !it.retried) && DONE.includes(it.status);
+  while (cursor < queue.length && resolved(deck[queue[cursor]])) cursor++;
+  state.hard = !!snap.hard; state.awaitingConf = false; state._medMs = medianReviewMs();
+  state.mode = snap.mode === "flash" ? "flash" : "quiz";
+  state.deck = deck; state.queue = queue; state.cursor = cursor;
+  state.combo = snap.combo || 0; state.maxCombo = snap.maxCombo || 0;
+  state.sessionXp = snap.sessionXp || 0;
+  state.section = snap.section; state.modules = snap.modules || null;
+  state.startedAt = snap.startedAt || Date.now();
+  state.replayFn = snap.section === "review" ? startReview
+    : snap.section === "weakspots" ? startWeakSpots
+    : () => startBlitz(snap.section, snap.modules);
+  /* [C] gauntlet snapshots: restore the flags + replay; the rebuilt deck keeps
+     the frozen qids/order (ids + optOrder round-trip, no reshuffle). */
+  if (snap.section === "gauntlet") { state.gauntlet = { scored: true, practice: false }; state.replayFn = startGauntlet; }
+  else if (snap.section === "gauntlet-practice") { state.gauntlet = { scored: false, practice: true }; state.replayFn = startGauntlet; }
+  state.sessSeq = []; state.sessMaxInterval = 0; state.sessRestored = false;   // [C]
+  state.inQuiz = true;
+  setQuizHash(state.section);
+  if (cursor >= queue.length) { finish(); return; } // every card answered: go straight to results
+  state.mode === "flash" ? renderCard() : renderQuestion();
 }
 
 /* ---------- quiz ---------- */
@@ -873,33 +1086,59 @@ function isLastInQueue() { return state.cursor >= state.queue.length - 1; }
 
 function comboMult() { return state.combo >= 5 ? 3 : state.combo >= 3 ? 2 : 1; }
 
+// Progress counter over the stable deck (queue length lies once items requeue
+// for redemption / teach-then-test): answered-of-total, plus pending redos.
+function deckProgressCounter() {
+  const DONE = ["correct", "wrong", "learned"];
+  const answered = state.deck.filter((it) => DONE.includes(it.status)).length;
+  const redo = state.deck.filter((it) => it.retry && !it.retried).length;
+  return `${answered}/${state.deck.length}${redo ? ` &middot; ${redo} redo` : ""}`;
+}
+function dotsHTML(idx) {
+  const DONE = ["correct", "wrong", "learned"];
+  return state.deck.map((it, i) =>
+    `<span class="dot ${DONE.includes(it.status) ? "done" : ""} ${it.boss ? "boss" : ""} ${i === idx ? "cur" : ""}"></span>`).join("");
+}
+
 function renderQuestion() {
   const idx = state.queue[state.cursor];
   const item = state.deck[idx];
-  const { q, opts } = item;
-  const teach = item.status === "skipped";
-  state.inQuiz = true; state.answered = false; state.curOptsLen = opts.length;
-  state.screenBack = null;                         // mouse-back never aborts a live deck
-  const DONE = ["correct", "wrong", "learned"];
-  const dots = state.deck.map((it, i) =>
-    `<span class="dot ${DONE.includes(it.status) ? "done" : ""} ${it.boss ? "boss" : ""} ${i === idx ? "cur" : ""}"></span>`).join("");
-  const bossBanner = item.boss && !teach
+  const { q } = item;
+  // A skipped question is taught first (concept card), then tested later.
+  if (item.status === "skipped" && !item.taught) { renderTeach(item); return; }
+  const testView = item.status === "skipped" && item.taught;                    // A5 lock-it-in test
+  const retryView = item.status === "wrong" && item.retry && !item.retried;     // A1 redemption re-test
+  if (retryView) { shuffle(item.opts); item.optOrder = item.opts.map((o) => o.src); }  // fresh arrangement
+  const opts = item.opts;
+  state.inQuiz = true; state.answered = false; state.awaitingConf = false; state.curOptsLen = opts.length;
+  state.qShownAt = performance.now();
+  const gated = state.hard && !item.revealed;                                    // A3 recall-first reveal gate
+  const bossBanner = item.boss && !testView && !retryView
     ? `<div class="boss-banner">&#9889; BOSS QUESTION &middot; 2&times; XP</div>` : "";
-  const teachBlock = teach
-    ? `<div class="teach-banner">Concept review &middot; you skipped this earlier. Learn it, then lock it in.</div>
-       <div class="reveal concept show"><b>Concept:</b> ${esc(q.answerFull)}</div>` : "";
-  // Show what the NEXT correct answer pays (gain is computed after combo+1).
+  const chip = retryView ? `<span class="redo-chip">Redemption round</span>`
+    : testView ? `<span class="lockin-chip">Lock it in</span>` : "";
+  // "hard for you" (calibrated) overrides the positional difficulty label.
+  if (state._medMs == null) state._medMs = medianReviewMs();
+  const pd = personalDifficulty(q, (state.progress.reviews || {})[q.id], state._medMs);
+  const diffChip = pd != null && pd >= 0.55
+    ? `<span class="diff d-personal">hard for you</span>`
+    : `<span class="diff d-${esc(q.difficulty)}">${esc(q.difficulty)}</span>`;
   const nextMult = state.combo + 1 >= 5 ? 3 : state.combo + 1 >= 3 ? 2 : 1;
-  const comboChip = state.combo >= 2 ? `<span class="combo">${ICON("flame", "i-flame")} ${state.combo} combo &middot; ${nextMult}&times; XP</span>` : "";
+  const comboChip = !testView && !retryView && state.combo >= 2
+    ? `<span class="combo">${ICON("flame", "i-flame")} ${state.combo} combo &middot; ${nextMult}&times; XP</span>` : "";
+  // Prefer the *Md display variant per option (src 0 = correct, i+1 = distractors[i]).
+  const optText = (o) => o.src === 0 ? (q.correctMd || q.correct)
+    : (q.distractorsMd && q.distractorsMd[o.src - 1]) || o.t;
   app.innerHTML = `
     <div class="qhead">
-      <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)} <span class="diff d-${esc(q.difficulty)}">${esc(q.difficulty)}</span></span>
-      <span class="qright"><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dots}</span><span class="qnum">${state.cursor + 1}/${state.queue.length}</span></span>
+      <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)} ${diffChip}</span>
+      <span class="qright"><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dotsHTML(idx)}</span><span class="qnum">${deckProgressCounter()}</span></span>
     </div>
-    ${bossBanner}${teachBlock}
-    <div class="qtext">${esc(q.question)} ${comboChip}</div>
-    <div class="options">
-      ${opts.map((o, i) => `<button class="opt" data-i="${i}"><kbd>${i + 1}</kbd>${esc(o.t)}<span class="mark"></span></button>`).join("")}
+    ${bossBanner}
+    <div class="qtext">${qInline(q.questionMd || q.question)} ${chip}${comboChip}</div>
+    ${gated ? `<button class="showopts" id="showOptsBtn">Show options <kbd>Space</kbd></button>` : ""}
+    <div class="options${gated ? " gated" : ""}">
+      ${opts.map((o, i) => `<button class="opt" data-i="${i}"><kbd>${i + 1}</kbd>${qInline(optText(o))}<span class="mark"></span></button>`).join("")}
     </div>
     <div class="reveal" id="reveal"></div>
     <div class="qactions">
@@ -908,74 +1147,221 @@ function renderQuestion() {
     </div>`;
   document.querySelectorAll(".opt").forEach((b) =>
     b.addEventListener("click", () => answer(parseInt(b.dataset.i, 10))));
+  if (gated) el("#showOptsBtn").addEventListener("click", revealHardOptions);
   if (item.status === "pending") el("#skipBtn").addEventListener("click", skipQuestion);
   el("#nextBtn").addEventListener("click", nextQuestion);
-  /* [C] interviewer stage (avatar + HP) or gauntlet practice banner */
+  el("#qpauseBtn").addEventListener("click", () => openPauseSheet(null));
+  /* [C] interviewer stage (avatar + HP bar) / gauntlet practice banner */
   if (state.interview) renderInterviewStage();
   else if (state.gauntlet && state.gauntlet.practice) renderPracticeBanner();
   app.focus({ preventScroll: true });              // keep keyboard + SR context on the new question
 }
 
+// A3: reveal the hidden options for a recall-first (hard-deck) question. Leave
+// qShownAt untouched so the recorded time spans think + answer as one number.
+function revealHardOptions() {
+  const item = state.deck[state.queue[state.cursor]];
+  if (!item || item.revealed) return;
+  item.revealed = true;
+  const wrap = el(".options"); if (wrap) wrap.classList.remove("gated");
+  const btn = el("#showOptsBtn"); if (btn) btn.remove();
+  const first = document.querySelector(".opt"); if (first) first.focus();
+  announce("Options shown.");
+}
+
+// A5: full-width concept card for a skipped question. Its key concept tokens
+// become blurred cloze chips the learner taps to reveal (first occurrence each,
+// max 5, word-boundary, case-insensitive).
+function clozeHTML(text, concepts) {
+  let html = qInline(text);
+  const seen = new Set();
+  let made = 0;
+  for (const raw of concepts || []) {
+    if (made >= 5) break;
+    const tok = String(raw || "").trim();
+    if (tok.length < 3 || seen.has(tok.toLowerCase())) continue;
+    seen.add(tok.toLowerCase());
+    const re = new RegExp(`\\b(${tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})\\b`, "i");
+    let hit = false;
+    html = html.replace(re, (m, g1, off, str) => {
+      // Skip matches that fall inside an html tag or entity we just emitted.
+      const before = str.slice(0, off);
+      if (/<[^>]*$/.test(before) || /&[^;]*$/.test(before)) return m;
+      hit = true;
+      return `<button class="cloze" type="button">${g1}</button>`;
+    });
+    if (hit) made++;
+  }
+  return html;
+}
+function renderTeach(item) {
+  const { q } = item;
+  const idx = state.queue[state.cursor];
+  state.inQuiz = true; state.answered = false; state.awaitingConf = false; state.curOptsLen = 0;
+  state.qShownAt = performance.now();
+  const hasCloze = (q.concepts || []).length > 0;
+  app.innerHTML = `
+    <div class="qhead">
+      <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)}</span>
+      <span class="qright"><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dotsHTML(idx)}</span><span class="qnum">${deckProgressCounter()}</span></span>
+    </div>
+    <div class="teach-chip">Concept preview &middot; you skipped this &mdash; learn it, we quiz you shortly</div>
+    <div class="qtext teach-head">${qInline(q.questionMd || q.question)}</div>
+    <div class="reveal concept show teach-concept">${clozeHTML(q.answerFullMd || q.answerFull, q.concepts)}${hasCloze ? `<div class="cloze-hint">Tap the blurred terms to reveal them</div>` : ""}</div>
+    <div class="qactions">
+      <span></span>
+      <button class="next show" id="gotItBtn">Got it &mdash; quiz me later (↵)</button>
+    </div>`;
+  document.querySelectorAll(".cloze").forEach((c) => c.addEventListener("click", () => c.classList.add("shown")));
+  el("#gotItBtn").addEventListener("click", teachDone);
+  el("#qpauseBtn").addEventListener("click", () => openPauseSheet(null));
+  /* [C] keep the interviewer stage / practice banner across the teach card */
+  if (state.interview) renderInterviewStage();
+  else if (state.gauntlet && state.gauntlet.practice) renderPracticeBanner();
+  app.focus({ preventScroll: true });
+}
+function teachDone() {
+  const item = state.deck[state.queue[state.cursor]];
+  if (!item || item.status !== "skipped" || item.taught) return;
+  item.taught = true;                              // the next skipped encounter is the test
+  nextQuestion();
+  saveDeckSnapshot();                              // teach records nothing beyond "taught"
+}
+
+// A4: first tap on an option locks the pick and asks for confidence; grading
+// waits until the learner says how sure they were. testMode / retryMode grade
+// immediately (no calibration on lock-ins or redemption re-tests).
 function answer(i) {
+  if (state.answered || state.awaitingConf) return;
+  const item = state.deck[state.queue[state.cursor]];
+  const testMode = item.status === "skipped";
+  const retryMode = item.status === "wrong" && item.retry && !item.retried;
+  if (!testMode && !retryMode) { lockChoice(i); return; }
+  gradeAnswer(i, null);
+}
+function lockChoice(i) {
+  state.awaitingConf = true; state.pendingPick = i;
+  document.querySelectorAll(".opt").forEach((b, k) => {
+    b.disabled = true;
+    b.classList.add(k === i ? "picked" : "dim");
+  });
+  const bar = document.createElement("div");
+  bar.className = "confbar"; bar.id = "confBar";
+  bar.innerHTML = `<span class="conf-q">How sure?</span>
+    <button class="conf-btn" id="confSure"><kbd>1</kbd> Sure</button>
+    <button class="conf-btn" id="confUnsure"><kbd>2</kbd> Not sure</button>`;
+  el(".options").insertAdjacentElement("afterend", bar);
+  el("#confSure").addEventListener("click", () => pickConfidence("high"));
+  el("#confUnsure").addEventListener("click", () => pickConfidence("low"));
+  announce("Choice locked. How sure are you?");
+}
+function pickConfidence(conf) {
+  if (!state.awaitingConf) return;
+  state.awaitingConf = false;
+  const bar = el("#confBar"); if (bar) bar.remove();
+  gradeAnswer(state.pendingPick, conf);
+}
+
+function gradeAnswer(i, conf) {
   if (state.answered) return;
   state.answered = true;
   const item = state.deck[state.queue[state.cursor]];
-  const { q, opts } = item;
-  const teach = item.status === "skipped";
+  item.ms = Math.max(0, Math.round(performance.now() - (state.qShownAt || performance.now())));
+  const { opts } = item;
+  const testMode = item.status === "skipped";
+  const retryMode = item.status === "wrong" && item.retry && !item.retried;
+  const right = opts[i].ok;
   const optBtns = document.querySelectorAll(".opt");
   optBtns.forEach((b, k) => {
-    b.disabled = true;
+    b.disabled = true; b.classList.remove("dim", "picked");
     if (opts[k].ok) { b.classList.add("correct"); b.querySelector(".mark").textContent = "✓"; }
     if (k === i && !opts[k].ok) { b.classList.add("wrong"); b.querySelector(".mark").textContent = "✗"; }
   });
-  const right = opts[i].ok;
-  announce(teach
-    ? "Locked in."
-    : right ? "Correct." : `Incorrect. The answer is: ${opts.find((o) => o.ok).t}`);
-  if (teach) {
-    item.status = "learned";
-  } else if (right) {
-    item.status = "correct";
-    state.combo += 1; state.maxCombo = Math.max(state.maxCombo, state.combo);
-    const gain = 10 * comboMult() * (item.boss ? 2 : 1);
-    state.sessionXp += gain;
-    floatXP(gain, optBtns[i]);
-    if (state.combo === 3 || state.combo === 5 || state.combo >= 7) { sfx.combo(); ripple(optBtns[i]); }
-    else sfx.correct();
+  announce(right ? "Correct." : `Incorrect. The answer is: ${opts.find((o) => o.ok).t}`);
+
+  if (retryMode) {
+    item.retried = true;
+    if (right) { item.redeemed = true; state.sessionXp += 5; floatXP(5, optBtns[i]); sfx.correct(); }  // flat bonus, no combo
+    else sfx.wrong();                                                                                   // still shaky
+  } else if (testMode) {
+    if (right) { item.status = "learned"; sfx.correct(); }                                              // no XP for a lock-in
+    else { item.status = "wrong"; item.picked = i; item.pickedOpt = opts[i]; sfx.wrong(); }
   } else {
-    item.status = "wrong";
-    state.combo = 0;
-    sfx.wrong();
-  }
-  const sk = el("#skipBtn"); if (sk) sk.remove();
-  if (!teach) {
-    const rev = el("#reveal");
-    rev.innerHTML = `<b>Full answer:</b> ${esc(q.answerFull)}
-      <button class="deeper" id="deeperBtn">Dive deeper into ${esc(q.moduleName)} &rarr;</button>`;
-    rev.classList.add("show");
-    el("#deeperBtn").addEventListener("click", () => { if (item.status === "wrong") bumpDeepReads(); openReader(q.module, q.moduleName); });  // [C] deep_habit counts miss-reveal dives
-  }
-  /* [C] award tracking + interviewer follow-up hook */
-  if (!teach) {
+    item.conf = conf;
     if (right) {
-      const pre = state.progress.reviews[q.id];
-      if (pre) {
-        state.sessMaxInterval = Math.max(state.sessMaxInterval || 0, pre.interval || 0);
-        if ((pre.lapses || 0) >= 3 && (pre.ease || 2.5) + 0.1 >= 2.5) state.sessRestored = true;
+      item.status = "correct";
+      state.combo += 1; state.maxCombo = Math.max(state.maxCombo, state.combo);
+      const gain = Math.round(10 * comboMult() * (item.boss ? 2 : 1) * (state.hard ? 1.5 : 1));         // A3 recall pays 1.5x
+      state.sessionXp += gain;
+      floatXP(gain, optBtns[i]);
+      if (state.combo === 3 || state.combo === 5 || state.combo >= 7) { sfx.combo(); ripple(optBtns[i]); }
+      else sfx.correct();
+    } else {
+      item.status = "wrong"; item.picked = i; item.pickedOpt = opts[i];
+      state.combo = 0; sfx.wrong();
+      if (!item.retry && !state.interview) {         // A1 miss loop: one in-session redemption re-test ([C] the Interviewer probes instead)
+        item.retry = true;
+        const at = Math.min(state.cursor + 3, state.queue.length);
+        state.queue.splice(at, 0, state.queue[state.cursor]);
       }
     }
-    (state.sessSeq = state.sessSeq || []).push(right ? "c" : "w");
+  }
+  const sk = el("#skipBtn"); if (sk) sk.remove();
+  buildReveal(item, i, right, { testMode, retryMode, conf });
+  el("#nextBtn").classList.add("show");
+  /* [C] ledger tracking (first attempts only) + interviewer HP / follow-up */
+  if (!testMode && !retryMode) {
+    if (right) {
+      const preRv = (state.progress.reviews || {})[item.q.id];
+      if (preRv) {
+        state.sessMaxInterval = Math.max(state.sessMaxInterval || 0, preRv.interval || 0);   // long_memory
+        if ((preRv.lapses || 0) >= 3 && (preRv.ease || 2.5) >= 2.4) state.sessRestored = true;  // restored (ease lands >= 2.5)
+      }
+    }
+    (state.sessSeq = state.sessSeq || []).push(right ? "c" : "w");                           // comeback
     if (state.interview) interviewAfterAnswer(item, right);
   }
-  el("#nextBtn").classList.add("show");
+  saveDeckSnapshot();
 }
 
+// The reveal panel: full answer (A2 honest provenance for a wrong pick, plus a
+// hypercorrection lead on a high-confidence miss), and dive-deeper to the exact
+// source file the Q&A came from.
+function buildReveal(item, pickIdx, right, ctx) {
+  const { q, opts } = item;
+  const rev = el("#reveal");
+  const hyper = !right && ctx.conf === "high";                     // wrong + sure
+  let prov = "";
+  if (!right) {
+    const src = distractorSource(q, opts[pickIdx]);
+    if (src) prov = `<div class="prov">You picked the answer to: <span class="prov-q">${qInline(src.questionMd || src.question)}</span> &mdash; from ${esc(src.moduleName)}.
+      <button class="deeper prov-read" data-mod="${esc(src.module)}" data-src="${esc(src.sourceFile || "README.md")}" data-name="${esc(src.moduleName)}">Read that instead &rarr;</button></div>`;
+  }
+  rev.className = "reveal show" + (hyper ? " hyper" : "");
+  rev.innerHTML = `${hyper ? `<div class="hyper-lead">High-confidence miss &mdash; worth a careful read.</div>` : ""}<b>Full answer:</b> ${qInline(q.answerFullMd || q.answerFull)}${prov}
+    <button class="deeper" id="deeperBtn">Dive deeper into ${esc(q.moduleName)} &rarr;</button>`;
+  el("#deeperBtn").addEventListener("click", () => openReaderPath(`${q.module}/${q.sourceFile || "README.md"}`, q.moduleName));
+  const pr = rev.querySelector(".prov-read");
+  if (pr) pr.addEventListener("click", () => openReaderPath(`${pr.dataset.mod}/${pr.dataset.src}`, pr.dataset.name));
+  /* [C] deep_habit: dive-deeper opens from a MISS reveal bump the persisted counter */
+  if (!right) {
+    el("#deeperBtn").addEventListener("click", bumpDeepReads);
+    if (pr) pr.addEventListener("click", bumpDeepReads);
+  }
+}
+
+// A5: skip now teaches then re-tests. The teach card is rendered next; the test
+// (a normal MCQ with no answer shown) returns at least 3 items later.
 function skipQuestion() {
   const idx = state.queue[state.cursor];
-  if (state.deck[idx].status !== "pending") return;  // double-click guard
-  state.deck[idx].status = "skipped";
-  state.queue.push(idx); // returns at the end in teach mode
+  const item = state.deck[idx];
+  if (item.status !== "pending") return;             // double-click guard
+  item.status = "skipped"; item.taught = false;
+  state.queue.splice(state.cursor + 1, 0, idx);      // TEACH: render next
+  const testAt = Math.min(state.cursor + 4, state.queue.length);
+  state.queue.splice(testAt, 0, idx);                // TEST: at least 3 items later (else end)
   nextQuestion();
+  saveDeckSnapshot();                                // reflects the advanced cursor + re-queued teach/test
 }
 
 function nextQuestion() {
@@ -990,14 +1376,14 @@ function renderCard() {
   const item = state.deck[idx];
   const { q } = item;
   state.inQuiz = true; state.answered = false; state.curOptsLen = 0;
-  state.screenBack = null;
+  state.qShownAt = performance.now();
   const DONE = ["correct", "wrong", "learned"];
   const dots = state.deck.map((it, i) =>
     `<span class="dot ${DONE.includes(it.status) ? "done" : ""} ${i === idx ? "cur" : ""}"></span>`).join("");
   app.innerHTML = `
     <div class="qhead">
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)}</span>
-      <span class="qright"><span class="dots" role="img" aria-label="Card ${state.cursor + 1} of ${state.queue.length}">${dots}</span><span class="qnum">${state.cursor + 1}/${state.queue.length}</span></span>
+      <span class="qright"><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Card ${state.cursor + 1} of ${state.queue.length}">${dots}</span><span class="qnum">${state.cursor + 1}/${state.queue.length}</span></span>
     </div>
     <div class="flash-label">Flashcard &middot; recall it, then grade yourself</div>
     <div class="qtext">${esc(q.question)}</div>
@@ -1007,6 +1393,7 @@ function renderCard() {
       <button class="next show" id="revealBtn">Reveal answer (Space)</button>
     </div>`;
   el("#revealBtn").addEventListener("click", revealCard);
+  el("#qpauseBtn").addEventListener("click", () => openPauseSheet(null));
   app.focus({ preventScroll: true });
 }
 
@@ -1015,75 +1402,106 @@ function revealCard() {
   state.answered = true;
   const { q } = state.deck[state.queue[state.cursor]];
   const rev = el("#reveal");
-  rev.innerHTML = `<b>Answer:</b> ${esc(q.answerFull)}
+  rev.innerHTML = `<b>Answer:</b> ${qInline(q.answerFullMd || q.answerFull)}
     <button class="deeper" id="deeperBtn">Dive deeper into ${esc(q.moduleName)} &rarr;</button>`;
   rev.classList.add("show");
   announce(`Answer: ${q.answerFull}`);
-  el("#deeperBtn").addEventListener("click", () => openReader(q.module, q.moduleName));
+  el("#deeperBtn").addEventListener("click", () => openReaderPath(`${q.module}/${q.sourceFile || "README.md"}`, q.moduleName));
+  // A4: three-way self-grade folds into the confidence signal — Hard/Easy both
+  // count correct, but record how sure the recall felt.
   el("#cardActions").innerHTML = `
-    <button class="grade miss" id="missBtn"><kbd>1</kbd> Missed it</button>
-    <button class="grade got" id="gotBtn"><kbd>2</kbd> Got it</button>`;
-  el("#missBtn").addEventListener("click", () => gradeCard(false));
-  el("#gotBtn").addEventListener("click", () => gradeCard(true));
+    <button class="grade miss" id="missBtn"><kbd>1</kbd> Missed</button>
+    <button class="grade hard" id="hardBtn"><kbd>2</kbd> Hard</button>
+    <button class="grade got" id="easyBtn"><kbd>3</kbd> Easy</button>`;
+  el("#missBtn").addEventListener("click", () => gradeCard(false, null));
+  el("#hardBtn").addEventListener("click", () => gradeCard(true, "low"));
+  el("#easyBtn").addEventListener("click", () => gradeCard(true, "high"));
 }
 
 // Self-grade feeds the SAME results pipeline as the MCQ blitz, so it drives the
 // existing SM-2 schedule. XP is flat (no combo/boss) so self-grading can't inflate
 // score versus the verifiable multiple-choice path.
-function gradeCard(got) {
+function gradeCard(got, conf) {
   if (!state.answered) return;
   const item = state.deck[state.queue[state.cursor]];
-  if (got) { item.status = "correct"; state.sessionXp += 10; sfx.correct(); floatXP(10, el("#gotBtn")); }
+  item.ms = Math.max(0, Math.round(performance.now() - (state.qShownAt || performance.now())));
+  if (got) { item.status = "correct"; item.conf = conf || null; state.sessionXp += 10; sfx.correct(); floatXP(10, el("#easyBtn") || el("#hardBtn")); }
   else { item.status = "wrong"; sfx.wrong(); }
-  /* [C] award tracking (flashcard path) */
+  /* [C] ledger tracking (flashcard path) */
   if (got) {
-    const pre = state.progress.reviews[item.q.id];
-    if (pre) {
-      state.sessMaxInterval = Math.max(state.sessMaxInterval || 0, pre.interval || 0);
-      if ((pre.lapses || 0) >= 3 && (pre.ease || 2.5) + 0.1 >= 2.5) state.sessRestored = true;
+    const preRv = (state.progress.reviews || {})[item.q.id];
+    if (preRv) {
+      state.sessMaxInterval = Math.max(state.sessMaxInterval || 0, preRv.interval || 0);
+      if ((preRv.lapses || 0) >= 3 && (preRv.ease || 2.5) >= 2.4) state.sessRestored = true;
     }
   }
   (state.sessSeq = state.sessSeq || []).push(got ? "c" : "w");
   state.cursor++;
   if (state.cursor < state.queue.length) renderCard();
   else finish();
+  saveDeckSnapshot();                              // guarded: no-op once finish() ends the deck
 }
 
-async function finish() {
+async function finish(opts = {}) {
   state.inQuiz = false;
+  clearDeckSnapshot();                             // the deck is resolved; no resume
   app.innerHTML = `<div class="loading">Saving your progress&hellip;</div>`;
-  const total = state.deck.length;
-  const correct = state.deck.filter((d) => d.status === "correct").length;
-  const learned = state.deck.filter((d) => d.status === "learned").length;
-  const cCtx = cBeforeFinish();                    // [C] snapshot codex + apply gauntlet seal bonus (mutates sessionXp)
+  const DONE = ["correct", "wrong", "learned"];
+  // Early finish ("Finish now") records only attempted cards; a normal finish
+  // records the whole deck (every card has a terminal status by then).
+  const recorded = opts.early ? state.deck.filter((d) => DONE.includes(d.status)) : state.deck;
+  const total = recorded.length;
+  const correct = recorded.filter((d) => d.status === "correct").length;
+  const learned = recorded.filter((d) => d.status === "learned").length;
+  const cCtx = cBeforeFinish();                    // [C] seal bonus (mutates sessionXp) + pre-save context
   const bonusXp = Math.max(0, state.sessionXp - correct * 10);
-  const results = state.deck.map((d) => ({ id: d.q.id, section: d.q.section, module: d.q.module, status: d.status }));
-  const { xp, freezeUsed } = await saveSession({ date: todayISO(), section: state.section, results, bonusXp });
+  const results = recorded.map((d) => ({ id: d.q.id, section: d.q.section, module: d.q.module, status: d.status, ms: d.ms || 0, conf: d.conf || null }));
+  const durationSec = Math.max(0, Math.round((Date.now() - (state.startedAt || Date.now())) / 1000));
+  const pre = progressSnapshot();                  // for the moments engine (before the save)
+  const { xp, freezeUsed } = saveSessionLocal({ date: todayISO(), section: state.section, results, bonusXp, durationSec });
+  const cExtra = cAfterSave(cCtx, { correct, total });   // [C] seal gauntlet · resolve interview · detect ledger awards
+  await queueMoments(pre, progressSnapshot(), cExtra);   // celebrate milestones before the results ([C] extras lead)
   refreshStats();
-  const cMoments = cAfterFinish(cCtx, { correct, total });   // [C] seal gauntlet, resolve interview, diff codex, detect ledger awards
-  const pct = Math.round((correct / total) * 100);
+  const pct = total ? Math.round((correct / total) * 100) : 0;
   const flawless = pct === 100 && total > 0;
   if (flawless) { confetti(); sfx.finish(); }
   const cheer = flawless ? "Flawless! " : pct >= 70 ? "Strong work. " : pct >= 40 ? "Good progress. " : "Every rep counts. ";
   announce(`Blitz finished. ${correct} of ${total} correct. ${xp} XP earned.`);
   const freezeNote = freezeUsed
     ? `<div class="freeze-saved">${ICON("snow", "i-snow")} Streak saved &mdash; 1 freeze used (${state.progress.freezes || 0} left)</div>` : "";
+  const backupNote = backupNudgeHTML();
   const extraBadges =
     (learned ? `<div class="badge"><div class="n">${learned}</div><div class="l">Learned</div></div>` : "") +
     (state.maxCombo >= 2 ? `<div class="badge"><div class="n">${state.maxCombo}&times;</div><div class="l">Best combo</div></div>` : "");
-  // Post-round review: every miss (and teach-mode learn) with its correct answer.
-  const misses = state.deck.filter((d) => d.status === "wrong" || d.status === "learned");
-  const missList = misses.length ? `
+  // Post-round review: misses split into Redeemed (retry-correct) and Still
+  // shaky, plus questions learned from a skip. Each is a <details> — summary is
+  // the correct sentence, expanding reveals the full answer (+ honest provenance
+  // for a wrong pick). Redeemed items still recorded their first-attempt wrong.
+  const wrongs = recorded.filter((d) => d.status === "wrong");
+  const redeemed = wrongs.filter((d) => d.redeemed);
+  const shaky = wrongs.filter((d) => !d.redeemed);
+  const learnedItems = recorded.filter((d) => d.status === "learned");
+  const missItem = (m) => {
+    let body = qInline(m.q.answerFullMd || m.q.answerFull);
+    if (m.status === "wrong" && m.pickedOpt) {
+      const src = distractorSource(m.q, m.pickedOpt);
+      if (src) body += `<div class="prov">You picked the answer to: <span class="prov-q">${qInline(src.questionMd || src.question)}</span> &mdash; from ${esc(src.moduleName)}.</div>`;
+    }
+    return `<details class="miss-item ${m.status}${m.redeemed ? " redeemed" : ""}">
+        <summary class="miss-q">${qInline(m.q.correctMd || m.q.correct)}</summary>
+        <div class="miss-a">${body}</div>
+        <button class="deeper miss-deeper" data-mod="${esc(m.q.module)}" data-src="${esc(m.q.sourceFile || "README.md")}" data-name="${esc(m.q.moduleName)}">Dive deeper into ${esc(m.q.moduleName)} &rarr;</button>
+      </details>`;
+  };
+  const group = (title, cls, arr) => arr.length ? `<h3 class="miss-group ${cls}">${title}</h3>${arr.map(missItem).join("")}` : "";
+  const missList = (wrongs.length || learnedItems.length) ? `
     <div class="miss-wrap">
       <h2 class="section-h">Review this round</h2>
-      ${misses.map((m, k) => `<div class="miss-item ${m.status}">
-        <div class="miss-q">${esc(m.q.question)}</div>
-        <div class="miss-a">${esc(m.q.correct)}</div>
-        <button class="deeper miss-deeper" data-k="${k}">Dive deeper into ${esc(m.q.moduleName)} &rarr;</button>
-      </div>`).join("")}
+      ${group("Redeemed", "good", redeemed)}
+      ${group("Still shaky", "warn", shaky)}
+      ${group("Learned from a skip", "", learnedItems)}
     </div>` : "";
   const R = 56, CIRC = +(2 * Math.PI * R).toFixed(1);
-  state.screenBack = renderHome;
   app.innerHTML = `
     <div class="result">
       <div class="score-wrap">
@@ -1098,7 +1516,7 @@ async function finish() {
         <div class="scorering">${correct}<small>/${total}</small></div>
       </div>
       <p class="sub">${cheer}${pct}% known${learned ? ` &middot; ${learned} learned` : ""}</p>
-      ${freezeNote}
+      ${freezeNote}${backupNote}
       <div class="badges">
         <div class="badge"><div class="n" id="xpCount">+0</div><div class="l">XP</div></div>
         ${extraBadges}
@@ -1117,17 +1535,191 @@ async function finish() {
     const f = el(".sr-fg");
     if (f) f.style.strokeDashoffset = (CIRC * (1 - correct / Math.max(1, total))).toFixed(1);
   });
-  el("#againBtn").addEventListener("click", () => (state.replayFn ? state.replayFn() : renderHome()));
-  el("#homeBtn").addEventListener("click", () => vt(renderHome));
-  el("#progBtn").addEventListener("click", () => vt(renderProgress));
+  el("#againBtn").addEventListener("click", () => (state.replayFn ? state.replayFn() : go("#/home")));
+  el("#homeBtn").addEventListener("click", () => go("#/home"));
+  el("#progBtn").addEventListener("click", () => go("#/progress"));
   document.querySelectorAll(".miss-deeper").forEach((b) =>
-    b.addEventListener("click", () => { const m = misses[+b.dataset.k]; bumpDeepReads(); openReader(m.q.module, m.q.moduleName); }));  // [C] deep_habit
+    b.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); openReaderPath(`${b.dataset.mod}/${b.dataset.src}`, b.dataset.name); }));
   wireReveals();
   app.focus({ preventScroll: true });
-  /* [C] decorate results for gauntlet/interviewer, then play any queued moments */
-  cApplyResults(cCtx);
+  /* [C] gauntlet / interviewer result banners, then drop the deck-scoped state */
+  cApplyResults(cCtx, { correct });
+  document.body.classList.remove("interview-mode");
   state.interview = null; state.gauntlet = null;
-  if (cMoments && cMoments.length) c_queueMoments(cMoments);
+}
+
+/* ---------- moments engine ---------- */
+// A moment is a full-screen glass overlay celebrating a milestone. Moments are
+// awaitable so finish() can play them one after another before the results.
+const TIER_RANK = { Bronze: 1, Silver: 2, Gold: 3 };
+const STREAK_MILES = [7, 14, 30, 50, 100];
+
+// Snapshot the milestone-bearing fields of progress so a before/after diff can
+// detect a level-up, tier promotion, streak milestone, cleared backlog, or goal.
+function progressSnapshot() {
+  const p = state.progress, tiers = {};
+  for (const s of Object.keys(p.sections || {})) tiers[s] = sectionTier(p.sections[s]);
+  return {
+    level: levelFromXP(p.totalXP), streak: p.streak || 0,
+    due: dueReviews().length, todaysXp: todaysXp(), tiers,
+    anyGold: Object.values(tiers).some((t) => t === "Gold"),
+    codex: cDeckCodex(),   /* [C] capture/foil state of only the modules the live deck touched */
+  };
+}
+
+function moment({ tier = "", title, sub = "", icon = "" }) {
+  return new Promise((resolve) => {
+    const reduced = REDUCED();
+    const o = document.createElement("div");
+    o.className = "moment" + (tier ? " m-" + tier : "") + (reduced ? " reduced" : "");
+    o.setAttribute("role", "status");
+    o.innerHTML = `${reduced ? "" : `<span class="moment-burst"></span>`}
+      <div class="moment-card">
+        ${icon ? `<div class="moment-icon">${icon}</div>` : ""}
+        <div class="moment-title">${esc(title)}</div>
+        ${sub ? `<div class="moment-sub">${esc(sub)}</div>` : ""}
+      </div>`;
+    document.body.appendChild(o);
+    announce(title + (sub ? ". " + sub : ""));
+    let done = false;
+    const close = () => {
+      if (done) return; done = true;
+      clearTimeout(timer);
+      document.removeEventListener("keydown", onKey, true);
+      o.classList.add("out");
+      setTimeout(() => { o.remove(); resolve(); }, reduced ? 0 : 180);
+    };
+    const onKey = (e) => { e.preventDefault(); e.stopPropagation(); close(); };
+    o.addEventListener("click", close);
+    document.addEventListener("keydown", onKey, true);
+    const timer = setTimeout(close, 2500);
+  });
+}
+
+// Diff pre/post progress snapshots into an ordered moment list, then play them
+// sequentially. Later phases add more moment types; the diff shape stays.
+// [C] extra: pre-built deck-headline moments (gauntlet seal, interview verdict,
+// ledger awards) that lead the queue.
+async function queueMoments(pre, post, extra) {
+  const list = [];
+  if (post.level > pre.level)
+    list.push({ tier: "level", icon: ICON("bolt"), title: `Level ${post.level}`, sub: "New level reached.", play: () => sfx.levelup() });
+  let firstGold = post.anyGold && !pre.anyGold;
+  for (const s of Object.keys(post.tiers)) {
+    const before = TIER_RANK[pre.tiers[s]] || 0, after = TIER_RANK[post.tiers[s]] || 0;
+    if (after <= before) continue;
+    const t = post.tiers[s];
+    if (t === "Gold" && firstGold) {
+      firstGold = false;
+      list.push({ tier: "gold", icon: `<span class="moment-tier gold">Gold</span>`, title: "First Gold", sub: `${label(s)} is your first Gold-tier section.`, play: () => sfx.gold() });
+    } else {
+      list.push({ tier: t.toLowerCase(), icon: `<span class="moment-tier ${t.toLowerCase()}">${t}</span>`, title: `${t}: ${label(s)}`, sub: "Mastery tier promoted.", play: () => sfx.tier() });
+    }
+  }
+  const mile = STREAK_MILES.find((m) => pre.streak < m && post.streak >= m);
+  if (mile)
+    list.push({ tier: "streak", icon: ICON("flame", "i-flame"), title: `${mile}-day streak`, sub: "Consistency compounds.", play: () => sfx.finish() });
+  if (pre.due > 0 && post.due === 0)
+    list.push({ tier: "backlog", icon: ICON("clock"), title: "Backlog cleared", sub: "Nothing due. Your memory is current.", play: () => sfx.bell() });
+  if (pre.todaysXp < DAILY_XP_GOAL && post.todaysXp >= DAILY_XP_GOAL)
+    list.push({ tier: "goal", icon: ICON("bolt"), title: "Daily goal met", sub: `${DAILY_XP_GOAL} XP today.`, play: () => sfx.chime() });
+  /* [C] codex captures/foils crossed by this deck (diffed from the snapshots) */
+  for (const mod of Object.keys(post.codex || {})) {
+    const a = (pre.codex || {})[mod] || {}, b = post.codex[mod];
+    if (b.captured && !a.captured)
+      list.push({ tier: "capture", icon: `<span class="c-flipcard"></span>`, title: `Captured: ${b.name}`, sub: "Added to your Codex.", play: () => sfx.capture() });
+    if (b.foil && !a.foil)
+      list.push({ tier: "foil", icon: `<span class="c-flipcard foil"></span>`, title: `Foil: ${b.name}`, sub: "Proven over 21 days.", play: () => sfx.gold() });
+  }
+  if (extra && extra.length) list.unshift(...extra);   /* [C] deck-headline moments lead */
+  for (const m of list) {
+    m.play?.();
+    await moment(m);
+  }
+}
+
+/* ---------- progress durability ---------- */
+// The whole game lives in this browser's localStorage — a backup is the only
+// safety net. Nudge on results every 25 sessions if no export in 30 days.
+function backupNudgeHTML() {
+  const n = (state.progress.history || []).length;
+  if (!(n > 0 && n % 25 === 0)) return "";
+  const last = localStorage.getItem("sd_last_export");
+  const recent = last && (Date.now() - new Date(last + "T00:00:00").getTime()) < 30 * 86400000;
+  if (recent) return "";
+  return `<div class="backup-note">Your progress lives in this browser. Export a backup from Progress.</div>`;
+}
+
+// Keys that make up a full save (future gauntlet/codex keys join this list).
+const BACKUP_KEYS = ["sd_progress", "sd_gauntlet"];
+
+function exportProgress() {
+  const blob = { version: 1, exportedAt: new Date().toISOString(), data: {} };
+  for (const k of BACKUP_KEYS) { const v = localStorage.getItem(k); if (v != null) blob.data[k] = v; }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(blob, null, 2)], { type: "application/json" }));
+  a.download = `sysdesign-daily-backup-${todayISO()}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  localStorage.setItem("sd_last_export", todayISO());
+  announce("Backup exported.");
+}
+
+function importProgress(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    let blob;
+    try { blob = JSON.parse(reader.result); } catch { alert("That file isn't a valid backup."); return; }
+    if (!blob || typeof blob !== "object" || !blob.data || typeof blob.data !== "object" || blob.data.sd_progress == null) {
+      alert("That file isn't a valid System Design Daily backup."); return;
+    }
+    if (!confirm("Import this backup? It replaces all current progress in this browser.")) return;
+    for (const k of BACKUP_KEYS) { if (blob.data[k] != null) localStorage.setItem(k, blob.data[k]); }
+    location.reload();
+  };
+  reader.readAsText(file);
+}
+
+/* ---------- session guard: pause sheet + guarded navigation ---------- */
+// Any attempt to leave a live blitz with at least one answered card raises this
+// glass confirm sheet. Zero answered -> leave silently, discard the snapshot.
+function answeredCount() {
+  const DONE = ["correct", "wrong", "learned"];
+  return state.deck.filter((d) => DONE.includes(d.status)).length;
+}
+
+// guardedNav(fn): run fn now if it's safe; otherwise open the pause sheet with
+// fn as the pending destination. Used by the router and the topbar nav handlers.
+function guardedNav(fn) {
+  if (!state.inQuiz) { fn(); return; }
+  if (answeredCount() === 0) { clearDeckSnapshot(); state.inQuiz = false; fn(); return; }
+  openPauseSheet(fn);
+}
+
+// pending: a function to run on leave (Pause & leave / Finish now). null -> Home.
+function openPauseSheet(pending) {
+  if (el("#pauseSheet")) return;
+  const leave = pending || (() => go("#/home"));
+  const done = answeredCount(), total = state.deck.length;
+  const o = document.createElement("div");
+  o.className = "pause-sheet"; o.id = "pauseSheet";
+  o.setAttribute("role", "dialog"); o.setAttribute("aria-label", "Pause this blitz");
+  o.innerHTML = `<div class="pause-card">
+      <h2>Pause this blitz?</h2>
+      <p>Your progress is saved &mdash; resume from Home. ${done}/${total} answered.</p>
+      <div class="pause-btns">
+        <button class="primary" id="pauseKeep">Keep playing</button>
+        <button class="ghost" id="pauseLeave">Pause &amp; leave</button>
+        <button class="ghost" id="pauseFinish">Finish now</button>
+      </div>
+    </div>`;
+  document.body.appendChild(o);
+  const closeSheet = () => { o.remove(); };
+  el("#pauseKeep").addEventListener("click", closeSheet);
+  el("#pauseLeave").addEventListener("click", () => { saveDeckSnapshot(); state.inQuiz = false; closeSheet(); leave(); });
+  el("#pauseFinish").addEventListener("click", () => { closeSheet(); finish({ early: true }); });
+  o.addEventListener("click", (e) => { if (e.target === o) closeSheet(); });
+  el("#pauseKeep").focus();
 }
 
 /* ---------- progress ---------- */
@@ -1136,7 +1728,7 @@ async function finish() {
 function heatmapHTML(history) {
   const xpByDay = new Map();
   for (const h of history || []) xpByDay.set(h.date, (xpByDay.get(h.date) || 0) + (h.xp || 0));
-  const gauntDays = new Set((history || []).filter((h) => h.section === "gauntlet").map((h) => h.date));  // [C] days a gauntlet was sealed
+  const gauntDays = new Set((history || []).filter((h) => h.section === "gauntlet").map((h) => h.date));  // [C] sealed-gauntlet days
   const WEEKS = 17;
   const today = new Date(todayISO() + "T00:00:00");
   const end = new Date(today); end.setDate(end.getDate() + (6 - today.getDay())); // Sat of this week
@@ -1148,7 +1740,7 @@ function heatmapHTML(history) {
     const xp = xpByDay.get(iso) || 0;
     if (d > today) { cells += `<span class="hmcell hm-future"></span>`; continue; }
     const lvl = xp === 0 ? 0 : xp < 30 ? 1 : xp < 70 ? 2 : xp < 120 ? 3 : 4;
-    const gaunt = gauntDays.has(iso) ? " hm-gaunt" : "";                  // [C] gold-dot overlay
+    const gaunt = gauntDays.has(iso) ? " hm-gaunt" : "";                       // [C] gold-dot overlay
     cells += `<span class="hmcell hm-l${lvl}${gaunt}" style="animation-delay:${i * 3}ms" title="${iso}: ${xp} XP${gaunt ? " · gauntlet" : ""}"></span>`;
   }
   const empty = !(history || []).length
@@ -1162,7 +1754,6 @@ function heatmapHTML(history) {
 
 function renderProgress() {
   state.inQuiz = false;
-  state.screenBack = renderHome;
   refreshStats();
   const p = state.progress, secs = state.index.sections;
   const tiles = Object.keys(secs).sort().map((s) => {
@@ -1190,15 +1781,25 @@ function renderProgress() {
     ${ledgerStripHTML()}
     <h2 class="section-h">Mastery by section</h2>
     ${tiles}
+    <div class="backup-row">
+      <div class="backup-copy">Your progress lives only in this browser. Keep a backup.</div>
+      <div class="backup-actions">
+        <button class="ghost" id="exportBtn">Export backup</button>
+        <button class="ghost" id="importBtn">Import backup</button>
+        <input type="file" id="importFile" accept="application/json,.json" hidden />
+      </div>
+    </div>
     <div class="row" style="margin-top:18px"><button class="primary" id="backHome">Back to today</button></div>`;
-  el("#backHome").addEventListener("click", () => vt(renderHome));
+  el("#backHome").addEventListener("click", () => go("#/home"));
+  el("#exportBtn").addEventListener("click", exportProgress);
+  el("#importBtn").addEventListener("click", () => el("#importFile").click());
+  el("#importFile").addEventListener("change", (e) => { if (e.target.files[0]) importProgress(e.target.files[0]); });
   wireReveals();
 }
 
 /* ---------- study mode (pure reading) ---------- */
 function renderStudy() {
   state.inQuiz = false;
-  state.screenBack = renderHome;
   refreshStats();
   const secs = state.index.sections;
   let lastRead = null;
@@ -1219,9 +1820,9 @@ function renderStudy() {
     <h2 class="section-h">Pick a section to browse its topics</h2>
     <div class="grid">${tiles}</div>
     <div class="row" style="margin-top:18px"><button class="ghost" id="studyHome">&larr; Home</button></div>`;
-  document.querySelectorAll(".tile").forEach((b) => b.addEventListener("click", () => openStudySection(b.dataset.section)));
+  document.querySelectorAll(".tile").forEach((b) => b.addEventListener("click", () => go("#/study/" + b.dataset.section)));
   if (contCard) el("#contBtn").addEventListener("click", () => { reader.back = []; openReaderPath(lastRead.path, lastRead.title, null); });
-  el("#studyHome").addEventListener("click", () => vt(renderHome));
+  el("#studyHome").addEventListener("click", () => go("#/home"));
   wireReveals();
 }
 
@@ -1269,7 +1870,7 @@ async function openStudySection(section) {
   // v2: weighted prerequisite edges from graph/<section>.json (real repo
   // cross-links + lexical Q&A overlap). Pairs are undirected; orient each one
   // forward along the path order. Missing/failed file -> plain v1 path.
-  const graph = await apiGet(`graph/${section}.json`, null, "default");
+  const graph = await fetchJSON(`graph/${section}.json`, null, "default");
   const modIdx = new Map(mods.map((m, i) => [m.module, i]));
   const chords = [];
   let crossLinks = 0;
@@ -1286,7 +1887,6 @@ async function openStudySection(section) {
     if (c.lex) return;
     peers[c.from].add(c.to); peers[c.to].add(c.from);
   });
-  state.screenBack = renderStudy;
   const list = mods.map((m) => ({ path: `${m.module}/README.md`, title: m.name }));
   const files = (state.index && state.index.files) || {};
   // Practiced = any spaced-repetition entry from this module (real history only).
@@ -1618,7 +2218,7 @@ async function openStudySection(section) {
     reader.back = [];
     openReaderPath(list[idx].path, list[idx].title, { list, idx });
   });
-  el("#studyBack").addEventListener("click", () => vt(renderStudy));
+  el("#studyBack").addEventListener("click", () => go("#/study"));
   let rzT = 0;
   const onResize = () => {                         // debounced; self-removes once the screen is gone
     if (!document.body.contains(wrap)) { window.removeEventListener("resize", onResize); return; }
@@ -2736,6 +3336,14 @@ function wireReaderBody(body) {
 // Open any repo content file by path. Pushing onto the back-stack is the caller's
 // job (cross-links push; Back/Prev/Next do not), keeping history clean.
 async function openReaderPath(path, title, navCtx, frag) {
+  // Route history: first open pushes a #/reader entry (so browser Back closes the
+  // reader onto the underlying screen); navigating within the reader replaces it.
+  // _readerRouting is set when the router itself drove the open (don't re-write).
+  if (!state._readerRouting) {
+    const h = readerHash(path, frag);
+    if (document.body.classList.contains("reader-open")) history.replaceState(null, "", h);
+    else { state.underHash = location.hash || "#/home"; history.pushState(null, "", h); }
+  }
   reader.path = path;
   reader.nav = navCtx || null;
   reader.titleText = title || titleFromPath(path);
@@ -2803,7 +3411,7 @@ async function openReaderPath(path, title, navCtx, frag) {
   }
   try {
     if (readerCache[path] == null) {
-      const r = await fetch(IS_STATIC ? `../${path}` : `/content/${path}`, { cache: "no-store" });
+      const r = await fetch(`../${path}`, { cache: "no-store" });
       if (!r.ok) throw 0;
       readerCache[path] = await r.text();
     }
@@ -2822,7 +3430,7 @@ async function openReaderPath(path, title, navCtx, frag) {
     if (frag) { const t = main.querySelector("#" + CSS.escape(frag)); if (t) t.scrollIntoView({ block: "start" }); }
     localStorage.setItem("sd_last_read", JSON.stringify({ path, title: reader.titleText }));   // Study's "Continue reading"
   } catch {
-    const b = el("#readerBody"); if (b) b.innerHTML = `<div class="error">Couldn't load this page &mdash; is <code>server.py</code> running?</div>`;
+    const b = el("#readerBody"); if (b) b.innerHTML = `<div class="error">Couldn't load this page. Check your connection and try again.</div>`;
   }
 }
 
@@ -2832,16 +3440,111 @@ function openReader(module, moduleName) {
   return openReaderPath(`${module}/README.md`, moduleName, null);
 }
 
-function closeReader() {
+// Remove the reader overlay only; the underlying screen DOM is untouched.
+function closeReaderDom() {
   document.body.classList.remove("reader-open", "reader-full");
   const p = el("#reader"); if (p) p.remove();
   reader.path = null; reader.back = []; reader.nav = null;
+}
+
+// User-initiated close (X / Esc): drop the overlay and restore the underlying
+// screen's hash. (Browser Back is handled in the router, which calls closeReaderDom.)
+function closeReader() {
+  closeReaderDom();
+  if (location.hash.startsWith("#/reader")) history.replaceState(null, "", state.underHash || "#/home");
+}
+
+/* ---------- hash router ---------- */
+// Screens are hash routes so browser Back/Forward, refresh, and shareable URLs
+// all work without a build step. go() sets the hash; a single hashchange
+// listener resolves the route -> screen render. _navLock swallows the one
+// programmatic hash write we make when restoring the quiz hash on a blocked Back.
+// Live (Phase C): #/gauntlet #/codex #/interview/<sec>. Reserved for later phases: #/insights #/debrief.
+let _navLock = false;
+
+const readerHash = (path, frag) => "#/reader/" + encodeURIComponent(path) + (frag ? "@" + frag : "");
+const quizRoute = (section) =>
+  section === "review" ? "#/quiz/review" : section === "weakspots" ? "#/quiz/weak" : "#/quiz/" + section;
+function setQuizHash(section) {
+  state.quizHash = quizRoute(section);
+  history.replaceState(null, "", state.quizHash);   // silent: no dispatch during play
+}
+
+// Navigate to a route (adds a history entry). The hashchange listener dispatches.
+function go(route) {
+  const r = route.startsWith("#") ? route : "#" + route;
+  if (location.hash === r) { onHashChange(); return; }   // same hash fires no event -> dispatch by hand
+  location.hash = r;
+}
+// Redirect without adding a history entry (fallbacks), then dispatch.
+function redirect(route) {
+  const r = route.startsWith("#") ? route : "#" + route;
+  history.replaceState(null, "", r);
+  onHashChange();
+}
+
+function onHashChange() {
+  if (_navLock) { _navLock = false; return; }       // swallow our own hash restore
+  const route = location.hash || "#/home";
+  const isReaderRoute = route.startsWith("#/reader/");
+
+  // Reader is an overlay: any non-reader route while it's open just closes it
+  // (Back-to-close); the underlying screen DOM is still mounted underneath.
+  if (document.body.classList.contains("reader-open") && !isReaderRoute) {
+    closeReaderDom();
+    return;
+  }
+  // Leaving a live blitz: 0 answered -> leave silently; else restore the quiz
+  // hash and raise the pause sheet with this route as the pending destination.
+  if (state.inQuiz && !route.startsWith("#/quiz") && !isReaderRoute) {
+    if (answeredCount() === 0) { clearDeckSnapshot(); state.inQuiz = false; }
+    else {
+      _navLock = true;
+      location.hash = state.quizHash || quizRoute(state.section);
+      openPauseSheet(() => go(route));
+      return;
+    }
+  }
+  vt(() => dispatch(route));
+}
+
+function dispatch(route) {
+  if (route.startsWith("#/reader/")) {
+    const enc = route.slice("#/reader/".length);
+    const at = enc.indexOf("@");
+    const path = decodeURIComponent(at >= 0 ? enc.slice(0, at) : enc);
+    const frag = at >= 0 ? enc.slice(at + 1) : null;
+    if (reader.path === path) return;               // already showing it
+    state._readerRouting = true;                    // suppress openReaderPath's own history write
+    if (!document.body.classList.contains("reader-open")) { state.underHash = "#/home"; renderHome(); }
+    openReaderPath(path, null, reader.nav || null, frag);
+    state._readerRouting = false;
+    return;
+  }
+  if (route.startsWith("#/quiz/")) {
+    if (state.inQuiz) return;                        // deck already live and rendered
+    const sec = route.slice("#/quiz/".length);       // a live deck can't survive refresh -> fall back
+    if (sec !== "review" && sec !== "weak" && state.index.sections[sec]) { redirect("#/topics/" + sec); return; }
+    redirect("#/home"); return;
+  }
+  /* [C] tentpole routes (previously reserved) — and leaving the quiz drops any
+     lingering interviewer/gauntlet skin before the next screen paints. */
+  if (!state.inQuiz) { document.body.classList.remove("interview-mode"); state.interview = null; state.gauntlet = null; }
+  if (route === "#/gauntlet") { startGauntlet(); return; }
+  if (route === "#/codex") { renderCodex(); return; }
+  if (route.startsWith("#/interview/")) { startInterview(route.slice("#/interview/".length)); return; }
+  if (route.startsWith("#/topics/")) { openTopics(route.slice("#/topics/".length)); return; }
+  if (route.startsWith("#/study/")) { openStudySection(route.slice("#/study/".length)); return; }
+  if (route === "#/study") { renderStudy(); return; }
+  if (route === "#/progress") { renderProgress(); return; }
+  renderHome();                                     // #/home and any unknown route
 }
 
 /* ---------- keyboard ---------- */
 document.addEventListener("keydown", (e) => {
   const typing = (e.target.tagName || "").toLowerCase() === "input";
   if (e.key === "Escape" && el("#helpOverlay")) { el("#helpOverlay").remove(); return; }
+  if (e.key === "Escape" && el("#pauseSheet")) { el("#pauseSheet").remove(); return; }
   if (e.key === "?" && !typing) { e.preventDefault(); toggleHelp(); return; }
   if (document.body.classList.contains("reader-open")) {
     if (e.key === "Escape") {                       // exit fullscreen first, then close
@@ -2867,8 +3570,27 @@ document.addEventListener("keydown", (e) => {
   if (state.mode === "flash") {
     if (!state.answered) {
       if (e.key === " " || e.key === "Enter") { e.preventDefault(); revealCard(); }
-    } else if (e.key === "1") { e.preventDefault(); gradeCard(false); }
-    else if (e.key === "2" || e.key === "Enter") { e.preventDefault(); gradeCard(true); }
+    } else if (e.key === "1") { e.preventDefault(); gradeCard(false, null); }      // Missed
+    else if (e.key === "2") { e.preventDefault(); gradeCard(true, "low"); }         // Hard
+    else if (e.key === "3" || e.key === "Enter") { e.preventDefault(); gradeCard(true, "high"); }  // Easy
+    return;
+  }
+  const cur = state.deck[state.queue[state.cursor]];
+  // A5 teach concept card: Enter/Space moves on (no answer to give here).
+  if (cur && cur.status === "skipped" && !cur.taught) {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); teachDone(); }
+    return;
+  }
+  // A3 recall-first gate: Space reveals the hidden options; block option keys
+  // until then so a blind 1-4 can't answer an unseen list.
+  if (state.hard && cur && !cur.revealed && !state.answered) {
+    if (e.key === " ") { e.preventDefault(); revealHardOptions(); }
+    return;
+  }
+  // A4 confidence step: after locking a pick, 1 = sure, 2 = not sure.
+  if (state.awaitingConf) {
+    if (e.key === "1") { e.preventDefault(); pickConfidence("high"); }
+    else if (e.key === "2") { e.preventDefault(); pickConfidence("low"); }
     return;
   }
   if (state.answered) {
@@ -2879,140 +3601,30 @@ document.addEventListener("keydown", (e) => {
     const i = +e.key - 1;
     if (i < state.curOptsLen) { e.preventDefault(); answer(i); }
   } else if (e.key.toLowerCase() === "s") {
-    const item = state.deck[state.queue[state.cursor]];
-    if (item && item.status === "pending") { e.preventDefault(); skipQuestion(); }
+    if (cur && cur.status === "pending") { e.preventDefault(); skipQuestion(); }
   }
 });
 
 /* ============================================================================
    [C] PHASE C — Gauntlet · Codex · Skyline · Ledger · Interviewer
-   Self-contained tentpole features. All new state is additive; the four
-   persisted keys are progress.awards, progress.deepReads and localStorage
-   sd_gauntlet. Deterministic randomness comes from c_cyrb53/c_mulberry32 seeded on
-   todayISO — never Date.now/Math.random for anything that must be stable.
-
-   STALE-BASE NOTE: this worktree forked before Phase 0, so the brief's "already
-   built" infra (moment/queueMoments engine, cyrb53/mulberry32, the hash router's
-   reserved #/gauntlet #/codex #/interview routes, two-step confidence answering)
-   is absent here. The helpers below are MINIMAL local stand-ins prefixed c_ so a
-   later `git merge main` cannot collide with the real, identically-named helpers.
-   POST-MERGE SWAP POINTS (single call sites — repoint, then delete the c_* defs):
-     c_cyrb53/c_mulberry32/c_seededShuffle  -> real cyrb53/mulberry32
-     c_moment/c_queueMoments/c_tone/c_MOMENT_SFX -> real moment()/MOMENTS engine
-     c_dispatch/c_go + hashchange listener  -> real dispatch()'s reserved routes
-     answer()'s [C] hook                    -> two-step lockChoice/gradeAnswer
+   Built on the Phase 0/A1 architecture: real cyrb53/mulberry32 + seededShuffle,
+   the moments engine (extra moments feed queueMoments), the hash router's
+   previously-reserved routes, and the two-step confidence answer flow (hooks
+   live in gradeAnswer). Persisted additions (all additive): progress.awards,
+   progress.deepReads, localStorage sd_gauntlet. Deterministic randomness only
+   (seeded on todayISO) for anything that must survive a reload.
    ========================================================================== */
 
-/* ---------- [C] deterministic PRNG ---------- */
-function c_cyrb53(str, seed = 0) {
-  let h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed;
-  for (let i = 0; i < str.length; i++) {
-    const ch = str.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
-}
-function c_mulberry32(a) {
-  return function () {
-    a |= 0; a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-function c_seededShuffle(arr, seedStr) {
-  const a = arr.slice();
-  const rnd = c_mulberry32(c_cyrb53(String(seedStr)) >>> 0);
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(rnd() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
+/* ---------- [C] shared helpers ---------- */
 const prettyMod = (mod) => (String(mod).split("/")[1] || String(mod)).replace(/_/g, " ");
 function tierOf(section) {
   const t = sectionTier((state.progress.sections || {})[section]);
-  return t ? t.toLowerCase() : null;   // null | bronze | silver | gold
+  return t ? t.toLowerCase() : null;               // null | bronze | silver | gold
 }
-
-/* ---------- [C] moments engine ---------- */
-let _cAudio = null;
-function c_tone(freq, dur = 0.14, type = "sine", gain = 0.05, delay = 0) {
-  if (localStorage.getItem("sd_mute") === "1") return;
-  try {
-    _cAudio = _cAudio || new (window.AudioContext || window.webkitAudioContext)();
-    if (_cAudio.state === "suspended") _cAudio.resume();
-    const t = _cAudio.currentTime + delay;
-    const o = _cAudio.createOscillator(), g = _cAudio.createGain();
-    o.type = type; o.frequency.value = freq; o.connect(g); g.connect(_cAudio.destination);
-    g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    o.start(t); o.stop(t + dur);
-  } catch { /* audio unavailable */ }
-}
-const c_MOMENT_SFX = {
-  base: () => { c_tone(587, 0.14); c_tone(880, 0.16, "sine", 0.05, 0.08); },
-  bronze: () => { c_tone(523, 0.14); c_tone(784, 0.16, "sine", 0.05, 0.09); },
-  silver: () => { c_tone(659, 0.14); c_tone(988, 0.18, "triangle", 0.05, 0.09); },
-  gold: () => { [659, 880, 1047, 1319].forEach((f, i) => c_tone(f, 0.2, "triangle", 0.05, i * 0.08)); },
-};
-// Full-screen celebratory overlay. Resolves on tap, any key, or timeout.
-function c_moment(opts) {
-  const { tier = "base", title = "", sub = "", icon = "", seal = false, flip = false } = opts || {};
-  return new Promise((resolve) => {
-    const o = document.createElement("div");
-    o.className = "c-moment tier-" + tier + (seal ? " seal" : "") + (flip ? " flip" : "");
-    o.setAttribute("role", "status"); o.setAttribute("aria-live", "assertive");
-    o.innerHTML = `<div class="c-moment-card">
-        <div class="c-moment-disc">${seal ? '<span class="c-seal-stamp"></span>' : (icon || "")}</div>
-        <div class="c-moment-title">${esc(title)}</div>
-        ${sub ? `<div class="c-moment-sub">${esc(sub)}</div>` : ""}
-        <div class="c-moment-hint">tap to continue</div>
-      </div>`;
-    document.body.appendChild(o);
-    (c_MOMENT_SFX[tier] || c_MOMENT_SFX.base)();
-    if (seal) c_tone(130, 0.26, "sawtooth", 0.05, 0.02);
-    let done = false;
-    const onKey = (e) => { e.preventDefault(); e.stopPropagation(); dismiss(); };
-    function dismiss() {
-      if (done) return; done = true;
-      o.removeEventListener("click", dismiss);
-      document.removeEventListener("keydown", onKey, true);
-      o.classList.add("out");
-      const after = () => { o.remove(); resolve(); };
-      REDUCED() ? after() : setTimeout(after, 260);
-    }
-    o.addEventListener("click", dismiss);
-    document.addEventListener("keydown", onKey, true);   // capture: keep the overlay above the quiz keyboard handler
-    if (REDUCED()) { o.classList.add("in"); setTimeout(dismiss, 850); }
-    else { requestAnimationFrame(() => o.classList.add("in")); setTimeout(dismiss, seal ? 2400 : 1900); }
-  });
-}
-function c_queueMoments(list) {
-  return (list || []).reduce((p, m) => p.then(() => c_moment(m)), Promise.resolve());
-}
-
-/* ---------- [C] router (reserved routes #/gauntlet #/codex #/interview/<sec>) ---------- */
-function c_dispatch() {
-  const h = location.hash;
-  if (h === "#/gauntlet") { startGauntlet(); return true; }
-  if (h === "#/codex") { renderCodex(); return true; }
-  const m = h.match(/^#\/interview\/([a-z_]+)$/);
-  if (m) { startInterview(m[1], false); return true; }
-  return false;
-}
-function c_go(hash) {                                  // hashchange fires only on a real change
-  if (location.hash === hash) c_dispatch();
-  else location.hash = hash;
-}
-window.addEventListener("hashchange", c_dispatch);
-
 function bumpDeepReads() {
   const p = state.progress;
   p.deepReads = (p.deepReads || 0) + 1;
-  localStorage.setItem("sd_progress", JSON.stringify(p));   // persist immediately; award detected at next finish()
+  localStorage.setItem("sd_progress", JSON.stringify(p));   // persist now; deep_habit is detected at the next finish()
 }
 
 /* ---------- [C] codex model (100% derived from review records) ---------- */
@@ -3022,6 +3634,9 @@ function moduleNeeded(mod) {
   if (bank) { const n = bank.filter((q) => q.module === mod).length; if (n && n < 5) return n; }
   return 5;
 }
+// held = review records with reps >= 1 AND not overdue; captured = held >= needed;
+// foil = any record proven over a 21-day interval; tarnished = would still be
+// captured ignoring overdue, but decay dropped it below the bar.
 function codexState(progress, onlyMods) {
   const reviews = (progress && progress.reviews) || {};
   const files = (state.index && state.index.files) || {};
@@ -3032,23 +3647,35 @@ function codexState(progress, onlyMods) {
     let a = byMod.get(r.module); if (!a) byMod.set(r.module, a = []);
     a.push(r);
   }
-  const keys = onlyMods || Object.keys(files);
   const out = new Map();
-  for (const mod of keys) {
+  for (const mod of onlyMods || Object.keys(files)) {
     const recs = byMod.get(mod) || [];
     const withRep = recs.filter((r) => (r.reps || 0) >= 1);
-    const held = withRep.filter((r) => r.due && r.due > today).length;   // reps>=1 AND not overdue
-    const heldEver = withRep.length;                                     // ignoring overdue
+    const held = withRep.filter((r) => r.due && r.due > today).length;
+    const heldEver = withRep.length;
     const needed = moduleNeeded(mod);
     const captured = held >= needed;
-    const foil = recs.some((r) => (r.interval || 0) >= 21);
-    const tarnished = !captured && heldEver >= needed;                   // was captured; overdue dropped it below the bar
-    out.set(mod, { held, heldEver, needed, captured, foil, tarnished });
+    out.set(mod, {
+      held, heldEver, needed, captured,
+      foil: recs.some((r) => (r.interval || 0) >= 21),
+      tarnished: !captured && heldEver >= needed,
+    });
   }
   return out;
 }
+// Snapshot piece for progressSnapshot(): capture/foil of only the modules the
+// live deck touched (cheap), so queueMoments can diff pre/post in one pass.
+function cDeckCodex() {
+  if (!state.deck || !state.deck.length) return {};
+  const names = {};
+  for (const d of state.deck) names[d.q.module] = d.q.moduleName;
+  const cs = codexState(state.progress, Object.keys(names));
+  const out = {};
+  cs.forEach((v, mod) => { out[mod] = { captured: v.captured, foil: v.foil, name: names[mod] || prettyMod(mod) }; });
+  return out;
+}
 
-/* ---------- [C] 1. THE GAUNTLET ---------- */
+/* ---------- [C] 1. THE GAUNTLET — daily sealed run ---------- */
 function loadGauntlet() {
   let g = null;
   try { g = JSON.parse(localStorage.getItem("sd_gauntlet")); } catch { /* corrupt */ }
@@ -3058,60 +3685,55 @@ function saveGauntlet(g) { localStorage.setItem("sd_gauntlet", JSON.stringify(g)
 
 async function questionsByIds(ids) {
   const secs = new Set(ids.map((id) => id.split("/")[0]));
-  const maps = {};
-  for (const s of secs) { const b = await loadBank(s); if (b) maps[s] = new Map(b.map((q) => [q.id, q])); }
+  for (const s of secs) await loadBank(s);
   const out = [];
-  for (const id of ids) { const s = id.split("/")[0]; const q = maps[s] && maps[s].get(id); if (q) out.push(q); }
+  for (const id of ids) { const byId = bankById(id.split("/")[0]); const q = byId && byId.get(id); if (q) out.push(q); }
   return out;
 }
 
-// Deterministic 10-question recipe for today. Q1-3 oldest due · Q4-7 suggested
-// · Q8-9 weakest section · Q10 an advanced from the weakest module by lapses.
+// Deterministic 10-question recipe for today: Q1-3 oldest due reviews · Q4-7
+// suggested section (core/intermediate first) · Q8-9 weakest section
+// (intermediate first) · Q10 an advanced from the weakest module by lapses.
 async function buildGauntletDeck() {
   const seed = todayISO();
   const used = new Set(), picks = [];
   const push = (q) => { if (q && !used.has(q.id)) { used.add(q.id); picks.push(q); return true; } return false; };
 
-  // Q1-3: oldest due reviews
   const due = dueReviews().slice(0, 8), bySec = {};
   due.forEach(([id, r]) => (bySec[r.section] = bySec[r.section] || []).push(id));
-  const dueQ = [];
   for (const sec of Object.keys(bySec)) {
-    const bank = await loadBank(sec); if (!bank) continue;
-    const map = new Map(bank.map((q) => [q.id, q]));
-    for (const id of bySec[sec]) { const q = map.get(id); if (q) dueQ.push(q); }
+    await loadBank(sec);
+    const byId = bankById(sec); if (!byId) continue;
+    for (const id of bySec[sec]) { if (picks.length >= 3) break; push(byId.get(id)); }
+    if (picks.length >= 3) break;
   }
-  for (const q of dueQ) { if (picks.length >= 3) break; push(q); }
 
-  // Q4-7: suggested section (core/intermediate preferred), seeded shuffle
   const sSec = (state.today && state.today.section) || pickSection();
   const sBank = (await loadBank(sSec)) || [];
-  const sShuf = c_seededShuffle(sBank, seed + "|sug|" + sSec);
+  const sShuf = seededShuffle(sBank, seed + "|sug|" + sSec);
   const sPool = [...sShuf.filter((q) => q.difficulty !== "advanced"), ...sShuf];
   while (picks.length < 7) { const q = sPool.shift(); if (!q) break; push(q); }
 
-  // Q8-9: weakest section, intermediate preferred
   const weak = weakSections()[0];
   const wSec = weak ? weak.s : pickSection();
   const wBank = (await loadBank(wSec)) || [];
-  const wShuf = c_seededShuffle(wBank, seed + "|weak|" + wSec);
+  const wShuf = seededShuffle(wBank, seed + "|weak|" + wSec);
   const wPool = [...wShuf.filter((q) => q.difficulty === "intermediate"), ...wShuf];
   while (picks.length < 9) { const q = wPool.shift(); if (!q) break; push(q); }
 
-  // Q10: The Final Question — advanced from the weakest module by lapses
-  const reviews = state.progress.reviews || {};
+  // The Final Question
   let weakRec = null;
-  for (const r of Object.values(reviews)) { if (r.module && (r.lapses || 0) > (weakRec ? weakRec.lapses : 0)) weakRec = r; }
+  for (const r of Object.values(state.progress.reviews || {}))
+    if (r.module && (r.lapses || 0) > (weakRec ? weakRec.lapses : 0)) weakRec = r;
   let finalQ = null;
   if (weakRec && weakRec.module) {
     const mb = (await loadBank(weakRec.section)) || [];
-    finalQ = c_seededShuffle(mb.filter((q) => q.module === weakRec.module && q.difficulty === "advanced"), seed + "|fin1").find((q) => !used.has(q.id));
+    finalQ = seededShuffle(mb.filter((q) => q.module === weakRec.module && q.difficulty === "advanced"), seed + "|fin1").find((q) => !used.has(q.id));
   }
-  if (!finalQ) finalQ = c_seededShuffle(wBank.filter((q) => q.difficulty === "advanced"), seed + "|fin2").find((q) => !used.has(q.id));
-  if (!finalQ) finalQ = c_seededShuffle(sBank.filter((q) => q.difficulty === "advanced"), seed + "|fin3").find((q) => !used.has(q.id));
+  if (!finalQ) finalQ = seededShuffle(wBank.filter((q) => q.difficulty === "advanced"), seed + "|fin2").find((q) => !used.has(q.id));
+  if (!finalQ) finalQ = seededShuffle(sBank.filter((q) => q.difficulty === "advanced"), seed + "|fin3").find((q) => !used.has(q.id));
   push(finalQ);
 
-  // backfill to exactly 10 from the leftover suggested/weak pools
   const filler = [...sPool, ...wPool];
   for (let i = 0; i < filler.length && picks.length < 10; i++) push(filler[i]);
   return picks.slice(0, 10);
@@ -3121,19 +3743,20 @@ async function startGauntlet() {
   app.innerHTML = `<div class="loading">Sealing today's gauntlet&hellip;</div>`;
   let g = loadGauntlet(), questions;
   if (g && g.qids && g.qids.length) {
-    questions = await questionsByIds(g.qids);           // frozen: same qids all day, across reloads
+    questions = await questionsByIds(g.qids);      // frozen at first open: same qids all day
   } else {
     questions = await buildGauntletDeck();
     g = { date: todayISO(), qids: questions.map((q) => q.id), sealed: false, score: null, attempt: [] };
     saveGauntlet(g);
   }
-  if (!questions.length) { renderHome(); return; }
-  const practice = !!g.sealed;                          // one scored attempt/day; after that it's practice
+  if (!questions.length) { redirect("#/home"); return; }
+  const practice = !!g.sealed;                     // one scored attempt/day; then unscored practice
   state.section = practice ? "gauntlet-practice" : "gauntlet";
+  state.modules = null;
   state.gauntlet = { scored: !practice, practice };
   state.interview = null;
-  if (practice) startDeck(questions, () => startGauntlet());                      // normal mixed blitz, no seal
-  else startDeck(questions, () => startGauntlet(), { keepOrder: true, gauntlet: true });   // sealed run: recipe order
+  if (practice) startDeck(questions, startGauntlet);                          // normal mixed blitz of the same qids
+  else startDeck(questions, startGauntlet, { keepOrder: true });              // sealed run: the recipe IS the arc
 }
 
 function gauntletCardHTML() {
@@ -3168,7 +3791,7 @@ function renderPracticeBanner() {
   app.prepend(b);
 }
 
-/* ---------- [C] 2. THE CODEX ---------- */
+/* ---------- [C] 2. THE CODEX — collection, 100% derived ---------- */
 function codexOrderedSections() {
   const files = (state.index && state.index.files) || {};
   const secOrder = Object.keys(STUDY_ORDER);
@@ -3182,7 +3805,8 @@ function codexModulesOf(sec) {
     .sort((a, b) => (order.indexOf(a) === -1 ? 9999 : order.indexOf(a)) - (order.indexOf(b) === -1 ? 9999 : order.indexOf(b)));
 }
 function renderCodex() {
-  state.inQuiz = false; state.screenBack = renderHome;
+  state.inQuiz = false;
+  refreshStats();
   const cs = codexState(state.progress);
   let captured = 0, foil = 0;
   cs.forEach((v) => { if (v.captured) captured++; if (v.foil) foil++; });
@@ -3206,18 +3830,22 @@ function renderCodex() {
       <p><b>${captured}</b>/${cs.size} captured &middot; <b>${foil}</b> foil</p></div>
     ${shelves}
     <div class="row" style="margin-top:18px"><button class="ghost" id="cxHome">&larr; Home</button></div>`;
-  el("#cxHome").addEventListener("click", () => { location.hash = "#"; vt(renderHome); });
+  el("#cxHome").addEventListener("click", () => go("#/home"));
   document.querySelectorAll(".cx-card").forEach((b) =>
-    b.addEventListener("click", () => { reader.back = []; openReaderPath(b.dataset.mod + "/README.md", prettyMod(b.dataset.mod), null); }));
+    b.addEventListener("click", () => { reader.back = []; openReaderPath(b.dataset.mod + "/README.md", prettyMod(b.dataset.mod)); }));
   wireReveals();
 }
 
-/* ---------- [C] 3. THE SKYLINE ---------- */
+/* ---------- [C] 3. THE SKYLINE — ambient retention city ---------- */
+// One building per CAPTURED module, grouped into section districts in
+// STUDY_ORDER order. Height tracks held count (3 tiers); windows lit in
+// proportion to current retention (dark = overdue). Neglect darkens windows,
+// never removes buildings. Hidden entirely at 0 captured.
 function skylineSVG(p) {
   const cs = codexState(p);
   const captured = [];
   cs.forEach((v, mod) => { if (v.captured) captured.push({ mod, v }); });
-  if (!captured.length) return "";                     // hide entirely when nothing is captured
+  if (!captured.length) return "";
   const secOrder = Object.keys(STUDY_ORDER);
   const key = (mod) => {
     const sec = mod.split("/")[0], order = STUDY_ORDER[sec] || [];
@@ -3225,13 +3853,13 @@ function skylineSVG(p) {
   };
   captured.sort((a, b) => { const ka = key(a.mod), kb = key(b.mod); return ka[0] - kb[0] || ka[1] - kb[1]; });
   const BW = 13, GAP = 4, DGAP = 12, H = 72, PAD = 6;
-  const rnd = c_mulberry32(c_cyrb53("skyline|" + todayISO()) >>> 0);
+  const rnd = mulberry32(cyrb53("skyline|" + todayISO()) >>> 0);   // seeded flicker picks
   let x = PAD, prevSec = null, buildings = "";
   for (const { mod, v } of captured) {
     const sec = mod.split("/")[0];
     if (prevSec !== null) x += (sec !== prevSec ? DGAP : GAP);
     prevSec = sec;
-    const bh = v.held >= 12 ? 56 : v.held >= 8 ? 42 : 30;   // 3 height tiers
+    const bh = v.held >= 12 ? 56 : v.held >= 8 ? 42 : 30;
     const by = H - bh - 2;
     const winTotal = Math.max(2, Math.min(6, v.heldEver || v.needed));
     const lit = Math.max(0, Math.min(winTotal, Math.round(winTotal * (v.held / Math.max(1, v.heldEver)))));
@@ -3250,7 +3878,7 @@ function skylineSVG(p) {
     `<svg viewBox="0 0 ${x + PAD} ${H}" width="100%" height="${H}" preserveAspectRatio="xMinYMax meet" role="img">${buildings}</svg></div>`;
 }
 
-/* ---------- [C] 4. THE LEDGER ---------- */
+/* ---------- [C] 4. THE LEDGER — achievements certifying learning events ---------- */
 const AWARDS = [
   { id: "clean_slate", title: "Clean Slate", hint: "Clear every due review with 10+ tracked." },
   { id: "long_memory", title: "Long Memory", hint: "Answer right at a 30-day interval." },
@@ -3264,24 +3892,26 @@ const AWARDS = [
 ];
 function comebackHit(seq) {
   let misses = 0, run = 0;
-  for (const s of seq) {
+  for (const s of seq || []) {
     if (s === "w") { misses++; run = 0; }
     else if (s === "c") { run++; if (misses >= 3 && run >= 7) return true; }
   }
   return false;
 }
+// Detect newly earned awards (never un-earn), write them into progress.awards,
+// return the definitions of the fresh ones. Runs post-save inside finish().
 function checkAwards(ctx, stats) {
   const p = state.progress;
   if (!p.awards) p.awards = {};
-  const today = ctx.today, reviews = p.reviews || {}, out = [];
+  const reviews = p.reviews || {}, out = [];
   const grant = (id) => {
     if (p.awards[id]) return;
     const def = AWARDS.find((a) => a.id === id); if (!def) return;
-    p.awards[id] = today; out.push(def);
+    p.awards[id] = ctx.today; out.push(def);
   };
   if (Object.keys(reviews).length >= 10 && dueReviews().length === 0) grant("clean_slate");
   if ((state.sessMaxInterval || 0) >= 30) grant("long_memory");
-  if (comebackHit(state.sessSeq || [])) grant("comeback");
+  if (comebackHit(state.sessSeq)) grant("comeback");
   if (state.section === "gauntlet" && stats.correct >= 8 && stats.total >= 10 && ctx.daysSinceLast >= 7) grant("cold_open");
   if (state.sessRestored) grant("restored");
   if ((p.deepReads || 0) >= 10) grant("deep_habit");
@@ -3310,15 +3940,16 @@ function ledgerStripHTML() {
   return `<h2 class="section-h">Ledger</h2><div class="ledger-strip">${chips}${passes}</div>`;
 }
 
-/* ---------- [C] 5. THE INTERVIEWER ---------- */
+/* ---------- [C] 5. THE INTERVIEWER — graph-driven boss battle ---------- */
 const IV_AVATAR_SVG = `<svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
     <defs><linearGradient id="ivg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="var(--accent)"/><stop offset="1" stop-color="var(--accent-2)"/></linearGradient></defs>
     <circle cx="32" cy="22" r="12" fill="url(#ivg)" fill-opacity="0.5"/>
     <path d="M12 58c0-13 9-20 20-20s20 7 20 20z" fill="url(#ivg)" fill-opacity="0.42"/>
     <rect x="20" y="46" width="24" height="12" rx="2" fill="var(--bg-2)" fill-opacity="0.55"/>
   </svg>`;
-function renderInterviewLocked(section) { openStudySection(section); }   // path header shows the lock chip
 
+// "He probes the weakness": highest-w graph edge from the missed module whose
+// pool still has questions; fall back to the same module, then any pool.
 function pickFollowUp(module, pairs, iv) {
   let best = null, bw = -1;
   for (const p of pairs || []) {
@@ -3332,24 +3963,28 @@ function pickFollowUp(module, pairs, iv) {
   let arr = iv.pool.get(mod);
   if (arr && arr.length) { const q = arr.shift(); iv.usedIds.add(q.id); return { q, mod }; }
   for (const [m, a] of iv.pool) { if (a.length) { const q = a.shift(); iv.usedIds.add(q.id); return { q, mod: m }; } }
-  return null;   // pool exhausted: continue the planned sequence
+  return null;                                     // pool exhausted: continue the planned sequence
 }
+// Swap the next still-pending planned question for the follow-up (swap the deck
+// entry in place: no orphaned pending items at finish, dots/total stay stable).
 function injectFollowUp(item) {
-  const iv = state.interview, nextPos = state.cursor + 1;
-  if (nextPos >= state.queue.length) return null;      // missed the last question — nothing to probe
+  const iv = state.interview;
+  let at = -1;
+  for (let k = state.cursor + 1; k < state.queue.length; k++) {
+    const cand = state.deck[state.queue[k]];
+    if (cand && cand.status === "pending") { at = k; break; }
+  }
+  if (at < 0) return null;                          // nothing left to probe
   const res = pickFollowUp(item.q.module, iv.pairs, iv);
   if (!res) return null;
-  const newItem = makeItem(res.q);
-  newItem.followUp = res.mod;
-  const di = state.deck.push(newItem) - 1;
-  state.queue[nextPos] = di;                            // "he probes the weakness": replace the next planned question
+  state.deck[state.queue[at]] = makeItem(res.q);
   iv.lastFollowUp = res;
   return res;
 }
 function interviewAfterAnswer(item, right) {
   const iv = state.interview; if (!iv) return;
   if (right) {
-    const crit = state.combo >= 3;                     // combo>=3 crits for 2 damage
+    const crit = state.combo >= 3;                 // combo crit: 2 damage
     iv.hp = Math.max(0, iv.hp - (crit ? 2 : 1));
     if (iv.hp <= 0) iv.won = true;
     updateInterviewHP(crit);
@@ -3357,7 +3992,12 @@ function interviewAfterAnswer(item, right) {
     const res = injectFollowUp(item);
     if (res) {
       const rev = el("#reveal");
-      if (rev) { const line = document.createElement("div"); line.className = "iv-followup"; line.textContent = `He follows up on ${prettyMod(res.mod)}.`; rev.appendChild(line); }
+      if (rev) {
+        const line = document.createElement("div");
+        line.className = "iv-followup";
+        line.textContent = `He follows up on ${prettyMod(res.mod)}.`;
+        rev.appendChild(line);
+      }
     }
     updateInterviewHP(false);
   }
@@ -3369,9 +4009,8 @@ function updateInterviewHP(crit) {
 }
 function renderInterviewStage() {
   const iv = state.interview; if (!iv) return;
-  let stage = el("#ivStage");
-  if (!stage) {
-    stage = document.createElement("div");
+  if (!el("#ivStage")) {
+    const stage = document.createElement("div");
     stage.className = "iv-stage"; stage.id = "ivStage";
     stage.innerHTML = `<div class="iv-avatar">${IV_AVATAR_SVG}</div>
       <div class="iv-hpwrap">
@@ -3389,7 +4028,7 @@ function typewriter(node, text) {
   tick();
 }
 function renderInterviewIntro(section, panel, deckQ) {
-  state.inQuiz = false; state.screenBack = renderHome;
+  state.inQuiz = false;
   const line = panel
     ? `A panel today. ${deckQ.length} hard questions on ${label(section)}. No warm-up.`
     : `Let's talk about ${label(section)}. ${deckQ.length} questions. Take your time — I won't.`;
@@ -3399,129 +4038,137 @@ function renderInterviewIntro(section, panel, deckQ) {
       <button class="cta inline" id="ivBegin">Begin</button>
     </div>`;
   typewriter(el("#ivType"), line);
-  el("#ivBegin").addEventListener("click", () =>
-    startDeck(deckQ, () => startInterview(section, panel), { keepOrder: true, interview: true }));
+  el("#ivBegin").addEventListener("click", () => {
+    state.section = "interview"; state.modules = null;
+    startDeck(deckQ, () => startInterview(section, panel), { keepOrder: true });
+  });
   app.focus({ preventScroll: true });
 }
-async function startInterview(section, panel = false) {
+// panel: undefined -> derived from tier (Gold runs the all-advanced Panel).
+async function startInterview(section, panel) {
   const tier = tierOf(section);
-  if (tier !== "silver" && tier !== "gold") { renderInterviewLocked(section); return; }
+  if (tier !== "silver" && tier !== "gold") { redirect("#/study/" + section); return; }   // locked: path header shows the chip
+  if (panel === undefined) panel = tier === "gold";
   app.innerHTML = `<div class="loading">Preparing the interview&hellip;</div>`;
   const bank = (await loadBank(section)) || [];
-  const graph = await apiGet(`graph/${section}.json`, null, "default");
+  const graph = await fetchJSON(`graph/${section}.json`, null, "default");
   const pairs = (graph && graph.pairs) || [];
   const seed = todayISO() + "|iv|" + section + (panel ? "|panel" : "");
   let deckQ;
   if (panel) {
-    deckQ = c_seededShuffle(bank.filter((q) => q.difficulty === "advanced"), seed).slice(0, 12);
+    deckQ = seededShuffle(bank.filter((q) => q.difficulty === "advanced"), seed).slice(0, 12);
   } else {
-    const core = c_seededShuffle(bank.filter((q) => q.difficulty === "core"), seed + "c").slice(0, 4);
-    const inter = c_seededShuffle(bank.filter((q) => q.difficulty === "intermediate"), seed + "i").slice(0, 4);
-    const adv = c_seededShuffle(bank.filter((q) => q.difficulty === "advanced"), seed + "a").slice(0, 4);
-    deckQ = [...core, ...inter, ...adv];   // escalation
+    const core = seededShuffle(bank.filter((q) => q.difficulty === "core"), seed + "c").slice(0, 4);
+    const inter = seededShuffle(bank.filter((q) => q.difficulty === "intermediate"), seed + "i").slice(0, 4);
+    const adv = seededShuffle(bank.filter((q) => q.difficulty === "advanced"), seed + "a").slice(0, 4);
+    deckQ = [...core, ...inter, ...adv];             // core -> intermediate -> advanced escalation
   }
-  if (deckQ.length < 12) {                  // backfill small sections up toward 12
+  if (deckQ.length < 12) {                            // small sections: backfill toward 12
     const seen = new Set(deckQ.map((q) => q.id));
-    for (const q of c_seededShuffle(bank, seed + "fill")) { if (deckQ.length >= 12) break; if (!seen.has(q.id)) { seen.add(q.id); deckQ.push(q); } }
+    for (const q of seededShuffle(bank, seed + "fill")) { if (deckQ.length >= 12) break; if (!seen.has(q.id)) { seen.add(q.id); deckQ.push(q); } }
   }
   deckQ = deckQ.slice(0, 12);
-  if (deckQ.length < 3) { renderHome(); return; }
+  if (deckQ.length < 3) { redirect("#/home"); return; }
   const usedIds = new Set(deckQ.map((q) => q.id)), pool = new Map();
-  for (const q of c_seededShuffle(bank, seed + "pool")) {
+  for (const q of seededShuffle(bank, seed + "pool")) {   // per-module follow-up pools
     if (usedIds.has(q.id)) continue;
     let a = pool.get(q.module); if (!a) pool.set(q.module, a = []); a.push(q);
   }
   state.interview = { section, panel, hp: deckQ.length, maxHp: deckQ.length, pairs, pool, usedIds, lastFollowUp: null, won: false };
-  state.section = "interview"; state.gauntlet = null;
+  state.gauntlet = null;
   document.body.classList.add("interview-mode");
   renderInterviewIntro(section, panel, deckQ);
 }
 function insertInterviewControl(section) {
-  const hero = el(".path-screen .hero") || el(".hero"); if (!hero) return;
+  const hero = el(".path-screen .hero"); if (!hero) return;
   const tier = tierOf(section), awards = state.progress.awards || {};
   const passed = awards["interview_" + section] || awards["panel_" + section];
   const wrap = document.createElement("div"); wrap.className = "iv-cta-wrap";
   let html = passed ? `<span class="c-chip pass">Passed</span>` : "";
-  if (tier === "gold") html += `<button class="ghost iv-cta" id="ivPanelBtn">${awards["panel_" + section] ? "Panel again" : "Panel"} &rarr;</button>`;
-  else if (tier === "silver") html += `<button class="ghost iv-cta" id="ivFaceBtn">Face the Interviewer &rarr;</button>`;
+  if (tier === "gold") html += `<button class="ghost iv-cta" id="ivGoBtn">${awards["panel_" + section] ? "Panel again" : "Panel"} &rarr;</button>`;
+  else if (tier === "silver") html += `<button class="ghost iv-cta" id="ivGoBtn">Face the Interviewer &rarr;</button>`;
   else html += `<span class="c-chip lock">Silver unlocks the Interviewer</span>`;
   wrap.innerHTML = html; hero.appendChild(wrap);
-  const f = el("#ivFaceBtn"); if (f) f.addEventListener("click", () => startInterview(section, false));
-  const pn = el("#ivPanelBtn"); if (pn) pn.addEventListener("click", () => startInterview(section, true));
+  const b = el("#ivGoBtn"); if (b) b.addEventListener("click", () => go("#/interview/" + section));
 }
 
-/* ---------- [C] finish() hooks: seal · resolve · diff codex · detect awards ---------- */
+/* ---------- [C] finish() hooks: seal · verdict · awards ---------- */
+// Pre-save: apply the gauntlet seal bonus (folds into bonusXp) and capture the
+// context that the save will overwrite (lastPlayed gap, touched modules).
 function cBeforeFinish() {
   const p = state.progress, today = todayISO();
-  const mods = new Set(), modName = {};
-  for (const d of state.deck) { mods.add(d.q.module); modName[d.q.module] = d.q.moduleName; }
-  const preCodex = codexState(p, [...mods]);
   const daysSinceLast = p.lastPlayed
     ? Math.round((new Date(today + "T00:00:00") - new Date(p.lastPlayed + "T00:00:00")) / 86400000)
     : Infinity;
-  if (state.section === "gauntlet") {                 // scored run only
+  const mods = [...new Set(state.deck.map((d) => d.q.module))];
+  if (state.section === "gauntlet") {
     const g = loadGauntlet();
-    if (g && !g.sealed) state.sessionXp += 40;         // +40 seal bonus, folded into bonusXp
+    if (g && !g.sealed) state.sessionXp += 40;      // seal bonus (one scored attempt/day)
   }
-  return { preCodex, mods: [...mods], modName, daysSinceLast, today, interviewWon: false };
+  return { today, daysSinceLast, mods, interviewWon: false };
 }
-function cAfterFinish(ctx, stats) {
-  const p = state.progress; if (!p.awards) p.awards = {};
-  const today = ctx.today, moments = [];
-  // Gauntlet seal
+// Post-save: seal the gauntlet, resolve the interview, detect ledger awards.
+// Returns moment entries for queueMoments' extra slot.
+function cAfterSave(ctx, stats) {
+  const p = state.progress;
+  if (!p.awards) p.awards = {};
+  const extra = [];
   if (state.section === "gauntlet") {
     const g = loadGauntlet();
     if (g && !g.sealed) {
-      g.sealed = true; g.score = stats.correct; g.attempt = state.deck.map((d) => d.status); saveGauntlet(g);
+      g.sealed = true; g.score = stats.correct; g.attempt = state.deck.map((d) => d.status);
+      saveGauntlet(g);
       const n = (p.history || []).filter((h) => h.section === "gauntlet").length;   // includes today's entry
-      moments.push({ tier: "gold", seal: true, title: `Gauntlet #${n} — sealed`, sub: `${stats.correct}/${state.deck.length}` });
+      extra.push({ tier: "gauntlet", icon: `<span class="c-seal-stamp"></span>`, title: `Gauntlet #${n} — sealed`, sub: `${stats.correct}/${state.deck.length}`, play: () => sfx.seal() });
     }
   }
-  // Interviewer result
   if (state.interview) {
     const iv = state.interview;
     ctx.interviewWon = iv.hp <= 0;
     if (ctx.interviewWon) {
       const id = iv.panel ? ("panel_" + iv.section) : ("interview_" + iv.section);
-      if (!p.awards[id]) p.awards[id] = today;
-      moments.push({ tier: "gold", title: `Passed: ${label(iv.section)}`, sub: iv.panel ? "Panel cleared." : "Interviewer satisfied." });
+      if (!p.awards[id]) p.awards[id] = ctx.today;
+      extra.push({ tier: "gold", icon: `<span class="moment-tier gold">Passed</span>`, title: `Passed: ${label(iv.section)}`, sub: iv.panel ? "Panel cleared." : "The interviewer is satisfied.", play: () => sfx.gold() });
     }
-    document.body.classList.remove("interview-mode");
   }
-  // Codex captures / foils on the touched modules
-  const postCodex = codexState(p, ctx.mods);
-  for (const mod of ctx.mods) {
-    const pre = ctx.preCodex.get(mod) || {}, post = postCodex.get(mod) || {};
-    if (post.captured && !pre.captured) moments.push({ tier: "silver", flip: true, title: `Captured: ${ctx.modName[mod] || prettyMod(mod)}`, sub: "Added to your Codex." });
-    if (post.foil && !pre.foil) moments.push({ tier: "gold", title: `Foil: ${ctx.modName[mod] || prettyMod(mod)}`, sub: "Proven over 21 days." });
-  }
-  // Ledger awards
-  for (const a of checkAwards(ctx, stats)) moments.push({ tier: "silver", title: `Ledger: ${a.title}`, sub: a.hint });
-  localStorage.setItem("sd_progress", JSON.stringify(p));   // persist awards + any deepReads
-  return moments;
+  for (const a of checkAwards(ctx, stats))
+    extra.push({ tier: "ledger", icon: `<span class="moment-tier">Ledger</span>`, title: `Ledger: ${a.title}`, sub: a.hint, play: () => sfx.chime() });
+  localStorage.setItem("sd_progress", JSON.stringify(p));   // persist awards written above
+  return extra;
 }
-function cApplyResults(ctx) {
+// Results-screen banners for the two special decks (called at the end of finish).
+function cApplyResults(ctx, stats) {
   const result = el(".result"); if (!result) return;
   if (state.section === "gauntlet" || state.section === "gauntlet-practice") {
     const b = document.createElement("div"); b.className = "c-gaunt-banner";
     if (state.section === "gauntlet-practice") b.innerHTML = `<span class="c-chip practice">practice</span> today's gauntlet is sealed`;
     else {
       const g = loadGauntlet(), n = (state.progress.history || []).filter((h) => h.section === "gauntlet").length;
-      b.innerHTML = `<span class="c-seal-mini"></span> Gauntlet #${n} sealed &middot; ${g ? g.score : stats_()}/${state.deck.length}`;
+      b.innerHTML = `<span class="c-seal-mini"></span> Gauntlet #${n} sealed &middot; ${g ? g.score : stats.correct}/${state.deck.length}`;
     }
     result.insertBefore(b, result.firstChild);
   }
   if (state.interview) {
     const b = document.createElement("div"); b.className = "c-iv-banner " + (ctx.interviewWon ? "won" : "resched");
     b.innerHTML = ctx.interviewWon
-      ? `<span class="c-chip pass">Passed</span> ${esc(label(state.interview.section))} &middot; interviewer satisfied.`
+      ? `<span class="c-chip pass">Passed</span> ${esc(label(state.interview.section))} &middot; the interviewer is satisfied.`
       : `We'll continue another day. Review what we covered.`;
     result.insertBefore(b, result.firstChild);
   }
 }
-function stats_() { return state.deck.filter((d) => d.status === "correct").length; }
 
 /* ---------- [C] ?qa=1 debug handle (documented in qa_phaseC.mjs) ---------- */
+// Non-mutating preview of which module a follow-up would draw from.
+function pickFollowUpPreview(module, iv) {
+  let best = null, bw = -1;
+  for (const p of iv.pairs || []) {
+    let other = null; if (p.a === module) other = p.b; else if (p.b === module) other = p.a;
+    if (!other) continue;
+    const arr = iv.pool.get(other);
+    if (arr && arr.length && p.w > bw) { bw = p.w; best = other; }
+  }
+  return best || module;
+}
 if (new URLSearchParams(location.search).get("qa") === "1") {
   window.__qa = {
     state,
@@ -3533,23 +4180,12 @@ if (new URLSearchParams(location.search).get("qa") === "1") {
     gauntlet() { try { return JSON.parse(localStorage.getItem("sd_gauntlet")); } catch { return null; } },
     interview() { return state.interview; },
     interviewHp() { return state.interview ? state.interview.hp : null; },
-    expectFollowUp(mod) { if (!state.interview) return null; const r = pickFollowUpPreview(mod, state.interview); return r; },
+    expectFollowUp(mod) { return state.interview ? pickFollowUpPreview(mod, state.interview) : null; },
     lastFollowUp() { return state.interview && state.interview.lastFollowUp ? state.interview.lastFollowUp.mod : null; },
-    codex(mods) { const m = codexState(state.progress, mods); return Object.fromEntries(m); },
-    moments() { return document.querySelectorAll(".c-moment").length; },
+    codex(mods) { return Object.fromEntries(codexState(state.progress, mods)); },
+    moments() { return document.querySelectorAll(".moment").length; },
     tierOf,
   };
-}
-// Non-mutating preview of which module a follow-up would draw from (QA assertion helper).
-function pickFollowUpPreview(module, iv) {
-  let best = null, bw = -1;
-  for (const p of iv.pairs || []) {
-    let other = null; if (p.a === module) other = p.b; else if (p.b === module) other = p.a;
-    if (!other) continue;
-    const arr = iv.pool.get(other);
-    if (arr && arr.length && p.w > bw) { bw = p.w; best = other; }
-  }
-  return best || module;
 }
 
 /* ---------- boot ---------- */
@@ -3573,17 +4209,17 @@ function syncModeBtn() {
 }
 
 async function boot() {
-  state.index = await apiGet("questions/index.json", null);
+  state.index = await fetchJSON("questions/index.json", null);
   if (!state.index) {
     app.innerHTML = `<div class="error">No question bank found. Run <code>python3 extract.py</code> then reload.</div>`;
     return;
   }
   el("#bankInfo").textContent = `${state.index.total} questions across ${Object.keys(state.index.sections).length} sections`;
-  state.progress = await loadProgress();
-  state.today = IS_STATIC ? {} : await apiGet("/api/today", {});
-  el("#navProgress").addEventListener("click", () => vt(renderProgress));
+  state.progress = loadProgress();
+  state.today = {};                                // reserved for the in-app coach (later phase)
+  el("#navProgress").addEventListener("click", () => guardedNav(() => go("#/progress")));
   const studyB = el("#navStudy");
-  if (studyB) studyB.addEventListener("click", () => vt(renderStudy));
+  if (studyB) studyB.addEventListener("click", () => guardedNav(() => go("#/study")));
   const helpB = el("#helpBtn");
   if (helpB) helpB.addEventListener("click", toggleHelp);
   restoreReaderWidth();
@@ -3602,8 +4238,22 @@ async function boot() {
     });
   }
   syncModeBtn();
-  renderHome();
-  c_dispatch();                                     // [C] honor a #/gauntlet · #/codex · #/interview/<sec> deep link on load
+  discardStaleDeck();                              // drop a previous-day resume snapshot
+  registerServiceWorker();
+  window.addEventListener("hashchange", onHashChange);
+  // Normalize an empty hash to #/home (replace, not push) so the very first
+  // history entry carries a real route and Back never lands on a hashless URL.
+  if (!location.hash) history.replaceState(null, "", "#/home");
+  onHashChange();                                  // dispatch the initial route
+}
+
+// PWA: register the offline shell/bank cache. Only in secure contexts (https or
+// localhost); a file:// or plain-http origin has no serviceWorker and must not throw.
+function registerServiceWorker() {
+  const secure = location.protocol === "https:" ||
+    ["localhost", "127.0.0.1"].includes(location.hostname);
+  if (!secure || !navigator.serviceWorker) return;
+  try { navigator.serviceWorker.register("sw.js"); } catch { /* unsupported */ }
 }
 
 boot();

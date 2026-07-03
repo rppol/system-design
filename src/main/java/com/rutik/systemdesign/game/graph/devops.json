@@ -261,15 +261,15 @@
    "lex": 0.1302
   },
   {
-   "a": "devops/infrastructure_as_code_terraform",
-   "b": "devops/secrets_management",
+   "a": "devops/observability_metrics_prometheus",
+   "b": "devops/observability_tracing_and_otel",
    "w": 0.1631,
    "links": 0,
    "lex": 0.1289
   },
   {
-   "a": "devops/observability_metrics_prometheus",
-   "b": "devops/observability_tracing_and_otel",
+   "a": "devops/infrastructure_as_code_terraform",
+   "b": "devops/secrets_management",
    "w": 0.1631,
    "links": 0,
    "lex": 0.1289
@@ -436,15 +436,15 @@
    "lex": 0.1074
   },
   {
-   "a": "devops/ml_platform_and_gpu_infrastructure",
-   "b": "devops/serverless_and_faas",
+   "a": "devops/kubernetes_scheduling_and_autoscaling",
+   "b": "devops/kubernetes_workloads_and_objects",
    "w": 0.1356,
    "links": 0,
    "lex": 0.1072
   },
   {
-   "a": "devops/kubernetes_scheduling_and_autoscaling",
-   "b": "devops/kubernetes_workloads_and_objects",
+   "a": "devops/ml_platform_and_gpu_infrastructure",
+   "b": "devops/serverless_and_faas",
    "w": 0.1356,
    "links": 0,
    "lex": 0.1072
@@ -646,15 +646,15 @@
    "lex": 0.0897
   },
   {
-   "a": "devops/container_runtimes_and_oci",
-   "b": "devops/observability_tracing_and_otel",
+   "a": "devops/disaster_recovery_and_resilience",
+   "b": "devops/performance_and_load_testing",
    "w": 0.1127,
    "links": 0,
    "lex": 0.0891
   },
   {
-   "a": "devops/disaster_recovery_and_resilience",
-   "b": "devops/performance_and_load_testing",
+   "a": "devops/container_runtimes_and_oci",
+   "b": "devops/observability_tracing_and_otel",
    "w": 0.1127,
    "links": 0,
    "lex": 0.0891
@@ -681,18 +681,18 @@
    "lex": 0.0873
   },
   {
-   "a": "devops/ml_platform_and_gpu_infrastructure",
-   "b": "devops/performance_and_load_testing",
-   "w": 0.1105,
-   "links": 0,
-   "lex": 0.0873
-  },
-  {
    "a": "devops/networking_for_devops",
    "b": "devops/performance_and_load_testing",
    "w": 0.1105,
    "links": 0,
    "lex": 0.0874
+  },
+  {
+   "a": "devops/ml_platform_and_gpu_infrastructure",
+   "b": "devops/performance_and_load_testing",
+   "w": 0.1105,
+   "links": 0,
+   "lex": 0.0873
   },
   {
    "a": "devops/linux_and_os_fundamentals",
