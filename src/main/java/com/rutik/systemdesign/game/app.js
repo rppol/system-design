@@ -4289,6 +4289,42 @@ function wireReaderBody(body) {
   }));
 }
 
+// "Evaluate me": every topic page ends with a one-click quiz scoped to its
+// module. Hidden mid-quiz (starting one would destroy the live deck) and on
+// pages that aren't a bank module (section roots, case studies).
+function appendEvalBlock(main, path) {
+  if (state.inQuiz) return;
+  const dir = path.replace(/\/[^/]+$/, "");
+  const files = (state.index && state.index.files) || {};
+  if (!files[dir]) return;                         // not a quizzable module page
+  const section = dir.split("/")[0];
+  const name = dir.split("/").pop().replace(/_/g, " ");
+  const block = document.createElement("div");
+  block.className = "eval-block";
+  block.innerHTML = `<div class="eval-h">Evaluate yourself</div>
+    <p class="eval-sub" id="evalSub">Quick check on ${esc(name)} &mdash; misses feed your review deck.</p>
+    <button class="eval-btn" id="evalBtn">Quiz this topic</button>`;
+  main.appendChild(block);
+  block.querySelector("#evalBtn").addEventListener("click", async () => {
+    const bank = await loadBank(section);
+    const pool = (bank || []).filter((q) => q.module === dir);
+    if (!pool.length) { announce("No questions extracted for this page yet."); return; }
+    closeReader();
+    startBlitz(section, [dir]);
+  });
+  // Fill the question count in the background (also warms the bank cache for
+  // an instant quiz start); hide the block for 0-question modules. Skips the
+  // multi-MB fetch on data-saver connections.
+  if (!(navigator.connection && navigator.connection.saveData)) {
+    loadBank(section).then((bank) => {
+      const n = (bank || []).filter((q) => q.module === dir).length;
+      if (!n) { block.remove(); return; }
+      const sub = block.querySelector("#evalSub");
+      if (sub) sub.textContent = `${n} questions on ${name} — misses feed your review deck.`;
+    }).catch(() => {});
+  }
+}
+
 // Open any repo content file by path. Pushing onto the back-stack is the caller's
 // job (cross-links push; Back/Prev/Next do not), keeping history clean.
 // Build a Study-equivalent nav context for a path from the boot-time index
@@ -4403,6 +4439,7 @@ async function openReaderPath(path, title, navCtx, frag) {
     wireReaderBody(main);
     wireDiagramsAndCopy(main);                     // copy buttons + ASCII-diagram zoom
     renderMermaid(main);                           // no-op when page has no mermaid fences
+    appendEvalBlock(main, path);                   // "Evaluate me" quiz launcher
     b.scrollTop = 0;
     if (frag) { const t = main.querySelector("#" + CSS.escape(frag)); if (t) t.scrollIntoView({ block: "start" }); }
     localStorage.setItem("sd_last_read", JSON.stringify({ path, title: reader.titleText }));   // Study's "Continue reading"
