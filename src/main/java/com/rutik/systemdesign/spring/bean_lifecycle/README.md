@@ -79,73 +79,51 @@ Think of a bean's lifecycle like hiring and onboarding an employee:
 
 ## 5. Architecture Diagrams
 
-```
-Complete Bean Lifecycle (Singleton)
-=====================================
-
-  Container.refresh()
-        |
-        v
-  [1] new MyBean()          <- constructor
-        |
-        v
-  [2] @Autowired injection  <- AutowiredAnnotationBPP.postProcessProperties
-        |
-        v
-  [3] setBeanName()         <- if implements BeanNameAware
-        |
-        v
-  [4] setBeanFactory()      <- if implements BeanFactoryAware
-        |
-        v
-  [5] setApplicationContext()<- if implements ApplicationContextAware
-        |
-        v
-  [6] BPP.postProcessBeforeInitialization()
-      (all registered BPPs called in order)
-        |
-        v
-  [7] @PostConstruct        <- CommonAnnotationBeanPostProcessor
-        |
-        v
-  [8] afterPropertiesSet()  <- if implements InitializingBean
-        |
-        v
-  [9] init-method           <- @Bean(initMethod=...) or XML init-method
-        |
-        v
-  [10] BPP.postProcessAfterInitialization()
-       <- AnnotationAwareAspectJAutoProxyCreator creates AOP proxy HERE
-        |
-        v
-  [11] BEAN READY (stored in singletonObjects map)
-        .
-        .  (bean in use)
-        .
-  [12] @PreDestroy           <- CommonAnnotationBeanPostProcessor
-        |
-        v
-  [13] destroy()            <- if implements DisposableBean
-        |
-        v
-  [14] destroy-method       <- @Bean(destroyMethod=...) or XML destroy-method
+```mermaid
+stateDiagram-v2
+    [*] --> Instantiated: new MyBean()\n(constructor)
+    Instantiated --> PropertiesPopulated: @Autowired injection\n(AutowiredAnnotationBPP)
+    PropertiesPopulated --> AwareCallbacks: setBeanName / setBeanFactory /\nsetApplicationContext (if implemented)
+    AwareCallbacks --> BPPBefore: BPP.postProcessBeforeInitialization\n(all registered BPPs, in order)
+    BPPBefore --> PostConstructed: @PostConstruct\n(CommonAnnotationBeanPostProcessor)
+    PostConstructed --> PropertiesSet: afterPropertiesSet()\n(if implements InitializingBean)
+    PropertiesSet --> InitMethodRun: init-method\n(@Bean(initMethod=...) or XML)
+    InitMethodRun --> BPPAfter: BPP.postProcessAfterInitialization\nAOP proxy created HERE
+    BPPAfter --> Ready: BEAN READY\n(stored in singletonObjects map)
+    Ready --> PreDestroyed: @PreDestroy\n(CommonAnnotationBeanPostProcessor)
+    PreDestroyed --> Destroyed: destroy()\n(if implements DisposableBean)
+    Destroyed --> DestroyMethodRun: destroy-method\n(@Bean(destroyMethod=...) or XML)
+    DestroyMethodRun --> [*]
 ```
 
-```
-Prototype Scope — Container Does NOT Destroy
-=============================================
+The AOP proxy is created at `BPPAfter`, one step before `Ready` — anything that runs earlier (the constructor, `@PostConstruct`) executes on the raw, unproxied bean.
 
-  getBean("myProto")      getBean("myProto")      getBean("myProto")
-        |                       |                       |
-        v                       v                       v
-  [1..10] lifecycle       [1..10] lifecycle       [1..10] lifecycle
-  new Instance1           new Instance2           new Instance3
-        |                       |                       |
-        v                       v                       v
-  Given to caller         Given to caller         Given to caller
-  (container forgets it)  (container forgets it)  (container forgets it)
-  @PreDestroy NEVER fires  @PreDestroy NEVER fires  @PreDestroy NEVER fires
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Call1["getBean(myProto) - call 1"]
+        L1["lifecycle steps 1..10"] --> I1["new Instance1"] --> C1["given to caller\ncontainer forgets it"]
+    end
+    subgraph Call2["getBean(myProto) - call 2"]
+        L2["lifecycle steps 1..10"] --> I2["new Instance2"] --> C2["given to caller\ncontainer forgets it"]
+    end
+    subgraph Call3["getBean(myProto) - call 3"]
+        L3["lifecycle steps 1..10"] --> I3["new Instance3"] --> C3["given to caller\ncontainer forgets it"]
+    end
+
+    class L1,L2,L3 mathOp
+    class I1,I2,I3 train
+    class C1,C2,C3 lossN
 ```
+
+Each prototype `getBean()` call independently runs the full 1-10 lifecycle and hands off a fresh instance; the container keeps no reference afterward, so `@PreDestroy` never fires for any of them.
 
 ---
 
@@ -595,29 +573,23 @@ The lifecycle hooks (`@PostConstruct`, `@PreDestroy`) and a `BeanPostProcessor` 
 
 ### Architecture Overview
 
+```mermaid
+stateDiagram-v2
+    [*] --> Instantiated: 1 instantiate\nconstructor: config only, no I/O
+    Instantiated --> PropertiesPopulated: 2 populate properties\n@Value max-size, timeouts
+    PropertiesPopulated --> AwareCallbacks: 3 Aware callbacks\nBeanNameAware, etc.
+    AwareCallbacks --> BPPBefore: 4 BPP.postProcessBeforeInitialization
+    BPPBefore --> PostConstructed: 5 @PostConstruct\nopens 10 connections, blocks until up
+    PostConstructed --> PropertiesSet: 6 InitializingBean.afterPropertiesSet
+    PropertiesSet --> BPPAfter: 7 BPP.postProcessAfterInitialization\nMetricsProxy wraps the DataSource
+    BPPAfter --> Ready: 8 BEAN READY\nsingleton in context
+    Ready --> PreDestroyed: 9 context close / SIGTERM
+    PreDestroyed --> Destroyed: 10 @PreDestroy\ndrains + closes all 10 connections
+    Destroyed --> DestroyMethodRun: 11 DisposableBean.destroy
+    DestroyMethodRun --> [*]: 12 GC
 ```
-  ApplicationContext refresh
-        |
-        v
-  +-------------------------------------------------------------+
-  | Bean creation: DatabaseConnectionPool                        |
-  |                                                              |
-  |  1 instantiate (constructor: config only, no I/O)           |
-  |  2 populate properties (@Value max-size, timeouts)          |
-  |  3 *Aware callbacks (BeanNameAware, ...)                    |
-  |  4 BeanPostProcessor.postProcessBeforeInitialization        |
-  |  5 @PostConstruct -> open 10 connections (BLOCKS until up)  |
-  |  6 InitializingBean.afterPropertiesSet                      |
-  |  7 BeanPostProcessor.postProcessAfterInitialization         |
-  |       -> MetricsProxy wraps the DataSource                  |
-  |  8 BEAN READY (singleton in context)                        |
-  |  ... serves traffic ...                                     |
-  |  9 context close / SIGTERM                                  |
-  | 10 @PreDestroy -> drain + close all 10 connections          |
-  | 11 DisposableBean.destroy                                   |
-  | 12 GC                                                        |
-  +-------------------------------------------------------------+
-```
+
+The pool serves ~3,000 queries/sec while in the `Ready` state; SIGTERM (Kubernetes grace period) drives it through the mirrored teardown sequence so all 10 connections close cleanly instead of leaking.
 
 ### Implementation
 

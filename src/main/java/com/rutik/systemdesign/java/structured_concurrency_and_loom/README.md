@@ -54,16 +54,39 @@ Timeline: Virtual threads GA in Java 21 (JEP 444). `StructuredTaskScope` preview
 
 ### 4.2 StructuredTaskScope Shapes
 
-```
-ShutdownOnFailure     ShutdownOnSuccess      Custom Scope
-─────────────────     ─────────────────      ─────────────
-fork A  fork B        fork A  fork B         fork A  fork B
-   │       │             │       │               │       │
-   └───────┘             └───────┘               └───────┘
-   join()                join()                  join()
-   if either fails:      when first succeeds:    your policy
-     cancel other          cancel other
-     rethrow               return result
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph SOF["ShutdownOnFailure"]
+        A1["fork A"] --> J1["join()"]
+        B1["fork B"] --> J1
+        J1 --> O1["if either fails:\ncancel other, rethrow"]
+    end
+
+    subgraph SOS["ShutdownOnSuccess"]
+        A2["fork A"] --> J2["join()"]
+        B2["fork B"] --> J2
+        J2 --> O2["when first succeeds:\ncancel other, return result"]
+    end
+
+    subgraph CUS["Custom Scope"]
+        A3["fork A"] --> J3["join()"]
+        B3["fork B"] --> J3
+        J3 --> O3["your policy"]
+    end
+
+    class A1,B1,A2,B2,A3,B3 req
+    class J1,J2,J3 mathOp
+    class O1 lossN
+    class O2 train
+    class O3 base
 ```
 
 ### 4.3 ScopedValue vs ThreadLocal
@@ -82,42 +105,57 @@ fork A  fork B        fork A  fork B         fork A  fork B
 
 ### Virtual Thread Scheduling
 
-```
-  JVM Virtual Thread Scheduler (ForkJoinPool)
-  ┌─────────────────────────────────────────────┐
-  │  carrier-1   carrier-2   carrier-3  ...      │  (= #CPU cores)
-  │    │              │           │               │
-  │  VT-101        VT-205      VT-310             │  running
-  │  [blocked?]   [blocked?]  [blocked?]          │
-  │    │              │           │               │
-  │  unmount      unmount     running             │
-  │    ↓              ↓                           │
-  │  VT-102        VT-207                         │  unmounted → mountable queue
-  └─────────────────────────────────────────────┘
+```mermaid
+sequenceDiagram
+    participant VT101 as VT-101
+    participant Carrier1 as carrier-1
+    participant Scheduler as JVM Scheduler (ForkJoinPool)
+    participant VT102 as VT-102
 
-  When VT-101 calls Socket.read() (blocking):
-    1. JVM intercepts at NIO layer
-    2. Saves VT-101's continuation (stack snapshot) to heap
-    3. Mounts VT-102 on carrier-1
-    4. When data arrives: queues VT-101 for re-mount
+    VT101->>Carrier1: running (mounted)
+    VT101->>Carrier1: Socket.read() — blocking call
+    Carrier1->>Scheduler: intercept at NIO layer
+    Scheduler->>Scheduler: save VT-101 continuation (stack snapshot) to heap
+    Scheduler->>VT102: mount on carrier-1
+    VT102->>Carrier1: running
+    Note over Scheduler: data arrives for VT-101
+    Scheduler->>Scheduler: queue VT-101 on mountable queue
+    Scheduler->>Carrier1: re-mount VT-101 when a carrier frees up
 ```
+
+Carrier threads (one per CPU core) never block: the scheduler unmounts a
+virtual thread the instant it hits blocking I/O and mounts a ready one in its
+place, only re-mounting the original once its data has arrived.
 
 ### Structured Task Scope Lifecycle
 
-```
-  try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-      Subtask<User>   userTask   = scope.fork(() -> fetchUser(id));     ─┐
-      Subtask<Order>  orderTask  = scope.fork(() -> fetchOrders(id));   ─┤  fork
-      Subtask<Prefs>  prefTask   = scope.fork(() -> fetchPrefs(id));    ─┘
-      scope.join().throwIfFailed();   ──────────────────── join & propagate failure
-      return new Dashboard(userTask.get(), orderTask.get(), prefTask.get());
-  }
-  ────────────────────────────────────────────────────────────────────────────────
-  If fetchOrders() throws:
-    → ShutdownOnFailure signals scope shutdown
-    → Other forks (fetchUser, fetchPrefs) receive InterruptedException
-    → join() returns; throwIfFailed() rethrows the exception
-    → No forked subtask leaks; scope closes cleanly
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    S["scope = new ShutdownOnFailure()"] --> F1["fork: fetchUser(id)"]
+    S --> F2["fork: fetchOrders(id)"]
+    S --> F3["fork: fetchPrefs(id)"]
+    F1 --> J["scope.join().throwIfFailed()"]
+    F2 --> J
+    F3 --> J
+    J --> D{"fetchOrders() throws?"}
+    D -->|"yes"| CANCEL["ShutdownOnFailure signals shutdown\nother forks get InterruptedException"]
+    CANCEL --> RETHROW["join() returns; throwIfFailed() rethrows\nno subtask leaks, scope closes cleanly"]
+    D -->|"no"| RESULT["return Dashboard(user, orders, prefs)"]
+
+    class S base
+    class F1,F2,F3 req
+    class J mathOp
+    class D base
+    class CANCEL,RETHROW lossN
+    class RESULT train
 ```
 
 ---
@@ -598,3 +636,6 @@ private AirlineResponse fetchAirline(Airline a, SearchRequest req) {
 - [Case Study: Thread Pool](../case_studies/design_thread_pool_java.md) — ThreadPoolExecutor internals and virtual thread pool comparison
 - [JVM Internals](../jvm_internals/README.md) — continuation implementation, ForkJoinPool internals
 - [LLD: Concurrency Patterns](../../lld/concurrency_patterns/README.md) — how Producer-Consumer and Thread Pool patterns adapt when threads become cheap (virtual threads)
+- [Spring WebFlux](../../spring/spring_webflux/README.md) — the reactive alternative for I/O-bound concurrency when you are not yet on Java 21+
+- [Async & Concurrency Patterns](../../backend/async_and_concurrency_patterns/README.md) — production fan-out/fan-in, timeout, and cancellation patterns applied to virtual threads
+- [Processes, Threads & Context Switching](../../cs_fundamentals/processes_threads_and_context_switching/README.md) — the OS-level thread and context-switch costs that virtual threads amortize

@@ -51,66 +51,53 @@ Auto-configuration is like a smart hotel room that detects your preferences and 
 
 ## 5. Architecture Diagrams
 
-```
-Auto-Configuration Loading Flow
-================================
+**Auto-Configuration Loading Flow**
 
-  @SpringBootApplication
-          |
-          v
-  @EnableAutoConfiguration
-          |
-          v
-  AutoConfigurationImportSelector.selectImports()
-          |
-          v
-  Reads: META-INF/spring/org.springframework.boot.autoconfigure
-         .AutoConfiguration.imports
-         (list of ~140 class names in spring-boot-autoconfigure)
-          |
-          v
-  For each class, evaluate @Conditional annotations:
-  +------------------------------------------+
-  | DataSourceAutoConfiguration               |
-  |   @ConditionalOnClass(DataSource.class)  |
-  |   @ConditionalOnMissingBean(DataSource)  | --> PASS? Register bean
-  +------------------------------------------+     FAIL? Skip
-          |
-          v
-  Registered configurations processed by container
-  (alongside user's @Configuration classes)
+```mermaid
+flowchart TD
+    classDef io    fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef req   fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef train fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef lossN fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+
+    A(["@SpringBootApplication"]) --> B["@EnableAutoConfiguration"]
+    B --> C["AutoConfigurationImportSelector.selectImports()"]
+    C --> D["reads AutoConfiguration.imports\n(~140 class names)"]
+    D --> E{"DataSourceAutoConfiguration:\n@ConditionalOnClass(DataSource)\n@ConditionalOnMissingBean(DataSource)"}
+    E -->|"pass"| F["register bean"]
+    E -->|"fail"| G["skip"]
+    F --> H["container processes registered configs\nalongside user @Configuration classes"]
+
+    class A io
+    class B,C,D req
+    class E train
+    class F,H train
+    class G lossN
 ```
 
-```
-Condition Layering Example: DataSourceAutoConfiguration
-========================================================
+`AutoConfigurationImportSelector` loads every class listed in `AutoConfiguration.imports`, then the container evaluates each one's `@Conditional` gates independently — a single failing condition skips only that configuration class, not the whole import list.
 
-  JAR on classpath?          is HikariCP present?
-  +--------------------------+
-  | @ConditionalOnClass      |  --> HikariDataSource.class in classpath? YES/NO
-  | (DataSource.class,       |
-  |  EmbeddedDatabase.class) |
-  +--------------------------+
-              |
-              YES
-              v
-  User defined DataSource?
-  +----------------------------+
-  | @ConditionalOnMissingBean  |  --> DataSource bean in context? YES(skip) / NO(proceed)
-  | (DataSource.class)         |
-  +----------------------------+
-              |
-              NO (user has no DataSource)
-              v
-  Property spring.datasource.url defined?
-  +------------------------------+
-  | @ConditionalOnProperty       |  (for JDBC auto-config; not shown for simplicity)
-  +------------------------------+
-              |
-              YES
-              v
-  Register HikariDataSource bean with config from spring.datasource.*
+**Condition Layering Example: DataSourceAutoConfiguration**
+
+```mermaid
+flowchart TD
+    classDef req   fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef train fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef lossN fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+
+    A{"@ConditionalOnClass:\nDataSource + HikariDataSource on classpath?"} -->|"no"| X1["skip"]
+    A -->|"yes"| B{"@ConditionalOnMissingBean:\nuser-defined DataSource bean?"}
+    B -->|"yes (user has one)"| X2["skip - user config wins"]
+    B -->|"no"| C{"@ConditionalOnProperty:\nspring.datasource.url set?"}
+    C -->|"no"| X3["skip"]
+    C -->|"yes"| D["register HikariDataSource\nfrom spring.datasource.*"]
+
+    class A,B,C req
+    class D train
+    class X1,X2,X3 lossN
 ```
+
+Each `@Conditional` gate runs in sequence; a "yes, so skip" outcome (a user already defined the bean) short-circuits registration just as reliably as a missing dependency does.
 
 ---
 
@@ -459,30 +446,25 @@ Two recurring failures drove the design hardening: double bean registration when
 
 ### Architecture Overview
 
+```mermaid
+flowchart TD
+    classDef io    fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef base  fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef train fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef req   fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+
+    A(["consuming-service\n(depends on starter jar)"]) --> B["Spring Boot startup"]
+    B --> C["AutoConfigurationImportSelector reads\nAutoConfiguration.imports"]
+    C --> D{"TracingAutoConfiguration:\n@ConditionalOnClass(Tracer)\n@ConditionalOnMissingBean(Tracer)"}
+    D -->|"both pass"| E["Tracer bean (default)\nvia @EnableConfigurationProperties"]
+
+    class A io
+    class B,C base
+    class D train
+    class E req
 ```
-   consuming-service (depends on starter jar)
-        |
-        v
-  Spring Boot startup
-        |
-        v
-  AutoConfigurationImportSelector reads:
-   META-INF/spring/
-     org.springframework.boot.autoconfigure.AutoConfiguration.imports
-        |
-        v
-  +------------------------------------------------------+
-  | TracingAutoConfiguration                              |
-  |   @ConditionalOnClass(Tracer.class)  --- backs off    |
-  |       if tracing lib absent                           |
-  |   @ConditionalOnMissingBean(Tracer.class) --- backs   |
-  |       off if user defines their own Tracer            |
-  |   @EnableConfigurationProperties(TracingProperties)   |
-  +-----------------------+------------------------------+
-                          | (only if both conditions pass)
-                          v
-                   Tracer bean (default)
-```
+
+`TracingAutoConfiguration` backs off the moment either condition fails — no tracing library on the classpath, or the consuming service already defines its own `Tracer` bean.
 
 ### Implementation
 

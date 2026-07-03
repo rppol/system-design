@@ -82,67 +82,77 @@ Beyond GoF, this module covers concurrency patterns specific to Java: Immutable 
 ## 5. Architecture Diagrams
 
 ### Decorator Pattern — InputStream Chain
-```
-         InputStream (abstract)
-               |
-               | wraps
-               v
-     FileInputStream (concrete source)
-               |
-               | wraps
-               v
-   BufferedInputStream (adds 8KB buffer)
-               |
-               | wraps
-               v
-    DataInputStream (adds readInt(), readLong())
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    A["InputStream (abstract)"] -->|wraps| B["FileInputStream\n(concrete source)"]
+    B -->|wraps| C["BufferedInputStream\n(adds 8KB buffer)"]
+    C -->|wraps| D["DataInputStream\n(adds readInt, readLong)"]
+
+    class A base
+    class B io
+    class C,D mathOp
+```
+
+```java
 new DataInputStream(
     new BufferedInputStream(
         new FileInputStream("data.bin")))
-
-Each decorator implements InputStream and delegates to the wrapped stream.
-Adding a new capability = write one new decorator class, no changes elsewhere.
 ```
+
+Each decorator implements `InputStream` and delegates to the wrapped stream. Adding a new capability = write one new decorator class, no changes elsewhere.
 
 ### Proxy Pattern — JDK Dynamic Proxy
-```
-Client Code
-    |
-    | calls method on proxy (same interface)
-    v
-$Proxy0 (JVM-generated class)
-    implements UserService
-    |
-    | delegates to
-    v
-InvocationHandler.invoke(proxy, method, args)
-    |-- before: log, time, transaction start
-    |-- delegate: realUserService.findById(id)
-    |-- after: log result, commit transaction
-    v
-RealUserService.findById(id)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-JDK proxy works ONLY for interfaces.
-For class proxying: CGLIB generates a subclass.
+    Client["Client Code"] -->|"calls method on proxy\n(same interface)"| Proxy["$Proxy0\n(JVM-generated, implements UserService)"]
+    Proxy -->|"delegates to"| Handler["InvocationHandler.invoke\n(proxy, method, args)"]
+    Handler -->|"before: log, time,\ntransaction start"| Real["RealUserService.findById(id)"]
+    Real -->|"after: log result,\ncommit transaction"| Handler
+
+    class Client req
+    class Proxy mathOp
+    class Handler mathOp
+    class Real base
 ```
+
+JDK proxy works ONLY for interfaces. For class proxying: CGLIB generates a subclass.
 
 ### Observer Pattern
-```
-EventSource (Subject)
-    |-- List<EventListener> listeners
-    |-- addListener(l)
-    |-- removeListener(l)
-    |-- fireEvent(event) --> for each l: l.onEvent(event)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Concrete implementations:
-  UserCreatedEvent --> UserAuditListener
-                   --> EmailNotificationListener
-                   --> MetricsListener
+    Source["EventSource (Subject)\naddListener / removeListener / fireEvent"] -->|"UserCreatedEvent"| L1["UserAuditListener"]
+    Source -->|"UserCreatedEvent"| L2["EmailNotificationListener"]
+    Source -->|"UserCreatedEvent"| L3["MetricsListener"]
 
-Each listener knows nothing about other listeners.
-Source knows nothing about what listeners do with the event.
+    class Source base
+    class L1,L2,L3 req
 ```
+
+Each listener knows nothing about other listeners. Source knows nothing about what listeners do with the event.
 
 ### Strategy Pattern with Enum
 ```java
@@ -517,13 +527,27 @@ An immutable object has no mutable state after construction: all fields are `fin
 **Q13: How does the Decorator pattern differ from inheritance, and how does Java I/O use it in practice?**
 Inheritance is compile-time, static, and "is-a" — a subclass permanently adds behaviour. Decorator is runtime, dynamic, and "wraps-a" — a Decorator holds a reference to the decorated component and delegates, adding behaviour before/after the delegation. The critical advantage: behaviours can be stacked in any combination without a class explosion. Java I/O is the canonical Decorator example:
 
-```
-InputStream (Component interface)
-  |-- FileInputStream          (Concrete Component — reads bytes from file)
-  |-- FilterInputStream        (Abstract Decorator — wraps InputStream)
-       |-- BufferedInputStream (Concrete Decorator — adds buffering)
-       |-- GZIPInputStream     (Concrete Decorator — adds decompression)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    IS["InputStream\n(Component interface)"] --> FIS["FileInputStream\n(Concrete Component - reads bytes from file)"]
+    IS --> FilterIS["FilterInputStream\n(Abstract Decorator - wraps InputStream)"]
+    FilterIS --> BIS["BufferedInputStream\n(Concrete Decorator - adds buffering)"]
+    FilterIS --> GIS["GZIPInputStream\n(Concrete Decorator - adds decompression)"]
+
+    class IS base
+    class FIS io
+    class FilterIS,BIS,GIS mathOp
+```
+
+```java
 // Stacked: read a gzip-compressed, buffered file
 InputStream in = new GZIPInputStream(new BufferedInputStream(new FileInputStream("data.gz")));
 ```
@@ -592,17 +616,29 @@ Flyweight shares one instance of an object among many contexts that need the sam
 
 **Scenario.** An order-processing engine handles **500k orders/day** (~6/sec average, ~50/sec at flash-sale peak). It composes five GoF patterns, each solving a distinct axis of change: **Strategy** selects the payment processor, **Decorator** layers tax and discount on the base price, **Observer** fans an `OrderCompleted` event out to inventory/notification/audit listeners, **Command** turns each saga step into an undoable command, and a **Facade** (`OrderService`) hides six subsystems behind one method. The patterns reinforce one another — adding a new payment scheme, a new price modifier, or a new post-order listener each touches exactly one class and zero call sites (Open-Closed Principle).
 
-```
-   client ---> OrderService.placeOrder(cart)          (FACADE: hides 6 subsystems)
-                    |
-       +------------+-----------------------------------------------+
-       v            v                v               v              v
-   PriceEngine   PaymentSvc      SagaRunner      InventorySvc   AuditSvc
-   (DECORATOR)   (STRATEGY)      (COMMAND)        (OBSERVER subscribers)
-   base price    pick processor  [reserve,        on OrderCompleted:
-   + TaxDecorator by scheme       charge,           inventory.deduct()
-   + DiscountDec                  ship] cmds        notify.email()
-                                  each undoable     audit.record()
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client["client"] --> Facade["OrderService.placeOrder(cart)\n(FACADE: hides 6 subsystems)"]
+    Facade --> Price["PriceEngine (DECORATOR)\nbase price + TaxDecorator + DiscountDec"]
+    Facade --> Payment["PaymentSvc (STRATEGY)\npick processor by scheme"]
+    Facade --> Saga["SagaRunner (COMMAND)\nreserve -> charge -> ship, each undoable"]
+    Facade --> Inventory["InventorySvc (OBSERVER subscriber)\non OrderCompleted: inventory.deduct()"]
+    Facade --> Audit["AuditSvc (OBSERVER subscriber)\non OrderCompleted: audit.record()"]
+
+    class Client req
+    class Facade base
+    class Price mathOp
+    class Payment train
+    class Saga lossN
+    class Inventory,Audit req
 ```
 
 ### How the Patterns Compose (Most Complex Interaction)

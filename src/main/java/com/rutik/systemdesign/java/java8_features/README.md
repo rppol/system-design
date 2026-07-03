@@ -84,20 +84,36 @@ Java 8 is still the second-most-used Java version in production (after Java 11/1
 ## 5. Architecture Diagrams
 
 ### Stream Pipeline
-```
-Source          Intermediate Ops (lazy)          Terminal Op (triggers execution)
-  |                                                         |
-List.stream()
-  -> filter(p -> p.active)        [lazy - no execution]
-  -> map(Person::getName)         [lazy - no execution]
-  -> sorted()                     [stateful - buffers all]
-  -> limit(10)                    [short-circuit]
-  -> collect(toList())            [TRIGGER: pipeline executes now]
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Short-circuit example:
-  -> filter(...)
-  -> findFirst()   -> stops after first match, doesn't process rest
+    subgraph Pipeline["Lazy pipeline -- nothing runs until the terminal op"]
+        S(["List.stream()"]) --> F["filter(p -> p.active)\nlazy - no execution"]
+        F --> M["map(Person::getName)\nlazy - no execution"]
+        M --> SO["sorted()\nstateful - buffers all"]
+        SO --> L["limit(10)\nshort-circuit"]
+        L --> Coll(["collect(toList())\nTRIGGER: pipeline executes now"])
+    end
+
+    subgraph ShortCircuit["Short-circuit example"]
+        F2["filter(...)"] --> FF["findFirst()"]
+        FF -->|"match found"| Stop(["stop -- rest never processed"])
+    end
+
+    class S,Coll io
+    class F,M,F2 mathOp
+    class SO train
+    class L,FF lossN
+    class Stop base
 ```
+Filter/map are lazy no-ops until `collect()` triggers the single fused pass; `findFirst()` short-circuits so elements after the first match are never visited.
 
 ### Lambda vs Anonymous Class (Bytecode Level)
 ```
@@ -426,21 +442,27 @@ A variable captured by a lambda must be effectively final — either explicitly 
 
 **Scenario.** A user-profile service ingests **10M profile records/day** (~115 records/sec sustained, ~2,000/sec peak during nightly batch). The legacy enrichment job is a 200-line imperative ETL: nested `for` loops, manual null checks at every level (`profile -> address -> city -> zipCode`), and a hand-rolled `HashMap` grouping by country. It throws ~4,000 `NullPointerException`s/day (profiles with partial addresses) which abort whole batches, forcing reruns. The rewrite to Java 8 (LTS) Streams + Optional eliminates the NPEs and cuts the code to ~40 lines.
 
-```
-  10M records/day
-        |
-        v
-  [ read ] --> Stream<Profile>
-        |
-        +--> map: Optional chain (profile -> address -> city -> zipCode)
-        |        never throws NPE; missing levels collapse to Optional.empty()
-        |
-        +--> filter: keep valid, enrichable profiles
-        |
-        +--> collect: groupingBy(country) -> Map<Country, List<EnrichedProfile>>
-                          |
-                          v
-                  downstream sink
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Recs(["10M records/day"]) --> Read["read"] --> St(["Stream&lt;Profile&gt;"])
+    St --> MapOp["map: Optional chain\nprofile -> address -> city -> zipCode\nnever throws NPE; missing levels -> Optional.empty()"]
+    MapOp --> FilterOp["filter: keep valid, enrichable profiles"]
+    FilterOp --> CollectOp["collect: groupingBy(country)\n-> Map&lt;Country, List&lt;EnrichedProfile&gt;&gt;"]
+    CollectOp --> Sink(["downstream sink"])
+
+    class Recs req
+    class Read,MapOp,FilterOp mathOp
+    class St io
+    class CollectOp train
+    class Sink base
 ```
 
 #### Null-safe nested access with chained Optional

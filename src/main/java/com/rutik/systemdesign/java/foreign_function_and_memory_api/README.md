@@ -81,20 +81,50 @@ Timeline:
 
 ### Panama Architecture
 
-```
-  Java Code                        Native World
-  ──────────────────────────────   ───────────────────────────────
-  MemorySegment                 ↔  native memory region (not GC)
-  Arena (lifetime manager)      →  malloc / free (managed by JVM)
-  MemoryLayout + VarHandle      ↔  C struct field access by offset
-  Linker.downcallHandle()       →  C function call (JIT-inlined)
-  Linker.upcallStub()           ←  C callback → Java MethodHandle
-  SymbolLookup                  →  dlsym / LoadLibrary address lookup
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Old (unsafe) paths:
-  sun.misc.Unsafe               ×  unbound raw pointer — no safety
-  JNI (native method)           ×  requires C glue code, re-JVM-link
-  ByteBuffer.allocateDirect()   ~  off-heap, but no struct layout support
+    subgraph Java["Java Code"]
+        MS["MemorySegment"]
+        AR["Arena (lifetime manager)"]
+        ML["MemoryLayout + VarHandle"]
+        LD["Linker.downcallHandle()"]
+        LU["Linker.upcallStub()"]
+        SL["SymbolLookup"]
+    end
+
+    subgraph Native["Native World"]
+        NM["native memory region (not GC)"]
+        MF["malloc / free (managed by JVM)"]
+        CS["C struct field access by offset"]
+        FC["C function call (JIT-inlined)"]
+        CB["C callback -> Java MethodHandle"]
+        DL["dlsym / LoadLibrary address lookup"]
+    end
+
+    MS <--> NM
+    AR --> MF
+    ML <--> CS
+    LD --> FC
+    CB --> LU
+    SL --> DL
+
+    subgraph Legacy["Old (unsafe) paths — avoid in new code"]
+        US["sun.misc.Unsafe: unbound raw pointer, no safety"]
+        JNI["JNI (native method): requires C glue code, re-JVM-link"]
+        BB["ByteBuffer.allocateDirect(): off-heap, but no struct layout support"]
+    end
+
+    class MS,AR,ML,LD,LU,SL io
+    class NM,MF,CS,FC,CB,DL frozen
+    class US,JNI,BB lossN
 ```
 
 ### Arena and MemorySegment Lifecycle

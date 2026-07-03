@@ -93,38 +93,53 @@ new ThreadPoolExecutor(
 ## 5. Architecture Diagrams
 
 ### ThreadPoolExecutor Task Flow
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    submit(["submit(task)"]) --> coreCheck{"corePoolSize\nreached?"}
+    coreCheck -->|"No"| newCore["create new core thread"] --> runCore["run task"]
+    coreCheck -->|"Yes"| queueCheck{"workQueue full?"}
+    queueCheck -->|"No"| enqueue["enqueue task"] --> waitCore["wait for a core thread"]
+    queueCheck -->|"Yes"| maxCheck{"maximumPoolSize\nreached?"}
+    maxCheck -->|"No"| newExtra["create extra thread"] --> runExtra["run task"]
+    maxCheck -->|"Yes"| reject["RejectedExecutionHandler\nAbortPolicy throws RejectedExecutionException"]
+
+    class submit req
+    class coreCheck,queueCheck,maxCheck mathOp
+    class newCore,newExtra,enqueue,waitCore,runCore,runExtra train
+    class reject lossN
 ```
-submit(task)
-  |
-  v
-corePoolSize reached? -- No --> create new core thread -> run task
-  |
-  Yes
-  v
-workQueue full? -- No --> enqueue task -> wait for core thread
-  |
-  Yes
-  v
-maximumPoolSize reached? -- No --> create extra thread -> run task
-  |
-  Yes
-  v
-RejectedExecutionHandler (AbortPolicy throws RejectedExecutionException)
-```
+
+Growth order is strict: core threads fill first, then the queue absorbs bursts, then extra threads spin up to `maximumPoolSize`, and only once all three are exhausted does the `RejectedExecutionHandler` run.
 
 ### ReentrantReadWriteLock
-```
-Read lock: multiple readers can hold simultaneously
-Write lock: exclusive; blocks all readers and other writers
 
-Thread A: readLock.lock()  -> granted (no writers)
-Thread B: readLock.lock()  -> granted (read sharing)
-Thread C: writeLock.lock() -> BLOCKED (waiting for A, B to release)
-Thread D: readLock.lock()  -> BLOCKED (writer waiting — prevents reader starvation)
-
-Downgrading: hold write lock, acquire read lock, release write lock
-Upgrading: NOT supported (would cause deadlock)
+```mermaid
+sequenceDiagram
+    participant A as Thread A
+    participant B as Thread B
+    participant C as Thread C
+    participant D as Thread D
+    participant L as ReadWriteLock
+    A->>L: readLock.lock()
+    L-->>A: granted (no writers)
+    B->>L: readLock.lock()
+    L-->>B: granted (read sharing)
+    C->>L: writeLock.lock()
+    L-->>C: BLOCKED (waiting for A, B to release)
+    D->>L: readLock.lock()
+    L-->>D: BLOCKED (writer waiting — prevents reader starvation)
 ```
+
+Read lock: multiple readers can hold simultaneously. Write lock: exclusive, blocks all readers and other writers. Thread D's read request queues behind Thread C's pending write — this is what prevents writer starvation, since new readers cannot keep leapfrogging a waiting writer forever. Downgrading (hold write lock, acquire read lock, then release write lock) is supported; upgrading a read lock to a write lock is NOT supported and would deadlock.
 
 ### CAS — Compare-And-Swap
 ```java
@@ -145,19 +160,22 @@ do {
 ```
 
 ### ABA Problem
-```
-Thread A: reads value=A
-Thread B: changes A -> B -> A (back to A)
-Thread A: CAS(expected=A, new=C) SUCCEEDS — but state has changed!
 
-Example: stack [A -> B]
-Thread A: reads top=A, will CAS(A, C)
-Thread B: pops A, pops B, pushes A back
-Thread A: CAS succeeds, but B is now lost (dangling pointer)
-
-Fix: AtomicStampedReference (value + version counter)
-     CAS checks both value AND version — even if value cycles back to A
+```mermaid
+sequenceDiagram
+    participant A as Thread A
+    participant S as "Stack (top: A, then B)"
+    participant B as Thread B
+    A->>S: read top = A (plans CAS(A, C))
+    B->>S: pop A
+    B->>S: pop B
+    B->>S: push A back
+    Note over S: top is A again, but the old B node is now lost
+    A->>S: CAS(expected=A, new=C)
+    S-->>A: SUCCEEDS — but the underlying state already changed
 ```
+
+Fix: `AtomicStampedReference` pairs the value with a version/stamp counter. CAS now checks both value AND stamp, so even though the value cycles back to A, the stamp has advanced and the CAS correctly fails.
 
 ---
 
@@ -353,36 +371,43 @@ LockSupport.park(blocker);  // jstack shows: "waiting on" the blocker object
 
 ### Priority Inversion
 
+Priority inversion: a high-priority thread is effectively blocked by a low-priority thread that holds a lock the high-priority thread needs.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    H["Thread H\nhigh priority\nneeds Lock L"] -->|"blocked on"| Lock["Lock L"]
+    Lock -->|"held by"| Lo["Thread L\nlow priority"]
+    M["Thread M\nmedium priority\nCPU-bound"] -->|"preempts"| Lo
+    Lo -->|"can't finish, never releases lock"| Lock
+
+    class H req
+    class M mathOp
+    class Lo frozen
+    class Lock lossN
 ```
-Priority inversion: a high-priority thread is effectively blocked by a low-priority thread
-that holds a lock the high-priority thread needs.
 
-Classic scenario:
-  Thread H (high priority):  needs Lock L
-  Thread M (medium priority): CPU-bound, preempts L
-  Thread L (low priority):    holds Lock L
-
-  L can't finish (M preempts it), H can't proceed (L holds the lock).
-  H is starved by M — even though H has higher priority than M.
+`L` can't finish (`M` preempts it), `H` can't proceed (`L` holds the lock) — `H` is starved by `M` even though `H` has higher priority than `M`.
 
 Java manifestation:
-  - OS thread scheduler prioritizes M over L
-  - L never releases its lock
-  - H blocks waiting for L forever
+- OS thread scheduler prioritizes M over L
+- L never releases its lock
+- H blocks waiting for L forever
 
 Mitigation strategies:
-  1. Priority inheritance: OS raises L's priority to H's level while L holds the lock
-     (POSIX real-time: PTHREAD_PRIO_INHERIT mutex attribute; not available in Java)
-  2. Priority ceiling: lock has a predefined "ceiling" priority; any thread holding it
-     gets that ceiling priority temporarily
-  3. Avoid priority dependency: don't use locks held by low-priority threads
-     from high-priority code; use lock-free algorithms instead
-  4. Use equal priorities: avoid priority differences in threads sharing locks
+1. Priority inheritance: OS raises L's priority to H's level while L holds the lock (POSIX real-time: `PTHREAD_PRIO_INHERIT` mutex attribute; not available in Java)
+2. Priority ceiling: lock has a predefined "ceiling" priority; any thread holding it gets that ceiling priority temporarily
+3. Avoid priority dependency: don't use locks held by low-priority threads from high-priority code; use lock-free algorithms instead
+4. Use equal priorities: avoid priority differences in threads sharing locks
 
-Java's ReentrantLock(fair=true) with FIFO ordering doesn't solve priority inversion —
-it can make it worse by allowing low-priority threads ahead of high-priority ones
-if they arrived first. Use lock-free data structures for latency-critical high-priority code.
-```
+Java's `ReentrantLock(fair=true)` with FIFO ordering doesn't solve priority inversion — it can make it worse by allowing low-priority threads ahead of high-priority ones if they arrived first. Use lock-free data structures for latency-critical high-priority code.
 
 ### AbstractQueuedSynchronizer (AQS) Internals
 
@@ -736,5 +761,7 @@ static Service get() {
 - [Case Study: Circuit Breaker](../case_studies/design_circuit_breaker_java.md) — CAS-based state machine for fault tolerance
 - [Async & Concurrency Patterns (Backend)](../../backend/async_and_concurrency_patterns/README.md) — thread pool sizing, CompletableFuture pitfalls, bulkhead patterns in production services
 - [LLD: Concurrency Patterns](../../lld/concurrency_patterns/README.md) — Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, and Thread Pool design patterns built on these primitives
+- [Deadlocks & Synchronization](../../cs_fundamentals/deadlocks_and_synchronization/README.md) — deadlock conditions, detection, and prevention that generalize the lock-ordering issues in this module
+- [Processes, Threads & Context Switching](../../cs_fundamentals/processes_threads_and_context_switching/README.md) — OS-level scheduling and context-switch cost beneath Java's thread abstractions
 
 **Is `computeIfAbsent` safe to call recursively or with a slow mapping function?** No — the mapping function runs while holding the bin lock, so a long-running or re-entrant `computeIfAbsent` on the same map can block other writers to that bin or deadlock. Keep the mapping function fast; here it only *creates* the future (`supplyAsync` returns immediately) rather than performing the load inline.

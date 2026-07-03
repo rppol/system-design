@@ -64,34 +64,47 @@ Submit() throughput at 100 core threads, no queue:
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    submit(["submit(task)"]) --> d1{"fewer workers than corePoolSize?"}
+    d1 -->|"yes"| coreW["create core worker thread"]
+    d1 -->|"no"| d2{"queue not full?"}
+    d2 -->|"yes"| enqueue["enqueue task"]
+    d2 -->|"no"| d3{"fewer workers than maximumPoolSize?"}
+    d3 -->|"yes"| nonCoreW["create non-core worker thread"]
+    d3 -->|"no"| reject["RejectedExecutionHandler"]
+
+    enqueue --> queue[("BlockingQueue of Runnable\n(bounded ArrayBlockingQueue)")]
+    queue --> workers["Workers W1..Wn\n(platform threads)"]
+    coreW --> workers
+    nonCoreW --> workers
+
+    class submit io
+    class d1,d2,d3 req
+    class coreW,nonCoreW,enqueue train
+    class reject lossN
+    class queue,workers base
 ```
-+------------------------------------------------------------------+
-|                    ThreadPool                                    |
-|                                                                  |
-|  submit(task)                                                    |
-|      |                                                           |
-|      v                                                           |
-|  +---------------------------+                                   |
-|  |  Submit path (addWorker)  |                                   |
-|  |  1. Fewer than core?      |----> Create core worker thread    |
-|  |  2. Queue not full?       |----> Enqueue task                 |
-|  |  3. Fewer than max?       |----> Create non-core worker thread|
-|  |  4. Reject                |----> RejectedExecutionHandler     |
-|  +---------------------------+                                   |
-|                                                                  |
-|  Workers (platform threads):                                     |
-|  [W1] [W2] [W3] [W4] ... [Wn]                                   |
-|    |    |    |    |                                              |
-|    v    v    v    v                                              |
-|  +----------------------------+                                  |
-|  |  BlockingQueue<Runnable>   |  (bounded ArrayBlockingQueue)    |
-|  |  [task] [task] [task] ...  |                                  |
-|  +----------------------------+                                  |
-|                                                                  |
-|  State: RUNNING → SHUTDOWN → STOP → TIDYING → TERMINATED        |
-|  ctl: AtomicInteger packing [workerState(3bits) | workerCount(29bits)]  |
-+------------------------------------------------------------------+
+
+```mermaid
+stateDiagram-v2
+    [*] --> RUNNING
+    RUNNING --> SHUTDOWN
+    SHUTDOWN --> STOP
+    STOP --> TIDYING
+    TIDYING --> TERMINATED
+    TERMINATED --> [*]
 ```
+
+*The pool only grows past `corePoolSize` when the bounded queue is full (§4.4); the lifecycle state and the 29-bit worker count are packed together into one `ctl` `AtomicInteger` for atomic CAS transitions (bit layout in §4.1).*
 
 **Component inventory:**
 - `ctl` (`AtomicInteger`) — encodes lifecycle state (3 high bits) + active worker count (29 bits) in one atomic variable

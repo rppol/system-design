@@ -65,51 +65,43 @@ Typical deployment: 1 CB per downstream service × 10 downstream services = 2 KB
 
 ## 3. High-Level Architecture
 
-```
-+------------------------------------------------------------+
-|                   CircuitBreaker                           |
-|                                                            |
-|  execute(supplier, fallback)                               |
-|      |                                                     |
-|      v                                                     |
-|  +------------------+                                      |
-|  |  StateCheck       |                                     |
-|  |  CLOSED → proceed |                                     |
-|  |  OPEN → if wait   |                                     |
-|  |    expired → probe|                                     |
-|  |  OPEN → fallback  |                                     |
-|  +------------------+                                      |
-|      |                                                     |
-|      v (CLOSED or probe allowed)                           |
-|  [call supplier.get()]                                     |
-|      |                                                     |
-|      v (outcome: SUCCESS, FAILURE, SLOW, EXCEPTION)        |
-|  +------------------+                                      |
-|  |  RecordOutcome    |                                     |
-|  |  → slidingWindow  |                                     |
-|  |  → stats update   |                                     |
-|  |  → checkThreshold |                                     |
-|  +------------------+                                      |
-|      |                                                     |
-|      v (threshold exceeded?)                               |
-|  +------------------+                                      |
-|  |  StateTransition  |                                     |
-|  |  CLOSED → OPEN    |                                     |
-|  |  HALF_OPEN→OPEN   |                                     |
-|  |  HALF_OPEN→CLOSED |                                     |
-|  +------------------+                                      |
-+------------------------------------------------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-                State Machine:
-CLOSED ──(failRate ≥ threshold)──────────────> OPEN
-  ^                                               |
-  |                                         waitDuration expires
-  |                                               |
-  └──(probes succeed)── HALF_OPEN <──────────────┘
-                             |
-                        (probes fail)
-                             |
-                             └────────────────> OPEN (reset)
+    execute(["execute(supplier, fallback)"]) --> stateCheck{"StateCheck"}
+    stateCheck -->|"CLOSED"| proceed["proceed"]
+    stateCheck -->|"OPEN, wait expired"| probe["allow probe"]
+    stateCheck -->|"OPEN, wait not expired"| fallbackNode["return fallback"]
+    proceed --> callSupplier["call supplier.get()"]
+    probe --> callSupplier
+    callSupplier --> outcome{"outcome: SUCCESS / FAILURE / SLOW / EXCEPTION"}
+    outcome --> recordOutcome["RecordOutcome\nupdate slidingWindow\nupdate stats\ncheckThreshold"]
+    recordOutcome --> thresholdCheck{"threshold exceeded?"}
+    thresholdCheck -->|"yes"| transition["StateTransition\nCLOSED to OPEN\nHALF_OPEN to OPEN\nHALF_OPEN to CLOSED"]
+    thresholdCheck -->|"no"| noop["no transition"]
+
+    class execute io
+    class stateCheck,outcome,thresholdCheck req
+    class proceed,probe,callSupplier train
+    class fallbackNode lossN
+    class recordOutcome,transition mathOp
+    class noop base
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+    CLOSED --> OPEN: failRate >= threshold
+    OPEN --> HALF_OPEN: waitDuration expires
+    HALF_OPEN --> CLOSED: probes succeed
+    HALF_OPEN --> OPEN: probes fail (reset)
 ```
 
 ---

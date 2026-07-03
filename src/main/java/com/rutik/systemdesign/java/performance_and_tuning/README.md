@@ -347,44 +347,32 @@ Production impact:
 
 ### Tiered Compilation
 
+Tiered compilation (Java 7+, default since Java 8) starts every method at Tier 0
+(interpreter) and progressively recompiles hot methods to higher tiers as invocation
+counts cross thresholds:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Tier0
+    Tier0 --> Tier1: gets hot
+    Tier1 --> Tier2
+    Tier2 --> Tier3
+    Tier3 --> Tier4: ~15K invocations (-XX:CompileThreshold)
+    Tier4 --> [*]
+
+    state "Tier 0 - Interpreter\nevery bytecode interpreted; slowest; all methods start here" as Tier0
+    state "Tier 1 - C1, no profiling\nfast compile; constant folding, dead code\n~1K invocations" as Tier1
+    state "Tier 2 - C1 with invocation/backedge counters\ncounts invocation frequency" as Tier2
+    state "Tier 3 - C1 with full profiling\ntype profiles, branch probabilities; feeds C2\n~2K invocations" as Tier3
+    state "Tier 4 - C2 (server compiler)\ninlining, escape analysis, loop unrolling;\nuses Tier 3 profile data speculatively" as Tier4
 ```
-Tiered compilation (Java 7+, default since Java 8):
-  All code starts at Tier 0 (interpreter)
-  As methods get hot, progressively compiled to higher tiers:
-
-  Tier 0: Interpreter (no compilation)
-           Every bytecode interpreted; slowest
-           All methods start here
-
-  Tier 1: C1 (client compiler), no profiling
-           Fast compile; basic optimizations (constant folding, dead code)
-           Triggered at ~1K invocations
-
-  Tier 2: C1 with invocation/backedge counters
-           Adds counting for invocation frequency
-
-  Tier 3: C1 with full profiling (type profiles, branch probabilities)
-           Most expensive C1 tier; feeds data to C2
-           Triggered at ~2K invocations
-
-  Tier 4: C2 (server compiler)
-           Aggressive optimizations: inlining, escape analysis, loop unrolling
-           Uses type profile data from Tier 3 for speculative optimizations
-           Triggered at ~15K invocations (configurable: -XX:CompileThreshold)
 
 Tiered compilation flags:
-  Default (tiered, levels 0-4):    -XX:+TieredCompilation (default in JDK 8+)
-  Cold-start optimization (JVM dies before warmup, e.g., serverless):
-    -XX:TieredStopAtLevel=1        → C1 only, fast startup, lower peak performance
-                                   → Suitable for AWS Lambda, short-lived processes
-  Disable JIT entirely:
-    -Xint                          → interpreter only; ~5-10x slower; rarely used
+- Default (tiered, levels 0-4): `-XX:+TieredCompilation` (default in JDK 8+)
+- Cold-start optimization (JVM dies before warmup, e.g., serverless): `-XX:TieredStopAtLevel=1` — C1 only, fast startup, lower peak performance; suitable for AWS Lambda, short-lived processes
+- Disable JIT entirely: `-Xint` — interpreter only; ~5-10x slower; rarely used
 
-GraalVM native image compiles ALL code AOT (ahead-of-time):
-  → zero warmup, fastest possible startup
-  → loses dynamic class loading, reflection becomes limited
-  → used for microservices where cold start time matters (Quarkus native, Micronaut)
-```
+GraalVM native image compiles ALL code AOT (ahead-of-time): zero warmup and the fastest possible startup, at the cost of losing dynamic class loading (reflection becomes limited) — used for microservices where cold start time matters (Quarkus native, Micronaut).
 
 ---
 
@@ -555,20 +543,15 @@ A JVM safepoint is a global stop where all threads pause at "safe" positions (me
 
 **Scenario.** A nightly Value-at-Risk (VaR) service revalues a portfolio of **10M positions** per batch. The original implementation took **45 seconds** per batch; with 600 batches across desks the nightly window blew past its SLA. Target hardware: 16-core x86-64, each core with a **32 KB L1 data cache** and **64-byte cache lines**, 32 GB heap on Java 17 with G1GC (`-XX:MaxGCPauseMillis=200`). After profiling-driven changes — JMH validation, struct-of-arrays layout, eliminating `BigDecimal` in the hot loop, and devirtualizing a megamorphic callsite — the batch dropped to **4 seconds**, a 10x improvement, with full-GC pauses gone.
 
+```mermaid
+xychart-beta
+    title "Nightly VaR batch time: 600 desk batches x 10M positions each"
+    x-axis ["Before tuning (FAIL SLA)", "After tuning (PASS)"]
+    y-axis "Batch time (seconds)"
+    bar [45, 4]
 ```
-   nightly window
-   |-- desk batches x600 ----------------------------------------------|
-        each batch = 10M positions
-        45s ------------------------------------------------>  (FAIL SLA)
 
-   after tuning:
-        4s --->  (PASS)
-        breakdown of the 11x gain:
-          BigDecimal -> long cents .......... ~3.0x  (allocation + arithmetic)
-          AoS -> SoA cache layout ........... ~2.0x  (L1/L2 hit rate)
-          devirtualize instanceof callsite .. ~1.4x  (JIT inlining restored)
-          G1 IHOP + region sizing ........... removes 2.5s full-GC stalls
-```
+Breakdown of the ~11x gain: `BigDecimal` -> `long` cents ~3.0x (allocation + arithmetic); AoS -> SoA cache layout ~2.0x (L1/L2 hit rate); devirtualize `instanceof` callsite ~1.4x (JIT inlining restored); G1 IHOP + region sizing removes 2.5s of full-GC stalls.
 
 ### Step 1 — Measure With JMH, Not a Stopwatch
 
@@ -689,5 +672,7 @@ for (var entry : byType.entrySet())
 - [JVM Internals](../jvm_internals/README.md) — GC algorithms, JIT compilation tiers, safepoints
 - [Java Memory Model](../java_memory_model/README.md) — false sharing, cache-line effects on concurrent performance
 - [Case Study: Connection Pool](../case_studies/design_connection_pool.md) — pool sizing math and throughput measurement with realistic load
+- [Performance Profiling](../../backend/performance_profiling/README.md) — async-profiler and JFR mechanics in production services, beyond this module's JVM-tuning focus
+- [Performance & Load Testing](../../devops/performance_and_load_testing/README.md) — load-generation methodology for validating a tuning change under realistic traffic
 
 **How do you tune G1 to eliminate the full GCs you saw, and what is the risk?** Lower `-XX:InitiatingHeapOccupancyPercent` so concurrent marking starts earlier (e.g. 35 instead of 45) and size regions to fit your object distribution; the risk is starting marking too early, spending CPU on concurrent work and reducing mutator throughput, so validate with GC logs that pauses drop without throughput regressing.

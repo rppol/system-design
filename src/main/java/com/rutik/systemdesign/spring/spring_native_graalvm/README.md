@@ -120,49 +120,105 @@ startup collapses but the build gets expensive and dynamic flexibility disappear
 
 ### JVM startup vs native: where the work happens
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph JVMPATH["JVM (runtime work)"]
+        direction LR
+        j1(["start"]) --> j2["classpath scan"] --> j3["read annotations\n(reflection)"] --> j4["build bean defs"] --> j5["create proxies\n(CGLIB)"] --> j6["refresh context"] --> j7(["READY (~2-4 s)"])
+        j7 -.-> j8["JIT warms up over minutes\n→ peak throughput"]
+    end
+
+    subgraph NBUILD["Native — BUILD time"]
+        direction LR
+        n1(["AOT process context"]) --> n2["generate bean-def code\n+ hints"] --> n3["GraalVM static analysis\n(closed world)"] --> n4(["native image (minutes)"])
+    end
+
+    subgraph NRUN["Native — RUN time"]
+        direction LR
+        n5(["start"]) --> n6["replay pre-built context"] --> n7(["READY (~30-80 ms)"])
+        n7 -.-> n8b["no JIT: throughput flat from t=0,\nlower peak than warm JVM"]
+    end
+
+    NBUILD --> NRUN
+
+    class j1,j7,n5,n7 io
+    class j2,j3,j4,j5,j6,j8,n8b mathOp
+    class n1,n2,n6 train
+    class n3,n4 base
 ```
-JVM (runtime work):
-  start -> classpath scan -> read annotations (reflection) -> build bean defs
-        -> create proxies (CGLIB) -> refresh context -> READY    (~2-4 s)
-        -> [JIT warms up over minutes -> peak throughput]
 
-Native (work moved to BUILD time):
-  BUILD: AOT process context -> generate bean-def code + hints
-         -> GraalVM static analysis (closed world) -> native image   (minutes)
-  RUN:   start -> replay pre-built context -> READY                  (~30-80 ms)
-         -> [no JIT: throughput flat from t=0, lower peak than warm JVM]
+The charts below contrast the two profiles (illustrative magnitudes):
+
+```mermaid
+xychart-beta
+    title "Startup time: JVM vs native"
+    x-axis ["JVM", "native"]
+    y-axis "Time to ready (ms)" 0 --> 2600
+    bar [2500, 50]
 ```
 
-The bars below contrast the two profiles (illustrative magnitudes):
-
-```
-Startup time        JVM   ############################   ~2500 ms
-                    native #                             ~50 ms
-
-Memory (RSS)        JVM   ####################           ~300 MB
-                    native #####                         ~70 MB
-
-Peak throughput     JVM   ##########################     warmed-up JIT
-                    native ##################             AOT, no JIT (~70-85%)
-
-Build time          JVM   ##                             seconds
-                    native ############################   minutes
+```mermaid
+xychart-beta
+    title "Memory (RSS): JVM vs native"
+    x-axis ["JVM", "native"]
+    y-axis "RSS (MB)" 0 --> 320
+    bar [300, 70]
 ```
 
-Native wins startup and memory by a wide margin; the JVM keeps peak throughput and
-fast builds. That is the entire decision.
+```mermaid
+xychart-beta
+    title "Peak throughput: JVM (warmed JIT) vs native (AOT, no JIT)"
+    x-axis ["JVM", "native"]
+    y-axis "Relative peak throughput (%)" 0 --> 100
+    bar [100, 78]
+```
+
+```mermaid
+xychart-beta
+    title "Build time: JVM vs native (illustrative only, not measured)"
+    x-axis ["JVM (seconds)", "native (minutes)"]
+    y-axis "Illustrative relative scale" 0 --> 30
+    bar [2, 28]
+```
+
+Peak throughput is charted at the ~70-85% midpoint stated above; build time has no
+fixed numbers and is shown only as an illustrative relative scale. Native wins
+startup and memory by a wide margin; the JVM keeps peak throughput and fast builds.
+That is the entire decision.
 
 ### The closed-world circle and the reflection teleport
 
-```
-        +------------------ reachable at build time ------------------+
-        |  main -> Controller -> Service -> Repository -> Entity      |
-        |                                                             |
-        |   Class.forName("com.x.Plugin")  --- teleports OUT --->  ?  |  <- analyzer
-        +-------------------------------------------------------------+     cannot follow
-                                                                            => Plugin DROPPED
-   FIX: a reflection hint puts Plugin back inside the circle:
-        hints.reflection().registerType(Plugin.class, INVOKE_DECLARED_CONSTRUCTORS);
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph RW["Reachable at build time (closed world)"]
+        direction LR
+        main(["main"]) --> ctl["Controller"] --> svc["Service"] --> repo["Repository"] --> ent["Entity"]
+        reflect["Class.forName('com.x.Plugin')"]
+    end
+
+    reflect -->|"teleports out — analyzer can't follow"| dropped["? Plugin DROPPED"]
+    hint["hints.reflection().registerType(Plugin.class,\nINVOKE_DECLARED_CONSTRUCTORS)"] -.->|"FIX: puts Plugin back inside the circle"| dropped
+
+    class main,ent io
+    class ctl,svc,repo,reflect frozen
+    class dropped lossN
+    class hint train
 ```
 
 Any class reached only via reflection is invisible to static analysis and removed
@@ -619,3 +675,6 @@ workload.
   time code generation, the same "move work to build time" philosophy as AOT.
 - [../../java/jvm_internals/](../../java/jvm_internals/) — JIT vs AOT, what you give
   up by dropping the runtime compiler.
+- [Bytecode & Class-File Format](../../java/bytecode_and_classfile/README.md) —
+  reachability analysis and reflection metadata operate on this bytecode/class-file
+  representation.

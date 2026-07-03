@@ -107,26 +107,33 @@ class StringBox extends Box<String> {
 
 ### Dynamic Proxy Architecture
 
-```
-Interface: UserService
-  +-- findById(long id): User
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-InvocationHandler:
-  +-- invoke(proxy, method, args):
-        |-- log before call
-        |-- result = realUserService.findById(args[0])
-        |-- log after call
-        |-- return result
+    IFACE["Interface: UserService\nfindById(long id): User"] --> NEWPROXY
+    NEWPROXY["Proxy.newProxyInstance(classLoader,\nUserService.class, LoggingInvocationHandler)"] --> PROXY
+    PROXY(["proxy object implementing UserService"]) --> ENTRY
 
-Proxy.newProxyInstance(
-    classLoader,
-    new Class[]{UserService.class},
-    new LoggingInvocationHandler(realService)
-)
+    ENTRY["every method call routes through invoke()\n(how Spring AOP works at the bytecode level)"] --> LOG1
 
-Result: a proxy object that implements UserService
-        every method call routes through invoke()
-        -- how Spring AOP works at the bytecode level
+    subgraph IH["InvocationHandler.invoke(proxy, method, args)"]
+        LOG1["log before call"] --> DELEGATE["result = realUserService.findById(args[0])"]
+        DELEGATE --> LOG2["log after call"]
+        LOG2 --> RETURN["return result"]
+    end
+
+    class IFACE base
+    class NEWPROXY mathOp
+    class PROXY io
+    class ENTRY req
+    class LOG1,DELEGATE,LOG2,RETURN train
 ```
 
 ---
@@ -491,7 +498,7 @@ Generic arrays would create heap pollution. After erasure, `new T[10]` becomes `
 Heap pollution occurs when a variable of a parameterized type refers to an object of the wrong parameterized type — possible because of erasure. Example: `List<String> list = (List<String>) (List) new ArrayList<Integer>()` — the cast is legal (both are `List` after erasure), but `String s = list.get(0)` throws `ClassCastException`. The JVM inserts a checkcast instruction at the point of *use*, not the point of assignment. The compiler warns about unchecked casts to prevent this; `@SafeVarargs` suppresses warnings for varargs that don't introduce pollution.
 
 **Q7: How does a JDK dynamic proxy work internally?**
-`Proxy.newProxyInstance(loader, interfaces, handler)` creates a new class at runtime (via `ProxyClassFactory`) that: (1) implements all specified interfaces; (2) extends `java.lang.reflect.Proxy`; (3) for every method call, invokes `handler.invoke(proxy, method, args)`. The generated class is loaded and cached. When you call a method on the proxy, it calls `handler.invoke()` with the `Method` object and arguments — the handler can execute before/after logic, delegate to a real service, or return a mock value. Limitation: only works for interfaces (not concrete classes — use CGLIB/ByteBuddy for class proxying).
+`Proxy.newProxyInstance` generates a new class at runtime that implements the given interfaces and routes every call to your `InvocationHandler`. Concretely, `Proxy.newProxyInstance(loader, interfaces, handler)` creates a class (via `ProxyClassFactory`) that: (1) implements all specified interfaces; (2) extends `java.lang.reflect.Proxy`; (3) for every method call, invokes `handler.invoke(proxy, method, args)`. The generated class is loaded and cached. When you call a method on the proxy, it calls `handler.invoke()` with the `Method` object and arguments — the handler can execute before/after logic, delegate to a real service, or return a mock value. Limitation: only works for interfaces (not concrete classes — use CGLIB/ByteBuddy for class proxying).
 
 **Q8: What is the TypeToken pattern and why is it needed?**
 TypeToken exploits the fact that an anonymous class retains its superclass's type parameters in the bytecode as a `ParameterizedType`. `new TypeToken<List<String>>() {}` creates an anonymous subclass of `TypeToken<List<String>>`. Calling `getClass().getGenericSuperclass()` returns `TypeToken<List<String>>` as a `ParameterizedType`, from which `getActualTypeArguments()[0]` returns the `Type` for `List<String>`. Without TypeToken, `List<String>.class` is illegal and you'd get only `List.class` — erased. Libraries like Gson, Guice, and Jackson use TypeToken for proper generic type deserialization/injection.
@@ -538,6 +545,33 @@ List<String> result = gson.fromJson(json, new TypeToken<List<String>>(){}.getTyp
 
 Jackson uses `TypeReference<T>` for the same purpose. This works because the byte code of an anonymous class stores its generic supertype in the `Signature` attribute, which `getGenericSuperclass()` reads at runtime — it's the one place erasure doesn't fully erase. Practical rule: whenever you write a method that must produce the right generic instance at runtime, accept `TypeToken<T>` as a parameter rather than `Class<T>`.
 
+**Q16: What does "reified" mean, and which Java types are reified vs erased at runtime?**
+A reified type is one whose full type information survives into the running bytecode; an erased type has that information stripped by the compiler. Primitives (`int`, `boolean`), raw types (`List`), `Class<?>` objects, and array component types (`String[]`) are reified — the JVM can check them at runtime, which is exactly why `arr instanceof String[]` compiles but `list instanceof List<String>` does not. Parameterized types (`List<String>`, `Map<K,V>`) are erased to their bound (`List`, `Map`) — the `<String>` part exists only in the `.class` file's `Signature` attribute for reflection, not as a runtime-checkable type. This distinction is why C#/.NET generics (reified) behave differently from Java generics (erased) despite similar syntax.
+
+**Q17: What is a recursive generic bound like `<T extends Comparable<T>>`, and why is it needed?**
+A recursive (self-referential) bound constrains `T` to be comparable to *itself*, which is what lets a generic method sort or compare a list of any `Comparable` type safely. The bound `<T extends Comparable<T>>` reads as "T must implement Comparable of its own type" — so `T.compareTo(T)` is guaranteed to accept another `T`, not some unrelated type:
+```java
+public static <T extends Comparable<T>> T max(List<T> list) {
+    T result = list.get(0);
+    for (T item : list) if (item.compareTo(result) > 0) result = item;
+    return result;
+}
+// Without the recursive bound, T extends Comparable would only guarantee
+// compareTo(Object), losing type safety on the argument.
+```
+This is the exact bound the JDK uses on `Collections.max()` and `Comparable<T>` itself — it is the standard idiom whenever a generic algorithm needs elements to compare against their own type.
+
+**Q18: What is "wildcard capture" and why does the compiler reject writing to a `List<?>` even inside your own method?**
+Wildcard capture is the compiler binding an unknown `?` to one fresh type variable, but only within a single expression, not across separate statements. That narrow scope is why reading an element out of a `List<?>` and writing it straight back via `set()` still fails to compile, even though the operation is logically safe — the compiler cannot prove the two `?` occurrences denote the same underlying type, so any `add`/`set` call is rejected as unsafe. The fix is to extract a private generic helper method with a named type variable, which forces one capture for the whole method body:
+```java
+// BROKEN: compiler can't prove list.get(0) matches the type list.set() expects
+static void swapFirst(List<?> list) { list.set(0, list.get(1)); }  // compile error
+
+// FIX: helper captures the wildcard as a concrete (if unnamed) type T
+static void swapFirst(List<?> list) { swapHelper(list); }
+private static <T> void swapHelper(List<T> list) { list.set(0, list.get(1)); }
+```
+
 ---
 
 ## 13. Best Practices
@@ -561,18 +595,28 @@ Jackson uses `TypeReference<T>` for the same purpose. This works because the byt
 
 **Scenario.** A shared `event-bus` library is published as a JAR and consumed by 30 microservices. Each service publishes domain events (`OrderPlaced`, `PaymentCaptured`, `ShipmentDispatched`) and subscribes to events it cares about. The library handles roughly 80k events/sec at peak across the fleet. Before generics were tightened, the team shipped three production `ClassCastException` incidents in one quarter caused by raw types and unsafe casts in the bus internals. The redesign goal: make every unsafe routing a compile-time error, not a 3am page.
 
-```
-                        EventBus<E extends Event>
-   publisher side                                      subscriber side
-   ------------------                                  -------------------
-   publish(List<? extends E>)  ---> [ Map<Class<?>,     ---> subscribe(
-        PECS: producer                CopyOnWrite          Consumer<? super E>)
-        "? extends" reads             List<...>> ]              PECS: consumer
-        from the list                                          "? super" writes
-                                                               into the consumer
-   OrderEvent (E)                                       Consumer<Event>  (super)
-     |  OrderPlaced                                      accepts OrderEvent  OK
-     |  OrderCancelled                                   Consumer<Object>    OK
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    OE(["OrderEvent (E)\nOrderPlaced, OrderCancelled"]) --> PUB
+    PUB["publish(List&lt;? extends E&gt;)\nPECS producer: reads from the list"] --> BUS
+    BUS["EventBus&lt;E extends Event&gt;\nMap&lt;Class&lt;?&gt;, CopyOnWriteList&lt;Consumer&gt;&gt;"] --> SUB
+    SUB["subscribe(Consumer&lt;? super E&gt;)\nPECS consumer: writes into the consumer"]
+    SUB --> CE(["Consumer&lt;Event&gt; (super)\naccepts OrderEvent: OK"])
+    SUB --> CO(["Consumer&lt;Object&gt;\naccepts OrderEvent: OK"])
+
+    class OE io
+    class PUB req
+    class BUS base
+    class SUB req
+    class CE,CO io
 ```
 
 ### PECS — Producer-Extends, Consumer-Super

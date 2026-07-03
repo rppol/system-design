@@ -65,48 +65,35 @@ Total added:            ~0.45 ms P50; ~1.8 ms P99 (network jitter)
 
 ## 3. High-Level Architecture
 
-```
- Incoming HTTP Request
-        |
-        v
- +-------------------------------+
- |  Spring Security Filter Chain |
- |  (order -100)                 |
- |                               |
- |  +-------------------------+  |
- |  | RateLimitFilter         |  |
- |  | - extract client key    |  |
- |  | - call RedisRateLimiter |  |
- |  | - set X-RateLimit-*     |  |
- |  | - allow / 429           |  |
- |  +-------------------------+  |
- +-------------------------------+
-        |           |
-        |       [Allowed]
-   [429 Too     |
-   Many Req]    v
-        |  +-----------------------------+
-        |  |  Redis Cluster              |
-        |  |  - token bucket keys        |
-        |  |  - Lua atomic decrement     |
-        |  |  - TTL-based key expiry     |
-        |  +-----------------------------+
-        |           |
-        |           v
-        |  +-----------------------+
-        |  |  Downstream Controller|
-        |  |  (business logic)     |
-        |  +-----------------------+
-        v
-    HTTP 429 + Retry-After header
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
- Config (loaded at startup):
- +----------------------------------+
- | RateLimitProperties              |
- | - default: 100 req/min           |
- | - /api/search: 10 req/s          |
- | - /api/export: 1 req/min         |
- +----------------------------------+
+    Req(["Incoming HTTP Request"]) --> RLF
+
+    subgraph FilterChain["Spring Security Filter Chain (order -100)"]
+        RLF["RateLimitFilter\nextract client key\ncall RedisRateLimiter\nset X-RateLimit-* headers"]
+    end
+
+    RLF --> Redis[("Redis Cluster\ntoken bucket keys\nLua atomic decrement\nTTL-based key expiry")]
+    Redis --> Decision{"tokens available?"}
+    Decision -->|"allowed"| Controller["Downstream Controller\n(business logic)"]
+    Decision -->|"429 too many requests"| Resp429(["HTTP 429 + Retry-After header"])
+    Props["RateLimitProperties (startup config)\ndefault 100 req/min\n/api/search 10 req/s\n/api/export 1 req/min"] -.->|"loaded at startup"| RLF
+
+    class Req io
+    class RLF base
+    class Redis frozen
+    class Decision mathOp
+    class Controller req
+    class Resp429 lossN
+    class Props base
 ```
 
 ### Component Inventory

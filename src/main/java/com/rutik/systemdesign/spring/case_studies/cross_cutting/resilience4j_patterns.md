@@ -52,11 +52,12 @@ retries stop and a fallback is served instantly.
 
 ### 3.1 Circuit Breaker state machine
 
-```
-CLOSED ──(failure rate ≥ threshold)──> OPEN
-  ^                                       |
-  |                                       v
-  └──(probe succeeds)── HALF_OPEN <──(wait duration expires)
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+    CLOSED --> OPEN: failure rate >= threshold
+    OPEN --> HALF_OPEN: wait duration expires
+    HALF_OPEN --> CLOSED: probe succeeds
 ```
 
 - **CLOSED**: normal operation; failure rate tracked over sliding window
@@ -300,42 +301,37 @@ With `registerHealthIndicator: true`, the circuit breaker state appears in
 
 ### Circuit breaker protecting a downstream call
 
-```
-[OrderService]
-     |
-     v
-[CircuitBreaker: payment-service]
-     |                           |
-     | CLOSED                    | OPEN (or HALF_OPEN, probe fails)
-     v                           v
-[Retry: payment-service]    [fallback: PaymentResult.pending()]
-     |                      (no network call; instant return)
-     v
-[TimeLimiter: 3s]
-     |
-     v
-[Bulkhead: max 20 concurrent]
-     |
-     v
-[HTTP POST /payment/charge]  -- may timeout, fail, or succeed
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    order["OrderService"] --> cb{"CircuitBreaker: payment-service"}
+    cb -->|"CLOSED"| retry["Retry: payment-service"]
+    cb -->|"OPEN (or HALF_OPEN, probe fails)"| fallback["fallback: PaymentResult.pending\nno network call, instant return"]
+    retry --> tl["TimeLimiter: 3s"]
+    tl --> bh["Bulkhead: max 20 concurrent"]
+    bh --> http(["HTTP POST /payment/charge\nmay timeout, fail, or succeed"])
+
+    class order req
+    class cb,retry,tl,bh mathOp
+    class http io
+    class fallback lossN
 ```
 
 ### State transition with sliding window metrics
 
-```
-Calls:  OK OK OK FAIL FAIL FAIL FAIL FAIL OK OK  (window=10, threshold=50%)
-                                                  |
-                                                  v
-Window failure rate = 5/10 = 50% >= threshold -> OPEN
-                                                  |
-                  +-- waitDuration (10s) ---------+
-                  |
-                  v
-              HALF_OPEN: 3 probe calls
-              2 succeed, 1 fails → 33% failure rate < 50% threshold
-                  |
-                  v
-              CLOSED (normal operation resumes)
+```mermaid
+stateDiagram-v2
+    [*] --> Window: Calls OK OK OK FAIL FAIL FAIL FAIL FAIL OK OK (window=10, threshold=50%)
+    Window --> OPEN: failure rate 5/10 = 50% >= threshold
+    OPEN --> HALF_OPEN: waitDuration (10s) elapses
+    HALF_OPEN --> CLOSED: 3 probes, 2 succeed 1 fails -> 33% < 50% threshold
 ```
 
 ---

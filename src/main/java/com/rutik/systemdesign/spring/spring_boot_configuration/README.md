@@ -63,51 +63,55 @@ Think of Spring Boot's configuration as a layered cake. The bottom layers are de
 
 ## 5. Architecture Diagrams
 
-```
-Property Resolution Flow
-=========================
+**Property Resolution Flow**
 
-  Application starts
-         |
-         v
-  SpringApplication.run()
-         |
-         v
-  EnvironmentPostProcessors run
-  (add property sources: system props, env vars, config files)
-         |
-         v
-  ConfigDataEnvironmentPostProcessor
-  loads application.properties / application.yml
-  and profile-specific variants
-         |
-         v
-  Spring Environment
-  +----------------------------------------------+
-  | [0] CommandLinePropertySource                 |  --server.port=8081
-  | [1] SystemProperties                          |  -Dserver.port=8082
-  | [2] SystemEnvironmentPropertySource           |  SERVER_PORT=8083
-  | [3] application-production.properties         |  server.port=8084
-  | [4] application.properties                    |  server.port=8085
-  +----------------------------------------------+
-  getProperty("server.port") -> 8081 (first match wins)
+```mermaid
+flowchart TD
+    classDef io    fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef req   fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef train fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef base  fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["application starts"]) --> B["SpringApplication.run()"]
+    B --> C["EnvironmentPostProcessors run\n(system props, env vars, config files)"]
+    C --> D["ConfigDataEnvironmentPostProcessor\nloads application.properties/yml\n+ profile-specific variants"]
+    D --> E["Spring Environment\n(ordered property sources)"]
+    E --> F["priority 0 - CommandLinePropertySource\nserver.port=8081"]
+    E --> G["priority 1 - SystemProperties\nserver.port=8082"]
+    E --> H["priority 2 - SystemEnvironmentPropertySource\nserver.port=8083"]
+    E --> I["priority 3 - application-production.properties\nserver.port=8084"]
+    E --> J["priority 4 - application.properties\nserver.port=8085"]
+    F --> K["getProperty('server.port') -> 8081\n(first match wins)"]
+
+    class A io
+    class B,C,D base
+    class E train
+    class F,G,H,I,J req
+    class K io
 ```
 
-```
-@ConfigurationProperties Relaxed Binding
-==========================================
+Spring Boot merges every property source into one ordered `Environment`; `getProperty()` walks the list top-down and returns the first source that defines the key, so command-line args always beat env vars, which always beat packaged files.
 
-  Java field: private int maxConnections;
+**@ConfigurationProperties Relaxed Binding**
 
-  All of these bind to maxConnections:
-  +-------------------------------------------+
-  | app.max-connections=25  (kebab-case)       |  <- application.properties
-  | APP_MAX_CONNECTIONS=25  (SCREAMING_SNAKE)  |  <- OS environment variable
-  | app.maxConnections=25   (camelCase)        |  <- application.properties
-  | app.max_connections=25  (underscore)       |  <- application.properties
-  +-------------------------------------------+
-  @Value("${app.max-connections}") would ONLY match exact key "app.max-connections"
+```mermaid
+flowchart LR
+    classDef io    fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef req   fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef lossN fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+
+    A["app.max-connections=25\nkebab-case"] --> F["private int maxConnections"]
+    B["APP_MAX_CONNECTIONS=25\nSCREAMING_SNAKE env var"] --> F
+    C["app.maxConnections=25\ncamelCase"] --> F
+    D["app.max_connections=25\nunderscore"] --> F
+    X["@Value on app.max-connections\nmatches ONLY that exact key"] -.->|"no relaxed binding"| F
+
+    class A,B,C,D req
+    class F io
+    class X lossN
 ```
+
+Relaxed binding lets four different naming conventions all resolve to the same `@ConfigurationProperties` field — `@Value` has no such fallback and only matches the literal key it names.
 
 ---
 
@@ -552,29 +556,37 @@ env:
 
 **Scale:** 23 services × 5 envs = 115 config surfaces. Secrets rotate every 90 days via HashiCorp Vault. 800 tenants × up to 50 custom properties each.
 
-```
-Config resolution priority (highest → lowest):
-  1. Kubernetes Secrets (mounted as env vars)   → SPRING_DATASOURCE_PASSWORD
-  2. Spring Cloud Config Server                 → per-env application.yml
-  3. Vault dynamic secrets                      → db.password, jwt.secret
-  4. application-{profile}.yml in classpath     → service-specific defaults
-  5. application.yml in classpath               → safe local-dev defaults
+Config resolution priority (highest to lowest):
 
-Deployment topology:
-  ┌──────────────────────────────────────────────────────────┐
-  │  Config Server (Spring Cloud Config + Vault backend)     │
-  │  ┌──────────────────┐  ┌────────────────────────────┐   │
-  │  │  Git repo         │  │  HashiCorp Vault           │   │
-  │  │  (env branches)   │  │  (db creds, JWT keys)      │   │
-  │  └──────────────────┘  └────────────────────────────┘   │
-  └───────────────────────┬──────────────────────────────────┘
-                          │  HTTP (TLS mutual auth)
-       ┌──────────────────┼─────────────────────────┐
-       │                  │                          │
-  [Service A]        [Service B]               [Service N]
-  @ConfigurationProperties + @Validated
-  spring.config.import=configserver:
+1. Kubernetes Secrets (mounted as env vars) -> `SPRING_DATASOURCE_PASSWORD`
+2. Spring Cloud Config Server -> per-env `application.yml`
+3. Vault dynamic secrets -> `db.password`, `jwt.secret`
+4. `application-{profile}.yml` in classpath -> service-specific defaults
+5. `application.yml` in classpath -> safe local-dev defaults
+
+**Deployment topology**
+
+```mermaid
+flowchart TD
+    classDef base   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef frozen fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef req    fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+
+    subgraph CS["Config Server (Spring Cloud Config + Vault backend)"]
+        Git["Git repo\n(env branches)"]
+        Vault["HashiCorp Vault\n(db creds, JWT keys)"]
+    end
+
+    CS -->|"HTTP (TLS mutual auth)"| SA["Service A"]
+    CS -->|"HTTP (TLS mutual auth)"| SB["Service B"]
+    CS -->|"HTTP (TLS mutual auth)"| SN["Service N"]
+
+    class Git,Vault frozen
+    class CS base
+    class SA,SB,SN req
 ```
+
+Each service pulls its `@ConfigurationProperties` + `@Validated` beans via `spring.config.import=configserver:`, resolving values from Git-backed YAML and Vault-backed secrets behind one TLS-authenticated endpoint.
 
 **Key design decisions:**
 

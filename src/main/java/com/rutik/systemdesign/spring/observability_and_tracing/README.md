@@ -77,43 +77,46 @@ Spring Micrometer Tracing defaults to W3C `traceparent` with the OTel bridge. B3
 
 ### Observability Stack Overview
 
-```
-  Spring Boot Service
-  ┌──────────────────────────────────────────────────────┐
-  │  HTTP Request → [traceparent header in]              │
-  │                                                      │
-  │  Spring MVC Filter (Micrometer Tracing)              │
-  │    creates root span, sets traceId in MDC            │
-  │                                                      │
-  │  @RestController → @Service → JdbcTemplate           │
-  │    auto child spans for JDBC, HTTP client calls      │
-  │                                                      │
-  │  Micrometer Observation API                          │
-  │    ├─ timer metric: http.server.requests             │
-  │    ├─ span: "GET /orders"                            │
-  │    └─ MDC: traceId=abc123 spanId=def456              │
-  │                                                      │
-  │  Logback (JSON output)                               │
-  │    {"traceId":"abc123","spanId":"def456",...}         │
-  └──────────────────────────────────────────────────────┘
-       │ metrics (Prometheus scrape)     │ spans (OTLP)    │ logs (stdout)
-       ▼                                 ▼                  ▼
-  Prometheus → Grafana             Jaeger / Tempo     Loki / Elasticsearch
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph SB["Spring Boot Service"]
+        REQ["HTTP Request\ntraceparent header in"] --> FILTER["Spring MVC Filter (Micrometer Tracing)\ncreates root span, sets traceId in MDC"]
+        FILTER --> APP["@RestController -> @Service -> JdbcTemplate\nauto child spans for JDBC, HTTP client calls"]
+        APP --> OBS["Micrometer Observation API\ntimer: http.server.requests\nspan: 'GET /orders'\nMDC: traceId=abc123 spanId=def456"]
+        OBS --> LOG["Logback (JSON output)\ntraceId, spanId, ..."]
+    end
+
+    OBS -->|"metrics (Prometheus scrape)"| PROM["Prometheus -> Grafana"]
+    OBS -->|"spans (OTLP)"| TRACE["Jaeger / Tempo"]
+    LOG -->|"logs (stdout)"| LOKI["Loki / Elasticsearch"]
+
+    class REQ req
+    class FILTER,APP mathOp
+    class OBS train
+    class LOG io
+    class PROM,TRACE,LOKI base
 ```
 
 ### Distributed Trace Propagation
 
-```
-  Service A (Spring Boot)          Service B (Spring Boot)
-  ┌───────────────────┐            ┌───────────────────────┐
-  │ TraceId: abc123   │ --HTTP--►  │ traceparent header:   │
-  │ SpanId: span-001  │            │ 00-abc123-span-001-01 │
-  │ [root span]       │            │                        │
-  │                   │            │ TraceId: abc123        │
-  │                   │            │ ParentSpanId: span-001 │
-  │                   │            │ SpanId: span-002       │
-  └───────────────────┘            └───────────────────────┘
-          └──────────────── same traceId = one distributed trace ──────────────────┘
+```mermaid
+sequenceDiagram
+    participant A as Service A (Spring Boot)
+    participant B as Service B (Spring Boot)
+
+    Note over A: TraceId: abc123, SpanId: span-001 (root span)
+    A->>B: HTTP call, traceparent: 00-abc123-span-001-01
+    Note over B: TraceId: abc123 (same), ParentSpanId: span-001, SpanId: span-002 (child span)
+    B-->>A: response
+    Note over A,B: Same traceId = one distributed trace
 ```
 
 ---
@@ -546,3 +549,6 @@ checkout (680ms)
 - [Spring Boot Actuator](../spring_boot_actuator/README.md) — Micrometer metrics foundation
 - [Case Study: OTel Observability](../case_studies/cross_cutting/otel_observability_for_spring.md) — production tracing setup
 - [Spring Cloud Patterns](../spring_cloud_patterns/README.md) — distributed tracing across services
+- [Observability, Tracing & OTel](../../devops/observability_tracing_and_otel/README.md) — OTel Collector pipeline, sampling policies, and backend deployment (Jaeger/Tempo/Prometheus) beyond the Spring-side instrumentation covered here
+- [Observability (HLD)](../../hld/observability/README.md) — the three-pillars theory and system-design tradeoffs behind metrics/traces/logs
+- [Observability & Monitoring](../../backend/observability_and_monitoring/README.md) — alerting, SLIs/SLOs, and dashboard design at the platform level

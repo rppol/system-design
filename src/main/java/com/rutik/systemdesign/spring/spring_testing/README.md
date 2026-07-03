@@ -85,100 +85,119 @@ Key insight: @MockBean is the single biggest performance enemy in test suites. E
 
 ### Spring Test Context Hierarchy
 
-```
-@SpringBootTest (full context)
-+--------------------------------------------------+
-|  @SpringBootApplication                          |
-|  All @Configuration, @Component, @Service,       |
-|  @Repository beans                               |
-|                                                  |
-|  Real DataSource (or TestContainers)             |
-|  Real Kafka (or EmbeddedKafka / TestContainers)  |
-|  @MockBean replaces specific beans               |
-+--------------------------------------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-@WebMvcTest (MVC slice)
-+--------------------------------------------------+
-|  @Controller, @ControllerAdvice                  |
-|  @Filter, HandlerInterceptor                     |
-|  WebMvcConfigurer                                |
-|  Spring Security (if present)                    |
-|                                                  |
-|  Services: NOT loaded — must @MockBean           |
-|  Repositories: NOT loaded — must @MockBean       |
-+--------------------------------------------------+
+    subgraph SBT["@SpringBootTest — full context"]
+        sbt1["All @Configuration, @Component,\n@Service, @Repository beans"]
+        sbt2["Real DataSource (or Testcontainers)\nReal Kafka (or EmbeddedKafka / Testcontainers)"]
+        sbt3["@MockBean replaces specific beans"]
+    end
 
-@DataJpaTest (JPA slice)
-+--------------------------------------------------+
-|  @Entity, @Repository (JPA)                      |
-|  JPA auto-configuration                          |
-|  Embedded H2 (default) or configured DataSource  |
-|                                                  |
-|  @Service: NOT loaded                            |
-|  Web layer: NOT loaded                           |
-+--------------------------------------------------+
+    subgraph WMT["@WebMvcTest — MVC slice"]
+        wmt1["@Controller, @ControllerAdvice,\nFilter, HandlerInterceptor,\nWebMvcConfigurer, Spring Security (if present)"]
+        wmt2["Services: NOT loaded — must @MockBean"]
+        wmt3["Repositories: NOT loaded — must @MockBean"]
+    end
+
+    subgraph DJT["@DataJpaTest — JPA slice"]
+        djt1["@Entity, @Repository (JPA),\nJPA auto-configuration"]
+        djt2["Embedded H2 (default) or\nconfigured DataSource"]
+        djt3["@Service: NOT loaded"]
+        djt4["Web layer: NOT loaded"]
+    end
+
+    class sbt1,sbt2 train
+    class sbt3 mathOp
+    class wmt1 train
+    class wmt2,wmt3 lossN
+    class djt1,djt2 train
+    class djt3,djt4 lossN
 ```
+
+Every node is colored: green (`train`) marks what each slice actually loads, red (`lossN`) marks what is deliberately left out and must be filled with `@MockBean`, orange (`mathOp`) marks the explicit override mechanism.
 
 ### Context Caching
 
-```
-Test Class A                   Test Class B                   Test Class C
-@SpringBootTest                @SpringBootTest                @SpringBootTest
-@MockBean(ServiceX)            @MockBean(ServiceX)            @MockBean(ServiceX)
-                                                              @MockBean(ServiceY)  <-- different signature
-        |                              |                              |
-        v                              v                              v
-  [Context 1]  <-- cached --> [Context 1 reused]          [Context 2 created]
-  (slow: 8s)                  (instant: 0ms)               (slow: 8s)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Key: same set of @MockBeans + same @SpringBootTest config = same context key = cache hit
+    A["Test Class A\n@SpringBootTest\n@MockBean(ServiceX)"] -->|"creates (slow: 8s)"| C1["Context 1"]
+    B["Test Class B\n@SpringBootTest\n@MockBean(ServiceX)"] -->|"cache hit (instant: 0ms)"| C1
+    D["Test Class C\n@SpringBootTest\n@MockBean(ServiceX, ServiceY) — different signature"] -->|"different key → creates (slow: 8s)"| C2["Context 2"]
+
+    class A,B,D req
+    class C1 train
+    class C2 lossN
 ```
+
+Same set of `@MockBean`s plus the same `@SpringBootTest` config produces the same context key, so Test Class B gets a free cache hit; Test Class C's extra `@MockBean(ServiceY)` changes the key and forces an expensive second context.
 
 ### MockMvc Request Flow
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    T["Test Method\nmockMvc.perform(get('/orders/123'))"] --> D["DispatcherServlet\n(in-memory, no real HTTP socket)"]
+    D --> H["HandlerMapping"]
+    H --> OC["OrderController.getOrder(123)"]
+    OC --> OS["OrderService\n(real or @MockBean)"]
+    OS --> R["MockHttpServletResponse"]
+    R --> E["andExpect(status().isOk())\nandExpect(jsonPath('$.id').value(123))"]
+
+    class T req
+    class D,H mathOp
+    class OC,OS train
+    class R,E io
 ```
-  Test Method
-      |
-      | mockMvc.perform(get("/orders/123"))
-      |
-      v
-  DispatcherServlet (in-memory, no real HTTP socket)
-      |
-      v
-  HandlerMapping --> OrderController.getOrder(123)
-      |
-      v
-  OrderService (real or @MockBean)
-      |
-      v
-  MockHttpServletResponse
-      |
-      v
-  .andExpect(status().isOk())
-  .andExpect(jsonPath("$.id").value(123))
-```
+
+The entire chain runs in-process — no TCP socket is opened — which is why `MOCK` web environment tests are an order of magnitude faster than `RANDOM_PORT` tests.
 
 ### Testcontainers Lifecycle
 
-```
-  @Testcontainers
-  @SpringBootTest
-  Test Suite Start
-      |
-      v
-  Docker: start PostgreSQLContainer  <-- once per test class (or suite with @Container static)
-      |
-      v
-  @DynamicPropertySource sets spring.datasource.url = jdbc:postgresql://localhost:<mapped-port>/test
-      |
-      v
-  Spring ApplicationContext starts with real PostgreSQL connection
-      |
-  Each @Test method:
-      | @Transactional -> auto-rollback at end
-      | OR @Sql("cleanup.sql") -> explicit cleanup
-      v
-  Test Suite End -> Docker: stop container
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    S["Test Suite Start\n@Testcontainers @SpringBootTest"] --> DC["Docker: start PostgreSQLContainer\n(once per class, or suite w/ static @Container)"]
+    DC --> DPS["@DynamicPropertySource sets\nspring.datasource.url = jdbc:postgresql://localhost:port/test"]
+    DPS --> CTX["Spring ApplicationContext starts\nwith real PostgreSQL connection"]
+    CTX --> TM{"Each @Test method"}
+    TM -->|"@Transactional: auto-rollback at end"| END["Test Suite End\nDocker: stop container"]
+    TM -->|"@Sql('cleanup.sql'): explicit cleanup"| END
+
+    class S req
+    class DC,DPS mathOp
+    class CTX train
+    class TM frozen
+    class END lossN
 ```
 
 ---
@@ -993,25 +1012,30 @@ The key insight was that test performance is a first-class concern. Every @MockB
 
 **Scale:** 14 controllers, 6 repos, 3 external clients, 1 batch job, 2 Kafka listeners → 3 test layers × ~150 tests each = ~450 tests total.
 
-```
 Test pyramid for the OMS:
 
-  ┌─────────────────────────────────────────┐
-  │  E2E / Contract tests (5)               │  ~45s each, run nightly
-  │  Testcontainers (Postgres+Kafka full)   │
-  ├─────────────────────────────────────────┤
-  │  Integration tests (120)                │  ~3s each
-  │  @WebMvcTest, @DataJpaTest              │  lightweight slices
-  │  MockMvc + Testcontainers (single DB)   │
-  ├─────────────────────────────────────────┤
-  │  Unit tests (350)                       │  ~20ms each
-  │  Plain JUnit 5 + Mockito                │  no Spring context
-  └─────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Total CI target: (350 × 20ms) + (120 × 3s) + (5 × 45s) = 7s + 360s + 225s ≈ 10min
-After slicing:   (350 × 20ms) + (120 × 1.5s) + (5 × 45s) = 7s + 180s + 225s ≈ 6.9min
-With context caching: reduces to ~4min
+    E2E["E2E / Contract tests (5)\nTestcontainers (Postgres+Kafka full)\n~45s each, run nightly"]
+    INT["Integration tests (120)\n@WebMvcTest, @DataJpaTest\nMockMvc + Testcontainers (single DB)\n~3s each"]
+    UNIT["Unit tests (350)\nPlain JUnit 5 + Mockito\nno Spring context, ~20ms each"]
+
+    E2E --> INT --> UNIT
+
+    class E2E mathOp
+    class INT train
+    class UNIT io
 ```
+
+Total CI target: (350 × 20ms) + (120 × 3s) + (5 × 45s) = 7s + 360s + 225s ≈ 10min. After slicing: (350 × 20ms) + (120 × 1.5s) + (5 × 45s) = 7s + 180s + 225s ≈ 6.9min. With context caching: reduces to ~4min.
 
 **Controller layer — @WebMvcTest with @MockBean:**
 
@@ -1209,3 +1233,4 @@ class OrderServiceIntegrationTest {
 
 - [Spring Boot Auto-Configuration](../spring_boot_autoconfiguration/README.md) — test slices
 - [Case Study: Testcontainers & Test Strategy](../case_studies/cross_cutting/testcontainers_and_test_strategy.md) — @ServiceConnection, integration tests
+- [Backend Testing Strategies](../../backend/backend_testing_strategies/README.md) — test pyramid theory, contract testing, flaky-test triage outside the Spring-specific tooling

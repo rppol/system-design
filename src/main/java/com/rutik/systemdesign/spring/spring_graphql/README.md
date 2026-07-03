@@ -127,17 +127,30 @@ helps, but the N+1 and query-cost problems are *yours* to manage.
 
 ### The N+1 explosion and the DataLoader fix
 
-```
-  Query: books { title author { name } }   (returns 100 books)
+```mermaid
+flowchart TD
+    classDef req    fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef train  fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN  fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
 
-  NAIVE (N+1):
-    1 query  -> load 100 books
-    + 100 queries -> load each book's author one at a time   = 101 DB hits
+    A["Query: books { title author { name } } - returns 100 books"] --> B["Load 100 books - 1 query"]
+    B --> C{"Naive resolver or DataLoader?"}
+    C -->|"Naive @SchemaMapping"| D["Load each book's author one at a time - 100 queries"]
+    D --> E["101 DB hits total"]
+    C -->|"DataLoader / @BatchMapping"| F["DataLoader collects author keys a1..a100 during the pass"]
+    F --> G["1 batch query: WHERE author_id IN (a1..a100)"]
+    G --> H["2 DB hits total"]
 
-  WITH DataLoader (batched per request):
-    1 query  -> load 100 books
-    DataLoader collects author keys [a1,a2,...,a100] during the pass,
-    then 1 batch query: WHERE author_id IN (a1..a100)         = 2 DB hits
+    class A req
+    class B train
+    class C mathOp
+    class D lossN
+    class E lossN
+    class F train
+    class G train
+    class H io
 ```
 
 GraphQL's per-field resolution makes the 101-query version the *default*; the
@@ -159,10 +172,20 @@ DataLoader defers each `author` resolution, gathers the keys, and dispatches one
 
 ### Transport split: HTTP for query/mutation, stream for subscription
 
-```
-  query / mutation :  client --POST /graphql--> [graphql-java] --> single JSON response
-  subscription     :  client --WebSocket/SSE--> [graphql-java] ==> Flux<event> stream
-                                                                   (server pushes N events)
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant E as graphql-java Engine
+
+    Note over C,E: Query / Mutation - single request/response
+    C->>E: POST /graphql
+    E-->>C: single JSON response
+
+    Note over C,E: Subscription - persistent stream
+    C->>E: subscribe via WebSocket or SSE
+    loop server pushes N events
+        E-->>C: streamed event (Flux)
+    end
 ```
 
 Subscriptions are the only operation that needs a persistent connection; queries and
@@ -654,6 +677,7 @@ gate. Worth it for the client-flexibility and round-trip reduction a BFF demands
   layer and `Window`/`ScrollPosition` pagination GraphQL builds on.
 - [spring_webflux](../spring_webflux/README.md) — `Mono`/`Flux` resolvers and the
   reactive transport behind subscriptions.
-- [../../backend/graphql/](../../backend/graphql/) — GraphQL at the architecture level
-  (federation, schema design, query cost); [../../backend/rest_api_design/](../../backend/rest_api_design/) —
-  REST vs GraphQL API design tradeoffs.
+- [GraphQL (backend)](../../backend/graphql/README.md) — GraphQL at the architecture
+  level (federation, schema design, query cost).
+- [REST API Design](../../backend/rest_api_design/README.md) — REST vs GraphQL API
+  design tradeoffs.

@@ -112,44 +112,89 @@ thousands of connections.
 
 ### Subscribe handshake: demand flows up, data flows down
 
-```
-   Assembly time (lazy)          Subscription time (subscribe())
-   ───────────────────          ───────────────────────────────
-   Flux.range(1,100)            Subscriber --- request(n) ---> upstream   (demand UP)
-      .map(f)                        ^                              |
-      .filter(g)                     |                              v
-      .subscribe(sub)            onNext(x) <---- emit element ---- source  (data DOWN)
+```mermaid
+sequenceDiagram
+    participant Sub as Subscriber
+    participant Filter as filter(g)
+    participant Map as map(f)
+    participant Source as Flux.range(1,100)
 
-   Nothing executes until subscribe() injects demand. request(n) propagates UP
-   through filter -> map -> source; elements propagate DOWN through map -> filter -> sub.
+    Note over Sub,Source: Assembly time (lazy) — nothing runs yet
+
+    Sub->>Filter: subscribe()
+    Filter->>Map: request(n)
+    Map->>Source: request(n)
+    Note right of Source: demand flows UP
+
+    Source->>Map: onNext(x)
+    Map->>Filter: onNext(f(x))
+    Filter->>Sub: onNext(g(f(x)))
+    Note left of Sub: data flows DOWN
 ```
+
+Nothing executes until `subscribe()` injects demand: `request(n)` propagates UP
+through filter -> map -> source, while elements propagate DOWN through
+map -> filter -> subscriber.
 
 ### subscribeOn vs publishOn — where the thread switch happens
 
-```
-  source.subscribeOn(boundedElastic)         source
-        .map(A)            <-- runs on -->      .publishOn(parallel)   <- switch here
-        .publishOn(parallel)                    .map(A)   <-- parallel thread
-        .map(B)                                 .map(B)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  subscribeOn: affects the SOURCE and everything until the first publishOn.
-               Position in the chain does NOT matter — only one takes effect.
-  publishOn:   affects everything DOWNSTREAM of its position. Position MATTERS;
-               you can chain several to hop threads multiple times.
+    subgraph SubOn["subscribeOn(boundedElastic) — position does NOT matter"]
+        direction LR
+        S1["source"] --> S2["map(A)"] --> S3["publishOn(parallel)\nswitch here"] --> S4["map(B)"]
+    end
+
+    subgraph PubOn["publishOn(parallel) — position MATTERS"]
+        direction LR
+        P1["source"] --> P2["publishOn(parallel)\nswitch here"] --> P3["map(A)\nparallel thread"] --> P4["map(B)\nparallel thread"]
+    end
+
+    class S1,P1 io
+    class S2,S4 base
+    class S3,P2 mathOp
+    class P3,P4 train
 ```
+
+`subscribeOn` affects the source and everything until the first `publishOn` —
+only one takes effect regardless of chain position. `publishOn` affects
+everything downstream of its position, so its placement matters and it can be
+chained repeatedly to hop threads multiple times.
 
 ### Backpressure: a slow consumer throttles a fast producer
 
-```
-  Producer (1000/s)   ──req(8)──>   Operator queue   ──onNext──>   Consumer (8/s)
-       |                              [########]                       |
-       | wants to push 1000           bounded(256)                     | pulls 8 at a time
-       v                                  |                            v
-   blocked by demand <─── request(8) ─────┘   (consumer asks for 8; producer sends 8)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Without backpressure the queue grows unbounded -> OutOfMemoryError.
-  request(n) is the brake lever: the producer may only emit what was requested.
+    P["Producer (1000/s)\nwants to push 1000"] -->|"onNext (only what was requested)"| Q["Operator queue\nbounded(256)"]
+    Q -->|"onNext"| C["Consumer (8/s)\npulls 8 at a time"]
+    C -->|"request(8)"| Q
+    Q -->|"request(8)"| P
+
+    class P io
+    class Q mathOp
+    class C req
 ```
+
+`request(n)` is the brake lever: a producer may only emit what was requested,
+so a slow consumer's `request(8)` throttles the whole chain back to the source.
+Without backpressure the queue grows unbounded and the process dies with
+`OutOfMemoryError`.
 
 ---
 

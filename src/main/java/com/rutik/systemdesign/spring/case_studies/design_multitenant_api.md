@@ -93,64 +93,78 @@ Fix: parallel migration with virtual threads (Java 21):
 
 ## 3. High-Level Architecture
 
-```
-                       Internet
-                          |
-             +------------+------------+
-             |     Load Balancer       |
-             |  (SNI / Host header)    |
-             +------------+------------+
-                          |
-             +------------+------------+
-             |   Spring Boot App       |
-             |                         |
-             |  [TenantResolutionFilter]|  ← extracts tenant from subdomain/header
-             |         |               |
-             |  [TenantContext]        |  ← ThreadLocal store (cleared in finally)
-             |         |               |
-             |  [TenantValidationInterceptor] ← validates tenant active
-             |         |               |
-             |  [Spring Security]      |  ← per-tenant AuthenticationManagerResolver
-             |         |               |
-             |  [Service Layer]        |
-             |         |               |
-             |  [Hibernate ORM]        |
-             |         |               |
-             |  [SchemaMultiTenantConnProv] ← SET search_path per connection
-             +------------+------------+
-                          |
-             +------------+------------+
-             |        PostgreSQL        |
-             |                         |
-             |  schema: public         |  ← tenant registry, system tables
-             |  schema: tenant_acme    |  ← ACME Corp data
-             |  schema: tenant_globex  |  ← Globex Corp data
-             |  schema: tenant_initech |  ← Initech data
-             +-------------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    INTERNET([Internet]) --> LB["Load Balancer\n(SNI / Host header)"]
+    LB --> TRF
+
+    subgraph APP["Spring Boot App"]
+        direction TD
+        TRF["TenantResolutionFilter\nextracts tenant from subdomain/header"] --> TC["TenantContext\nThreadLocal store, cleared in finally"]
+        TC --> TVI["TenantValidationInterceptor\nvalidates tenant active"]
+        TVI --> SEC["Spring Security\nper-tenant AuthenticationManagerResolver"]
+        SEC --> SVC["Service Layer"]
+        SVC --> ORM["Hibernate ORM"]
+        ORM --> SCP["SchemaMultiTenantConnProv\nSET search_path per connection"]
+    end
+
+    SCP --> PUB
+
+    subgraph PG["PostgreSQL"]
+        direction TD
+        PUB["schema: public\ntenant registry, system tables"]
+        ACME["schema: tenant_acme\nACME Corp data"]
+        GLOBEX["schema: tenant_globex\nGlobex Corp data"]
+        INITECH["schema: tenant_initech\nInitech data"]
+    end
+
+    class INTERNET io
+    class LB,TRF,TC,TVI,SEC,SVC,ORM,SCP base
+    class PUB,ACME,GLOBEX,INITECH frozen
 ```
 
 ### Request lifecycle
 
-```
-1. TenantResolutionFilter (order=1, before Security):
-   → extract tenant ID from X-Tenant-ID header or subdomain
-   → TenantContext.setTenantId(id)
-   → finally: TenantContext.clear()
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant TRF as TenantResolutionFilter
+    participant TC as TenantContext
+    participant TVI as TenantValidationInterceptor
+    participant SEC as Spring Security JWT Filter
+    participant APP as Controller/Service/Repository
+    participant HIB as Hibernate EntityManager
+    participant DB as PostgreSQL
 
-2. TenantValidationInterceptor (preHandle):
-   → validate tenant exists and is active in registry
-   → return 400/404/403 if not
-
-3. Spring Security JWT filter:
-   → extract JWT, verify against tenant's signing key (per-tenant KMS key)
-   → TenantAuthenticationManagerResolver.resolve() → per-tenant AuthMgr
-
-4. Controller → Service → Repository → Hibernate EntityManager:
-   → CurrentTenantIdentifierResolver reads TenantContext
-   → SchemaMultiTenantConnectionProvider sets search_path on connection
-   → all unqualified table refs resolve to tenant schema
-
-5. Filter finally block: TenantContext.clear()
+    C->>TRF: HTTP request (order=1, before Security)
+    TRF->>TRF: extract tenant ID from X-Tenant-ID header or subdomain
+    TRF->>TC: setTenantId(id)
+    TRF->>TVI: filterChain.doFilter()
+    TVI->>TC: getTenantId()
+    TVI->>TVI: validate tenant exists and is active in registry
+    alt tenant missing/unknown/suspended
+        TVI-->>C: 400 / 404 / 403
+    else tenant active
+        TVI->>SEC: continue chain
+        SEC->>SEC: extract JWT, verify against tenant's signing key (per-tenant KMS key)
+        SEC->>SEC: TenantAuthenticationManagerResolver.resolve() -> per-tenant AuthMgr
+        SEC->>APP: Controller -> Service -> Repository
+        APP->>HIB: EntityManager operation
+        HIB->>TC: CurrentTenantIdentifierResolver reads TenantContext
+        HIB->>DB: SchemaMultiTenantConnectionProvider sets search_path; unqualified table refs resolve to tenant schema
+        DB-->>HIB: result set
+        HIB-->>APP: entities
+        APP-->>C: response
+    end
+    TRF->>TC: finally: TenantContext.clear()
 ```
 
 ---

@@ -461,23 +461,28 @@ In modern Java, prefer `Instant` / `LocalDate` (immutable) over `java.util.Date`
 
 **Scenario.** A reusable `payments-core` library processes **5M payments/day** (~58/sec average, ~600/sec peak) across a fleet. It composes four interview-staple patterns into one coherent flow: an **immutable `Payment`** value object (Effective Java Item 17), a **Builder** for safe construction (Item 2), an **enum singleton** registry of payment gateways (Item 3), and a **factory method** that selects a processor by scheme. After replacing mutable DTOs with immutable value objects, the team logged **zero NullPointerExceptions in the payment path over 18 months** — the fail-fast `build()` validation moved every "missing field" bug to construction time, where a unit test catches it.
 
-```
-   client code
-      |
-      v
-   Payment.builder()           (Item 2: Builder)
-      .amount(10000)           validates at build(): amount>0, currency set
-      .currency("USD")
-      .scheme(VISA)
-      .build()  ----> Payment  (Item 17: immutable, final fields, no setters)
-                         |
-                         v
-   PaymentGateway.INSTANCE     (Item 3: enum singleton registry)
-      .process(payment)
-                         |
-                         v
-   ProcessorFactory.forScheme(VISA)  (factory method -> returns interface)
-      -> CardProcessor (impl hidden behind PaymentProcessor interface)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client["client code"] --> Builder["Payment.builder()\n.amount(10000).currency(USD).scheme(VISA)\n(Item 2: Builder)"]
+    Builder -->|"build() validates:\namount>0, currency set"| Payment["Payment\n(Item 17: immutable, final fields, no setters)"]
+    Payment --> Gateway["PaymentGateway.INSTANCE.process(payment)\n(Item 3: enum singleton registry)"]
+    Gateway --> Factory["ProcessorFactory.forScheme(VISA)\n(factory method, returns interface)"]
+    Factory --> Card["CardProcessor\n(impl hidden behind PaymentProcessor interface)"]
+
+    class Client req
+    class Builder mathOp
+    class Payment io
+    class Gateway frozen
+    class Factory mathOp
+    class Card base
 ```
 
 ### Composing the Four Patterns

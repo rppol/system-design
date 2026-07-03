@@ -100,100 +100,65 @@ Final token: <header_b64>.<payload_b64>.<signature_b64>
 
 ### Authorization Code + PKCE Flow
 
+```mermaid
+sequenceDiagram
+    participant Client as Client (SPA/Mobile)
+    participant AS as Authorization Server
+    participant RS as Resource Server
+
+    Note over Client: [1] Generate code_verifier (random)<br/>code_challenge = BASE64URL(SHA256(cv))
+    Client->>AS: [2] GET /authorize? response_type=code&client_id=...&code_challenge=...&code_challenge_method=S256
+    AS-->>Client: [3] redirect with authorization code
+    Client->>AS: [4] POST /token code=...&code_verifier=... (no client_secret for public clients)
+    AS-->>Client: [5] access_token + refresh_token
+    Client->>RS: [6] GET /api/resource, Authorization: Bearer access_token
+    Note over RS: [7] validate JWT locally (JWKS cache, no network)
+    RS-->>Client: [8] 200 OK + data
 ```
-Client (SPA/Mobile)          Authorization Server          Resource Server
-        |                            |                            |
-        |--[1] Generate              |                            |
-        |    code_verifier (random)  |                            |
-        |    code_challenge =        |                            |
-        |    BASE64URL(SHA256(cv))   |                            |
-        |                            |                            |
-        |--[2] GET /authorize?       |                            |
-        |    response_type=code      |                            |
-        |    client_id=...           |                            |
-        |    code_challenge=...      |                            |
-        |    code_challenge_method=S256                           |
-        |--------------------------->|                            |
-        |                            |                            |
-        |<--[3] redirect with code---|                            |
-        |                            |                            |
-        |--[4] POST /token           |                            |
-        |    code=...                |                            |
-        |    code_verifier=...       |                            |
-        |    (no client_secret       |                            |
-        |     for public clients)    |                            |
-        |--------------------------->|                            |
-        |                            |                            |
-        |<--[5] access_token+--------|                            |
-        |       refresh_token        |                            |
-        |                            |                            |
-        |--[6] GET /api/resource     |                            |
-        |    Authorization: Bearer   |                            |
-        |    <access_token>          |                            |
-        |------------------------------------------->            |
-        |                            |   [7] validate JWT locally |
-        |                            |   (JWKS cache, no network) |
-        |<--[8] 200 OK + data------------------------------------|
-```
+
+PKCE closes the gap left by public clients that cannot hold a secret: the authorization code is useless to an attacker who intercepts it, because exchanging it for tokens requires the `code_verifier`, which never crosses the network until step 4.
 
 ### Stateless JWT Filter Chain
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    req(["HTTP Request"]) --> chain["SecurityFilterChain"]
+    chain --> upf["UsernamePasswordAuthenticationFilter\n(skipped for JWT paths)"]
+    upf --> jwtf["JwtAuthenticationFilter\n1. Extract Bearer token\n2. Parse JWT\n3. Validate sig/exp/iss\n4. Set SecurityContext"]
+    jwtf --> authf["AuthorizationFilter\n(check roles/scopes)"]
+    authf --> ctrl(["Controller"])
+
+    class req,ctrl io
+    class chain base
+    class upf train
+    class jwtf mathOp
+    class authf train
 ```
-HTTP Request
-     |
-     v
-+--------------------+
-| SecurityFilterChain|
-|                    |
-| +----------------+ |
-| |UsernamePassword| | <-- skipped for JWT paths
-| |AuthFilter      | |
-| +----------------+ |
-|         |          |
-| +----------------+ |
-| |JwtAuthentication| |
-| |Filter          | |
-| | 1. Extract     | |
-| |    Bearer token| |
-| | 2. Parse JWT   | |
-| | 3. Validate    | |
-| |    sig/exp/iss | |
-| | 4. Set         | |
-| |    SecurityCtx | |
-| +----------------+ |
-|         |          |
-| +----------------+ |
-| |Authorization   | |
-| |Filter          | |
-| | check roles/   | |
-| | scopes         | |
-| +----------------+ |
-+--------------------+
-     |
-     v
-  Controller
-```
+
+The JWT filter sits between the (skipped) session-based filter and the authorization check — it is the only place credentials are extracted, so a failure here means every downstream filter sees an unauthenticated request.
 
 ### Refresh Token Rotation
 
+```mermaid
+sequenceDiagram
+    participant Client
+    participant AS as Auth Server
+
+    Client->>AS: POST /token/refresh, refresh_token=RT1
+    Note over AS: invalidate RT1; issue new AT2 + RT2
+    AS-->>Client: access_token=AT2, refresh_token=RT2
+    Note over Client,AS: RT1 is now dead — if an attacker replays RT1,<br/>the server detects reuse and revokes the entire token family
 ```
-Client                    Auth Server
-  |                           |
-  |--POST /token/refresh ----->|
-  |   refresh_token=RT1        |
-  |                            |
-  |                   [invalidate RT1]
-  |                   [issue new AT2 + RT2]
-  |                            |
-  |<-- access_token=AT2 -------|
-  |    refresh_token=RT2        |
-  |                            |
-  | (RT1 is now dead;          |
-  |  if attacker tries RT1,    |
-  |  server detects reuse      |
-  |  and revokes entire        |
-  |  token family)             |
-```
+
+Rotation turns a stolen refresh token into a detectable event rather than a silent, standing compromise: the very first reuse of an already-rotated token proves theft and triggers a family-wide revocation.
 
 ---
 
@@ -689,7 +654,7 @@ A JWT consists of three base64url-encoded parts separated by dots: header, paylo
 HS256 uses a single shared secret for both signing and verification. RS256 uses an RSA private key to sign and the corresponding public key to verify. In a microservices architecture, RS256 is strongly preferred: only the Authorization Server holds the private key, while every Resource Server only needs the public key (fetched from the JWKS endpoint). With HS256, every service that needs to validate tokens must possess the secret, meaning a compromise of any service compromises the signing secret for all services.
 
 **Explain the OAuth2 Authorization Code + PKCE flow and why PKCE is required for public clients.**
-The flow has six steps: (1) client generates a random code_verifier and computes code_challenge = BASE64URL(SHA256(code_verifier)); (2) client redirects user to the authorization endpoint with code_challenge; (3) user authenticates and server returns an authorization code; (4) client sends the code plus the original code_verifier to the token endpoint; (5) server recomputes SHA256(code_verifier) and compares it to the stored code_challenge; (6) if they match, server issues tokens. PKCE prevents authorization code interception attacks: an attacker who intercepts the code cannot exchange it for tokens because they do not know the code_verifier, which was never transmitted over the network.
+The flow has six steps that bind the token exchange to the client instance which started the request, without needing a client secret. (1) client generates a random code_verifier and computes code_challenge = BASE64URL(SHA256(code_verifier)); (2) client redirects user to the authorization endpoint with code_challenge; (3) user authenticates and server returns an authorization code; (4) client sends the code plus the original code_verifier to the token endpoint; (5) server recomputes SHA256(code_verifier) and compares it to the stored code_challenge; (6) if they match, server issues tokens. PKCE prevents authorization code interception attacks: an attacker who intercepts the code cannot exchange it for tokens because they do not know the code_verifier, which was never transmitted over the network.
 
 **How does Spring Security's OAuth2 Resource Server validate JWTs?**
 When configured with `http.oauth2ResourceServer(oauth2 -> oauth2.jwt(...))`, Spring auto-configures a `BearerTokenAuthenticationFilter`. For each request with a Bearer token, it calls the configured `JwtDecoder` (typically `NimbusJwtDecoder`). Nimbus fetches the JWKS from the configured URI, caches the public keys (default 5-minute TTL), and verifies the token signature and standard claims (exp, nbf). The decoded JWT is then passed to a `JwtAuthenticationConverter` which maps claims to `GrantedAuthority` objects and populates the `SecurityContext`.
@@ -727,6 +692,15 @@ Use `AuthenticationManagerResolver<HttpServletRequest>`. Each issuer gets its ow
 **How does NimbusJwtDecoder handle JWKS key rotation without downtime?**
 NimbusJwtDecoder fetches the JWKS from the configured URI and caches the keys. When a JWT arrives with a `kid` (key ID) claim not found in the cache, Nimbus automatically re-fetches the JWKS to pick up new keys. Authorization Servers that rotate keys publish the new key alongside the old key for a grace period (typically 24–48 hours), so tokens signed with the old key continue to validate while clients refresh their JWKS cache. This is why JWKS endpoints should never remove old keys the moment a new key is published.
 
+**What is the difference between an access token and a refresh token, and why does rotating the refresh token matter more?**
+An access token authorizes API calls directly and is deliberately short-lived (5–15 minutes), while a refresh token only exchanges for a new access token and is long-lived (hours to days). Because the access token rides on every request, its blast radius is bounded purely by its short expiry; the refresh token is used far less often but grants renewable access, so a leaked refresh token is much more valuable to an attacker. This asymmetry is exactly why refresh token rotation — invalidating the old refresh token on every use and issuing a new one — is the primary defense: a single reuse of an already-rotated refresh token is a reliable compromise signal, whereas a stolen access token simply expires on its own within minutes.
+
+**What is the architectural difference between an OAuth2 Authorization Server and a Resource Server?**
+The Authorization Server authenticates the user and issues tokens, while the Resource Server only validates tokens and serves protected data. Spring Security lets a single Boot application play both roles for small deployments, but production systems usually separate them: Keycloak, Auth0, or Spring Authorization Server plays the Authorization Server, and every microservice adds `spring-boot-starter-oauth2-resource-server` to become a Resource Server that trusts that issuer's public keys. A Resource Server has no login forms, consent screens, or credential storage — it only knows how to fetch the JWKS and check claims — which is precisely what makes horizontal scaling of the API tier trivial: any number of Resource Server instances validate the same tokens without ever calling the Authorization Server on the request hot path.
+
+**What are the exact steps Spring Security's OAuth2 Resource Server performs to validate an incoming JWT, and in what order?**
+Signature verification runs first against the cached JWKS public key, then timestamp checks (`exp`, `nbf`), then issuer (`iss`), then any custom validators such as audience (`aud`). Signature verification comes first because there is no point evaluating claims on a token that could have been tampered with — a failed signature check short-circuits immediately. `JwtTimestampValidator` handles expiry, `JwtIssuerValidator` confirms the token came from the trusted Authorization Server, and any additional checks are composed on top via `DelegatingOAuth2TokenValidator`. The gotcha: replacing the default validator to add a custom check (instead of composing it with `JwtValidators.createDefaultWithIssuer(...)`) silently drops the exp/iss checks — exactly the mistake in Pitfall 2 of this module's case study.
+
 ---
 
 ## 13. Best Practices
@@ -754,25 +728,35 @@ NimbusJwtDecoder fetches the JWKS from the configured URI and caches the keys. W
 
 ### Architecture
 
-```
-            +------------------+  rotate keys quarterly
-            | Authorization    |  signs JWT with RSA private key (RS256)
-            | Server (Keycloak)|  publishes /.well-known/jwks.json
-            +--------+---------+
-                     | JWKS (public keys, kid-tagged)
-        +------------+------------+----------------+
-        |            |            |                |
-   +----v----+  +----v----+  +----v----+      +----v-----+
-   | API pod |  | API pod |  | API pod | ...  | 60 pods  |
-   | JWKS    |  | JWKS    |  | JWKS    |      | (50k rps)|
-   | cache1h |  | cache1h |  | cache1h |      |          |
-   +----+----+  +----+----+  +----+----+      +----------+
-        |  validate sig + exp + iss + tenant claim (<1ms, no network)
-        v
-   +---------+        +----------------------------+
-   |  Redis  |<-------| refresh-token rotation +    |
-   | revoke  |        | jti revocation list (SETEX) |
-   +---------+        +----------------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    as["Authorization Server (Keycloak)\nsigns JWT with RSA private key (RS256)\npublishes /.well-known/jwks.json\nrotates keys quarterly"]
+    pod1["API pod\nJWKS cache 1h"]
+    pod2["API pod\nJWKS cache 1h"]
+    podn["... 60 pods total\n(50k rps)"]
+    redis[("Redis\nrevoke list")]
+    rot["refresh-token rotation +\njti revocation list (SETEX)"]
+
+    as -->|"JWKS (public keys, kid-tagged)"| pod1
+    as --> pod2
+    as --> podn
+    pod1 -->|"validate sig + exp + iss + tenant claim (<1ms, no network)"| rot
+    pod2 --> rot
+    podn --> rot
+    rot --> redis
+
+    class as frozen
+    class pod1,pod2,podn train
+    class rot mathOp
+    class redis base
 ```
 
 ### Resource Server Configuration
@@ -988,3 +972,5 @@ public class JwtBlocklist {
 - [Spring Security Architecture](../spring_security_architecture/README.md) — FilterChainProxy
 - [Case Study: OAuth2 Authorization Server](../case_studies/design_oauth2_authorization_server.md) — PKCE, rotation
 - [Case Study: Multi-Tenant API](../case_studies/design_multitenant_api.md) — tenant isolation via JWT
+- [Auth & Authorization Systems](../../backend/auth_and_authorization_systems/README.md) — OAuth2/OIDC flows and token revocation at the systems level
+- [Security & Auth (HLD)](../../hld/security_and_auth/README.md) — authn/authz tradeoffs in distributed system design

@@ -70,45 +70,47 @@ Spring Boot 3.2+ ships with virtual thread integration: `spring.threads.virtual.
 
 ### Event Publication and Listener Dispatch
 
-```
-  @Service OrderService
-  ├── @Transactional
-  │   createOrder(order):
-  │     repo.save(order)                ← DB write
-  │     publisher.publishEvent(         ← in-transaction event
-  │         new OrderCreatedEvent(order))
-  │   [transaction commits here]
-  │
-  ↓ Spring event multicaster
-  ├── @EventListener
-  │   emailService.sendConfirmation()   ← fires synchronously in same TX
-  │
-  └── @TransactionalEventListener(AFTER_COMMIT)
-      notificationService.push()        ← fires AFTER commit; no rollback possible
-      kafkaTemplate.send()              ← fire-and-forget; failure = data inconsistency
+```mermaid
+sequenceDiagram
+    participant S as OrderService (@Transactional)
+    participant DB as Database
+    participant M as Event Multicaster
+    participant L1 as @EventListener (emailService)
+    participant L2 as @TransactionalEventListener(AFTER_COMMIT)
+    participant L3 as @Async @EventListener
 
-  If @Async is added to the listener:
-  └── @Async @EventListener
-      notificationService.push()        ← fires on TaskExecutor thread, no TX context
+    S->>DB: repo.save(order)
+    S->>M: publisher.publishEvent(OrderCreatedEvent)
+    M->>L1: dispatch (synchronous, same TX)
+    L1-->>S: sendConfirmation() completes in-TX
+    Note over S,DB: transaction commits here
+    M->>L2: dispatch (AFTER_COMMIT — no rollback possible)
+    L2-->>L2: notificationService.push(), kafkaTemplate.send() (fire-and-forget)
+    M->>L3: dispatch (on TaskExecutor thread — no TX context)
 ```
 
 ### Distributed Scheduling with ShedLock
 
-```
-  Kubernetes cluster (3 pods)
-  ┌──────────┐  ┌──────────┐  ┌──────────┐
-  │  Pod-1   │  │  Pod-2   │  │  Pod-3   │
-  │@Scheduled│  │@Scheduled│  │@Scheduled│
-  └────┬─────┘  └────┬─────┘  └────┬─────┘
-       │              │              │
-       ▼ all three attempt lock acquisition
-  ┌──────────────────────────────────────┐
-  │  shedlock table (PostgreSQL/Redis)   │
-  │  INSERT ... WHERE lock_until < NOW() │
-  │  → only ONE pod succeeds             │
-  └──────────────────────────────────────┘
-  Pod-1 wins: runs the task
-  Pod-2, Pod-3: lock acquisition fails → skip this run
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pod1["Pod-1 @Scheduled"] --> lock["shedlock table (PostgreSQL/Redis)\nINSERT ... WHERE lock_until < NOW()"]
+    pod2["Pod-2 @Scheduled"] --> lock
+    pod3["Pod-3 @Scheduled"] --> lock
+    lock -->|"only ONE pod succeeds"| winner["Pod-1 wins: runs the task"]
+    lock -->|"lock acquisition fails"| skip["Pod-2, Pod-3: skip this run"]
+
+    class pod1,pod2,pod3 req
+    class lock base
+    class winner train
+    class skip lossN
 ```
 
 ---

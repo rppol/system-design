@@ -74,37 +74,28 @@ Think of AOP like airport security checks. Every passenger (method call) enterin
 
 ## 5. Architecture Diagrams
 
-```
-AOP Proxy Advice Chain
-=======================
+**AOP Proxy Advice Chain**
 
-  Caller
-    |
-    v
-  +-------------------------------------------------+
-  |  AOP Proxy (CGLIB or JDK)                      |
-  |                                                  |
-  |  @Around advice start                            |
-  |    |                                             |
-  |    v                                             |
-  |  @Before advice                                  |
-  |    |                                             |
-  |    v                                             |
-  |  target.method()  (real bean method)             |
-  |    |                                             |
-  |    v                                             |
-  |  @AfterReturning / @AfterThrowing               |
-  |    |                                             |
-  |    v                                             |
-  |  @After (finally)                                |
-  |    |                                             |
-  |    v                                             |
-  |  @Around advice end (return / rethrow)           |
-  +-------------------------------------------------+
-    |
-    v
-  Caller receives result
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Proxy as AOP Proxy (CGLIB or JDK)
+    participant Target as target.method()
+
+    Caller->>Proxy: invoke method
+    activate Proxy
+    Note over Proxy: @Around advice start
+    Proxy->>Proxy: @Before advice
+    Proxy->>Target: target.method() (real bean method)
+    Target-->>Proxy: return value or exception
+    Proxy->>Proxy: @AfterReturning / @AfterThrowing
+    Proxy->>Proxy: @After (finally)
+    Note over Proxy: @Around advice end (return / rethrow)
+    Proxy-->>Caller: result
+    deactivate Proxy
 ```
+
+Every advice type nests inside the single `@Around` wrapper around the real method call — this is why `@Around` alone can subsume `@Before`/`@AfterReturning`/`@AfterThrowing`/`@After`, and why forgetting to call `proceed()` inside it skips the target method entirely.
 
 ```
 Pointcut Expression: execution() Breakdown
@@ -645,29 +636,33 @@ public class TraceIdFilter extends OncePerRequestFilter {
 
 **Scale:** 40 endpoints, 8k req/min peak, audit log must include user identity + request hash + response status, latency buckets reported to Prometheus every 10s.
 
-```
-AOP proxy chain (outermost first, highest @Order first):
+AOP proxy chain (outermost first, highest `@Order` first):
 
-  HTTP Request
-      │
-  [DispatcherServlet]
-      │
-  [RateLimitAspect @Order(1)]      -- rejects before compute cost
-      │
-  [AuditAspect @Order(2)]          -- logs entry + exit
-      │
-  [LatencyAspect @Order(3)]        -- timer around real work
-      │
-  [Target: PaymentService]         -- business logic
-      │
-  [LatencyAspect]                  -- records elapsed
-      │
-  [AuditAspect]                    -- logs result / exception
-      │
-  [RateLimitAspect]                -- pass-through on success
-      │
-  HTTP Response
+```mermaid
+sequenceDiagram
+    participant Client
+    participant RateLimit as RateLimitAspect (Order 1)
+    participant Audit as AuditAspect (Order 2)
+    participant Latency as LatencyAspect (Order 3)
+    participant Service as PaymentService
+
+    Client->>RateLimit: HTTP request
+    RateLimit->>RateLimit: rejects before compute cost
+    RateLimit->>Audit: proceed
+    Audit->>Audit: logs entry
+    Audit->>Latency: proceed
+    Latency->>Latency: starts timer
+    Latency->>Service: business logic
+    Service-->>Latency: result
+    Latency->>Latency: records elapsed
+    Latency-->>Audit: result
+    Audit->>Audit: logs result / exception
+    Audit-->>RateLimit: result
+    RateLimit->>RateLimit: pass-through on success
+    RateLimit-->>Client: HTTP response
 ```
+
+`@Order(1)` on `RateLimitAspect` makes it the outermost wrapper, so a rejected request never reaches `AuditAspect` or `LatencyAspect` — the same nesting shows up as before-logic running outside-in and after-logic running inside-out.
 
 **Rate-limit aspect with Redis token bucket:**
 
@@ -872,4 +867,5 @@ public void saveAudit(AuditEntry entry) {
 - [Spring Proxies](../spring_proxies/README.md) — JDK proxy vs CGLIB
 - [Spring Transactions](../spring_transactions/README.md) — @Transactional is AOP
 - [Filters & Interceptors](../filters_and_interceptors/README.md) — filter vs AOP
-- [LLD: Proxy Pattern](../../lld/structural/proxy/README.md) — the GoF pattern AOP proxies (JDK/CGLIB) are built on
+- [Proxy Pattern](../../lld/structural/proxy/README.md) — the GoF pattern AOP proxies (JDK/CGLIB) are built on
+- [Bytecode & Class-File Format](../../java/bytecode_and_classfile/README.md) — how CGLIB generates a proxy subclass's bytecode at runtime

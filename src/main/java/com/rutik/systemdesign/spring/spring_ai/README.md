@@ -112,58 +112,89 @@ conditional beans, and `@ConfigurationProperties` carries over.
 
 ### ChatClient request through the advisor chain
 
-```
-  chatClient.prompt()
-     .user("How do I reset my password?")
-     .call().content()
-        |
-        v
-  +--------------------- Advisor chain (ordered) ---------------------+
-  | SafeGuardAdvisor  ->  QuestionAnswerAdvisor  ->  ChatMemoryAdvisor |
-  |   (block unsafe)      (RAG: retrieve top-k        (inject history)  |
-  |                        from VectorStore,                            |
-  |                        augment prompt)                              |
-  +-------------------------------+----------------------------------- +
-                                  v
-                            ChatModel.call()  --HTTP-->  LLM provider
-                                  ^                         (OpenAI/Claude/...)
-                                  |
-                          response parsed -> String / record / Flux
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Advisors wrap the call like AOP around-advice: each can mutate the request
-  (add context) on the way down and the response on the way back up.
+    req0(["chatClient.prompt().user(...)"]) --> safe["SafeGuardAdvisor\nblock unsafe"]
+
+    subgraph chain ["Advisor chain (ordered)"]
+        direction LR
+        safe --> qa["QuestionAnswerAdvisor\nRAG: retrieve top-k from VectorStore, augment prompt"]
+        qa --> mem["ChatMemoryAdvisor\ninject history"]
+    end
+
+    mem --> model["ChatModel.call()"]
+    model -- HTTP --> provider["LLM provider\nOpenAI / Claude / ..."]
+    provider --> model
+    model --> resp(["response parsed -> String / record / Flux"])
+
+    class req0,resp io
+    class safe,qa,mem train
+    class model mathOp
+    class provider frozen
 ```
+
+Advisors wrap the call like AOP around-advice: each can mutate the request (add context) on the way down and the response on the way back up.
 
 ### RAG: ingestion (ETL) vs query time
 
-```
-  INGESTION (offline)                          QUERY (online)
-  ──────────────────                           ──────────────
-  PDF/HTML/Markdown                            user question
-       |  DocumentReader                            |  EmbeddingModel.embed()
-       v                                            v
-  List<Document>                              query vector  [0.12, -0.4, ...]
-       |  TextSplitter (chunk ~800 tokens)         |  VectorStore.similaritySearch(topK=4)
-       v                                            v
-  chunks                                      top-4 nearest chunks
-       |  EmbeddingModel + VectorStore.add()        |  inject into prompt template
-       v                                            v
-  PgVector / Redis (cosine index)             augmented prompt -> ChatModel
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph ingest ["INGESTION (offline)"]
+        direction TB
+        doc(["PDF / HTML / Markdown"]) -->|"DocumentReader"| docs["List of Document"]
+        docs -->|"TextSplitter (chunk ~800 tokens)"| chunks["chunks"]
+        chunks -->|"EmbeddingModel + VectorStore.add()"| store["PgVector / Redis\ncosine index"]
+    end
+
+    subgraph query ["QUERY (online)"]
+        direction TB
+        q(["user question"]) -->|"EmbeddingModel.embed()"| qvec["query vector (0.12, -0.4, ...)"]
+        qvec -->|"VectorStore.similaritySearch(topK=4)"| topk["top-4 nearest chunks"]
+        topk -->|"inject into prompt template"| augmented["augmented prompt -> ChatModel"]
+    end
+
+    store -.->|"same VectorStore"| qvec
+
+    class doc,q io
+    class docs,chunks,qvec,topk mathOp
+    class store frozen
+    class augmented train
 ```
 
 ### Tool (function) calling round trip
 
-```
-  user: "What's the weather in Pune and should I carry an umbrella?"
-     |
-     v  ChatModel sees registered @Tool getWeather(city)
-  model responds: tool_call getWeather("Pune")   <-- model, not your code, decides
-     |
-     v  Spring AI invokes your Java method getWeather("Pune") -> {temp:31, rain:80%}
-  result fed back to model
-     |
-     v  model composes final answer using the tool result
-  "It's 31C with an 80% chance of rain — yes, carry an umbrella."
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant SA as Spring AI (ChatClient)
+    participant M as ChatModel (LLM)
+    participant T as @Tool getWeather(city)
+
+    U->>SA: "What's the weather in Pune and should I carry an umbrella?"
+    SA->>M: prompt + registered tool schema
+    M-->>SA: tool_call getWeather("Pune")
+    Note over M: model, not your code, decides to call the tool
+    SA->>T: invoke getWeather("Pune")
+    T-->>SA: {temp: 31, rain: 80%}
+    SA->>M: tool result fed back
+    M-->>SA: composes final answer
+    SA-->>U: "It's 31C with an 80% chance of rain — yes, carry an umbrella."
 ```
 
 ---
@@ -544,6 +575,7 @@ the resilience/observability machinery the team already used everywhere else.
 
 - [LLM: Advanced RAG](../../llm/advanced_rag/README.md) — RAG pipelines, retrieval quality, reranking
 - [LLM: Agentic Frameworks](../../llm/agentic_frameworks/README.md) — tool use and agent orchestration the `@Tool` API exposes
+- [LLM: Agents & Tool Use](../../llm/agents_and_tool_use/README.md) — the function-calling round trip and agent-loop theory behind `@Tool`
 - [LLM: Embeddings & Similarity Search](../../llm/embeddings_and_similarity_search/README.md) — vector embeddings and `VectorStore` internals
 - [Spring Boot Autoconfiguration](../spring_boot_autoconfiguration/README.md) — starter + conditional-bean mechanics that auto-configure models
 - [Spring AOP](../spring_aop/README.md) — the interceptor model that advisors mirror

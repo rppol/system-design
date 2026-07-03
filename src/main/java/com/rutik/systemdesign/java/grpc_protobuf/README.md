@@ -131,36 +131,52 @@ The NAME "name"/"age" never appears. Field number 1 and 2 are the identity.
 
 ### One HTTP/2 connection multiplexes many gRPC streams
 
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Server
+    Note over Client,Server: single TCP + TLS connection (HTTP/2) carries all streams below
+    par Stream 1 - GetUser (unary)
+        Client->>Server: request
+        Server-->>Client: response
+    and Stream 3 - Search (server streaming)
+        Client->>Server: request
+        Server-->>Client: response
+        Server-->>Client: response
+        Server-->>Client: response
+    and Stream 5 - Chat (bidirectional)
+        Client->>Server: message
+        Server-->>Client: message
+        Client->>Server: message
+        Server-->>Client: message
+    end
+    Note over Client,Server: no head-of-line blocking between streams; each has its own flow-control window
 ```
-        single TCP + TLS connection (HTTP/2)
-   client ===========================================> server
-          | stream 1: GetUser (unary)        req|resp |
-          | stream 3: Search   (server-stream) req|r r r r ...
-          | stream 5: Chat     (bidi)         r w r w r w ...
-          +------------------------------------------+
-   no head-of-line blocking between streams; each has its own flow-control window.
-```
+Three independent gRPC calls — unary, server-streaming, bidirectional — multiplex
+over one HTTP/2 connection as separate streams with independent flow control.
 
 REST/HTTP/1.1 would need one connection per concurrent call (or pipelining with
 head-of-line blocking). HTTP/2 multiplexing is why gRPC streaming is cheap.
 
 ### Deadline propagation shares one budget across the call tree
 
+```mermaid
+sequenceDiagram
+    participant Client
+    participant A as Service A
+    participant B as Service B
+    Client->>A: call, deadline = now + 300ms
+    Note right of Client: 300ms budget travels in the grpc-timeout header
+    A->>A: spends 50ms
+    A->>B: call, remaining deadline = 250ms
+    B->>B: spends 250ms - deadline hit
+    B-->>A: DEADLINE_EXCEEDED
+    A-->>Client: DEADLINE_EXCEEDED
+    Note over A,B: cancellation propagates back up automatically; B stops work, A stops waiting
 ```
-  client sets deadline = now + 300ms
-     |
-     v  (300ms budget travels in grpc-timeout header)
-  service A  (spends 50ms) --> remaining 250ms passed downstream
-     |
-     v
-  service B  (spends 250ms) --> deadline hit -> DEADLINE_EXCEEDED
-     ^
-     +-- cancellation propagates back UP automatically; B stops work,
-         A stops waiting, client already got the error.
-```
-
-A single absolute deadline, not a per-hop timeout, prevents the "client gave up but
-servers keep working" waste.
+A single absolute deadline set by the client travels downstream and shrinks at each
+hop; once it is exceeded, cancellation propagates back up the call tree so no
+service keeps working for a caller that has already given up.
 
 ---
 
@@ -627,5 +643,8 @@ admin tool. Both were acceptable given the CPU, bandwidth, and streaming wins.
   cancellation, and context propagation in the broader resilience picture.
 - [generics_and_type_system](../generics_and_type_system/README.md) — generated
   stub generics and `StreamObserver<T>` typing.
-- [../../backend/grpc_and_protobuf/](../../backend/grpc_and_protobuf/) — gRPC at the
-  architecture/design level (load balancing, mesh, API design).
+- [gRPC & Protobuf (backend design)](../../backend/grpc_and_protobuf/README.md) —
+  gRPC at the architecture/design level (load balancing, mesh, API design).
+- [Spring gRPC](../../spring/spring_grpc/README.md) — the Spring Boot-managed
+  channel/server lifecycle, interceptors as beans, and auto-configuration built on
+  top of the pure-`io.grpc` mechanics covered here.

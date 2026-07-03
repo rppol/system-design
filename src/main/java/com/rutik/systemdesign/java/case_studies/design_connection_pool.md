@@ -95,37 +95,30 @@ The limiting resource is always the database, not the pool itself.
 
 ## 3. High-Level Architecture
 
-```
-  ┌────────────────────────────────────────────────────────────────┐
-  │                     Application Threads                        │
-  │   thread-1  thread-2  thread-3  ...  thread-N                  │
-  └───────┬──────────┬──────────────────────┘
-          │ acquire()│                   release()
-          ▼          ▼                      │
-  ┌───────────────────────────────────────────────────────────────┐
-  │                      ConnectionPool                            │
-  │                                                                │
-  │   available: ArrayBlockingQueue<PooledConnection>  (bounded)  │
-  │   allConnections: ConcurrentHashMap.newKeySet()               │
-  │   poolSize: AtomicInteger  (CAS-guarded creation)             │
-  │   leakTracker: ConcurrentHashMap<PooledConnection, LeakInfo>  │
-  │   closed: volatile boolean                                     │
-  └──────────────────┬────────────────────────────────────────────┘
-                     │ create / validate / close
-                     ▼
-  ┌──────────────────────────────────┐
-  │  ScheduledExecutorService        │
-  │  (daemon, "pool-health-check")   │
-  │  runs every 30 s                 │
-  │  drainTo → isValid(2) → requeue  │
-  └──────────────────────────────────┘
-                     │ JDBC DriverManager
-                     ▼
-  ┌──────────────────────────────────┐
-  │  Database (PostgreSQL / MySQL)   │
-  │  each PooledConnection = 1 TCP   │
-  │  socket + 1 backend process      │
-  └──────────────────────────────────┘
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    AT["Application Threads\nthread-1 · thread-2 · thread-3 · ... · thread-N"]
+    CP["ConnectionPool\navailable: ArrayBlockingQueue of PooledConnection (bounded)\nallConnections: ConcurrentHashMap.newKeySet()\npoolSize: AtomicInteger (CAS-guarded creation)\nleakTracker: ConcurrentHashMap of PooledConnection to LeakInfo\nclosed: volatile boolean"]
+    SES["ScheduledExecutorService\n(daemon, pool-health-check)\nruns every 30 s\ndrainTo, then isValid(2), then requeue"]
+    DB["Database (PostgreSQL / MySQL)\neach PooledConnection = 1 TCP socket\n+ 1 backend process"]
+
+    AT -->|"acquire()"| CP
+    AT -->|"release()"| CP
+    CP -->|"create / validate / close"| SES
+    SES -->|"JDBC DriverManager"| DB
+
+    class AT req
+    class CP base
+    class SES mathOp
+    class DB frozen
 ```
 
 ### Class diagram
@@ -515,7 +508,7 @@ HTTP request span (10 ms)
   └── db.query (8 ms)              ← the actual work
 ```
 
-Every acquire emits an OpenTelemetry span with attributes: `pool.name`, `db.system` (`postgresql`), `acquire.result` (`hit` | `created` | `waited` | `timeout`). See [OTel Observability for Spring](../spring/case_studies/cross_cutting/otel_observability_for_spring.md) for the full instrumentation pattern.
+Every acquire emits an OpenTelemetry span with attributes: `pool.name`, `db.system` (`postgresql`), `acquire.result` (`hit` | `created` | `waited` | `timeout`). See [OTel Observability for Spring](../../spring/case_studies/cross_cutting/otel_observability_for_spring.md) for the full instrumentation pattern.
 
 ### c) Incident Runbooks
 

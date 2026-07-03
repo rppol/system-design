@@ -35,27 +35,42 @@ The I/O story covers two generations: the original `java.io` stream-based API (D
 
 ### 4.1 Exception Hierarchy
 
-```
-Throwable
-  |
-  +-- Error (don't catch these)
-  |     |-- OutOfMemoryError
-  |     |-- StackOverflowError
-  |     |-- LinkageError
-  |
-  +-- Exception
-        |-- IOException (checked)
-        |     |-- FileNotFoundException
-        |     |-- SocketException
-        |
-        +-- RuntimeException (unchecked)
-              |-- NullPointerException
-              |-- IllegalArgumentException
-              |-- IllegalStateException
-              |-- IndexOutOfBoundsException
-              |-- ClassCastException
-              |-- ConcurrentModificationException
-              |-- UnsupportedOperationException
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    T["Throwable"] --> ERR["Error\n(don't catch these)"]
+    T --> EXC["Exception"]
+
+    ERR --> OOM["OutOfMemoryError"]
+    ERR --> SOE["StackOverflowError"]
+    ERR --> LE["LinkageError"]
+
+    EXC --> IOE["IOException (checked)"]
+    EXC --> RTE["RuntimeException (unchecked)"]
+
+    IOE --> FNF["FileNotFoundException"]
+    IOE --> SE["SocketException"]
+
+    RTE --> NPE["NullPointerException"]
+    RTE --> IAE["IllegalArgumentException"]
+    RTE --> ISE["IllegalStateException"]
+    RTE --> IOOBE["IndexOutOfBoundsException"]
+    RTE --> CCE["ClassCastException"]
+    RTE --> CME["ConcurrentModificationException"]
+    RTE --> UOE["UnsupportedOperationException"]
+
+    class T base
+    class ERR,OOM,SOE,LE lossN
+    class EXC io
+    class IOE,FNF,SE frozen
+    class RTE,NPE,IAE,ISE,IOOBE,CCE,CME,UOE train
 ```
 
 ### 4.2 Checked vs Unchecked Decision Rule
@@ -81,23 +96,31 @@ Throwable
 ## 5. Architecture Diagrams
 
 ### I/O Decorator Chain
-```
-Reader hierarchy (Decorator Pattern):
-  InputStream (abstract)
-    |-- FileInputStream           (bytes from file)
-    |-- BufferedInputStream       (adds buffering layer)
-    |-- DataInputStream           (reads primitives)
-    |-- ObjectInputStream         (reads Java objects - deserialization)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Example chain:
-  new ObjectInputStream(
-    new BufferedInputStream(
-      new FileInputStream("data.obj")))
+    IS["InputStream (abstract)"] --> FIS["FileInputStream\nbytes from file"]
+    IS --> BIS["BufferedInputStream\nadds buffering layer"]
+    IS --> DIS["DataInputStream\nreads primitives"]
+    IS --> OIS["ObjectInputStream\nreads Java objects (deserialization)"]
 
-Each layer wraps and extends the previous:
-  FileInputStream: raw bytes from OS
-  BufferedInputStream: 8KB buffer (reduces system calls 100x)
-  ObjectInputStream: deserialize Java objects
+    subgraph CHAIN["Example chain: new ObjectInputStream(new BufferedInputStream(new FileInputStream(...)))"]
+        F2["FileInputStream\nraw bytes from OS"] --> B2["BufferedInputStream\n8KB buffer — cuts system calls ~100x"]
+        B2 --> O2["ObjectInputStream\ndeserialize Java objects"]
+    end
+
+    class IS base
+    class FIS,BIS,DIS,OIS frozen
+    class F2 frozen
+    class B2 mathOp
+    class O2 io
 ```
 
 ### try-with-resources and Suppressed Exceptions
@@ -561,15 +584,27 @@ try {
 
 **Scenario.** A platform runs **500 microservice instances** that load runtime config (feature flags, rate limits, routing tables) from a properties file mounted via a shared volume / ConfigMap. Operators push a config change and expect every instance to pick it up **without a restart** — restarting 500 instances drops in-flight requests and takes ~10 minutes of rolling deploys. Each instance runs a `WatchService` (Java NIO.2, Java 7+) loop that detects file changes and atomically swaps the config reference. The tricky parts are that the editor/writer fires **multiple `MODIFY` events per save** (one per buffer flush) and that an empty `catch` would silently swallow a parse failure, leaving the fleet running stale config believing it reloaded.
 
-```
-   operator updates config.properties (atomic rename)
-        |
-        v  (per instance)
-   WatchService.take()  --> debounce 200ms --> reload + parse
-        |                                          |
-   coalesces N MODIFY events into 1 reload     ConfigParseException on bad value
-        v                                          |
-   volatile swap of Properties reference       -> keep old config, alarm, do NOT swap
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    OP(["operator updates config.properties\n(atomic rename)"]) --> TAKE["WatchService.take()\nper instance"]
+    TAKE --> DEBOUNCE["debounce 200ms\ncoalesces N MODIFY events into 1 reload"]
+    DEBOUNCE --> RELOAD["reload + parse"]
+    RELOAD -->|success| SWAP["volatile swap of\nProperties reference"]
+    RELOAD -->|ConfigParseException| KEEP["keep old config, alarm,\ndo NOT swap"]
+
+    class OP io
+    class TAKE,DEBOUNCE mathOp
+    class RELOAD req
+    class SWAP train
+    class KEEP lossN
 ```
 
 #### Domain exception hierarchy with structured error codes
@@ -687,5 +722,7 @@ throw new ConfigParseException("load failed", e);  // FIX: cause preserved, full
 
 - [Networking & HTTP Client](../networking_and_http_client/README.md) — IOException handling in HTTP calls, connection-level error hierarchies
 - [JDBC & Database](../jdbc_and_database/README.md) — SQLException hierarchy, try-with-resources for connection cleanup
+- [Fault Tolerance Patterns](../../backend/fault_tolerance_patterns/README.md) — retries, circuit breakers, and timeout strategies that build on checked/unchecked error handling
+- [File & Storage Fundamentals](../../cs_fundamentals/database_and_storage_fundamentals/README.md) — I/O buffering and page-cache concepts underlying `BufferedInputStream` and memory-mapped files
 
 **Why never catch `Throwable` broadly?** `Throwable` includes `Error` subclasses (`OutOfMemoryError`, `StackOverflowError`) that signal JVM-level failures you cannot meaningfully recover from. Swallowing them keeps a doomed process running in a corrupt state; catch `Exception` or the specific types instead.

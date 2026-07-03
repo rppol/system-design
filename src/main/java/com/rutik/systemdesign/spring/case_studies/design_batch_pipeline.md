@@ -12,7 +12,7 @@ where the last launch left off and skips completed work. Without both, a mid-run
 means starting over.
 
 See also: [Testcontainers and test strategy](./cross_cutting/testcontainers_and_test_strategy.md),
-[JVM tuning and GC for services](./cross_cutting/jvm_tuning_and_gc_for_services.md)
+[JVM tuning and GC for services](../../java/case_studies/cross_cutting/jvm_tuning_and_gc_for_services.md)
 
 ---
 
@@ -83,37 +83,42 @@ Bottleneck is NOT I/O — it is database write throughput
 
 ## 3. High-Level Architecture
 
-```
- Nightly Trigger (cron: 0 2 * * *)
-          |
-          v
- [EtlJobScheduler.@Scheduled] --> [JobLauncher] --> [customerEtlJob]
-                                                           |
-                                             +-------------+-------------+
-                                             |                           |
-                                    [masterStep]                [JobCompletionListener]
-                                    (Partitioner)              (metrics, alerts)
-                                             |
-                  +----------+---------+---------+---------+
-                  |          |         |         |         |...
-            [workerStep-0] [workerStep-1] ... [workerStep-7]
-                  |
-          [FlatFileItemReader per partition]
-            (StepScope — one reader per partition, own file path)
-                  |
-          [CustomerItemProcessor]
-            - validateRequired (customerId, email, countryCode)
-            - parseDate/Revenue (throw ValidationException -> skip)
-            - enrich from countryNameCache (pre-loaded Map, no DB per record)
-            - deriveCustomerTier (BRONZE/SILVER/GOLD)
-                  |
-          [CustomerItemWriter]
-            JdbcTemplate.batchUpdate(UPSERT_SQL, 1000 rows)
-                  |
-          [PostgreSQL: customers table]
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
- JobRepository: batch_* tables (same PostgreSQL) — step state for restart
- CustomerSkipListener: writes rejected records to /data/customers/output/rejected.csv
+    trigger["Nightly Trigger\ncron: 0 2 * * *"] --> scheduler["EtlJobScheduler\n@Scheduled"]
+    scheduler --> launcher["JobLauncher"]
+    launcher --> job["customerEtlJob"]
+    job --> masterStep["masterStep\n(Partitioner)"]
+    job --> completionListener["JobCompletionListener\n(metrics, alerts)"]
+
+    masterStep --> workerStep0["workerStep-0"]
+    masterStep --> workerStep1["workerStep-1"]
+    masterStep -.-> workerStepDots["..."]
+    masterStep --> workerStep7["workerStep-7"]
+
+    workerStep0 --> reader["FlatFileItemReader per partition\n(StepScope — one reader per partition, own file path)"]
+    reader --> processor["CustomerItemProcessor\nvalidateRequired / parseDate/Revenue / enrich from countryNameCache / deriveCustomerTier"]
+    processor --> writer["CustomerItemWriter\nJdbcTemplate.batchUpdate(UPSERT_SQL, 1000 rows)"]
+    writer --> db[("PostgreSQL: customers table")]
+
+    job --> jobRepo[("JobRepository: batch_* tables\n(same PostgreSQL) — step state for restart")]
+    processor -. skip .-> skipListener["CustomerSkipListener\nwrites rejected records to /data/customers/output/rejected.csv"]
+
+    class trigger req
+    class scheduler,launcher,job,masterStep,completionListener base
+    class workerStep0,workerStep1,workerStepDots,workerStep7 train
+    class reader,writer io
+    class processor mathOp
+    class db,jobRepo frozen
+    class skipListener lossN
 ```
 
 **Component inventory:**

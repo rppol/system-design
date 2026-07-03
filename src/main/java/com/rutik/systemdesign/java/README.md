@@ -47,6 +47,9 @@ A comprehensive, one-stop reference for mastering **pure Java** — from languag
 | 22 | [JDBC & Database Access](jdbc_and_database/README.md) | PreparedStatement, HikariCP, transaction isolation levels, batch inserts, ResultSet streaming | Intermediate |
 | 23 | [gRPC & Protocol Buffers](grpc_protobuf/README.md) | Protobuf wire format + schema evolution, 4 RPC modes, generated stubs, interceptors, deadlines/cancellation, Status error model, HTTP/2 transport | Advanced |
 | 24 | [Microservices Patterns](microservices_patterns/README.md) | Saga (choreography + orchestration), transactional outbox, idempotency keys, distributed tracing context propagation, strangler fig, bulkhead | Advanced |
+| 25 | [Java Date/Time (java.time)](java_time_datetime/README.md) | Instant vs LocalDateTime, ZoneId/offsets, Duration vs Period, TemporalAdjuster, Clock (testable time), DST gaps/overlaps | Intermediate |
+| 26 | [Bytecode & Class-File Format](bytecode_and_classfile/README.md) | .class structure, constant pool, opcode families, invokedynamic, javap, ASM/Byte Buddy, java agents & Instrumentation | Advanced |
+| 27 | [Security & Cryptography](security_and_cryptography/README.md) | JCA/JCE, MessageDigest/Cipher/KeyStore/SecureRandom, AES-GCM, TLS/SSLEngine handshake, password hashing, JAAS | Advanced |
 
 > **Note**: `java8_features` covers Streams as part of the full Java 8 overview. `java_streams` is the dedicated deep dive — all 20+ operations, `Spliterator` internals, parallel rules, `reduce` vs `collect`, and the full `Collectors` catalogue.
 
@@ -62,15 +65,15 @@ Understand what Java code actually means at the semantic level — object contra
 
 ### Phase 2 — Modern Java
 ```
-java8_features  -->  java_streams  -->  functional_programming  -->  java9_to_21_features
+java8_features  -->  java_time_datetime  -->  java_streams  -->  functional_programming  -->  java9_to_21_features
 ```
-Master the functional style, stream pipelines (full deep dive), and the new language features from Java 8 through 21.
+Master the functional style, stream pipelines (full deep dive), the modern `java.time` date/time model, and the new language features from Java 8 through 21.
 
 ### Phase 3 — JVM Internals (Show Depth)
 ```
-jvm_internals
+jvm_internals  -->  bytecode_and_classfile
 ```
-Understand what the JVM does under the hood — GC algorithms, JIT compilation, memory model, and class loading. This module separates senior from junior engineers at interviews.
+Understand what the JVM does under the hood — GC algorithms, JIT compilation, memory model, and class loading. `bytecode_and_classfile` goes one level deeper: the `.class` format, opcodes, `invokedynamic`, and runtime bytecode manipulation (ASM/Byte Buddy, java agents) that powers proxies, mocks, and profilers. This phase separates senior from junior engineers at interviews.
 
 ### Phase 4 — Concurrency + Collections + Patterns (Most Tested)
 ```
@@ -98,10 +101,10 @@ Project Loom virtual threads and Panama FFM/Memory API — Java 21/22 GA feature
 
 ### Phase 8 — Networking, Database & Distributed Systems (Optional Deep-Dives)
 ```
-networking_and_http_client  -->  jdbc_and_database
+networking_and_http_client  -->  jdbc_and_database  -->  security_and_cryptography
 grpc_protobuf  -->  microservices_patterns
 ```
-Advanced topics for senior engineers building services that talk to other services and databases directly. `grpc_protobuf` covers the typed RPC transport between services; `microservices_patterns` covers correctness across them (Saga, outbox, idempotency, tracing, bulkhead) — both pure-Java foundations under the `backend/` and `spring/` framework treatments.
+Advanced topics for senior engineers building services that talk to other services and databases directly. `security_and_cryptography` covers the JCA/JCE toolkit — symmetric/asymmetric ciphers, AES-GCM, KeyStore, SecureRandom, password hashing, and the TLS handshake — that secures every one of those connections. `grpc_protobuf` covers the typed RPC transport between services; `microservices_patterns` covers correctness across them (Saga, outbox, idempotency, tracing, bulkhead) — both pure-Java foundations under the `backend/` and `spring/` framework treatments.
 
 ---
 
@@ -145,7 +148,12 @@ Advanced topics for senior engineers building services that talk to other servic
 | design_patterns_in_java | core_language (inner classes, polymorphism), generics_and_type_system (dynamic proxy, reflection), concurrency (Producer-Consumer, Immutable Object) |
 | testing_junit_mockito | design_patterns_in_java (test doubles taxonomy), concurrency (testing concurrent code) |
 | networking_and_http_client | concurrency (CompletableFuture, virtual threads), java9_to_21_features (virtual threads) |
-| jdbc_and_database | concurrency (connection pool, thread safety), performance_and_tuning (pool sizing) |
+| jdbc_and_database | concurrency (connection pool, thread safety), performance_and_tuning (pool sizing), java_time_datetime (TIMESTAMP vs TIMESTAMPTZ mapping) |
+| java_time_datetime | java8_features (where java.time was introduced), strings_and_text (parsing/formatting), jdbc_and_database (temporal column mapping) |
+| bytecode_and_classfile | jvm_internals (class loading, JIT), annotation_processing (compile-time vs bytecode-time codegen), generics_and_type_system (bridge methods, erasure in bytecode) |
+| security_and_cryptography | networking_and_http_client (TLS transport), `../../cs_fundamentals/cryptography_fundamentals/`, `../../backend/backend_security_owasp/`, `../../backend/auth_and_authorization_systems/` |
+| strings_and_text → regex_engine_and_redos.md (sub-file) | catastrophic backtracking / ReDoS, possessive/atomic groups, `../../backend/backend_security_owasp/` |
+| performance_and_tuning → jmx_and_management.md (sub-file) | platform MXBeans, custom MBeans, remote JMX security, `../../spring/spring_boot_actuator/` |
 
 ---
 

@@ -102,38 +102,66 @@ Incidental whitespace is stripped based on the position of the closing `"""`. Th
 
 ### String Interning Flow
 
-```
-  Source Code         Compile Time           Run Time (JVM)
-  ──────────────────────────────────────────────────────────
-  "hello"  ────────►  LDC #2  ───────────►  string table lookup
-                      (load constant)        │
-                                             ├─ found?  ──► return existing ref
-                                             └─ missing? ─► allocate on heap,
-                                                            add to table,
-                                                            return ref
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  new String("hello") ──► new allocation on heap (always separate object)
-                           ↑ even though "hello" is already in the table
+    LIT(["\"hello\" literal"]) --> LDC["LDC #2\nload constant"]
+    LDC --> LOOKUP{"string table\nlookup"}
+    LOOKUP -->|found| RET(["return existing ref"])
+    LOOKUP -->|missing| ALLOC["allocate on heap,\nadd to table"]
+    ALLOC --> RET2(["return ref"])
+
+    NEWSTR(["new String(\"hello\")"]) --> HEAP["new heap allocation\nalways a separate object"]
+
+    class LIT,RET,RET2,NEWSTR io
+    class LDC,ALLOC mathOp
+    class LOOKUP req
+    class HEAP frozen
 ```
+Even though `"hello"` is already interned, `new String("hello")` always allocates a fresh heap object — the two paths never share a reference unless you explicitly call `.intern()`.
 
 ### Concatenation Bytecode (Java 9+)
 
-```
-  Source:   String result = a + " " + b;
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Java 8 bytecode:
-    new StringBuilder
-    invokespecial StringBuilder.<init>
-    aload a  →  invokevirtual append
-    ldc " "  →  invokevirtual append
-    aload b  →  invokevirtual append
-    invokevirtual toString
+    SRC(["String result = a + \" \" + b;"])
 
-  Java 9+ bytecode:
-    aload a
-    aload b
-    invokedynamic makeConcatWithConstants(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
-    ↑ single call-site; JVM picks best strategy at link-time
+    subgraph J8["Java 8 bytecode"]
+        NSB["new StringBuilder"] --> INIT["invokespecial StringBuilder.&lt;init&gt;"]
+        INIT --> AP1["aload a → invokevirtual append"]
+        AP1 --> AP2["ldc \" \" → invokevirtual append"]
+        AP2 --> AP3["aload b → invokevirtual append"]
+        AP3 --> TOS["invokevirtual toString"]
+    end
+
+    subgraph J9["Java 9+ bytecode"]
+        LA["aload a"] --> LB["aload b"]
+        LB --> IDY["invokedynamic makeConcatWithConstants(...)\nsingle call-site; JVM picks strategy at link-time"]
+    end
+
+    SRC --> NSB
+    SRC --> LA
+
+    class SRC io
+    class NSB,INIT,AP1,AP2,AP3 frozen
+    class TOS mathOp
+    class LA,LB frozen
+    class IDY train
 ```
 
 ### Compact String Memory Layout
@@ -568,3 +596,4 @@ StringFormat.invokedynamic   avgt   10   105 ±   3  ns/op  (+ operator, 6 parts
 - [Java 9–21 Features](../java9_to_21_features/README.md) — text blocks (JEP 378, Java 15), invokedynamic string concat (JEP 280)
 - [Performance & Tuning](../performance_and_tuning/README.md) — String allocation cost, StringBuilder vs String.format benchmarks with JMH
 - [Java Memory Model](../java_memory_model/README.md) — `hash` field benign data race in `String.hashCode()`
+- [Arrays, Strings & Hashing](../../cs_fundamentals/arrays_strings_and_hashing/README.md) — language-agnostic string/hashing fundamentals underlying `String.hashCode()` and interning

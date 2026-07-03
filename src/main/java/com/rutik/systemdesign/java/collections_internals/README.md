@@ -491,11 +491,26 @@ A fail-fast iterator (on `ArrayList`, `HashMap`, etc.) tracks a `modCount` that 
 
 **Scenario.** An API gateway caches HTTP responses for hot endpoints, serving **50,000 req/sec** per instance. The cache must be bounded (fixed memory budget, ~200k entries) and evict the least-recently-used entry on overflow. The implementation evolved through three stages as load grew, each fixing the bottleneck of the previous one.
 
-```
-  Stage 1: HashMap                -> no eviction, unbounded growth -> OOM
-  Stage 2: LinkedHashMap(access)  -> correct LRU, but single lock -> 12k ops/sec ceiling
-  Stage 3: ConcurrentHashMap +    -> sharded, lock-free reads -> 85k ops/sec on 8 cores
-           ConcurrentLinkedDeque
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    s1["Stage 1: HashMap"] -->|"no eviction"| oom["unbounded growth -> OOM"]
+    s1 -.->|"evolves to"| s2["Stage 2: LinkedHashMap (access-order)"]
+    s2 -->|"correct LRU"| lock["single lock -> 12k ops/sec ceiling"]
+    s2 -.->|"evolves to"| s3["Stage 3: ConcurrentHashMap +\nConcurrentLinkedDeque"]
+    s3 -->|"sharded, lock-free reads"| fast["85k ops/sec on 8 cores"]
+
+    class s1,s2,s3 req
+    class oom lossN
+    class lock mathOp
+    class fast train
 ```
 
 #### Stage 2 — `LinkedHashMap` access-ordered with `removeEldestEntry`
@@ -607,5 +622,7 @@ List<Chunk> out = new ArrayList<>(expectedSize); // FIX: one allocation
 - [Java Memory Model](../java_memory_model/README.md) — safe publication of collection contents, `volatile` reference semantics
 - [Generics & Type System](../generics_and_type_system/README.md) — bounded type parameters and PECS in generic collection APIs
 - [Case Study: LRU Cache](../case_studies/design_lru_cache_java.md) — LinkedHashMap + lock pattern for a production-grade LRU cache
+- [Arrays, Strings & Hashing](../../cs_fundamentals/arrays_strings_and_hashing/README.md) — hash table fundamentals and collision strategies underlying `HashMap`
+- [Trees & Binary Search Trees](../../cs_fundamentals/trees_and_binary_search_trees/README.md) — red-black tree mechanics behind HashMap's treeified buckets
 
 **Why is `ConcurrentHashMap.size()` only approximate?** Under concurrent mutation the count is maintained across striped counter cells and summed without a global lock, so `size()` reflects a recent-but-not-instantaneous view. For a capacity-bounded cache, treat the eviction check as best-effort rather than an exact invariant.

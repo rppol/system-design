@@ -61,65 +61,60 @@ Think of Actuator as the diagnostic dashboard of a modern aircraft. The pilot (o
 
 ## 5. Architecture Diagrams
 
-```
-Actuator Request Flow
-======================
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  HTTP GET /actuator/health
-           |
-           v
-  DispatcherServlet (or dedicated management port)
-           |
-           v
-  Spring Security filter (if configured)
-           |
-           v
-  HealthEndpoint.health()
-           |
-           v
-  CompositeHealthContributor
-     |        |        |
-     v        v        v
-  DataSource  Redis   Custom
-  HealthInd  HealthInd HealthInd
-     |        |        |
-     v        v        v
-  UP/DOWN  UP/DOWN  UP/DOWN
-     |        |        |
-     +--------+--------+
-              |
-              v
-  CompositeHealth {
-    status: UP,
-    components: {
-      db: {status: UP, details: {database: PostgreSQL}},
-      redis: {status: UP},
-      orderService: {status: UP, details: {pendingOrders: 42}}
-    }
-  }
+    A(["HTTP GET /actuator/health"]) --> B["DispatcherServlet\n(or dedicated management port)"]
+    B --> C["Spring Security filter\n(if configured)"]
+    C --> D["HealthEndpoint.health()"]
+    D --> E["CompositeHealthContributor"]
+    E --> F["DataSourceHealthIndicator"]
+    E --> G["RedisHealthIndicator"]
+    E --> H["Custom HealthIndicator"]
+    F --> I{"UP / DOWN"}
+    G --> I
+    H --> I
+    I --> J(["CompositeHealth: status UP\ncomponents: db (PostgreSQL), redis,\norderService (pendingOrders: 42)"])
+
+    class A req
+    class B,C frozen
+    class D,E base
+    class F,G,H train
+    class I mathOp
+    class J io
 ```
 
-```
-Micrometer Architecture
-========================
+Each contributor reports its own status, and `CompositeHealthContributor` rolls them up into one aggregate `CompositeHealth` — the worst status among the leaves determines the overall health.
 
-  Application Code
-  +-----------------------------+
-  | Counter.increment()         |
-  | Timer.record(duration)      |
-  | Gauge.register(supplier)    |
-  +-----------------------------+
-              |
-              v
-  MeterRegistry (abstraction layer)
-              |
-         +----+----+----+
-         |    |    |    |
-         v    v    v    v
-  Prometheus  Datadog  CloudWatch  Graphite
-  (scrape     (push    (push       (push
-   /metrics)   agent)   agent)     agent)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A["Application Code\nCounter.increment()\nTimer.record(duration)\nGauge.register(supplier)"] --> B["MeterRegistry\n(abstraction layer)"]
+    B --> C["Prometheus\n(scrape /metrics)"]
+    B --> D["Datadog\n(push agent)"]
+    B --> E["CloudWatch\n(push agent)"]
+    B --> F["Graphite\n(push agent)"]
+
+    class A train
+    class B base
+    class C,D,E,F io
 ```
+
+`MeterRegistry` is the one abstraction application code talks to; swapping the backend (Prometheus, Datadog, CloudWatch, Graphite) is a dependency change, not a code change.
 
 ---
 
@@ -545,27 +540,33 @@ The team had two recurring problems: 503 spikes during rolling deploys (probes p
 
 ### Architecture Overview
 
-```
-   Prometheus --scrape /actuator/prometheus (15s)--> +------------------+
-                                                      |   Payment Pod    |
-   K8s kubelet --GET /actuator/health/readiness-----> |                  |
-              --GET /actuator/health/liveness-------> |  Actuator        |
-                                                      |   health group:  |
-                                                      |    readiness =    |
-                                                      |     db, gateway   |
-                                                      |   /prometheus     |
-                                                      |   custom @Endpoint|
-                                                      +---------+--------+
-                                                                |
-                          +-------------------------------------+
-                          |                                     |
-                          v                                     v
-                 +------------------+                  +------------------+
-                 | PaymentGateway   |                  | Resilience4j CB  |
-                 | HealthIndicator  |                  | state endpoint   |
-                 +------------------+                  +------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-   Grafana <--PromQL-- Prometheus    (rate(payments_total[1m]), histogram p99)
+    Prom["Prometheus"] -->|"scrape /actuator/prometheus (15s)"| Act
+    K8s["K8s kubelet"] -->|"GET /actuator/health/readiness"| Act
+    K8s -->|"GET /actuator/health/liveness"| Act
+
+    subgraph Pod["Payment Pod"]
+        Act["Actuator\nhealth group readiness = db, gateway\n/prometheus, custom @Endpoint"]
+    end
+
+    Act --> GW["PaymentGateway HealthIndicator"]
+    Act --> CB["Resilience4j CB state endpoint"]
+
+    Prom -->|"PromQL"| Graf["Grafana\nrate(payments_total[1m]), histogram p99"]
+
+    class Prom,Graf req
+    class K8s frozen
+    class Act base
+    class GW,CB train
 ```
 
 ### Implementation
@@ -730,3 +731,5 @@ scrape_interval: 15s          # then use rate(payments_total[1m]) in Grafana/ale
 - [Observability & Tracing](../observability_and_tracing/README.md) — Micrometer + OTLP
 - [Spring Boot Auto-Configuration](../spring_boot_autoconfiguration/README.md) — actuator auto-config
 - [Case Study: OTel Observability](../case_studies/cross_cutting/otel_observability_for_spring.md) — production tracing
+- [Prometheus Metrics](../../devops/observability_metrics_prometheus/README.md) — scrape configs, PromQL, alerting rules behind `/actuator/prometheus`
+- [Observability & Monitoring](../../backend/observability_and_monitoring/README.md) — the broader monitoring stack Actuator health/metrics feed into

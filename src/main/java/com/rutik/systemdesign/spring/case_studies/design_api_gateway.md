@@ -83,37 +83,42 @@ Rate-limiter Redis: per-region cluster, NOT shared across regions (no cross-regi
 
 ## 3. High-Level Architecture
 
-```
-                          Internet
-                              |
-                    +---------+---------+
-                    |    API Gateway     |
-                    |  (Spring Cloud GW) |
-                    |                   |
-                    |  GlobalFilters:   |
-                    |  1. TracingFilter  | <- injects trace/span IDs (order HIGHEST_PREC)
-                    |  2. AuthFilter     | <- validates JWT (order 0)
-                    |  3. MetricsFilter  | <- records counters/timers (order HIGHEST+1)
-                    |  4. LoggingFilter  | <- times request, logs (order LOWEST_PREC)
-                    |                   |
-                    |  RouteFilters:    |
-                    |  - RateLimiter    | <- Redis token bucket per user
-                    |  - CircuitBreaker | <- Resilience4j per route
-                    |  - RewritePath    | <- /api/v1/orders -> /orders
-                    |  - AddHeader      | <- X-Gateway-Source
-                    +---------+---------+
-                              |
-         +--------------------+--------------------+
-         |                    |                    |
-   [Order Service]    [User Service]    [Payment Service]
-   lb://order-service  lb://user-service  lb://payment-service
-         |                    |                    |
-   [Inventory Svc]    [Product Svc]     [Notification Svc]
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Filter execution order (request):
-    TracingFilter -> AuthFilter -> MetricsFilter -> [RouteFilters] -> backend
-  Filter execution order (response):
-    backend -> [RouteFilters] -> MetricsFilter.doFinally -> LoggingFilter.then
+    Internet(["Internet"])
+
+    subgraph GW["API Gateway (Spring Cloud GW)"]
+        Tracing["1. TracingFilter\ninjects trace/span IDs\n(order HIGHEST_PRECEDENCE)"]
+        Auth["2. AuthFilter\nvalidates JWT\n(order 0)"]
+        Metrics["3. MetricsFilter\nrecords counters/timers\n(order HIGHEST+1)"]
+        Logging["4. LoggingFilter\ntimes request, logs\n(order LOWEST_PRECEDENCE)"]
+        RouteFilters["RouteFilters:\nRateLimiter, CircuitBreaker,\nRewritePath, AddHeader"]
+        Tracing --> Auth --> Metrics --> RouteFilters
+    end
+
+    Internet --> Tracing
+    RouteFilters --> OrderSvc["Order Service\nlb://order-service"]
+    RouteFilters --> UserSvc["User Service\nlb://user-service"]
+    RouteFilters --> PaymentSvc["Payment Service\nlb://payment-service"]
+    OrderSvc --> InventorySvc["Inventory Svc"]
+    UserSvc --> ProductSvc["Product Svc"]
+    PaymentSvc --> NotificationSvc["Notification Svc"]
+
+    RouteFilters -. "response: doFinally" .-> Metrics
+    Metrics -. "response: then" .-> Logging
+    Logging -. "response" .-> Internet
+
+    class Internet req
+    class Tracing,Auth,Metrics,Logging,RouteFilters base
+    class OrderSvc,UserSvc,PaymentSvc,InventorySvc,ProductSvc,NotificationSvc frozen
 ```
 
 **Component inventory:**

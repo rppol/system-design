@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 32 Modules
+## Module List — 35 Modules
 
 | Module Directory | Phase | Topic |
 |-----------------|-------|-------|
@@ -41,6 +41,13 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `spring_integration/` | 7 | EIP: message channels, channel adapters/gateways, router/splitter/aggregator/transformer/filter, Java DSL; contrast with spring_messaging (Kafka/Rabbit) |
 | `spring_modulith/` | 3 | Modular monolith: @ApplicationModule, ArchUnit verification, @ApplicationModuleListener, event publication registry, @ApplicationModuleTest, Documenter (Boot 3.1+) |
 | `spring_graphql/` | 4 | Schema-first @QueryMapping/@MutationMapping/@SubscriptionMapping/@SchemaMapping, @BatchMapping + DataLoader (N+1), subscriptions (WebSocket/SSE), cursor pagination, error handling |
+| `spring_hateoas_rest_maturity/` | 4 | Richardson Maturity Model L0-L3, Spring HATEOAS (EntityModel/CollectionModel/Link, WebMvcLinkBuilder, assemblers, affordances), HAL/HAL-FORMS, @HttpExchange/RestClient, ProblemDetail, API versioning |
+| `spring_grpc/` | 4 | @GrpcService beans, server/channel autoconfig, Server/ClientInterceptor + ordering, @GrpcExceptionHandler Status mapping, deadlines/cancellation, 4 streaming modes, Security + Micrometer tracing, gRPC vs REST |
+| `spring_session/` | 6 | SessionRepositoryFilter, Redis/JDBC/Hazelcast/Mongo backends, serialization, session fixation (changeSessionId), concurrent-session control, cookie vs header id, WebSession, stateless-JWT vs stateful tradeoff |
+
+**Deep-dive sub-files** (group under parent module's game topic; NO separate `STUDY_ORDER` entry):
+- `spring_webflux/rsocket_reactive_messaging.md` — RSocket 4 interaction models, protocol-level backpressure (`REQUEST_N`), `@MessageMapping`/`RSocketRequester`, RSocket vs gRPC/WebSocket.
+- `request_handling/i18n_and_localization.md` — `MessageSource`, `LocaleResolver`/`LocaleChangeInterceptor`, `LocaleContextHolder`, locale-aware validation + number/date formatting.
 
 ---
 
@@ -91,7 +98,7 @@ Learning-path index: `case_studies/README.md` (mandatory; update with every new 
 | `spring_caching/` | `../../database/database_caching_patterns/` — cache-aside, stampede theory; `../../database/key_value_stores/` — Redis internals |
 | `spring_transactions/` | `../../database/concurrency_control_and_locking/` — MVCC, gap locks; `../../database/consistency_models_and_consensus/` — distributed consistency |
 | `spring_messaging/` | `../../backend/kafka_deep_dive/` — Kafka EOS, Schema Registry; `../../backend/event_driven_fundamentals/` — choreography vs orchestration |
-| `spring_webflux/` | `../../java/reactive_programming/` — Project Reactor internals (once created) |
+| `spring_webflux/` | `../../java/reactive_programming/` — Project Reactor internals (Flux/Mono, Schedulers, backpressure); `../../java/structured_concurrency_and_loom/` — virtual-thread alternative to reactive |
 | `spring_security_jwt_oauth/` | `../../backend/auth_and_authorization_systems/` — OAuth2 flows, OIDC, token revocation |
 | `spring_events_and_scheduling/` | `../../lld/behavioral/observer/` — Observer pattern theory behind ApplicationEvent |
 | `spring_proxies/` | `../../lld/structural/proxy/` — Proxy pattern theory (virtual/protection/remote) |
@@ -105,6 +112,9 @@ Learning-path index: `case_studies/README.md` (mandatory; update with every new 
 | `spring_graphql/` | `../../backend/graphql/` — GraphQL architecture (federation, schema design, query cost); `../../backend/rest_api_design/` — REST vs GraphQL tradeoffs |
 | `dependency_injection/` | `../../lld/solid_principles/` — Dependency Inversion Principle; `../../lld/creational/factory_method/` — BeanFactory as Factory Method |
 | `bean_lifecycle/` | `../../lld/creational/singleton/` — Singleton scope theory |
+| `spring_hateoas_rest_maturity/` | `../../backend/rest_api_design/` — REST maturity, versioning; `../../hld/api_design/` — API design at scale; `request_handling/` — content negotiation |
+| `spring_grpc/` | `../../java/grpc_protobuf/` — Protobuf wire format, stubs, RPC modes (pure-Java depth); `../../backend/grpc_and_protobuf/` — LB/mesh; `observability_and_tracing/` — trace propagation |
+| `spring_session/` | `spring_security_architecture/` — filter chain, session fixation; `spring_security_jwt_oauth/` — stateless alternative; `../../backend/auth_and_authorization_systems/`; `../../database/key_value_stores/` — Redis backend |
 
 ---
 
@@ -127,22 +137,45 @@ When covering a Spring feature, always note the version:
 ## Adding a New Spring Module
 
 1. Create `<module_name>/README.md` — 14-section template
-2. Meet the Q&A minimum for the module's depth level
+2. Meet the Q&A minimum for the module's depth level. **First answer sentence
+   must be self-contained and 15–220 chars** or `extract.py` silently drops the
+   Q&A from the game bank.
 3. Add a row to the module table in `README.md` (the Spring master index)
 4. Place it in the correct phase in the phase diagram
 5. Add cross-references in the Cross-Reference Map in `README.md`
 6. Update root `README.md` Phase table under the Spring section
 7. Update `spring/CLAUDE.md` module table (this file)
+8. **REQUIRED for the game:** add the new module id (`spring/<module_name>`) to
+   `STUDY_ORDER.spring` in `game/app.js` at its phase position — a module missing
+   from that array sorts to the end. (A new **sub-file** `<module>/<name>.md`
+   needs no `STUDY_ORDER` entry; it groups under its parent module's topic and its
+   Q&As merge into that module's bank.)
+9. **Re-run `python3 game/extract.py`** to regenerate the question bank.
 
 ---
 
-## Visual Intuition Diagrams
+## Diagrams — Appeal-First (Mermaid preferred)
 
-Section 5 (Architecture Diagrams) and any hard-to-picture concept should use an
-**ASCII visual intuition diagram** that makes an abstract relationship visible
-(constraint grid, before/after-with-delta, stacked flow, routing fan-out, bar
-chart, or curve/sketch). Generate and validate them with the
-`/visual-intuition-diagrams` skill. The full archetype catalog, conventions
-(ASCII only, no tabs, no emojis, widest line <= 100 cols, caption every diagram),
-and the `diagram_tools.py` validator live in root `CLAUDE.md` -> "Visual Intuition
-Diagrams".
+**Owner policy (2026-07-02), supersedes the old ASCII-only rule.** Section 5
+(Architecture Diagrams) and any hard-to-picture concept should use the most
+visually appealing renderable form that conveys the info accurately. In practice
+the **Mermaid family is preferred** — `sequenceDiagram` for actor chains
+(`@Transactional` proxy, DispatcherServlet request path, OAuth2/JWT flows, 2PC),
+`flowchart` for pipelines (FilterChainProxy, auto-configuration import selection,
+gateway filter chain), `stateDiagram-v2` for lifecycles (bean lifecycle,
+persistence-context entity states, circuit-breaker), `xychart-beta` for magnitude
+comparisons. Run `/mermaid-diagrams` before authoring or converting any diagram —
+it has the One-Dark `classDef` palette, supported types, and gotchas.
+
+**Reader contract:** Mermaid renders in the game reader (v11, pitch-black
+surface). Color **every** flowchart node with the One-Dark `classDef` or **none**
+(the reader auto-tints uncolored flowcharts, but bails to flat gray if even one
+node is authored-colored). Never set a light background inside a diagram.
+
+**Keep ASCII only** for shapes Mermaid cannot draw — the `README.md` 8-Phase
+learning-path layout map, the `case_studies/README.md` dependency-map trees, the
+transaction-propagation REQUIRED/REQUIRES_NEW/NESTED timeline, the N+1
+annotated-log, constraint grids, and alignment-critical layout maps. Validate
+those with the `/visual-intuition-diagrams` skill's `diagram_tools.py check`
+(ASCII only, no tabs/emojis, widest line ≤ 100 cols, caption every diagram). Full
+policy in root `CLAUDE.md` → "Mermaid Diagrams" and "Visual Intuition Diagrams".

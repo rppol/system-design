@@ -232,19 +232,26 @@ missing `@Column(nullable=false)`, wrong `FetchType` causing N+1, incorrect `@Lo
 
 ### Container lifecycle in a test suite
 
-```
-JVM start (surefire fork)
-    |
-    v
-[Static @Container postgres starts]  ← runs once per JVM fork
-[Static @Container kafka starts]
-    |
-    v
-[Test class 1 methods run]   -- @Transactional rolls back after each test
-[Test class 2 methods run]   -- same containers reused
-    |
-    v
-[JVM exits → containers stopped automatically by Ryuk]
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["JVM start (surefire fork)"]) --> pg["Static @Container postgres starts\nruns once per JVM fork"]
+    start --> kafka["Static @Container kafka starts"]
+    pg --> t1["Test class 1 methods run\n@Transactional rolls back after each test"]
+    kafka --> t1
+    t1 --> t2["Test class 2 methods run\nsame containers reused"]
+    t2 --> exit(["JVM exits -> containers stopped automatically by Ryuk"])
+
+    class start,exit io
+    class pg,kafka frozen
+    class t1,t2 train
 ```
 
 The Ryuk container (started automatically by Testcontainers) monitors JVM lifecycle and

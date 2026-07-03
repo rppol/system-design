@@ -65,66 +65,68 @@ Think of a controller method as a contract: it declares exactly what it needs fr
 
 ## 5. Architecture Diagrams
 
-```
-RequestMappingHandlerAdapter Execution
-=======================================
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  HandlerMethod (controller method + bean + annotations)
-       |
-       v
-  [1] InvocableHandlerMethod.invokeForRequest()
-       |
-       v
-  [2] For each method parameter:
-      HandlerMethodArgumentResolverComposite.resolveArgument()
-      |
-      |-- @PathVariable  -> PathVariableMethodArgumentResolver
-      |-- @RequestParam  -> RequestParamMethodArgumentResolver
-      |-- @RequestBody   -> RequestResponseBodyMethodProcessor
-      |                     uses HttpMessageConverter to deserialize body
-      |-- @Valid         -> triggers Bean Validation after resolution
-      |-- Principal      -> PrincipalMethodArgumentResolver
-      |-- HttpSession    -> ServletRequestMethodArgumentResolver
-       |
-       v
-  [3] controller method invoked with resolved args
-       |
-       v
-  [4] HandlerMethodReturnValueHandlerComposite.handleReturnValue()
-      |
-      |-- ResponseEntity<T>  -> HttpEntityMethodProcessor
-      |-- @ResponseBody       -> RequestResponseBodyMethodProcessor
-      |                         uses HttpMessageConverter to serialize
-      |-- String (view name)  -> ViewNameMethodReturnValueHandler
-      |-- ModelAndView        -> ModelAndViewMethodReturnValueHandler
+    A["HandlerMethod\n(controller method + bean + annotations)"] --> B["1. InvocableHandlerMethod.invokeForRequest()"]
+    B --> C["2. HandlerMethodArgumentResolverComposite.resolveArgument()\n(per method parameter)"]
+    C --> D["@PathVariable -> PathVariableMethodArgumentResolver"]
+    C --> E["@RequestParam -> RequestParamMethodArgumentResolver"]
+    C --> F["@RequestBody -> RequestResponseBodyMethodProcessor\n(HttpMessageConverter deserializes body)"]
+    C --> G["@Valid -> triggers Bean Validation after resolution"]
+    C --> H["Principal / HttpSession -> dedicated resolvers"]
+    D --> I["3. controller method invoked with resolved args"]
+    E --> I
+    F --> I
+    G --> I
+    H --> I
+    I --> J["4. HandlerMethodReturnValueHandlerComposite.handleReturnValue()"]
+    J --> K["ResponseEntity (typed) -> HttpEntityMethodProcessor"]
+    J --> L["@ResponseBody -> RequestResponseBodyMethodProcessor\n(HttpMessageConverter serializes)"]
+    J --> M["String (view name) -> ViewNameMethodReturnValueHandler"]
+    J --> N["ModelAndView -> ModelAndViewMethodReturnValueHandler"]
+
+    class A base
+    class B,I train
+    class C,J mathOp
+    class D,E,F,G,H req
+    class K,L,M,N io
 ```
 
-```
-Global Exception Handling with @ControllerAdvice
-==================================================
+Argument resolution and return-value handling are both composite dispatchers: each registered resolver/handler is asked in order whether it supports the parameter or return type, and the first match wins.
 
-  Controller method throws UserNotFoundException
-       |
-       v
-  DispatcherServlet catches exception
-       |
-       v
-  HandlerExceptionResolver chain:
-       |
-       v
-  ExceptionHandlerExceptionResolver
-  - Finds @ControllerAdvice with @ExceptionHandler(UserNotFoundException.class)
-       |
-       v
-  GlobalExceptionHandler.handleUserNotFound()
-  Returns ResponseEntity<ErrorResponse> with 404 status
-       |
-       v
-  MappingJackson2HttpMessageConverter writes JSON body
-       |
-       v
-  HTTP 404 + {"error":"not_found","message":"User 123 not found"}
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A["Controller method throws\nUserNotFoundException"] --> B["DispatcherServlet catches exception"]
+    B --> C["HandlerExceptionResolver chain"]
+    C --> D["ExceptionHandlerExceptionResolver\nfinds @ControllerAdvice with\n@ExceptionHandler(UserNotFoundException.class)"]
+    D --> E["GlobalExceptionHandler.handleUserNotFound()\nreturns ResponseEntity (ErrorResponse) 404"]
+    E --> F["MappingJackson2HttpMessageConverter writes JSON body"]
+    F --> G(["HTTP 404\nerror: not_found, message: User 123 not found"])
+
+    class A lossN
+    class B,C frozen
+    class D,E train
+    class F mathOp
+    class G io
 ```
+
+A thrown exception is routed through the `HandlerExceptionResolver` chain to the matching `@ControllerAdvice` method, which produces the error response that the same message-converter pipeline serializes.
 
 ---
 
@@ -574,20 +576,28 @@ throw new ResponseStatusException(HttpStatus.NOT_FOUND,
 
 ### Request and Error Flow
 
-```
-   Partner request
-        |
-        v
-   +------------------------+
-   | @RestController        |
-   |  @Valid @RequestBody   |---- validation fails ----> MethodArgumentNotValidException
-   |  @PathVariable         |                                   |
-   |  @RequestParam         |                                   v
-   |  MultipartFile (<=25MB)|                          @RestControllerAdvice
-   +-----------+------------+                          -> ProblemDetail (application/problem+json)
-               | success
-               v
-        domain service
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    P(["Partner request"]) --> RC["@RestController\n@Valid @RequestBody, @PathVariable,\n@RequestParam, MultipartFile (up to 25MB)"]
+    RC -->|"validation fails"| MANV["MethodArgumentNotValidException"]
+    MANV --> ADV["@RestControllerAdvice"]
+    ADV --> PD(["ProblemDetail\napplication/problem+json"])
+    RC -->|"success"| DS["domain service"]
+
+    class P req
+    class RC base
+    class MANV lossN
+    class ADV train
+    class PD io
+    class DS mathOp
 ```
 
 ### Controller and Validation
@@ -725,3 +735,4 @@ spring:
 - [Spring MVC Architecture](../spring_mvc_architecture/README.md) — DispatcherServlet
 - [Validation & Error Handling](../validation_and_error_handling/README.md) — @Valid, ProblemDetail
 - [Filters & Interceptors](../filters_and_interceptors/README.md) — pre/post request processing
+- [REST API Design](../../backend/rest_api_design/README.md) — resource modeling, versioning, pagination contracts these handlers implement

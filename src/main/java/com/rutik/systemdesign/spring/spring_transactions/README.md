@@ -88,39 +88,47 @@ Key insight: Spring transactions work via AOP proxies. The proxy only intercepts
 
 ### @Transactional Proxy Mechanism
 
-```
-Spring ApplicationContext
-         |
-   [UserService bean]
-         |
-   Actually a JDK/CGLIB proxy:
-   ┌──────────────────────────────────────────┐
-   │  TransactionInterceptor (AOP advice)      │
-   │    |                                      │
-   │    ▼                                      │
-   │  PlatformTransactionManager               │
-   │    .getTransaction(definition)            │
-   │    |                                      │
-   │    ▼                                      │
-   │  [real UserService.createUser()]  ◄────── │ ← only reached through proxy
-   │    |                                      │
-   │    ▼                                      │
-   │  PlatformTransactionManager               │
-   │    .commit() or .rollback()               │
-   └──────────────────────────────────────────┘
+```mermaid
+sequenceDiagram
+    participant Ctx as Spring ApplicationContext
+    participant Proxy as UserService (JDK/CGLIB proxy)
+    participant TI as TransactionInterceptor (AOP advice)
+    participant PTM as PlatformTransactionManager
+    participant Real as real UserService.createUser()
+
+    Ctx->>Proxy: bean lookup / method call
+    Proxy->>TI: intercept invocation
+    TI->>PTM: getTransaction(definition)
+    PTM-->>TI: transaction begun
+    TI->>Real: invoke createUser() (only reachable through proxy)
+    Real-->>TI: return / exception
+    TI->>PTM: commit() or rollback()
 ```
 
 ### Self-Invocation Problem
 
-```
-// Correct call path (through proxy):
-Controller → [UserService PROXY] → TransactionInterceptor → real UserService.methodA()
+```mermaid
+flowchart TD
+    classDef req   fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef train fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef lossN fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
 
-// Self-invocation (bypasses proxy entirely):
-real UserService.methodA()
-    calls this.methodB()  ← 'this' is the real object, NOT the proxy
-                          → TransactionInterceptor NEVER invoked
-                          → @Transactional on methodB() is IGNORED
+    subgraph Correct["Correct call path (through proxy)"]
+        C1["Controller"] --> C2["UserService PROXY"]
+        C2 --> C3["TransactionInterceptor"]
+        C3 --> C4["real UserService.methodA()"]
+    end
+
+    subgraph SelfInvoke["Self-invocation (bypasses proxy entirely)"]
+        S1["real UserService.methodA()"] --> S2["calls this.methodB()\n('this' is the real object, not the proxy)"]
+        S2 -.-> S3["TransactionInterceptor NEVER invoked"]
+        S3 -.-> S4["@Transactional on methodB() is IGNORED"]
+    end
+
+    class C1,C2 req
+    class C3,C4 train
+    class S1,S2 req
+    class S3,S4 lossN
 ```
 
 ### Propagation: REQUIRED vs REQUIRES_NEW vs NESTED
@@ -144,43 +152,54 @@ NESTED:
 
 ### Transaction Lifecycle with JpaTransactionManager
 
-```
-@Transactional method called via proxy
-         │
-JpaTransactionManager.getTransaction()
-         │
-         ├─ No existing tx → EntityManagerFactory.createEntityManager()
-         │                  → bind EntityManager to thread-local
-         │                  → begin JDBC transaction (conn.setAutoCommit(false))
-         │
-         ├─ Existing tx (REQUIRED) → reuse bound EntityManager
-         │
-[method executes — reads/writes go through bound EntityManager]
-         │
-No exception → EntityManager.flush()  (dirty checking, SQL sent to DB)
-             → connection.commit()
-             → EntityManager.close() (unbind from thread-local)
-             │
-Exception → connection.rollback()
-          → EntityManager.close()
+```mermaid
+sequenceDiagram
+    participant Caller as Proxy caller
+    participant JTM as JpaTransactionManager
+    participant EMF as EntityManagerFactory
+    participant EM as EntityManager (thread-local)
+    participant DB as JDBC Connection
+
+    Caller->>JTM: @Transactional method invoked
+    JTM->>JTM: getTransaction()
+    alt No existing transaction
+        JTM->>EMF: createEntityManager()
+        EMF-->>JTM: EntityManager
+        JTM->>EM: bind to thread-local
+        JTM->>DB: begin tx (setAutoCommit(false))
+    else Existing tx (REQUIRED)
+        JTM->>EM: reuse bound EntityManager
+    end
+    Caller->>EM: method executes (reads/writes)
+    alt No exception
+        JTM->>EM: flush() (dirty checking, SQL sent)
+        JTM->>DB: commit()
+        JTM->>EM: close() (unbind thread-local)
+    else Exception thrown
+        JTM->>DB: rollback()
+        JTM->>EM: close()
+    end
 ```
 
 ### Distributed Transaction: Two-Phase Commit (XA)
 
-```
-Application
-    │
-JtaTransactionManager (coordinator)
-    │
-    ├── Phase 1: PREPARE
-    │      ├── DataSource A (DB): "ready to commit?" → YES
-    │      └── DataSource B (JMS): "ready to commit?" → YES
-    │
-    └── Phase 2: COMMIT
-           ├── DataSource A: COMMIT
-           └── DataSource B: COMMIT
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant Coord as JtaTransactionManager (coordinator)
+    participant A as DataSource A (DB)
+    participant B as DataSource B (JMS)
 
-If any resource says NO in Phase 1 → ROLLBACK sent to all
+    App->>Coord: begin distributed transaction
+    Note over Coord: Phase 1 - PREPARE
+    Coord->>A: ready to commit?
+    A-->>Coord: YES
+    Coord->>B: ready to commit?
+    B-->>Coord: YES
+    Note over Coord: Phase 2 - COMMIT
+    Coord->>A: COMMIT
+    Coord->>B: COMMIT
+    Note over Coord,B: If any resource votes NO in Phase 1, ROLLBACK is sent to all instead
 ```
 
 ---
@@ -1146,3 +1165,4 @@ public SettlementResult settle(Payment p) { ... }
 - [Case Study: Idempotent Payment API](../case_studies/design_idempotent_payment_api.md) — transactional outbox
 - [Concurrency Control & Locking (Database)](../../database/concurrency_control_and_locking/README.md) — MVCC, gap locks, SELECT FOR UPDATE at the DB engine level
 - [Consistency Models & Consensus (Database)](../../database/consistency_models_and_consensus/README.md) — linearizability, Raft, distributed locks, fencing tokens
+- [Distributed Transactions (HLD)](../../hld/distributed_transactions/README.md) — 2PC/3PC coordinator failure modes, Saga orchestration/choreography, the distributed-systems view behind JTA/XA vs Saga

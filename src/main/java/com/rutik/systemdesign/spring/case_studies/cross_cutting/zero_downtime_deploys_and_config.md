@@ -48,21 +48,37 @@ old and new code share the same database table for 5–10 minutes during rollout
 
 ### 3.1 Expand-Contract pattern (the only safe schema migration approach)
 
-```
-PHASE 1: EXPAND (deploy with new DB schema, old code still works)
-  - Add nullable column
-  - Add new table
-  - Create new index (CONCURRENTLY on PostgreSQL — no table lock)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-PHASE 2: MIGRATE (deploy new code; old code still compatible)
-  - Deploy new app version (writes new column; reads new column with null fallback)
-  - Backfill existing rows (batch UPDATE)
-  - Old instances still running: they ignore the new column
+    subgraph P1["PHASE 1: EXPAND (new DB schema, old code still works)"]
+        e1["Add nullable column"]
+        e2["Add new table"]
+        e3["Create new index CONCURRENTLY on PostgreSQL\nno table lock"]
+    end
+    subgraph P2["PHASE 2: MIGRATE (deploy new code; old code still compatible)"]
+        m1["Deploy new app version\nwrites new column, reads with null fallback"]
+        m2["Backfill existing rows (batch UPDATE)"]
+        m3["Old instances still running: ignore the new column"]
+    end
+    subgraph P3["PHASE 3: CONTRACT (final cleanup; old code is gone)"]
+        c1["Add NOT NULL constraint\nafter all instances run new code"]
+        c2["Drop old column"]
+        c3["Remove compatibility logic from new code"]
+    end
 
-PHASE 3: CONTRACT (final cleanup; old code is gone)
-  - Add NOT NULL constraint (after all instances run new code)
-  - Drop old column
-  - Remove compatibility logic from new code
+    P1 --> P2 --> P3
+
+    class e1,e2,e3 train
+    class m1,m2,m3 mathOp
+    class c1,c2,c3 frozen
 ```
 
 ### 3.2 Readiness vs Liveness probes
@@ -80,30 +96,26 @@ makes the outage worse.
 
 ### 3.3 Graceful shutdown sequence
 
-```
-SIGTERM received
-    |
-    v
-1. Kubernetes removes pod from Service endpoint (traffic stops coming)
-    |
-    v (2s grace period for endpoint removal to propagate)
-    |
-2. Spring Boot sets readiness probe to REFUSING (HTTP 503)
-    |
-    v
-3. Spring Boot waits for in-flight requests to complete (server.shutdown.timeout)
-    |
-    v
-4. Spring Boot closes Kafka consumers (commits outstanding offsets)
-    |
-    v
-5. Spring Boot closes DB connection pool (HikariCP drains)
-    |
-    v
-6. Spring context closes (beans destroyed)
-    |
-    v
-7. JVM exits (exit code 0 → Kubernetes marks pod as succeeded)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    sigterm(["SIGTERM received"]) --> s1["1. Kubernetes removes pod from Service endpoint\ntraffic stops coming"]
+    s1 -->|"2s grace period for endpoint removal to propagate"| s2["2. Spring Boot sets readiness probe to REFUSING (HTTP 503)"]
+    s2 --> s3["3. Spring Boot waits for in-flight requests to complete\nserver.shutdown.timeout"]
+    s3 --> s4["4. Spring Boot closes Kafka consumers\ncommits outstanding offsets"]
+    s4 --> s5["5. Spring Boot closes DB connection pool\nHikariCP drains"]
+    s5 --> s6["6. Spring context closes (beans destroyed)"]
+    s6 --> s7(["7. JVM exits (exit code 0)\nKubernetes marks pod as succeeded"])
+
+    class sigterm,s7 io
+    class s1,s2,s3,s4,s5,s6 mathOp
 ```
 
 ---

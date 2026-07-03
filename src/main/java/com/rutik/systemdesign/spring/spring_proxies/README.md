@@ -49,70 +49,91 @@ Think of a proxy like a personal assistant standing in front of a celebrity. Whe
 
 ### Proxy Selection Logic
 
+```mermaid
+flowchart TD
+    classDef req   fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef train fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef base  fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A{"Bean's class implements an interface?"} -->|"yes"| B{"proxyTargetClass = true?"}
+    A -->|"no"| C["Always CGLIB\n(subclass proxy)"]
+    B -->|"no (default)"| D["JDK dynamic proxy\n(implements interfaces)"]
+    B -->|"yes"| E["CGLIB proxy\n(subclasses target)"]
+
+    class A,B req
+    class C,E train
+    class D base
 ```
-Has the bean's class any interfaces?
-       /                \
-     YES                NO
-      |                  |
-proxyTargetClass=false?  Always CGLIB
-      |
-     YES: JDK proxy      NO: CGLIB
-```
+
+Spring makes this choice once per bean at proxy-creation time: no interface always forces CGLIB, and `proxyTargetClass=true` forces CGLIB even when an interface exists.
 
 ---
 
 ## 5. Architecture Diagrams
 
-```
-JDK Dynamic Proxy
-==================
+**JDK Dynamic Proxy**
 
-  Client code                Proxy (implements MyInterface)        Real Bean
-  ----------                 --------------------------            ----------
-  myInterface.doWork()  -->  InvocationHandler.invoke()  -------> MyServiceImpl.doWork()
-                             |                             <-------
-                             |  before advice (transaction begin)
-                             |  target.doWork()
-                             |  after advice (transaction commit)
-                             return result
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Proxy as Proxy (implements MyInterface)
+    participant Target as MyServiceImpl (real bean)
 
-  proxy instanceof MyInterface  --> true
-  proxy instanceof MyServiceImpl --> false (JDK proxy!)
-  Note: casting to MyServiceImpl will throw ClassCastException
-```
-
-```
-CGLIB Proxy (Subclass)
-=======================
-
-  Client code                CGLIBProxy$MyService (extends MyService)    Real Bean
-  ----------                 ---------------------------------            ----------
-  myService.doWork()  -----> MethodInterceptor.intercept()  -----------> MyService.doWork()
-                             |                               <-----------
-                             |  before advice (transaction begin)
-                             |  super.doWork()  or  target.doWork()
-                             |  after advice (transaction commit)
-                             return result
-
-  proxy instanceof MyService  --> true (subclass is-a MyService)
-  proxy.getClass()            --> MyService$$EnhancerBySpringCGLIB$$abc123
+    Client->>Proxy: myInterface.doWork()
+    activate Proxy
+    Note over Proxy: InvocationHandler.invoke()
+    Proxy->>Proxy: before advice (transaction begin)
+    Proxy->>Target: target.doWork()
+    Target-->>Proxy: return result
+    Proxy->>Proxy: after advice (transaction commit)
+    Proxy-->>Client: return result
+    deactivate Proxy
 ```
 
-```
-Self-Invocation Problem
-========================
+`proxy instanceof MyInterface` is `true`, but `proxy instanceof MyServiceImpl` is `false` — a JDK proxy only implements the target's interfaces, so casting it to the concrete class throws `ClassCastException`.
 
-  External call: goes through proxy (advice applied)
-  --------------------------------------------------
-  OrderController --> proxy.placeOrder() --> advice --> OrderService.placeOrder()
+**CGLIB Proxy (Subclass)**
 
-  Internal call: bypasses proxy (no advice)
-  -----------------------------------------
-  OrderService.placeOrder() {
-      this.sendConfirmation();   // <-- "this" is the raw OrderService, NOT the proxy
-  }                              // @Transactional on sendConfirmation() has NO EFFECT
-                                 // @Cacheable on sendConfirmation() has NO EFFECT
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Proxy as CGLIBProxy$MyService (extends MyService)
+    participant Target as MyService (real bean)
+
+    Client->>Proxy: myService.doWork()
+    activate Proxy
+    Note over Proxy: MethodInterceptor.intercept()
+    Proxy->>Proxy: before advice (transaction begin)
+    Proxy->>Target: super.doWork() / target.doWork()
+    Target-->>Proxy: return result
+    Proxy->>Proxy: after advice (transaction commit)
+    Proxy-->>Client: return result
+    deactivate Proxy
 ```
+
+Because the CGLIB proxy is a real subclass, `proxy instanceof MyService` is `true` and `proxy.getClass()` reports `MyService$$EnhancerBySpringCGLIB$$abc123`.
+
+**Self-Invocation Problem**
+
+```mermaid
+sequenceDiagram
+    participant Controller as OrderController
+    participant Proxy as Proxy (advice applied)
+    participant Service as OrderService
+
+    Note over Controller,Service: External call - goes through the proxy
+    Controller->>Proxy: placeOrder(order)
+    Proxy->>Proxy: advice (transaction begin)
+    Proxy->>Service: placeOrder(order)
+    Service-->>Proxy: done
+    Proxy-->>Controller: done
+
+    Note over Service: Internal call - self-invocation bypasses the proxy
+    Service->>Service: this.sendConfirmation()
+    Note right of Service: "this" is the raw OrderService, not the proxy<br/>@Transactional / @Cacheable on sendConfirmation() has no effect
+```
+
+The external call crosses the proxy boundary and gets advice; the internal `this.sendConfirmation()` call never leaves the target object, so any `@Transactional` or `@Cacheable` on that method is silently skipped.
 
 ---
 
@@ -479,10 +500,19 @@ When a bean injects itself via `@Autowired private MyService self`, Spring injec
 CGLIB subclasses cannot override `final` methods — they are not intercepted by the proxy. A `@Transactional` annotation on a `final` method is silently ignored: the method is called directly on the target object without any transaction management. Spring does not log a warning by default. Diagnosis: add `logging.level.org.springframework.aop=DEBUG` — Spring logs when it cannot proxy a method. Fix: remove `final` from the method (or use `@Transactional` on the class and ensure no methods are final). The same applies to any AOP advice on `final` methods — `@Cacheable`, `@Async`, `@Secured` all fail silently on `final` methods.
 
 **What happens to a Spring-managed bean's CGLIB proxy when the target class has a `@Bean` method with `@Scope("prototype")`?**
-When a `@Configuration` class (which is CGLIB-proxied in full mode) has a `@Bean` method annotated `@Scope("prototype")`, each call to the method returns a new prototype instance — the CGLIB proxy intercepts the method call, goes to the bean factory, and asks for a new prototype. However, if the method is called from within the same `@Configuration` class (e.g., one `@Bean` method calling another), the CGLIB proxy intercepts the call and still creates a new prototype instance. Contrast with `@Configuration` in lite mode (`@Component` + `@Bean`) — in lite mode, `@Bean` methods are NOT intercepted; calling them returns a new Java object, bypassing the container entirely (neither singleton nor prototype semantics are enforced). Full mode is the safe default for `@Configuration`.
+When a `@Configuration` class (which is CGLIB-proxied in full mode) has a `@Bean` method annotated `@Scope("prototype")`, each call to the method returns a new prototype instance. The CGLIB proxy intercepts the method call, goes to the bean factory, and asks for a new prototype. However, if the method is called from within the same `@Configuration` class (e.g., one `@Bean` method calling another), the CGLIB proxy intercepts the call and still creates a new prototype instance. Contrast with `@Configuration` in lite mode (`@Component` + `@Bean`) — in lite mode, `@Bean` methods are NOT intercepted; calling them returns a new Java object, bypassing the container entirely (neither singleton nor prototype semantics are enforced). Full mode is the safe default for `@Configuration`.
 
 **What is `InfrastructureAdvisorAutoProxyCreator` and how does it differ from `AnnotationAwareAspectJAutoProxyCreator`?**
 Both are `BeanPostProcessor` implementations that create AOP proxies. `InfrastructureAdvisorAutoProxyCreator` only applies advisor beans with the `ROLE_INFRASTRUCTURE` role — internal Spring framework advisors (transaction advisor, async advisor, caching advisor). It is registered first and handles Spring's built-in AOP. `AnnotationAwareAspectJAutoProxyCreator` handles all advisors including user-defined `@Aspect` classes. It replaces `InfrastructureAdvisorAutoProxyCreator` when `@EnableAspectJAutoProxy` is present. Key implication: if both infrastructure advisors and user `@Aspect` classes apply to the same bean, they all go through `AnnotationAwareAspectJAutoProxyCreator`, and their relative order is controlled by `@Order` on the advisors.
+
+**How does `AopContext.currentProxy()` fix self-invocation, and what must you enable for it to work?**
+`AopContext.currentProxy()` retrieves the current proxy from a `ThreadLocal`, so calling the returned proxy re-enters the interceptor chain instead of calling `this` directly. It only works when `exposeProxy=true` is set on `@EnableAspectJAutoProxy` (or the XML equivalent), which makes the auto-proxy creator publish the proxy to the `ThreadLocal` before invoking the target — without it, `AopContext.currentProxy()` throws `IllegalStateException`. The cast (`(MyService) AopContext.currentProxy()`) couples business code to Spring AOP internals, so most teams prefer extracting the advised method into a separate bean instead of relying on this workaround.
+
+**Can CGLIB advise `static` or `private` methods, and why not?**
+No: CGLIB proxies subclass the target and override methods, and neither static methods (resolved at compile time) nor private methods (invisible to a subclass) can be overridden this way. This is a distinct limitation from `final` methods — a `final` method exists on the instance and could in principle be dispatched dynamically, but the JVM specifically forbids overriding it, whereas `static`/`private` methods are excluded by Java's dispatch rules regardless of any modifier. Any `@Transactional`, `@Cacheable`, or `@Async` on a `static` or `private` method is silently ignored, with no warning at startup — always keep advised methods public and non-static.
+
+**How does a CGLIB proxy affect `equals()`/`hashCode()`, and why can that break `HashSet`/`HashMap` lookups?**
+A CGLIB-proxied bean and a plain instance of the same class are never `equal()` by default, because the proxy's runtime class differs from the original class. Unless the target overrides `equals()`/`hashCode()` based on business fields, comparisons fall back to identity semantics inherited through the generated subclass, so storing a proxied bean in a `HashSet`/`HashMap` and later probing it with a manually constructed instance silently misses. The fix is to compare by a stable identifier field or unwrap the proxy first with `AopUtils.getTargetClass()` / `AopTestUtils.getTargetObject()`, rather than relying on default object equality across proxied and non-proxied instances.
 
 ---
 
@@ -515,22 +545,22 @@ Understanding the proxy mechanics (CGLIB vs JDK, `proxyTargetClass`, `final`, se
 
 ### Architecture Overview
 
-```
-   caller ----> [ CGLIB Proxy : OrderService$$SpringCGLIB ]   <-- intercepts here
-                       |  applies @Transactional, @Cacheable
-                       v
-                 [ OrderService (real target) ]
-                       |
-   self-invocation:  this.getOrder(id)  --X-- never re-enters the proxy
-                       |                       (no caching, no transaction)
-                       v
-                 plain method body
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Proxy as CGLIB Proxy (OrderService$$SpringCGLIB)
+    participant Target as OrderService (real target)
 
-   Proxy class hierarchy:
-     CGLIB:  OrderService  <-  OrderService$$SpringCGLIB  (subclass, default in Boot)
-     JDK:    OrderService implements OrderApi
-             Proxy  implements OrderApi   (only interface methods visible)
+    Caller->>Proxy: getOrder(id)
+    Proxy->>Target: applies @Transactional, @Cacheable
+    Target-->>Proxy: result
+    Proxy-->>Caller: result
+
+    Note over Target: self-invocation: this.getOrder(id)
+    Target--xProxy: never re-enters the proxy (no caching, no transaction)
 ```
+
+Proxy class hierarchy: CGLIB makes `OrderService$$SpringCGLIB` a *subclass* of `OrderService` (the Boot default); a JDK proxy instead only `implements OrderApi`, so only interface methods are visible to callers.
 
 ### Implementation
 

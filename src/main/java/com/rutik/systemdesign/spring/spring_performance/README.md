@@ -84,55 +84,52 @@ Key insight: Most Spring Boot performance problems are not JVM problems — they
 
 ### HikariCP Connection Pool — Request Flow
 
-```
-  HTTP Request
-       |
-       v
-  Tomcat Thread Pool (max: 200 threads)
-  [T1][T2][T3]...[T200]
-       |
-       | thread acquires DB connection from pool
-       v
-  HikariCP Connection Pool
-  +----------------------------------+
-  |  maximumPoolSize: 10             |
-  |  [C1][C2][C3]...[C10] (idle)     |
-  |  [P1][P2]            (pending)   |  <-- threads waiting for a free connection
-  +----------------------------------+
-       |
-       | JDBC connection
-       v
-  PostgreSQL Database
-  (max_connections: 100)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Saturation scenario:
-200 Tomcat threads * all blocked waiting on HikariCP (pool size 10)
-= 190 threads in pending queue
-= connection_timeout exceeded for late arrivals
-= SQLTimeoutException thrown to callers
+    R["HTTP Request"] --> T["Tomcat Thread Pool\nmax: 200 threads"]
+    T -->|"thread acquires DB connection"| H["HikariCP Connection Pool\nmaximumPoolSize: 10\n10 idle, up to 190 pending"]
+    H -->|"JDBC connection"| D["PostgreSQL Database\nmax_connections: 100"]
+
+    class R req
+    class T mathOp
+    class H frozen
+    class D base
 ```
+
+Saturation scenario: 200 Tomcat threads all blocked waiting on HikariCP (pool size 10) leaves 190 threads in the pending queue, so `connection-timeout` is exceeded for late arrivals and `SQLTimeoutException` is thrown to callers.
 
 ### @Cacheable — Cache-Aside Flow
 
-```
-  Service.getProduct(id)
-       |
-       | Spring AOP proxy intercepts
-       v
-  Cache lookup: Redis.get("products::id")
-       |
-       |-- HIT -----------------------------------------> return cached value (sub-ms)
-       |
-       |-- MISS
-            |
-            v
-       ProductRepository.findById(id)  (5-10ms DB query)
-            |
-            v
-       Redis.set("products::id", value, TTL=300s)
-            |
-            v
-       return value to caller
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    S["Service.getProduct(id)"] -->|"Spring AOP proxy intercepts"| C{"Cache lookup\nRedis.get('products::id')"}
+    C -->|"HIT"| RV["return cached value (sub-ms)"]
+    C -->|"MISS"| DB["ProductRepository.findById(id)\n(5-10ms DB query)"]
+    DB --> SET["Redis.set('products::id', value, TTL=300s)"]
+    SET --> RET["return value to caller"]
+
+    class S req
+    class C mathOp
+    class RV io
+    class DB frozen
+    class SET train
+    class RET io
 ```
 
 ### Virtual Thread vs Platform Thread — I/O Blocking
@@ -156,46 +153,48 @@ Virtual Thread [V50000] -- millions can exist; carrier pool = CPU cores
 
 ### GraalVM Native AOT Build Pipeline
 
-```
-  Source Code
-       |
-       v
-  spring-aot-maven-plugin (AOT processing)
-  - Generates reflection configuration
-  - Generates proxy hints
-  - Generates resource configuration
-  - Computes bean definitions at build time
-       |
-       v
-  native-image compiler (GraalVM)
-  - Points-to analysis (30-90 min build)
-  - Eliminates dead code
-  - AOT compiles to native binary
-       |
-       v
-  Single native executable (~50-100MB)
-  - No JVM required
-  - Startup: <200ms
-  - Memory: 50-70% less than JVM baseline
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SC["Source Code"] --> AOT["spring-aot-maven-plugin (AOT processing)\nreflection config, proxy hints,\nresource config, bean defs at build time"]
+    AOT --> NI["native-image compiler (GraalVM)\npoints-to analysis (30-90 min build)\neliminates dead code, AOT compiles to native binary"]
+    NI --> BIN["Single native executable (~50-100MB)\nno JVM required, startup: less than 200ms\nmemory: 50-70% less than JVM baseline"]
+
+    class SC io
+    class AOT mathOp
+    class NI train
+    class BIN base
 ```
 
 ### Startup Time Contributors
 
+```mermaid
+xychart-beta
+    title "Startup phases: baseline vs fully optimized"
+    x-axis ["JVM init", "Context refresh", "Tomcat start"]
+    y-axis "Time (seconds)" 0 --> 7
+    bar [0.5, 7, 0.5]
+    bar [0.3, 1.5, 0.3]
 ```
-Spring Boot JVM startup timeline (typical 10s boot):
-|-- JVM init (0.5s) --|
-                       |-- Spring context refresh (7s) --|
-                                                          |-- Tomcat start (0.5s) --|
-                                                                                    |-- Ready
 
-Spring context refresh breakdown:
-  class scanning:         2.5s  <-- narrowing @ComponentScan helps here
-  bean instantiation:     3.0s  <-- lazy init defers most of this
-  auto-configuration:     1.5s  <-- excluding unused auto-configs helps
+First bar = baseline (~8s total boot); second bar = with lazy init + spring-context-indexer + CDS applied (~2.1s total, "Ready" reached far sooner).
 
-With all optimizations (lazy init + spring-context-indexer + CDS):
-|-- JVM (0.3s) --|-- context refresh (1.5s) --|-- Tomcat (0.3s) --| = ~2s
+```mermaid
+xychart-beta
+    title "Spring context refresh breakdown (baseline, 7s total)"
+    x-axis ["Class scanning", "Bean instantiation", "Auto-configuration"]
+    y-axis "Time (seconds)" 0 --> 3
+    bar [2.5, 3.0, 1.5]
 ```
+
+Class scanning shrinks with a narrower `@ComponentScan`; bean instantiation shrinks the most from lazy init; auto-configuration shrinks by excluding unused auto-configs.
 
 ---
 
@@ -1109,24 +1108,20 @@ public void warmUp() {
 
 **Scale:** 200 TPS sustained, peak 400 TPS on Monday morning GPS batch sync. 8 cores, 4GB heap, 40ms DB p50, PostgreSQL with 20 existing HikariCP connections.
 
-```
 Bottleneck analysis (JFR profiling, 30-minute recording):
 
-  200 Tomcat threads:
-    40% blocked on JDBC (40ms avg)
-    25% blocked on HTTP client calls (external GPS API, 80ms avg)
-    15% blocked on Redis (5ms avg)
-    20% active CPU (parsing, business logic)
-
-  CPU utilization: 22% (8 cores × 22% = 1.76 cores in use)
-  Thread utilization: 98% (196/200 threads blocked at any given time)
-  → This is a classic I/O-bound profile: threads are the bottleneck, not CPU
-
-After virtual threads:
-  CPU utilization: 45% (same I/O time, but threads never block OS threads)
-  Threads: unlimited (JVM creates carriers on demand, 8 OS threads total)
-  TPS capacity: 400+ (I/O-bound ceiling removed)
+```mermaid
+pie showData
+    title Where 200 Tomcat threads spend their time
+    "Blocked on JDBC (40ms avg)" : 40
+    "Blocked on HTTP client / GPS API (80ms avg)" : 25
+    "Blocked on Redis (5ms avg)" : 15
+    "Active CPU (parsing, business logic)" : 20
 ```
+
+CPU utilization: 22% (8 cores × 22% = 1.76 cores in use). Thread utilization: 98% (196/200 threads blocked at any given time) — a classic I/O-bound profile: threads are the bottleneck, not CPU.
+
+After virtual threads: CPU utilization rises to 45% (same I/O time, but threads never block OS threads); thread count is effectively unlimited (JVM creates carriers on demand, 8 OS threads total); TPS capacity reaches 400+ (the I/O-bound ceiling is removed).
 
 **Virtual threads enablement (Spring Boot 3.2+):**
 
@@ -1289,4 +1284,5 @@ spring:
 
 - [Spring Boot Actuator](../spring_boot_actuator/README.md) — metrics, GraalVM native
 - [Observability & Tracing](../observability_and_tracing/README.md) — tracing overhead
-- [Structured Concurrency & Loom (Java)](../../java/structured_concurrency_and_loom/README.md) — virtual threads
+- [Structured Concurrency & Loom (Java)](../../java/structured_concurrency_and_loom/README.md) — virtual threads, pinning, carrier threads
+- [Performance Profiling](../../backend/performance_profiling/README.md) — JFR, async-profiler, flame graphs, and profiling methodology behind the JVM tuning in this module

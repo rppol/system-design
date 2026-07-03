@@ -63,79 +63,65 @@ Think of `DispatcherServlet` as an airport dispatcher. Every flight (HTTP reques
 
 ## 5. Architecture Diagrams
 
-```
-DispatcherServlet Request Pipeline
-====================================
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  HTTP Request
-       |
-       v
-  [Filter Chain]                    (Servlet container filters, Spring Security)
-       |
-       v
-  DispatcherServlet.doDispatch()
-       |
-       v
-  [1] HandlerMapping.getHandler()
-       Returns HandlerExecutionChain:
-       - handler (controller method)
-       - interceptors
-       |
-       v
-  [2] HandlerAdapter.supports(handler)?
-       Find adapter that can invoke this handler
-       |
-       v
-  [3] HandlerInterceptor.preHandle()  (all interceptors)
-       |
-  If false returned -> abort, response already set
-       |
-       v
-  [4] HandlerAdapter.handle()
-       - Resolves @RequestParam, @RequestBody, @PathVariable, etc.
-       - Invokes controller method
-       - Returns ModelAndView (or null for @ResponseBody)
-       |
-       v
-  [5] HandlerInterceptor.postHandle()  (reverse order)
-       (only if no exception)
-       |
-       v
-  [6] ViewResolver.resolveViewName()  (if ModelAndView has view name)
-       OR
-       HttpMessageConverter.write()   (if @ResponseBody / ResponseEntity)
-       |
-       v
-  [7] HandlerInterceptor.afterCompletion()  (always, reverse order)
-       |
-       v
-  HTTP Response
+    A(["HTTP Request"]) --> B["Filter Chain\n(servlet container filters, Spring Security)"]
+    B --> C["DispatcherServlet.doDispatch()"]
+    C --> D["1. HandlerMapping.getHandler()\nreturns HandlerExecutionChain\n(handler + interceptors)"]
+    D --> E["2. HandlerAdapter.supports(handler)?\nfind adapter that can invoke it"]
+    E --> F["3. HandlerInterceptor.preHandle()\n(all interceptors)"]
+    F -->|"false returned"| Z(["abort - response already set"])
+    F --> G["4. HandlerAdapter.handle()\nresolves @RequestParam/@RequestBody/@PathVariable,\ninvokes controller method,\nreturns ModelAndView or null"]
+    G --> H["5. HandlerInterceptor.postHandle()\n(reverse order, only if no exception)"]
+    H --> I{"ModelAndView\nhas view name?"}
+    I -->|"yes"| J["6. ViewResolver.resolveViewName()"]
+    I -->|"no - @ResponseBody/ResponseEntity"| K["6. HttpMessageConverter.write()"]
+    J --> L["7. HandlerInterceptor.afterCompletion()\n(always, reverse order)"]
+    K --> L
+    L --> M(["HTTP Response"])
+
+    class A,M io
+    class B frozen
+    class C base
+    class D,E,F,G,H,L train
+    class I mathOp
+    class J,K mathOp
+    class Z lossN
 ```
 
-```
-WebApplicationContext Hierarchy (Classic Spring MVC)
-=====================================================
+The pipeline runs every request through handler mapping, interceptor pre/post hooks, and either view resolution or message-converter serialization before a response is written.
 
-  Root ApplicationContext (started by ContextLoaderListener)
-  +--------------------------------------------------+
-  | @Service, @Repository, DataSource               |
-  | TransactionManager, SecurityConfig              |
-  | Shared infrastructure beans                      |
-  +--------------------------------------------------+
-                    ^  parent
-                    |
-  Servlet WebApplicationContext (per DispatcherServlet)
-  +--------------------------------------------------+
-  | @Controller, ViewResolver                       |
-  | HandlerMapping, HandlerAdapter                  |
-  | MessageConverters, ArgumentResolvers             |
-  +--------------------------------------------------+
-                    |
-             DispatcherServlet
-             (handles /api/*)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Spring Boot: single merged context (no hierarchy)
+    Root["Root ApplicationContext\n(started by ContextLoaderListener)\n@Service, @Repository, DataSource,\nTransactionManager, SecurityConfig,\nshared infrastructure beans"]
+    Servlet["Servlet WebApplicationContext\n(per DispatcherServlet)\n@Controller, ViewResolver,\nHandlerMapping, HandlerAdapter,\nMessageConverters, ArgumentResolvers"]
+    DS(["DispatcherServlet\n(handles /api/*)"])
+
+    Servlet -->|"parent"| Root
+    DS --> Servlet
+
+    class Root frozen
+    class Servlet train
+    class DS base
 ```
+
+Classic Spring MVC keeps two contexts — a root context of shared infrastructure beans and a child per-servlet context of MVC beans that can see the parent but not vice versa; Spring Boot collapses both into a single merged context.
 
 ---
 
@@ -472,22 +458,27 @@ Content negotiation is the process by which Spring MVC selects the response medi
 
 ### Request Lifecycle
 
-```
-Client request
-   |
-   v
-+-------------------+
-| DispatcherServlet |
-+--------+----------+
-         | 1. HandlerMapping (RequestMappingHandlerMapping) -> HandlerMethod
-         | 2. HandlerInterceptor.preHandle()  (timing start)
-         | 3. HandlerAdapter invokes method:
-         |       ArgumentResolvers: @CurrentUser, @PathVariable, @RequestBody
-         | 4. @RestController method runs
-         | 5. ReturnValueHandler -> HttpMessageConverter (Jackson | Protobuf via Accept)
-         | 6. HandlerInterceptor.afterCompletion()  (timing stop, record metric)
-         v
-   HTTP response (or @ExceptionHandler -> ProblemDetail on failure)
+```mermaid
+sequenceDiagram
+    participant Client
+    participant DS as DispatcherServlet
+    participant HM as HandlerMapping
+    participant HI as HandlerInterceptor
+    participant HA as HandlerAdapter
+    participant C as "@RestController"
+    participant RVH as ReturnValueHandler
+
+    Client->>DS: HTTP request
+    DS->>HM: 1. getHandler() (RequestMappingHandlerMapping)
+    HM-->>DS: HandlerMethod
+    DS->>HI: 2. preHandle() (timing start)
+    DS->>HA: 3. handle()
+    HA->>HA: resolve args (@CurrentUser, @PathVariable, @RequestBody)
+    HA->>C: 4. invoke method
+    C-->>HA: return value
+    HA->>RVH: 5. write response (Jackson | Protobuf via Accept)
+    DS->>HI: 6. afterCompletion() (timing stop, record metric)
+    DS-->>Client: HTTP response (or @ExceptionHandler -> ProblemDetail on failure)
 ```
 
 ### Custom Argument Resolver and Negotiation
@@ -684,3 +675,4 @@ public class GlobalExceptionHandler { ... }
 - [Request Handling](../request_handling/README.md) — @RequestMapping, argument resolvers
 - [Filters & Interceptors](../filters_and_interceptors/README.md) — filter vs interceptor
 - [Spring WebFlux](../spring_webflux/README.md) — reactive alternative
+- [REST API Design](../../backend/rest_api_design/README.md) — resource modeling, versioning, pagination for the APIs DispatcherServlet serves

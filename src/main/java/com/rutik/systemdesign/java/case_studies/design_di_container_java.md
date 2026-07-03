@@ -58,35 +58,28 @@ Runtime lookup: O(1) HashMap.get() = ~30 ns
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    reg["Step 1 -- Registration phase\nbind(Interface, Implementation, scope)\nbind(Interface).toInstance(existingObject)\nbind(Interface).toProvider(Supplier)"] --> bindings[("bindings: Map of Class to Binding\ne.g. Interface to Implementation, SINGLETON")]
+    bindings --> resolve["Step 2 -- Eager startup resolve (Injector.build())\nfor each singleton binding:\nresolve(type) recursively resolves dependencies\ndetect cycles (inProgressSet)\ncache in singletonCache"]
+    resolve --> cache[("singletonCache: Map of Class to Object\ne.g. PaymentService, OrderService instances")]
+    cache --> lookup["Step 3 -- Runtime getBean(Class)\nO(1) cache lookup"]
+
+    class reg train
+    class bindings,cache base
+    class resolve mathOp
+    class lookup io
 ```
-+------------------------------------------------------------------+
-|                    DI Container                                  |
-|                                                                  |
-|  [1] Registration phase                                          |
-|    bind(Interface.class, Implementation.class, scope)           |
-|    bind(Interface.class).toInstance(existingObject)             |
-|    bind(Interface.class).toProvider(Supplier)                   |
-|                          |                                       |
-|                          v                                       |
-|  bindings: Map<Class, Binding>                                   |
-|    {Interface → (Implementation.class, SINGLETON)}              |
-|                          |                                       |
-|                          v                                       |
-|  [2] Eager startup resolve (Injector.build())                   |
-|    For each singleton binding:                                   |
-|      resolve(type) → recursively resolve dependencies           |
-|      detect cycles (inProgressSet)                              |
-|      cache in singletonCache                                     |
-|                          |                                       |
-|                          v                                       |
-|  singletonCache: Map<Class, Object>                              |
-|    {PaymentService → paymentService instance}                   |
-|    {OrderService → orderService instance}                       |
-|                          |                                       |
-|                          v                                       |
-|  [3] Runtime getBean(Class) — O(1) cache lookup                 |
-+------------------------------------------------------------------+
-```
+
+*Registration builds a `bindings` map, `Injector.build()` eagerly resolves every singleton (recursively, with cycle detection) into `singletonCache`, and `getBean()` is then a pure O(1) lookup.*
 
 **Component inventory:**
 - `Binding<T>` — records: implementation class, instance (for `toInstance()`), provider, scope
@@ -457,13 +450,20 @@ public class ServiceB {
 ```
 
 **Fixed (the `inProgress` set in `DependencyResolver`):**
-```
-resolve(A)              → inProgress = {A}
-  createInstance(A)     → needs B
-    resolve(B)          → inProgress = {A, B}
-      createInstance(B) → needs A
-        resolve(A)      → A is in inProgress!
-          → throw CircularDependencyException("A → B → A")
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Resolver as DependencyResolver
+
+    Caller->>Resolver: resolve(A)
+    Note right of Resolver: inProgress = {A}
+    Resolver->>Resolver: createInstance(A) needs B
+    Resolver->>Resolver: resolve(B)
+    Note right of Resolver: inProgress = {A, B}
+    Resolver->>Resolver: createInstance(B) needs A
+    Resolver->>Resolver: resolve(A)
+    Note right of Resolver: A already in inProgress!
+    Resolver-->>Caller: throw CircularDependencyException("A -> B -> A")
 ```
 
 The error message shows the exact cycle path, enabling fast diagnosis. Spring's circular

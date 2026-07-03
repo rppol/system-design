@@ -66,51 +66,83 @@ For server-side networking, NIO's `Selector` enables a single thread to monitor 
 ## 5. Architecture Diagrams
 
 ### Classic Blocking: One Thread Per Connection
-```
-Client 1 ─── TCP ─── Thread 1 (blocks on read, holds thread while waiting)
-Client 2 ─── TCP ─── Thread 2 (blocks on read)
-Client 3 ─── TCP ─── Thread 3 (blocks on read)
-  ...
-Client N ─── TCP ─── Thread N
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Problem: N=10,000 → 10,000 threads × ~1MB stack = ~10GB memory
-         + context-switch overhead between 10,000 OS threads
-Solution: Virtual threads (Java 21) make this affordable again
+    C1["Client 1"] -->|"TCP"| T1["Thread 1\nblocks on read"]
+    C2["Client 2"] -->|"TCP"| T2["Thread 2\nblocks on read"]
+    C3["Client 3"] -->|"TCP"| T3["Thread 3\nblocks on read"]
+    CN["Client N"] -->|"TCP"| TN["Thread N\nblocks on read"]
+
+    class C1,C2,C3,CN io
+    class T1,T2,T3,TN frozen
 ```
+
+Problem: N=10,000 concurrent clients means 10,000 held threads x ~1 MB stack =
+~10 GB memory, plus OS context-switch overhead across 10,000 threads. Virtual
+threads (Java 21) make this thread-per-connection model affordable again.
 
 ### NIO Reactor Pattern
-```
-ServerSocketChannel (registered OP_ACCEPT)
-        |
-        v
-   Selector.select()  ←─────────────────────────────────┐
-        |                                                 |
-        | returns ready keys                              |
-        v                                                 |
-  for (SelectionKey key : selector.selectedKeys()) {     |
-      if (key.isAcceptable()) accept(key) ──> register OP_READ
-      if (key.isReadable())   read(key)   ──> process request
-      if (key.isWritable())   write(key)  ──> send response
-  }                                                       |
-        └─────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-ONE thread handles thousands of connections.
-Trade-off: code is more complex; blocking inside event loop is catastrophic.
+    SSC["ServerSocketChannel\nregistered OP_ACCEPT"] --> SEL["Selector.select()"]
+    SEL -->|"returns ready keys"| LOOP{"for each SelectionKey"}
+    LOOP -->|"isAcceptable()"| ACC["accept(key) -> register OP_READ"]
+    LOOP -->|"isReadable()"| READ["read(key) -> process request"]
+    LOOP -->|"isWritable()"| WRITE["write(key) -> send response"]
+    ACC --> SEL
+    READ --> SEL
+    WRITE --> SEL
+
+    class SSC base
+    class SEL mathOp
+    class LOOP base
+    class ACC,READ,WRITE req
 ```
+
+ONE thread handles thousands of connections by looping on `select()`.
+Trade-off: the code is more complex than blocking I/O, and blocking inside the
+event loop is catastrophic — it stalls every connection that thread serves.
 
 ### HttpClient HTTP/2 Multiplexing
-```
-Single TCP connection to api.example.com:443
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Stream 1 ──> GET /users/1        <── 200 OK {"id":1}
-Stream 3 ──> GET /orders/100     <── 200 OK [{...}]
-Stream 5 ──> POST /events        <── 201 Created
-Stream 7 ──> GET /users/2        <── 200 OK {"id":2}
+    TCP["Single TCP connection\napi.example.com:443"]
+    TCP -->|"Stream 1"| S1["GET /users/1 -> 200 OK"]
+    TCP -->|"Stream 3"| S3["GET /orders/100 -> 200 OK"]
+    TCP -->|"Stream 5"| S5["POST /events -> 201 Created"]
+    TCP -->|"Stream 7"| S7["GET /users/2 -> 200 OK"]
 
-All 4 requests in flight simultaneously over ONE connection.
-HTTP/2 frames include a stream ID (1, 3, 5, 7...) to demultiplex.
-HttpClient manages connection pool and multiplexing automatically.
+    class TCP base
+    class S1,S3,S5,S7 req
 ```
+
+All 4 requests are in flight simultaneously over ONE connection: HTTP/2 frames
+carry a stream ID (1, 3, 5, 7...) to demultiplex responses, and `HttpClient`
+manages the connection pool and multiplexing automatically.
 
 ---
 
@@ -475,13 +507,34 @@ HTTP/2 server push allows the server to proactively send resources to the client
 
 **Scenario.** A pricing service makes **~50,000 external API calls/day** to a partner enrichment API (peak ~5/sec, bursts to 40/sec). The legacy code used `HttpURLConnection` (the Java 1.1 API): one new TCP+TLS connection per call, blocking I/O, and manual stream handling. A connection-leak bug — unclosed input streams under error paths — periodically exhausted ephemeral ports and produced `Too many open files`, paging on-call ~twice a month. The migration to the **Java 11 `HttpClient`** delivered HTTP/2 multiplexing (many concurrent requests over **one** TCP connection instead of thousands), a `CompletableFuture`-based async API, and built-in connection pooling — and the leak class disappeared because the new API manages the body lifecycle.
 
-```
-   BEFORE (HttpURLConnection, HTTP/1.1)        AFTER (HttpClient, HTTP/2)
-   --------------------------------------      --------------------------------
-   call 1 -> TCP+TLS handshake -> conn 1       call 1 ---\
-   call 2 -> TCP+TLS handshake -> conn 2       call 2 ----+--> 1 TCP conn,
-   ...      (no reuse, leak risk)              ...        |    multiplexed streams
-   50k calls -> 50k handshakes                 call N ---/     + pooled reuse
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Before["BEFORE: HttpURLConnection (HTTP/1.1)"]
+        direction LR
+        B1["call 1"] --> BC1["TCP+TLS handshake -> conn 1"]
+        B2["call 2"] --> BC2["TCP+TLS handshake -> conn 2"]
+        BN["...50k calls"] --> BCN["50k handshakes\nno reuse, leak risk"]
+    end
+
+    subgraph After["AFTER: HttpClient (HTTP/2)"]
+        direction LR
+        A1["call 1"] --> AC["1 TCP conn,\nmultiplexed streams\n+ pooled reuse"]
+        A2["call 2"] --> AC
+        AN["call N"] --> AC
+    end
+
+    class B1,B2,BN io
+    class BC1,BC2,BCN lossN
+    class A1,A2,AN io
+    class AC train
 ```
 
 ### Broken: HttpURLConnection Leaking Connections
@@ -574,6 +627,7 @@ A blocking `send()` on a *virtual thread* (Java 21) is fine — it unmounts from
 - [JDBC & Database](../jdbc_and_database/README.md) — connection pooling patterns and pool sizing (same principles apply to HTTP pools)
 - [Concurrency](../concurrency/README.md) — async HTTP with CompletableFuture, non-blocking I/O patterns
 - [HTTP Protocols (Backend)](../../backend/http_protocols/README.md) — HTTP/1.1 vs /2 vs /3, TLS 1.3, ALPN, SNI — the protocol deep-dive
+- [TCP/IP Deep Dive (Backend)](../../backend/tcp_ip_deep_dive/README.md) — handshakes, congestion control, and the transport-layer mechanics underneath every `Socket`/`HttpClient` call
 - [gRPC & Protobuf (Backend)](../../backend/grpc_and_protobuf/README.md) — Protobuf wire format, 4 RPC modes, interceptors, deadlines
 - [Case Study: Connection Pool](../case_studies/design_connection_pool.md) — full connection pooling design applicable to both DB and HTTP connections
 

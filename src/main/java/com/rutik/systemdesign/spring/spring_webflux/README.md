@@ -57,24 +57,40 @@ Reactor provides `Context` — an immutable, read-only key-value store that flow
 
 ### 4.1 Mono
 
-```
-subscribe()
-    |
-    v
- source  -->  [0 or 1 item] --> onNext(item) --> onComplete()
-                            OR  onError(e)
+```mermaid
+flowchart LR
+    classDef io    fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef train fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef lossN fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+
+    A["subscribe()"] --> B["source emits 0 or 1 item"]
+    B --> C["onNext(item) then onComplete()"]
+    B --> D["onError(e)"]
+
+    class A io
+    class B train
+    class C train
+    class D lossN
 ```
 
 Use cases: single database lookup, single HTTP call result, `void`-returning operations (use `Mono<Void>`).
 
 ### 4.2 Flux
 
-```
-subscribe()
-    |
-    v
- source  -->  item1 -> item2 -> item3 -> ... -> itemN -> onComplete()
-                                                      OR  onError(e)
+```mermaid
+flowchart LR
+    classDef io    fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef train fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef lossN fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+
+    A["subscribe()"] --> B["source emits item1 -> item2 -> item3 -> ... -> itemN"]
+    B --> C["onComplete()"]
+    B --> D["onError(e)"]
+
+    class A io
+    class B train
+    class C train
+    class D lossN
 ```
 
 Use cases: streaming database results, Server-Sent Events, paginated API responses.
@@ -145,23 +161,19 @@ Reactive driver specification for relational databases. Supports PostgreSQL, MyS
 
 ### Reactive Streams Protocol
 
-```
-Publisher                        Subscriber
-   |                                 |
-   |<------- subscribe(subscriber) --|
-   |                                 |
-   |-- onSubscribe(subscription) --->|
-   |                                 |
-   |<------- request(n) -------------|  Subscriber requests n items
-   |                                 |
-   |-- onNext(item1) --------------->|
-   |-- onNext(item2) --------------->|
-   |        ...                      |
-   |-- onNext(itemN) --------------->|
-   |                                 |
-   |<------- request(n) -------------|  Subscriber is ready for more
-   |        ...                      |
-   |-- onComplete() ---------------->|  OR  onError(e)
+```mermaid
+sequenceDiagram
+    participant P as Publisher
+    participant S as Subscriber
+
+    S->>P: subscribe(subscriber)
+    P->>S: onSubscribe(subscription)
+    S->>P: request(n)
+    P->>S: onNext(item1)
+    P->>S: onNext(item2)
+    P->>S: onNext(itemN)
+    S->>P: request(n) - ready for more
+    P->>S: onComplete() (or onError(e))
 ```
 
 ### Netty Event Loop vs Tomcat Thread-per-Request
@@ -211,68 +223,49 @@ SUBSCRIPTION TIME (subscribe() called — work begins):
 
 ### WebFlux Request Handling on Netty
 
-```
-HTTP Request
-     |
-     v
-+-------------------+
-| Netty EventLoop   |  (1 thread per CPU core, default min 4)
-| accepts connection|
-+--------+----------+
-         |
-         v
-+-------------------+
-|  HttpHandler      |  Spring WebFlux entry point
-+--------+----------+
-         |
-         v
-+-------------------+
-|  WebFilter chain  |  Reactive equivalent of Servlet filters
-+--------+----------+
-         |
-         v
-+-------------------+
-| DispatcherHandler |  Routes to RouterFunction or annotated @Controller
-+--------+----------+
-         |
-         v
-+-------------------+
-|  HandlerAdapter   |
-+--------+----------+
-         |
-         v
-+-----------------------------------------------+
-|  Handler method returns Mono<T> or Flux<T>    |
-|  Nothing executes yet — a recipe is returned  |
-+--------+--------------------------------------+
-         |
-         v
-+-------------------+
-|  Result Handler   |  Subscribes to the Mono/Flux
-|  writes response  |  Data flows when source emits
-+-------------------+
-         |
-         v
-   Netty writes bytes to socket (non-blocking NIO)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+
+    A["HTTP Request"] --> B["Netty EventLoop accepts connection - 1 thread per CPU core, min 4"]
+    B --> C["HttpHandler - Spring WebFlux entry point"]
+    C --> D["WebFilter chain - reactive equivalent of Servlet filters"]
+    D --> E["DispatcherHandler - routes to RouterFunction or @Controller"]
+    E --> F["HandlerAdapter"]
+    F --> G["Handler method returns Mono&lt;T&gt; or Flux&lt;T&gt; - nothing executes yet, a recipe is returned"]
+    G --> H["Result Handler subscribes to the Mono/Flux - data flows when source emits"]
+    H --> I["Netty writes bytes to socket - non-blocking NIO"]
+
+    class A io
+    class B base
+    class C train
+    class D mathOp
+    class E train
+    class F train
+    class G mathOp
+    class H train
+    class I io
 ```
 
 ### Context Propagation
 
-```
-Downstream (Subscriber side)          Upstream (Publisher side)
+```mermaid
+flowchart TD
+    classDef io    fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef train fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef base  fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-subscribe(subscriber)
-  + Context{traceId=abc123}
-           |
-           |  Context flows UPSTREAM (against data flow)
-           v
-  Operators can read Context via
-  Mono.deferContextual(...) or
-  .contextWrite(ctx -> ctx.put(k,v))
-           |
-           v
-  Source publisher can access Context
-  (e.g., inject traceId into DB query log)
+    A["subscribe(subscriber) - Context{traceId=abc123} written (downstream/subscriber side)"] --> B["Context flows UPSTREAM - against the data flow direction"]
+    B --> C["Operators read Context via Mono.deferContextual(...) or contextWrite(ctx -> ctx.put(k,v))"]
+    C --> D["Source publisher accesses Context (upstream/publisher side) - e.g. inject traceId into DB query log"]
+
+    class A io
+    class B base
+    class C train
+    class D train
 ```
 
 ---
@@ -756,6 +749,9 @@ A `Mono` or `Flux` represents a description of a computation, not the execution 
 **Q: What is backpressure, and how does Reactor implement it?**
 Backpressure is a flow-control mechanism by which a downstream subscriber signals to an upstream publisher how many items it is ready to consume, preventing the publisher from overwhelming the subscriber. Reactor implements the Reactive Streams specification: when a subscriber calls `subscription.request(n)`, the upstream publishes at most `n` items. Operators like `limitRate(n)` request `n` items at a time and replenish at 75% consumed. For sources that cannot honor backpressure (like `Flux.interval`), overflow strategies like `onBackpressureDrop()` or `onBackpressureBuffer(maxSize)` are applied.
 
+**Q: What backpressure strategies does Reactor provide when a publisher outpaces its subscriber?**
+Reactor provides five overflow strategies for backpressure: `limitRate`, buffered (bounded or unbounded), `onBackpressureDrop`, and `onBackpressureLatest`. `limitRate(n)` paces demand by requesting n items at a time and replenishing once 75% are consumed — the right default for well-behaved consumers. Unbounded `onBackpressureBuffer()` queues every item and risks an `OutOfMemoryError` under sustained overload, while bounded `onBackpressureBuffer(n)` caps the queue and errors on overflow instead. `onBackpressureDrop()` discards items the subscriber cannot keep up with, and `onBackpressureLatest()` keeps only the newest item — both are lossy but appropriate for metrics streams or live UI updates where freshness matters more than completeness. Sources that cannot honor backpressure natively, such as `Flux.interval`, must have one of these strategies applied explicitly or they will eventually exhaust memory.
+
 **Q: What is the difference between flatMap and concatMap?**
 `flatMap` subscribes to all inner publishers concurrently as each item arrives from the source, emitting results as they arrive — so output order may differ from input order. `concatMap` subscribes to the next inner publisher only after the previous one completes, preserving order but sacrificing concurrency. Use `flatMap` when maximum throughput matters and order is irrelevant (parallel HTTP calls). Use `concatMap` when operations must be sequential and ordered (processing financial events where order is contractually required).
 
@@ -766,10 +762,13 @@ Calling `block()` suspends the current thread until the inner publisher complete
 Reactor `Context` is an immutable, read-only key-value store that propagates upstream through the reactive chain (against the data flow direction). It replaces `ThreadLocal` for per-request state (trace IDs, security context, locale) in reactive pipelines where operators can execute on different threads and `ThreadLocal` values are therefore unreliable. You write to the context with `.contextWrite(Context.of(key, value))` and read it with `Mono.deferContextual(ctx -> ...)`. Spring Security Reactive uses this to propagate `Authentication` through reactive chains via `ReactiveSecurityContextHolder`.
 
 **Q: When should you use Spring WebFlux instead of Spring MVC?**
-WebFlux provides a benefit for I/O-bound applications with high concurrency — API gateways, proxies, microservices that aggregate many downstream calls, streaming endpoints, and applications handling thousands of simultaneous connections. For CPU-bound work, low-concurrency services, or teams unfamiliar with reactive programming, Spring MVC is simpler with equivalent performance. A practical threshold: if your service needs to handle more concurrent connections than your Tomcat thread pool (default 200), WebFlux is worth considering. If your service uses JDBC/JPA and you cannot migrate to R2DBC, the benefit of WebFlux is significantly reduced.
+WebFlux pays off for I/O-bound applications with high concurrency. Good fits include API gateways, proxies, microservices that aggregate many downstream calls, streaming endpoints, and applications handling thousands of simultaneous connections. For CPU-bound work, low-concurrency services, or teams unfamiliar with reactive programming, Spring MVC is simpler with equivalent performance. A practical threshold: if your service needs to handle more concurrent connections than your Tomcat thread pool (default 200), WebFlux is worth considering. If your service uses JDBC/JPA and you cannot migrate to R2DBC, the benefit of WebFlux is significantly reduced.
 
 **Q: How do you offload blocking I/O when you must use it inside a reactive chain?**
 Use `Mono.fromCallable(() -> blockingCall()).subscribeOn(Schedulers.boundedElastic())`. The `subscribeOn` operator moves the subscription (and therefore the execution of the callable) to a thread from `boundedElastic()`, which is a pool of expandable threads designed for blocking I/O. The result is then published back to the event loop for downstream processing. `boundedElastic()` defaults to `10 * CPU cores` threads and an unbounded task queue. For latency-sensitive paths, set an explicit bound with `Schedulers.newBoundedElastic(threadCap, queueSize, name)`.
+
+**Q: Why does Spring WebFlux need R2DBC instead of JDBC to be fully non-blocking?**
+JDBC is fundamentally blocking, which is incompatible with WebFlux's non-blocking event-loop threads. Every JDBC `Connection`, `Statement`, and `ResultSet` call parks the calling thread until the database responds; running that call directly on a Netty event-loop thread stalls every other request sharing that loop. Wrapping JDBC in `subscribeOn(Schedulers.boundedElastic())` makes it safe but not actually non-blocking — a thread is still held per in-flight query, just from a separate elastic pool, so you avoid deadlock without gaining the event loop's concurrency benefit. R2DBC (Reactive Relational Database Connectivity) is a driver specification built on the Reactive Streams contract from the start, so a query yields the thread while waiting for I/O and Reactor resumes it via callback when data arrives — no thread is held during the wait. The tradeoff is ecosystem maturity: R2DBC drivers still lag JDBC on stored procedures, some complex transaction features, and vendor-specific behavior, which is why teams sometimes settle for the `boundedElastic` wrapper instead of a full migration.
 
 **Q: What is the WebClient alternative to RestTemplate and why is RestTemplate deprecated for WebFlux?**
 `WebClient` is the non-blocking HTTP client for reactive applications. `RestTemplate` is synchronous — it blocks the calling thread for the duration of the HTTP call. Inside a WebFlux application, using `RestTemplate` blocks the event-loop thread, serializing I/O that should be concurrent. `WebClient` returns `Mono<T>` or `Flux<T>`, integrating natively with reactive chains. In Spring MVC applications, you can also use `WebClient` and call `.block()` at the boundary, replacing `RestTemplate` uniformly. Spring has officially deprecated `RestTemplate` for new development since Spring 5.
@@ -794,7 +793,7 @@ StepVerifier.create(userService.findById("123"))
 Spring Security for WebFlux uses `SecurityWebFilterChain` instead of Spring MVC's `SecurityFilterChain`. Authentication and authorization are implemented as `WebFilter` instances (WebFlux's equivalent of servlet filters). Security context is stored in Reactor `Context` and accessed via `ReactiveSecurityContextHolder.getContext()`. Configuration uses `@EnableWebFluxSecurity` and a `SecurityWebFilterChain` bean created with `ServerHttpSecurity`. Method security uses `@EnableReactiveMethodSecurity` and `@PreAuthorize` with SpEL that can reference the authenticated principal from the reactive context.
 
 **Q: What are the symptoms of blocking code on the event-loop, and how do you detect it?**
-Symptoms: p99 latency spikes to 10-100x baseline; thread dumps show all Netty event-loop threads in `WAITING` or `TIMED_WAITING` state on `java.util.concurrent.locks.*` or JDBC/socket operations; CPU usage drops to near zero despite high request rate. Detection: (1) Enable `BlockHound` — a Java agent that instruments blocking calls and throws `BlockingOperationError` when blocking happens on non-blocking threads; (2) Use `Schedulers.onScheduleHook` to log thread-scheduler mismatches; (3) Thread dumps at peak load — event-loop threads should always be in I/O selection or running short computations, never parked on locks.
+Symptoms include p99 latency spikes to 10-100x baseline and CPU usage dropping to near zero despite a high request rate. Thread dumps show all Netty event-loop threads in `WAITING` or `TIMED_WAITING` state on `java.util.concurrent.locks.*` or JDBC/socket operations. Detection: (1) Enable `BlockHound` — a Java agent that instruments blocking calls and throws `BlockingOperationError` when blocking happens on non-blocking threads; (2) Use `Schedulers.onScheduleHook` to log thread-scheduler mismatches; (3) Thread dumps at peak load — event-loop threads should always be in I/O selection or running short computations, never parked on locks.
 
 **Q: What is the difference between publishOn and subscribeOn?**
 `subscribeOn(scheduler)` affects where the subscription-time code (the source's `subscribe()` call and any upstream code) runs. It determines the thread on which the source begins emitting. `publishOn(scheduler)` affects where downstream operators and the subscriber run — it inserts a thread switch for all operators that appear after it in the chain. If you have a blocking source and want to run it on `boundedElastic`, use `subscribeOn`. If you want to run specific downstream operators on a different scheduler (e.g., move CPU-intensive processing to `parallel()`), use `publishOn`. In most real-world scenarios for offloading blocking I/O, `subscribeOn(Schedulers.boundedElastic())` is the correct choice.
@@ -841,27 +840,34 @@ Use `.timeout(Duration)` to emit a `TimeoutException` if the publisher does not 
 
 **Architecture:**
 
-```
-POST /checkout
-     |
-     v
-CheckoutController (WebFlux @RestController)
-     |
-     v
-+----------------------------------------------------+
-|  Mono.zip(                                         |
-|    inventoryClient.validate(items),    -- concurrent|
-|    paymentClient.validate(method),     -- concurrent|
-|    fraudClient.check(userId, amount),  -- concurrent|
-|    addressClient.getDefault(userId)    -- concurrent|
-|  )                                                  |
-|  All 4 subscribe simultaneously                     |
-|  Total latency = max(individual latencies)          |
-|  If ANY fails: others are cancelled via zip semantics|
-+----------------------------------------------------+
-     |
-     v
-Mono<CheckoutResult>  -->  200 OK or 422 Unprocessable
+```mermaid
+flowchart TD
+    classDef req    fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef train  fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+
+    A["POST /checkout"] --> B["CheckoutController - WebFlux @RestController"]
+    B --> C["Mono.zip - 4 concurrent validations"]
+    C --> D1["inventoryClient.validate(items)"]
+    C --> D2["paymentClient.validate(method)"]
+    C --> D3["fraudClient.check(userId, amount)"]
+    C --> D4["addressClient.getDefault(userId)"]
+    D1 --> E["All 4 subscribe simultaneously - total latency = max(individual latencies); any failure cancels the rest via zip semantics"]
+    D2 --> E
+    D3 --> E
+    D4 --> E
+    E --> F["Mono&lt;CheckoutResult&gt; - 200 OK or 422 Unprocessable"]
+
+    class A req
+    class B train
+    class C mathOp
+    class D1 train
+    class D2 train
+    class D3 train
+    class D4 train
+    class E mathOp
+    class F io
 ```
 
 **Key implementation:**
@@ -1019,3 +1025,5 @@ public Mono<Vehicle> getVehicle(@PathVariable String id) {
 - [Spring MVC Architecture](../spring_mvc_architecture/README.md) — Servlet stack comparison
 - [Spring Messaging](../spring_messaging/README.md) — reactive Kafka with WebFlux
 - [Concurrency (Java)](../../java/concurrency/README.md) — virtual threads vs reactive
+- [Reactive Programming (Java)](../../java/reactive_programming/README.md) — Project Reactor internals: Flux/Mono, Schedulers, backpressure in depth
+- [Async & Concurrency Patterns](../../backend/async_and_concurrency_patterns/README.md) — non-blocking I/O and concurrency patterns at the architecture level

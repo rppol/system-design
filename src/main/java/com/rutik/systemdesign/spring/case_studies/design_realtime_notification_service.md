@@ -66,38 +66,23 @@ TTL: 7 days for each notification; 30-day TTL for the user's list (ZSET)
 
 ## 3. High-Level Architecture
 
-```
- Event Sources (Kafka Producers)
- [Order Service] [Payment Service] [Chat Service]
-        |               |               |
-        v               v               v
- +-----------------------------------------+
- |           Kafka: notifications-topic    |
- |           (partitioned by user_id)      |
- +-----------------------------------------+
-              |
-              | Kafka consumers (one consumer group per pod)
-              v
- +---------------------------------------------------+
- |  NotificationPod-1          NotificationPod-N     |
- |  +--------------------+  ...+-------------------+ |
- |  | Kafka Consumer     |     | Kafka Consumer    | |
- |  | → Redis PUBLISH    |     | → Redis PUBLISH   | |
- |  +--------------------+     +-------------------+ |
- |  | Redis Subscriber   |     | Redis Subscriber  | |
- |  | → WS/SSE delivery  |     | → WS/SSE delivery | |
- |  +--------------------+     +-------------------+ |
- |  | WS Connection Map  |     | WS Connection Map | |
- |  | userId → sessions  |     | userId → sessions | |
- +---------------------------------------------------+
-              |
-              v
-    Redis Cluster
-    - Pub/Sub channels: user:<userId>
-    - Notification store: ZSET notif:<userId>
-    - Unread count: HASH unread:<userId>
+```mermaid
+sequenceDiagram
+    participant Sources as Event Sources<br/>(Order / Payment / Chat Service)
+    participant Kafka as Kafka: notifications-topic<br/>(partitioned by user_id)
+    participant Pod1 as NotificationPod-1<br/>(Kafka Consumer + Redis Subscriber + WS map)
+    participant PodN as NotificationPod-N<br/>(Kafka Consumer + Redis Subscriber + WS map)
+    participant Redis as Redis Cluster<br/>(Pub/Sub, notif ZSET, unread HASH)
 
- Clients connect to any pod via Load Balancer (sticky sessions optional but not required)
+    Sources->>Kafka: publish event (Kafka producer)
+    Kafka->>Pod1: consumer group delivers partition
+    Pod1->>Redis: PUBLISH user:{userId}
+    Redis-->>Pod1: relay - Pod1 subscribed to this user
+    Redis-->>PodN: relay - PodN also subscribed (user on 2 devices)
+    Pod1->>Pod1: WS Connection Map lookup, deliver to sessions
+    PodN->>PodN: WS Connection Map lookup, deliver to sessions
+
+    Note over Sources,Redis: Clients connect to any pod via Load Balancer (sticky sessions optional)
 ```
 
 ### Component Inventory

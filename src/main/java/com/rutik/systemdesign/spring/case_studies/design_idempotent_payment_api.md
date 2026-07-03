@@ -67,47 +67,37 @@ Writes:   134 req/s × 3 INSERTs in one TX = 134 TX/s (lightweight for Postgres)
 
 ## 3. High-Level Architecture
 
-```
- Client
-   |
-   | POST /payments  +  Idempotency-Key: <uuid>
-   v
- +----------------------------------+
- |  PaymentController               |
- |  @PostMapping("/payments")       |
- +----------------------------------+
-           |
-           v
- +----------------------------------+
- |  IdempotencyFilter               |
- |  1. Extract key + client_id      |
- |  2. SELECT from idempotency_keys |
- |  3. If found: return stored resp |
- |  4. Acquire DB-level advisory    |
- |     lock on (client_id, key)     |
- +----------------------------------+
-           |
-           v  [first call — no record yet]
- +----------------------------------+
- |  PaymentService.charge()         |
- |  @Transactional                  |
- |  - Call payment provider         |
- |  - INSERT INTO payments          |
- |  - INSERT INTO outbox            |
- |  - INSERT INTO idempotency_keys  |
- +----------------------------------+
-           |
-           v
- +-------------------------------+      +------------------+
- |  OutboxPoller (background)    |----->|  Apache Kafka    |
- |  SELECT unprocessed outbox    |      |  PaymentTopic    |
- |  DELETE after ACK             |      +------------------+
- +-------------------------------+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Controller as PaymentController
+    participant Filter as IdempotencyFilter
+    participant Service as PaymentService
+    participant DB as Postgres<br/>(payments, idempotency_keys, outbox)
+    participant Poller as OutboxPoller (background)
+    participant Kafka as Apache Kafka (PaymentTopic)
 
- Postgres
-   - payments (id, client_id, amount, currency, status, created_at)
-   - idempotency_keys (client_id, key, status, response_body, expires_at)
-   - outbox (id, aggregate_type, aggregate_id, event_type, payload, created_at)
+    Client->>Controller: POST /payments + Idempotency-Key
+    Controller->>Filter: extract key + client_id
+    Filter->>DB: SELECT FROM idempotency_keys
+
+    alt record found
+        Filter-->>Controller: return stored response
+    else first call - no record yet
+        Filter->>DB: acquire advisory lock on (client_id, key)
+        Filter->>Service: charge()
+        Service->>DB: INSERT payments + outbox + idempotency_keys (one TX)
+        Service-->>Controller: response
+    end
+
+    Controller-->>Client: response
+
+    loop every 100 ms
+        Poller->>DB: SELECT unprocessed outbox
+        Poller->>Kafka: publish event
+        Kafka-->>Poller: ack
+        Poller->>DB: DELETE after ACK
+    end
 ```
 
 ### Component Inventory

@@ -73,56 +73,71 @@ Spring Boot 3.0 / Spring Framework 6 made `ProblemDetail` the standard error res
 
 ### Request Validation Pipeline (Spring MVC)
 
+```mermaid
+flowchart TD
+    classDef req    fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef train  fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN  fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+
+    A["HTTP POST /orders with body"] --> B["DispatcherServlet"]
+    B --> C["HandlerAdapter resolves @RequestBody"]
+    C --> D["HttpMessageConverter.read() - parse JSON to CreateOrderRequest"]
+    D --> E{"@Valid annotation present?"}
+    E -->|Yes| F["Invoke Validator"]
+    E -->|No| I["@RestController method executes"]
+    F --> G{"All constraints pass?"}
+    G -->|Yes| I
+    G -->|"Violations found"| H["Throw MethodArgumentNotValidException"]
+    I --> J["Response"]
+    H --> K["@ControllerAdvice / ResponseEntityExceptionHandler"]
+    K --> L["ProblemDetail (RFC 7807) response"]
+
+    class A req
+    class B train
+    class C train
+    class D train
+    class E mathOp
+    class F train
+    class G mathOp
+    class H lossN
+    class I train
+    class J io
+    class K train
+    class L io
 ```
-  HTTP POST /orders  {body}
-      │
-      ▼
-  DispatcherServlet
-      │
-      ▼
-  HandlerAdapter → resolves @RequestBody
-      │
-      ├── HttpMessageConverter.read()  ← parse JSON to CreateOrderRequest
-      │
-      ├── @Valid annotation present?
-      │     └─ YES: invoke Validator
-      │           ├─ all constraints pass? → continue
-      │           └─ violations found?    → throw MethodArgumentNotValidException
-      │
-      ▼
-  @RestController method executes
-      │  (if @Validated on class + MethodValidationPostProcessor)
-      │  ├─ validate @RequestParam / @PathVariable via AOP proxy
-      │
-      ▼
-  Response
-      │
-  [on MethodArgumentNotValidException]
-  @ControllerAdvice / ResponseEntityExceptionHandler
-      │
-      ▼
-  ProblemDetail (RFC 7807) response:
-  {
-    "type": "about:blank",
-    "title": "Bad Request",
-    "status": 400,
-    "detail": "name: must not be blank; quantity: must be greater than 0",
-    "instance": "/orders"
-  }
+
+Example `ProblemDetail` body produced on the violation path (`H` → `K` → `L`):
+
+```json
+{
+  "type": "about:blank",
+  "title": "Bad Request",
+  "status": 400,
+  "detail": "name: must not be blank; quantity: must be greater than 0",
+  "instance": "/orders"
+}
 ```
 
 ### Exception Handling Resolution Order
 
-```
-  Exception thrown in Controller
-      │
-      ├─ 1. @ExceptionHandler on the same controller
-      │
-      ├─ 2. @ExceptionHandler in @ControllerAdvice (ordered by @Order)
-      │
-      ├─ 3. ResponseEntityExceptionHandler (base class for Boot 3 ProblemDetail)
-      │
-      └─ 4. DefaultHandlerExceptionResolver → 500 response
+```mermaid
+flowchart TD
+    classDef req   fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef train fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef lossN fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+
+    A["Exception thrown in Controller"] --> B["1. @ExceptionHandler on the same controller"]
+    B -->|"not handled"| C["2. @ExceptionHandler in @ControllerAdvice (ordered by @Order)"]
+    C -->|"not handled"| D["3. ResponseEntityExceptionHandler - Boot 3 ProblemDetail base class"]
+    D -->|"not handled"| E["4. DefaultHandlerExceptionResolver - 500 response"]
+
+    class A req
+    class B train
+    class C train
+    class D train
+    class E lossN
 ```
 
 ---
@@ -572,3 +587,4 @@ See the Spring case study: [Design a Multi-Tenant API](../case_studies/design_mu
 - [Request Handling](../request_handling/README.md) — @ControllerAdvice, ProblemDetail
 - [Spring MVC Architecture](../spring_mvc_architecture/README.md) — HandlerExceptionResolver
 - [Case Study: Multi-Tenant API](../case_studies/design_multitenant_api.md) — tenant-aware error responses
+- [REST API Design](../../backend/rest_api_design/README.md) — error response contracts, RFC 7807 in the broader REST API design context

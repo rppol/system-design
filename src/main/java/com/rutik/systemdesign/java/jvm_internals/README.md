@@ -102,40 +102,39 @@ Total: 8+4+4+8+4 = 28B -> padded to 32B
 ```
 
 ### GC Tri-Color Marking (Concurrent GC)
-```
-WHITE = not yet visited (candidate for collection)
-GRAY  = visited, but references not yet scanned
-BLACK = visited, all references scanned (definitely live)
 
-Initial: all objects WHITE
-Phase 1 (STW): mark GC roots GRAY
-Phase 2 (concurrent): scan GRAY objects:
-  - mark referenced objects GRAY
-  - mark self BLACK
-Phase 3: any remaining WHITE objects are garbage
-
-Problem: mutator thread assigns black -> white reference during concurrent phase
-Solution: write barrier (incremental update OR snapshot-at-the-beginning)
-G1 uses post-write barrier (incremental update)
-ZGC uses load barrier (colored pointers)
+```mermaid
+stateDiagram-v2
+    [*] --> WHITE: object allocated
+    WHITE --> GRAY: Phase 1 (STW) - mark\nGC roots gray
+    GRAY --> GRAY: Phase 2 (concurrent) - scan\nrefs, mark them gray
+    GRAY --> BLACK: self fully scanned,\ndefinitely live
+    WHITE --> Reclaimed: Phase 3 - still white\nat end = garbage
+    BLACK --> [*]: retained, survives GC
+    note right of GRAY
+        Mutator writing a black -> white reference mid-scan
+        breaks the invariant unless a write barrier catches it.
+        G1: incremental update (post-write barrier).
+        ZGC: load barrier (colored pointers).
+    end note
 ```
+
+WHITE = not yet visited (candidate for collection); GRAY = visited but references not yet scanned; BLACK = visited with all references scanned (definitely live). The write barrier is what makes concurrent marking safe: without it, a mutator thread could point a BLACK object at a WHITE one mid-scan and the WHITE object would be wrongly collected even though it is still reachable.
 
 ### Java Memory Model — Happens-Before Edges
-```
-Thread A                    Thread B
-write x = 42
-volatile write flag = true
-                            volatile read flag (sees true) [hb edge here]
-                            read x  (guaranteed to see 42)
 
-Happens-before edges:
-1. Program order: each action hb the next in same thread
-2. Monitor: unlock hb subsequent lock of same monitor
-3. Volatile: volatile write hb subsequent volatile read
-4. Thread start: Thread.start() hb any action in started thread
-5. Thread join: any action in thread hb Thread.join() return
-6. Constructor: object construction hb finalize() of same object
+```mermaid
+sequenceDiagram
+    participant A as Thread A
+    participant B as Thread B
+    A->>A: write x = 42
+    A->>A: volatile write flag = true
+    Note over A,B: happens-before edge — volatile write hb subsequent volatile read
+    B->>B: volatile read flag (sees true)
+    B->>B: read x (guaranteed to see 42)
 ```
+
+Happens-before edges: (1) Program order — each action hb the next in the same thread. (2) Monitor — unlock hb subsequent lock of the same monitor. (3) Volatile — volatile write hb subsequent volatile read. (4) Thread start — `Thread.start()` hb any action in the started thread. (5) Thread join — any action in a thread hb `Thread.join()` returning. (6) Constructor — object construction hb `finalize()` of the same object.
 
 ---
 
@@ -196,26 +195,31 @@ Practical result: sub-1ms pauses on 1TB heaps
 
 ### Class Loading: Load → Link → Initialize
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["bytecode source: filesystem, network, or JAR"]) --> load["1. Load\ncreate Class object in metaspace;\nBootstrap then Platform then App loader,\nparent delegation"]
+    load --> verify["2a. Verify\nbytecode safety checks"]
+    verify --> prepare["2b. Prepare\nallocate static fields, set defaults"]
+    prepare --> resolve["2c. Resolve\nsymbolic refs to direct refs (optional)"]
+    resolve --> init["3. Initialize\nrun clinit; thread-safe, at-most-once, lazy"]
+    init --> ready(["class ready for use"])
+    load -.->|"too many classes / leaked ClassLoader"| oom["OutOfMemoryError: Metaspace"]
+
+    class start,ready io
+    class load,verify,prepare,resolve mathOp
+    class init train
+    class oom lossN
 ```
-1. Load: find bytecode (filesystem/network/JAR), create Class object in metaspace
-   Bootstrap ClassLoader: rt.jar / JDK modules
-   Platform ClassLoader: Java SE APIs not in bootstrap
-   App ClassLoader: classpath JARs
 
-   Parent delegation: check parent first; if not found, load self
-
-2. Link:
-   a. Verify: bytecode safety (type safety, stack overflow checks)
-   b. Prepare: allocate memory for static fields, set to defaults (0/null/false)
-   c. Resolve: resolve symbolic references to direct references (optional)
-
-3. Initialize:
-   - Execute <clinit> (static initializer blocks + static field assignments)
-   - Thread-safe: JVM guarantees at-most-once execution
-   - Lazy: only when class first actively used (first instance, static call, etc.)
-
-OutOfMemoryError: Metaspace -> too many class definitions (common in dynamic proxies, CGLIB)
-```
+Bootstrap ClassLoader loads `rt.jar`/JDK modules, Platform ClassLoader loads Java SE APIs not in bootstrap, App ClassLoader loads classpath JARs — parent delegation means each checks its parent first. The dashed edge shows the common production failure: a class generator (CGLIB, dynamic proxies) or a leaked ClassLoader piles up class metadata that never unloads, exhausting Metaspace.
 
 ### Double-Checked Locking — Broken vs Fixed
 
@@ -641,5 +645,7 @@ The success criterion is not "no GC" but "old-gen occupancy is flat over the soa
 - [Java Memory Model](../java_memory_model/README.md) — memory barriers, happens-before rules that underpin JVM memory guarantees
 - [Performance & Tuning](../performance_and_tuning/README.md) — GC tuning flags, JIT profiling, JMH methodology
 - [Foreign Function & Memory API](../foreign_function_and_memory_api/README.md) — MemorySegment, off-heap allocation, replacing Unsafe
+- [Memory Management & Virtual Memory](../../cs_fundamentals/memory_management_and_virtual_memory/README.md) — paging, virtual address translation, and OS-level memory concepts beneath heap/Metaspace
+- [Performance Profiling](../../backend/performance_profiling/README.md) — async-profiler, flame graphs, and JFR methodology for diagnosing the GC/JIT issues in this module
 
 **Why is `InitiatingHeapOccupancyPercent` relevant to a pause storm?** IHOP controls when G1 starts the concurrent marking cycle. If it starts too late, the old gen fills before marking completes and G1 falls back to a costly full GC (evacuation failure). Lowering it starts reclamation earlier, smoothing pauses while the leak is being fixed.

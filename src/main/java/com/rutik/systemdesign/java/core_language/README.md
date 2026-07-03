@@ -72,19 +72,31 @@ This module covers the foundational contracts that underpin all Java programs: t
 ## 5. Architecture Diagrams
 
 ### Object Hierarchy & equals/hashCode Contract
-```
-java.lang.Object
-  |-- equals(Object o): boolean   // default: identity (==)
-  |-- hashCode(): int              // default: based on memory address (JVM-impl)
-  |-- toString(): String           // default: ClassName@hexHashCode
-  |-- clone(): Object              // protected; shallow copy; needs Cloneable
-  |-- finalize(): void             // deprecated; called before GC (unreliable)
-  |-- wait() / notify() / notifyAll()  // intrinsic lock coordination
-  |-- getClass(): Class<?>         // runtime type
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-RULE: if a.equals(b) == true, then a.hashCode() == b.hashCode() MUST be true
-      (converse NOT required: hash collision is allowed)
+    OBJ["java.lang.Object"] --> EQ["equals(Object o): boolean\ndefault: identity (==)"]
+    OBJ --> HC["hashCode(): int\ndefault: memory address (JVM-impl)"]
+    OBJ --> TS["toString(): String\ndefault: ClassName@hexHashCode"]
+    OBJ --> CL["clone(): Object\nprotected; shallow copy; needs Cloneable"]
+    OBJ --> FI["finalize(): void\ndeprecated; unreliable pre-GC hook"]
+    OBJ --> WN["wait() / notify() / notifyAll()\nintrinsic lock coordination"]
+    OBJ --> GC["getClass(): Class&lt;?&gt;\nruntime type"]
+
+    class OBJ base
+    class EQ,HC lossN
+    class TS,GC io
+    class CL,FI frozen
+    class WN req
 ```
+**Rule**: if `a.equals(b) == true`, then `a.hashCode() == b.hashCode()` MUST be true (the converse is NOT required — hash collisions are legal).
 
 ### Static vs Dynamic Dispatch
 ```
@@ -458,19 +470,25 @@ Also: never include mutable fields in `hashCode()` if the object will be stored 
 
 Because the type crosses 40 service boundaries, a single defect in `equals`/`hashCode`/`compareTo` does not fail in one place — it silently corrupts maps, drops set members, and produces inconsistent sort orders across the fleet. The contract MUST be airtight.
 
-```
-        Pricing Engine                    Discount Resolver
-   HashMap<Money,LineItem>            TreeSet<Money> (sorted)
-            |  lookup by hashCode+equals     |  navigation by compareTo
-            v                                v
-   +---------------------------------------------------+
-   |          commons-money.jar : Money (final)        |
-   |  amount:BigDecimal(normalized) | currency:Currency|
-   |  equals  hashCode  compareTo  toString            |
-   +---------------------------------------------------+
-            ^                                ^
-   Kafka ledger topic                 FX conversion service
-   (4M serializations/day)            (compareTo for thresholds)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PE["Pricing Engine\nHashMap&lt;Money,LineItem&gt;\nlookup by hashCode+equals"] --> MONEY
+    DR["Discount Resolver\nTreeSet&lt;Money&gt; (sorted)\nnavigation by compareTo"] --> MONEY
+    MONEY["commons-money.jar : Money (final)\namount: BigDecimal (normalized) · currency: Currency\nequals · hashCode · compareTo · toString"]
+    KAFKA["Kafka ledger topic\n4M serializations/day"] --> MONEY
+    FX["FX conversion service\ncompareTo for thresholds"] --> MONEY
+
+    class PE,DR req
+    class MONEY base
+    class KAFKA,FX io
 ```
 
 #### Broken patterns, then fixes
@@ -605,5 +623,7 @@ if ("USD".equals(code)) { ... }     // FIX: value comparison, null-safe on the l
 - [Java Interview Patterns](../java_interview_patterns/README.md) — immutable class recipe, equals/hashCode contract, Builder pattern
 - [Generics & Type System](../generics_and_type_system/README.md) — type erasure, wildcards, polymorphism at the type level
 - [Java Memory Model](../java_memory_model/README.md) — safe publication of object construction, `final` field semantics
+- [SOLID Principles](../../lld/solid_principles/README.md) — Liskov Substitution Principle, polymorphism and substitutability at the design level
+- [Arrays, Strings & Hashing](../../cs_fundamentals/arrays_strings_and_hashing/README.md) — hashing fundamentals underlying the equals/hashCode contract
 
 **Should you use a record here?** A record removes the `equals`/`hashCode`/`toString` boilerplate, but you must still add a compact constructor for scale normalization and implement `Comparable` manually. Records are a good fit precisely because the type is an immutable data carrier.

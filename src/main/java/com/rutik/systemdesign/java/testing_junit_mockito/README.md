@@ -77,32 +77,51 @@ JUnit 5 (released 2017, composed of JUnit Platform + JUnit Jupiter + JUnit Vinta
 ## 5. Architecture Diagrams
 
 ### Test Lifecycle (per test method)
-```
-@BeforeAll (once, static) ─────────────────────────────────┐
-                                                             |
-  @BeforeEach ──> @Test (test method 1) ──> @AfterEach     |
-  @BeforeEach ──> @Test (test method 2) ──> @AfterEach     |
-  @BeforeEach ──> @Test (test method 3) ──> @AfterEach     |
-                                                             |
-@AfterAll (once, static) ──────────────────────────────────┘
+```mermaid
+stateDiagram-v2
+    [*] --> BeforeAll
+    BeforeAll --> BeforeEach
+    BeforeEach --> Test
+    Test --> AfterEach
+    AfterEach --> BeforeEach: next test method
+    AfterEach --> AfterAll: all methods done
+    AfterAll --> [*]
 
-Default: new instance per test method (maximizes isolation)
-@TestInstance(PER_CLASS): reuse one instance (needed for @BeforeAll on non-static)
+    state "@BeforeAll (once, static)" as BeforeAll
+    state "@BeforeEach" as BeforeEach
+    state "@Test" as Test
+    state "@AfterEach" as AfterEach
+    state "@AfterAll (once, static)" as AfterAll
 ```
+
+Default: new instance per test method (maximizes isolation). `@TestInstance(PER_CLASS)`: reuse one instance (needed for `@BeforeAll` on non-static).
 
 ### Mockito @InjectMocks Injection Strategy
-```
-@InjectMocks tries (in this order):
-  1. Constructor injection:
-     largest constructor with all mocks available
-  2. Setter injection:
-     setters matching mock type/name
-  3. Field injection:
-     fields matching mock type/name (least preferred)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-If none works: creates instance with no-arg constructor, fields remain null
-— always check your mocks are actually injected (NPE at runtime = silent injection failure)
+    Start(["@InjectMocks resolves a target"]) --> C{"Constructor injection possible?\n(largest ctor with all mocks available)"}
+    C -->|yes| Done1["Inject via constructor"]
+    C -->|no| S{"Setter injection possible?\n(setters matching mock type/name)"}
+    S -->|yes| Done2["Inject via setters"]
+    S -->|no| F{"Field injection possible?\n(fields matching mock type/name)"}
+    F -->|yes| Done3["Inject via fields (least preferred)"]
+    F -->|no| Fail["No-arg constructor used;\nfields remain null"]
+
+    class Start req
+    class C,S,F mathOp
+    class Done1,Done2,Done3 train
+    class Fail lossN
 ```
+
+If none of the three strategies works: Mockito creates the instance with a no-arg constructor and leaves the unmatched fields null — always check your mocks are actually injected (an NPE at runtime is often a silent injection failure, not a bug in the code under test).
 
 ### AAA Structure
 ```
@@ -554,15 +573,23 @@ Martin Fowler's taxonomy (from xUnit Test Patterns):
 
 **Scenario.** A `PaymentService` orchestrates three collaborators that must never run in a unit test: a `PaymentGateway` (external HTTP, costs real money), an `AuditRepository` (a database), and a `FraudDetector` (a remote ML service, ~200ms/call). The team enforces a **test pyramid of roughly 80% unit / 15% integration / 5% end-to-end**; this class is the unit tier, so all three collaborators are mocked with Mockito and the suite runs **~1,200 unit tests in under 8 seconds** on Java 17. The load-bearing assertion is an `ArgumentCaptor` check that the *exact* audit record (amount, status, fraud score) was written — a previous incident shipped a transposed amount/score with no test to catch it.
 
+```mermaid
+sequenceDiagram
+    participant Test
+    participant Service as PaymentService.charge(req)
+    participant Fraud as fraudDetector (Mock, stubbed)
+    participant Gateway as gateway (Mock, stubbed)
+    participant Audit as auditRepo (Mock, captured)
+
+    Test->>Service: charge(req)
+    Service->>Fraud: score(req)
+    Fraud-->>Service: fraud score
+    Service->>Gateway: charge(req)
+    Gateway-->>Service: receipt
+    Service->>Audit: save(record)
 ```
-            +------------------- unit under test -------------------+
-   test --> |  PaymentService.charge(req)                           |
-            |     |-> fraudDetector.score(req)    [@Mock, stubbed]   |
-            |     |-> gateway.charge(req)         [@Mock, stubbed]   |
-            |     |-> auditRepo.save(record)      [@Mock, captured]  |
-            +-------------------------------------------------------+
-   pyramid:   unit 80% (here) | integration 15% | e2e 5%
-```
+
+Test pyramid position: unit 80% (this test, all three collaborators mocked) | integration 15% | e2e 5%.
 
 ### The Test Class
 
@@ -666,5 +693,6 @@ service = new PaymentService(gateway, auditRepo, fraudDetector);
 
 - [Concurrency](../concurrency/README.md) — concurrent test patterns, thread-safety verification strategies
 - [JDBC & Database](../jdbc_and_database/README.md) — integration test patterns for database code, Testcontainers usage
+- [Backend Testing Strategies](../../backend/backend_testing_strategies/README.md) — test pyramid, contract testing, and Testcontainers at the service/system level beyond this module's unit-test focus
 
 **Why does the test pyramid put 80% of tests at the unit level?** Unit tests are the cheapest to run and the most precise at localizing failures; integration and e2e tests are slower and flakier, so you keep them few and reserve them for wiring and contract coverage that mocks cannot prove — inverting the ratio (the "ice-cream cone") yields slow, brittle suites.

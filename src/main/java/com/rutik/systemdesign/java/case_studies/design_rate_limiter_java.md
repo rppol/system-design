@@ -94,30 +94,29 @@ Total: ~200 bytes per key
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    IR(["Incoming Request"])
+    MK["MultiKeyRateLimiter (per-user / per-API-key)\nkey: user:abc · ip:1.2.3.4 · global\nConcurrentHashMap of String to TokenBucketRateLimiter"]
+    TB["TokenBucketRateLimiter (single key)\ntokens: AtomicLong (current x SCALE)\nlastRefillNanos: AtomicLong\nmaxTokens: long (capacity x SCALE)\nrefillRatePerNano: long (tokens x SCALE / 1_000_000_000)\nlock: ReentrantLock (for blocking acquire only)\ntokenAvailable: Condition (signaled on refill)"]
+
+    IR --> MK
+    MK -->|"delegates to"| TB
+
+    class IR io
+    class MK base
+    class TB train
 ```
-  ┌──────────────────────────────────────────────────────────────┐
-  │                   Incoming Request                           │
-  └───────────────────────┬──────────────────────────────────────┘
-                          │
-                          ▼
-  ┌──────────────────────────────────────────────────────────────┐
-  │             MultiKeyRateLimiter (per-user / per-API-key)     │
-  │   key: "user:abc"  key: "ip:1.2.3.4"  key: "global"         │
-  │   ConcurrentHashMap<String, TokenBucketRateLimiter>          │
-  └──────────────────┬───────────────────────────────────────────┘
-                     │  delegates to
-                     ▼
-  ┌──────────────────────────────────────────────────────────────┐
-  │              TokenBucketRateLimiter (single key)             │
-  │                                                              │
-  │   tokens: AtomicLong        (current × SCALE)               │
-  │   lastRefillNanos: AtomicLong                                │
-  │   maxTokens: long           (capacity × SCALE)              │
-  │   refillRatePerNano: long   (tokens × SCALE / 1_000_000_000)│
-  │   lock: ReentrantLock       (for blocking acquire only)      │
-  │   tokenAvailable: Condition (signaled on refill)             │
-  └──────────────────────────────────────────────────────────────┘
-```
+
+Incoming requests are routed by key (user, API key, or IP) to a per-key `TokenBucketRateLimiter`; the map delegates every check to the matching bucket instance.
 
 ### Data flow for `tryAcquire()`
 
@@ -133,16 +132,26 @@ Total: ~200 bytes per key
 
 ### Two-tier architecture (production)
 
-```
-  Request
-     │
-     ├─► In-process limiter (AtomicLong, ~0 latency)
-     │     "shed obvious abuse cheaply"
-     │     limit: 10× global Redis quota (generous, per-instance)
-     │
-     └─► Redis Lua limiter (0.5 ms RTT)
-           "enforce precise cluster-wide quota"
-           limit: the contract quota (e.g., 1,000 req/sec)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    R(["Request"])
+    IP["In-process limiter\nAtomicLong · ~0 latency\nshed obvious abuse cheaply\nlimit: 10x global Redis quota (generous, per-instance)"]
+    RL["Redis Lua limiter\n0.5 ms RTT\nenforce precise cluster-wide quota\nlimit: the contract quota (e.g. 1,000 req/sec)"]
+
+    R --> IP
+    R --> RL
+
+    class R req
+    class IP mathOp
+    class RL frozen
 ```
 
 ---
@@ -363,7 +372,7 @@ public class MultiKeyRateLimiter {
 
 **Guava `RateLimiter`**: implements a token bucket with a warm-up period (slowly builds to full rate from zero, preventing burst on startup). Uses a single `synchronized` block for correctness; throughput is ~2M checks/sec — sufficient for most single-JVM workloads. Its `tryAcquire(timeout)` returns the wait time in seconds, enabling smooth permit scheduling (callers sleep their allocated wait rather than spinning).
 
-**Resilience4j `RateLimiter`**: provides both `AtomicRateLimiter` (CAS-based, ~8M calls/sec, no lock) and `SemaphoreBasedRateLimiter` (for integration tests). Configurable via `RateLimiterConfig.custom()`. Integrates with Micrometer for `rate_limiter.available_permissions` and `rate_limiter.waiting_threads` metrics. See [Resilience4j Patterns](../spring/case_studies/cross_cutting/resilience4j_patterns.md) for the Spring integration.
+**Resilience4j `RateLimiter`**: provides both `AtomicRateLimiter` (CAS-based, ~8M calls/sec, no lock) and `SemaphoreBasedRateLimiter` (for integration tests). Configurable via `RateLimiterConfig.custom()`. Integrates with Micrometer for `rate_limiter.available_permissions` and `rate_limiter.waiting_threads` metrics. See [Resilience4j Patterns](../../spring/case_studies/cross_cutting/resilience4j_patterns.md) for the Spring integration.
 
 **NGINX `limit_req` module**: implements a leaky bucket (smooth output) rather than token bucket (burst-friendly). `burst` parameter sets the queue size; `nodelay` converts the queue into burst-then-drop behavior (equivalent to a token bucket). Per-IP and per-URI limits via shared memory zones (`limit_req_zone`). Rate math is computed using millisecond-resolution timestamps stored in shared memory — same one-clock principle as Redis `TIME`.
 

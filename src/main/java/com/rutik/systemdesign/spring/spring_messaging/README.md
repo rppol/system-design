@@ -93,103 +93,117 @@ STOMP (Simple Text Oriented Messaging Protocol) is a frame-based protocol over W
 
 ### Kafka Producer / Consumer Flow in Spring
 
-```
-+-------------------+          +--------------------+          +--------------------+
-|  Spring Service   |          |   Apache Kafka     |          |  @KafkaListener    |
-|                   |          |   Broker Cluster   |          |  (Consumer Group)  |
-|  KafkaTemplate    | -------> | Topic: orders      | -------> |  partition 0  [T1] |
-|  .send(topic, k,v)|          |   partition 0      |          |  partition 1  [T2] |
-|                   |          |   partition 1      |          |  partition 2  [T3] |
-+-------------------+          |   partition 2      |          +--------------------+
-                                +--------------------+
-                                        |
-                                  on processing failure
-                                        |
-                                        v
-                               +--------------------+
-                               | Dead Letter Topic  |
-                               | orders.DLT         |
-                               +--------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    svc["Spring Service\nKafkaTemplate.send(topic, k, v)"] --> broker["Apache Kafka Broker Cluster\nTopic: orders\npartition 0 / 1 / 2"]
+    broker --> listener["@KafkaListener consumer group\npartition 0 -> T1\npartition 1 -> T2\npartition 2 -> T3"]
+    broker -- "on processing failure" --> dlt["Dead Letter Topic\norders.DLT"]
+
+    class svc req
+    class broker frozen
+    class listener train
+    class dlt lossN
 ```
 
 ### Exactly-Once Kafka Flow
 
-```
-  Producer                  Broker                  Consumer
-     |                        |                        |
-     |-- BEGIN TX ----------->|                        |
-     |-- send(msg)  --------->| [msg: uncommitted]     |
-     |-- COMMIT TX ---------->| [msg: committed]       |
-     |                        |                        |
-     |                        |<-- poll() -------------|
-     |                        |-- msg (committed) ---->|
-     |                        |                        | process
-     |                        |<-- commit offset ------|
+```mermaid
+sequenceDiagram
+    participant P as Producer
+    participant B as Broker
+    participant C as Consumer
+
+    P->>B: BEGIN TX
+    P->>B: send(msg) [uncommitted]
+    P->>B: COMMIT TX [committed]
+    C->>B: poll()
+    B->>C: msg (committed, isolation.level=read_committed)
+    Note over C: process
+    C->>B: commit offset
 ```
 
 ### RabbitMQ DLX Flow
 
-```
-  Publisher --> Exchange --> Queue (x-dead-letter-exchange=dlx)
-                                  |
-                              [NACK or TTL expired or queue full]
-                                  |
-                                  v
-                             DLX Exchange --> Dead Letter Queue
-                                                    |
-                                              [Manual inspection
-                                               or retry consumer]
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pub["Publisher"] --> ex["Exchange"] --> q["Queue\nx-dead-letter-exchange=dlx"]
+    q -- "NACK or TTL expired or queue full" --> dlx["DLX Exchange"]
+    dlx --> dlq["Dead Letter Queue\nmanual inspection or retry consumer"]
+
+    class pub req
+    class ex,dlx mathOp
+    class q frozen
+    class dlq lossN
 ```
 
 ### Spring Cloud Stream Functional
 
-```
-  Kafka Topic [orders-in]
-         |
-         v
-  +-------------------+
-  |  Function<Order,  |  <- Spring Cloud Stream binder
-  |  Receipt> bean    |     maps input binding to topic
-  +-------------------+
-         |
-         v
-  Kafka Topic [orders-out]
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    topicIn(["Kafka Topic\norders-in"]) --> fn["Function bean: Order -> Receipt\nSpring Cloud Stream binder maps input binding to topic"]
+    fn --> topicOut(["Kafka Topic\norders-out"])
+
+    class topicIn,topicOut frozen
+    class fn train
 ```
 
 ### @Async Thread Pool
 
-```
-  Caller Thread
-       |
-       | @Async method call
-       |
-       v
-  ThreadPoolTaskExecutor
-  +----------------------------------+
-  |  corePoolSize: 10                |
-  |  maxPoolSize:  50                |
-  |  queueCapacity: 100              |
-  |  [T1][T2][T3]...[T10] (running)  |
-  |  [Q1][Q2]...[Q100]    (queued)   |
-  +----------------------------------+
-       |
-       | Returns CompletableFuture<T> immediately to caller
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    caller(["Caller Thread"]) -- "@Async method call" --> pool["ThreadPoolTaskExecutor\ncorePoolSize 10 / maxPoolSize 50 / queueCapacity 100\n10 threads running, up to 100 queued"]
+    pool -- "returns CompletableFuture immediately" --> caller
+
+    class caller req
+    class pool train
 ```
 
 ### WebSocket STOMP Architecture
 
-```
-  Browser                      Spring Backend
-     |                               |
-     |-- WS Upgrade ----------------->|
-     |<- 101 Switching Protocols -----|
-     |                               |
-     |-- STOMP CONNECT -------------->|
-     |-- SUBSCRIBE /topic/prices ---->|  SimpleBroker or
-     |                               |  External STOMP Broker
-     |                               |  (RabbitMQ STOMP plugin)
-     |<-- MESSAGE /topic/prices ------|  SimpMessagingTemplate
-     |<-- MESSAGE /topic/prices ------|  .convertAndSend(...)
+```mermaid
+sequenceDiagram
+    participant Br as Browser
+    participant Be as Spring Backend
+
+    Br->>Be: WS Upgrade
+    Be-->>Br: 101 Switching Protocols
+    Br->>Be: STOMP CONNECT
+    Br->>Be: SUBSCRIBE /topic/prices
+    Note over Be: SimpleBroker or external STOMP broker (RabbitMQ STOMP plugin)
+    Be-->>Br: MESSAGE /topic/prices (SimpMessagingTemplate.convertAndSend)
+    Be-->>Br: MESSAGE /topic/prices
 ```
 
 ---
@@ -999,25 +1013,28 @@ The DLQ is consumed by a separate listener for manual review or republish after 
 
 ### Architecture
 
-```
-   orders topic (24 partitions, 10k events/sec)
-        |
-        v
-   +----------------------------------------+
-   | ConcurrentKafkaListenerContainerFactory|  concurrency=24 (1 thread/partition)
-   |  AckMode = MANUAL                      |
-   +-------------------+--------------------+
-                       | @KafkaListener
-                       v
-   +----------------------------------------+
-   | @Transactional process()               |
-   |  1. write order ledger (DB)            |
-   |  2. ack.acknowledge() AFTER commit     |
-   +-------------------+--------------------+
-          success      |        failure (3 retries, backoff)
-          v            v
-   @Async notify   DefaultErrorHandler ---> DeadLetterPublishingRecoverer
-   (email/SMS)                              ---> orders.DLT
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    topic(["orders topic\n24 partitions, 10k events/sec"]) --> factory["ConcurrentKafkaListenerContainerFactory\nconcurrency=24 (1 thread/partition), AckMode=MANUAL"]
+    factory -- "@KafkaListener" --> process["@Transactional process()\n1. write order ledger (DB)\n2. ack.acknowledge() AFTER commit"]
+    process -- success --> notify["@Async notify\nemail / SMS"]
+    process -- "failure (3 retries, backoff)" --> handler["DefaultErrorHandler"]
+    handler --> recoverer["DeadLetterPublishingRecoverer"]
+    recoverer --> dlt["orders.DLT"]
+
+    class topic frozen
+    class factory,process train
+    class notify req
+    class handler,recoverer mathOp
+    class dlt lossN
 ```
 
 ### Listener and Container Configuration
@@ -1149,3 +1166,6 @@ ThreadPoolTaskExecutor notifyExecutor() {
 - [Spring Batch](../spring_batch/README.md) — event-driven batch triggers
 - [Spring Events & Scheduling](../spring_events_and_scheduling/README.md) — @TransactionalEventListener
 - [Case Study: Event-Driven Microservice](../case_studies/design_event_driven_microservice.md) — Kafka integration
+- [Kafka Deep Dive](../../backend/kafka_deep_dive/README.md) — Kafka internals, EOS, Schema Registry
+- [Message Queues (HLD)](../../hld/message_queues/README.md) — broker architecture at the system-design level
+- [Event-Driven Fundamentals](../../backend/event_driven_fundamentals/README.md) — choreography vs orchestration

@@ -130,44 +130,48 @@ public class MyBenchmark {
 
 ### JMH execution model
 
-```
-@Benchmark method
-        |
-        v
-+-----------------------------------------------+
-|  JMH harness (generated at annotation-process  |
-|  time; calls your method in a loop)            |
-+-----------------------------------------------+
-        |
-        v
-+---------------------------+   +---------------+
-|  Warm-up phase            |   |  Fork JVM     |
-|  5 × 1s iterations        |   |  (clean JIT   |
-|  JIT reaches C2 tier      |   |   profile)    |
-+---------------------------+   +---------------+
-        |
-        v
-+---------------------------+
-|  Measurement phase        |
-|  10 × 1s iterations       |
-|  Blackhole consumes result|
-+---------------------------+
-        |
-        v
-+-----------------------------------------------+
-|  Statistical reporter                          |
-|  mean ± 99% CI (Student t); ops/s or ns/op    |
-+-----------------------------------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    bm(["@Benchmark method"]) --> harness["JMH harness\n(generated at annotation-process\ntime; calls your method in a loop)"]
+    harness --> warmup["Warm-up phase\n5 × 1s iterations\nJIT reaches C2 tier"]
+    harness --> fork["Fork JVM\n(clean JIT profile)"]
+    warmup --> measure["Measurement phase\n10 × 1s iterations\nBlackhole consumes result"]
+    fork --> measure
+    measure --> report["Statistical reporter\nmean ± 99% CI (Student t); ops/s or ns/op"]
+
+    class bm io
+    class harness frozen
+    class warmup,fork mathOp
+    class measure mathOp
+    class report io
 ```
 
 ### JIT tiered compilation levels JMH traverses during warm-up
 
-```
-Cold invocation           Warm-up completes          Measurement
-      |                         |                         |
-      v                         v                         v
-[Interpreter L0] -> [C1 L1-L3] -> [C2 L4 fully opt] -> [measure here]
-  ~100 ns/op         ~50 ns/op       ~5 ns/op              ~5 ns/op
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    L0["Interpreter L0\n(cold invocation)\n~100 ns/op"] --> L1["C1 L1-L3\n~50 ns/op"]
+    L1 --> L2["C2 L4 fully optimized\n(warm-up completes)\n~5 ns/op"]
+    L2 --> L3(["measure here\n~5 ns/op"])
+
+    class L0,L1,L2 mathOp
+    class L3 io
 ```
 
 Without warm-up you measure the interpreter / C1; with warm-up you measure the C2 steady state

@@ -8,18 +8,27 @@ Spring Data JPA is a layer on top of JPA (Java Persistence API) and Hibernate th
 
 Spring Data JPA sits in the stack as follows:
 
-```
-Your Code (Service / Controller)
-       |
-Spring Data JPA Repository (proxy)
-       |
-JPA EntityManager (javax.persistence / jakarta.persistence)
-       |
-Hibernate ORM (default JPA provider)
-       |
-JDBC DataSource
-       |
-Database (PostgreSQL, MySQL, Oracle, etc.)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A["Your Code\n(Service / Controller)"] --> B["Spring Data JPA Repository\n(proxy)"]
+    B --> C["JPA EntityManager\n(jakarta.persistence)"]
+    C --> D["Hibernate ORM\n(default JPA provider)"]
+    D --> E["JDBC DataSource"]
+    E --> F["Database\n(PostgreSQL, MySQL, Oracle, etc.)"]
+
+    class A io
+    class B req
+    class C base
+    class D train
+    class E base
+    class F frozen
 ```
 
 Key terms:
@@ -58,11 +67,22 @@ Key insight: the entire repository infrastructure (proxy creation, query derivat
 
 ### Repository Hierarchy
 
-```
-Repository<T, ID>                    (marker, no methods)
-    └── CrudRepository<T, ID>        (save, findById, findAll, delete, count, existsById)
-            └── PagingAndSortingRepository<T, ID>  (findAll(Pageable), findAll(Sort))
-                    └── JpaRepository<T, ID>       (flush, saveAndFlush, deleteInBatch, getOne/getById)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A["Repository&lt;T, ID&gt;\nmarker, no methods"] --> B["CrudRepository&lt;T, ID&gt;\nsave, findById, findAll, delete, count, existsById"]
+    B --> C["PagingAndSortingRepository&lt;T, ID&gt;\nfindAll(Pageable), findAll(Sort)"]
+    C --> D["JpaRepository&lt;T, ID&gt;\nflush, saveAndFlush, deleteInBatch, getById"]
+
+    class A base
+    class B io
+    class C req
+    class D train
 ```
 
 `JpaRepository` also extends `QueryByExampleExecutor<T>` for Example-based queries.
@@ -93,58 +113,69 @@ Repository<T, ID>                    (marker, no methods)
 
 ### Repository Proxy Creation at Startup
 
-```
-ApplicationContext startup
-         |
-RepositoryFactoryBean.afterPropertiesSet()
-         |
-JpaRepositoryFactory.getRepository(UserRepository.class)
-         |
-   ┌─────────────────────────────────────┐
-   │  Query lookup strategy              │
-   │  1. Scan @Query annotations         │
-   │  2. Parse method names → JPQL       │
-   │  3. Register NamedQueries           │
-   └─────────────────────────────────────┘
-         |
-ProxyFactory.createProxy(UserRepository.class)
-         |
-JdkDynamicAopProxy wraps SimpleJpaRepository
-         |
-UserRepository bean ready in context
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A["ApplicationContext startup"] --> B["RepositoryFactoryBean.afterPropertiesSet()"]
+    B --> C["JpaRepositoryFactory.getRepository(UserRepository.class)"]
+    C --> D["Query lookup strategy"]
+    D --> D1["1. Scan @Query annotations"]
+    D --> D2["2. Parse method names to JPQL"]
+    D --> D3["3. Register NamedQueries"]
+    D1 --> E["ProxyFactory.createProxy(UserRepository.class)"]
+    D2 --> E
+    D3 --> E
+    E --> F["JdkDynamicAopProxy wraps SimpleJpaRepository"]
+    F --> G["UserRepository bean ready in context"]
+
+    class A,G io
+    class B,C base
+    class D mathOp
+    class D1,D2,D3 req
+    class E,F train
 ```
 
 ### Request Flow: findByEmailAndStatus(email, status)
 
-```
-Service.findUser(email, status)
-         |
-[AOP Proxy] → RepositoryFactorySupport.QueryExecutorMethodInterceptor
-         |
-Looks up pre-compiled PartTreeJpaQuery
-         |
-PartTreeJpaQuery.doCreateQuery(params)
-  → builds: SELECT u FROM User u WHERE u.email = ?1 AND u.status = ?2
-         |
-EntityManager.createQuery(jpql).setParameter(1, email)...
-         |
-Hibernate → JDBC PreparedStatement → DB
-         |
-ResultSet → Entity hydration → return List<User>
+```mermaid
+sequenceDiagram
+    participant Svc as Service
+    participant Proxy as AOP Proxy
+    participant Interceptor as QueryExecutorMethodInterceptor
+    participant Query as PartTreeJpaQuery
+    participant EM as EntityManager
+    participant Hib as Hibernate
+    participant DB as Database
+
+    Svc->>Proxy: findUser(email, status)
+    Proxy->>Interceptor: invoke()
+    Interceptor->>Query: lookup pre-compiled query
+    Query->>Query: doCreateQuery(params) builds\nSELECT u FROM User u WHERE u.email=?1 AND u.status=?2
+    Query->>EM: createQuery(jpql).setParameter(...)
+    EM->>Hib: execute query
+    Hib->>DB: PreparedStatement
+    DB-->>Hib: ResultSet
+    Hib-->>EM: entity hydration
+    EM-->>Svc: return List of User
 ```
 
 ### Persistence Context Entity States
 
-```
-  new User()           persist()            flush/commit
-  [Transient] ──────► [Managed] ──────────► [DB Row written]
-                           │  ▲
-                   remove()│  │merge(detached)
-                           ▼  │
-                      [Removed]   [Detached]
-                                  (closed EM,
-                                   serialized,
-                                   evicted)
+```mermaid
+stateDiagram-v2
+    [*] --> Transient: new User()
+    Transient --> Managed: persist()
+    Managed --> Removed: remove()
+    Managed --> Detached: EM closed / serialized / evicted
+    Detached --> Managed: merge(detached)
+    Managed --> [*]: flush/commit (DB row written)
+    Removed --> [*]: flush/commit (DB row deleted)
 ```
 
 ### N+1 Problem Visualization
@@ -811,33 +842,26 @@ The original implementation loaded full entity graphs in a loop and called `find
 
 ### Architecture Overview
 
-```
-                 +-------------------------------------------------+
-  Mobile/Web --> |              OrderController                    |
-                 |  GET /orders?customerId&page  (projection)      |
-                 |  GET /orders/search           (Specification)   |
-                 |  POST /checkout               (pessimistic lock)|
-                 +------------------------+------------------------+
-                                          |
-                          +---------------v----------------+
-                          |          OrderService          |
-                          |  @Transactional boundaries      |
-                          +------+----------------+---------+
-                                 |                |
-              read (readOnly)    |                |  write (PESSIMISTIC_WRITE)
-                                 v                v
-                       +-----------------+  +-------------------+
-                       | OrderRepository |  | InventoryRepo     |
-                       | EntityGraph     |  | SELECT ... FOR    |
-                       | JOIN FETCH      |  | UPDATE            |
-                       | Projections     |  +---------+---------+
-                       +--------+--------+            |
-                                |                     |
-                                v                     v
-                        +-----------------------------------+
-                        |  PostgreSQL 15 (orders 50M rows)  |
-                        |  partitioned by created_at month  |
-                        +-----------------------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client["Mobile/Web"] --> Controller["OrderController\nGET /orders?customerId&page (projection)\nGET /orders/search (Specification)\nPOST /checkout (pessimistic lock)"]
+    Controller --> Service["OrderService\n@Transactional boundaries"]
+    Service -->|"read (readOnly)"| OrderRepo["OrderRepository\nEntityGraph / JOIN FETCH / Projections"]
+    Service -->|"write (PESSIMISTIC_WRITE)"| InvRepo["InventoryRepository\nSELECT ... FOR UPDATE"]
+    OrderRepo --> DB["PostgreSQL 15\norders 50M rows, partitioned by created_at month"]
+    InvRepo --> DB
+
+    class Client io
+    class Controller req
+    class Service train
+    class OrderRepo,InvRepo base
+    class DB frozen
 ```
 
 ### Implementation

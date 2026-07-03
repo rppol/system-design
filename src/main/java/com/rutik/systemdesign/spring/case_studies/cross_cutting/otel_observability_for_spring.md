@@ -163,39 +163,34 @@ active. Every log statement inside a traced request carries the correlation IDs 
 
 ### OTel signals flow in a Spring service
 
-```
-Inbound HTTP request (traceparent: 00-abc...-def...-01)
-        |
-        v
-+--------------------------------------+
-|  Spring MVC DispatcherServlet        |
-|  OTel instrumentation auto-creates   |
-|  child Span(traceId=abc, parentId=def|
-+--------------------------------------+
-        |
-        v
-+--------------------------------------+   +------------------+
-|  Service Layer                       |   |  MDC             |
-|  @Observed / Observation.start()     |-->|  traceId=abc...  |
-|  Emits: timer, span, log events      |   |  spanId=xyz...   |
-+--------------------------------------+   +------------------+
-        |                  |
-        v                  v
-+-------------+    +--------------------+
-|  DB call    |    |  Kafka produce     |
-|  OTel JDBC  |    |  traceparent in    |
-|  auto-spans |    |  message headers   |
-+-------------+    +--------------------+
-        |
-        v
-+--------------------------------------------------+
-|  OTel SDK: BatchSpanProcessor                    |
-|  → OTLP exporter → OTel Collector               |
-+--------------------------------------------------+
-             |                 |
-             v                 v
-       Jaeger/Tempo         Prometheus/Grafana
-       (trace spans)        (metrics + exemplars)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    inbound(["Inbound HTTP request\ntraceparent: 00-abc...-def...-01"]) --> dispatcher
+    dispatcher["Spring MVC DispatcherServlet\nOTel auto-creates child Span\ntraceId=abc, parentId=def"] --> service
+    service["Service Layer\n@Observed / Observation.start()\nEmits timer, span, log events"] --> mdc
+    service --> dbcall
+    service --> kafka
+    mdc["MDC\ntraceId=abc...\nspanId=xyz..."]
+    dbcall["DB call\nOTel JDBC auto-spans"] --> batch
+    kafka["Kafka produce\ntraceparent in message headers"] --> batch
+    batch["OTel SDK: BatchSpanProcessor\nOTLP exporter to OTel Collector"] --> jaeger
+    batch --> prom
+    jaeger["Jaeger / Tempo\ntrace spans"]
+    prom["Prometheus / Grafana\nmetrics + exemplars"]
+
+    class inbound req
+    class dispatcher,dbcall,kafka,batch mathOp
+    class service train
+    class mdc base
+    class jaeger,prom frozen
 ```
 
 ### Trace tree for a distributed order request

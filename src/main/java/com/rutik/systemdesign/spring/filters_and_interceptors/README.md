@@ -116,95 +116,71 @@ Extends `HandlerInterceptor` with `afterConcurrentHandlingStarted()`, which fire
 
 ### Full Request/Response Flow
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant F1 as Filter 1
+    participant F2 as Filter 2 (Security FilterChainProxy)
+    participant DS as DispatcherServlet
+    participant I1 as Interceptor 1
+    participant I2 as Interceptor 2
+    participant H as Handler (@RestController)
+
+    C->>F1: HTTP Request
+    F1->>F2: chain.doFilter()
+    F2->>DS: chain.doFilter()
+    DS->>DS: Handler Mapping resolves route
+    DS->>I1: preHandle()
+    I1->>I2: preHandle()
+    I2->>H: invoke handler method
+    H-->>I2: postHandle()
+    I2-->>I1: postHandle()
+    I1-->>DS: view resolution
+    DS-->>I2: afterCompletion()
+    I2-->>I1: afterCompletion()
+    I1-->>F2: return (reverse order)
+    F2-->>F1: return
+    F1-->>C: HTTP Response
 ```
-HTTP Request
-     |
-     v
-+--------------------+
-|  Servlet Container |
-|  (Tomcat/Jetty)    |
-|                    |
-|  +-------------+  |
-|  |   Filter 1  |  |   <-- @Order(1) or FilterRegistrationBean order 1
-|  |  doFilter() |  |
-|  +------+------+  |
-|         |         |
-|  +------v------+  |
-|  |   Filter 2  |  |   <-- Spring Security FilterChainProxy is here
-|  |  doFilter() |  |
-|  +------+------+  |
-|         |         |
-+---------|----------+
-          |
-          v
-+--------------------+
-|  DispatcherServlet |
-|                    |
-|  Handler Mapping   |
-|  (resolves route)  |
-|         |          |
-|  +------v---------+|
-|  | Interceptor 1   ||  preHandle()
-|  | Interceptor 2   ||  preHandle()
-|  +------+----------+|
-|         |           |
-|  +------v----------+|
-|  |   Handler        ||  (@RestController method)
-|  |   (execution)    ||
-|  +------+----------+|
-|         |           |
-|  +------v----------+|
-|  | Interceptor 2   ||  postHandle()
-|  | Interceptor 1   ||  postHandle()
-|  +------+----------+|
-|         |           |
-|  +------v----------+|
-|  | View Resolution  ||
-|  +------+----------+|
-|         |           |
-|  +------v----------+|
-|  | Interceptor 2   ||  afterCompletion()
-|  | Interceptor 1   ||  afterCompletion()
-|  +------------------+|
-+--------------------+
-          |
-          v
-  Return through Filter 2, then Filter 1 (reverse order)
-          |
-          v
-     HTTP Response
-```
+
+Filters wrap the entire chain (F1 before F2, F2 unwinds before F1); interceptors nest one layer deeper, with `preHandle` running in registration order and `postHandle`/`afterCompletion` running in reverse order — exactly like a stack.
 
 ### Exception Handling Flow
 
-```
-Handler throws RuntimeException
-          |
-          v
-   postHandle() SKIPPED  <-- critical pitfall
-          |
-          v
-   ExceptionResolver resolves error
-          |
-          v
-   afterCompletion() called with non-null Exception  <-- always runs
-          |
-          v
-   @ExceptionHandler / BasicErrorController
+```mermaid
+flowchart TD
+    classDef lossN fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef train fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef io    fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+
+    A["Handler throws RuntimeException"] --> B["postHandle() SKIPPED - critical pitfall"]
+    B --> C["ExceptionResolver resolves error"]
+    C --> D["afterCompletion() called with non-null Exception - always runs"]
+    D --> E["@ExceptionHandler / BasicErrorController"]
+
+    class A lossN
+    class B lossN
+    class C train
+    class D train
+    class E io
 ```
 
 ### OncePerRequestFilter Dispatch Detection
 
-```
-Incoming Dispatch
-      |
-      v
-Check request attribute:
-  "com.example.MyFilter.FILTERED"
-      |
-      +-- attribute present? --> skip, call chain.doFilter() directly
-      |
-      +-- attribute absent?  --> set attribute, run doFilterInternal()
+```mermaid
+flowchart TD
+    classDef req    fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef mathOp fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef train  fill:#98c379,stroke:#27ae60,color:#1a1a1a
+
+    A["Incoming Dispatch"] --> B{"Request attribute 'com.example.MyFilter.FILTERED' present?"}
+    B -->|Yes| C["Skip - call chain.doFilter() directly"]
+    B -->|No| D["Set attribute, run doFilterInternal()"]
+
+    class A req
+    class B mathOp
+    class C train
+    class D train
 ```
 
 ---
@@ -782,64 +758,33 @@ When a controller starts async processing (`DeferredResult`, `Callable`, `@Async
 
 **Architecture:**
 
+```mermaid
+sequenceDiagram
+    participant Client as External Client
+    participant TF as TraceIdFilter (Order -100)
+    participant Sec as Spring Security FilterChain
+    participant DS as DispatcherServlet
+    participant AI as AuditInterceptor
+    participant OC as OrderController
+    participant Inv as InventoryService
+    participant Pay as PaymentService
+
+    Client->>TF: POST /api/orders (no X-Trace-Id header)
+    TF->>TF: extract or generate UUID, MDC.put(traceId), set request attribute
+    TF->>Sec: chain.doFilter()
+    Sec->>DS: chain.doFilter()
+    DS->>AI: preHandle() - read traceId, open audit record
+    AI->>OC: createOrder()
+    OC->>Inv: WebClient call (injects X-Trace-Id)
+    OC->>Pay: WebClient call (injects X-Trace-Id)
+    Inv-->>OC: response
+    Pay-->>OC: response
+    OC-->>AI: afterCompletion() - close audit record, record outcome + duration
+    AI-->>TF: return through chain
+    TF-->>Client: HTTP Response with X-Trace-Id header, MDC cleared
 ```
-External Client
-     |
-     | POST /api/orders  (no X-Trace-Id header)
-     v
-+----------------------------------+
-|  TraceIdFilter (Order: -100)     |
-|  - Extract X-Trace-Id if present |
-|  - Generate UUID if absent       |
-|  - Store in MDC: "traceId"       |
-|  - Set request attribute         |
-+----------------------------------+
-     |
-     v
-+----------------------------------+
-|  Spring Security FilterChain     |
-|  (Order: -100 Spring Security    |
-|   auto-order, after tracing)     |
-+----------------------------------+
-     |
-     v
-+----------------------------------+
-|  DispatcherServlet               |
-+----------------------------------+
-     |
-     v
-+----------------------------------+
-|  AuditInterceptor.preHandle()    |
-|  - read traceId from request     |
-|  - open audit record             |
-+----------------------------------+
-     |
-     v
-+----------------------------------+
-|  OrderController.createOrder()   |
-|  - calls InventoryService via    |
-|    WebClient (injects X-Trace-Id)|
-|  - calls PaymentService via      |
-|    WebClient (injects X-Trace-Id)|
-+----------------------------------+
-     |
-     v
-+----------------------------------+
-|  AuditInterceptor.afterCompletion|
-|  - close audit record            |
-|  - record outcome + duration     |
-+----------------------------------+
-     |
-     v
-+----------------------------------+
-|  TraceIdFilter (response path)   |
-|  - set X-Trace-Id response header|
-|  - clear MDC                     |
-+----------------------------------+
-     |
-     v
-  HTTP Response with X-Trace-Id: <uuid>
-```
+
+Everything below `DispatcherServlet` is Spring MVC's own layer; the filter (`TraceIdFilter`) and the interceptor (`AuditInterceptor`) sandwich it from the outside and the inside respectively — the filter's `finally` block guarantees the trace header and MDC cleanup happen no matter what the handler does.
 
 **Implementation:**
 

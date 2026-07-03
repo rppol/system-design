@@ -83,109 +83,116 @@ Spring Boot 3.x / Spring Security 6.x made breaking changes: `WebSecurityConfigu
 
 ## 5. Architecture Diagrams
 
+### FilterChainProxy Request Pipeline
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    req(["HTTP Request"]) --> dfp["DelegatingFilterProxy\n(springSecurityFilterChain)"]
+    dfp --> fcp["FilterChainProxy\n(selects matching chain by request matcher)"]
+    fcp --> f1["1. SecurityContextHolderFilter"]
+    f1 -->|"loads SecurityContext from session/token store"| f2["2. UsernamePasswordAuthenticationFilter\n(POST /login)"]
+    f2 -->|"or BasicAuthFilter / OAuth2Filter / custom JWT filter"| f3["3. RememberMeAuthenticationFilter"]
+    f3 --> f4["4. AnonymousAuthenticationFilter"]
+    f4 -->|"sets AnonymousAuthenticationToken if still unauthenticated"| f5["5. ExceptionTranslationFilter"]
+    f5 -->|"catches AccessDeniedException / AuthenticationException"| f6["6. AuthorizationFilter"]
+    f6 -->|"calls AuthorizationManager.check(authentication, request)"| ctrl(["DispatcherServlet → Controller"])
+
+    class req,ctrl io
+    class dfp,fcp base
+    class f1,f2,f3,f4,f5,f6 train
 ```
-HTTP Request
-     |
-     v
-+------------------+
-| DelegatingFilter |  (registered in servlet container as "springSecurityFilterChain")
-|     Proxy        |
-+------------------+
-     |
-     v
-+-------------------+
-| FilterChainProxy  |  (selects matching SecurityFilterChain by request matcher)
-+-------------------+
-     |
-     +---> SecurityFilterChain [/** matcher]
-               |
-               | (ordered filter list)
-               v
-     1. SecurityContextHolderFilter
-               |            (loads SecurityContext from session/token store)
-               v
-     2. UsernamePasswordAuthenticationFilter  (POST /login)
-               |            (or BasicAuthFilter, OAuth2Filter, custom JWT filter)
-               v
-     3. RememberMeAuthenticationFilter
-               |
-               v
-     4. AnonymousAuthenticationFilter
-               |            (sets AnonymousAuthenticationToken if still unauthenticated)
-               v
-     5. ExceptionTranslationFilter
-               |            (catches AccessDeniedException / AuthenticationException)
-               v
-     6. AuthorizationFilter
-               |            (calls AuthorizationManager.check(authentication, request))
-               v
-          DispatcherServlet → Controller
 
+Every request runs the same ordered gauntlet of filters before reaching a controller; any filter can short-circuit the chain, which is why filter order (not just filter presence) determines behavior.
 
-Authentication Flow (within step 2):
+### Authentication Flow (within step 2)
 
-  UsernamePasswordAuthenticationFilter
-          |
-          | creates UsernamePasswordAuthenticationToken(username, password)
-          v
-  ProviderManager (AuthenticationManager)
-          |
-          | iterates AuthenticationProviders
-          v
-  DaoAuthenticationProvider
-          |
-          | calls UserDetailsService.loadUserByUsername(username)
-          v
-  UserDetailsService (your implementation)
-          |
-          | returns UserDetails
-          v
-  DaoAuthenticationProvider
-          |
-          | verifies password via PasswordEncoder.matches()
-          v
-  ProviderManager
-          |
-          | returns fully authenticated UsernamePasswordAuthenticationToken
-          v
-  SecurityContextHolder.getContext().setAuthentication(token)
-          |
-          v
-  Session saved / JWT issued
+```mermaid
+sequenceDiagram
+    participant Filter as UsernamePasswordAuthenticationFilter
+    participant PM as ProviderManager
+    participant DAP as DaoAuthenticationProvider
+    participant UDS as UserDetailsService
+    participant SCH as SecurityContextHolder
 
-
-Authorization Flow (step 6):
-
-  AuthorizationFilter
-          |
-          v
-  AuthorizationManager (e.g., RequestMatcherDelegatingAuthorizationManager)
-          |
-          +---> matches /api/admin/** -> hasRole('ADMIN')
-          |
-          +---> matches /api/public/** -> permitAll()
-          |
-          v
-  AccessDeniedException -> ExceptionTranslationFilter
-          |
-          +---> authenticated? -> 403 Forbidden response
-          +---> anonymous?     -> 401 / redirect to login
-
-
-Method Security (orthogonal layer):
-
-  Controller calls Service.someMethod()
-          |
-          v
-  AOP Proxy (created by @EnableMethodSecurity)
-          |
-          v
-  PreAuthorizeAuthorizationManager.check(authentication, methodInvocation)
-          |
-          | evaluates SpEL: "hasRole('ADMIN') and #user.tenantId == authentication.tenantId"
-          v
-  AccessDeniedException or proceed to real method
+    Filter->>PM: authenticate(UsernamePasswordAuthenticationToken)
+    PM->>DAP: authenticate(token)
+    DAP->>UDS: loadUserByUsername(username)
+    UDS-->>DAP: UserDetails
+    DAP->>DAP: PasswordEncoder.matches(raw, stored)
+    DAP-->>PM: fully authenticated token
+    PM-->>Filter: authenticated token
+    Filter->>SCH: setAuthentication(token)
+    Note over SCH: Session saved / JWT issued
 ```
+
+`ProviderManager` never talks to the database directly — it delegates to `DaoAuthenticationProvider`, which is the only component that knows about `UserDetailsService` and the password encoder.
+
+### Authorization Flow (step 6)
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    af["AuthorizationFilter"] --> am["AuthorizationManager\n(RequestMatcherDelegatingAuthorizationManager)"]
+    am -->|"matches /api/admin/**"| ade["hasRole('ADMIN') fails"]
+    am -->|"matches /api/public/**"| pa["permitAll() — request proceeds"]
+    ade --> exc["AccessDeniedException"]
+    exc --> etf["ExceptionTranslationFilter"]
+    etf --> anon{"caller anonymous?"}
+    anon -->|"yes"| r401(["401 / redirect to login"])
+    anon -->|"no (authenticated)"| r403(["403 Forbidden"])
+
+    class af train
+    class am,anon mathOp
+    class pa io
+    class ade,exc,r401,r403 lossN
+    class etf train
+```
+
+`ExceptionTranslationFilter` is the piece that turns a thrown `AccessDeniedException` into the right HTTP status: 401 for anonymous callers who never authenticated, 403 for authenticated callers who lack permission.
+
+### Method Security (orthogonal layer)
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ctrl["Controller"] --> svc["Service.someMethod()"]
+    svc --> proxy["AOP Proxy\n(created by @EnableMethodSecurity)"]
+    proxy --> pam["PreAuthorizeAuthorizationManager.check(...)"]
+    pam --> spel{"SpEL: hasRole('ADMIN') and\n#user.tenantId == authentication.tenantId"}
+    spel -->|"false"| ade["AccessDeniedException"]
+    spel -->|"true"| ok(["proceed to real method"])
+
+    class ctrl io
+    class svc train
+    class proxy base
+    class pam,spel mathOp
+    class ade lossN
+    class ok io
+```
+
+Method security is orthogonal to the filter chain: it runs at the AOP proxy boundary, not the servlet boundary, which is exactly why self-invocation (calling `this.method()` instead of going through the proxy) silently bypasses it.
 
 ---
 
@@ -1058,3 +1065,6 @@ public class SecurityAuditListener {
 - [Filters & Interceptors](../filters_and_interceptors/README.md) — security filter chain
 - [Spring Security JWT & OAuth2](../spring_security_jwt_oauth/README.md) — JWT resource server
 - [Case Study: OAuth2 Authorization Server](../case_studies/design_oauth2_authorization_server.md) — Spring Auth Server
+- [Auth & Authorization Systems](../../backend/auth_and_authorization_systems/README.md) — OAuth2/OIDC flows, session vs token tradeoffs at the systems level
+- [Backend Security / OWASP](../../backend/backend_security_owasp/README.md) — CSRF, injection, and the broader web-app threat model behind these filters
+- [Security & Auth (HLD)](../../hld/security_and_auth/README.md) — authn/authz at the distributed-systems architecture level

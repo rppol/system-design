@@ -245,37 +245,54 @@ the Reactive Streams specification (now part of `java.util.concurrent.Flow` in J
 
 ### Thread pool with bounded queue and backpressure
 
-```
-HTTP Request
-     |
-     v
-+-------------------+
-|  Tomcat connector |  (accept queue: 100 connections)
-+-------------------+
-     |
-     v
-+-----------------------------------+
-|  ThreadPoolExecutor               |
-|  core=8, max=32, queue=500        |
-|  RejectionPolicy: CallerRuns      |  <-- backpressure: blocks connector thread
-+-----------------------------------+
-     |                   |
-     v                   v (when queue full + max threads: CallerRuns fires)
-  worker threads     Tomcat connector thread executes task
-                     → new connections are blocked at TCP accept queue
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    httpReq(["HTTP Request"]) --> tomcat["Tomcat connector\n(accept queue: 100 connections)"]
+    tomcat --> tpe["ThreadPoolExecutor\ncore=8, max=32, queue=500\nRejectionPolicy: CallerRuns"]
+    tpe --> workers["worker threads"]
+    tpe -.->|"queue full + max threads:\nCallerRuns fires"| connThread["Tomcat connector thread\nexecutes task"]
+    connThread -.-> blocked["new connections blocked\nat TCP accept queue"]
+
+    class httpReq io
+    class tomcat base
+    class tpe req
+    class workers base
+    class connThread,blocked lossN
 ```
 
 ### Pipeline with multiple bounded buffers
 
-```
-[Kafka Consumer]                [Processor]               [DB Writer]
-    λ = 5000 rec/s                 μ = 1000 rec/s              μ = 500 rec/s
-         |                              |                            |
-         v                              v                            v
-  [ArrayBlockingQueue(2000)]    [ArrayBlockingQueue(1000)]    [BatchBuffer(100)]
-         |                              |                            |
-         |                              |                            v
-         |<-- consumer pauses if full   |<-- slows consumer      [DB executeBatch()]
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    kc["Kafka Consumer\nλ = 5000 rec/s"] --> q1["ArrayBlockingQueue(2000)"]
+    q1 --> proc["Processor\nμ = 1000 rec/s"]
+    proc --> q2["ArrayBlockingQueue(1000)"]
+    q2 --> dbw["DB Writer\nμ = 500 rec/s"]
+    dbw --> q3["BatchBuffer(100)"]
+    q3 --> batch["DB executeBatch()"]
+
+    q1 -.->|"consumer pauses if full"| kc
+    q2 -.->|"slows consumer"| proc
+
+    class kc,proc,dbw req
+    class q1,q2,q3 base
+    class batch base
 ```
 
 The pipeline auto-tunes: the slowest stage (DB Writer, 500/s) determines maximum throughput.

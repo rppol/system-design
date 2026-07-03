@@ -83,15 +83,13 @@ Key insight: reactive programming (WebFlux/Project Reactor) is not optional for 
 
 ### Circuit Breaker States
 
-```
-CLOSED ----[failure rate >= threshold]----> OPEN
-  ^                                           |
-  |                               [wait-duration elapses]
-  |                                           |
-  |                                           v
-  +---[test calls succeed]---------> HALF_OPEN
-                                     (limited test calls)
-  +---[test calls fail]-----------> back to OPEN
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+    CLOSED --> OPEN: failure rate >= threshold
+    OPEN --> HALF_OPEN: wait-duration elapses
+    HALF_OPEN --> CLOSED: test calls succeed
+    HALF_OPEN --> OPEN: test calls fail
 ```
 
 ### Service Discovery Architectures
@@ -108,122 +106,109 @@ CLOSED ----[failure rate >= threshold]----> OPEN
 
 ### Spring Cloud Gateway Architecture
 
-```
-External Clients
-       |
-       v
-+------------------------------------+
-|       Spring Cloud Gateway         |
-|            (Netty, WebFlux)        |
-|                                    |
-| [1] RoutePredicateHandlerMapping   |
-|     -- match request to route      |
-|                                    |
-| [2] GlobalFilters (all routes):    |
-|     - AuthenticationFilter         |
-|     - LoggingFilter                |
-|     - MetricsFilter                |
-|                                    |
-| [3] GatewayFilters (per route):    |
-|     - RateLimiter (Redis token     |
-|       bucket, e.g. 100 req/s)      |
-|     - CircuitBreaker               |
-|     - RewritePath                  |
-|     - AddRequestHeader             |
-+------------------------------------+
-       |              |              |
-       v              v              v
-  order-service  payment-service  user-service
-  (lb://order-   (lb://payment-   (lb://user-
-   service)       service)         service)
-       |
-  [LoadBalancer resolves from Eureka registry]
-       |
-  +----------+  +----------+  +----------+
-  | pod-1    |  | pod-2    |  | pod-3    |
-  +----------+  +----------+  +----------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    clients(["External Clients"]) --> gw["Spring Cloud Gateway\n(Netty, WebFlux)"]
+    gw --> rpm["1. RoutePredicateHandlerMapping\nmatch request to route"]
+    rpm --> gf["2. GlobalFilters (all routes)\nAuthenticationFilter, LoggingFilter, MetricsFilter"]
+    gf --> rf["3. GatewayFilters (per route)\nRateLimiter (Redis, 100 req/s), CircuitBreaker,\nRewritePath, AddRequestHeader"]
+    rf --> order["order-service\nlb://order-service"]
+    rf --> payment["payment-service\nlb://payment-service"]
+    rf --> user["user-service\nlb://user-service"]
+    order -->|"LoadBalancer resolves from Eureka registry"| pod1["pod-1"]
+    order --> pod2["pod-2"]
+    order --> pod3["pod-3"]
+
+    class clients req
+    class gw base
+    class rpm,gf,rf mathOp
+    class order,payment,user train
+    class pod1,pod2,pod3 io
 ```
 
 ### Resilience4j Circuit Breaker State Machine
 
-```
-                   failure rate >= 50%
-                   (10 calls, count-based)
-                   +-----------------------+
-                   |                       |
-              +----+----+             +----+----+
-  requests -->| CLOSED  |   open      |  OPEN   |--> fallback
-              |         |------------>|         |    returned
-              | calls   |             | all     |    immediately
-              | proceed |             | calls   |
-              +---------+             | fail    |
-                   ^                  | fast    |
-                   |                  +----+----+
-                   |                       |
-                   |              wait 60s (waitDurationInOpenState)
-                   |                       |
-                   |                  +----v----+
-        success    |                  |HALF_OPEN|
-        rate >=    +------------------|         |
-        success    (5 test calls)     | limited |
-        threshold                     | calls   |
-                                      +---------+
-                   failure            |
-                   +------------------+ (back to OPEN)
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+
+    CLOSED --> OPEN: failure rate >= 50%\n(10-call sliding window)
+    OPEN --> HALF_OPEN: wait-duration elapses\n(60s waitDurationInOpenState)
+    HALF_OPEN --> CLOSED: success rate >= threshold\n(5 test calls pass)
+    HALF_OPEN --> OPEN: test call fails
+
+    note right of CLOSED
+        Requests proceed; failures
+        counted in sliding window
+    end note
+    note right of OPEN
+        All calls fail fast;
+        fallback returned immediately
+    end note
+    note right of HALF_OPEN
+        Limited test calls probe
+        the recovering dependency
+    end note
 ```
 
 ### Distributed Tracing with Micrometer Tracing
 
-```
-Client
-  |
-  | [1] Request arrives, no trace context
-  v
-Gateway (traceId=abc123, spanId=s1)
-  | [2] Propagates B3 headers:
-  |     X-B3-TraceId: abc123
-  |     X-B3-SpanId: s2  (new span)
-  |     X-B3-ParentSpanId: s1
-  v
-order-service (traceId=abc123, spanId=s2)
-  | [3] Calls inventory-service
-  |     X-B3-TraceId: abc123
-  |     X-B3-SpanId: s3
-  |     X-B3-ParentSpanId: s2
-  v
-inventory-service (traceId=abc123, spanId=s3)
-  |
-  | [4] All spans exported async to Zipkin/Jaeger
-  v
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Gateway as Gateway (s1)
+    participant Order as order-service (s2)
+    participant Inventory as inventory-service (s3)
+    participant Zipkin
 
-Zipkin UI: reconstruct full trace tree for traceId=abc123
-  Gateway(s1) --> order-service(s2) --> inventory-service(s3)
-  Total: 145ms  |  120ms              |  80ms
+    Client->>Gateway: [1] Request arrives, no trace context
+    Note over Gateway: traceId=abc123, spanId=s1
+    Gateway->>Order: [2] X-B3-TraceId: abc123\nX-B3-SpanId: s2\nX-B3-ParentSpanId: s1
+    Note over Order: traceId=abc123, spanId=s2
+    Order->>Inventory: [3] X-B3-TraceId: abc123\nX-B3-SpanId: s3\nX-B3-ParentSpanId: s2
+    Note over Inventory: traceId=abc123, spanId=s3
+    par [4] async span export
+        Gateway-->>Zipkin: export span s1
+        Order-->>Zipkin: export span s2
+        Inventory-->>Zipkin: export span s3
+    end
+    Note over Zipkin: Reconstruct trace tree for traceId=abc123\nGateway(s1) 145ms -> order-service(s2) 120ms -> inventory-service(s3) 80ms
 ```
 
 ### Eureka Service Discovery
 
-```
-Eureka Server (AP system)
-+---------------------------+
-| Registry:                 |
-| order-service:            |
-|   192.168.1.10:8081       |
-|   192.168.1.11:8081       |
-| payment-service:          |
-|   192.168.1.20:8082       |
-+---------------------------+
-     ^                 ^
-     | self-register   | self-register
-     | heartbeat/30s   | heartbeat/30s
-     |                 |
-order-service      payment-service
-(all instances)    (all instances)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-order-service fetches registry at startup
-(cached locally, refreshed every 30s by default)
-Uses Spring Cloud LoadBalancer to pick:
-  192.168.1.20:8082 (RoundRobin) for payment calls
+    eureka["Eureka Server (AP system)\nRegistry: order-service (2), payment-service (1)"]
+    orderInst["order-service\n(all instances)"]
+    paymentInst["payment-service\n(all instances)"]
+    fetch["order-service instance\nfetches registry at startup\ncached locally, refreshed every 30s"]
+    pick["Spring Cloud LoadBalancer\npicks 192.168.1.20:8082\n(RoundRobin) for payment calls"]
+
+    orderInst -->|"self-register + heartbeat/30s"| eureka
+    paymentInst -->|"self-register + heartbeat/30s"| eureka
+    eureka --> fetch --> pick
+
+    class eureka base
+    class orderInst,paymentInst train
+    class fetch mathOp
+    class pick io
 ```
 
 ---
@@ -998,6 +983,15 @@ class GatewayRouteTest {
 **Explain the concept of slow call circuit breaking and why it matters for production.**
 In addition to failure rate thresholds, Resilience4j allows configuring a `slowCallRateThreshold` and `slowCallDurationThreshold`. A call is considered "slow" (and counted as a negative signal) if it exceeds the duration threshold (e.g., 2000ms) even if it returns a 200 OK. This matters because a dependency that consistently responds in 3 seconds is effectively a failure from the caller's perspective — it ties up resources, adds latency to the user response, and can exhaust thread pools just as a full failure would. By treating slow calls like failures, the circuit breaker opens before the downstream service fully fails, enabling the fallback to serve fast degraded responses rather than slow partial responses.
 
+**What's the difference between Resilience4j's semaphore bulkhead and thread-pool bulkhead, and which should you default to?**
+The semaphore bulkhead limits concurrent calls with an in-memory counter, while the thread-pool bulkhead isolates calls onto a dedicated thread pool. The semaphore variant is cheap — no thread creation, sub-microsecond overhead — but the caller's own thread still waits for a permit up to `maxWaitDuration`, so a genuinely hung call can still tie up caller threads once that wait elapses. The thread-pool variant fully decouples the caller from a stuck call: the caller gets a `Future` back immediately and the bulkhead's own pool absorbs the block, at the cost of thread-context-switch overhead and a fixed memory footprint per pool. Resilience4j defaults to the semaphore bulkhead because most Spring MVC/WebFlux call sites are already synchronous or reactive and don't want another thread hop; reserve the thread-pool bulkhead for unavoidable blocking calls (e.g., a legacy JDBC call invoked from a reactive pipeline) where true thread isolation outweighs the extra overhead.
+
+**What is the risk of retrying a non-idempotent operation like a POST that creates an order, and how do you make it safe?**
+Retrying a non-idempotent POST can create duplicate side effects, such as two orders billed for one purchase. Resilience4j's `@Retry` annotation and Spring Cloud Gateway's Retry filter both retry blindly by exception type or HTTP status — neither has any concept of whether the first attempt already reached the server and mutated state before the connection dropped. The safe pattern is to restrict automatic retries to safe methods (`GET`, `HEAD`) by default, and for POST/PUT operations that must be retried, require an idempotency key: the client generates a unique key per logical operation, the server persists `key -> result`, and a retried request carrying the same key returns the cached result instead of re-executing the side effect. In Spring Cloud Gateway, configure the Retry filter's `methods` argument to `GET, HEAD` and only extend it to write methods once the downstream service implements idempotency-key deduplication.
+
+**Why was Netflix Hystrix retired in favor of Resilience4j, and what changed architecturally?**
+Netflix put Hystrix into maintenance-only mode in 2018, and Resilience4j replaced it as the actively maintained standard. Architecturally, Hystrix isolated every command in its own dedicated thread pool by default, giving strong isolation but adding thread-context-switch overhead and memory cost per command; Resilience4j defaults to a lightweight semaphore-based bulkhead and composes circuit breaker, retry, rate limiter, bulkhead, and time limiter as separate, independently configurable decorators instead of one monolithic command object. Resilience4j also has first-class support for Java 8+ functional interfaces (`Supplier`, `CompletionStage`) and integrates natively with Micrometer for metrics, whereas Hystrix predates both and only reaches Spring Boot through the deprecated `spring-cloud-netflix` bridge. In practice this means any new Spring Boot 3 project should use Resilience4j exclusively — Hystrix has no Spring Boot 3 / Jakarta EE support path.
+
 ---
 
 ## 13. Best Practices
@@ -1119,25 +1113,36 @@ Before this architecture, the equivalent incident took down the product listing 
 
 **Scale:** 100k req/min = ~1,667 RPS sustained. 12 downstream services, 3 of which are critical path (Orders, Inventory, Shipping). SLA: gateway p99 < 80ms, availability 99.9%.
 
-```
-Resilience topology:
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Client  ──→  [Spring Cloud Gateway]
-                    │
-        ┌───────────┼───────────────────┐
-        │           │                   │
-  [RateLimiter]  [CircuitBreaker]   [Retry]
-  Redis token    Resilience4j       3 attempts
-  bucket         per-service        with backoff
-        │           │                   │
-        └───────────┼───────────────────┘
-                    │
-        ┌───────────┼──────────────────────────┐
-        │           │           │              │
-  [Orders]    [Inventory]  [Shipping]  [Notifications]
-  Eureka-     Eureka-      Eureka-     Eureka-
-  registered  registered   registered  registered
-  2 instances 3 instances  2 instances 1 instance
+    client(["Client"]) --> gw["Spring Cloud Gateway"]
+
+    subgraph filters ["Resilience filter chain"]
+        direction LR
+        rl["RateLimiter\nRedis token bucket"]
+        cb["CircuitBreaker\nResilience4j, per-service"]
+        retry["Retry\n3 attempts with backoff"]
+    end
+
+    gw --> rl --> cb --> retry --> route["Route to downstream\n(lb://service-name)"]
+
+    route --> orders["Orders\nEureka-registered, 2 instances"]
+    route --> inventory["Inventory\nEureka-registered, 3 instances"]
+    route --> shipping["Shipping\nEureka-registered, 2 instances"]
+    route --> notifications["Notifications\nEureka-registered, 1 instance"]
+
+    class client req
+    class gw,route base
+    class rl,cb,retry mathOp
+    class orders,inventory,shipping,notifications train
 ```
 
 **Gateway configuration — circuit breaker + rate limiter per route:**
@@ -1326,3 +1331,6 @@ public class InventoryServiceApplication {
 - [Spring Messaging](../spring_messaging/README.md) — Kafka + Spring Cloud Stream
 - [Case Study: API Gateway](../case_studies/design_api_gateway.md) — Spring Cloud Gateway
 - [Case Study: Resilience4j Patterns](../case_studies/cross_cutting/resilience4j_patterns.md) — CB, retry, bulkhead
+- [Fault Tolerance Patterns](../../backend/fault_tolerance_patterns/README.md) — circuit breaker, retry, bulkhead theory outside the Spring wrapper
+- [Resilience Patterns (HLD)](../../hld/resilience_patterns/README.md) — cascading failure and blast-radius containment at the system level
+- [Service Mesh & Service Discovery](../../backend/service_mesh_and_service_discovery/README.md) — sidecar-based alternative to Eureka + client-side LoadBalancer

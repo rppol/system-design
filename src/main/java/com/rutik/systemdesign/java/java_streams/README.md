@@ -91,26 +91,39 @@ Conversions: `.mapToInt()`, `.mapToObj()`, `.boxed()`, `IntStream.of()`, `IntStr
 ## 5. Architecture Diagrams
 
 ### Pipeline Internals — ReferencePipeline
-```
-Source (Collection / array / generator)
-  |
-  Spliterator (how to split the source for traversal / parallelism)
-  |
-  Head (SourceStage)
-  |
-  StatelessOp (filter) -- linked list of pipeline stages
-  |
-  StatelessOp (map)
-  |
-  StatefulOp (sorted) -- must buffer all elements before emitting
-  |
-  TerminalOp (collect) -- triggers evaluation, walks back up the chain
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Execution (sequential):
-  TerminalOp.evaluate() ->
-    Sink chain: sorted.Sink -> map.Sink -> filter.Sink -> source
-    Pull elements from source one at a time through the chain
-    sorted.Sink buffers all; flushes sorted to map.Sink when done
+    subgraph Build["Pipeline construction -- linked list of stages"]
+        Src(["Source\nCollection / array / generator"]) --> Spl["Spliterator\nhow to split the source for traversal / parallelism"]
+        Spl --> Head["Head (SourceStage)"]
+        Head --> Filt["StatelessOp: filter"]
+        Filt --> MapS["StatelessOp: map"]
+        MapS --> Sorted["StatefulOp: sorted\nmust buffer all elements before emitting"]
+        Sorted --> Term["TerminalOp: collect\ntriggers evaluation, walks back up the chain"]
+    end
+
+    subgraph Exec["Execution (sequential) -- Sink chain, pulled one element at a time from source"]
+        direction LR
+        SortSink["sorted.Sink\nbuffers all; flushes when done"] --> MapSink["map.Sink"] --> FiltSink["filter.Sink"] --> SourcePull(["source"])
+    end
+
+    Term -.->|"TerminalOp.evaluate()"| SortSink
+
+    class Src req
+    class Spl,Head base
+    class Filt,MapS mathOp
+    class Sorted train
+    class Term lossN
+    class SortSink,MapSink,FiltSink mathOp
+    class SourcePull io
 ```
 
 ### Short-Circuit Execution
@@ -131,19 +144,31 @@ Output:
 ```
 
 ### Parallel Stream Fork/Join
-```
-Source: List<T> with Spliterator (SIZED + SUBSIZED + ORDERED)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-ForkJoinPool.commonPool():
-  Main task: split via trySplit()
-    Left half -> Worker 1
-    Right half -> Worker 2 -> split again
-      Quarter 3 -> Worker 3
-      Quarter 4 -> Worker 4
+    Src(["Source: List&lt;T&gt;\nSpliterator (SIZED + SUBSIZED + ORDERED)"]) --> Main["ForkJoinPool.commonPool()\nMain task: split via trySplit()"]
+    Main --> W1["Worker 1\nleft half"]
+    Main --> W2Split["Worker 2\nright half -- splits again"]
+    W2Split --> W3["Worker 3\nquarter 3"]
+    W2Split --> W4["Worker 4\nquarter 4"]
+    W1 --> Comb(["Combiner\nmerges partial results\ne.g. partial lists -> full list"])
+    W3 --> Comb
+    W4 --> Comb
+    Comb --> Result["Collector.combiner()\nmerges worker results"]
 
-  Each worker: applies pipeline stages to its sub-range
-  Combiner: merges partial results (e.g., partial lists -> full list)
-  Collector.combiner() is called to merge worker results
+    class Src req
+    class Main base
+    class W1,W2Split,W3,W4 train
+    class Comb mathOp
+    class Result io
 ```
 
 ### Spliterator Characteristics
@@ -593,18 +618,26 @@ Practical rule: benchmark with JMH under realistic data sizes before shipping `p
 
 **Scenario.** An edge fleet emits **100GB of access logs/day** (~100M log lines). A nightly analytics job must compute a response-code histogram, p99 latency per endpoint, and bytes-served per host. The job runs on an 8-core machine with a 6GB heap. Loading 100GB into a `List` is impossible, so the pipeline streams lazily from disk via a custom `Spliterator`, aggregates with a custom `Collector`, and parallelizes onto a dedicated 8-thread `ForkJoinPool` (never the shared common pool). Measured throughput: ~500MB/sec, finishing 100M lines in ~45 minutes.
 
-```
-  access.log.gz (100GB)
-        |
-   [ LineSpliterator ]  lazy, splits on file regions, never materializes whole file
-        |
-        v
-   Stream<LogLine> --parallel(dedicatedPool=8)-->
-        |
-   [ HistogramCollector ]  per-thread accumulators merged by combiner
-        |
-        v
-   Map<Integer, Long>  (200->8.2M, 404->410k, 500->12k, ...)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Log(["access.log.gz (100GB)"]) --> Spl["LineSpliterator\nlazy, splits on file regions, never materializes whole file"]
+    Spl --> St(["Stream&lt;LogLine&gt;"])
+    St -->|"parallel(dedicatedPool=8)"| Hist["HistogramCollector\nper-thread accumulators merged by combiner"]
+    Hist --> Result(["Map&lt;Integer, Long&gt;\n200-&gt;8.2M, 404-&gt;410k, 500-&gt;12k, ..."])
+
+    class Log req
+    class Spl mathOp
+    class St io
+    class Hist train
+    class Result base
 ```
 
 #### Custom lazy Spliterator (bounded memory)

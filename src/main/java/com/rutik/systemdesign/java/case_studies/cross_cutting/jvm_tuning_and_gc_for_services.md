@@ -85,21 +85,32 @@ Heap (e.g., -Xmx8g):
 
 ### GC pause sources in a request-processing service
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    t0(["t0: request received"]) --> t1["t1: Eden allocation\nfor request objects"]
+    t1 --> t2["t2: response sent;\nobjects become unreachable"]
+    t2 --> yg["Young GC ~5ms\n(short-lived, t1→t2)"]
+
+    t1 --> t3["t3: session/cache objects\npromoted to Survivor"]
+    t3 --> t4["t4: Survivor fill →\npromotion to Old Gen"]
+    t4 --> mg["Mixed/Full GC ~100-500ms\n(long-lived, in Old Gen)"]
+
+    class t0 io
+    class t1,t2 train
+    class yg mathOp
+    class t3,t4 frozen
+    class mg lossN
 ```
-Request handling timeline:
-  t0: request received
-  t1: Eden allocation for request objects
-  t2: response sent; objects become unreachable
 
-  [Short-lived: t1→t2, collected in Young GC (~5ms)]
-
-  t3: session/cache objects promoted to Survivor
-  t4: Survivor fill → promotion to Old Gen
-
-  [Long-lived: in Old Gen; collected in Mixed/Full GC (~100-500ms)]
-
-Tuning goal: prevent t3→t4 by ensuring object lifetime < 2 survivor copies
-```
+Tuning goal: prevent t3→t4 by ensuring object lifetime < 2 survivor copies.
 
 ---
 

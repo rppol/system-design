@@ -61,6 +61,11 @@ This section covers:
 | 30 | [spring_performance](spring_performance/) | 8 — Testing & Production | Advanced | Startup time, lazy init, virtual threads (Boot 3.2), GraalVM native, connection pools |
 | 31 | [observability_and_tracing](observability_and_tracing/) | 8 — Testing & Production | Advanced | Micrometer Observation API, Micrometer Tracing + OTLP, W3C traceparent, structured logging, exemplars |
 | 32 | [spring_native_graalvm](spring_native_graalvm/) | 8 — Testing & Production | Advanced | AOT processing, reachability metadata/hints, build-time vs runtime init, tracing agent, startup/memory vs peak-throughput tradeoff |
+| 33 | [spring_hateoas_rest_maturity](spring_hateoas_rest_maturity/) | 4 — Spring Web | Advanced | Richardson Maturity Model L0-L3, Spring HATEOAS (EntityModel/Link/assemblers), HAL/HAL-FORMS, @HttpExchange/RestClient, ProblemDetail |
+| 34 | [spring_grpc](spring_grpc/) | 4 — Spring Web | Advanced | @GrpcService beans, server/channel autoconfig, Server/ClientInterceptor, Status↔exception mapping, deadlines, streaming, security + tracing |
+| 35 | [spring_session](spring_session/) | 6 — Security | Advanced | SessionRepositoryFilter, Redis/JDBC/Hazelcast backends, session fixation, concurrent-session control, WebSession, JWT vs stateful tradeoff |
+
+**Deep-dive sub-files** (group under their parent module's game topic; no separate `STUDY_ORDER` entry): [spring_webflux/rsocket_reactive_messaging.md](spring_webflux/rsocket_reactive_messaging.md) — RSocket 4 interaction models, protocol-level backpressure, `@MessageMapping`/`RSocketRequester`; [request_handling/i18n_and_localization.md](request_handling/i18n_and_localization.md) — `MessageSource`, `LocaleResolver`/`LocaleChangeInterceptor`, locale-aware formatting.
 
 ---
 
@@ -135,6 +140,12 @@ Phase 8: Testing & Production
 
 Phase 4 additions:
 | validation_and_error_handling    |  (extends request_handling)
+| spring_hateoas_rest_maturity     |  (REST maturity L0-L3, hypermedia)
+| spring_grpc                      |  (gRPC endpoints in Spring)
++----------------------------------+
+
+Phase 6 addition:
+| spring_session                   |  (distributed / Redis-backed sessions)
 +----------------------------------+
 ```
 
@@ -236,6 +247,11 @@ Dependencies to note:
 | [spring_modulith](spring_modulith/) | [spring_events_and_scheduling](spring_events_and_scheduling/), [spring_integration](spring_integration/), [../../lld/solid_principles/](../../lld/solid_principles/), [../../java/microservices_patterns/](../../java/microservices_patterns/) |
 | [spring_graphql](spring_graphql/) | [request_handling](request_handling/), [spring_data_jpa](spring_data_jpa/) (N+1), [spring_webflux](spring_webflux/), [../../backend/graphql/](../../backend/graphql/) |
 | [spring_events_and_scheduling](spring_events_and_scheduling/) | [spring_transactions](spring_transactions/), [spring_messaging](spring_messaging/), [spring_aop](spring_aop/) |
+| [spring_hateoas_rest_maturity](spring_hateoas_rest_maturity/) | [request_handling](request_handling/), [spring_mvc_architecture](spring_mvc_architecture/), [../../backend/rest_api_design/](../../backend/rest_api_design/), [../../hld/api_design/](../../hld/api_design/) |
+| [spring_grpc](spring_grpc/) | [../../java/grpc_protobuf/](../../java/grpc_protobuf/) (wire format), [../../backend/grpc_and_protobuf/](../../backend/grpc_and_protobuf/), [spring_webflux](spring_webflux/), [observability_and_tracing](observability_and_tracing/) |
+| [spring_session](spring_session/) | [spring_security_architecture](spring_security_architecture/), [spring_security_jwt_oauth](spring_security_jwt_oauth/), [../../backend/auth_and_authorization_systems/](../../backend/auth_and_authorization_systems/), [../../database/key_value_stores/](../../database/key_value_stores/) |
+| [spring_webflux → rsocket_reactive_messaging.md](spring_webflux/rsocket_reactive_messaging.md) (sub-file) | [../../java/reactive_programming/](../../java/reactive_programming/), [spring_messaging](spring_messaging/), [spring_grpc](spring_grpc/) |
+| [request_handling → i18n_and_localization.md](request_handling/i18n_and_localization.md) (sub-file) | [validation_and_error_handling](validation_and_error_handling/), [ioc_container](ioc_container/), [../../java/java_time_datetime/](../../java/java_time_datetime/) |
 | [validation_and_error_handling](validation_and_error_handling/) | [request_handling](request_handling/), [spring_mvc_architecture](spring_mvc_architecture/), [spring_boot_autoconfiguration](spring_boot_autoconfiguration/) |
 | [observability_and_tracing](observability_and_tracing/) | [spring_boot_actuator](spring_boot_actuator/), [spring_cloud_patterns](spring_cloud_patterns/), [spring_performance](spring_performance/) |
 

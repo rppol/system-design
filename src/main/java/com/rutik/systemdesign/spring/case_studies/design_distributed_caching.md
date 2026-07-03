@@ -82,45 +82,45 @@ At 20k read req/sec + pub/sub: use LettucePoolingClientConfiguration maxTotal=16
 
 ## 3. High-Level Architecture
 
-```
-  [Client Request]
-        |
-        v
-  [Service Layer: @Cacheable / @CachePut / @CacheEvict]
-        |
-        v
-  [TwoLevelCacheManager] (@Primary CacheManager)
-        |
-   L1 Caffeine check
-        |
-   +----+----+
-   |         |
-  HIT       MISS (L1)
-   |         |
- return   L2 Redis check
-           |
-       +---+---+
-       |       |
-      HIT    MISS (L2)
-       |       |
-       |    [PostgreSQL DB]
-       |       |
-       |    populate L2 (Redis SET with TTL)
-       |    promote L1 (Caffeine.put)
-       |
-    promote L1 (Caffeine.put for future requests)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Write / Invalidation path:
-  @CachePut --> update L2 (Redis) --> @CacheEvict L1 locally
-            --> CacheInvalidationPublisher.publishInvalidation()
-                         |
-                  [Redis Pub/Sub: "cache-invalidation" channel]
-                         |
-              +----------+-----------+
-              |          |           |
-        [Instance 1] [Instance 2] [Instance 3-5]
-        evict L1     evict L1     evict L1
-        (<5ms)       (<5ms)       (<5ms)
+    CR[Client Request] --> SVC["Service Layer:\n@Cacheable / @CachePut / @CacheEvict"]
+    SVC --> MGR["TwoLevelCacheManager\n(@Primary CacheManager)"]
+    MGR --> L1Q{L1 Caffeine check}
+    L1Q -->|HIT| RET[Return to caller]
+    L1Q -->|MISS| L2Q{L2 Redis check}
+    L2Q -->|HIT| PROM2["promote L1\n(Caffeine.put)"]
+    PROM2 --> RET
+    L2Q -->|MISS| DB[(PostgreSQL DB)]
+    DB --> POP["populate L2\n(Redis SET with TTL)"]
+    POP --> PROM1["promote L1\n(Caffeine.put for future requests)"]
+    PROM1 --> RET
+
+    subgraph WRITE["Write / Invalidation Path"]
+        CP["@CachePut:\nupdate L2 (Redis)"] --> EV["@CacheEvict\nL1 locally"]
+        EV --> PUB["CacheInvalidationPublisher\n.publishInvalidation()"]
+        PUB --> CH[["Redis Pub/Sub:\ncache-invalidation channel"]]
+        CH --> I1["Instance 1:\nevict L1 (less than 5ms)"]
+        CH --> I2["Instance 2:\nevict L1 (less than 5ms)"]
+        CH --> I3["Instance 3-5:\nevict L1 (less than 5ms)"]
+    end
+
+    class CR,RET io
+    class SVC,MGR base
+    class L1Q,L2Q mathOp
+    class PROM1,PROM2,POP train
+    class DB frozen
+    class CP,EV,PUB base
+    class CH frozen
+    class I1,I2,I3 req
 ```
 
 **Component inventory:**

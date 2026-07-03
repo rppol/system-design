@@ -96,25 +96,31 @@ non-sealed class Triangle implements Shape { }  // allows further subclassing
 ## 5. Architecture Diagrams
 
 ### Virtual Thread Architecture
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    App(["Application code\nThread.ofVirtual().start(...)\nblocking HTTP call"]) --> Sched["JVM Scheduler\nForkJoinPool -- carrier threads = OS threads"]
+    Sched --> C1["Carrier Thread 1\nrunning VT-A"]
+    Sched --> C2["Carrier Thread 2\nrunning VT-B"]
+    C1 -->|"VT-A blocks on socket read"| Unmount["JVM unmounts VT-A\nstack saved to heap"]
+    Unmount --> Free["Carrier Thread 1 freed"]
+    Free --> C3["Carrier Thread 1 picks up VT-C\n(ready to run)"]
+    Unmount -.->|"socket read completes"| Remount(["VT-A remounted\non a free carrier"])
+
+    class App req
+    class Sched base
+    class C1,C2,C3 train
+    class Unmount,Free mathOp
+    class Remount io
 ```
-Application Code (virtual threads)
-  Thread.ofVirtual().start(() -> {
-      // blocking HTTP call
-      HttpClient.send(request, BodyHandlers.ofString())
-  });
-
-JVM Scheduler (ForkJoinPool — "carrier threads" = OS threads)
-  Carrier Thread 1: running VT-A
-  Carrier Thread 2: running VT-B
-
-When VT-A blocks on socket read:
-  JVM unmounts VT-A from Carrier Thread 1
-  VT-A's stack is saved to heap
-  Carrier Thread 1 picks up VT-C (which is ready)
-  When socket read completes: VT-A is remounted on a free carrier
-
-Key: carrier threads = CPU cores count, virtual threads = request count
-```
+Key: carrier threads scale with CPU core count; virtual threads scale with request count — a blocked VT unmounts instead of tying up an OS thread.
 
 ### Pattern Matching for Switch (Java 21)
 ```
@@ -466,15 +472,30 @@ A virtual thread is "pinned" when it cannot be unmounted from its carrier platfo
 
 **Scenario.** An order-orchestration REST API runs on Java 11 (LTS) with a fixed pool of **200 platform threads**. Each request fans out to 2–3 downstream services (user, inventory, pricing), each a blocking HTTP call averaging ~60ms. At 500 concurrent requests the 200-thread pool is exhausted; requests queue and **p99 hits 800ms** even though the CPU sits at 25%. The threads are not busy — they are *blocked* waiting on I/O. Migrating to Java 21 virtual threads lets the service hold **10,000 concurrent requests** with **p99 ~120ms**, because a blocked virtual thread unmounts its carrier instead of pinning an OS thread.
 
-```
-  Java 11 (200 platform threads, ~1MB stack each = ~200MB)
-  500 concurrent -> 300 queued -> p99 800ms, CPU 25% (threads blocked on I/O)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Java 21 (virtual threads, ~few KB each)
-  10,000 concurrent -> ~8 carrier threads (1/core) -> p99 120ms, CPU ~70%
+    subgraph J11["Java 11 -- 200 platform threads, ~1MB stack each = ~200MB"]
+        A1(["500 concurrent"]) --> B1["300 queued"] --> C1["p99 800ms, CPU 25%\nthreads blocked on I/O"]
+    end
+    subgraph J21["Java 21 -- virtual threads, ~few KB each"]
+        A2(["10,000 concurrent"]) --> B2["~8 carrier threads\n(1/core)"] --> C2["p99 120ms, CPU ~70%"]
+    end
+    Req(["request"]) --> VT["virtual thread"]
+    VT -->|"blocks on I/O"| Un["UNMOUNTS carrier"]
+    Un --> Car["carrier serves another VT"]
 
-   request --> virtual thread --[blocks on I/O]--> UNMOUNTS carrier
-                                                   carrier serves another VT
+    class A1,A2,Req req
+    class B1,B2,VT train
+    class C1,C2 lossN
+    class Un,Car mathOp
 ```
 
 #### The migration: one line, plus structured concurrency
@@ -606,5 +627,6 @@ record Cart(List<Item> items) {
 - [Structured Concurrency & Loom](../structured_concurrency_and_loom/README.md) — virtual threads GA (Java 21), StructuredTaskScope, ScopedValue deep dive
 - [JVM Internals](../jvm_internals/README.md) — class loading, JPMS module system, JIT tiers
 - [Java 8 Features](../java8_features/README.md) — evolution baseline: lambdas, streams, and Optional
+- [Spring Native / GraalVM](../../spring/spring_native_graalvm/README.md) — AOT compilation of records, sealed classes, and reflection-heavy frameworks into native images
 
 **Why does CPU rise from 25% to ~70% after the migration?** The platform-thread service had idle cores because threads sat blocked on I/O while the work was waiting. Virtual threads keep more requests progressing concurrently, so the cores spend their time on actual request processing instead of being stalled behind a bounded pool.

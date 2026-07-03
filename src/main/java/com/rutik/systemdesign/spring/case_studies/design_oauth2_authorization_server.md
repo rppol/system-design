@@ -68,33 +68,27 @@ Memory per pod: 256 MB (Spring Authorization Server is not memory-hungry)
 
 ## 3. High-Level Architecture
 
-```
- Browser / Mobile App
-        |
-        | (1) Authorization Request + PKCE code_challenge
-        v
- +---------------------------+       +-----------------------+
- |  Authorization Server     |       |  Identity Provider    |
- |  (Spring Auth Server)     |<----->|  (Okta/Cognito/LDAP)  |
- |  /oauth2/authorize        |       |  (user authentication)|
- |  /oauth2/token            |       +-----------------------+
- |  /oauth2/jwks             |
- |  /oauth2/introspect       |
- |  /.well-known/openid-conf |
- +---------------------------+
-        |           |
-        |           | (2) authorization code
-        v           v
- Client App    +---------+
-        |      | Redis   |  ← code, refresh token storage
-        | (3) code + verifier → access token + refresh token
-        v
- +---------------------------+
- |  Resource Server (API)    |
- |  - validates JWT locally  |
- |  - fetches JWKS on startup|
- |  - caches JWKS 1 hour     |
- +---------------------------+
+```mermaid
+sequenceDiagram
+    participant Browser as Browser / Mobile App
+    participant AuthServer as Authorization Server<br/>(Spring Auth Server)
+    participant IdP as Identity Provider<br/>(Okta/Cognito/LDAP)
+    participant Redis as Redis<br/>(code + refresh token store)
+    participant ClientApp as Client App
+    participant ResourceServer as Resource Server (API)
+
+    Note over AuthServer: endpoints - /oauth2/authorize, /oauth2/token,<br/>/oauth2/jwks, /oauth2/introspect, /.well-known/openid-configuration
+
+    Browser->>AuthServer: (1) Authorization Request + PKCE code_challenge
+    AuthServer->>IdP: authenticate user
+    IdP-->>AuthServer: user authenticated
+    AuthServer->>Redis: store code, code_challenge, client_id, scope, user
+    AuthServer-->>ClientApp: (2) authorization code
+    ClientApp->>AuthServer: (3) code + verifier
+    AuthServer->>Redis: verify code_challenge, delete code
+    AuthServer-->>ClientApp: access token + refresh token
+    ClientApp->>ResourceServer: API request with access token
+    ResourceServer->>ResourceServer: validate JWT locally (JWKS cached 1 hour)
 ```
 
 ### Data Flow (Authorization Code + PKCE)

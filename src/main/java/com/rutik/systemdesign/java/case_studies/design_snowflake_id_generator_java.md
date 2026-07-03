@@ -72,44 +72,39 @@ Lock-free per-call overhead: one AtomicLong.incrementAndGet() + one System.curre
 
 ## 3. High-Level Architecture
 
-```
- Caller Threads (N)
-       |
-       v
- +----------------------------+
- |   SnowflakeIdGenerator     |
- |  - nodeId (long, fixed)    |
- |  - lastTimestamp (long)    |
- |  - sequence (AtomicLong)   |
- |  + nextId(): long          |
- |  + parse(id): IdInfo       |
- +----------------------------+
-       |
-       v
-  [bit-pack: ts | dc | w | seq]
-       |
-       v
-  64-bit unique ID (long)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
- Node ID Assignment (startup only)
- +---------------------------+
- | environment variable /    |
- | config file / K8s         |
- | downward API pod ordinal  |
- +---------------------------+
-       |
-       v
-  SnowflakeIdGenerator(nodeId)
+    callers(["Caller Threads (N)"]) --> gen
+    gen["SnowflakeIdGenerator\nnodeId (long, fixed)\nlastTimestamp (long)\nsequence (AtomicLong)\nnextId() : long\nparse(id) : IdInfo"] --> pack
+    pack["bit-pack: ts / dc / w / seq"] --> id(["64-bit unique ID (long)"])
 
- Optional: ID Decoder Service
- +--------------------------+
- | parse(rawId)             |
- | → timestamp (Instant)    |
- | → datacenter (int)       |
- | → worker (int)           |
- | → sequence (int)         |
- +--------------------------+
+    subgraph startup["Node ID Assignment (startup only)"]
+        cfg["env var / config file /\nK8s downward API pod ordinal"] --> ctor["SnowflakeIdGenerator(nodeId)"]
+    end
+    ctor -.-> gen
+
+    subgraph decoder["Optional: ID Decoder Service"]
+        parse["parse(rawId)\ntimestamp (Instant)\ndatacenter (int)\nworker (int)\nsequence (int)"]
+    end
+    id -.-> parse
+
+    class callers,id io
+    class gen base
+    class pack mathOp
+    class cfg frozen
+    class ctor train
+    class parse req
 ```
+
+*Callers hit one `SnowflakeIdGenerator` that bit-packs timestamp, node id, and sequence into a 64-bit long; the node id is assigned once at startup (dotted), and an optional decoder reverses any raw id back into its parts.*
 
 ### Component Inventory
 | Component | Role |

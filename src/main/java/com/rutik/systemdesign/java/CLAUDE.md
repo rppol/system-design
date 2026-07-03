@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 24 Modules
+## Module List — 27 Modules
 
 | Module Directory | Topic |
 |-----------------|-------|
@@ -33,6 +33,13 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `microservices_patterns/` | Saga (choreography + orchestration), transactional outbox, idempotency keys, distributed tracing context propagation, strangler fig, bulkhead (thread-pool vs semaphore) |
 | `grpc_protobuf/` | Protobuf wire format (varint/tag) + schema evolution + reserved, 4 RPC modes, blocking/async/future stubs, interceptors, deadlines/cancellation, Status error model, HTTP/2 transport |
 | `annotation_processing/` | JSR 269 rounds, AbstractProcessor, Filer/Messager, javax.lang.model element model, JavaPoet codegen, Lombok AST mutation, MapStruct, AutoService, compile-time vs runtime tradeoff |
+| `java_time_datetime/` | Instant vs LocalDateTime, ZoneId/ZoneOffset, Duration vs Period, ChronoUnit, TemporalAdjuster, DateTimeFormatter, Clock (testable time), DST gaps/overlaps, legacy Date interop |
+| `bytecode_and_classfile/` | .class structure + constant pool, opcode families, all 5 invoke*, invokedynamic (LambdaMetafactory/StringConcatFactory), javap, verification, ASM/Byte Buddy, java agents + Instrumentation |
+| `security_and_cryptography/` | JCA/JCE providers, MessageDigest/Mac, AES-GCM vs CBC, RSA-OAEP/ECDH, KeyStore, SecureRandom, PBKDF2/bcrypt/Argon2, Signature, TLS/SSLEngine handshake + mTLS, JAAS |
+
+**Deep-dive sub-files** (group under their parent module's game topic; no separate `STUDY_ORDER` entry):
+- `strings_and_text/regex_engine_and_redos.md` — backtracking NFA engine, catastrophic backtracking / ReDoS, possessive/atomic groups, mitigations.
+- `performance_and_tuning/jmx_and_management.md` — MBeanServer/MXBeans, custom MBeans, `ThreadMXBean` deadlock detection, remote-JMX security, JMX vs Prometheus.
 
 ---
 
@@ -89,6 +96,9 @@ Learning-path index: `case_studies/README.md` (mandatory; update with every new 
 | `annotation_processing/` | `generics_and_type_system/` — reflection/dynamic proxies (runtime metaprogramming); `design_patterns_in_java/` — Builder/Factory codegen; `../../spring/spring_native_graalvm/` — AOT, same build-time philosophy |
 | `design_patterns_in_java/` | `../../lld/` — full GoF pattern catalogue (all 23 patterns with UML + Java implementations) |
 | `functional_programming/` | `../../lld/behavioral/strategy/` — Strategy pattern via lambdas |
+| `java_time_datetime/` | `java8_features/` — where java.time landed; `strings_and_text/` — parsing/formatting; `jdbc_and_database/` — TIMESTAMP vs TIMESTAMPTZ; `../../spring/request_handling/i18n_and_localization.md` — locale-aware formatting |
+| `bytecode_and_classfile/` | `jvm_internals/` — class loading, JIT; `annotation_processing/` — compile-time vs bytecode-time codegen; `../../spring/spring_native_graalvm/` — reachability/reflection hints |
+| `security_and_cryptography/` | `../../cs_fundamentals/cryptography_fundamentals/` — primitives; `../../backend/backend_security_owasp/` — applied security; `../../backend/auth_and_authorization_systems/` — OAuth/OIDC; `networking_and_http_client/` — TLS transport |
 
 ---
 
@@ -110,22 +120,45 @@ When covering a feature, always include the version it was introduced and LTS st
 ## Adding a New Java Module
 
 1. Create `<module_name>/README.md` — 14-section template
-2. Minimum 15 Q&As; ordered by interview frequency (gotchas first)
+2. Minimum 15 Q&As; ordered by interview frequency (gotchas first). **First
+   answer sentence must be self-contained and 15–220 chars** or `extract.py`
+   silently drops the Q&A from the game bank.
 3. Add a row to the module table in `README.md` (the Java master index)
 4. Place it in the correct learning phase in the phase diagram in `README.md`
 5. Add cross-references in the Cross-Reference Map in `README.md` if applicable
 6. Update root `README.md` Phase table under the Java section
 7. Update `java/CLAUDE.md` module table (this file)
+8. **REQUIRED for the game:** add the new module id (`java/<module_name>`) to
+   `STUDY_ORDER.java` in `game/app.js` at its learning-path position — a module
+   missing from that array sorts to the end. (A new **sub-file**
+   `<module>/<name>.md` needs no `STUDY_ORDER` entry; it groups under its parent
+   module's topic and its Q&As merge into that module's bank.)
+9. **Re-run `python3 game/extract.py`** to regenerate the question bank.
 
 ---
 
-## Visual Intuition Diagrams
+## Diagrams — Appeal-First (Mermaid preferred)
 
-Section 5 (Architecture Diagrams) and any hard-to-picture concept should use an
-**ASCII visual intuition diagram** that makes an abstract relationship visible
-(constraint grid, before/after-with-delta, stacked flow, routing fan-out, bar
-chart, or curve/sketch). Generate and validate them with the
-`/visual-intuition-diagrams` skill. The full archetype catalog, conventions
-(ASCII only, no tabs, no emojis, widest line <= 100 cols, caption every diagram),
-and the `diagram_tools.py` validator live in root `CLAUDE.md` -> "Visual Intuition
-Diagrams".
+**Owner policy (2026-07-02), supersedes the old ASCII-only rule.** Section 5
+(Architecture Diagrams) and any hard-to-picture concept should use the most
+visually appealing renderable form that conveys the info accurately. In practice
+the **Mermaid family is preferred** — `flowchart` for directed flows (GC roots,
+NIO Reactor, Panama Java→Native, HTTP/2 multiplexing), `sequenceDiagram` for
+actor chains (thread interaction, JDBC round-trips), `stateDiagram-v2` for
+lifecycles (circuit-breaker CLOSED→OPEN→HALF_OPEN, connection-pool states),
+`xychart-beta` for magnitude comparisons. Run `/mermaid-diagrams` before
+authoring or converting any diagram — it has the One-Dark `classDef` palette,
+supported types, and gotchas.
+
+**Reader contract:** Mermaid renders in the game reader (v11, pitch-black
+surface). Color **every** flowchart node with the One-Dark `classDef` or **none**
+(the reader auto-tints uncolored flowcharts, but bails to flat gray if even one
+node is authored-colored). Never set a light background inside a diagram.
+
+**Keep ASCII only** for shapes Mermaid cannot draw — byte/memory-layout maps
+(Compact Strings `byte[]`, MemoryLayout field offsets), the JVM heap-region grid,
+the HashMap bucket-array grid, constraint grids, and alignment-critical layout
+maps. Validate those with the `/visual-intuition-diagrams` skill's
+`diagram_tools.py check` (ASCII only, no tabs/emojis, widest line ≤ 100 cols,
+caption every diagram). Full policy in root `CLAUDE.md` → "Mermaid Diagrams" and
+"Visual Intuition Diagrams".

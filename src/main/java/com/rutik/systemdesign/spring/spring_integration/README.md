@@ -126,30 +126,56 @@ the business logic stays untouched. That decoupling *is* the framework.
 
 ### Pipes-and-filters: endpoints decoupled by channels
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    inbound(["inbound file adapter\nreads *.csv"]) -->|"ch1"| filter["filter\ndrop invalid"]
+    filter -->|"ch2"| transformer["transformer\nCSV -> Order"]
+    transformer -->|"ch3"| router{"router"}
+    router -->|"ch4 (EU)"| chA(["outbound JMS adapter"])
+    router -->|"ch4 (US)"| chB(["outbound JMS adapter"])
+
+    class inbound,chA,chB io
+    class filter,transformer train
+    class router mathOp
 ```
-  [inbound      ]   ch1   +--------+  ch2  +-----------+ ch3 +-----------+ ch4 [outbound ]
-  [file adapter ]-------->| filter |------>|transformer|---->| router    |---->[ JMS      ]
-                          +--------+       +-----------+     +-----+-----+     [ adapter  ]
-   reads *.csv            drop invalid     CSV -> Order            |  \
-                                                                   v   v
-                                                              chA(EU)  chB(US)
-  Endpoints never call each other; they only read/write channels.
-  Swap ch2 DirectChannel -> QueueChannel => same flow, now async, zero endpoint changes.
-```
+
+Endpoints never call each other; they only read/write channels. Swap ch2 from a `DirectChannel` to a `QueueChannel` and the same flow becomes async with zero endpoint changes.
 
 ### Splitter + aggregator: scatter and re-gather by correlation id
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    order(["Order (3 items)"]) -->|splitter| itemA["Item A\ncorrelationId=order-7, seq 1/3"]
+    order -->|splitter| itemB["Item B\ncorrelationId=order-7, seq 2/3"]
+    order -->|splitter| itemC["Item C\ncorrelationId=order-7, seq 3/3"]
+
+    itemA --> agg{"aggregator\nrelease when 3/3 collected"}
+    itemB --> agg
+    itemC --> agg
+    agg --> result(["OrderResult (3 priced)"])
+
+    class order,result io
+    class itemA,itemB,itemC train
+    class agg mathOp
 ```
-                 splitter                         aggregator
-  Order{3 items} ----> Item A (correlationId=order-7, seq 1/3) --\
-                       Item B (correlationId=order-7, seq 2/3) ----> [ release when
-                       Item C (correlationId=order-7, seq 3/3) --/    3/3 collected ]
-                                                                          |
-                                                                          v
-                                                                   OrderResult{3 priced}
-  Aggregator groups by correlation id, buffers in a MessageStore, and applies a
-  release strategy (here: size = sequenceSize) + a timeout for missing parts.
-```
+
+The aggregator groups by correlation id, buffers in a `MessageStore`, and applies a release strategy (here: size = sequenceSize) plus a timeout for missing parts.
 
 The aggregator is the subtle one: it must correlate, buffer, decide *when* a group is
 complete (release strategy), and handle parts that never arrive (group timeout). This
@@ -157,10 +183,34 @@ is exactly the logic SI gives you so you do not hand-roll it.
 
 ### Channel choice sets the threading/back-pressure profile
 
-```
-  DirectChannel   : producer --(same thread, blocks)--> consumer   (sync, in-TX)
-  ExecutorChannel : producer --> [thread pool] --> consumer         (async, pool-bounded)
-  QueueChannel    : producer --> [ buffer ] <-poller- consumer      (async, buffered, rate-limited)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph direct ["DirectChannel — sync, in-TX"]
+        direction LR
+        p1(["producer"]) -- "same thread, blocks" --> c1(["consumer"])
+    end
+
+    subgraph executor ["ExecutorChannel — async, pool-bounded"]
+        direction LR
+        p2(["producer"]) --> pool["thread pool"] --> c2(["consumer"])
+    end
+
+    subgraph queue ["QueueChannel — async, buffered, rate-limited"]
+        direction LR
+        p3(["producer"]) --> buf["buffer"]
+        c3(["consumer"]) -. poller .-> buf
+    end
+
+    class p1,c1,p2,c2,p3,c3 req
+    class pool,buf mathOp
 ```
 
 One line of DSL (`.channel(c -> c.queue(500))`) changes the whole concurrency and

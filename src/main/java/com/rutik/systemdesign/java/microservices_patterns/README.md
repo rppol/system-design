@@ -130,39 +130,61 @@ idempotency and dedup. You never get exactly-once delivery — you get
 
 ### The dual-write problem the outbox solves
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Without["WITHOUT outbox: two separate I/O calls - NOT atomic"]
+        SvcA["Service"] -->|"1) UPDATE order SET status='PAID' - ok"| DBA[("DB")]
+        SvcA -.->|"2) publish OrderPaid - CRASH between 1 and 2"| BrokerA[["Broker: event LOST, Payment never told"]]
+    end
+
+    subgraph With["WITH outbox: one local transaction"]
+        TxB["BEGIN\nUPDATE order SET status='PAID'\nINSERT outbox(event='OrderPaid')\nCOMMIT - one atomic commit"] --> RelayB["Relay thread reads outbox"]
+        RelayB -->|"publishes"| BrokerB[["Broker"]]
+        RelayB -->|"marks sent (retried until it sticks)"| TxB
+    end
+
+    class SvcA req
+    class DBA frozen
+    class BrokerA lossN
+    class TxB train
+    class RelayB mathOp
+    class BrokerB base
 ```
-WITHOUT outbox (two separate I/O calls — NOT atomic):
-
-  [Service]---(1) UPDATE order SET status='PAID'--->[ DB ]   ok
-      |
-      +--------(2) publish "OrderPaid"------------->[Broker]  CRASH between 1 and 2
-                                                              => DB updated, event LOST
-                                                              => Payment never told
-
-WITH outbox (one local transaction):
-
-  BEGIN
-    UPDATE order   SET status='PAID'      \
-    INSERT outbox (event='OrderPaid', ...) | one atomic commit
-  COMMIT                                   /
-        |
-        v
-  [Relay thread] reads outbox --> publishes --> marks sent  (retried until it sticks)
-```
-
 The two writes are now one commit, so they cannot half-succeed. Publication becomes
 a *separate, retryable* step that can crash and resume without losing the event.
 
 ### Saga compensation runs in reverse (orchestration)
 
-```
-  forward:   reserveInventory --> chargeCard --> createShipment
-                  T1                T2               T3 (FAILS)
-                  |                 |
-  compensate: <-- releaseInventory  <-- refundCard       (reverse order)
-                  C1                C2
-```
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    subgraph Forward["forward path"]
+        T1["T1: reserveInventory"] --> T2["T2: chargeCard"] --> T3["T3: createShipment - FAILS"]
+    end
+    subgraph Compensate["compensate (reverse order)"]
+        C2["C2: refundCard"] --> C1["C1: releaseInventory"]
+    end
+    T3 -.->|"failure triggers compensation"| C2
+
+    class T1,T2 train
+    class T3 lossN
+    class C2,C1 mathOp
+```
 Each forward step Tn has a compensating step Cn. On failure at step k, run
 C(k-1), C(k-2), ... C1. Compensations must themselves be idempotent and should not
 fail (or must be retried forever) — there is no compensation for a failed
@@ -170,15 +192,18 @@ compensation.
 
 ### At-least-once delivery + idempotent receiver = effectively-once
 
+```mermaid
+sequenceDiagram
+    participant Sender
+    participant Dedup as Dedup Store
+    Sender->>Dedup: msg-42 (attempt 1, network gave up waiting)
+    Dedup-->>Sender: processed - side effect #1 applied
+    Sender->>Dedup: msg-42 (attempt 2, retry)
+    Dedup-->>Sender: key 42 already seen - SKIP (cached result)
+    Sender->>Dedup: msg-42 (attempt 3, retry)
+    Dedup-->>Sender: key 42 already seen - SKIP (cached result)
+    Note over Sender,Dedup: delivered 3x, side effect applied exactly 1x
 ```
-  sender retries (network gave up waiting):
-     msg#42 --->|        |---> processed, side effect #1
-     msg#42 --->| dedup  |---> key 42 seen -> SKIP (return cached result)
-     msg#42 --->| store  |---> key 42 seen -> SKIP
-                +--------+
-  delivered 3x, side effect applied exactly 1x.
-```
-
 The receiver's dedup store is the only place "exactly once" is actually enforced.
 
 ---
@@ -742,11 +767,15 @@ tables. Both were acceptable given the correctness and isolation gains.
   orchestration calls.
 - [concurrency](../concurrency/README.md) — `CompletableFuture`,
   `ThreadPoolExecutor` internals behind the bulkhead.
-- [../../backend/microservices_fundamentals/](../../backend/microservices_fundamentals/) —
+- [Microservices Fundamentals](../../backend/microservices_fundamentals/README.md) —
   service decomposition, API design, deployment topology.
 - [../../backend/event_driven_fundamentals/](../../backend/event_driven_fundamentals/) —
   choreography vs orchestration at the architecture level.
-- [../../backend/event_sourcing_and_cqrs/](../../backend/event_sourcing_and_cqrs/) —
+- [Event Sourcing & CQRS](../../backend/event_sourcing_and_cqrs/README.md) —
   event sourcing as the durable foundation behind sagas and outboxes.
+- [Microservices (HLD)](../../hld/microservices/README.md) — the architecture-level
+  view of service decomposition and communication this module implements in code.
+- [Distributed Transactions (HLD)](../../hld/distributed_transactions/README.md) —
+  the theory (2PC, sagas, consensus) behind why this module avoids XA/2PC.
 - [case_studies/design_circuit_breaker_java.md](../case_studies/design_circuit_breaker_java.md) —
   the breaker that pairs with the bulkhead in this module.

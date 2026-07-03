@@ -141,16 +141,31 @@ Modulith sits in the middle: the *internal* discipline of microservices without 
 
 ### Dependency inversion via events keeps the graph acyclic
 
-```
-  WITHOUT events (cycle):  Order ---calls---> Inventory
-                           Inventory ---calls---> Order  (notify on restock) => CYCLE, fails
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  WITH events (DAG):       Order --publishes--> OrderPlaced
-                                                    |
-                           Inventory --listens-----+   (no back-reference to Order)
-                           Inventory --publishes--> StockReserved
-                                                    |
-                           Order --listens---------+
+    subgraph Cycle["WITHOUT events - cycle, verify() fails"]
+        O1["Order"] -->|"calls"| I1["Inventory"]
+        I1 -->|"calls (notify on restock)"| O1
+    end
+
+    subgraph Dag["WITH events - DAG, verify() passes"]
+        O2["Order"] -->|"publishes"| E1(["OrderPlaced"])
+        E1 -.->|"listens"| I2["Inventory"]
+        I2 -->|"publishes"| E2(["StockReserved"])
+        E2 -.->|"listens"| O2
+    end
+
+    class O1,I1 lossN
+    class O2,I2 train
+    class E1,E2 io
 ```
 
 Both modules depend only on *event types*, not on each other's beans, so the module
@@ -653,7 +668,10 @@ needed it.
   on.
 - [spring_integration](../spring_integration/README.md) — EIP-based integration when
   flows cross protocols/systems rather than in-process modules.
-- [../../lld/solid_principles/](../../lld/solid_principles/) — dependency inversion and
+- [SOLID Principles](../../lld/solid_principles/README.md) — dependency inversion and
   separation of concerns, the design principles Modulith enforces mechanically.
 - [../../java/microservices_patterns/](../../java/microservices_patterns/) — the
   transactional-outbox and saga patterns Modulith's event registry mirrors in-process.
+- [Microservices Fundamentals](../../backend/microservices_fundamentals/README.md) —
+  the network-boundary tradeoffs Modulith lets you defer until a module truly needs
+  independent deployment or scaling.

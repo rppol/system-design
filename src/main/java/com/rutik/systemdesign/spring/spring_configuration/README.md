@@ -115,26 +115,30 @@ Think of configuration as blueprints for a construction project:
   txManager uses id=2     <-- different object! Not the Spring-managed bean
 ```
 
-```
-@Conditional Evaluation Order
-==============================
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  @SpringBootApplication
-         |
-         v
-  AutoConfigurationImportSelector
-         |
-         v
-  For each AutoConfiguration class:
-  +------------------------------+
-  |  @ConditionalOnClass         |  Is HikariCP on classpath?
-  |  @ConditionalOnMissingBean   |  Is DataSource already defined?
-  |  @ConditionalOnProperty      |  Is spring.datasource.url set?
-  +------------------------------+
-         |
-    all true?
-    yes -> register bean
-    no  -> skip
+    App(["@SpringBootApplication"]) --> Selector["AutoConfigurationImportSelector"]
+    Selector --> ForEach["for each AutoConfiguration class"]
+    ForEach --> Cond1["@ConditionalOnClass:\nis HikariCP on classpath?"]
+    Cond1 --> Cond2["@ConditionalOnMissingBean:\nis DataSource already defined?"]
+    Cond2 --> Cond3["@ConditionalOnProperty:\nis spring.datasource.url set?"]
+    Cond3 --> AllTrue{"all conditions true?"}
+    AllTrue -->|"yes"| Register(["register bean"])
+    AllTrue -->|"no"| Skip(["skip"])
+
+    class App req
+    class Selector,ForEach base
+    class Cond1,Cond2,Cond3,AllTrue mathOp
+    class Register train
+    class Skip lossN
 ```
 
 ---

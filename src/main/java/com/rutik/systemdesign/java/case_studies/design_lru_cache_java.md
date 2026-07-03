@@ -97,28 +97,23 @@ Benefit: GC auto-evicts under pressure → prevents OOM at the cost of ~5% more 
 
 ## 3. High-Level Architecture
 
-```
-  ┌──────────────────────────────────────────────────────────────┐
-  │                     Caller Threads                           │
-  │   thread-1    thread-2    thread-3    ...    thread-N        │
-  └───────┬─────────────┬──────────────────────────────────────┘
-          │ get/put      │
-          ▼              ▼
-  ┌───────────────────────────────────────────────────────────┐
-  │                ThreadSafeLruCache                          │
-  │                                                           │
-  │   lock: Object (intrinsic monitor)                        │
-  │                                                           │
-  │   cache: LinkedHashMap<K, CacheEntry<V>>                  │
-  │     ├── hash table: O(1) lookup by key                    │
-  │     └── doubly-linked list (access-order):                │
-  │           HEAD (LRU) ─────────────── TAIL (MRU)          │
-  │           get()    moves accessed entry to TAIL           │
-  │           put()    evicts HEAD if size > maxSize          │
-  │                                                           │
-  │   hits: AtomicLong    misses: AtomicLong                  │
-  │   evictions: AtomicLong                                   │
-  └───────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CT["Caller Threads\nthread-1 · thread-2 · thread-3 · ... · thread-N"]
+    LRU["ThreadSafeLruCache\nlock: Object (intrinsic monitor)\ncache: LinkedHashMap of K to CacheEntry V\n  hash table: O(1) lookup by key\n  doubly-linked list (access-order):\n  HEAD (LRU) -> ... -> TAIL (MRU)\n  get() moves accessed entry to TAIL\n  put() evicts HEAD if size > maxSize\nhits / misses / evictions: AtomicLong"]
+
+    CT -->|"get / put"| LRU
+
+    class CT req
+    class LRU base
 ```
 
 ### Implementation levels

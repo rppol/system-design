@@ -90,50 +90,35 @@ Page threshold: 2,100 events of consumer lag per group
 
 ## 3. High-Level Architecture
 
-```
- [Client HTTP]
-      |
-      v
- [Order Service]
-      |
-      |---(1) INSERT orders + INSERT outbox_events (same DB TX, PostgreSQL)
-      |
-      v
- [OutboxPublisher]-------@Scheduled 100ms----->[Kafka: order.created]
-                                                      |
-                          +--------------------------++--------------------------+
-                          |                                                     |
-                          v                                                     v
-               [Payment Service]                                    [Inventory Service]
-               consumes order.created                               consumes order.created
-               charges customer via gateway                         reserves SKUs
-                          |                                                     |
-               payment.completed                               inventory.reserved
-               OR payment.failed                               OR inventory.failed
-                          |                                                     |
-                          +----------->  [Order Service saga handler]  <-------+
-                                                    |
-                                        both events received?
-                                                    |
-                                     yes: publish order.confirmed
-                                     no:  publish payment.refund.requested
-                                                    |
-                                                    v
-                                         [Fulfillment Service]
-                                         consumes order.confirmed
-                                         ships package
-                                                    |
-                                         publishes fulfillment.shipped
-                                                    |
-                                                    v
-                                         [Order Service]
-                                         marks order SHIPPED
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
- Compensation path:
-   payment.completed + inventory.failed
-        --> Order Service publishes payment.refund.requested (via outbox)
-        --> Payment Service refunds, publishes payment.refunded
-        --> Order Service transitions: COMPENSATION_IN_PROGRESS -> FAILED
+    Client["Client HTTP"] --> OrderSvc["Order Service\nINSERT orders + INSERT outbox_events\n(same DB TX, PostgreSQL)"]
+    OrderSvc --> OutboxPub["OutboxPublisher\n(@Scheduled 100ms)"]
+    OutboxPub --> Kafka1["Kafka: order.created"]
+    Kafka1 --> PaymentSvc["Payment Service\nconsumes order.created\ncharges customer via gateway"]
+    Kafka1 --> InventorySvc["Inventory Service\nconsumes order.created\nreserves SKUs"]
+    PaymentSvc -->|"payment.completed OR payment.failed"| SagaHandler["Order Service\nsaga handler"]
+    InventorySvc -->|"inventory.reserved OR inventory.failed"| SagaHandler
+    SagaHandler --> Decision{"both events received?"}
+    Decision -->|"yes: publish order.confirmed"| FulfillmentSvc["Fulfillment Service\nconsumes order.confirmed\nships package"]
+    Decision -->|"no: publish payment.refund.requested"| Refund["Payment Service\nrefunds, publishes payment.refunded"]
+    FulfillmentSvc -->|"publishes fulfillment.shipped"| OrderShipped["Order Service\nmarks order SHIPPED"]
+    Refund --> CompDone["Order Service transitions\nCOMPENSATION_IN_PROGRESS -> FAILED"]
+
+    class Client io
+    class OrderSvc,OutboxPub,OrderShipped base
+    class Kafka1 frozen
+    class PaymentSvc,InventorySvc,FulfillmentSvc req
+    class SagaHandler,Decision mathOp
+    class Refund,CompDone lossN
 ```
 
 **Component inventory:**
@@ -657,7 +642,7 @@ query in Jaeger/Grafana Tempo:
 ```
 {service.name=~"order|payment|inventory|fulfillment"} | logfmt | orderId="<id>"
 ```
-Cross-reference: [OTel observability for Spring](../cross_cutting/otel_observability_for_spring.md)
+Cross-reference: [OTel observability for Spring](cross_cutting/otel_observability_for_spring.md)
 
 ### (c) Incident Runbooks
 

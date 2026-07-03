@@ -68,57 +68,89 @@ This module covers raw JDBC (no ORM), which is the foundation that every framewo
 ## 5. Architecture Diagrams
 
 ### JDBC API Flow
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    App["Application Code"] --> DS["DataSource\n(HikariCP pool)"]
+    DS -->|"getConnection()"| Conn["Connection\n(pooled TCP socket to DB)"]
+    Conn --> PS["PreparedStatement\nsetString(1,value) · setInt(2,count)"]
+    PS -->|"executeQuery / executeUpdate / executeBatch"| RS["ResultSet\n(cursor into DB result)\nnext() -> getString/getInt -> close()"]
+    Conn -.->|"on close: returned to pool"| DS
+
+    class App req
+    class DS base
+    class Conn train
+    class PS mathOp
+    class RS io
 ```
-Application Code
-    |
-    v
-DataSource (HikariCP pool)
-    |-- getConnection() ─────────────────────────────────┐
-    |                                                     |
-    v                                                     v
-Connection (pooled TCP socket to DB)           [on close: returned to pool]
-    |
-    v
-PreparedStatement
-    |-- setString(1, value)
-    |-- setInt(2, count)
-    |-- executeQuery() / executeUpdate() / executeBatch()
-    |
-    v
-ResultSet (cursor into DB result)
-    |-- next()  -> advance cursor
-    |-- getString("column")
-    |-- getInt(2)
-    |-- close() -> releases server cursor
-```
+The call chain from application code down to the result cursor: `DataSource` hands out pooled connections, `PreparedStatement` executes against one, and `ResultSet` streams the cursor back; closing a `Connection` returns it to the pool rather than tearing down the socket.
 
 ### HikariCP Connection Pool
-```
-Application threads (10 concurrent requests)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Thread 1 ──> getConnection() ──> Connection 1 (from pool) ──> execute ──> return to pool
-Thread 2 ──> getConnection() ──> Connection 2 (from pool) ──> execute ──> return to pool
-  ...
-Thread 10 -> getConnection() ──> Connection 10 (from pool)
-Thread 11 -> getConnection() ──> WAIT (pool size = 10) ──> timeout if too long
+    subgraph Threads["10 concurrent application threads"]
+        T1["Thread 1"]
+        T2["Thread 2"]
+        T10["Thread 10"]
+    end
+    subgraph Pool["HikariCP Pool (min idle = 5, max = 10)"]
+        C1["Connection 1"]
+        C2["Connection 2"]
+        C10["Connection 10"]
+    end
+    T1 -->|"getConnection() → execute → return to pool"| C1
+    T2 -->|"getConnection() → execute → return to pool"| C2
+    T10 -->|"getConnection() → execute → return to pool"| C10
+    T11["Thread 11"] -->|"getConnection()"| Wait{"pool full: WAIT"}
+    Wait -->|"connectionTimeout exceeded"| TO["PoolTimeoutException"]
 
-Pool size: min=5 idle connections, max=10 total
-HikariCP keeps min idle connections warm (pre-created, ready to use)
+    class T1,T2,T10,T11 req
+    class C1,C2,C10 train
+    class Wait mathOp
+    class TO lossN
 ```
+Ten threads borrow, use, and return pooled connections in microseconds; an eleventh thread beyond `maximumPoolSize` blocks until `connectionTimeout` fires a `PoolTimeoutException` — the concrete anatomy of pool exhaustion. HikariCP keeps `minimumIdle` connections warm (pre-created, ready to use) so the first ten never pay a connection-creation cost.
 
 ### Transaction Flow
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Begin["conn.setAutoCommit(false)\nbegin transaction"] --> Op1["INSERT INTO orders ..."]
+    Op1 --> Op2["UPDATE inventory ..."]
+    Op2 --> Op3["INSERT INTO audit_log ..."]
+    Op3 --> Check{"all three operations succeed?"}
+    Check -->|"yes"| Commit["conn.commit()\nDB commits all three atomically"]
+    Check -->|"no"| Rollback["conn.rollback()\nDB undoes all changes"]
+
+    class Begin base
+    class Op1,Op2,Op3 mathOp
+    class Check mathOp
+    class Commit train
+    class Rollback lossN
 ```
-conn.setAutoCommit(false);   ← begin transaction
-
-INSERT INTO orders ...        ← operation 1
-UPDATE inventory ...          ← operation 2
-INSERT INTO audit_log ...     ← operation 3
-
-[all succeed]                 conn.commit()   ─→ DB commits all three atomically
-[any fails]                   conn.rollback() ─→ DB undoes all changes
-
-Either ALL three are visible, or NONE are. No partial state.
-```
+Either every statement since `setAutoCommit(false)` becomes visible together at `commit()`, or `rollback()` undoes all of them — there is no partially-applied state.
 
 ---
 

@@ -48,7 +48,10 @@ SKIP_SECTIONS = {"game"}
 # Path components that exclude a README from the bank (e.g. case studies).
 SKIP_PATH_PARTS = {"case_studies"}
 
-# Quality filters for the SHORT answer used as an MCQ option.
+# Bounds for the SHORT answer shown as an MCQ option. A first sentence longer
+# than SHORT_MAX is TRIMMED to a clean clause boundary (see make_short) rather
+# than dropped, so no question is ever excluded from the bank on length alone.
+# The full answer is always preserved for the post-answer reveal.
 SHORT_MIN = 15
 SHORT_MAX = 220
 
@@ -152,6 +155,23 @@ def first_sentence(text):
         return candidate
 
 
+def make_short(text):
+    """Bounded MCQ option derived from the answer's first sentence. Never drops on
+    length: an over-long first sentence is trimmed to a clean boundary at or below
+    SHORT_MAX (prefer a clause delimiter; fall back to a word boundary + ellipsis).
+    Short first sentences are returned as-is. Returns "" only for empty input."""
+    s = first_sentence(text).strip()
+    if len(s) <= SHORT_MAX:
+        return s
+    cut = s[:SHORT_MAX]
+    for delim in ("; ", " — ", " – ", ": ", ", "):
+        idx = cut.rfind(delim)
+        if idx >= 80:                      # keep a substantive, self-contained clause
+            return cut[:idx].rstrip(" ,;:—–")
+    idx = cut.rfind(" ")
+    return (cut[:idx] if idx >= 80 else cut).rstrip() + "…"
+
+
 def parse_md(path, section, module):
     """Yield per-question dicts from one .md file (a module README or deep-dive
     sub-file). Each dict carries both the stripped text (used for ids, options,
@@ -221,8 +241,8 @@ def parse_md(path, section, module):
 
         if not question or not answer_full:
             continue
-        short = first_sentence(answer_full)
-        if not (SHORT_MIN <= len(short) <= SHORT_MAX):
+        short = make_short(answer_full)
+        if not short:
             continue
         # Display variants: emitted only when they differ from the stripped text.
         short_md = first_sentence(answer_full_md)

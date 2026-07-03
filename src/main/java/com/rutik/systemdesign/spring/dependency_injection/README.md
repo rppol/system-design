@@ -62,59 +62,62 @@ When multiple beans match an injection point, Spring resolves in this priority:
 
 ## 5. Architecture Diagrams
 
-```
-Dependency Resolution Flow
-===========================
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Injection Point: @Autowired UserRepository repo
-         |
-         v
-  +----------------------------------+
-  |  Find all beans of type          |
-  |  UserRepository                  |
-  +----------------------------------+
-         |
-   +-----+------+
-   |             |
-  1 match     0 matches        2+ matches
-   |             |                  |
-   v             v                  v
-  Inject    Check if           Check @Primary
-            required=false     on candidates
-              |                    |
-           Yes: OK          1 @Primary: inject
-           No: throw         0 or 2+ @Primary:
-           NoSuchBean-         Check @Qualifier
-           DefinitionEx         on injection point
-                                    |
-                              Match: inject
-                              No match: check
-                              field/param name
-                                    |
-                              Name match: inject
-                              No match: throw
-                              NoUniqueBeanDef
-                              DefinitionException
+    Point(["Injection Point:\n@Autowired UserRepository repo"]) --> Find["Find all beans of type UserRepository"]
+    Find --> Count{"how many matches?"}
+    Count -->|"1 match"| Inject(["Inject"])
+    Count -->|"0 matches"| ReqCheck{"required=false?"}
+    Count -->|"2+ matches"| Primary{"exactly one @Primary\namong candidates?"}
+    ReqCheck -->|"yes"| OkNull(["OK, field stays null"])
+    ReqCheck -->|"no"| ThrowNSBDE(["throw NoSuchBeanDefinitionException"])
+    Primary -->|"yes"| Inject
+    Primary -->|"no (0 or 2+)"| Qualifier{"@Qualifier on\ninjection point matches?"}
+    Qualifier -->|"yes"| Inject
+    Qualifier -->|"no"| NameMatch{"field/param name\nmatches a bean name?"}
+    NameMatch -->|"yes"| Inject
+    NameMatch -->|"no"| ThrowNUBDE(["throw NoUniqueBeanDefinitionException"])
+
+    class Point req
+    class Find base
+    class Count,ReqCheck,Primary,Qualifier,NameMatch mathOp
+    class Inject,OkNull io
+    class ThrowNSBDE,ThrowNUBDE lossN
 ```
 
-```
-Constructor vs Field Injection — Object Graph
-=============================================
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Constructor Injection (preferred):
-  -----------------------------------
-  OrderService(PaymentService p, InventoryService i, NotificationService n)
-    ^--- all three must exist and be non-null before OrderService is created
-    ^--- OrderService.paymentService is final; cannot change
-    ^--- testable: new OrderService(mockPayment, mockInventory, mockNotify)
+    subgraph Ctor["Constructor Injection (preferred)"]
+        CtorSig["OrderService(PaymentService p,\nInventoryService i, NotificationService n)"]
+        CtorSig --> CtorReq["all three must exist and be\nnon-null before OrderService is created"]
+        CtorSig --> CtorFinal["fields are final; cannot change"]
+        CtorSig --> CtorTest["testable: new OrderService(mockPayment,\nmockInventory, mockNotify)"]
+    end
 
-  Field Injection (avoid):
-  -------------------------
-  OrderService {
-    @Autowired PaymentService paymentService;    // set via reflection post-construction
-    @Autowired InventoryService inventoryService; // hidden dependency
-    @Autowired NotificationService notification;  // impossible to set in unit test
-  }                                              // without Spring or @InjectMocks
+    subgraph FieldInj["Field Injection (avoid)"]
+        FieldSig["OrderService with @Autowired fields"]
+        FieldSig --> FieldHidden["dependencies set via reflection\npost-construction; hidden from signature"]
+        FieldSig --> FieldTest["impossible to construct in a plain\nunit test without Spring or @InjectMocks"]
+    end
+
+    class CtorSig,CtorReq,CtorFinal,CtorTest train
+    class FieldSig,FieldHidden,FieldTest lossN
 ```
 
 ---
@@ -556,21 +559,27 @@ DI features — collection injection, `@Primary`, `@Qualifier`, and `ObjectProvi
 
 ### Architecture Overview
 
-```
-                         +----------------------------------+
-   event ----dispatch--> |        NotificationService       |
-                         |                                  |
-                         |  List<NotificationChannel> all   |--> fan-out
-                         |  @Primary EmailChannel default   |--> single
-                         |  @Qualifier("sms") for opt-in    |
-                         |  ObjectProvider<TemplatePreview> |--> optional
-                         +------------+---------+-----------+
-                                      |         |
-              +-----------+-----------+         +-----------------+
-              |           |                     |                 |
-              v           v                     v                 v
-        EmailChannel   SmsChannel          PushChannel    TemplatePreviewService
-        (@Primary)     (@Qualifier sms)                    (maybe absent)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Event(["event"]) -->|"dispatch"| Svc["NotificationService\nList of NotificationChannel: fan-out\n@Primary EmailChannel: default\n@Qualifier(sms): opt-in\nObjectProvider of TemplatePreview: optional"]
+
+    Svc --> Email["EmailChannel\n(@Primary)"]
+    Svc --> Sms["SmsChannel\n(@Qualifier sms)"]
+    Svc --> Push["PushChannel"]
+    Svc --> Preview["TemplatePreviewService\n(maybe absent)"]
+
+    class Event req
+    class Svc base
+    class Email,Sms,Push train
+    class Preview frozen
 ```
 
 ### Implementation
@@ -736,5 +745,6 @@ public void record(Event e) {
 - [Spring Configuration](../spring_configuration/README.md) — @Bean methods
 - [Spring Boot Auto-Configuration](../spring_boot_autoconfiguration/README.md) — auto-wiring
 - [Case Study: DI Container (Java)](../../java/case_studies/design_di_container_java.md) — reflection-based IoC
-- [LLD: Dependency Inversion Principle](../../lld/solid_principles/DependencyInversion.md) — the SOLID principle DI frameworks exist to satisfy
+- [LLD: SOLID Principles](../../lld/solid_principles/README.md) — the Dependency Inversion Principle DI frameworks exist to satisfy
+- [LLD: Dependency Inversion Principle](../../lld/solid_principles/DependencyInversion.md) — deep dive on the specific principle
 - [LLD: Factory Method Pattern](../../lld/creational/factory_method/README.md) — `BeanFactory` is a Factory Method at framework scale

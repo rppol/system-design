@@ -87,52 +87,63 @@ Max DLQ depth: 10,000 entries = 5 MB — bounded and monitored
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pubs(["Publisher Threads\nthread-1, thread-2, thread-3"]) -->|"post(event) / postAsync(event)"| bus["EventBus\nhandlers: ConcurrentHashMap (Class to CopyOnWriteArrayList)\nasyncExecutor: virtual-thread-per-task (Java 21)\ndeadLetterQueue: BlockingDeque of DeadLetter"]
+    bus -->|"dispatch() (calling thread)"| entry["HandlerEntry (per subscriber per event type)\nhandlerRef: WeakReference of Consumer\npriority: int\n(dead ref auto-purged on next publish)"]
+    bus -->|"postAsync() (asyncExecutor)"| entry
+
+    class pubs io
+    class bus base
+    class entry train
 ```
-  ┌────────────────────────────────────────────────────────────────────┐
-  │                      Publisher Threads                             │
-  │   thread-1              thread-2              thread-3            │
-  └────────────────┬──────────────────────────────────────────────────┘
-                   │  post(event) / postAsync(event)
-                   ▼
-  ┌──────────────────────────────────────────────────────────────────┐
-  │                         EventBus                                  │
-  │                                                                   │
-  │  handlers: ConcurrentHashMap<Class<?>, CopyOnWriteArrayList>     │
-  │  asyncExecutor: Executor (virtual thread per task, Java 21)      │
-  │  deadLetterQueue: BlockingDeque<DeadLetter>                      │
-  └─────────────┬──────────────────┬────────────────────────────────┘
-                │ dispatch()       │ postAsync()
-                │ (calling thread) │ (asyncExecutor)
-                ▼                  ▼
-  ┌─────────────────────────────────────────────────────────────────┐
-  │               HandlerEntry (per subscriber per event type)       │
-  │                                                                  │
-  │   handlerRef: WeakReference<Consumer<Object>>                   │
-  │   priority: int                                                  │
-  │   (dead ref auto-purged on next publish)                        │
-  └──────────────────────────────────────────────────────────────────┘
-```
+
+*Publisher threads hand events to the shared `EventBus`, which either dispatches synchronously on the calling thread or asynchronously via the virtual-thread executor; both paths land on the same per-subscriber `HandlerEntry`.*
 
 ### Subscription lifecycle
 
-```
-1. subscribe(OrderPlaced.class, handler, priority=1)
-   → computeIfAbsent: create COWAL for OrderPlaced
-   → new HandlerEntry(new WeakReference<>(handler), 1)
-   → re-sort COWAL by priority
-   → return Subscription (lambda: list.remove(entry))
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-2. Subscriber goes out of scope (no strong ref outside bus):
-   → GC collects the handler lambda
-   → handlerRef.get() returns null on next dispatch
-   → entry added to deadEntries, removed from COWAL
+    subgraph sub["1. subscribe(OrderPlaced.class, handler, priority=1)"]
+        s1a["computeIfAbsent: create COWAL for OrderPlaced"] --> s1b["new HandlerEntry(new WeakReference(handler), 1)"]
+        s1b --> s1c["re-sort COWAL by priority"]
+        s1c --> s1d["return Subscription (lambda: list.remove(entry))"]
+    end
 
-3. post(new OrderPlaced(...))
-   → walk type hierarchy: [OrderPlaced, DomainEvent, ...]
-   → for each type: iterate COWAL snapshot
-   → skip dead refs; invoke live handlers in priority order
-   → catch per-handler exception; route to DLQ; continue
+    subgraph gc["2. Subscriber goes out of scope (no strong ref outside bus)"]
+        s2a["GC collects the handler lambda"] --> s2b["handlerRef.get() returns null on next dispatch"]
+        s2b --> s2c["entry added to deadEntries, removed from COWAL"]
+    end
+
+    subgraph post["3. post(new OrderPlaced(...))"]
+        s3a["walk type hierarchy: OrderPlaced, DomainEvent, ..."] --> s3b["for each type: iterate COWAL snapshot"]
+        s3b --> s3c["skip dead refs; invoke live handlers in priority order"]
+        s3c --> s3d["catch per-handler exception; route to DLQ; continue"]
+    end
+
+    class s1a,s1b,s1c,s1d train
+    class s2a,s2b,s2c frozen
+    class s3a io
+    class s3b,s3c,s3d mathOp
 ```
+
+*Three independent lifecycles share the same `HandlerEntry`: subscribing installs it, garbage collection of the subscriber silently marks it dead, and every `post()` walks the type hierarchy to invoke or skip it.*
 
 ---
 

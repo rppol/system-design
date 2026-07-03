@@ -65,72 +65,52 @@ Spring MVC creates a **child** ApplicationContext (servlet context) from a **par
 
 ## 5. Architecture Diagrams
 
-```
-ApplicationContext Startup Sequence
-====================================
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Configuration Metadata
-  (XML / @Configuration / @Component)
-           |
-           v
-  +----------------------------+
-  |  BeanDefinitionReader      |  Parses config, creates BeanDefinition objects
-  +----------------------------+
-           |
-           v
-  +----------------------------+
-  |  BeanDefinitionRegistry    |  Stores all BeanDefinitions (name -> definition map)
-  +----------------------------+
-           |
-           v
-  +----------------------------+
-  |  BeanFactoryPostProcessor  |  Modify BeanDefinitions BEFORE any bean is created
-  |  (PropertySourcesPlaceholder|  (e.g., resolve ${placeholders})
-  |   ConfigurerBPP, etc.)     |
-  +----------------------------+
-           |
-           v
-  +----------------------------+
-  |  BeanPostProcessor         |  Register post-processors for bean initialization hooks
-  |  Registration              |  (@Autowired, @Value, @PostConstruct processors)
-  +----------------------------+
-           |
-           v
-  +----------------------------+
-  |  Singleton Instantiation   |  Instantiate all non-lazy singletons
-  |  (finishBeanFactoryInit)   |  (dependency order resolved via DFS)
-  +----------------------------+
-           |
-           v
-  +----------------------------+
-  |  finishRefresh             |  Publish ContextRefreshedEvent; start lifecycle beans
-  +----------------------------+
-           |
-           v
-        READY
+    Config(["Configuration Metadata\nXML / @Configuration / @Component"]) --> Reader["BeanDefinitionReader\nParses config, creates BeanDefinition objects"]
+    Reader --> Registry["BeanDefinitionRegistry\nStores all BeanDefinitions\n(name to definition map)"]
+    Registry --> BFPP["BeanFactoryPostProcessor\nPropertySourcesPlaceholderConfigurer BPP, etc.\nModifies BeanDefinitions BEFORE any bean is created"]
+    BFPP --> BPPReg["BeanPostProcessor Registration\nRegisters post-processors for init hooks\n(@Autowired, @Value, @PostConstruct)"]
+    BPPReg --> Singleton["Singleton Instantiation\nfinishBeanFactoryInitialization\nInstantiates all non-lazy singletons"]
+    Singleton --> Finish["finishRefresh\nPublishes ContextRefreshedEvent; starts lifecycle beans"]
+    Finish --> Ready(["READY"])
+
+    class Config,Ready io
+    class Reader,Registry base
+    class BFPP,BPPReg mathOp
+    class Singleton train
+    class Finish io
 ```
 
-```
-Parent/Child Context (Classic Spring MVC)
-==========================================
+The `refresh()` pipeline: configuration metadata becomes `BeanDefinition`s, `BeanFactoryPostProcessor`s edit that metadata, `BeanPostProcessor`s register their hooks, then non-lazy singletons are instantiated and the context is marked ready.
 
-  +-----------------------------------------+
-  |  Root ApplicationContext (parent)        |
-  |  - @Service, @Repository, DataSource     |
-  |  - SecurityConfig, TransactionManager    |
-  +-----------------------------------------+
-                      |
-                      | child can see parent
-                      v
-  +-----------------------------------------+
-  |  WebApplicationContext (child)           |
-  |  - @Controller, ViewResolver            |
-  |  - HandlerMapping, HandlerAdapter        |
-  +-----------------------------------------+
-                      |
-                      v
-               DispatcherServlet
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Parent["Root ApplicationContext (parent)\n@Service, @Repository, DataSource\nSecurityConfig, TransactionManager"] -->|"child can see parent"| Child["WebApplicationContext (child)\n@Controller, ViewResolver\nHandlerMapping, HandlerAdapter"]
+    Child --> Dispatcher(["DispatcherServlet"])
+
+    class Parent frozen
+    class Child train
+    class Dispatcher io
 ```
+
+Classic Spring MVC's child `WebApplicationContext` sees every bean in the root `Parent`, but the root cannot see child-only MVC beans — Spring Boot collapses this into a single context by default.
 
 ---
 
@@ -464,25 +444,37 @@ The container publishes: `ContextRefreshedEvent` (refresh complete), `ContextSta
 
 ### Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Request(["Request: X-Tenant-Id=acme"]) --> Registry["TenantDataSourceRegistry"]
+    Registry --> Exists{"bean ds-acme exists?"}
+    Exists -->|"no"| Register["registerBeanDefinition(ds-acme, ...)"]
+    Exists -->|"yes, cached"| GetBean["ctx.getBean(ds-acme)"]
+    Register --> DLBF["DefaultListableBeanFactory\n(singleton scope)"]
+    DLBF --> GetBean
+    GetBean --> BPP["TenantContextBPP\ninjects TenantContext into every tenant bean"]
+    BPP --> Jdbc["JdbcTemplate"] --> Warehouse(["tenant warehouse"])
+
+    class Request req
+    class Registry base
+    class Exists mathOp
+    class Register train
+    class DLBF base
+    class GetBean req
+    class BPP mathOp
+    class Jdbc io
+    class Warehouse io
 ```
-   Request (X-Tenant-Id: acme)
-        |
-        v
-   +---------------------------+    bean "ds-acme" exists?
-   | TenantDataSourceRegistry  |---- no ---> registerBeanDefinition("ds-acme", ...)
-   +-------------+-------------+                       |
-                 | yes (cached)                        v
-                 v                            +------------------------+
-        ctx.getBean("ds-acme")                | DefaultListableBeanFactory|
-                 |                             |  (singleton scope)        |
-                 v                             +------------------------+
-        +-----------------+                            |
-        | TenantContextBPP|  injects TenantContext into every tenant bean
-        +-----------------+
-                 |
-                 v
-        JdbcTemplate -> tenant warehouse
-```
+
+A new tenant ID misses the bean-existence check, triggers runtime `registerBeanDefinition`, then falls through to the same cached-lookup path every subsequent request takes.
 
 ### Runtime Bean Registration
 
@@ -623,3 +615,4 @@ class ReportRunner {
 - [Dependency Injection](../dependency_injection/README.md) — wiring beans together
 - [Spring Configuration](../spring_configuration/README.md) — @Configuration, @Conditional
 - [Case Study: DI Container (Java)](../../java/case_studies/design_di_container_java.md) — mini-IoC built from scratch
+- [LLD: Factory Method Pattern](../../lld/creational/factory_method/README.md) — `BeanFactory`/`ApplicationContext` is a Factory Method at framework scale: callers ask for a bean by type/name and never invoke `new` themselves

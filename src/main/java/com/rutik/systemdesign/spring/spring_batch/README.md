@@ -63,16 +63,27 @@ Spring Batch 5 (GA with Spring Boot 3.0) requires Java 17 and Spring Framework 6
 
 ### 4.3 Retry and Skip Policies
 
-```
-  Chunk processing with skip/retry:
-  ──────────────────────────────────────────────────────
-  read item
-    └─ if exception: skip (up to skipLimit) or fail
-  process item
-    └─ if exception: skip or fail
-  write batch
-    └─ if exception: retry (up to retryLimit, with back-off)
-                   : if retry exhausted → binary search to find bad item → skip or fail
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    read["read item"] -->|"exception"| skipRead{"skip up to skipLimit, or fail"}
+    read --> process["process item"]
+    process -->|"exception"| skipProcess{"skip or fail"}
+    process --> write["write batch"]
+    write -->|"exception"| retry{"retry up to retryLimit, with back-off"}
+    retry -->|"exhausted"| scan["binary search: isolate the bad item"]
+    scan --> skipWrite{"skip or fail"}
+
+    class read,process,write train
+    class skipRead,skipProcess,skipWrite,retry mathOp
+    class scan lossN
 ```
 
 ---
@@ -81,54 +92,72 @@ Spring Batch 5 (GA with Spring Boot 3.0) requires Java 17 and Spring Framework 6
 
 ### Job Execution Flow
 
-```
-  JobLauncher.run(job, params)
-      │
-      ▼
-  JobRepository: find or create JobInstance
-      │
-      ▼
-  JobExecution (STARTED) → stored in BATCH_JOB_EXECUTION table
-      │
-      ▼
-  Step-1: SimpleStepHandler
-      │
-      ├── StepExecution (STARTED) → BATCH_STEP_EXECUTION
-      │
-      ├── Open ItemStream (restore ExecutionContext from DB)
-      │
-      ├── [Chunk loop]
-      │     ├─ read(commit-interval) items  → ItemReader
-      │     ├─ process each item            → ItemProcessor
-      │     ├─ write batch                  → ItemWriter
-      │     ├─ commit transaction
-      │     └─ ItemStream.update(ctx) → save progress to BATCH_STEP_EXECUTION_CONTEXT
-      │
-      ├── Close ItemStream
-      └── StepExecution (COMPLETED) → BATCH_STEP_EXECUTION
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Step-2, Step-3 ... (sequential by default)
-      │
-      ▼
-  JobExecution (COMPLETED) → BATCH_JOB_EXECUTION
+    launch["JobLauncher.run(job, params)"] --> repo["JobRepository: find or create JobInstance"]
+    repo --> jobExec["JobExecution STARTED\n-> BATCH_JOB_EXECUTION table"]
+    jobExec --> stepExec["Step-1: StepExecution STARTED\n-> BATCH_STEP_EXECUTION"]
+    stepExec --> openStream["Open ItemStream\nrestore ExecutionContext from DB"]
+    openStream --> chunkLoop
+
+    subgraph chunkLoop ["Chunk loop (repeats per commit-interval)"]
+        direction LR
+        read["read items\nItemReader"] --> process["process each item\nItemProcessor"]
+        process --> write["write batch\nItemWriter"]
+        write --> commit["commit transaction"]
+        commit --> update["ItemStream.update(ctx)\nsave to BATCH_STEP_EXECUTION_CONTEXT"]
+    end
+
+    chunkLoop --> closeStream["Close ItemStream"]
+    closeStream --> stepDone["StepExecution COMPLETED\n-> BATCH_STEP_EXECUTION"]
+    stepDone --> step2["Step-2, Step-3 ...\nsequential by default"]
+    step2 --> jobDone["JobExecution COMPLETED\n-> BATCH_JOB_EXECUTION"]
+
+    class launch,repo base
+    class jobExec,stepExec,stepDone,jobDone io
+    class openStream,closeStream,step2 train
+    class read,process,write,commit,update mathOp
 ```
 
 ### Partitioned Step (Local)
 
-```
-  PartitionStep (manager)
-      │
-      ├── Partitioner.partition(gridSize)
-      │      → Map<"partition0", ExecutionContext{start=0, end=999}>
-      │        Map<"partition1", ExecutionContext{start=1000, end=1999}>
-      │        ...
-      │
-      ├── TaskExecutorPartitionHandler (local, N threads)
-      │      ├─ StepExecution for partition0 → worker Step runs with its ExecutionContext
-      │      ├─ StepExecution for partition1 → worker Step runs in parallel
-      │      └─ ...
-      │
-      └── All partition StepExecutions complete → PartitionStep completes
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    manager["PartitionStep (manager)"] --> partitioner["Partitioner.partition(gridSize)"]
+    partitioner --> ctx0["partition0: ExecutionContext start=0 end=999"]
+    partitioner --> ctx1["partition1: ExecutionContext start=1000 end=1999"]
+    partitioner --> ctxN["partitionN: ..."]
+
+    manager --> handler["TaskExecutorPartitionHandler\nlocal, N threads"]
+    handler --> w0["StepExecution partition0\nworker Step runs with its ExecutionContext"]
+    handler --> w1["StepExecution partition1\nworker Step runs in parallel"]
+    handler --> wN["StepExecution partitionN ..."]
+
+    w0 --> done["All partition StepExecutions complete\n-> PartitionStep completes"]
+    w1 --> done
+    wN --> done
+
+    class manager,handler train
+    class partitioner mathOp
+    class ctx0,ctx1,ctxN io
+    class w0,w1,wN train
+    class done base
 ```
 
 ---

@@ -264,44 +264,39 @@ cost of `volatile` (primarily relevant on ARM; x86 fences are cheap regardless).
 
 ### Memory visibility: CPU caches and the store buffer
 
-```
-Thread 1 (CPU 0)                    Thread 2 (CPU 1)
-+-------------------+               +-------------------+
-| L1 cache          |               | L1 cache          |
-|  x = 1 (pending)  |               |  reads x (stale?) |
-+-------------------+               +-------------------+
-        |                                    |
-        v                                    v
-+-----------------------------------------------+
-|         Store buffer (per-core)                |
-|  Writes queued here before reaching L3         |
-+-----------------------------------------------+
-        |                                    |
-        v                                    v
-+-----------------------------------------------+
-|                  L3 (shared)                  |
-|           x = 0 (not yet updated)             |
-+-----------------------------------------------+
-        |
-        v
-+-----------------------------------------------+
-|                  Main memory                  |
-+-----------------------------------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Without a memory fence: Thread 2 may read x = 0 even after Thread 1 wrote 1.
-With volatile / synchronized / release fence: store buffer flushed; Thread 2 sees x = 1.
+    T1["Thread 1 (CPU 0)\nL1 cache: x = 1 (pending)"] --> SB["Store buffer (per-core)\nWrites queued before reaching L3"]
+    T2["Thread 2 (CPU 1)\nL1 cache: reads x (stale?)"] --> SB
+    SB --> L3["L3 (shared)\nx = 0 (not yet updated)"]
+    L3 --> MM["Main memory"]
+
+    class T1,T2 req
+    class SB,L3,MM base
 ```
+
+Without a memory fence: Thread 2 may read x = 0 even after Thread 1 wrote 1. With
+volatile / synchronized / release fence: store buffer flushed; Thread 2 sees x = 1.
 
 ### Happens-before chains in a producer-consumer pattern
 
-```
-Thread P (producer)                 Thread C (consumer)
+```mermaid
+sequenceDiagram
+    participant P as Thread P (producer)
+    participant C as Thread C (consumer)
 
-write(data = payload)  ──────────┐
-volatile write(ready = true)     │  HB edge (volatile write → volatile read)
-                                 │
-                                 └──> volatile read(ready)
-                                      read(data)   ← sees payload (via transitivity)
+    P->>P: write(data = payload)
+    P->>C: volatile write(ready = true)  -- HB edge
+    C->>C: volatile read(ready)
+    C->>C: read(data) -- sees payload (via transitivity)
 ```
 
 The single `volatile` write on `ready` creates an HB edge; the HB rule for program order

@@ -72,65 +72,76 @@ The four core annotations are:
 
 ## 5. Architecture Diagrams
 
+**CacheInterceptor invocation pipeline** — the AOP path a `@Cacheable` call takes from proxy to cache lookup to (optional) method execution:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A["@EnableCaching activates CacheInterceptor\nvia CachingConfigurationSelector"] --> B["ProxyFactory wraps @Cacheable beans\nwith CglibAopProxy / JdkDynamicProxy"]
+    B --> C["Caller invokes proxy method"]
+    C --> D["CacheInterceptor.invoke()"]
+    D --> E["CacheAspectSupport.execute()"]
+    E --> F["1. Compute cache key\n(KeyGenerator or SpEL)"]
+    F --> G["2. Lookup CacheManager -> Cache"]
+    G --> H{"3. Cache hit?"}
+    H -->|"YES"| I["Return cached value\n(method skipped)"]
+    H -->|"NO"| J["4. Invoke real method\n(ProceedingJoinPoint.proceed())"]
+    J --> K["5. @CacheEvict(beforeInvocation=false) executions"]
+    K --> L["6. @CachePut / @Cacheable store result"]
+    L --> M["7. Return result to caller"]
+    I --> M
+
+    class A,B base
+    class C req
+    class D,E train
+    class F,G,K,L mathOp
+    class H mathOp
+    class I frozen
+    class J req
+    class M io
 ```
-@EnableCaching — activates CacheInterceptor via CachingConfigurationSelector
-        |
-        v
-  ProxyFactory wraps @Cacheable beans with CglibAopProxy (or JdkDynamicProxy)
-        |
-   Caller invokes proxy method
-        |
-        v
-  CacheInterceptor.invoke()
-        |
-        +--- CacheAspectSupport.execute()
-               |
-               +-- 1. Compute cache key (KeyGenerator or SpEL)
-               |
-               +-- 2. Lookup CacheManager -> Cache
-               |
-               +-- 3. Cache hit? ---- YES --> return cached value (method skipped)
-               |         |
-               |         NO
-               |         |
-               +-- 4. Invoke real method (ProceedingJoinPoint.proceed())
-               |
-               +-- 5. @CacheEvict(beforeInvocation=false) executions
-               |
-               +-- 6. @CachePut / @Cacheable store result
-               |
-               +-- 7. Return result to caller
 
+**CacheManager hierarchy** — one logical `CacheManager` fronts multiple named caches, each backed by a concrete store with its own TTL/eviction policy:
 
-CacheManager hierarchy:
+```mermaid
+flowchart TD
+    classDef base   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef train  fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef frozen fill:#c678dd,stroke:#9b59b6,color:#fff
 
-  CacheManager
-       |
-       +-- RedisCacheManager
-       |       |
-       |       +-- RedisCache("products", TTL=10min)
-       |       +-- RedisCache("users",    TTL=60min)
-       |
-       +-- CaffeineCacheManager
-               |
-               +-- CaffeineCache("sessions", maxSize=10000, expireAfterAccess=30min)
+    CM["CacheManager"] --> Redis["RedisCacheManager"]
+    CM --> Caffeine["CaffeineCacheManager"]
+    Redis --> RP["RedisCache: products\nTTL=10min"]
+    Redis --> RU["RedisCache: users\nTTL=60min"]
+    Caffeine --> CS["CaffeineCache: sessions\nmaxSize=10000, expireAfterAccess=30min"]
 
+    class CM base
+    class Redis,Caffeine train
+    class RP,RU,CS frozen
+```
 
-Redis serialization pipeline:
+**Redis serialization pipeline** — how a cached Java object becomes a Redis key/value pair on the wire:
 
-  Java Object
-      |
-      v
-  Jackson2JsonRedisSerializer (value)
-      |
-      v
-  "com.example.Product::{\"id\":1,\"name\":\"Laptop\"}"
-      |
-      v
-  StringRedisSerializer (key) -> "products::1"
-      |
-      v
-  Redis SETEX products::1 600 <serialized-json>
+```mermaid
+flowchart LR
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef mathOp fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef frozen fill:#c678dd,stroke:#9b59b6,color:#fff
+
+    A["Java Object"] --> B["Jackson2JsonRedisSerializer\n(value)"]
+    B --> C["JSON payload:\ncom.example.Product::id-1-name-Laptop"]
+    C --> D["StringRedisSerializer (key):\nproducts::1"]
+    D --> E["Redis SETEX products::1 600 (serialized-json)"]
+
+    class A io
+    class B,D mathOp
+    class C,E frozen
 ```
 
 ---
@@ -575,7 +586,7 @@ Spring's cache abstraction is not transaction-aware by default. When both annota
 By default, eviction happens after the method returns successfully. If the method throws, the cache is not cleared. Setting `beforeInvocation = true` evicts the cache entry before the method runs, ensuring the entry is removed regardless of whether the method succeeds or throws. Use this when it is safer to serve a cache miss than to serve potentially stale data during a failed update.
 
 **How do you configure per-cache TTL with `RedisCacheManager`?**
-Build a `RedisCacheConfiguration` for each named cache using `RedisCacheConfiguration.defaultCacheConfig().entryTtl(Duration)` and pass a `Map<String, RedisCacheConfiguration>` to `RedisCacheManager.builder(...).withInitialCacheConfigurations(map).build()`. Caches not in the map use the default configuration provided via `cacheDefaults(...)`.
+Build one `RedisCacheConfiguration` per named cache, each with its own `entryTtl(Duration)`. Use `RedisCacheConfiguration.defaultCacheConfig().entryTtl(Duration)` per cache, then pass a `Map<String, RedisCacheConfiguration>` to `RedisCacheManager.builder(...).withInitialCacheConfigurations(map).build()`. Caches not in the map use the default configuration provided via `cacheDefaults(...)`.
 
 **How do you prevent storing null values in Redis cache?**
 Call `.disableCachingNullValues()` on `RedisCacheConfiguration`. This throws an `IllegalArgumentException` if a null value reaches the cache. Pair this with `@Cacheable(unless = "#result == null")` so nulls are filtered out before reaching the cache store, or have methods return `Optional<T>` instead of nullable types.
@@ -590,13 +601,13 @@ Spring caching uses AOP proxies. When a method calls `this.method()`, it bypasse
 Annotate the test with `@SpringBootTest` to load the full context. Inject the service under test and call the method twice. Verify the underlying dependency (repository mock) was called exactly once using `Mockito.verify(repository, times(1)).findById(anyLong())`. Alternatively, use `@CacheConfig` on the test configuration with a `ConcurrentMapCacheManager` to avoid Redis dependency in unit tests. Use `CacheManager.getCache("products").clear()` in `@BeforeEach` to reset state between tests.
 
 **What is cache stampede (thundering herd) and how does Spring's `@Cacheable` expose your system to it — and how do you mitigate it?**
-Cache stampede occurs when a cached key expires and many concurrent threads simultaneously find a cache miss, all execute the expensive source query, and all try to populate the cache — multiplying load on the backing store. `@Cacheable` provides no built-in protection: if 500 threads call `getProduct(id)` within the same millisecond after the TTL expires, all 500 call the database. Mitigation strategies: (1) **Probabilistic early expiry (jitter)** — randomise the TTL slightly so keys expire at different times, preventing simultaneous expiry of related keys. (2) **Mutex / distributed lock on cache miss** — only one thread computes the value; others wait. Implement with `RedisTemplate.opsForValue().setIfAbsent()` as a distributed lock in a custom `CacheManager`. (3) **Background refresh** — use a scheduled job to proactively refresh near-expiry keys before they expire. For critical paths, option 2 (lock on miss) is the most robust.
+Cache stampede occurs when a cached key expires and many concurrent threads simultaneously hit a cache miss on it. All of them then execute the expensive source query and try to populate the cache at once, multiplying load on the backing store. `@Cacheable` provides no built-in protection: if 500 threads call `getProduct(id)` within the same millisecond after the TTL expires, all 500 call the database. Mitigation strategies: (1) **Probabilistic early expiry (jitter)** — randomise the TTL slightly so keys expire at different times, preventing simultaneous expiry of related keys. (2) **Mutex / distributed lock on cache miss** — only one thread computes the value; others wait. Implement with `RedisTemplate.opsForValue().setIfAbsent()` as a distributed lock in a custom `CacheManager`. (3) **Background refresh** — use a scheduled job to proactively refresh near-expiry keys before they expire. For critical paths, option 2 (lock on miss) is the most robust.
 
 **What is the difference between `@CachePut` and `@Cacheable`, and when should you use each?**
 `@Cacheable` performs a cache-read: it checks the cache first; if a hit is found, returns the cached value without executing the method. If a miss, executes the method and populates the cache. `@CachePut` always executes the method AND always writes the result to the cache — no cache read is performed. Use `@CachePut` on update/create operations where you want to refresh the cache with the newly written value without requiring a subsequent cache miss to repopulate it. Example: a `save(Product)` method annotated with `@CachePut(key="#product.id")` ensures the cache is always consistent with what was just persisted. Never put `@Cacheable` and `@CachePut` with the same key on the same method — the write path would be skipped by `@Cacheable` if a cached value already exists.
 
 **How do you configure Redis as the Spring cache backend with per-cache TTLs?**
-Configure a `RedisCacheManager` with a `RedisCacheConfiguration` that sets default TTL and per-cache overrides:
+Configure a `RedisCacheManager` with a `RedisCacheConfiguration` that sets default TTL and per-cache overrides. Here's an example:
 
 ```java
 @Bean
@@ -619,6 +630,15 @@ RedisCacheManager cacheManager(RedisConnectionFactory cf) {
 ```
 
 Use JSON serialization (not Java serialization) so cached objects survive rolling deploys that rename classes. Java serialization is the default and will throw `SerializationException` when a cached class has changed between versions.
+
+**What causes a cache key collision between two different `@Cacheable` methods, and how do you prevent it?**
+A key collision happens when two methods share the same cache name and produce identical computed keys, so one method's cached value is silently returned for the other. For example, `findById(1L)` and `findByVariantId(1L)` both default to key `1` under `SimpleKeyGenerator` when they share the `products` cache — the second call returns the first entity's cached result with no error or warning of any kind. The fix is to always prefix the key with `#root.methodName` (e.g. `key = "#root.methodName + ':' + #id"`) or give each method its own cache name, so keys are namespaced and cannot collide across method boundaries.
+
+**When should you choose cache-aside (`@Cacheable`) over write-through (`@CachePut`), and what consistency risk does each carry?**
+Cache-aside populates the cache lazily on a read miss, while write-through refreshes the cache eagerly on every write, trading staleness risk against wasted work. Cache-aside is cheaper when reads vastly outnumber writes, because only the keys actually requested are ever cached, but data can go stale between a write and the next read until the TTL expires or an explicit `@CacheEvict` fires. Write-through keeps the cache in lockstep with every write and eliminates that staleness window, but it does unnecessary work for entries nobody reads and does nothing for a cold cache, since nothing is cached until the first write happens. Most read-heavy services default to cache-aside with a short TTL and add `@CachePut` only on the specific write paths where an immediately consistent read matters.
+
+**What is the difference between letting a Redis entry expire via TTL and explicitly removing it with `@CacheEvict`?**
+TTL expiration is passive and time-based, configured once on the `CacheManager`, while `@CacheEvict` is an active removal triggered by application code at a specific write. TTL guarantees an upper bound on staleness with zero code changes — if a developer forgets to evict, the entry still disappears once the TTL elapses, which is why every production cache should carry one. `@CacheEvict` closes the staleness window immediately when the underlying data changes, rather than waiting out the full TTL. Relying on TTL alone means readers can see stale data for up to the entire TTL window after every write; relying on eviction alone means an entry that is never explicitly evicted — say, after a missed code path or an out-of-band bulk DB update — is cached indefinitely with `ConcurrentMapCacheManager` or until an operator clears it by hand. Production systems should combine both: `@CacheEvict` on known write paths, TTL as the safety net for everything else.
 
 ---
 
@@ -654,19 +674,22 @@ Use JSON serialization (not Java serialization) so cached objects survive rollin
 
 ### Architecture
 
-```
-   storefront (25k req/sec)
-        |
-        v
-   +------------------------+    hit (98.5%)    +---------+
-   | @Cacheable("catalog")  |------------------>|  Redis  |
-   | @Cacheable("pricing")  |                   | catalog 1h
-   +-----------+------------+                   | pricing 5m
-        miss (1.5%) |  early-refresh on hot keys+---------+
-                    v
-   +------------------------+   @CachePut("catalog")  on create
-   | ProductRepository (DB) |   @CacheEvict           on update
-   +------------------------+
+```mermaid
+flowchart TD
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef req    fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef frozen fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef lossN  fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+
+    Client["storefront (25k req/sec)"] --> App["@Cacheable('catalog') / @Cacheable('pricing')"]
+    App -->|"hit 98.5%"| Redis["Redis\ncatalog TTL=1h, pricing TTL=5m"]
+    App -->|"miss 1.5% / early-refresh on hot keys"| DB["ProductRepository (DB)"]
+    DB -->|"@CachePut('catalog') on create\n@CacheEvict on update"| Redis
+
+    class Client io
+    class App req
+    class Redis frozen
+    class DB lossN
 ```
 
 ### Cache Configuration
@@ -868,5 +891,7 @@ public void updateProduct(Long id, Product updated) { ... }
 - [Spring Data JPA](../spring_data_jpa/README.md) — caching queries
 - [Spring Proxies](../spring_proxies/README.md) — self-invocation breaks caching
 - [Case Study: Distributed Caching](../case_studies/design_distributed_caching.md) — two-level cache
+- [Caching (HLD)](../../hld/caching/README.md) — cache-aside/read-through/write-through/write-behind theory, eviction policies, distributed cache topologies
+- [Caching Strategies Deep Dive (Backend)](../../backend/caching_strategies_deep_dive/README.md) — thundering herd, cache stampede mitigation, negative caching at the systems level
 - [Database Caching Patterns](../../database/database_caching_patterns/README.md) — stampede, write-behind, hot-key at the DB layer
 - [Key-Value Stores (Database)](../../database/key_value_stores/README.md) — Redis internals: persistence, Cluster, Streams, Redlock

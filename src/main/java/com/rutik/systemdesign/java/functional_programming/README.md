@@ -59,18 +59,32 @@ Characteristics:
 ```
 
 ### 4.3 Parallel Stream Fork/Join
-```
-Stream source (List<T> with size n)
-  |
-  Spliterator (splits source into halves recursively)
-  |
-  ForkJoinPool.commonPool() (by default)
-  |-- Worker thread 1: process sub-range [0, n/4)
-  |-- Worker thread 2: process sub-range [n/4, n/2)
-  |-- Worker thread 3: process sub-range [n/2, 3n/4)
-  |-- Worker thread 4: process sub-range [3n/4, n)
-  |
-  Combiner: merge partial results
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Src(["Stream source: List&lt;T&gt;, size n"]) --> Spl["Spliterator\nsplits source into halves recursively"]
+    Spl --> Pool["ForkJoinPool.commonPool()\n(by default)"]
+    Pool --> W1["Worker thread 1\n0 to n/4"]
+    Pool --> W2["Worker thread 2\nn/4 to n/2"]
+    Pool --> W3["Worker thread 3\nn/2 to 3n/4"]
+    Pool --> W4["Worker thread 4\n3n/4 to n"]
+    W1 --> Comb(["Combiner\nmerge partial results"])
+    W2 --> Comb
+    W3 --> Comb
+    W4 --> Comb
+
+    class Src req
+    class Spl base
+    class Pool mathOp
+    class W1,W2,W3,W4 train
+    class Comb io
 ```
 
 ---
@@ -404,13 +418,29 @@ Practical guidance: treat functional interfaces as trusted contracts; in code re
 
 **Scenario.** A finance team runs a nightly report job over ~5M transactions. The pipeline has five stages: load from DB, filter (settled, non-test), transform (normalize currency), aggregate (total/avg/min/max/top-10 merchants), and format to CSV. The original code was one monolithic method that was impossible to unit-test or reorder. The rewrite models each stage as a `Function<T, R>` composed with `andThen()`, computes all aggregates in a single pass via a custom `Collector`, and memoizes an expensive pure FX-rate lookup with `ConcurrentHashMap.computeIfAbsent()`. The composed pipeline is testable stage-by-stage and the single-pass collector touches 5M rows once instead of five times.
 
-```
-  loadFromDb : Function<Query, List<Txn>>
-       andThen filter        : List<Txn> -> List<Txn>
-       andThen normalizeFx   : List<Txn> -> List<Txn>   (memoized rate lookups)
-       andThen aggregate     : List<Txn> -> Report      (one-pass custom Collector)
-       andThen toCsv         : Report    -> String
-            = Function<Query, String>   (the whole pipeline as one value)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q(["Query"]) --> Load["loadFromDb"]
+    Load --> Filt["andThen filter"]
+    Filt --> Norm["andThen normalizeFx\nmemoized rate lookups"]
+    Norm --> Agg["andThen aggregate\none-pass custom Collector"]
+    Agg --> Csv["andThen toCsv"]
+    Csv --> Out(["String (the whole pipeline as one Function&lt;Query, String&gt; value)"])
+
+    class Q req
+    class Load,Filt mathOp
+    class Norm train
+    class Agg lossN
+    class Csv mathOp
+    class Out io
 ```
 
 #### Stage composition with `andThen`

@@ -73,90 +73,119 @@ Key insight: Config Server trades deployment simplicity for operational complexi
 
 ### Config Server Overview
 
-```
-Git Repository                     Config Server                  Microservices
-(github.com/org/config-repo)       (port 8888)
-+---------------------------+       +--------------------+         +------------------+
-|  application.yml          |       |                    |  HTTP   | order-service    |
-|  application-prod.yml     |<----->| @EnableConfigServer|-------->| (Config Client)  |
-|  order-service.yml        |  Git  |                    |         +------------------+
-|  order-service-prod.yml   |  pull | JGit clone/pull    |         +------------------+
-|  payment-service.yml      |       | Caching (5 min TTL)|-------->| payment-service  |
-+---------------------------+       | Encryption/decrypt |         | (Config Client)  |
-                                    +--------------------+         +------------------+
-                                             ^                     +------------------+
-                                             |                     | inventory-service|
-                                    Vault (optional)               | (Config Client)  |
-                                    (dynamic secrets)              +------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    git[("Git Repository\ngithub.com/org/config-repo\napplication.yml, order-service.yml, ...")]
+    cs["Config Server (port 8888)\n@EnableConfigServer\nJGit clone/pull, caching (5 min TTL)\nencryption/decrypt"]
+    order["order-service\n(Config Client)"]
+    payment["payment-service\n(Config Client)"]
+    inventory["inventory-service\n(Config Client)"]
+    vault[("Vault (optional)\ndynamic secrets")]
+
+    git <-->|"Git pull"| cs
+    cs -->|"HTTP"| order
+    cs -->|"HTTP"| payment
+    cs -->|"HTTP"| inventory
+    vault -.-> cs
+
+    class git frozen
+    class cs base
+    class order,payment,inventory req
+    class vault frozen
 ```
 
 ### Property Resolution Order (highest to lowest priority)
 
-```
-[1] Config Server (remote) — spring.config.import=configserver:
-         |
-         v
-[2] Environment variables (OS / container)
-         |
-         v
-[3] Command-line arguments (--key=value)
-         |
-         v
-[4] application-{profile}.yml (local, inside JAR)
-         |
-         v
-[5] application.yml (local, inside JAR)
-         |
-         v
-[6] @PropertySource annotations
-         |
-         v
-[7] Default values in @Value("${key:default}")
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    p1["1. Config Server (remote)\nspring.config.import=configserver:"]
+    p2["2. Environment variables (OS / container)"]
+    p3["3. Command-line arguments (--key=value)"]
+    p4["4. application-{profile}.yml (local, inside JAR)"]
+    p5["5. application.yml (local, inside JAR)"]
+    p6["6. @PropertySource annotations"]
+    p7["7. Default values in @Value with a fallback"]
+
+    p1 --> p2 --> p3 --> p4 --> p5 --> p6 --> p7
+
+    class p1 req
+    class p2,p3,p4,p5,p6 base
+    class p7 frozen
 ```
 
 ### Spring Cloud Bus Broadcast Refresh
 
-```
-Git Repository
-     |
-     | [1] developer pushes config change
-     v
-Config Server
-     |
-     | [2] webhook triggers POST /actuator/busrefresh on any one instance
-     |     (or developer manually calls it)
-     v
-+----------+     [3] publishes RefreshRemoteApplicationEvent
-| Bus Event|-----------> Kafka / RabbitMQ Topic: springCloudBus
-| Publisher|
-+----------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Kafka / RabbitMQ
-     |
-     | [4] all subscribed instances receive the event
-     v
-+----------------------------+
-| Instance 1  | Instance 2  |    ... N instances
-| @RefreshScope re-creates  |
-| annotated beans            |
-+----------------------------+
+    git[("Git Repository")]
+    cs["Config Server"]
+    pub["Bus Event Publisher"]
+    topic{{"Kafka / RabbitMQ\nTopic: springCloudBus"}}
+    inst1["Instance 1\n@RefreshScope beans re-created"]
+    inst2["Instance 2\n@RefreshScope beans re-created"]
+    instn["... N instances"]
+
+    git -->|"1. developer pushes config change"| cs
+    cs -->|"2. webhook or manual call: POST /actuator/busrefresh"| pub
+    pub -->|"3. publishes RefreshRemoteApplicationEvent"| topic
+    topic -->|"4. all subscribed instances receive the event"| inst1
+    topic --> inst2
+    topic --> instn
+
+    class git frozen
+    class cs base
+    class pub mathOp
+    class topic base
+    class inst1,inst2,instn train
 ```
 
 ### Vault Integration — Dynamic Database Credentials
 
-```
-Vault Server                  Config Server               Microservice
-+-------------------+         +---------------+           +-----------+
-| database/creds/   |         |               |           |           |
-| my-role           |<------->| Vault Backend |---------->| DataSource|
-|                   |  renew  | (spring-cloud |  dynamic  | username: |
-| username: v-usr-X |  lease  |  -vault-config|  creds    | password: |
-| password: abc123  |         | )             |           | (TTL 1h)  |
-| TTL: 1 hour       |         |               |           |           |
-+-------------------+         +---------------+           +-----------+
-     ^                               |
-     |                               | lease renewal before expiry
-     +-------------------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    vault[("Vault Server\ndatabase/creds/my-role\nusername: v-usr-X, password: abc123\nTTL: 1 hour")]
+    cs["Config Server\n(spring-cloud-vault-config)"]
+    ds["DataSource\nusername / password\n(TTL 1h)"]
+
+    vault -->|"renew lease"| cs
+    cs -->|"dynamic creds"| ds
+    ds -.->|"lease renewal before expiry"| vault
+
+    class vault frozen
+    class cs base
+    class ds io
 ```
 
 ---
@@ -699,24 +728,37 @@ The Config Server loads properties by combining three application names in order
 
 ### Architecture
 
-```
-   Git repo (config)            Vault (secrets)
-        |                            |
-        +------------+   +-----------+
-                     v   v
-            +--------------------------+   3 replicas, HA
-            |   Config Server cluster  |   local Git clone fallback
-            +-----------+--------------+
-                        | served via /{app}/{profile}
-        +---------------+----------------+----------------+
-        |               |                |                |
-   +----v----+    +-----v---+      +-----v---+      +-----v----+
-   | svc-001 |    | svc-002 | ...  | svc-199 |      | svc-200  |
-   | @Refresh|    | @Refresh|      | @Refresh|      | @Refresh |
-   +----+----+    +----+----+      +----+----+      +----+-----+
-        |              |                |                |
-        +--------------+----- Kafka (springCloudBus) ----+
-                         RefreshRemoteApplicationEvent fan-out
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    git[("Git repo (config)")]
+    vault[("Vault (secrets)")]
+    cs["Config Server cluster\n3 replicas, HA\nlocal Git clone fallback"]
+    svc1["svc-001\n@RefreshScope"]
+    svc2["svc-002\n@RefreshScope"]
+    svcn["... svc-199, svc-200\n@RefreshScope"]
+    kafka{{"Kafka (springCloudBus)\nRefreshRemoteApplicationEvent fan-out"}}
+
+    git --> cs
+    vault --> cs
+    cs -->|"served via /{app}/{profile}"| svc1
+    cs --> svc2
+    cs --> svcn
+    svc1 --> kafka
+    svc2 --> kafka
+    svcn --> kafka
+
+    class git,vault frozen
+    class cs base
+    class svc1,svc2,svcn train
+    class kafka mathOp
 ```
 
 ### Bootstrap and Refresh Setup
@@ -756,14 +798,20 @@ public class DataSourceConfig {
 }
 ```
 
-```
-Refresh call flow:
-1. Ops merges flag change to Git main
-2. Git webhook -> POST /actuator/busrefresh on any Config Server replica   (<1s)
-3. Config Server publishes RefreshRemoteApplicationEvent to Kafka          (<100ms)
-4. All 200 services consume the event                                      (<1s)
-5. Each rebuilds only its @RefreshScope beans (lazy, on next access)       (<200ms)
-   Total: ~3s merge-to-effect across the fleet
+```mermaid
+sequenceDiagram
+    participant Ops
+    participant Git
+    participant CS as Config Server
+    participant Kafka
+    participant Svc as 200 services
+
+    Ops->>Git: merge flag change to main
+    Git->>CS: webhook -> POST /actuator/busrefresh on any replica (<1s)
+    CS->>Kafka: publish RefreshRemoteApplicationEvent (<100ms)
+    Kafka->>Svc: fan out event to all 200 services (<1s)
+    Svc->>Svc: rebuild only @RefreshScope beans, lazy on next access (<200ms)
+    Note over Ops,Svc: Total: ~3s merge-to-effect across the fleet
 ```
 
 ### Metrics
@@ -849,3 +897,4 @@ public class RateLimiter {
 
 - [Spring Boot Configuration](../spring_boot_configuration/README.md) — @ConfigurationProperties
 - [Case Study: Zero-Downtime Deploys](../case_studies/cross_cutting/zero_downtime_deploys_and_config.md) — @RefreshScope pitfalls
+- [Secrets Management](../../devops/secrets_management/README.md) — Vault dynamic secrets, rotation, and encryption-at-rest patterns behind this module's Vault backend
