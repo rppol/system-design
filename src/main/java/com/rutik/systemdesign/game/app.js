@@ -409,7 +409,7 @@ function countUp(node, to) {
 
 /* ---------- persistence ---------- */
 async function loadProgress() {
-  const fill = (p) => { if (!p.reviews) p.reviews = {}; if (p.freezes == null) p.freezes = 2; if (!p.freezeUsedOn) p.freezeUsedOn = []; return p; };
+  const fill = (p) => { if (!p.reviews) p.reviews = {}; if (p.freezes == null) p.freezes = 2; if (!p.freezeUsedOn) p.freezeUsedOn = []; if (!p.awards) p.awards = {}; if (p.deepReads == null) p.deepReads = 0; return p; };  /* [C] awards + deepReads are additive persisted fields */
   if (!IS_STATIC) {
     await flushPendingSessions();                  // replay sessions saved while the server was down
     const p = await apiGet("/api/progress", null);
@@ -648,8 +648,9 @@ function renderHome() {
     const st = (p.sections && p.sections[s]) || { seen: 0, correct: 0 };
     const acc = st.seen ? Math.round((st.correct / st.seen) * 100) : null;
     const bar = acc === null ? "" : `<span class="tbar"><i style="width:${acc}%"></i></span>`;
+    const passChip = (p.awards && (p.awards["interview_" + s] || p.awards["panel_" + s])) ? `<span class="c-chip pass sm">Passed</span>` : "";  // [C] interviewer plaque
     return `<button class="tile ${s === section ? "suggested" : ""}" data-section="${s}">
-        <span class="tname">${esc(label(s))}</span>
+        <span class="tname">${esc(label(s))}${passChip}</span>
         <span class="tmeta">${secs[s]} Qs &middot; ${acc === null ? "new" : acc + "% mastery"}</span>
         ${bar}
       </button>`;
@@ -662,6 +663,8 @@ function renderHome() {
         <div class="eyebrow date-eyebrow">${esc(dateLine)}</div>
         <h1>Today's 5-minute blitz</h1><p>${streakLine}</p></div></div>
     </div>
+    ${skylineSVG(p)}
+    ${gauntletCardHTML()}
     <div class="topic-card">
       <div class="eyebrow">Suggested for today</div>
       <h2>${esc(label(section))}</h2>
@@ -671,9 +674,15 @@ function renderHome() {
     ${reviewCard}
     ${weakCard}
     ${rustyNote}
-    <h2 class="section-h">Or pick a section &mdash; then choose sub-topics</h2>
+    <div class="section-head-row">
+      <h2 class="section-h">Or pick a section &mdash; then choose sub-topics</h2>
+      <button class="c-codex-link" id="codexLink">The Codex &rarr;</button>
+    </div>
     <div class="grid">${tiles}</div>`;
   el("#startBtn").addEventListener("click", () => startBlitz(section));
+  /* [C] gauntlet + codex entry points */
+  const gauntBtn = el("#gauntBtn"); if (gauntBtn) gauntBtn.addEventListener("click", () => c_go("#/gauntlet"));
+  const codexLink = el("#codexLink"); if (codexLink) codexLink.addEventListener("click", () => c_go("#/codex"));
   if (due.length) el("#reviewBtn").addEventListener("click", startReview);
   if (worst) el("#weakBtn").addEventListener("click", startWeakSpots);
   if (rusty) el("#rustyBtn").addEventListener("click", () => startBlitz(rusty.s));
@@ -761,10 +770,14 @@ function makeItem(q) {
 // Quiz vs flashcard is a global, persisted preference toggled from the top bar.
 function deckMode() { return localStorage.getItem("sd_mode") === "flash" ? "flash" : "quiz"; }
 
-function startDeck(questions, replayFn) {
+function startDeck(questions, replayFn, opts = {}) {
   state.mode = deckMode();
+  if (opts.interview) state.mode = "quiz";       // [C] interviewer needs the MCQ engine, not flashcards
+  state.deckOpts = opts;                          // [C]
   const items = questions.map(makeItem);
-  if (state.mode === "flash") {
+  if (opts.keepOrder) {
+    state.deck = items;                           // [C] gauntlet/interview: the recipe IS the arc — no shuffle, no boss partition
+  } else if (state.mode === "flash") {
     state.deck = shuffle(items);                 // no boss ordering for self-grade cards
   } else {
     // boss round: advanced-difficulty questions go last and are worth 2x
@@ -776,6 +789,7 @@ function startDeck(questions, replayFn) {
   state.queue = state.deck.map((_, i) => i);
   state.cursor = 0;
   state.combo = 0; state.maxCombo = 0; state.sessionXp = 0;
+  state.sessSeq = []; state.sessMaxInterval = 0; state.sessRestored = false;   // [C] per-session award tracking
   state.replayFn = replayFn;
   state.mode === "flash" ? renderCard() : renderQuestion();
 }
@@ -896,6 +910,9 @@ function renderQuestion() {
     b.addEventListener("click", () => answer(parseInt(b.dataset.i, 10))));
   if (item.status === "pending") el("#skipBtn").addEventListener("click", skipQuestion);
   el("#nextBtn").addEventListener("click", nextQuestion);
+  /* [C] interviewer stage (avatar + HP) or gauntlet practice banner */
+  if (state.interview) renderInterviewStage();
+  else if (state.gauntlet && state.gauntlet.practice) renderPracticeBanner();
   app.focus({ preventScroll: true });              // keep keyboard + SR context on the new question
 }
 
@@ -936,7 +953,19 @@ function answer(i) {
     rev.innerHTML = `<b>Full answer:</b> ${esc(q.answerFull)}
       <button class="deeper" id="deeperBtn">Dive deeper into ${esc(q.moduleName)} &rarr;</button>`;
     rev.classList.add("show");
-    el("#deeperBtn").addEventListener("click", () => openReader(q.module, q.moduleName));
+    el("#deeperBtn").addEventListener("click", () => { if (item.status === "wrong") bumpDeepReads(); openReader(q.module, q.moduleName); });  // [C] deep_habit counts miss-reveal dives
+  }
+  /* [C] award tracking + interviewer follow-up hook */
+  if (!teach) {
+    if (right) {
+      const pre = state.progress.reviews[q.id];
+      if (pre) {
+        state.sessMaxInterval = Math.max(state.sessMaxInterval || 0, pre.interval || 0);
+        if ((pre.lapses || 0) >= 3 && (pre.ease || 2.5) + 0.1 >= 2.5) state.sessRestored = true;
+      }
+    }
+    (state.sessSeq = state.sessSeq || []).push(right ? "c" : "w");
+    if (state.interview) interviewAfterAnswer(item, right);
   }
   el("#nextBtn").classList.add("show");
 }
@@ -1006,6 +1035,15 @@ function gradeCard(got) {
   const item = state.deck[state.queue[state.cursor]];
   if (got) { item.status = "correct"; state.sessionXp += 10; sfx.correct(); floatXP(10, el("#gotBtn")); }
   else { item.status = "wrong"; sfx.wrong(); }
+  /* [C] award tracking (flashcard path) */
+  if (got) {
+    const pre = state.progress.reviews[item.q.id];
+    if (pre) {
+      state.sessMaxInterval = Math.max(state.sessMaxInterval || 0, pre.interval || 0);
+      if ((pre.lapses || 0) >= 3 && (pre.ease || 2.5) + 0.1 >= 2.5) state.sessRestored = true;
+    }
+  }
+  (state.sessSeq = state.sessSeq || []).push(got ? "c" : "w");
   state.cursor++;
   if (state.cursor < state.queue.length) renderCard();
   else finish();
@@ -1017,10 +1055,12 @@ async function finish() {
   const total = state.deck.length;
   const correct = state.deck.filter((d) => d.status === "correct").length;
   const learned = state.deck.filter((d) => d.status === "learned").length;
+  const cCtx = cBeforeFinish();                    // [C] snapshot codex + apply gauntlet seal bonus (mutates sessionXp)
   const bonusXp = Math.max(0, state.sessionXp - correct * 10);
   const results = state.deck.map((d) => ({ id: d.q.id, section: d.q.section, module: d.q.module, status: d.status }));
   const { xp, freezeUsed } = await saveSession({ date: todayISO(), section: state.section, results, bonusXp });
   refreshStats();
+  const cMoments = cAfterFinish(cCtx, { correct, total });   // [C] seal gauntlet, resolve interview, diff codex, detect ledger awards
   const pct = Math.round((correct / total) * 100);
   const flawless = pct === 100 && total > 0;
   if (flawless) { confetti(); sfx.finish(); }
@@ -1081,9 +1121,13 @@ async function finish() {
   el("#homeBtn").addEventListener("click", () => vt(renderHome));
   el("#progBtn").addEventListener("click", () => vt(renderProgress));
   document.querySelectorAll(".miss-deeper").forEach((b) =>
-    b.addEventListener("click", () => { const m = misses[+b.dataset.k]; openReader(m.q.module, m.q.moduleName); }));
+    b.addEventListener("click", () => { const m = misses[+b.dataset.k]; bumpDeepReads(); openReader(m.q.module, m.q.moduleName); }));  // [C] deep_habit
   wireReveals();
   app.focus({ preventScroll: true });
+  /* [C] decorate results for gauntlet/interviewer, then play any queued moments */
+  cApplyResults(cCtx);
+  state.interview = null; state.gauntlet = null;
+  if (cMoments && cMoments.length) c_queueMoments(cMoments);
 }
 
 /* ---------- progress ---------- */
@@ -1092,6 +1136,7 @@ async function finish() {
 function heatmapHTML(history) {
   const xpByDay = new Map();
   for (const h of history || []) xpByDay.set(h.date, (xpByDay.get(h.date) || 0) + (h.xp || 0));
+  const gauntDays = new Set((history || []).filter((h) => h.section === "gauntlet").map((h) => h.date));  // [C] days a gauntlet was sealed
   const WEEKS = 17;
   const today = new Date(todayISO() + "T00:00:00");
   const end = new Date(today); end.setDate(end.getDate() + (6 - today.getDay())); // Sat of this week
@@ -1103,7 +1148,8 @@ function heatmapHTML(history) {
     const xp = xpByDay.get(iso) || 0;
     if (d > today) { cells += `<span class="hmcell hm-future"></span>`; continue; }
     const lvl = xp === 0 ? 0 : xp < 30 ? 1 : xp < 70 ? 2 : xp < 120 ? 3 : 4;
-    cells += `<span class="hmcell hm-l${lvl}" style="animation-delay:${i * 3}ms" title="${iso}: ${xp} XP"></span>`;
+    const gaunt = gauntDays.has(iso) ? " hm-gaunt" : "";                  // [C] gold-dot overlay
+    cells += `<span class="hmcell hm-l${lvl}${gaunt}" style="animation-delay:${i * 3}ms" title="${iso}: ${xp} XP${gaunt ? " · gauntlet" : ""}"></span>`;
   }
   const empty = !(history || []).length
     ? `<p class="hm-empty">No activity yet &mdash; your first blitz lights up this grid.</p>` : "";
@@ -1141,6 +1187,7 @@ function renderProgress() {
       <div class="badge"><div class="n">${due}</div><div class="l">Due review</div></div>
     </div>
     ${heatmapHTML(p.history)}
+    ${ledgerStripHTML()}
     <h2 class="section-h">Mastery by section</h2>
     ${tiles}
     <div class="row" style="margin-top:18px"><button class="primary" id="backHome">Back to today</button></div>`;
@@ -1303,6 +1350,8 @@ async function openStudySection(section) {
     </div>
     <div class="row" style="margin-top:18px"><button class="ghost" id="studyBack">&larr; Sections</button></div>
     </div>`;
+
+  insertInterviewControl(section);                 // [C] Face the Interviewer / Panel / lock chip on the path header
 
   const wrap = el("#pathWrap"), svg = el("#pathSvg");
   const stepEls = [...wrap.querySelectorAll(".pathstep")];
@@ -2835,6 +2884,674 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+/* ============================================================================
+   [C] PHASE C — Gauntlet · Codex · Skyline · Ledger · Interviewer
+   Self-contained tentpole features. All new state is additive; the four
+   persisted keys are progress.awards, progress.deepReads and localStorage
+   sd_gauntlet. Deterministic randomness comes from c_cyrb53/c_mulberry32 seeded on
+   todayISO — never Date.now/Math.random for anything that must be stable.
+
+   STALE-BASE NOTE: this worktree forked before Phase 0, so the brief's "already
+   built" infra (moment/queueMoments engine, cyrb53/mulberry32, the hash router's
+   reserved #/gauntlet #/codex #/interview routes, two-step confidence answering)
+   is absent here. The helpers below are MINIMAL local stand-ins prefixed c_ so a
+   later `git merge main` cannot collide with the real, identically-named helpers.
+   POST-MERGE SWAP POINTS (single call sites — repoint, then delete the c_* defs):
+     c_cyrb53/c_mulberry32/c_seededShuffle  -> real cyrb53/mulberry32
+     c_moment/c_queueMoments/c_tone/c_MOMENT_SFX -> real moment()/MOMENTS engine
+     c_dispatch/c_go + hashchange listener  -> real dispatch()'s reserved routes
+     answer()'s [C] hook                    -> two-step lockChoice/gradeAnswer
+   ========================================================================== */
+
+/* ---------- [C] deterministic PRNG ---------- */
+function c_cyrb53(str, seed = 0) {
+  let h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
+}
+function c_mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function c_seededShuffle(arr, seedStr) {
+  const a = arr.slice();
+  const rnd = c_mulberry32(c_cyrb53(String(seedStr)) >>> 0);
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+const prettyMod = (mod) => (String(mod).split("/")[1] || String(mod)).replace(/_/g, " ");
+function tierOf(section) {
+  const t = sectionTier((state.progress.sections || {})[section]);
+  return t ? t.toLowerCase() : null;   // null | bronze | silver | gold
+}
+
+/* ---------- [C] moments engine ---------- */
+let _cAudio = null;
+function c_tone(freq, dur = 0.14, type = "sine", gain = 0.05, delay = 0) {
+  if (localStorage.getItem("sd_mute") === "1") return;
+  try {
+    _cAudio = _cAudio || new (window.AudioContext || window.webkitAudioContext)();
+    if (_cAudio.state === "suspended") _cAudio.resume();
+    const t = _cAudio.currentTime + delay;
+    const o = _cAudio.createOscillator(), g = _cAudio.createGain();
+    o.type = type; o.frequency.value = freq; o.connect(g); g.connect(_cAudio.destination);
+    g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.start(t); o.stop(t + dur);
+  } catch { /* audio unavailable */ }
+}
+const c_MOMENT_SFX = {
+  base: () => { c_tone(587, 0.14); c_tone(880, 0.16, "sine", 0.05, 0.08); },
+  bronze: () => { c_tone(523, 0.14); c_tone(784, 0.16, "sine", 0.05, 0.09); },
+  silver: () => { c_tone(659, 0.14); c_tone(988, 0.18, "triangle", 0.05, 0.09); },
+  gold: () => { [659, 880, 1047, 1319].forEach((f, i) => c_tone(f, 0.2, "triangle", 0.05, i * 0.08)); },
+};
+// Full-screen celebratory overlay. Resolves on tap, any key, or timeout.
+function c_moment(opts) {
+  const { tier = "base", title = "", sub = "", icon = "", seal = false, flip = false } = opts || {};
+  return new Promise((resolve) => {
+    const o = document.createElement("div");
+    o.className = "c-moment tier-" + tier + (seal ? " seal" : "") + (flip ? " flip" : "");
+    o.setAttribute("role", "status"); o.setAttribute("aria-live", "assertive");
+    o.innerHTML = `<div class="c-moment-card">
+        <div class="c-moment-disc">${seal ? '<span class="c-seal-stamp"></span>' : (icon || "")}</div>
+        <div class="c-moment-title">${esc(title)}</div>
+        ${sub ? `<div class="c-moment-sub">${esc(sub)}</div>` : ""}
+        <div class="c-moment-hint">tap to continue</div>
+      </div>`;
+    document.body.appendChild(o);
+    (c_MOMENT_SFX[tier] || c_MOMENT_SFX.base)();
+    if (seal) c_tone(130, 0.26, "sawtooth", 0.05, 0.02);
+    let done = false;
+    const onKey = (e) => { e.preventDefault(); e.stopPropagation(); dismiss(); };
+    function dismiss() {
+      if (done) return; done = true;
+      o.removeEventListener("click", dismiss);
+      document.removeEventListener("keydown", onKey, true);
+      o.classList.add("out");
+      const after = () => { o.remove(); resolve(); };
+      REDUCED() ? after() : setTimeout(after, 260);
+    }
+    o.addEventListener("click", dismiss);
+    document.addEventListener("keydown", onKey, true);   // capture: keep the overlay above the quiz keyboard handler
+    if (REDUCED()) { o.classList.add("in"); setTimeout(dismiss, 850); }
+    else { requestAnimationFrame(() => o.classList.add("in")); setTimeout(dismiss, seal ? 2400 : 1900); }
+  });
+}
+function c_queueMoments(list) {
+  return (list || []).reduce((p, m) => p.then(() => c_moment(m)), Promise.resolve());
+}
+
+/* ---------- [C] router (reserved routes #/gauntlet #/codex #/interview/<sec>) ---------- */
+function c_dispatch() {
+  const h = location.hash;
+  if (h === "#/gauntlet") { startGauntlet(); return true; }
+  if (h === "#/codex") { renderCodex(); return true; }
+  const m = h.match(/^#\/interview\/([a-z_]+)$/);
+  if (m) { startInterview(m[1], false); return true; }
+  return false;
+}
+function c_go(hash) {                                  // hashchange fires only on a real change
+  if (location.hash === hash) c_dispatch();
+  else location.hash = hash;
+}
+window.addEventListener("hashchange", c_dispatch);
+
+function bumpDeepReads() {
+  const p = state.progress;
+  p.deepReads = (p.deepReads || 0) + 1;
+  localStorage.setItem("sd_progress", JSON.stringify(p));   // persist immediately; award detected at next finish()
+}
+
+/* ---------- [C] codex model (100% derived from review records) ---------- */
+// needed = 5 captures, or the module's whole bank when it holds fewer than 5.
+function moduleNeeded(mod) {
+  const sec = mod.split("/")[0], bank = bankCache[sec];
+  if (bank) { const n = bank.filter((q) => q.module === mod).length; if (n && n < 5) return n; }
+  return 5;
+}
+function codexState(progress, onlyMods) {
+  const reviews = (progress && progress.reviews) || {};
+  const files = (state.index && state.index.files) || {};
+  const today = todayISO();
+  const byMod = new Map();
+  for (const r of Object.values(reviews)) {
+    if (!r.module) continue;
+    let a = byMod.get(r.module); if (!a) byMod.set(r.module, a = []);
+    a.push(r);
+  }
+  const keys = onlyMods || Object.keys(files);
+  const out = new Map();
+  for (const mod of keys) {
+    const recs = byMod.get(mod) || [];
+    const withRep = recs.filter((r) => (r.reps || 0) >= 1);
+    const held = withRep.filter((r) => r.due && r.due > today).length;   // reps>=1 AND not overdue
+    const heldEver = withRep.length;                                     // ignoring overdue
+    const needed = moduleNeeded(mod);
+    const captured = held >= needed;
+    const foil = recs.some((r) => (r.interval || 0) >= 21);
+    const tarnished = !captured && heldEver >= needed;                   // was captured; overdue dropped it below the bar
+    out.set(mod, { held, heldEver, needed, captured, foil, tarnished });
+  }
+  return out;
+}
+
+/* ---------- [C] 1. THE GAUNTLET ---------- */
+function loadGauntlet() {
+  let g = null;
+  try { g = JSON.parse(localStorage.getItem("sd_gauntlet")); } catch { /* corrupt */ }
+  return (g && g.date === todayISO()) ? g : null;
+}
+function saveGauntlet(g) { localStorage.setItem("sd_gauntlet", JSON.stringify(g)); }
+
+async function questionsByIds(ids) {
+  const secs = new Set(ids.map((id) => id.split("/")[0]));
+  const maps = {};
+  for (const s of secs) { const b = await loadBank(s); if (b) maps[s] = new Map(b.map((q) => [q.id, q])); }
+  const out = [];
+  for (const id of ids) { const s = id.split("/")[0]; const q = maps[s] && maps[s].get(id); if (q) out.push(q); }
+  return out;
+}
+
+// Deterministic 10-question recipe for today. Q1-3 oldest due · Q4-7 suggested
+// · Q8-9 weakest section · Q10 an advanced from the weakest module by lapses.
+async function buildGauntletDeck() {
+  const seed = todayISO();
+  const used = new Set(), picks = [];
+  const push = (q) => { if (q && !used.has(q.id)) { used.add(q.id); picks.push(q); return true; } return false; };
+
+  // Q1-3: oldest due reviews
+  const due = dueReviews().slice(0, 8), bySec = {};
+  due.forEach(([id, r]) => (bySec[r.section] = bySec[r.section] || []).push(id));
+  const dueQ = [];
+  for (const sec of Object.keys(bySec)) {
+    const bank = await loadBank(sec); if (!bank) continue;
+    const map = new Map(bank.map((q) => [q.id, q]));
+    for (const id of bySec[sec]) { const q = map.get(id); if (q) dueQ.push(q); }
+  }
+  for (const q of dueQ) { if (picks.length >= 3) break; push(q); }
+
+  // Q4-7: suggested section (core/intermediate preferred), seeded shuffle
+  const sSec = (state.today && state.today.section) || pickSection();
+  const sBank = (await loadBank(sSec)) || [];
+  const sShuf = c_seededShuffle(sBank, seed + "|sug|" + sSec);
+  const sPool = [...sShuf.filter((q) => q.difficulty !== "advanced"), ...sShuf];
+  while (picks.length < 7) { const q = sPool.shift(); if (!q) break; push(q); }
+
+  // Q8-9: weakest section, intermediate preferred
+  const weak = weakSections()[0];
+  const wSec = weak ? weak.s : pickSection();
+  const wBank = (await loadBank(wSec)) || [];
+  const wShuf = c_seededShuffle(wBank, seed + "|weak|" + wSec);
+  const wPool = [...wShuf.filter((q) => q.difficulty === "intermediate"), ...wShuf];
+  while (picks.length < 9) { const q = wPool.shift(); if (!q) break; push(q); }
+
+  // Q10: The Final Question — advanced from the weakest module by lapses
+  const reviews = state.progress.reviews || {};
+  let weakRec = null;
+  for (const r of Object.values(reviews)) { if (r.module && (r.lapses || 0) > (weakRec ? weakRec.lapses : 0)) weakRec = r; }
+  let finalQ = null;
+  if (weakRec && weakRec.module) {
+    const mb = (await loadBank(weakRec.section)) || [];
+    finalQ = c_seededShuffle(mb.filter((q) => q.module === weakRec.module && q.difficulty === "advanced"), seed + "|fin1").find((q) => !used.has(q.id));
+  }
+  if (!finalQ) finalQ = c_seededShuffle(wBank.filter((q) => q.difficulty === "advanced"), seed + "|fin2").find((q) => !used.has(q.id));
+  if (!finalQ) finalQ = c_seededShuffle(sBank.filter((q) => q.difficulty === "advanced"), seed + "|fin3").find((q) => !used.has(q.id));
+  push(finalQ);
+
+  // backfill to exactly 10 from the leftover suggested/weak pools
+  const filler = [...sPool, ...wPool];
+  for (let i = 0; i < filler.length && picks.length < 10; i++) push(filler[i]);
+  return picks.slice(0, 10);
+}
+
+async function startGauntlet() {
+  app.innerHTML = `<div class="loading">Sealing today's gauntlet&hellip;</div>`;
+  let g = loadGauntlet(), questions;
+  if (g && g.qids && g.qids.length) {
+    questions = await questionsByIds(g.qids);           // frozen: same qids all day, across reloads
+  } else {
+    questions = await buildGauntletDeck();
+    g = { date: todayISO(), qids: questions.map((q) => q.id), sealed: false, score: null, attempt: [] };
+    saveGauntlet(g);
+  }
+  if (!questions.length) { renderHome(); return; }
+  const practice = !!g.sealed;                          // one scored attempt/day; after that it's practice
+  state.section = practice ? "gauntlet-practice" : "gauntlet";
+  state.gauntlet = { scored: !practice, practice };
+  state.interview = null;
+  if (practice) startDeck(questions, () => startGauntlet());                      // normal mixed blitz, no seal
+  else startDeck(questions, () => startGauntlet(), { keepOrder: true, gauntlet: true });   // sealed run: recipe order
+}
+
+function gauntletCardHTML() {
+  const g = loadGauntlet();
+  if (g && g.sealed) {
+    const n = (state.progress.history || []).filter((h) => h.section === "gauntlet").length;
+    return `<button class="c-gaunt-card sealed" id="gauntBtn">
+        <div class="c-gaunt-seal broken" aria-hidden="true"></div>
+        <div class="c-gaunt-body">
+          <div class="eyebrow gold">Daily Gauntlet</div>
+          <h2>Gauntlet #${n} &middot; ${g.score}/${(g.qids || []).length}</h2>
+          <p class="msg">Sealed for today. Replay as unscored practice.</p>
+        </div>
+        <span class="c-gaunt-go">Practice &rarr;</span>
+      </button>`;
+  }
+  return `<button class="c-gaunt-card" id="gauntBtn">
+      <div class="c-gaunt-seal" aria-hidden="true"></div>
+      <div class="c-gaunt-body">
+        <div class="eyebrow gold">Daily Gauntlet</div>
+        <h2>Today's Gauntlet</h2>
+        <p class="msg">Sealed &middot; 10 questions, one attempt.</p>
+      </div>
+      <span class="c-gaunt-go">Enter &rarr;</span>
+    </button>`;
+}
+function renderPracticeBanner() {
+  if (el("#cPracticeBanner")) return;
+  const b = document.createElement("div");
+  b.className = "c-practice-banner"; b.id = "cPracticeBanner";
+  b.innerHTML = `<span class="c-chip practice">practice</span> today's gauntlet is sealed`;
+  app.prepend(b);
+}
+
+/* ---------- [C] 2. THE CODEX ---------- */
+function codexOrderedSections() {
+  const files = (state.index && state.index.files) || {};
+  const secOrder = Object.keys(STUDY_ORDER);
+  const all = [...new Set(Object.keys(files).map((k) => k.split("/")[0]))];
+  return [...secOrder.filter((s) => all.includes(s)), ...all.filter((s) => !secOrder.includes(s))];
+}
+function codexModulesOf(sec) {
+  const files = (state.index && state.index.files) || {};
+  const order = STUDY_ORDER[sec] || [];
+  return Object.keys(files).filter((k) => k.split("/")[0] === sec)
+    .sort((a, b) => (order.indexOf(a) === -1 ? 9999 : order.indexOf(a)) - (order.indexOf(b) === -1 ? 9999 : order.indexOf(b)));
+}
+function renderCodex() {
+  state.inQuiz = false; state.screenBack = renderHome;
+  const cs = codexState(state.progress);
+  let captured = 0, foil = 0;
+  cs.forEach((v) => { if (v.captured) captured++; if (v.foil) foil++; });
+  const shelves = codexOrderedSections().map((sec) => {
+    const mods = codexModulesOf(sec);
+    if (!mods.length) return "";
+    const cards = mods.map((mod) => {
+      const v = cs.get(mod) || { held: 0, needed: 5, captured: false, foil: false, tarnished: false };
+      const cls = [v.captured ? "captured" : "", v.foil ? "foil" : "", v.tarnished ? "tarnished" : "",
+        (!v.captured && !v.tarnished) ? "dim" : ""].filter(Boolean).join(" ");
+      const dots = Array.from({ length: v.needed }, (_, i) => `<span class="cx-dot ${i < v.held ? "on" : ""}"></span>`).join("");
+      return `<button class="cx-card ${cls}" data-mod="${esc(mod)}" title="${esc(prettyMod(mod))} — ${v.held}/${v.needed} held${v.foil ? " · foil" : ""}${v.tarnished ? " · fading" : ""}">
+          <span class="cx-name">${esc(prettyMod(mod))}</span>
+          <span class="cx-dots">${dots}</span>
+        </button>`;
+    }).join("");
+    return `<div class="cx-shelf"><h2 class="section-h">${esc(label(sec))}</h2><div class="cx-grid">${cards}</div></div>`;
+  }).join("");
+  app.innerHTML = `
+    <div class="hero"><h1>The Codex</h1>
+      <p><b>${captured}</b>/${cs.size} captured &middot; <b>${foil}</b> foil</p></div>
+    ${shelves}
+    <div class="row" style="margin-top:18px"><button class="ghost" id="cxHome">&larr; Home</button></div>`;
+  el("#cxHome").addEventListener("click", () => { location.hash = "#"; vt(renderHome); });
+  document.querySelectorAll(".cx-card").forEach((b) =>
+    b.addEventListener("click", () => { reader.back = []; openReaderPath(b.dataset.mod + "/README.md", prettyMod(b.dataset.mod), null); }));
+  wireReveals();
+}
+
+/* ---------- [C] 3. THE SKYLINE ---------- */
+function skylineSVG(p) {
+  const cs = codexState(p);
+  const captured = [];
+  cs.forEach((v, mod) => { if (v.captured) captured.push({ mod, v }); });
+  if (!captured.length) return "";                     // hide entirely when nothing is captured
+  const secOrder = Object.keys(STUDY_ORDER);
+  const key = (mod) => {
+    const sec = mod.split("/")[0], order = STUDY_ORDER[sec] || [];
+    return [(secOrder.indexOf(sec) === -1 ? 99 : secOrder.indexOf(sec)), (order.indexOf(mod) === -1 ? 999 : order.indexOf(mod))];
+  };
+  captured.sort((a, b) => { const ka = key(a.mod), kb = key(b.mod); return ka[0] - kb[0] || ka[1] - kb[1]; });
+  const BW = 13, GAP = 4, DGAP = 12, H = 72, PAD = 6;
+  const rnd = c_mulberry32(c_cyrb53("skyline|" + todayISO()) >>> 0);
+  let x = PAD, prevSec = null, buildings = "";
+  for (const { mod, v } of captured) {
+    const sec = mod.split("/")[0];
+    if (prevSec !== null) x += (sec !== prevSec ? DGAP : GAP);
+    prevSec = sec;
+    const bh = v.held >= 12 ? 56 : v.held >= 8 ? 42 : 30;   // 3 height tiers
+    const by = H - bh - 2;
+    const winTotal = Math.max(2, Math.min(6, v.heldEver || v.needed));
+    const lit = Math.max(0, Math.min(winTotal, Math.round(winTotal * (v.held / Math.max(1, v.heldEver)))));
+    let wins = "";
+    for (let i = 0; i < winTotal; i++) {
+      const col = i % 2, row = (i / 2) | 0;
+      const wx = x + 3 + col * 5, wy = by + 4 + row * 5, on = i < lit;
+      const flick = (!REDUCED() && on && rnd() < 0.18) ? ' class="sky-flicker"' : "";
+      wins += `<rect x="${wx}" y="${wy}" width="3" height="3" fill="${on ? "var(--warn)" : "var(--faint)"}" fill-opacity="${on ? 0.9 : 0.15}"${flick}/>`;
+    }
+    buildings += `<g><title>${esc(prettyMod(mod))} — ${lit}/${winTotal} lit</title>` +
+      `<rect x="${x}" y="${by}" width="${BW}" height="${bh}" rx="2" fill="var(--accent)" fill-opacity="0.14" stroke="var(--accent)" stroke-opacity="0.22"/>${wins}</g>`;
+    x += BW;
+  }
+  return `<div class="skyline" aria-label="Retention skyline: ${captured.length} captured modules">` +
+    `<svg viewBox="0 0 ${x + PAD} ${H}" width="100%" height="${H}" preserveAspectRatio="xMinYMax meet" role="img">${buildings}</svg></div>`;
+}
+
+/* ---------- [C] 4. THE LEDGER ---------- */
+const AWARDS = [
+  { id: "clean_slate", title: "Clean Slate", hint: "Clear every due review with 10+ tracked." },
+  { id: "long_memory", title: "Long Memory", hint: "Answer right at a 30-day interval." },
+  { id: "comeback", title: "Comeback", hint: "3+ misses, then 7 straight correct in a session." },
+  { id: "cold_open", title: "Cold Open", hint: "8/10+ on a gauntlet after a 7-day gap." },
+  { id: "cartographer", title: "Cartographer", hint: "Touch every module of a section once." },
+  { id: "triple_gold", title: "Triple Gold", hint: "Reach Gold tier in three sections." },
+  { id: "restored", title: "Restored", hint: "Revive a 3x-lapsed question to full ease." },
+  { id: "deep_habit", title: "Deep Habit", hint: "Open 10 dive-deepers from misses." },
+  { id: "foil_row", title: "Foil Row", hint: "Hold a 21-day interval in every module of a section." },
+];
+function comebackHit(seq) {
+  let misses = 0, run = 0;
+  for (const s of seq) {
+    if (s === "w") { misses++; run = 0; }
+    else if (s === "c") { run++; if (misses >= 3 && run >= 7) return true; }
+  }
+  return false;
+}
+function checkAwards(ctx, stats) {
+  const p = state.progress;
+  if (!p.awards) p.awards = {};
+  const today = ctx.today, reviews = p.reviews || {}, out = [];
+  const grant = (id) => {
+    if (p.awards[id]) return;
+    const def = AWARDS.find((a) => a.id === id); if (!def) return;
+    p.awards[id] = today; out.push(def);
+  };
+  if (Object.keys(reviews).length >= 10 && dueReviews().length === 0) grant("clean_slate");
+  if ((state.sessMaxInterval || 0) >= 30) grant("long_memory");
+  if (comebackHit(state.sessSeq || [])) grant("comeback");
+  if (state.section === "gauntlet" && stats.correct >= 8 && stats.total >= 10 && ctx.daysSinceLast >= 7) grant("cold_open");
+  if (state.sessRestored) grant("restored");
+  if ((p.deepReads || 0) >= 10) grant("deep_habit");
+  const golds = Object.keys(p.sections || {}).filter((s) => sectionTier(p.sections[s]) === "Gold").length;
+  if (golds >= 3) grant("triple_gold");
+  const files = (state.index && state.index.files) || {};
+  for (const sec of new Set(ctx.mods.map((m) => m.split("/")[0]))) {
+    const secMods = Object.keys(files).filter((k) => k.split("/")[0] === sec);
+    if (!secMods.length) continue;
+    const haveRec = new Set(Object.values(reviews).filter((r) => r.section === sec && r.module).map((r) => r.module));
+    if (secMods.every((m) => haveRec.has(m))) grant("cartographer");
+    const foilMods = new Set(Object.values(reviews).filter((r) => r.section === sec && (r.interval || 0) >= 21 && r.module).map((r) => r.module));
+    if (secMods.every((m) => foilMods.has(m))) grant("foil_row");
+  }
+  return out;
+}
+function ledgerStripHTML() {
+  const awards = (state.progress && state.progress.awards) || {};
+  const chips = AWARDS.map((a) => awards[a.id]
+    ? `<div class="ledger-chip earned" title="${esc(a.title)}"><span class="lg-t">${esc(a.title)}</span><span class="lg-d">${esc(awards[a.id])}</span></div>`
+    : `<div class="ledger-chip" title="${esc(a.hint)}"><span class="lg-t">${esc(a.title)}</span><span class="lg-h">${esc(a.hint)}</span></div>`).join("");
+  const passes = Object.keys(awards).filter((k) => k.startsWith("interview_") || k.startsWith("panel_")).map((k) => {
+    const sec = k.replace(/^(interview|panel)_/, ""), kind = k.startsWith("panel_") ? "Panel" : "Interview";
+    return `<div class="ledger-chip earned pass"><span class="lg-t">${kind}: ${esc(label(sec))}</span><span class="lg-d">${esc(awards[k])}</span></div>`;
+  }).join("");
+  return `<h2 class="section-h">Ledger</h2><div class="ledger-strip">${chips}${passes}</div>`;
+}
+
+/* ---------- [C] 5. THE INTERVIEWER ---------- */
+const IV_AVATAR_SVG = `<svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
+    <defs><linearGradient id="ivg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="var(--accent)"/><stop offset="1" stop-color="var(--accent-2)"/></linearGradient></defs>
+    <circle cx="32" cy="22" r="12" fill="url(#ivg)" fill-opacity="0.5"/>
+    <path d="M12 58c0-13 9-20 20-20s20 7 20 20z" fill="url(#ivg)" fill-opacity="0.42"/>
+    <rect x="20" y="46" width="24" height="12" rx="2" fill="var(--bg-2)" fill-opacity="0.55"/>
+  </svg>`;
+function renderInterviewLocked(section) { openStudySection(section); }   // path header shows the lock chip
+
+function pickFollowUp(module, pairs, iv) {
+  let best = null, bw = -1;
+  for (const p of pairs || []) {
+    let other = null;
+    if (p.a === module) other = p.b; else if (p.b === module) other = p.a;
+    if (!other) continue;
+    const arr = iv.pool.get(other);
+    if (arr && arr.length && p.w > bw) { bw = p.w; best = other; }
+  }
+  const mod = best || module;
+  let arr = iv.pool.get(mod);
+  if (arr && arr.length) { const q = arr.shift(); iv.usedIds.add(q.id); return { q, mod }; }
+  for (const [m, a] of iv.pool) { if (a.length) { const q = a.shift(); iv.usedIds.add(q.id); return { q, mod: m }; } }
+  return null;   // pool exhausted: continue the planned sequence
+}
+function injectFollowUp(item) {
+  const iv = state.interview, nextPos = state.cursor + 1;
+  if (nextPos >= state.queue.length) return null;      // missed the last question — nothing to probe
+  const res = pickFollowUp(item.q.module, iv.pairs, iv);
+  if (!res) return null;
+  const newItem = makeItem(res.q);
+  newItem.followUp = res.mod;
+  const di = state.deck.push(newItem) - 1;
+  state.queue[nextPos] = di;                            // "he probes the weakness": replace the next planned question
+  iv.lastFollowUp = res;
+  return res;
+}
+function interviewAfterAnswer(item, right) {
+  const iv = state.interview; if (!iv) return;
+  if (right) {
+    const crit = state.combo >= 3;                     // combo>=3 crits for 2 damage
+    iv.hp = Math.max(0, iv.hp - (crit ? 2 : 1));
+    if (iv.hp <= 0) iv.won = true;
+    updateInterviewHP(crit);
+  } else {
+    const res = injectFollowUp(item);
+    if (res) {
+      const rev = el("#reveal");
+      if (rev) { const line = document.createElement("div"); line.className = "iv-followup"; line.textContent = `He follows up on ${prettyMod(res.mod)}.`; rev.appendChild(line); }
+    }
+    updateInterviewHP(false);
+  }
+}
+function updateInterviewHP(crit) {
+  const iv = state.interview, f = el("#ivHpFill"); if (!iv || !f) return;
+  f.style.width = (100 * iv.hp / iv.maxHp).toFixed(1) + "%";
+  if (crit && !REDUCED()) { const s = el("#ivStage"); if (s) { s.classList.remove("hit"); void s.offsetWidth; s.classList.add("hit"); } }
+}
+function renderInterviewStage() {
+  const iv = state.interview; if (!iv) return;
+  let stage = el("#ivStage");
+  if (!stage) {
+    stage = document.createElement("div");
+    stage.className = "iv-stage"; stage.id = "ivStage";
+    stage.innerHTML = `<div class="iv-avatar">${IV_AVATAR_SVG}</div>
+      <div class="iv-hpwrap">
+        <div class="iv-hplabel">Interviewer${iv.panel ? " · panel" : ""}</div>
+        <div class="iv-hpbar"><i id="ivHpFill"></i></div>
+      </div>`;
+    app.prepend(stage);
+  }
+  updateInterviewHP(false);
+}
+function typewriter(node, text) {
+  if (REDUCED()) { node.textContent = text; return; }
+  node.textContent = ""; let i = 0;
+  const tick = () => { node.textContent = text.slice(0, ++i); if (i < text.length) setTimeout(tick, 26); };
+  tick();
+}
+function renderInterviewIntro(section, panel, deckQ) {
+  state.inQuiz = false; state.screenBack = renderHome;
+  const line = panel
+    ? `A panel today. ${deckQ.length} hard questions on ${label(section)}. No warm-up.`
+    : `Let's talk about ${label(section)}. ${deckQ.length} questions. Take your time — I won't.`;
+  app.innerHTML = `<div class="iv-intro">
+      <div class="iv-avatar big" aria-hidden="true">${IV_AVATAR_SVG}</div>
+      <div class="iv-type" id="ivType" role="status"></div>
+      <button class="cta inline" id="ivBegin">Begin</button>
+    </div>`;
+  typewriter(el("#ivType"), line);
+  el("#ivBegin").addEventListener("click", () =>
+    startDeck(deckQ, () => startInterview(section, panel), { keepOrder: true, interview: true }));
+  app.focus({ preventScroll: true });
+}
+async function startInterview(section, panel = false) {
+  const tier = tierOf(section);
+  if (tier !== "silver" && tier !== "gold") { renderInterviewLocked(section); return; }
+  app.innerHTML = `<div class="loading">Preparing the interview&hellip;</div>`;
+  const bank = (await loadBank(section)) || [];
+  const graph = await apiGet(`graph/${section}.json`, null, "default");
+  const pairs = (graph && graph.pairs) || [];
+  const seed = todayISO() + "|iv|" + section + (panel ? "|panel" : "");
+  let deckQ;
+  if (panel) {
+    deckQ = c_seededShuffle(bank.filter((q) => q.difficulty === "advanced"), seed).slice(0, 12);
+  } else {
+    const core = c_seededShuffle(bank.filter((q) => q.difficulty === "core"), seed + "c").slice(0, 4);
+    const inter = c_seededShuffle(bank.filter((q) => q.difficulty === "intermediate"), seed + "i").slice(0, 4);
+    const adv = c_seededShuffle(bank.filter((q) => q.difficulty === "advanced"), seed + "a").slice(0, 4);
+    deckQ = [...core, ...inter, ...adv];   // escalation
+  }
+  if (deckQ.length < 12) {                  // backfill small sections up toward 12
+    const seen = new Set(deckQ.map((q) => q.id));
+    for (const q of c_seededShuffle(bank, seed + "fill")) { if (deckQ.length >= 12) break; if (!seen.has(q.id)) { seen.add(q.id); deckQ.push(q); } }
+  }
+  deckQ = deckQ.slice(0, 12);
+  if (deckQ.length < 3) { renderHome(); return; }
+  const usedIds = new Set(deckQ.map((q) => q.id)), pool = new Map();
+  for (const q of c_seededShuffle(bank, seed + "pool")) {
+    if (usedIds.has(q.id)) continue;
+    let a = pool.get(q.module); if (!a) pool.set(q.module, a = []); a.push(q);
+  }
+  state.interview = { section, panel, hp: deckQ.length, maxHp: deckQ.length, pairs, pool, usedIds, lastFollowUp: null, won: false };
+  state.section = "interview"; state.gauntlet = null;
+  document.body.classList.add("interview-mode");
+  renderInterviewIntro(section, panel, deckQ);
+}
+function insertInterviewControl(section) {
+  const hero = el(".path-screen .hero") || el(".hero"); if (!hero) return;
+  const tier = tierOf(section), awards = state.progress.awards || {};
+  const passed = awards["interview_" + section] || awards["panel_" + section];
+  const wrap = document.createElement("div"); wrap.className = "iv-cta-wrap";
+  let html = passed ? `<span class="c-chip pass">Passed</span>` : "";
+  if (tier === "gold") html += `<button class="ghost iv-cta" id="ivPanelBtn">${awards["panel_" + section] ? "Panel again" : "Panel"} &rarr;</button>`;
+  else if (tier === "silver") html += `<button class="ghost iv-cta" id="ivFaceBtn">Face the Interviewer &rarr;</button>`;
+  else html += `<span class="c-chip lock">Silver unlocks the Interviewer</span>`;
+  wrap.innerHTML = html; hero.appendChild(wrap);
+  const f = el("#ivFaceBtn"); if (f) f.addEventListener("click", () => startInterview(section, false));
+  const pn = el("#ivPanelBtn"); if (pn) pn.addEventListener("click", () => startInterview(section, true));
+}
+
+/* ---------- [C] finish() hooks: seal · resolve · diff codex · detect awards ---------- */
+function cBeforeFinish() {
+  const p = state.progress, today = todayISO();
+  const mods = new Set(), modName = {};
+  for (const d of state.deck) { mods.add(d.q.module); modName[d.q.module] = d.q.moduleName; }
+  const preCodex = codexState(p, [...mods]);
+  const daysSinceLast = p.lastPlayed
+    ? Math.round((new Date(today + "T00:00:00") - new Date(p.lastPlayed + "T00:00:00")) / 86400000)
+    : Infinity;
+  if (state.section === "gauntlet") {                 // scored run only
+    const g = loadGauntlet();
+    if (g && !g.sealed) state.sessionXp += 40;         // +40 seal bonus, folded into bonusXp
+  }
+  return { preCodex, mods: [...mods], modName, daysSinceLast, today, interviewWon: false };
+}
+function cAfterFinish(ctx, stats) {
+  const p = state.progress; if (!p.awards) p.awards = {};
+  const today = ctx.today, moments = [];
+  // Gauntlet seal
+  if (state.section === "gauntlet") {
+    const g = loadGauntlet();
+    if (g && !g.sealed) {
+      g.sealed = true; g.score = stats.correct; g.attempt = state.deck.map((d) => d.status); saveGauntlet(g);
+      const n = (p.history || []).filter((h) => h.section === "gauntlet").length;   // includes today's entry
+      moments.push({ tier: "gold", seal: true, title: `Gauntlet #${n} — sealed`, sub: `${stats.correct}/${state.deck.length}` });
+    }
+  }
+  // Interviewer result
+  if (state.interview) {
+    const iv = state.interview;
+    ctx.interviewWon = iv.hp <= 0;
+    if (ctx.interviewWon) {
+      const id = iv.panel ? ("panel_" + iv.section) : ("interview_" + iv.section);
+      if (!p.awards[id]) p.awards[id] = today;
+      moments.push({ tier: "gold", title: `Passed: ${label(iv.section)}`, sub: iv.panel ? "Panel cleared." : "Interviewer satisfied." });
+    }
+    document.body.classList.remove("interview-mode");
+  }
+  // Codex captures / foils on the touched modules
+  const postCodex = codexState(p, ctx.mods);
+  for (const mod of ctx.mods) {
+    const pre = ctx.preCodex.get(mod) || {}, post = postCodex.get(mod) || {};
+    if (post.captured && !pre.captured) moments.push({ tier: "silver", flip: true, title: `Captured: ${ctx.modName[mod] || prettyMod(mod)}`, sub: "Added to your Codex." });
+    if (post.foil && !pre.foil) moments.push({ tier: "gold", title: `Foil: ${ctx.modName[mod] || prettyMod(mod)}`, sub: "Proven over 21 days." });
+  }
+  // Ledger awards
+  for (const a of checkAwards(ctx, stats)) moments.push({ tier: "silver", title: `Ledger: ${a.title}`, sub: a.hint });
+  localStorage.setItem("sd_progress", JSON.stringify(p));   // persist awards + any deepReads
+  return moments;
+}
+function cApplyResults(ctx) {
+  const result = el(".result"); if (!result) return;
+  if (state.section === "gauntlet" || state.section === "gauntlet-practice") {
+    const b = document.createElement("div"); b.className = "c-gaunt-banner";
+    if (state.section === "gauntlet-practice") b.innerHTML = `<span class="c-chip practice">practice</span> today's gauntlet is sealed`;
+    else {
+      const g = loadGauntlet(), n = (state.progress.history || []).filter((h) => h.section === "gauntlet").length;
+      b.innerHTML = `<span class="c-seal-mini"></span> Gauntlet #${n} sealed &middot; ${g ? g.score : stats_()}/${state.deck.length}`;
+    }
+    result.insertBefore(b, result.firstChild);
+  }
+  if (state.interview) {
+    const b = document.createElement("div"); b.className = "c-iv-banner " + (ctx.interviewWon ? "won" : "resched");
+    b.innerHTML = ctx.interviewWon
+      ? `<span class="c-chip pass">Passed</span> ${esc(label(state.interview.section))} &middot; interviewer satisfied.`
+      : `We'll continue another day. Review what we covered.`;
+    result.insertBefore(b, result.firstChild);
+  }
+}
+function stats_() { return state.deck.filter((d) => d.status === "correct").length; }
+
+/* ---------- [C] ?qa=1 debug handle (documented in qa_phaseC.mjs) ---------- */
+if (new URLSearchParams(location.search).get("qa") === "1") {
+  window.__qa = {
+    state,
+    get progress() { return state.progress; },
+    correctIndex() { const it = state.deck[state.queue[state.cursor]]; return it ? it.opts.findIndex((o) => o.ok) : -1; },
+    wrongIndex() { const it = state.deck[state.queue[state.cursor]]; return it ? it.opts.findIndex((o) => !o.ok) : -1; },
+    curModule() { const it = state.deck[state.queue[state.cursor]]; return it ? it.q.module : null; },
+    nextModule() { const i = state.queue[state.cursor + 1]; return (i != null && state.deck[i]) ? state.deck[i].q.module : null; },
+    gauntlet() { try { return JSON.parse(localStorage.getItem("sd_gauntlet")); } catch { return null; } },
+    interview() { return state.interview; },
+    interviewHp() { return state.interview ? state.interview.hp : null; },
+    expectFollowUp(mod) { if (!state.interview) return null; const r = pickFollowUpPreview(mod, state.interview); return r; },
+    lastFollowUp() { return state.interview && state.interview.lastFollowUp ? state.interview.lastFollowUp.mod : null; },
+    codex(mods) { const m = codexState(state.progress, mods); return Object.fromEntries(m); },
+    moments() { return document.querySelectorAll(".c-moment").length; },
+    tierOf,
+  };
+}
+// Non-mutating preview of which module a follow-up would draw from (QA assertion helper).
+function pickFollowUpPreview(module, iv) {
+  let best = null, bw = -1;
+  for (const p of iv.pairs || []) {
+    let other = null; if (p.a === module) other = p.b; else if (p.b === module) other = p.a;
+    if (!other) continue;
+    const arr = iv.pool.get(other);
+    if (arr && arr.length && p.w > bw) { bw = p.w; best = other; }
+  }
+  return best || module;
+}
+
 /* ---------- boot ---------- */
 function syncMuteBtn() {
   const b = el("#muteBtn");
@@ -2886,6 +3603,7 @@ async function boot() {
   }
   syncModeBtn();
   renderHome();
+  c_dispatch();                                     // [C] honor a #/gauntlet · #/codex · #/interview/<sec> deep link on load
 }
 
 boot();
