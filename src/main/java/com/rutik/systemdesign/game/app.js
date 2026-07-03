@@ -175,10 +175,22 @@ const state = {
   combo: 0, maxCombo: 0, sessionXp: 0, inQuiz: false, answered: false,
   curOptsLen: 0, replayFn: null,
   hard: false, awaitingConf: false, pendingPick: null,
+  // [B] per-deck session trackers — reset by resetPhaseBState() in startDeck/resumeDeck.
+  _bossIntroShown: false, _doubleDown: null, _doubleDownIdx: null, _doubleDownWager: 0,
+  _missStreak: 0, _maxMissStreak: 0, _answerLog: [], _cardStreak: 0, _capsuleReturns: [],
 };
 
 /* ---------- helpers ---------- */
-const todayISO = () => new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD, local
+// [D] QA seam: a ?qa_date=YYYY-MM-DD URL param overrides "today" everywhere date
+// math flows through this function (coach pick, streaks, debrief week bounds,
+// due reviews). Only honored when present and well-formed — normal play is
+// untouched. See qa_phaseD.mjs for how tests use it to force date-dependent
+// scenarios without changing the system clock.
+const todayISO = () => {
+  const qp = new URLSearchParams(location.search).get("qa_date");
+  if (qp && /^\d{4}-\d{2}-\d{2}$/.test(qp)) return qp;
+  return new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD, local
+};
 const el = (sel) => document.querySelector(sel);
 
 // Inline SVG icons (lucide-style paths) — consistent weight in every theme,
@@ -284,7 +296,7 @@ function toggleHelp() {
   o.innerHTML = `<div class="help-card">
     <h2>Keyboard shortcuts</h2>
     <div class="help-cols">
-      <div><h3>Quiz</h3>${row("1 2 3 4", "Answer")}${row("↵", "Next")}${row("S", "Skip for now")}</div>
+      <div><h3>Quiz</h3>${row("1 2 3 4", "Answer")}${row("↵", "Next")}${row("S", "Skip for now")}${row("D", "Double down")}</div>
       <div><h3>Cards</h3>${row("Space", "Reveal")}${row("1", "Missed it")}${row("2", "Got it")}</div>
       <div><h3>Reader</h3>${row("F", "Fullscreen")}${row("Esc", "Exit / close")}</div>
       <div><h3>Diagram zoom</h3>${row("+ −", "Zoom")}${row("0", "Fit")}${row("← →", "Pan")}</div>
@@ -362,16 +374,8 @@ function mulberry32(seed) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-/* [C] Fisher-Yates with a string-seeded PRNG: the same seed always yields the
-   same order (the Gauntlet's frozen daily deck, Interviewer escalation). */
-function seededShuffle(arr, seedStr) {
-  const a = arr.slice(), rnd = mulberry32(cyrb53(String(seedStr)) >>> 0);
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(rnd() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
+/* [C] NOTE: seededShuffle lives beside the [D] quest helpers — it accepts an
+   rng function ([D] callers) or a plain seed string ([C] callers). */
 
 // Fetch a static JSON file (question banks, index, graph); returns `fallback`
 // on any error. Pages serves these with normal caching; "default" lets a 304
@@ -379,6 +383,106 @@ function seededShuffle(arr, seedStr) {
 async function fetchJSON(path, fallback, cache = "no-store") {
   try { const r = await fetch(path, { cache }); if (!r.ok) throw 0; return await r.json(); }
   catch { return fallback; }
+}
+
+/* ---------- [A2] shared learning helpers ---------- */
+// Knowledge-graph cache — mirrors bankCache; a missing file tolerantly -> null.
+const graphCache = {};
+async function loadGraph(section) {
+  if (!(section in graphCache)) graphCache[section] = await fetchJSON(`graph/${section}.json`, null, "default");
+  return graphCache[section];
+}
+
+// Tokenizer ported from extract.py (lowercase, split on non-alphanumerics, drop
+// <3-char tokens and the stopword set) — applied to the USER's explain-back text
+// only; the question side uses the bank's precomputed `concepts`.
+const A2_STOP = new Set(("a an and the of to in for on with is are be by as at it its this that these those or " +
+  "not no if then else when while do does done can could should would may might will you your they them their " +
+  "we our he she his her from into over under than so such each per via use used using uses what why how which " +
+  "who whom where whose between within across about after before during because both either neither only also " +
+  "more most less least very much many few some any all one two three first second data system systems model " +
+  "models value values case cases example examples type types").split(/\s+/));
+function a2Tokenize(text) {
+  return (String(text).toLowerCase().match(/[a-z0-9]+/g) || []).filter((t) => t.length > 2 && !A2_STOP.has(t));
+}
+
+// Greedy reorder so no two consecutive items share a module: among modules that
+// differ from the previous one, take the one with the MOST remaining (minimizes
+// forced same-module adjacencies); graph-connectedness breaks ties, so the
+// A-B-A'-C texture shows when counts are equal. Accepts raw questions or deck items.
+function orderInterleaved(items, pairs) {
+  if (items.length < 3) return items.slice();
+  const modOf = (it) => it.module || (it.q && it.q.module);
+  const adj = new Map();
+  for (const p of pairs || []) {
+    if (!adj.has(p.a)) adj.set(p.a, new Set());
+    if (!adj.has(p.b)) adj.set(p.b, new Set());
+    adj.get(p.a).add(p.b); adj.get(p.b).add(p.a);
+  }
+  const connected = (m1, m2) => m1 && m2 && m1 !== m2 && adj.has(m1) && adj.get(m1).has(m2);
+  const pool = items.slice(), out = [];
+  const count = new Map();
+  pool.forEach((it) => count.set(modOf(it), (count.get(modOf(it)) || 0) + 1));
+  let prevMod = null;
+  while (pool.length) {
+    let best = 0, bestScore = -1;
+    for (let i = 0; i < pool.length; i++) {
+      const m = modOf(pool[i]);
+      const score = (m === prevMod ? 0 : 1000) + count.get(m) * 2 + (connected(m, prevMod) ? 1 : 0);
+      if (score > bestScore) { bestScore = score; best = i; }
+    }
+    const chosen = pool.splice(best, 1)[0], cm = modOf(chosen);
+    out.push(chosen);
+    count.set(cm, count.get(cm) - 1);
+    prevMod = cm;
+  }
+  return out;
+}
+
+// Aggregate spaced-repetition records per module for the Memory Map.
+// retention = mean exp(-daysSinceScheduled / max(1, interval*ease)), capped 0..1.
+function moduleStats(progress) {
+  const today = new Date(todayISO() + "T00:00:00"), tISO = todayISO();
+  const acc = {};
+  for (const rv of Object.values((progress && progress.reviews) || {})) {
+    const mod = rv.module;
+    if (!mod) continue;
+    const s = acc[mod] || (acc[mod] = { count: 0, held: 0, overdue: 0, easeSum: 0, retSum: 0 });
+    s.count++;
+    s.easeSum += rv.ease || 2.5;
+    const overdue = !!(rv.due && rv.due < tISO);
+    if (overdue) s.overdue++;
+    if ((rv.reps || 0) >= 1 && !overdue) s.held++;
+    let ret = 0;
+    if (rv.due) {
+      const interval = rv.interval || 1;
+      const from = new Date(rv.due + "T00:00:00");
+      from.setDate(from.getDate() - interval);         // the day it was last scheduled
+      const days = Math.max(0, Math.round((today - from) / 86400000));
+      ret = Math.exp(-days / Math.max(1, interval * (rv.ease || 2.5)));
+    }
+    s.retSum += Math.max(0, Math.min(1, ret));
+  }
+  const out = {};
+  for (const [mod, s] of Object.entries(acc)) {
+    out[mod] = { count: s.count, held: s.held, overdue: s.overdue, avgEase: s.easeSum / s.count, retention: s.retSum / s.count };
+  }
+  return out;
+}
+
+// Display name for a module key ("hld/caching" -> "caching") — matches extract.py.
+const modDisplay = (mod) => String(mod).split("/").pop().replace(/_/g, " ");
+
+// Confusion tally: increment "<a>|<b>" (canonical order set by caller), cap 50 keys.
+function tallyConfusion(p, key) {
+  const c = (p.confusions = p.confusions || {});
+  c[key] = (c[key] || 0) + 1;
+  const keys = Object.keys(c);
+  if (keys.length > 50) {
+    let minK = keys[0];
+    for (const k of keys) if (c[k] < c[minK]) minK = k;
+    if (minK !== key) delete c[minK];
+  }
 }
 
 /* ---------- sound (zero-asset Web Audio) ---------- */
@@ -413,6 +517,9 @@ const sfx = (() => {
     /* [C] gauntlet wax-seal thud + codex card-flip */
     seal() { tone(120, 0.3, "sawtooth", 0.06); tone(90, 0.4, "sine", 0.05, 0.05); tone(1568, 0.5, "sine", 0.03, 0.28); },
     capture() { tone(660, 0.12, "triangle", 0.05); tone(990, 0.16, "triangle", 0.05, 0.08); tone(1320, 0.2, "sine", 0.04, 0.16); },
+    // --- [B] moment/feedback tones ---
+    bossSting() { tone(110, 0.4, "sawtooth", 0.05); tone(165, 0.4, "sawtooth", 0.04, 0.05); },
+    recovered() { tone(440, 0.14, "sine", 0.055); tone(660, 0.16, "sine", 0.05, 0.08); },
     isOn: on,
     toggle() { const wasOn = on(); localStorage.setItem("sd_mute", wasOn ? "1" : "0"); return !wasOn; },
   };
@@ -519,7 +626,9 @@ function personalDifficulty(q, rv, medMs) {
 }
 
 // Streak-freeze + SM-2 progress update. Writes localStorage sd_progress.
-function saveSessionLocal(session) {
+// [A2] opts.quiet (prime pretest): write ONLY review records — no section
+// tallies, XP, streak, or history side effects.
+function saveSessionLocal(session, opts = {}) {
   const p = state.progress;
   if (p.freezes == null) p.freezes = 2;
   if (!p.freezeUsedOn) p.freezeUsedOn = [];
@@ -530,13 +639,15 @@ function saveSessionLocal(session) {
   const medCorrect = cms.length ? cms[cms.length >> 1] : 0;
   let correct = 0;
   for (const res of session.results || []) {
-    const sec = (p.sections[res.section] = p.sections[res.section] || { seen: 0, correct: 0 });
-    sec.seen += 1;
-    sec.lastPlayed = session.date;
-    if (res.status === "correct") { sec.correct += 1; correct += 1; }
-    // Confidence calibration tallies (A4) — only first-attempt picks carry conf.
-    if (res.conf === "high") { sec.sureSeen = (sec.sureSeen || 0) + 1; if (res.status === "correct") sec.sureCorrect = (sec.sureCorrect || 0) + 1; }
-    else if (res.conf === "low") { sec.unsureSeen = (sec.unsureSeen || 0) + 1; if (res.status === "correct") sec.unsureCorrect = (sec.unsureCorrect || 0) + 1; }
+    if (!opts.quiet) {
+      const sec = (p.sections[res.section] = p.sections[res.section] || { seen: 0, correct: 0 });
+      sec.seen += 1;
+      sec.lastPlayed = session.date;
+      if (res.status === "correct") { sec.correct += 1; correct += 1; }
+      // Confidence calibration tallies (A4) — only first-attempt picks carry conf.
+      if (res.conf === "high") { sec.sureSeen = (sec.sureSeen || 0) + 1; if (res.status === "correct") sec.sureCorrect = (sec.sureCorrect || 0) + 1; }
+      else if (res.conf === "low") { sec.unsureSeen = (sec.unsureSeen || 0) + 1; if (res.status === "correct") sec.unsureCorrect = (sec.unsureCorrect || 0) + 1; }
+    }
     if (res.id) {
       const rv = reviews[res.id] || { ease: 2.5, interval: 0, reps: 0, lapses: 0 };
       rv.section = res.section; rv.module = res.module;
@@ -546,6 +657,11 @@ function saveSessionLocal(session) {
       scheduleReview(rv, res.status, session.date, res.ms, eff);
       reviews[res.id] = rv;
     }
+    if (res.confusion) tallyConfusion(p, res.confusion);   // [A2] confusion-pair tally (cap 50)
+  }
+  if (opts.quiet) {                                        // [A2] side-effect-free save (prime)
+    localStorage.setItem("sd_progress", JSON.stringify(p));
+    return { xp: 0, freezeUsed: false };
   }
   const dayMs = 86400000, atMidnight = (iso) => new Date(iso + "T00:00:00");
   let freezeUsed = false, advanced = false;
@@ -569,6 +685,7 @@ function saveSessionLocal(session) {
   (p.history = p.history || []).push({
     date: session.date, answered: (session.results || []).length, correct, xp,
     section: session.section || "unknown", durationSec: session.durationSec || 0,
+    comeback: !!session.comeback,                  // [B] comeback engine — see queueMoments/finish()
   });
   p.history = p.history.slice(-365);               // rolling one-year history cap
   localStorage.setItem("sd_progress", JSON.stringify(p));
@@ -610,6 +727,30 @@ function sectionTier(st) {
 }
 const levelFromXP = (xp) => Math.floor((xp || 0) / 250) + 1;
 
+/* ---------- [B] career ladder ---------- */
+// Level bands -> a job title, cosmetic on top of levelFromXP. Bands repeat the
+// same title until the next threshold (e.g. levels 6-9 are all "Mid-level Engineer").
+const LEVEL_TITLES = [
+  { at: 1, title: "Intern" }, { at: 3, title: "Junior Engineer" },
+  { at: 6, title: "Mid-level Engineer" }, { at: 10, title: "Senior Engineer" },
+  { at: 15, title: "Staff Engineer" }, { at: 21, title: "Senior Staff" },
+  { at: 28, title: "Principal" }, { at: 36, title: "Distinguished" }, { at: 45, title: "Fellow" },
+];
+function titleForLevel(lvl) {
+  let t = LEVEL_TITLES[0].title;
+  for (const b of LEVEL_TITLES) { if (lvl >= b.at) t = b.title; else break; }
+  return t;
+}
+// Progress ring in the topbar Lv chip: fraction of the way through the current level.
+function updateLevelRing() {
+  const ring = el("#lvlRingFg");
+  if (!ring) return;
+  const pct = ((state.progress.totalXP || 0) % 250) / 250;
+  const r = 9, circ = 2 * Math.PI * r;
+  ring.setAttribute("stroke-dasharray", circ.toFixed(1));
+  ring.setAttribute("stroke-dashoffset", (circ * (1 - pct)).toFixed(1));
+}
+
 // Most-invested section not practiced in a week, to nudge a refresh.
 function rustiestSection() {
   const secs = state.progress.sections || {};
@@ -638,6 +779,8 @@ function refreshStats() {
   set("#streakVal", state.progress.streak || 0);
   set("#xpVal", state.progress.totalXP || 0);
   set("#lvlVal", levelFromXP(state.progress.totalXP));
+  set("#lvlTitle", titleForLevel(levelFromXP(state.progress.totalXP)));  // [B] career ladder
+  updateLevelRing();
 }
 
 /* ---------- home ---------- */
@@ -682,7 +825,10 @@ function renderHome() {
        </button>`
     : "";
   const due = dueReviews();
-  const reviewCard = due.length
+  /* [D] coach: reboarding protocol — a >2-day gap replaces the suggested card
+     and suppresses the separate due-review card below (its CTA already covers it). */
+  const reboard = reboardingInfo();
+  const reviewCard = (due.length && !reboard)
     ? `<button class="review-card" id="reviewBtn">
          <div><div class="eyebrow good">Spaced repetition</div>
          <h2>${due.length} question${due.length === 1 ? "" : "s"} due for review</h2>
@@ -703,6 +849,37 @@ function renderHome() {
   const rustyNote = rusty
     ? `<button class="rusty-note" id="rustyBtn">${ICON("clock")} <b>${esc(label(rusty.s))}</b> is getting rusty &mdash; ${rusty.days} days since you practiced it. Refresh it &rarr;</button>`
     : "";
+  /* [A2] confusion drill card: the pair you mix up most (count >= 3) */
+  const conf = state.progress.confusions || {};
+  let topPair = null;
+  for (const [k, n] of Object.entries(conf)) if (n >= 3 && (!topPair || n > topPair.n)) topPair = { k, n };
+  let confCard = "";
+  if (topPair) {
+    const [ma, mb] = topPair.k.split("|");
+    confCard = `<button class="review-card confuse" id="confuseBtn">
+         <div><div class="eyebrow warn">Confusion spotted</div>
+         <h2>You keep mixing up ${esc(modDisplay(ma))} and ${esc(modDisplay(mb))}</h2>
+         <p class="msg">Missed ${topPair.n}&times; by picking one when the other was right &mdash; drill the pair.</p></div>
+         <span class="review-go warn">Drill &rarr;</span>
+       </button>`;
+  }
+  /* [A2] fading-this-week card: >=5 questions due within 7 days whose module retention < 0.5 */
+  const mstats = moduleStats(state.progress);
+  const t7 = (() => { const d = new Date(todayISO() + "T00:00:00"); d.setDate(d.getDate() + 7); return d.toLocaleDateString("en-CA"); })();
+  const fadingIds = [], fadingMods = new Set();
+  for (const [id, rv] of Object.entries(state.progress.reviews || {})) {
+    if (!rv.due || rv.due > t7) continue;
+    const ms = mstats[rv.module];
+    if (ms && ms.retention < 0.5) { fadingIds.push(id); fadingMods.add(rv.module); }
+  }
+  const fadingCard = fadingIds.length >= 5
+    ? `<button class="review-card fading" id="fadingBtn">
+         <div><div class="eyebrow good">Spaced repetition</div>
+         <h2>Fading this week: ${fadingIds.length} questions across ${fadingMods.size} modules</h2>
+         <p class="msg">Retention is slipping on these. Refresh them before they're gone.</p></div>
+         <span class="review-go">Refresh &rarr;</span>
+       </button>`
+    : "";
   const secs = state.index.sections, p = state.progress;
   const tiles = Object.keys(secs).sort().map((s) => {
     const st = (p.sections && p.sections[s]) || { seen: 0, correct: 0 };
@@ -716,6 +893,34 @@ function renderHome() {
       </button>`;
   }).join("");
   const dateLine = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+  /* [D] coach: the suggested card becomes either the reboarding card (calm,
+     non-red — "the reviews kept your place") or the normal coach-voice card
+     (eyebrow "Coach · <why-chip>", message = state.today.message). */
+  const whyChip = state.today && WHY_CHIP[state.today.why];
+  const topicCardHTML = reboard ? `
+    <div class="topic-card reboard">
+      <div class="eyebrow">Coach</div>
+      <h2>It&rsquo;s been ${reboard.days} days.</h2>
+      <p class="msg">Doesn&rsquo;t matter &mdash; the reviews kept your place. ${reboard.dueCount
+        ? `${reboard.dueCount} ${reboard.dueCount === 1 ? "is" : "are"} waiting. The oldest ten take about five minutes.`
+        : `Nothing waiting &mdash; ${esc(label(section))} picks up the rotation.`}</p>
+      <button class="cta" id="startBtn">${reboard.dueCount ? "Start review" : `Start &mdash; ${QUESTIONS_PER_BLITZ} questions`}<small>${reboard.dueCount ? `${Math.min(reboard.dueCount, QUESTIONS_PER_BLITZ)} questions &middot; ~5 min` : `~5 min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}`}</small></button>
+    </div>` : `
+    <div class="topic-card" data-coach-tpl="${state.today ? esc(state.today.templateId || "") : ""}">
+      <div class="eyebrow">${whyChip ? `Coach &middot; ${esc(whyChip)}` : "Suggested for today"}</div>
+      <h2>${esc(label(section))}</h2>
+      <p class="msg">${esc(coachMsg || `${QUESTIONS_PER_BLITZ} questions pulled from your ${label(section)} notes.`)}</p>
+      <button class="cta" id="startBtn">Start &mdash; ${QUESTIONS_PER_BLITZ} questions<small>~5 min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}</small></button>
+    </div>`;
+  /* [D] coach: Debrief-ready card + live quest chips */
+  const debriefCard = debriefReady() ? `
+    <button class="review-card debrief" id="debriefBtn">
+      <div><div class="eyebrow">Coach</div>
+      <h2>Debrief ready</h2>
+      <p class="msg">Your week, summarized &mdash; deltas, a held-memory highlight, three quests for next week.</p></div>
+      <span class="review-go">Open &rarr;</span>
+    </button>` : "";
+  const questRow = questChipsHTML(ensureQuests());
   app.innerHTML = `
     <div class="hero">
       <div class="hero-row">${goalRing()}<div>
@@ -724,14 +929,13 @@ function renderHome() {
     </div>
     ${skylineSVG(p)}
     ${gauntletCardHTML()}
-    <div class="topic-card">
-      <div class="eyebrow">Suggested for today</div>
-      <h2>${esc(label(section))}</h2>
-      <p class="msg">${esc(coachMsg || `${QUESTIONS_PER_BLITZ} questions pulled from your ${label(section)} notes.`)}</p>
-      <button class="cta" id="startBtn">Start &mdash; ${QUESTIONS_PER_BLITZ} questions<small>~5 min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}</small></button>
-    </div>
+    ${topicCardHTML}
+    ${questRow}
     ${resumeCard}
+    ${debriefCard}
     ${reviewCard}
+    ${confCard}
+    ${fadingCard}
     ${weakCard}
     ${rustyNote}
     <div class="section-head-row">
@@ -739,14 +943,17 @@ function renderHome() {
       <button class="c-codex-link" id="codexLink">The Codex &rarr;</button>
     </div>
     <div class="grid">${tiles}</div>`;
-  el("#startBtn").addEventListener("click", () => startBlitz(section));
+  el("#startBtn").addEventListener("click", () => (reboard && reboard.dueCount ? startReview() : startBlitz(section)));
   /* [C] gauntlet + codex entry points */
   const gauntBtn = el("#gauntBtn"); if (gauntBtn) gauntBtn.addEventListener("click", () => go("#/gauntlet"));
   el("#codexLink").addEventListener("click", () => go("#/codex"));
   if (resume) el("#resumeBtn").addEventListener("click", resumeDeck);
-  if (due.length) el("#reviewBtn").addEventListener("click", startReview);
+  if (due.length && !reboard) el("#reviewBtn").addEventListener("click", startReview);
+  if (topPair) el("#confuseBtn").addEventListener("click", () => startConfusionDrill(topPair.k));   // [A2]
+  if (fadingCard) el("#fadingBtn").addEventListener("click", () => startRefresh(fadingIds));        // [A2]
   if (worst) el("#weakBtn").addEventListener("click", startWeakSpots);
   if (rusty) el("#rustyBtn").addEventListener("click", () => startBlitz(rusty.s));
+  if (debriefCard) el("#debriefBtn").addEventListener("click", () => go("#/debrief"));
   document.querySelectorAll(".tile").forEach((b) =>
     b.addEventListener("click", () => go("#/topics/" + b.dataset.section)));
   wireReveals();
@@ -848,10 +1055,26 @@ function optionsFor(q) {
   return [{ src: 0, t: q.correct, ok: true },
     ...q.distractors.map((d, i) => ({ src: i + 1, t: d, ok: false }))];
 }
+// [A2] Flip-round options: the prompt becomes the ANSWER and the options are
+// QUESTION texts — the item's own question (correct) plus the 3 questions behind
+// its distractorIds. Same src semantics as optionsFor (0 = correct, i+1 =
+// distractorIds[i]) so snapshot optOrder replay works unchanged. Returns null
+// unless all 3 resolve to distinct real questions.
+function flipOptsFor(q) {
+  const byId = bankById(q.section);
+  if (!byId || !Array.isArray(q.distractorIds) || q.distractorIds.length !== 3) return null;
+  const srcs = q.distractorIds.map((id) => byId.get(id));
+  if (!srcs.every((s) => s && s.id !== q.id)) return null;
+  const texts = new Set([q.question, ...srcs.map((s) => s.question)]);
+  if (texts.size !== 4) return null;                 // duplicate question text -> unusable
+  return [{ src: 0, t: q.question, md: q.questionMd, ok: true },
+    ...srcs.map((s, i) => ({ src: i + 1, t: s.question, md: s.questionMd, ok: false }))];
+}
 // optOrder (from a resume snapshot) rebuilds the same option order without a
 // reshuffle; a stale/mismatched order falls back to a fresh shuffle.
-function makeItem(q, optOrder) {
-  const base = optionsFor(q);
+function makeItem(q, optOrder, flip) {
+  const fbase = flip ? flipOptsFor(q) : null;        // [A2] unresolvable flip -> normal MCQ
+  const base = fbase || optionsFor(q);
   let opts;
   if (optOrder && optOrder.length === base.length) {
     const bySrc = new Map(base.map((o) => [o.src, o]));
@@ -860,25 +1083,43 @@ function makeItem(q, optOrder) {
   } else {
     opts = shuffle(base);
   }
-  return { q, opts, optOrder: opts.map((o) => o.src), status: "pending", boss: false };
+  return { q, opts, optOrder: opts.map((o) => o.src), status: "pending", boss: false, flip: !!fbase };
 }
 
 // Quiz vs flashcard is a global, persisted preference toggled from the top bar.
 function deckMode() { return localStorage.getItem("sd_mode") === "flash" ? "flash" : "quiz"; }
 
+// [B] Reset every per-deck Phase B tracker (boss intro, double-down, comeback
+// engine, flashcard recall streak, time-capsule returns). Called at the start
+// of every fresh deck and on resume — a resumed deck restarts these counters,
+// which only cost a little mid-deck polish, never persisted progress.
+function resetPhaseBState() {
+  state._bossIntroShown = false;
+  state._doubleDown = null; state._doubleDownIdx = null; state._doubleDownWager = 0;
+  state._missStreak = 0; state._maxMissStreak = 0; state._answerLog = [];
+  state._cardStreak = 0;
+  state._capsuleReturns = [];
+}
+
 function startDeck(questions, replayFn, opts = {}) {
-  state.mode = deckMode();
+  state.prime = !!opts.prime;                    // [A2] pretest deck: no XP/combo/snapshot/confidence
+  state.mode = opts.prime ? "quiz" : deckMode(); // [A2] prime always uses the MCQ path
   if (opts.keepOrder) state.mode = "quiz";       // [C] gauntlet/interview always run the MCQ engine
   state.hard = !!opts.hard;
   state.awaitingConf = false;
   state._medMs = medianReviewMs();
-  const items = questions.map(makeItem);
+  resetPhaseBState();
+  const flipSet = state.mode === "flash" ? null : opts.flip;   // [A2] Set of qids to flip
+  const ilv = opts.keepOrder ? null : opts.interleave;         // [A2] graph pairs — [C] never reorder a gauntlet/interview recipe
+  const items = questions.map((q) => makeItem(q, null, flipSet && flipSet.has(q.id)));
   if (opts.keepOrder) {
-    state.deck = items;                          // [C] the recipe IS the arc — no shuffle, no boss partition
+    state.deck = items;                          // [C] the recipe IS the arc — no shuffle, no interleave, no boss partition
   } else if (state.mode === "flash") {
     state.deck = shuffle(items);                 // no boss ordering for self-grade cards
+    if (ilv) state.deck = orderInterleaved(state.deck, ilv);
   } else if (state.hard) {
     state.deck = shuffle(items);                 // recall-first review: plain shuffle, no boss
+    if (ilv) state.deck = orderInterleaved(state.deck, ilv);
   } else {
     // Boss round: the hardest questions go last (2x XP). "Hardest" = calibrated
     // personal difficulty >= 0.55, or advanced-tagged when there's no telemetry
@@ -889,9 +1130,12 @@ function startDeck(questions, replayFn, opts = {}) {
       return { it, boss: (pd != null && pd >= 0.55) || (pd == null && it.q.difficulty === "advanced"), rank: pd == null ? -1 : pd };
     });
     const bossSet = new Set(scored.filter((s) => s.boss).sort((a, b) => b.rank - a.rank).slice(0, 3).map((s) => s.it));
-    const normal = items.filter((it) => !bossSet.has(it));
+    let normal = items.filter((it) => !bossSet.has(it));
     const boss = items.filter((it) => bossSet.has(it));
     boss.forEach((it) => (it.boss = true));
+    // [A2] confusion-aware interleave on the NON-BOSS prefix only — boss items
+    // stay last, so pulling them out can't re-cluster same-module questions.
+    if (ilv) normal = orderInterleaved(normal, ilv);
     state.deck = [...normal, ...boss];
   }
   state.queue = state.deck.map((_, i) => i);
@@ -915,7 +1159,14 @@ async function startBlitz(section, modules) {
   state.section = section;
   state.modules = modules && modules.length ? modules : null;
   const picked = shuffle(bank.slice()).slice(0, QUESTIONS_PER_BLITZ);
-  startDeck(picked, () => startBlitz(section, state.modules));
+  // [A2] confusion-aware interleaving for multi-module decks: no two consecutive
+  // questions share a module; graph-connected topics sit adjacent (A-B-A'-C).
+  let interleave;
+  if (new Set(picked.map((q) => q.module)).size > 1) {
+    const g = await loadGraph(section);
+    interleave = (g && g.pairs) || [];
+  }
+  startDeck(picked, () => startBlitz(section, state.modules), interleave ? { interleave } : {});
 }
 
 async function startReview() {
@@ -938,7 +1189,18 @@ async function startReview() {
   }
   if (!items.length) { renderHome(); return; }
   state.section = "review"; state.modules = null;
-  startDeck(items.slice(0, QUESTIONS_PER_BLITZ), startReview, { hard: true });
+  const deck = items.slice(0, QUESTIONS_PER_BLITZ);
+  // [A2] flip rounds: ~30% of review items (deterministic per day+qid) whose 3
+  // distractorIds all resolve become answer->question flips. Works with the
+  // hard-deck recall gate and the confidence step unchanged.
+  const dateSeed = todayISO();
+  const flipP = window.__a2ForceFlip ? 1 : 0.3;      // QA can force all-eligible via ?qa=1
+  const flip = new Set();
+  for (const q of deck) {
+    if (mulberry32(cyrb53(dateSeed + q.id))() < flipP && flipOptsFor(q)) flip.add(q.id);
+  }
+  // [A2] cross-section interleave (by module only — no single graph spans sections).
+  startDeck(deck, startReview, { hard: true, flip, interleave: [] });
 }
 
 /* ---------- weak spots ---------- */
@@ -978,6 +1240,153 @@ async function startWeakSpots() {
   startDeck(items.slice(0, QUESTIONS_PER_BLITZ), startWeakSpots, { hard: true });
 }
 
+/* ---------- [A2] confusion drill + fading refresh decks ---------- */
+// Mixed deck of two mixed-up modules (module keys carry their section prefix, so
+// the pair may span sections). Alternate the two modules so the contrast is
+// front-and-center.
+async function startConfusionDrill(key) {
+  app.innerHTML = `<div class="loading">Building your mix-up drill&hellip;</div>`;
+  const items = [];
+  for (const mod of key.split("|")) {
+    const bank = await loadBank(mod.split("/")[0]);
+    if (bank) items.push(...bank.filter((q) => q.module === mod));
+  }
+  if (!items.length) { renderHome(); return; }
+  const picked = shuffle(items).slice(0, QUESTIONS_PER_BLITZ);
+  state.section = "drill"; state.modules = null;
+  startDeck(picked, () => startConfusionDrill(key), { interleave: [] });
+}
+
+// Exactly the fading question ids, capped at 10; hard mode OFF.
+async function startRefresh(ids) {
+  app.innerHTML = `<div class="loading">Gathering your refresh deck&hellip;</div>`;
+  const bySec = {};
+  for (const id of ids) {
+    const rv = (state.progress.reviews || {})[id];
+    if (rv && rv.section) (bySec[rv.section] = bySec[rv.section] || []).push(id);
+  }
+  const items = [];
+  for (const sec of Object.keys(bySec)) {
+    const bank = await loadBank(sec);
+    if (!bank) continue;
+    const byId = bankById(sec);
+    for (const id of bySec[sec]) { const q = byId.get(id); if (q) items.push(q); }
+  }
+  if (!items.length) { renderHome(); return; }
+  state.section = "refresh"; state.modules = null;
+  startDeck(items.slice(0, QUESTIONS_PER_BLITZ), () => startRefresh(ids), { interleave: [] });
+}
+
+/* ---------- [A2] prime: pretest before reading ---------- */
+function primeEligible(m, bank) {
+  if (Object.values(state.progress.reviews || {}).some((r) => r.module === m.module)) return false;  // already quizzed
+  if (bank.filter((q) => q.module === m.module).length < 3) return false;
+  let opt = 0; try { opt = +localStorage.getItem("sd_prime_opt") || 0; } catch { }
+  return opt < 3;                                    // 3 "Just read" in a row -> stop offering
+}
+// Returns true if it took over navigation (showed the sheet); false -> caller reads now.
+function maybePrime(section, m, bank, justRead) {
+  if (!primeEligible(m, bank)) return false;
+  showPrimeSheet(section, m, justRead);
+  return true;
+}
+function showPrimeSheet(section, m, justRead) {
+  if (el("#primeSheet")) return;
+  const o = document.createElement("div");
+  o.className = "pause-sheet"; o.id = "primeSheet";  // same glass-confirm pattern as the pause sheet
+  o.setAttribute("role", "dialog"); o.setAttribute("aria-label", "Prime your brain");
+  o.innerHTML = `<div class="pause-card">
+      <h2>Prime your brain</h2>
+      <p>3 quick guesses before you read. Nothing counts.</p>
+      <div class="pause-btns">
+        <button class="primary" id="primeGo">Prime me</button>
+        <button class="ghost" id="primeSkip">Just read</button>
+      </div>
+    </div>`;
+  document.body.appendChild(o);
+  const close = () => o.remove();
+  el("#primeGo").addEventListener("click", () => {
+    try { localStorage.setItem("sd_prime_opt", "0"); } catch { }   // engagement resets the opt-out
+    close(); startPrime(section, m.module, m.name);
+  });
+  el("#primeSkip").addEventListener("click", () => {
+    let opt = 0; try { opt = +localStorage.getItem("sd_prime_opt") || 0; } catch { }
+    try { localStorage.setItem("sd_prime_opt", String(opt + 1)); } catch { }
+    close(); justRead();
+  });
+  o.addEventListener("click", (e) => { if (e.target === o) { close(); justRead(); } });   // backdrop = just read
+  el("#primeGo").focus();
+}
+async function startPrime(section, module, moduleName) {
+  const bank = await loadBank(section);
+  if (!bank) { openReader(module, moduleName); return; }
+  let pool = bank.filter((q) => q.module === module && q.difficulty === "core");
+  if (pool.length < 3) pool = bank.filter((q) => q.module === module);   // fall back to any difficulty
+  const picked = shuffle(pool.slice()).slice(0, 3);
+  if (picked.length < 3) { openReader(module, moduleName); return; }
+  state.section = "prime"; state.modules = null;
+  startDeck(picked, null, { prime: true });
+}
+// After Q3: record the three as "learned" review seeds (quiet — no XP/streak/
+// history/section tallies), then land in the reader at the module.
+function finishPrime() {
+  state.inQuiz = false; state.prime = false;
+  const first = state.deck[0].q;
+  const results = state.deck.map((d) => ({ id: d.q.id, section: d.q.section, module: d.q.module, status: "learned" }));
+  saveSessionLocal({ date: todayISO(), section: "prime", results, bonusXp: 0 }, { quiet: true });
+  refreshStats();
+  history.replaceState(null, "", "#/study/" + first.section);   // Back from the reader lands on the path, not #/quiz/prime
+  openReader(first.module, first.moduleName);
+}
+
+/* ---------- [A2] explain-back ---------- */
+// Optional "say it in your own words" on wrong reveals and flashcard reveals.
+// The question side uses the bank's precomputed `concepts`; only the user's text
+// runs through the ported tokenizer. Nothing is persisted.
+const a2Explained = new Set();                       // qids that earned the bonus this session
+function explainBackHTML(item) {
+  if (!(item.q.concepts || []).length) return "";    // nothing to match against
+  return `<details class="explain-back" data-qid="${esc(item.q.id)}">
+      <summary>Say it in your own words (E)</summary>
+      <div class="eb-body">
+        <textarea class="eb-input" rows="3" placeholder="Explain the idea from memory&hellip;"></textarea>
+        <button class="ghost eb-submit">Check my words</button>
+        <div class="eb-result" aria-live="polite"></div>
+      </div>
+    </details>`;
+}
+function wireExplainBack(root, item) {
+  const det = root.querySelector(".explain-back");
+  if (!det) return;
+  det.querySelector(".eb-submit").addEventListener("click", () => runExplainBack(det, item));
+}
+function runExplainBack(det, item) {
+  const text = (det.querySelector(".eb-input").value || "").trim();
+  const resEl = det.querySelector(".eb-result");
+  const words = text.split(/\s+/).filter(Boolean);
+  const concepts = (item.q.concepts || []).map((c) => String(c).toLowerCase());
+  const userToks = new Set(a2Tokenize(text));
+  const hit = concepts.filter((c) => userToks.has(c));
+  const conceptSet = new Set(concepts);
+  // Echo the user's own words with matched concept tokens glowing.
+  const echoed = esc(text).replace(/[A-Za-z0-9]+/g, (w) =>
+    conceptSet.has(w.toLowerCase()) ? `<span class="hit">${w}</span>` : w);
+  // Show the model answer with the concept tokens the user MISSED glowing.
+  const missed = new Set(concepts.filter((c) => !userToks.has(c)));
+  const ans = esc(item.q.answerFull).replace(/[A-Za-z0-9]+/g, (w) =>
+    missed.has(w.toLowerCase()) ? `<span class="missterm">${w}</span>` : w);
+  let bonus = "";
+  if (words.length >= 8 && !a2Explained.has(item.q.id)) {   // +5 XP once per question per session
+    a2Explained.add(item.q.id);
+    state.sessionXp += 5;
+    bonus = ` &middot; <b>+5 XP</b>`;
+    floatXP(5, det);
+  }
+  resEl.innerHTML = `<div class="eb-score">Key terms covered: ${hit.length}/${concepts.length}${bonus}</div>
+      <div class="eb-echo">${echoed || "&mdash;"}</div>
+      <div class="eb-ans"><b>Model answer:</b> ${ans}</div>`;
+}
+
 /* ---------- session guard: pause / resume ---------- */
 // A live deck is snapshotted to localStorage after every answer/skip/grade so a
 // refresh (or navigating away) can resume the exact same blitz. optOrder makes
@@ -985,10 +1394,11 @@ async function startWeakSpots() {
 function saveDeckSnapshot() {
   if (!state.inQuiz || !state.deck.length) return;
   if (state.section === "interview") return;       // [C] an interview can't pause — leaving reschedules it
+  if (state.prime) return;                           // [A2] prime pretests never snapshot
   const snap = {
     date: todayISO(), section: state.section, modules: state.modules, mode: state.mode, hard: state.hard,
     items: state.deck.map((d) => ({
-      id: d.q.id, optOrder: d.optOrder, status: d.status, boss: d.boss,
+      id: d.q.id, optOrder: d.optOrder, status: d.status, boss: d.boss, flip: d.flip || undefined,
       retry: d.retry, retried: d.retried, redeemed: d.redeemed, taught: d.taught, revealed: d.revealed, conf: d.conf, picked: d.picked,
     })),
     queue: state.queue, cursor: state.cursor,
@@ -1039,7 +1449,7 @@ async function resumeDeck() {
   snap.items.forEach((it, oldIdx) => {
     const q = byId.get(it.id);
     if (!q) return;                                // orphaned question: drop gracefully
-    const item = makeItem(q, it.optOrder);
+    const item = makeItem(q, it.optOrder, !!it.flip);   // [A2] flip survives resume
     item.status = it.status; item.boss = !!it.boss;
     item.retry = !!it.retry; item.retried = !!it.retried; item.redeemed = !!it.redeemed;
     item.taught = !!it.taught; item.revealed = !!it.revealed;
@@ -1060,7 +1470,8 @@ async function resumeDeck() {
   // leading-skip must stop on them.
   const resolved = (it) => it.status !== "skipped" && !(it.status === "wrong" && it.retry && !it.retried) && DONE.includes(it.status);
   while (cursor < queue.length && resolved(deck[queue[cursor]])) cursor++;
-  state.hard = !!snap.hard; state.awaitingConf = false; state._medMs = medianReviewMs();
+  state.hard = !!snap.hard; state.prime = false; state.awaitingConf = false; state._medMs = medianReviewMs();
+  resetPhaseBState();                              // [B] a resumed deck restarts these session counters
   state.mode = snap.mode === "flash" ? "flash" : "quiz";
   state.deck = deck; state.queue = queue; state.cursor = cursor;
   state.combo = snap.combo || 0; state.maxCombo = snap.maxCombo || 0;
@@ -1100,6 +1511,73 @@ function dotsHTML(idx) {
     `<span class="dot ${DONE.includes(it.status) ? "done" : ""} ${it.boss ? "boss" : ""} ${i === idx ? "cur" : ""}"></span>`).join("");
 }
 
+/* ---------- [B] combo HUD slot ---------- */
+// Lives in .qhead's right cluster (reserved min-width — see style.css) so the
+// question text itself never reflows when a combo starts/ends. Shows the
+// multiplier the NEXT correct answer would pay, same math as the old inline chip.
+function comboChipHTML(combo) {
+  if (combo < 2) return "";
+  const nextMult = combo + 1 >= 5 ? 3 : combo + 1 >= 3 ? 2 : 1;
+  return `<span class="combo${combo >= 5 ? " hot" : ""}">${ICON("flame", "i-flame")} ${combo} combo &middot; ${nextMult}&times; XP</span>`;
+}
+function refreshComboSlot() {
+  const slot = el("#comboSlot");
+  if (slot) slot.innerHTML = comboChipHTML(state.combo);
+}
+
+/* ---------- [B] boss staging ---------- */
+// 1.2s interstitial the first time the cursor reaches a boss item in a deck.
+// Tap/keypress skips ahead; body.boss-mode dims the backdrop toward warn/gold
+// for the duration of the boss zone (toggled per-render in renderQuestion).
+function renderBossIntro(bossCount, cb) {
+  document.body.classList.add("boss-mode");
+  const comboLine = state.combo >= 3
+    ? `<div class="boss-intro-combo">Your x${comboMult()} combo carries in.</div>` : "";
+  // Appended to <body> (like moment()/the pause sheet), NOT app.innerHTML — a
+  // direct child of #app inherits the base screen-transition animation, which
+  // (ID beats classes) would silently mask anything this overlay declares.
+  const o = document.createElement("div");
+  o.className = "boss-intro"; o.id = "bossIntro";
+  o.setAttribute("role", "status");
+  o.innerHTML = `<div class="boss-intro-card">
+      <div class="boss-intro-title">${ICON("bolt")} BOSS ROUND</div>
+      <div class="boss-intro-sub">${bossCount} question${bossCount === 1 ? "" : "s"} &middot; 2&times; XP</div>
+      ${comboLine}
+      <div class="boss-intro-hint">tap or press any key to continue</div>
+    </div>`;
+  document.body.appendChild(o);
+  sfx.bossSting();
+  announce(`Boss round. ${bossCount} questions, double XP.`);
+  let done = false;
+  const go = () => {
+    if (done) return; done = true;
+    clearTimeout(timer);
+    document.removeEventListener("keydown", onKey, true);
+    o.remove();
+    /* [C] guard: the deck may have advanced or ended under the interstitial
+       (programmatic drivers can reach the buttons beneath the overlay). */
+    if (state.inQuiz && state.deck[state.queue[state.cursor]]) cb();
+  };
+  const onKey = (e) => { e.preventDefault(); go(); };
+  o.addEventListener("click", go);
+  document.addEventListener("keydown", onKey, true);
+  const timer = setTimeout(go, 1200);
+}
+
+/* ---------- [B] double-down ---------- */
+// Session accuracy so far, over genuinely graded MCQ answers (correct/wrong —
+// "learned" lock-ins aren't a first-attempt pick and don't count toward this).
+function sessionAccuracySoFar() {
+  const graded = state.deck.filter((d) => d.status === "correct" || d.status === "wrong");
+  return { acc: graded.length ? graded.filter((d) => d.status === "correct").length / graded.length : 0, n: graded.length };
+}
+// Bonus XP earned so far this session (everything beyond the flat 10/correct) —
+// the same definition finish() uses, so "your bonus rides on this" is honest.
+function bonusXpSoFar() {
+  const correctSoFar = state.deck.filter((d) => d.status === "correct").length;
+  return Math.max(0, state.sessionXp - correctSoFar * 10);
+}
+
 function renderQuestion() {
   const idx = state.queue[state.cursor];
   const item = state.deck[idx];
@@ -1108,6 +1586,14 @@ function renderQuestion() {
   if (item.status === "skipped" && !item.taught) { renderTeach(item); return; }
   const testView = item.status === "skipped" && item.taught;                    // A5 lock-it-in test
   const retryView = item.status === "wrong" && item.retry && !item.retried;     // A1 redemption re-test
+  // [B] boss staging: 1.2s interstitial the first time the cursor reaches a boss
+  // item; body.boss-mode stays on for the whole boss zone, off outside it.
+  document.body.classList.toggle("boss-mode", !!item.boss && !testView && !retryView);
+  if (item.boss && !testView && !retryView && !state._bossIntroShown) {
+    state._bossIntroShown = true;
+    renderBossIntro(state.deck.filter((d) => d.boss).length, () => renderQuestion());
+    return;
+  }
   if (retryView) { shuffle(item.opts); item.optOrder = item.opts.map((o) => o.src); }  // fresh arrangement
   const opts = item.opts;
   state.inQuiz = true; state.answered = false; state.awaitingConf = false; state.curOptsLen = opts.length;
@@ -1123,32 +1609,55 @@ function renderQuestion() {
   const diffChip = pd != null && pd >= 0.55
     ? `<span class="diff d-personal">hard for you</span>`
     : `<span class="diff d-${esc(q.difficulty)}">${esc(q.difficulty)}</span>`;
-  const nextMult = state.combo + 1 >= 5 ? 3 : state.combo + 1 >= 3 ? 2 : 1;
-  const comboChip = !testView && !retryView && state.combo >= 2
-    ? `<span class="combo">${ICON("flame", "i-flame")} ${state.combo} combo &middot; ${nextMult}&times; XP</span>` : "";
+  // [B] combo HUD slot lives in .qhead (reserved width), not inline in .qtext.
+  const comboSlotHTML = !testView && !retryView ? comboChipHTML(state.combo) : "";
+  // [B] double-down: one-time offer before the LAST fresh question of a quiz deck.
+  if (!state.hard && item.status === "pending" && isLastInQueue() && state._doubleDown == null) {
+    const { acc, n } = sessionAccuracySoFar();
+    if (n >= 3 && acc >= 0.7) { state._doubleDown = "offered"; state._doubleDownIdx = idx; state._doubleDownWager = bonusXpSoFar(); }
+  }
+  const ddBar = (state._doubleDown === "offered" && state._doubleDownIdx === idx && state._doubleDownWager > 0)
+    ? `<div class="dd-bar" id="ddBar">Double down &mdash; your bonus XP (<b>${state._doubleDownWager}</b>) rides on this one.
+         <button class="dd-yes" id="ddYes">Double down <kbd>D</kbd></button>
+         <button class="dd-no" id="ddNo">No thanks</button>
+       </div>` : "";
   // Prefer the *Md display variant per option (src 0 = correct, i+1 = distractors[i]).
-  const optText = (o) => o.src === 0 ? (q.correctMd || q.correct)
+  // [A2] flip items carry their own option texts (questions), each with its md.
+  const optText = (o) => item.flip ? (o.md || o.t)
+    : o.src === 0 ? (q.correctMd || q.correct)
     : (q.distractorsMd && q.distractorsMd[o.src - 1]) || o.t;
+  // [A2] flip prompt: the ANSWER is shown; the options are candidate questions.
+  // (Combo lives in the [B] #comboSlot in .qhead, not inline in .qtext.)
+  const prompt = item.flip
+    ? `<div class="flip-eyebrow">Which question does this answer?</div>
+       <div class="qtext flip-item">${qInline(q.correctMd || q.correct)} ${chip}</div>`
+    : `<div class="qtext">${qInline(q.questionMd || q.question)} ${chip}</div>`;
+  const skippable = item.status === "pending" && !item.flip && !state.prime;   // [A2] no skip-teach on flips/prime
   app.innerHTML = `
     <div class="qhead">
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)} ${diffChip}</span>
-      <span class="qright"><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dotsHTML(idx)}</span><span class="qnum">${deckProgressCounter()}</span></span>
+      <span class="qright"><span class="combo-slot" id="comboSlot">${comboSlotHTML}</span><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dotsHTML(idx)}</span><span class="qnum">${deckProgressCounter()}</span></span>
     </div>
     ${bossBanner}
-    <div class="qtext">${qInline(q.questionMd || q.question)} ${chip}${comboChip}</div>
+    ${prompt}
+    ${ddBar}
     ${gated ? `<button class="showopts" id="showOptsBtn">Show options <kbd>Space</kbd></button>` : ""}
     <div class="options${gated ? " gated" : ""}">
       ${opts.map((o, i) => `<button class="opt" data-i="${i}"><kbd>${i + 1}</kbd>${qInline(optText(o))}<span class="mark"></span></button>`).join("")}
     </div>
     <div class="reveal" id="reveal"></div>
     <div class="qactions">
-      ${item.status === "pending" ? `<button class="skip" id="skipBtn">Skip for now (S) &rarr;</button>` : "<span></span>"}
+      ${skippable ? `<button class="skip" id="skipBtn">Skip for now (S) &rarr;</button>` : "<span></span>"}
       <button class="next" id="nextBtn">${isLastInQueue() ? "Finish" : "Next (↵)"}</button>
     </div>`;
   document.querySelectorAll(".opt").forEach((b) =>
     b.addEventListener("click", () => answer(parseInt(b.dataset.i, 10))));
   if (gated) el("#showOptsBtn").addEventListener("click", revealHardOptions);
-  if (item.status === "pending") el("#skipBtn").addEventListener("click", skipQuestion);
+  if (skippable) el("#skipBtn").addEventListener("click", skipQuestion);
+  if (ddBar) {
+    el("#ddYes").addEventListener("click", () => { state._doubleDown = "accepted"; el("#ddBar")?.remove(); announce("Double down accepted."); });
+    el("#ddNo").addEventListener("click", () => { state._doubleDown = "declined"; el("#ddBar")?.remove(); });
+  }
   el("#nextBtn").addEventListener("click", nextQuestion);
   el("#qpauseBtn").addEventListener("click", () => openPauseSheet(null));
   /* [C] interviewer stage (avatar + HP bar) / gauntlet practice banner */
@@ -1197,6 +1706,7 @@ function clozeHTML(text, concepts) {
 function renderTeach(item) {
   const { q } = item;
   const idx = state.queue[state.cursor];
+  document.body.classList.remove("boss-mode");     // [B] teach card is never a boss screen
   state.inQuiz = true; state.answered = false; state.awaitingConf = false; state.curOptsLen = 0;
   state.qShownAt = performance.now();
   const hasCloze = (q.concepts || []).length > 0;
@@ -1234,6 +1744,7 @@ function teachDone() {
 function answer(i) {
   if (state.answered || state.awaitingConf) return;
   const item = state.deck[state.queue[state.cursor]];
+  if (state.prime) { gradeAnswer(i, null); return; }   // [A2] prime: instant reveal, no confidence step
   const testMode = item.status === "skipped";
   const retryMode = item.status === "wrong" && item.retry && !item.retried;
   if (!testMode && !retryMode) { lockChoice(i); return; }
@@ -1265,9 +1776,10 @@ function pickConfidence(conf) {
 function gradeAnswer(i, conf) {
   if (state.answered) return;
   state.answered = true;
-  const item = state.deck[state.queue[state.cursor]];
+  const idx = state.queue[state.cursor];
+  const item = state.deck[idx];
   item.ms = Math.max(0, Math.round(performance.now() - (state.qShownAt || performance.now())));
-  const { opts } = item;
+  const { opts, q } = item;
   const testMode = item.status === "skipped";
   const retryMode = item.status === "wrong" && item.retry && !item.retried;
   const right = opts[i].ok;
@@ -1279,7 +1791,29 @@ function gradeAnswer(i, conf) {
   });
   announce(right ? "Correct." : `Incorrect. The answer is: ${opts.find((o) => o.ok).t}`);
 
-  if (retryMode) {
+  // [A2] confusion recording: a wrong pick whose provenance resolves to ANOTHER
+  // module logs the pair (canonical order) — tallied in saveSessionLocal.
+  // Skipped for flip items: their options ARE questions, not answers.
+  if (!right && !item.flip) {
+    const csrc = distractorSource(item.q, opts[i]);
+    if (csrc && csrc.module !== item.q.module) item.confusion = [item.q.module, csrc.module].sort().join("|");
+  }
+  // [B] time capsules: this question was buried on a past flawless run and its
+  // 60-day due date has arrived. Clear the flag either way; only a correct
+  // answer earns the "it kept" moment (queued, played from finish()).
+  const rv0 = (state.progress.reviews || {})[q.id];
+  if (rv0 && rv0.capsule && todayISO() >= rv0.due) {
+    const plantedOn = rv0.capsule;
+    delete rv0.capsule;
+    if (right) state._capsuleReturns.push({ plantedOn, moduleName: q.moduleName });
+  }
+
+  if (state.prime) {
+    // [A2] prime pretest: reveal-only grading — no XP, combo, or redemption loop.
+    item.status = right ? "correct" : "wrong";
+    if (!right) { item.picked = i; item.pickedOpt = opts[i]; }
+    right ? sfx.correct() : sfx.wrong();
+  } else if (retryMode) {
     item.retried = true;
     if (right) { item.redeemed = true; state.sessionXp += 5; floatXP(5, optBtns[i]); sfx.correct(); }  // flat bonus, no combo
     else sfx.wrong();                                                                                   // still shaky
@@ -1291,26 +1825,45 @@ function gradeAnswer(i, conf) {
     if (right) {
       item.status = "correct";
       state.combo += 1; state.maxCombo = Math.max(state.maxCombo, state.combo);
-      const gain = Math.round(10 * comboMult() * (item.boss ? 2 : 1) * (state.hard ? 1.5 : 1));         // A3 recall pays 1.5x
+      let gain = Math.round(10 * comboMult() * (item.boss ? 2 : 1) * (state.hard ? 1.5 : 1));            // A3 recall pays 1.5x
+      // [B] comeback engine: a correct answer after >=2 consecutive misses recovers.
+      const recovered = (state._missStreak || 0) >= 2;
+      if (recovered) { gain += 5; item._recovered = true; }
       state.sessionXp += gain;
       floatXP(gain, optBtns[i]);
+      state._missStreak = 0;
+      state._answerLog.push("correct");
       if (state.combo === 3 || state.combo === 5 || state.combo >= 7) { sfx.combo(); ripple(optBtns[i]); }
+      else if (recovered) sfx.recovered();
       else sfx.correct();
     } else {
       item.status = "wrong"; item.picked = i; item.pickedOpt = opts[i];
       state.combo = 0; sfx.wrong();
+      state._missStreak = (state._missStreak || 0) + 1;
+      state._maxMissStreak = Math.max(state._maxMissStreak || 0, state._missStreak);
+      state._answerLog.push("wrong");
       if (!item.retry && !state.interview) {         // A1 miss loop: one in-session redemption re-test ([C] the Interviewer probes instead)
         item.retry = true;
         const at = Math.min(state.cursor + 3, state.queue.length);
         state.queue.splice(at, 0, state.queue[state.cursor]);
       }
     }
+    refreshComboSlot();                              // [B] update the HUD slot immediately, not next render
   }
+
+  // [B] double-down payout — applies once, to the exact item it was wagered on.
+  if (state._doubleDown === "accepted" && idx === state._doubleDownIdx && !item._ddApplied) {
+    item._ddApplied = true;
+    if (right) { const amt = state._doubleDownWager; state.sessionXp += amt; item._ddOutcome = { win: true, amount: amt }; }
+    else { const amt = Math.min(state._doubleDownWager, state.sessionXp); state.sessionXp -= amt; item._ddOutcome = { win: false, amount: amt }; }
+  }
+
   const sk = el("#skipBtn"); if (sk) sk.remove();
+  const ddBar = el("#ddBar"); if (ddBar) ddBar.remove();
   buildReveal(item, i, right, { testMode, retryMode, conf });
   el("#nextBtn").classList.add("show");
-  /* [C] ledger tracking (first attempts only) + interviewer HP / follow-up */
-  if (!testMode && !retryMode) {
+  /* [C] ledger tracking (first attempts only, never prime pretests) + interviewer HP / follow-up */
+  if (!testMode && !retryMode && !state.prime) {
     if (right) {
       const preRv = (state.progress.reviews || {})[item.q.id];
       if (preRv) {
@@ -1332,14 +1885,25 @@ function buildReveal(item, pickIdx, right, ctx) {
   const rev = el("#reveal");
   const hyper = !right && ctx.conf === "high";                     // wrong + sure
   let prov = "";
-  if (!right) {
+  // [A2] provenance is skipped for flip items — their options ARE questions.
+  if (!right && !item.flip) {
     const src = distractorSource(q, opts[pickIdx]);
     if (src) prov = `<div class="prov">You picked the answer to: <span class="prov-q">${qInline(src.questionMd || src.question)}</span> &mdash; from ${esc(src.moduleName)}.
       <button class="deeper prov-read" data-mod="${esc(src.module)}" data-src="${esc(src.sourceFile || "README.md")}" data-name="${esc(src.moduleName)}">Read that instead &rarr;</button></div>`;
   }
   rev.className = "reveal show" + (hyper ? " hyper" : "");
-  rev.innerHTML = `${hyper ? `<div class="hyper-lead">High-confidence miss &mdash; worth a careful read.</div>` : ""}<b>Full answer:</b> ${qInline(q.answerFullMd || q.answerFull)}${prov}
+  // [B] comeback + double-down outcome chips, above the usual reveal content.
+  const recoveredChip = item._recovered ? `<span class="recovered-chip">Recovered.</span>` : "";
+  const ddNote = item._ddOutcome
+    ? `<div class="dd-outcome ${item._ddOutcome.win ? "win" : "lose"}">Double-down ${item._ddOutcome.win ? "paid" : "lost"}: ${item._ddOutcome.win ? "+" : "−"}${item._ddOutcome.amount}</div>` : "";
+  rev.innerHTML = `${recoveredChip}${ddNote}${hyper ? `<div class="hyper-lead">High-confidence miss &mdash; worth a careful read.</div>` : ""}<b>Full answer:</b> ${qInline(q.answerFullMd || q.answerFull)}${prov}
     <button class="deeper" id="deeperBtn">Dive deeper into ${esc(q.moduleName)} &rarr;</button>`;
+  // [A2] explain-back on any wrong reveal (first attempt and failed redemption);
+  // not on flips (prompt is the answer already) and not in prime (nothing counts).
+  if (!right && !item.flip && !state.prime) {
+    rev.insertAdjacentHTML("beforeend", explainBackHTML(item));
+    wireExplainBack(rev, item);
+  }
   el("#deeperBtn").addEventListener("click", () => openReaderPath(`${q.module}/${q.sourceFile || "README.md"}`, q.moduleName));
   const pr = rev.querySelector(".prov-read");
   if (pr) pr.addEventListener("click", () => openReaderPath(`${pr.dataset.mod}/${pr.dataset.src}`, pr.dataset.name));
@@ -1367,6 +1931,7 @@ function skipQuestion() {
 function nextQuestion() {
   state.cursor++;
   if (state.cursor < state.queue.length) renderQuestion();
+  else if (state.prime) finishPrime();               // [A2] prime: quiet save, then open the reader
   else finish();
 }
 
@@ -1375,17 +1940,20 @@ function renderCard() {
   const idx = state.queue[state.cursor];
   const item = state.deck[idx];
   const { q } = item;
+  document.body.classList.remove("boss-mode");     // [B] flashcards never boss-stage
   state.inQuiz = true; state.answered = false; state.curOptsLen = 0;
   state.qShownAt = performance.now();
   const DONE = ["correct", "wrong", "learned"];
   const dots = state.deck.map((it, i) =>
     `<span class="dot ${DONE.includes(it.status) ? "done" : ""} ${i === idx ? "cur" : ""}"></span>`).join("");
+  // [B] recall-streak chip — accumulated Got-it/Easy grades in a row this deck.
+  const streakChip = state._cardStreak >= 2 ? ` <span class="card-streak">${state._cardStreak} in a row</span>` : "";
   app.innerHTML = `
     <div class="qhead">
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)}</span>
       <span class="qright"><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Card ${state.cursor + 1} of ${state.queue.length}">${dots}</span><span class="qnum">${state.cursor + 1}/${state.queue.length}</span></span>
     </div>
-    <div class="flash-label">Flashcard &middot; recall it, then grade yourself</div>
+    <div class="flash-label">Flashcard &middot; recall it, then grade yourself${streakChip}</div>
     <div class="qtext">${esc(q.question)}</div>
     <div class="reveal" id="reveal"></div>
     <div class="qactions" id="cardActions">
@@ -1400,11 +1968,15 @@ function renderCard() {
 function revealCard() {
   if (state.answered) return;
   state.answered = true;
-  const { q } = state.deck[state.queue[state.cursor]];
+  const item = state.deck[state.queue[state.cursor]];
+  const { q } = item;
   const rev = el("#reveal");
   rev.innerHTML = `<b>Answer:</b> ${qInline(q.answerFullMd || q.answerFull)}
     <button class="deeper" id="deeperBtn">Dive deeper into ${esc(q.moduleName)} &rarr;</button>`;
+  rev.insertAdjacentHTML("beforeend", explainBackHTML(item));   // [A2] explain-back on card reveal
+  wireExplainBack(rev, item);
   rev.classList.add("show");
+  if (!REDUCED()) rev.classList.add("card-flip");  // [B] 3D flip; instant swap when reduced-motion
   announce(`Answer: ${q.answerFull}`);
   el("#deeperBtn").addEventListener("click", () => openReaderPath(`${q.module}/${q.sourceFile || "README.md"}`, q.moduleName));
   // A4: three-way self-grade folds into the confidence signal — Hard/Easy both
@@ -1425,8 +1997,16 @@ function gradeCard(got, conf) {
   if (!state.answered) return;
   const item = state.deck[state.queue[state.cursor]];
   item.ms = Math.max(0, Math.round(performance.now() - (state.qShownAt || performance.now())));
-  if (got) { item.status = "correct"; item.conf = conf || null; state.sessionXp += 10; sfx.correct(); floatXP(10, el("#easyBtn") || el("#hardBtn")); }
-  else { item.status = "wrong"; sfx.wrong(); }
+  if (got) {
+    item.status = "correct"; item.conf = conf || null; state.sessionXp += 10;
+    // [B] recall-streak: sfx.combo() at 3/5/7+, matching the quiz-mode milestone feel.
+    state._cardStreak = (state._cardStreak || 0) + 1;
+    if (state._cardStreak === 3 || state._cardStreak === 5 || state._cardStreak >= 7) sfx.combo();
+    else sfx.correct();
+    floatXP(10, el("#easyBtn") || el("#hardBtn"));
+  } else {
+    item.status = "wrong"; state._cardStreak = 0; sfx.wrong();
+  }
   /* [C] ledger tracking (flashcard path) */
   if (got) {
     const preRv = (state.progress.reviews || {})[item.q.id];
@@ -1444,6 +2024,7 @@ function gradeCard(got, conf) {
 
 async function finish(opts = {}) {
   state.inQuiz = false;
+  document.body.classList.remove("boss-mode");     // [B] the deck is ending; drop the boss dim
   clearDeckSnapshot();                             // the deck is resolved; no resume
   app.innerHTML = `<div class="loading">Saving your progress&hellip;</div>`;
   const DONE = ["correct", "wrong", "learned"];
@@ -1455,24 +2036,61 @@ async function finish(opts = {}) {
   const learned = recorded.filter((d) => d.status === "learned").length;
   const cCtx = cBeforeFinish();                    // [C] seal bonus (mutates sessionXp) + pre-save context
   const bonusXp = Math.max(0, state.sessionXp - correct * 10);
-  const results = recorded.map((d) => ({ id: d.q.id, section: d.q.section, module: d.q.module, status: d.status, ms: d.ms || 0, conf: d.conf || null }));
+  // [B] comeback engine: a deep miss streak (>=3) recovered by the last 5 in a row.
+  const last5 = (state._answerLog || []).slice(-5);
+  const comeback = (state._maxMissStreak || 0) >= 3 && last5.length === 5 && last5.every((x) => x === "correct");
+  const results = recorded.map((d) => ({ id: d.q.id, section: d.q.section, module: d.q.module, status: d.status, ms: d.ms || 0, conf: d.conf || null, confusion: d.confusion }));   // [A2] confusion pair
   const durationSec = Math.max(0, Math.round((Date.now() - (state.startedAt || Date.now())) / 1000));
   const pre = progressSnapshot();                  // for the moments engine (before the save)
-  const { xp, freezeUsed } = saveSessionLocal({ date: todayISO(), section: state.section, results, bonusXp, durationSec });
+  const { xp, freezeUsed } = saveSessionLocal({ date: todayISO(), section: state.section, results, bonusXp, durationSec, comeback });
   const cExtra = cAfterSave(cCtx, { correct, total });   // [C] seal gauntlet · resolve interview · detect ledger awards
-  await queueMoments(pre, progressSnapshot(), cExtra);   // celebrate milestones before the results ([C] extras lead)
-  refreshStats();
+  const post = progressSnapshot();                 // (after the save)
+  // [B] time-capsule returns: correct answers on questions whose 60-day capsule
+  // came due this session, celebrated before the general milestone moments.
+  for (const cr of state._capsuleReturns || [])
+    await moment({ tier: "capsule", icon: ICON("clock"), title: "Capsule recovered", sub: `You planted this on ${fmtDate(cr.plantedOn)}. It kept.`, play: () => sfx.chime() });
+  await queueMoments(pre, post, cExtra);           // celebrate milestones before the results ([C] extras lead)
   const pct = total ? Math.round((correct / total) * 100) : 0;
   const flawless = pct === 100 && total > 0;
+  // [B] bury a new time capsule on a flawless, full-length, non-flash/non-hard blitz.
+  if (flawless && total === QUESTIONS_PER_BLITZ && !opts.early && state.mode !== "flash" && !state.hard
+      && state.section !== "review" && state.section !== "weakspots" && !state.deck.some((d) => d.retry)) {
+    maybeBuryCapsule();
+    if (state._capsuleBuried) {
+      await moment({ tier: "capsule", icon: ICON("clock"), title: "Time capsule buried", sub: `${state._capsuleBuried.moduleName}. Returns ${fmtDate(state._capsuleBuried.due)}.`, play: () => sfx.chime() });
+    }
+  }
+  refreshStats();
   if (flawless) { confetti(); sfx.finish(); }
   const cheer = flawless ? "Flawless! " : pct >= 70 ? "Strong work. " : pct >= 40 ? "Good progress. " : "Every rep counts. ";
   announce(`Blitz finished. ${correct} of ${total} correct. ${xp} XP earned.`);
   const freezeNote = freezeUsed
     ? `<div class="freeze-saved">${ICON("snow", "i-snow")} Streak saved &mdash; 1 freeze used (${state.progress.freezes || 0} left)</div>` : "";
   const backupNote = backupNudgeHTML();
+  // [B] boss/comeback badges alongside the existing learned/combo ones.
+  const bossItems = recorded.filter((d) => d.boss);
+  const bossCorrect = bossItems.filter((d) => d.status === "correct").length;
   const extraBadges =
     (learned ? `<div class="badge"><div class="n">${learned}</div><div class="l">Learned</div></div>` : "") +
-    (state.maxCombo >= 2 ? `<div class="badge"><div class="n">${state.maxCombo}&times;</div><div class="l">Best combo</div></div>` : "");
+    (state.maxCombo >= 2 ? `<div class="badge"><div class="n">${state.maxCombo}&times;</div><div class="l">Best combo</div></div>` : "") +
+    (bossItems.length ? `<div class="badge"><div class="n">${bossCorrect}/${bossItems.length}</div><div class="l">Boss cleared</div></div>` : "") +
+    (comeback ? `<div class="badge"><div class="n">&#8635;</div><div class="l">Comeback</div></div>` : "");
+  // [B] results reward moments: daily goal ring, elapsed stopwatch, streak-advance line.
+  const goalRemain = Math.max(0, DAILY_XP_GOAL - post.todaysXp);
+  const goalLineTxt = post.todaysXp >= DAILY_XP_GOAL
+    ? `Daily goal: complete &mdash; ${post.todaysXp} XP today`
+    : `Daily goal: ${post.todaysXp}/${DAILY_XP_GOAL} &mdash; ${goalRemain} to go`;
+  const mm = Math.floor(durationSec / 60), ss = durationSec % 60;
+  const elapsedStr = `${mm}:${String(ss).padStart(2, "0")}`;
+  const fastChip = durationSec > 0 && durationSec < 300 ? `<span class="fast-chip">under 5 minutes</span>` : "";
+  const streakAdvanceLine = post.streak > pre.streak
+    ? `<p class="streak-advance">+${post.streak - pre.streak} day &mdash; ${post.streak}-day streak</p>` : "";
+  const resultsMeta = `
+    <div class="results-meta">
+      <div class="goal-line">${goalRing()}<span>${goalLineTxt}</span></div>
+      <div class="elapsed-line">Finished in <b>${elapsedStr}</b> ${fastChip}</div>
+    </div>
+    ${streakAdvanceLine}`;
   // Post-round review: misses split into Redeemed (retry-correct) and Still
   // shaky, plus questions learned from a skip. Each is a <details> — summary is
   // the correct sentence, expanding reveals the full answer (+ honest provenance
@@ -1516,6 +2134,7 @@ async function finish(opts = {}) {
         <div class="scorering">${correct}<small>/${total}</small></div>
       </div>
       <p class="sub">${cheer}${pct}% known${learned ? ` &middot; ${learned} learned` : ""}</p>
+      ${resultsMeta}
       ${freezeNote}${backupNote}
       <div class="badges">
         <div class="badge"><div class="n" id="xpCount">+0</div><div class="l">XP</div></div>
@@ -1602,8 +2221,15 @@ function moment({ tier = "", title, sub = "", icon = "" }) {
 // ledger awards) that lead the queue.
 async function queueMoments(pre, post, extra) {
   const list = [];
-  if (post.level > pre.level)
-    list.push({ tier: "level", icon: ICON("bolt"), title: `Level ${post.level}`, sub: "New level reached.", play: () => sfx.levelup() });
+  if (post.level > pre.level) {
+    // [B] career ladder: crossing a title band gets a bigger celebration than a plain level-up.
+    const preTitle = titleForLevel(pre.level), postTitle = titleForLevel(post.level);
+    if (postTitle !== preTitle) {
+      list.push({ tier: "title", icon: ICON("bolt"), title: `Level ${post.level} — ${postTitle}`, sub: `You made ${postTitle}.`, play: () => { sfx.levelup(); confetti(); } });
+    } else {
+      list.push({ tier: "level", icon: ICON("bolt"), title: `Level ${post.level}`, sub: "New level reached.", play: () => sfx.levelup() });
+    }
+  }
   let firstGold = post.anyGold && !pre.anyGold;
   for (const s of Object.keys(post.tiers)) {
     const before = TIER_RANK[pre.tiers[s]] || 0, after = TIER_RANK[post.tiers[s]] || 0;
@@ -1636,6 +2262,35 @@ async function queueMoments(pre, post, extra) {
     m.play?.();
     await moment(m);
   }
+}
+
+/* ---------- [B] time capsules ---------- */
+const fmtDate = (iso) => new Date(iso + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+
+// On a flawless (10/10, no redemptions) quiz-mode blitz, bury the session's
+// hardest question 60 days out: due/interval jump ahead and rv.capsule marks
+// it. Guarded to at most one new capsule per day. Sets state._capsuleBuried
+// for finish() to celebrate; returns nothing (reviews are mutated in place —
+// saveSessionLocal has already persisted them by the time this runs).
+function maybeBuryCapsule() {
+  const today = todayISO();
+  const reviews = state.progress.reviews || {};
+  if (Object.values(reviews).some((rv) => rv.capsule === today)) return;   // 1/day guard
+  if (!state.deck.length) return;
+  const medMs = state._medMs != null ? state._medMs : medianReviewMs();
+  const scored = state.deck.map((d) => ({ d, pd: personalDifficulty(d.q, reviews[d.q.id], medMs) }));
+  const best = scored.filter((s) => s.pd != null).sort((a, b) => b.pd - a.pd)[0];
+  const pick = (best ? best.d : state.deck[Math.floor(Math.random() * state.deck.length)]).q;
+  const rv = reviews[pick.id] || { ease: 2.5, interval: 0, reps: 0, lapses: 0 };
+  rv.section = pick.section; rv.module = pick.module;
+  rv.interval = 60;
+  const due = new Date(today + "T00:00:00"); due.setDate(due.getDate() + 60);
+  rv.due = due.toLocaleDateString("en-CA");
+  rv.capsule = today;
+  reviews[pick.id] = rv;
+  state.progress.reviews = reviews;
+  localStorage.setItem("sd_progress", JSON.stringify(state.progress));
+  state._capsuleBuried = { moduleName: pick.moduleName, due: rv.due };
 }
 
 /* ---------- progress durability ---------- */
@@ -1692,6 +2347,7 @@ function answeredCount() {
 // fn as the pending destination. Used by the router and the topbar nav handlers.
 function guardedNav(fn) {
   if (!state.inQuiz) { fn(); return; }
+  if (state.prime) { state.inQuiz = false; state.prime = false; fn(); return; }   // [A2] prime never blocks
   if (answeredCount() === 0) { clearDeckSnapshot(); state.inQuiz = false; fn(); return; }
   openPauseSheet(fn);
 }
@@ -1891,6 +2547,7 @@ async function openStudySection(section) {
   const files = (state.index && state.index.files) || {};
   // Practiced = any spaced-repetition entry from this module (real history only).
   const practiced = new Set(Object.values(state.progress.reviews || {}).map((r) => r.module).filter(Boolean));
+  const mstats = moduleStats(state.progress);          // [A2] Module Memory Map retention tints
   // "You are here" = last page opened in the reader, if it lives in this section.
   let lastRead = null;
   try { lastRead = JSON.parse(localStorage.getItem("sd_last_read")); } catch { }
@@ -1905,13 +2562,21 @@ async function openStudySection(section) {
     const multi = mFiles.length > 1;
     const isHere = m.module === hereMod;
     const isOpen = openFans.has(m.module);
+    // [A2] Memory Map: tint each node by estimated retention (+ amber pulse when overdue).
+    const ms = mstats[m.module];
+    let mmCls = " mm-cold", retTxt = "no review data yet";
+    if (ms) {
+      mmCls = ms.retention >= 0.75 ? " mm-fresh" : ms.retention >= 0.5 ? " mm-warm" : " mm-fading";
+      retTxt = `est. retention ${Math.round(ms.retention * 100)}%, ${ms.overdue} due`;
+      if (ms.overdue > 0) mmCls += " mm-overdue";
+    }
     const leaves = multi ? mFiles.map((fn, k) => {
       const p = `${m.module}/${fn}`;
       return `<button class="pathleaf${p === herePath ? " here" : ""}" data-idx="${i}" data-path="${esc(p)}" style="animation-delay:${k * 30}ms">${esc(leafLabel(fn))}</button>`;
     }).join("") : "";
     return `<div class="pathstep${isOpen ? " open" : ""}">
-      <div class="pathnode${practiced.has(m.module) ? " practiced" : ""}${isHere ? " here" : ""}">
-        <button class="pn-main" data-idx="${i}" aria-label="Step ${i + 1} of ${mods.length}: ${esc(m.name)}, ${m.count} questions${peers[i].size ? `, connects to ${peers[i].size} other topics` : ""}">
+      <div class="pathnode${practiced.has(m.module) ? " practiced" : ""}${isHere ? " here" : ""}${mmCls}" title="${esc(retTxt)}">
+        <button class="pn-main" data-idx="${i}" aria-label="Step ${i + 1} of ${mods.length}: ${esc(m.name)}, ${m.count} questions, ${retTxt}${peers[i].size ? `, connects to ${peers[i].size} other topics` : ""}">
           <span class="pn-num">${String(i + 1).padStart(2, "0")}</span>
           <span class="pn-body">
             <span class="pn-name">${esc(m.name)}</span>
@@ -2141,8 +2806,10 @@ async function openStudySection(section) {
 
   wrap.querySelectorAll(".pn-main").forEach((b) => b.addEventListener("click", () => {
     const idx = +b.dataset.idx;
-    reader.back = [];                              // a fresh reading session
-    openReaderPath(list[idx].path, list[idx].title, { list, idx });
+    const openIt = () => { reader.back = []; openReaderPath(list[idx].path, list[idx].title, { list, idx }); };
+    // [A2] Prime: offer a 3-question pretest for a never-quizzed module before reading.
+    if (maybePrime(section, mods[idx], bank, openIt)) return;
+    openIt();
   }));
   wrap.querySelectorAll(".pathleaf").forEach((b) => b.addEventListener("click", () => {
     const idx = +b.dataset.idx;
@@ -3454,12 +4121,532 @@ function closeReader() {
   if (location.hash.startsWith("#/reader")) history.replaceState(null, "", state.underHash || "#/home");
 }
 
+/* ============================================================================
+   ---------- [D] Coach ----------
+   Everything below, up to the matching end marker, is the in-app coach
+   (Phase D): daily pick, the message bank + true-specifics voice, the
+   reboarding protocol, quest generation, the Friday Debrief, and the same-day
+   streak nudge. Persists to `sd_coach` (additive to `sd_progress`). Touches
+   the rest of app.js only via small blocks marked with a [D] comment tag
+   inside boot(), dispatch(), and renderHome() — everything else here is new,
+   self-contained code to keep this phase's merge surface small.
+   ========================================================================== */
+
+/* ---------- [D] date/time helpers ---------- */
+function toISO(d) { return d.toLocaleDateString("en-CA"); }
+function isoAdd(d, days) { const n = new Date(d); n.setDate(n.getDate() + days); return n; }
+function daysBetweenISO(aISO, bISO) {
+  return Math.round((new Date(bISO + "T00:00:00") - new Date(aISO + "T00:00:00")) / 86400000);
+}
+// Monday of the week containing `iso` (Date object).
+function weekStart(iso) {
+  const d = new Date(iso + "T00:00:00");
+  const day = d.getDay();                          // 0 Sun .. 6 Sat
+  return isoAdd(d, day === 0 ? -6 : 1 - day);
+}
+// ISO date of the most recent Friday on/before `iso` — the Debrief's week key.
+function mostRecentFriday(iso) {
+  const d = new Date(iso + "T00:00:00");
+  return toISO(isoAdd(d, -((d.getDay() + 2) % 7)));
+}
+function dayOfYear(iso) {
+  const d = new Date(iso + "T00:00:00");
+  return Math.floor((d - new Date(d.getFullYear(), 0, 0)) / 86400000);
+}
+function ordinal(n) {
+  const s = ["th", "st", "nd", "rd"], v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
+}
+function fmtDateShort(iso) { return `the ${ordinal(new Date(iso + "T00:00:00").getDate())}`; }
+// QA seam twin of todayISO(): a ?qa_time=HH:MM URL param overrides "now" for the
+// same-day nudge's local-time gate. Only honored when present and well-formed.
+function nowHM() {
+  const qp = new URLSearchParams(location.search).get("qa_time");
+  if (qp && /^\d{2}:\d{2}$/.test(qp)) return qp;
+  const d = new Date();
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+
+/* ---------- [D] coach memory (sd_coach) ---------- */
+// Additive to sd_progress. Shape: lastTemplates (cap 3, message-bank variety),
+// observations [{date, note}] (cap 12, general audit trail), lastComebackDate,
+// praisedSections {section: dateISO} (once-per-week-per-section gate for the
+// accuracy-delta observation), todayTemplate {date, id} (same-day stability),
+// lastDebrief (Friday key of the last-opened debrief), quests, nudgedOn.
+function loadCoach() {
+  let c = null;
+  try { c = JSON.parse(localStorage.getItem("sd_coach")); } catch { /* corrupt -> reseed */ }
+  return (c && typeof c === "object") ? c : {
+    lastTemplates: [], observations: [], lastComebackDate: null, praisedSections: {},
+    todayTemplate: null, lastDebrief: null, quests: [], nudgedOn: null,
+  };
+}
+function saveCoach(c) { localStorage.setItem("sd_coach", JSON.stringify(c)); }
+function pushObservation(coach, note) {
+  coach.observations = [{ date: todayISO(), note }, ...(coach.observations || [])].slice(0, 12);
+}
+function recentlyPraised(coach, section) {
+  const d = coach.praisedSections && coach.praisedSections[section];
+  return !!d && daysBetweenISO(d, todayISO()) < 7;
+}
+
+/* ---------- [D] daily pick — port of the old pick_today.py logic ---------- */
+// Priority: (a) never-played sections, alphabetical rotation by day; (b) lowest
+// accuracy among sections with seen >= 5; (c) least-seen. Never repeats
+// yesterday's section unless it is the only candidate left, in which case the
+// forced repeat is tagged why:"rotation" instead of whatever tier chose it.
+function coachPick() {
+  const avail = Object.keys((state.index && state.index.sections) || {}).sort();
+  if (!avail.length) return { section: null, why: "new" };
+  const seenMap = state.progress.sections || {};
+  const history = state.progress.history || [];
+  const lastSection = history.length ? history[history.length - 1].section : null;
+  const seen = (s) => (seenMap[s] && seenMap[s].seen) || 0;
+  const acc = (s) => (seenMap[s] && seenMap[s].seen ? seenMap[s].correct / seenMap[s].seen : null);
+  const day = dayOfYear(todayISO());
+
+  const rank = (pool, why) => {
+    if (!pool.length) return null;
+    let chosen;
+    if (why === "new") chosen = pool.slice().sort()[day % pool.length];
+    else if (why === "weak") chosen = pool.slice().sort((a, b) => acc(a) - acc(b) || seen(a) - seen(b))[0];
+    else chosen = pool.slice().sort((a, b) => seen(a) - seen(b) || a.localeCompare(b))[0];
+    return { section: chosen, why };
+  };
+  const tryPick = (excludeLast) => {
+    const base = excludeLast && lastSection ? avail.filter((s) => s !== lastSection) : avail;
+    if (!base.length) return null;
+    const unplayed = base.filter((s) => seen(s) === 0);
+    if (unplayed.length) return rank(unplayed, "new");
+    const weakPool = base.filter((s) => seen(s) >= 5);
+    if (weakPool.length) return rank(weakPool, "weak");
+    return rank(base, "least");
+  };
+
+  let pick = tryPick(true) || tryPick(false);
+  if (pick && pick.section === lastSection) pick = { section: pick.section, why: "rotation" };
+  return pick || { section: avail[0], why: "least" };
+}
+
+/* ---------- [D] true specifics computed from live progress ---------- */
+// Cumulative accuracy for a section using only direct-blitz history entries up
+// to and including dateISO (review/weak-spot sessions tag section as
+// "review"/"weakspots" and mix content sections, so they're not attributable
+// per-section here — an accepted approximation, same one the Debrief's
+// per-section deltas make).
+function accAsOf(section, dateISO) {
+  const rows = (state.progress.history || []).filter((h) => h.section === section && h.date <= dateISO);
+  const answered = rows.reduce((s, h) => s + (h.answered || 0), 0);
+  const correct = rows.reduce((s, h) => s + (h.correct || 0), 0);
+  return answered ? { acc: correct / answered, seen: answered } : null;
+}
+// >=10-point, 7-day accuracy climb for a section, or null if there isn't a
+// large-enough, clean-enough signal to say something true about it.
+function weeklyAccDelta(section) {
+  const today = todayISO();
+  const cutoffISO = toISO(isoAdd(new Date(today + "T00:00:00"), -7));
+  const now = accAsOf(section, today), then = accAsOf(section, cutoffISO);
+  if (!now || !then || then.seen < 5 || now.seen - then.seen < 3) return null;
+  return { deltaPts: Math.round((now.acc - then.acc) * 100), sinceLabel: fmtDateShort(cutoffISO) };
+}
+// Consecutive days (ending today if already met, else yesterday) at/above the
+// daily XP goal.
+function goalStreakDays() {
+  const map = {};
+  for (const h of state.progress.history || []) map[h.date] = (map[h.date] || 0) + (h.xp || 0);
+  const today = todayISO();
+  let d = new Date(today + "T00:00:00");
+  if (!(map[today] >= DAILY_XP_GOAL)) d = isoAdd(d, -1);
+  let count = 0;
+  for (let guard = 0; guard < 3650; guard++) {
+    const iso = toISO(d);
+    if ((map[iso] || 0) < DAILY_XP_GOAL) break;
+    count++; d = isoAdd(d, -1);
+  }
+  return count;
+}
+// The day right after a >2-day gap ends (compares the two most recent history
+// entries) — purely derived from history, so it needs no hook elsewhere.
+function detectComeback() {
+  const h = state.progress.history || [];
+  if (h.length < 2) return null;
+  const last = h[h.length - 1], prev = h[h.length - 2];
+  const gap = daysBetweenISO(prev.date, last.date);
+  const sinceLast = daysBetweenISO(last.date, todayISO());
+  if (gap > 2 && sinceLast === 1) {
+    return { gapDays: gap, yesterdayPct: last.answered ? Math.round((last.correct / last.answered) * 100) : null, date: last.date };
+  }
+  return null;
+}
+// Today, before playing: gap since lastPlayed > 2 days -> reboarding protocol.
+function reboardingInfo() {
+  const p = state.progress;
+  if (!p.lastPlayed) return null;
+  const gap = daysBetweenISO(p.lastPlayed, todayISO());
+  return gap > 2 ? { days: gap, dueCount: dueReviews().length } : null;
+}
+
+/* ---------- [D] the voice: ~30 message templates, true specifics only ---------- */
+// Selection: build the day's context, find the highest-priority group with an
+// eligible template, then seed-pick within that group (mulberry32(cyrb53(date
+// + streak))) so the choice is stable across reloads the same day but varies
+// day to day. Never repeats a template in sd_coach.lastTemplates when another
+// eligible one exists. NO exclamation marks; terse, specific, remembers.
+const WHY_CHIP = { new: "new territory", weak: "weak spot", least: "least practiced", rotation: "rotation" };
+const COACH_PRIORITY = ["firstEver", "comeback", "dueHigh", "streakMilestone", "goalStreak", "accDelta", "weekend", "byWhy"];
+const COACH_LINES = [
+  { id: "first1", group: "firstEver", when: (c) => c.isFirstEver, text: (c) => `First one. Ten questions, five minutes — start with ${label(c.section)}.` },
+  { id: "first2", group: "firstEver", when: (c) => c.isFirstEver, text: () => `Nothing recorded yet. No baseline to protect, so just answer.` },
+  { id: "first3", group: "firstEver", when: (c) => c.isFirstEver, text: (c) => `Day one. ${label(c.section)} is as good a place to start as any.` },
+
+  { id: "cb1", group: "comeback", when: (c) => !!c.comeback, text: (c) => `Back ${c.comeback.gapDays} days now. Yesterday: ${c.comeback.yesterdayPct}% cold. Memory held better than you feared.` },
+  { id: "cb2", group: "comeback", when: (c) => !!c.comeback, text: (c) => `${c.comeback.gapDays} days off, then ${c.comeback.yesterdayPct}% on the first try back. The spaced reviews did their job.` },
+  { id: "cb3", group: "comeback", when: (c) => !!c.comeback, text: (c) => `You came back after ${c.comeback.gapDays} days and still landed ${c.comeback.yesterdayPct}%. Keep going.` },
+
+  { id: "due1", group: "dueHigh", when: (c) => c.due >= 15, text: (c) => `${c.due} reviews stacked up. Clear the oldest ten before they compound further.` },
+  { id: "due2", group: "dueHigh", when: (c) => c.due >= 15, text: (c) => `${c.due} due for review. That backlog doesn't shrink on its own.` },
+  { id: "due3", group: "dueHigh", when: (c) => c.due >= 15, text: (c) => `${c.due} questions waiting on review. Ten minutes there clears most of it.` },
+
+  { id: "sm1", group: "streakMilestone", when: (c) => c.freezeAway, text: (c) => `Day ${c.streak} — one more for a freeze token.` },
+  { id: "sm2", group: "streakMilestone", when: (c) => c.milesAway === 1, text: (c) => `One more day puts you at a ${c.nextMile}-day streak.` },
+  { id: "sm3", group: "streakMilestone", when: (c) => c.milesAway != null && c.milesAway > 1 && c.milesAway <= 2, text: (c) => `${c.milesAway} days from a ${c.nextMile}-day streak.` },
+
+  { id: "gs1", group: "goalStreak", when: (c) => c.goalStreak >= 3, text: (c) => `${c.goalStreak} straight days at the XP goal. ${label(c.section)} keeps the run going.` },
+  { id: "gs2", group: "goalStreak", when: (c) => c.goalStreak >= 3, text: (c) => `${c.goalStreak} days hitting goal in a row. Numbers don't lie.` },
+
+  { id: "ad1", group: "accDelta", when: (c) => !!c.accDelta, text: (c) => `Your ${label(c.accDelta.section)} accuracy climbed ${c.accDelta.deltaPts} points since ${c.accDelta.sinceLabel}.` },
+  { id: "ad2", group: "accDelta", when: (c) => !!c.accDelta, text: (c) => `${label(c.accDelta.section)} is up ${c.accDelta.deltaPts} points since ${c.accDelta.sinceLabel}. That's real progress.` },
+
+  { id: "we1", group: "weekend", when: (c) => c.isWeekend, text: (c) => `Weekend or not, ten questions still count — ${label(c.section)}.` },
+  { id: "we2", group: "weekend", when: (c) => c.isWeekend, text: (c) => `Weekend pace is fine. ${label(c.section)}, whenever you get to it.` },
+  { id: "we3", group: "weekend", when: (c) => c.isWeekend, text: (c) => `No rush today. ${label(c.section)} will still be there in five minutes.` },
+
+  { id: "new1", group: "byWhy", why: "new", when: () => true, text: (c) => `Untouched section. ${label(c.section)} has nothing recorded yet.` },
+  { id: "new2", group: "byWhy", why: "new", when: () => true, text: (c) => `${label(c.section)} hasn't been touched. Today's as good a day as any.` },
+  { id: "new3", group: "byWhy", why: "new", when: () => true, text: (c) => `Fresh ground: ${label(c.section)}. No baseline yet, so anything right is a start.` },
+  { id: "new4", group: "byWhy", why: "new", when: () => true, text: (c) => `${label(c.section)} is new territory. Ten questions sets the first baseline.` },
+
+  { id: "wk1", group: "byWhy", why: "weak", when: () => true, text: (c) => `${label(c.section)} sits at ${c.acc}% over ${c.seen} questions — the softest spot right now.` },
+  { id: "wk2", group: "byWhy", why: "weak", when: () => true, text: (c) => `Lowest accuracy: ${label(c.section)} at ${c.acc}%. Ten more questions moves that number.` },
+  { id: "wk3", group: "byWhy", why: "weak", when: () => true, text: (c) => `${label(c.section)} is dragging at ${c.acc}%. Time to close the gap.` },
+  { id: "wk4", group: "byWhy", why: "weak", when: () => true, text: (c) => `${c.acc}% in ${label(c.section)} after ${c.seen} questions. Worth the ten minutes.` },
+
+  { id: "ls1", group: "byWhy", why: "least", when: () => true, text: (c) => `${label(c.section)} has the fewest reps of anything you've touched — ${c.seen} so far.` },
+  { id: "ls2", group: "byWhy", why: "least", when: () => true, text: (c) => `Least practiced: ${label(c.section)}, ${c.seen} questions in. Building the baseline.` },
+  { id: "ls3", group: "byWhy", why: "least", when: () => true, text: (c) => `${label(c.section)} trails everything else on reps. Ten more closes some of that.` },
+
+  { id: "rot1", group: "byWhy", why: "rotation", when: () => true, text: (c) => `Back to ${label(c.section)} — every other section was touched more recently.` },
+  { id: "rot2", group: "byWhy", why: "rotation", when: () => true, text: (c) => `${label(c.section)} again. The rotation loops here until something else opens up.` },
+];
+
+function buildCoachCtx(pick, coach) {
+  const p = state.progress, streak = p.streak || 0;
+  const history = p.history || [];
+  const today = todayISO();
+  const weekday = new Date(today + "T00:00:00").getDay();
+  const nextMile = STREAK_MILES.find((m) => m > streak) || null;
+  let accDelta = null;
+  for (const s of Object.keys((state.index && state.index.sections) || {})) {
+    if (recentlyPraised(coach, s)) continue;
+    const d = weeklyAccDelta(s);
+    if (d && d.deltaPts >= 10 && (!accDelta || d.deltaPts > accDelta.deltaPts)) accDelta = { section: s, ...d };
+  }
+  const st = p.sections && p.sections[pick.section];
+  return {
+    section: pick.section, why: pick.why, streak,
+    due: dueReviews().length,
+    isWeekend: weekday === 0 || weekday === 6,
+    isFirstEver: !p.lastPlayed && history.length === 0,
+    nextMile, milesAway: nextMile ? nextMile - streak : null,
+    freezeAway: streak > 0 && streak % 7 === 6,
+    goalStreak: goalStreakDays(),
+    comeback: detectComeback(),
+    accDelta,
+    acc: st && st.seen ? Math.round((st.correct / st.seen) * 100) : null,
+    seen: (st && st.seen) || 0,
+  };
+}
+
+// Returns { templateId, group, text }. Writes sd_coach (lastTemplates,
+// todayTemplate, and — only when that group is actually chosen — the
+// accDelta/comeback observation) exactly once per call.
+function coachMessage(pick) {
+  const coach = loadCoach();
+  const today = todayISO();
+  const ctx = buildCoachCtx(pick, coach);
+
+  // Same-day reload: reuse the exact template already chosen so the card is
+  // stable across reloads, rather than re-rolling the seeded pick.
+  if (coach.todayTemplate && coach.todayTemplate.date === today) {
+    const found = COACH_LINES.find((t) => t.id === coach.todayTemplate.id);
+    if (found && found.when(ctx) && (found.group !== "byWhy" || found.why === pick.why)) {
+      return { templateId: found.id, group: found.group, text: found.text(ctx) };
+    }
+  }
+
+  const groups = {};
+  for (const t of COACH_LINES) if (t.when(ctx)) (groups[t.group] = groups[t.group] || []).push(t);
+  const chosenGroup = COACH_PRIORITY.find((g) => groups[g] && groups[g].length) || "byWhy";
+  const pool = chosenGroup === "byWhy"
+    ? COACH_LINES.filter((t) => t.group === "byWhy" && t.why === pick.why)
+    : groups[chosenGroup];
+
+  const avoid = new Set(coach.lastTemplates || []);
+  const candidates = pool.filter((t) => !avoid.has(t.id));
+  const finalPool = candidates.length ? candidates : pool;   // everything eligible was used recently -> allow repeats
+  const rng = mulberry32(cyrb53(today + ":" + ctx.streak));
+  const chosen = finalPool[Math.floor(rng() * finalPool.length)];
+  const text = chosen.text(ctx);
+
+  if (chosenGroup === "accDelta" && ctx.accDelta) {
+    coach.praisedSections = { ...(coach.praisedSections || {}), [ctx.accDelta.section]: today };
+    pushObservation(coach, text);
+  } else if (chosenGroup === "comeback" && ctx.comeback) {
+    coach.lastComebackDate = ctx.comeback.date;
+    pushObservation(coach, text);
+  }
+  coach.lastTemplates = [chosen.id, ...(coach.lastTemplates || []).filter((id) => id !== chosen.id)].slice(0, 3);
+  coach.todayTemplate = { date: today, id: chosen.id };
+  saveCoach(coach);
+  return { templateId: chosen.id, group: chosenGroup, text };
+}
+
+/* ---------- [D] quests (generated on/after each Friday, expire the next) ---------- */
+const TIER_NEED = { Bronze: { seen: 8, acc: 0.50 }, Silver: { seen: 20, acc: 0.70 }, Gold: { seen: 40, acc: 0.85 } };
+const TIER_ORDER = [null, "Bronze", "Silver", "Gold"];
+
+// Deterministic Fisher-Yates. Accepts a ready rng function ([D] quests) or any
+// non-function seed, hashed via cyrb53 -> mulberry32 ([C] gauntlet/interviewer).
+function seededShuffle(arr, rngOrSeed) {
+  const rng = typeof rngOrSeed === "function" ? rngOrSeed : mulberry32(cyrb53(String(rngOrSeed)) >>> 0);
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+// Section closest to its next mastery-tier boundary (smallest remaining `seen` gap).
+function pickTierQuestSection() {
+  const secs = state.progress.sections || {};
+  let best = null;
+  for (const s of Object.keys((state.index && state.index.sections) || {})) {
+    const st = secs[s] || { seen: 0, correct: 0 };
+    const idx = TIER_ORDER.indexOf(sectionTier(st));
+    const next = idx >= 0 && idx < TIER_ORDER.length - 1 ? TIER_ORDER[idx + 1] : null;
+    if (!next) continue;
+    const need = TIER_NEED[next], gap = Math.max(0, need.seen - st.seen);
+    if (!best || gap < best.gap) best = { section: s, nextTier: next, need, gap };
+  }
+  return best;
+}
+function generateQuests(friKey) {
+  const rng = mulberry32(cyrb53("quests-" + friKey));
+  const due = dueReviews().length;
+  const reviewsTarget = due > 0 ? due : 5;
+  const quests = [{
+    id: "q-reviews-" + friKey, type: "reviews", target: reviewsTarget, weekKey: friKey,
+    text: `Clear ${reviewsTarget} review${reviewsTarget === 1 ? "" : "s"}`,
+  }];
+  const tierPick = pickTierQuestSection();
+  if (tierPick) {
+    quests.push({
+      id: "q-tier-" + friKey, type: "tier", section: tierPick.section, nextTier: tierPick.nextTier,
+      target: tierPick.need.seen, weekKey: friKey, text: `Push ${label(tierPick.section)} to ${tierPick.nextTier}`,
+    });
+  }
+  const touched = new Set(Object.values(state.progress.reviews || {}).map((r) => r.module).filter(Boolean));
+  const untouched = Object.keys((state.index && state.index.files) || {}).filter((m) => !touched.has(m));
+  if (untouched.length) {
+    const n = Math.min(3, untouched.length);
+    const modules = seededShuffle(untouched, rng).slice(0, n);
+    quests.push({
+      id: "q-modules-" + friKey, type: "modules", modules, target: n, weekKey: friKey,
+      text: `Touch ${n} untouched module${n === 1 ? "" : "s"}`,
+    });
+  }
+  return quests;
+}
+// Regenerates on/after each Friday; lives until the next Friday replaces it.
+function ensureQuests() {
+  const coach = loadCoach();
+  const friKey = mostRecentFriday(todayISO());
+  if (!coach.quests || !coach.quests.length || coach.quests[0].weekKey !== friKey) {
+    coach.quests = generateQuests(friKey);
+    saveCoach(coach);
+  }
+  return coach.quests;
+}
+// Progress is always recomputed live from current state — quests store only
+// {type, target, section?, modules?}, never a serialized function.
+function questProgress(q) {
+  if (q.type === "reviews") {
+    const current = dueReviews().length;
+    return { done: Math.max(0, Math.min(q.target, q.target - current)), target: q.target };
+  }
+  if (q.type === "tier") {
+    const st = (state.progress.sections && state.progress.sections[q.section]) || { seen: 0, correct: 0 };
+    return { done: Math.min(q.target, st.seen), target: q.target };
+  }
+  if (q.type === "modules") {
+    const touched = new Set(Object.values(state.progress.reviews || {}).map((r) => r.module).filter(Boolean));
+    return { done: (q.modules || []).filter((m) => touched.has(m)).length, target: q.target };
+  }
+  return { done: 0, target: q.target || 1 };
+}
+function questChipsHTML(quests) {
+  if (!quests || !quests.length) return "";
+  const rows = quests.map((q) => {
+    const { done, target } = questProgress(q);
+    const pct = target ? Math.min(100, Math.round((done / target) * 100)) : 0;
+    return `<div class="quest-chip${done >= target ? " done" : ""}" data-qid="${esc(q.id)}">
+        <span class="qc-text">${esc(q.text)}</span>
+        <span class="qc-bar"><i style="width:${pct}%"></i></span>
+        <span class="qc-count">${done}/${target}</span>
+      </div>`;
+  }).join("");
+  return `<div class="quest-row">${rows}</div>`;
+}
+
+/* ---------- [D] Friday Debrief ---------- */
+function moduleLabel(moduleKey) {
+  const parts = (moduleKey || "").split("/");
+  return (parts[1] || parts[0] || moduleKey || "").replace(/_/g, " ");
+}
+function weekAgg(history, startISO, endISO, section) {
+  const rows = history.filter((h) => h.date >= startISO && h.date <= endISO && h.section === section);
+  const answered = rows.reduce((s, h) => s + (h.answered || 0), 0);
+  const correct = rows.reduce((s, h) => s + (h.correct || 0), 0);
+  return { answered, correct, acc: answered ? correct / answered : null };
+}
+function bestSessionThisWeek(startISO, endISO) {
+  const rows = (state.progress.history || []).filter((h) => h.date >= startISO && h.date <= endISO && h.answered > 0);
+  if (!rows.length) return null;
+  return rows.slice().sort((a, b) => (b.correct / b.answered) - (a.correct / a.answered) || b.xp - a.xp)[0];
+}
+// Reviews whose most recent correct answer (approximated as due - interval,
+// since review records don't log a per-event timestamp) fell inside the range.
+function reviewsAnsweredInRange(startISO, endISO) {
+  const out = [];
+  for (const rv of Object.values(state.progress.reviews || {})) {
+    if (!rv.due || !rv.interval) continue;
+    const answeredISO = toISO(isoAdd(new Date(rv.due + "T00:00:00"), -rv.interval));
+    if (answeredISO >= startISO && answeredISO <= endISO) out.push({ module: rv.module, section: rv.section, interval: rv.interval, answeredISO });
+  }
+  return out.sort((a, b) => b.interval - a.interval);
+}
+function debriefHeadline(deltas, held) {
+  const bestUp = deltas.find((d) => d.delta >= 5);
+  if (bestUp) return `${label(bestUp.section)} climbed ${bestUp.delta} points this week. That's the number that moved.`;
+  if (held.length) return `You held ${moduleLabel(held[0].module)} across a ${held[0].interval}-day gap. Spaced repetition, working as designed.`;
+  const worseDown = deltas.find((d) => d.delta <= -8);
+  if (worseDown) return `${label(worseDown.section)} slipped ${Math.abs(worseDown.delta)} points. Worth a look next week.`;
+  return `Quiet week by the numbers. Still logged, still counts.`;
+}
+// Home shows a "Debrief ready" card once a new week's debrief is available and
+// hasn't been opened yet — this naturally covers Fri-Sun of the current week
+// and every day after if a previous week's was never opened.
+function debriefReady() {
+  if (!(state.progress.history || []).length) return false;
+  return loadCoach().lastDebrief !== mostRecentFriday(todayISO());
+}
+
+function renderDebrief() {
+  state.inQuiz = false;
+  refreshStats();
+  const coach = loadCoach();
+  const today = todayISO();
+  coach.lastDebrief = mostRecentFriday(today);
+  saveCoach(coach);
+
+  const thisStart = weekStart(today), thisStartISO = toISO(thisStart), thisEndISO = toISO(isoAdd(thisStart, 6));
+  const lastStart = isoAdd(thisStart, -7), lastStartISO = toISO(lastStart), lastEndISO = toISO(isoAdd(lastStart, 6));
+  const history = state.progress.history || [];
+  const todayDate = new Date(today + "T00:00:00");
+
+  const dayCells = [];
+  for (let i = 0; i < 7; i++) {
+    const d = isoAdd(thisStart, i), iso = toISO(d);
+    const xp = history.filter((h) => h.date === iso).reduce((s, h) => s + (h.xp || 0), 0);
+    const future = d > todayDate;
+    const lvl = future ? -1 : xp === 0 ? 0 : xp < 30 ? 1 : xp < 70 ? 2 : xp < 120 ? 3 : 4;
+    dayCells.push({ iso, xp, lvl, label: d.toLocaleDateString("en-US", { weekday: "short" }) });
+  }
+
+  const deltas = Object.keys((state.index && state.index.sections) || {}).map((s) => {
+    const thisWk = weekAgg(history, thisStartISO, thisEndISO, s), lastWk = weekAgg(history, lastStartISO, lastEndISO, s);
+    if (thisWk.answered < 5 && lastWk.answered < 5) return null;
+    if (thisWk.acc == null || lastWk.acc == null) return null;
+    return { section: s, delta: Math.round((thisWk.acc - lastWk.acc) * 100), thisAcc: Math.round(thisWk.acc * 100), lastAcc: Math.round(lastWk.acc * 100) };
+  }).filter(Boolean).sort((a, b) => b.delta - a.delta);
+
+  const held = reviewsAnsweredInRange(thisStartISO, thisEndISO).filter((r) => r.interval >= 14);
+  const momentHTML = held.length
+    ? `You held <b>${esc(moduleLabel(held[0].module))}</b> across a ${held[0].interval}-day gap.`
+    : (() => {
+        const best = bestSessionThisWeek(thisStartISO, thisEndISO);
+        return best
+          ? `Best session this week: <b>${Math.round((best.correct / best.answered) * 100)}%</b> in ${esc(label(best.section))} (${best.correct}/${best.answered}).`
+          : `Quiet week &mdash; no sessions recorded yet.`;
+      })();
+
+  const headline = debriefHeadline(deltas, held);
+  const quests = ensureQuests();
+
+  const stripHTML = `<div class="week-strip">${dayCells.map((c) => `
+      <div class="week-cell ${c.lvl < 0 ? "wc-future" : "wc-l" + c.lvl}" title="${c.iso}: ${c.xp} XP">
+        <span class="wc-day">${c.label}</span>
+      </div>`).join("")}</div>`;
+  const deltaHTML = deltas.length ? deltas.map((d) => `
+      <div class="delta-row ${d.delta >= 0 ? "up" : "down"}">
+        <span class="dr-name">${esc(label(d.section))}</span>
+        <span class="dr-num">${d.delta >= 0 ? "+" : ""}${d.delta} pts</span>
+        <span class="dr-sub">${d.lastAcc}% &rarr; ${d.thisAcc}%</span>
+      </div>`).join("") : `<p class="hm-empty">Not enough volume in any section this week or last (5+ answers needed) to compare.</p>`;
+
+  app.innerHTML = `
+    <div class="hero"><h1>Friday Debrief</h1><p>${esc(headline)}</p></div>
+    <h2 class="section-h">This week</h2>
+    ${stripHTML}
+    <h2 class="section-h">Section deltas &mdash; this week vs last</h2>
+    <div class="delta-list">${deltaHTML}</div>
+    <h2 class="section-h">Moment of the week</h2>
+    <p class="moment-week">${momentHTML}</p>
+    <h2 class="section-h">Next week</h2>
+    ${questChipsHTML(quests)}
+    <div class="row" style="margin-top:18px"><button class="primary" id="debriefHome">Back to today</button></div>`;
+  el("#debriefHome").addEventListener("click", () => go("#/home"));
+  wireReveals();
+}
+
+/* ---------- [D] same-day streak nudge (tab-open only) ---------- */
+function maybeShowNudge() {
+  if (state.inQuiz || el("#nudgeToast")) return;
+  const coach = loadCoach();
+  const today = todayISO();
+  if (coach.nudgedOn === today) return;
+  const streak = state.progress.streak || 0;
+  if (streak < 3) return;
+  if ((state.progress.history || []).some((h) => h.date === today)) return;   // already played today
+  if (nowHM() < "16:00") return;
+  const o = document.createElement("div");
+  o.className = "nudge-toast"; o.id = "nudgeToast";
+  o.setAttribute("role", "status");
+  o.innerHTML = `<span>Your ${streak}-day streak ends at midnight. Ten questions cover it.</span>
+    <button class="nudge-dismiss" id="nudgeDismiss" aria-label="Dismiss">&times;</button>`;
+  document.body.appendChild(o);
+  el("#nudgeDismiss").addEventListener("click", () => {
+    const c = loadCoach(); c.nudgedOn = todayISO(); saveCoach(c);
+    o.classList.add("out");
+    setTimeout(() => o.remove(), REDUCED() ? 0 : 200);
+  });
+}
+/* ---------- end [D] Coach ---------- */
+
 /* ---------- hash router ---------- */
 // Screens are hash routes so browser Back/Forward, refresh, and shareable URLs
 // all work without a build step. go() sets the hash; a single hashchange
 // listener resolves the route -> screen render. _navLock swallows the one
 // programmatic hash write we make when restoring the quiz hash on a blocked Back.
-// Live (Phase C): #/gauntlet #/codex #/interview/<sec>. Reserved for later phases: #/insights #/debrief.
+// Live (Phase C): #/gauntlet #/codex #/interview/<sec>. #/debrief is implemented
+// — see [D] Coach above (renderDebrief). Reserved for later phases: #/insights.
 let _navLock = false;
 
 const readerHash = (path, frag) => "#/reader/" + encodeURIComponent(path) + (frag ? "@" + frag : "");
@@ -3497,7 +4684,7 @@ function onHashChange() {
   // Leaving a live blitz: 0 answered -> leave silently; else restore the quiz
   // hash and raise the pause sheet with this route as the pending destination.
   if (state.inQuiz && !route.startsWith("#/quiz") && !isReaderRoute) {
-    if (answeredCount() === 0) { clearDeckSnapshot(); state.inQuiz = false; }
+    if (state.prime || answeredCount() === 0) { clearDeckSnapshot(); state.inQuiz = false; state.prime = false; }   // [A2] prime never blocks
     else {
       _navLock = true;
       location.hash = state.quizHash || quizRoute(state.section);
@@ -3537,12 +4724,16 @@ function dispatch(route) {
   if (route.startsWith("#/study/")) { openStudySection(route.slice("#/study/".length)); return; }
   if (route === "#/study") { renderStudy(); return; }
   if (route === "#/progress") { renderProgress(); return; }
+  if (route === "#/debrief") { renderDebrief(); return; }   /* [D] Friday Debrief */
   renderHome();                                     // #/home and any unknown route
 }
 
 /* ---------- keyboard ---------- */
 document.addEventListener("keydown", (e) => {
-  const typing = (e.target.tagName || "").toLowerCase() === "input";
+  const tag = (e.target.tagName || "").toLowerCase();
+  const typing = tag === "input" || tag === "textarea";   // [A2] textarea: explain-back input
+  // [A2] toggle explain-back with E (guarded against typing into its own textarea)
+  const toggleEB = () => { const det = el(".explain-back"); if (det) { det.open = !det.open; if (det.open) det.querySelector(".eb-input")?.focus(); } };
   if (e.key === "Escape" && el("#helpOverlay")) { el("#helpOverlay").remove(); return; }
   if (e.key === "Escape" && el("#pauseSheet")) { el("#pauseSheet").remove(); return; }
   if (e.key === "?" && !typing) { e.preventDefault(); toggleHelp(); return; }
@@ -3566,16 +4757,21 @@ document.addEventListener("keydown", (e) => {
   }
   if (!state.inQuiz) return;
   if (e.repeat) return;   // holding a key must not auto-advance/grade a deck
-  if ((e.target.tagName || "").toLowerCase() === "input") return;
+  if (typing) return;
   if (state.mode === "flash") {
     if (!state.answered) {
       if (e.key === " " || e.key === "Enter") { e.preventDefault(); revealCard(); }
     } else if (e.key === "1") { e.preventDefault(); gradeCard(false, null); }      // Missed
     else if (e.key === "2") { e.preventDefault(); gradeCard(true, "low"); }         // Hard
     else if (e.key === "3" || e.key === "Enter") { e.preventDefault(); gradeCard(true, "high"); }  // Easy
+    else if (e.key === "e" || e.key === "E") { e.preventDefault(); toggleEB(); }    // [A2]
     return;
   }
   const cur = state.deck[state.queue[state.cursor]];
+  // [B] double-down: D accepts the one-time offer whenever it's live.
+  if ((e.key === "d" || e.key === "D") && state._doubleDown === "offered") {
+    e.preventDefault(); el("#ddYes")?.click(); return;
+  }
   // A5 teach concept card: Enter/Space moves on (no answer to give here).
   if (cur && cur.status === "skipped" && !cur.taught) {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); teachDone(); }
@@ -3595,13 +4791,14 @@ document.addEventListener("keydown", (e) => {
   }
   if (state.answered) {
     if (e.key === "Enter") { e.preventDefault(); nextQuestion(); }
+    else if (e.key === "e" || e.key === "E") { e.preventDefault(); toggleEB(); }   // [A2]
     return;
   }
   if (/^[1-4]$/.test(e.key)) {
     const i = +e.key - 1;
     if (i < state.curOptsLen) { e.preventDefault(); answer(i); }
   } else if (e.key.toLowerCase() === "s") {
-    if (cur && cur.status === "pending") { e.preventDefault(); skipQuestion(); }
+    if (cur && cur.status === "pending" && !cur.flip && !state.prime) { e.preventDefault(); skipQuestion(); }   // [A2] no skip on flips/prime
   }
 });
 
@@ -4170,9 +5367,10 @@ function pickFollowUpPreview(module, iv) {
   return best || module;
 }
 if (new URLSearchParams(location.search).get("qa") === "1") {
-  window.__qa = {
+  /* additive: B's and A2's ?qa=1 handles merge into the same object below */
+  Object.assign(window.__qa = window.__qa || {}, {
     state,
-    get progress() { return state.progress; },
+    progress() { return state.progress; },
     correctIndex() { const it = state.deck[state.queue[state.cursor]]; return it ? it.opts.findIndex((o) => o.ok) : -1; },
     wrongIndex() { const it = state.deck[state.queue[state.cursor]]; return it ? it.opts.findIndex((o) => !o.ok) : -1; },
     curModule() { const it = state.deck[state.queue[state.cursor]]; return it ? it.q.module : null; },
@@ -4185,7 +5383,7 @@ if (new URLSearchParams(location.search).get("qa") === "1") {
     codex(mods) { return Object.fromEntries(codexState(state.progress, mods)); },
     moments() { return document.querySelectorAll(".moment").length; },
     tierOf,
-  };
+  });
 }
 
 /* ---------- boot ---------- */
@@ -4208,6 +5406,17 @@ function syncModeBtn() {
   b.classList.toggle("on", flash);
 }
 
+// [B] QA-only debug handle, gated behind ?qa=1 — never exposed otherwise. Lets
+// an automated driver find the currently-correct option index (and other
+// internals) without guessing from the shuffled DOM. See qa_phaseB.mjs.
+if (new URLSearchParams(location.search).get("qa") === "1") {
+  /* additive with the [C]/[A2] handles — NOTE: the `state` key is the state
+     OBJECT (set by [C]/[A2]); use __qa.state directly, not __qa.state(). */
+  Object.assign(window.__qa = window.__qa || {}, {
+    correctIdx: () => { const it = state.deck[state.queue[state.cursor]]; return it ? it.opts.findIndex((o) => o.ok) : -1; },
+  });
+}
+
 async function boot() {
   state.index = await fetchJSON("questions/index.json", null);
   if (!state.index) {
@@ -4216,7 +5425,10 @@ async function boot() {
   }
   el("#bankInfo").textContent = `${state.index.total} questions across ${Object.keys(state.index.sections).length} sections`;
   state.progress = loadProgress();
-  state.today = {};                                // reserved for the in-app coach (later phase)
+  /* [D] coach: daily pick + message, computed once per boot */
+  const todayPick = coachPick();
+  const todayMsg = coachMessage(todayPick);
+  state.today = { date: todayISO(), ...todayPick, message: todayMsg.text, templateId: todayMsg.templateId };
   el("#navProgress").addEventListener("click", () => guardedNav(() => go("#/progress")));
   const studyB = el("#navStudy");
   if (studyB) studyB.addEventListener("click", () => guardedNav(() => go("#/study")));
@@ -4238,6 +5450,11 @@ async function boot() {
     });
   }
   syncModeBtn();
+  // [A2] QA-only debug handle (guarded by ?qa=1): read state + call helpers headlessly.
+  // Additive: merges with the [C] and [B] handles instead of clobbering them.
+  if (new URLSearchParams(location.search).get("qa") === "1") {
+    Object.assign(window.__qa = window.__qa || {}, { state, moduleStats, orderInterleaved, distractorSource, flipOptsFor, loadGraph, loadBank, bankById, bankCache });
+  }
   discardStaleDeck();                              // drop a previous-day resume snapshot
   registerServiceWorker();
   window.addEventListener("hashchange", onHashChange);
@@ -4245,6 +5462,10 @@ async function boot() {
   // history entry carries a real route and Back never lands on a hashless URL.
   if (!location.hash) history.replaceState(null, "", "#/home");
   onHashChange();                                  // dispatch the initial route
+  /* [D] coach: same-day streak nudge — check now (tab already visible at load)
+     and again whenever the tab regains visibility (no OS scheduler on Pages). */
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") maybeShowNudge(); });
+  maybeShowNudge();
 }
 
 // PWA: register the offline shell/bank cache. Only in secure contexts (https or
