@@ -175,6 +175,9 @@ const state = {
   combo: 0, maxCombo: 0, sessionXp: 0, inQuiz: false, answered: false,
   curOptsLen: 0, replayFn: null,
   hard: false, awaitingConf: false, pendingPick: null,
+  // [B] per-deck session trackers — reset by resetPhaseBState() in startDeck/resumeDeck.
+  _bossIntroShown: false, _doubleDown: null, _doubleDownIdx: null, _doubleDownWager: 0,
+  _missStreak: 0, _maxMissStreak: 0, _answerLog: [], _cardStreak: 0, _capsuleReturns: [],
 };
 
 /* ---------- helpers ---------- */
@@ -280,7 +283,7 @@ function toggleHelp() {
   o.innerHTML = `<div class="help-card">
     <h2>Keyboard shortcuts</h2>
     <div class="help-cols">
-      <div><h3>Quiz</h3>${row("1 2 3 4", "Answer")}${row("↵", "Next")}${row("S", "Skip for now")}</div>
+      <div><h3>Quiz</h3>${row("1 2 3 4", "Answer")}${row("↵", "Next")}${row("S", "Skip for now")}${row("D", "Double down")}</div>
       <div><h3>Cards</h3>${row("Space", "Reveal")}${row("1", "Missed it")}${row("2", "Got it")}</div>
       <div><h3>Reader</h3>${row("F", "Fullscreen")}${row("Esc", "Exit / close")}</div>
       <div><h3>Diagram zoom</h3>${row("+ −", "Zoom")}${row("0", "Fit")}${row("← →", "Pan")}</div>
@@ -396,6 +399,9 @@ const sfx = (() => {
     gold() { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.7, "sine", 0.055, i * 0.03)); },
     bell() { tone(1047, 1.3, "sine", 0.06); tone(2094, 1.1, "sine", 0.02, 0.01); },
     chime() { tone(784, 0.4, "sine", 0.045); tone(1175, 0.5, "sine", 0.035, 0.06); },
+    // --- [B] moment/feedback tones ---
+    bossSting() { tone(110, 0.4, "sawtooth", 0.05); tone(165, 0.4, "sawtooth", 0.04, 0.05); },
+    recovered() { tone(440, 0.14, "sine", 0.055); tone(660, 0.16, "sine", 0.05, 0.08); },
     isOn: on,
     toggle() { const wasOn = on(); localStorage.setItem("sd_mute", wasOn ? "1" : "0"); return !wasOn; },
   };
@@ -552,6 +558,7 @@ function saveSessionLocal(session) {
   (p.history = p.history || []).push({
     date: session.date, answered: (session.results || []).length, correct, xp,
     section: session.section || "unknown", durationSec: session.durationSec || 0,
+    comeback: !!session.comeback,                  // [B] comeback engine — see queueMoments/finish()
   });
   p.history = p.history.slice(-365);               // rolling one-year history cap
   localStorage.setItem("sd_progress", JSON.stringify(p));
@@ -593,6 +600,30 @@ function sectionTier(st) {
 }
 const levelFromXP = (xp) => Math.floor((xp || 0) / 250) + 1;
 
+/* ---------- [B] career ladder ---------- */
+// Level bands -> a job title, cosmetic on top of levelFromXP. Bands repeat the
+// same title until the next threshold (e.g. levels 6-9 are all "Mid-level Engineer").
+const LEVEL_TITLES = [
+  { at: 1, title: "Intern" }, { at: 3, title: "Junior Engineer" },
+  { at: 6, title: "Mid-level Engineer" }, { at: 10, title: "Senior Engineer" },
+  { at: 15, title: "Staff Engineer" }, { at: 21, title: "Senior Staff" },
+  { at: 28, title: "Principal" }, { at: 36, title: "Distinguished" }, { at: 45, title: "Fellow" },
+];
+function titleForLevel(lvl) {
+  let t = LEVEL_TITLES[0].title;
+  for (const b of LEVEL_TITLES) { if (lvl >= b.at) t = b.title; else break; }
+  return t;
+}
+// Progress ring in the topbar Lv chip: fraction of the way through the current level.
+function updateLevelRing() {
+  const ring = el("#lvlRingFg");
+  if (!ring) return;
+  const pct = ((state.progress.totalXP || 0) % 250) / 250;
+  const r = 9, circ = 2 * Math.PI * r;
+  ring.setAttribute("stroke-dasharray", circ.toFixed(1));
+  ring.setAttribute("stroke-dashoffset", (circ * (1 - pct)).toFixed(1));
+}
+
 // Most-invested section not practiced in a week, to nudge a refresh.
 function rustiestSection() {
   const secs = state.progress.sections || {};
@@ -621,6 +652,8 @@ function refreshStats() {
   set("#streakVal", state.progress.streak || 0);
   set("#xpVal", state.progress.totalXP || 0);
   set("#lvlVal", levelFromXP(state.progress.totalXP));
+  set("#lvlTitle", titleForLevel(levelFromXP(state.progress.totalXP)));  // [B] career ladder
+  updateLevelRing();
 }
 
 /* ---------- home ---------- */
@@ -840,11 +873,24 @@ function makeItem(q, optOrder) {
 // Quiz vs flashcard is a global, persisted preference toggled from the top bar.
 function deckMode() { return localStorage.getItem("sd_mode") === "flash" ? "flash" : "quiz"; }
 
+// [B] Reset every per-deck Phase B tracker (boss intro, double-down, comeback
+// engine, flashcard recall streak, time-capsule returns). Called at the start
+// of every fresh deck and on resume — a resumed deck restarts these counters,
+// which only cost a little mid-deck polish, never persisted progress.
+function resetPhaseBState() {
+  state._bossIntroShown = false;
+  state._doubleDown = null; state._doubleDownIdx = null; state._doubleDownWager = 0;
+  state._missStreak = 0; state._maxMissStreak = 0; state._answerLog = [];
+  state._cardStreak = 0;
+  state._capsuleReturns = [];
+}
+
 function startDeck(questions, replayFn, opts = {}) {
   state.mode = deckMode();
   state.hard = !!opts.hard;
   state.awaitingConf = false;
   state._medMs = medianReviewMs();
+  resetPhaseBState();
   const items = questions.map(makeItem);
   if (state.mode === "flash") {
     state.deck = shuffle(items);                 // no boss ordering for self-grade cards
@@ -1030,6 +1076,7 @@ async function resumeDeck() {
   const resolved = (it) => it.status !== "skipped" && !(it.status === "wrong" && it.retry && !it.retried) && DONE.includes(it.status);
   while (cursor < queue.length && resolved(deck[queue[cursor]])) cursor++;
   state.hard = !!snap.hard; state.awaitingConf = false; state._medMs = medianReviewMs();
+  resetPhaseBState();                              // [B] a resumed deck restarts these session counters
   state.mode = snap.mode === "flash" ? "flash" : "quiz";
   state.deck = deck; state.queue = queue; state.cursor = cursor;
   state.combo = snap.combo || 0; state.maxCombo = snap.maxCombo || 0;
@@ -1064,6 +1111,71 @@ function dotsHTML(idx) {
     `<span class="dot ${DONE.includes(it.status) ? "done" : ""} ${it.boss ? "boss" : ""} ${i === idx ? "cur" : ""}"></span>`).join("");
 }
 
+/* ---------- [B] combo HUD slot ---------- */
+// Lives in .qhead's right cluster (reserved min-width — see style.css) so the
+// question text itself never reflows when a combo starts/ends. Shows the
+// multiplier the NEXT correct answer would pay, same math as the old inline chip.
+function comboChipHTML(combo) {
+  if (combo < 2) return "";
+  const nextMult = combo + 1 >= 5 ? 3 : combo + 1 >= 3 ? 2 : 1;
+  return `<span class="combo${combo >= 5 ? " hot" : ""}">${ICON("flame", "i-flame")} ${combo} combo &middot; ${nextMult}&times; XP</span>`;
+}
+function refreshComboSlot() {
+  const slot = el("#comboSlot");
+  if (slot) slot.innerHTML = comboChipHTML(state.combo);
+}
+
+/* ---------- [B] boss staging ---------- */
+// 1.2s interstitial the first time the cursor reaches a boss item in a deck.
+// Tap/keypress skips ahead; body.boss-mode dims the backdrop toward warn/gold
+// for the duration of the boss zone (toggled per-render in renderQuestion).
+function renderBossIntro(bossCount, cb) {
+  document.body.classList.add("boss-mode");
+  const comboLine = state.combo >= 3
+    ? `<div class="boss-intro-combo">Your x${comboMult()} combo carries in.</div>` : "";
+  // Appended to <body> (like moment()/the pause sheet), NOT app.innerHTML — a
+  // direct child of #app inherits the base screen-transition animation, which
+  // (ID beats classes) would silently mask anything this overlay declares.
+  const o = document.createElement("div");
+  o.className = "boss-intro"; o.id = "bossIntro";
+  o.setAttribute("role", "status");
+  o.innerHTML = `<div class="boss-intro-card">
+      <div class="boss-intro-title">${ICON("bolt")} BOSS ROUND</div>
+      <div class="boss-intro-sub">${bossCount} question${bossCount === 1 ? "" : "s"} &middot; 2&times; XP</div>
+      ${comboLine}
+      <div class="boss-intro-hint">tap or press any key to continue</div>
+    </div>`;
+  document.body.appendChild(o);
+  sfx.bossSting();
+  announce(`Boss round. ${bossCount} questions, double XP.`);
+  let done = false;
+  const go = () => {
+    if (done) return; done = true;
+    clearTimeout(timer);
+    document.removeEventListener("keydown", onKey, true);
+    o.remove();
+    cb();
+  };
+  const onKey = (e) => { e.preventDefault(); go(); };
+  o.addEventListener("click", go);
+  document.addEventListener("keydown", onKey, true);
+  const timer = setTimeout(go, 1200);
+}
+
+/* ---------- [B] double-down ---------- */
+// Session accuracy so far, over genuinely graded MCQ answers (correct/wrong —
+// "learned" lock-ins aren't a first-attempt pick and don't count toward this).
+function sessionAccuracySoFar() {
+  const graded = state.deck.filter((d) => d.status === "correct" || d.status === "wrong");
+  return { acc: graded.length ? graded.filter((d) => d.status === "correct").length / graded.length : 0, n: graded.length };
+}
+// Bonus XP earned so far this session (everything beyond the flat 10/correct) —
+// the same definition finish() uses, so "your bonus rides on this" is honest.
+function bonusXpSoFar() {
+  const correctSoFar = state.deck.filter((d) => d.status === "correct").length;
+  return Math.max(0, state.sessionXp - correctSoFar * 10);
+}
+
 function renderQuestion() {
   const idx = state.queue[state.cursor];
   const item = state.deck[idx];
@@ -1072,6 +1184,14 @@ function renderQuestion() {
   if (item.status === "skipped" && !item.taught) { renderTeach(item); return; }
   const testView = item.status === "skipped" && item.taught;                    // A5 lock-it-in test
   const retryView = item.status === "wrong" && item.retry && !item.retried;     // A1 redemption re-test
+  // [B] boss staging: 1.2s interstitial the first time the cursor reaches a boss
+  // item; body.boss-mode stays on for the whole boss zone, off outside it.
+  document.body.classList.toggle("boss-mode", !!item.boss && !testView && !retryView);
+  if (item.boss && !testView && !retryView && !state._bossIntroShown) {
+    state._bossIntroShown = true;
+    renderBossIntro(state.deck.filter((d) => d.boss).length, () => renderQuestion());
+    return;
+  }
   if (retryView) { shuffle(item.opts); item.optOrder = item.opts.map((o) => o.src); }  // fresh arrangement
   const opts = item.opts;
   state.inQuiz = true; state.answered = false; state.awaitingConf = false; state.curOptsLen = opts.length;
@@ -1087,19 +1207,29 @@ function renderQuestion() {
   const diffChip = pd != null && pd >= 0.55
     ? `<span class="diff d-personal">hard for you</span>`
     : `<span class="diff d-${esc(q.difficulty)}">${esc(q.difficulty)}</span>`;
-  const nextMult = state.combo + 1 >= 5 ? 3 : state.combo + 1 >= 3 ? 2 : 1;
-  const comboChip = !testView && !retryView && state.combo >= 2
-    ? `<span class="combo">${ICON("flame", "i-flame")} ${state.combo} combo &middot; ${nextMult}&times; XP</span>` : "";
+  // [B] combo HUD slot lives in .qhead (reserved width), not inline in .qtext.
+  const comboSlotHTML = !testView && !retryView ? comboChipHTML(state.combo) : "";
+  // [B] double-down: one-time offer before the LAST fresh question of a quiz deck.
+  if (!state.hard && item.status === "pending" && isLastInQueue() && state._doubleDown == null) {
+    const { acc, n } = sessionAccuracySoFar();
+    if (n >= 3 && acc >= 0.7) { state._doubleDown = "offered"; state._doubleDownIdx = idx; state._doubleDownWager = bonusXpSoFar(); }
+  }
+  const ddBar = (state._doubleDown === "offered" && state._doubleDownIdx === idx && state._doubleDownWager > 0)
+    ? `<div class="dd-bar" id="ddBar">Double down &mdash; your bonus XP (<b>${state._doubleDownWager}</b>) rides on this one.
+         <button class="dd-yes" id="ddYes">Double down <kbd>D</kbd></button>
+         <button class="dd-no" id="ddNo">No thanks</button>
+       </div>` : "";
   // Prefer the *Md display variant per option (src 0 = correct, i+1 = distractors[i]).
   const optText = (o) => o.src === 0 ? (q.correctMd || q.correct)
     : (q.distractorsMd && q.distractorsMd[o.src - 1]) || o.t;
   app.innerHTML = `
     <div class="qhead">
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)} ${diffChip}</span>
-      <span class="qright"><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dotsHTML(idx)}</span><span class="qnum">${deckProgressCounter()}</span></span>
+      <span class="qright"><span class="combo-slot" id="comboSlot">${comboSlotHTML}</span><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dotsHTML(idx)}</span><span class="qnum">${deckProgressCounter()}</span></span>
     </div>
     ${bossBanner}
-    <div class="qtext">${qInline(q.questionMd || q.question)} ${chip}${comboChip}</div>
+    <div class="qtext">${qInline(q.questionMd || q.question)} ${chip}</div>
+    ${ddBar}
     ${gated ? `<button class="showopts" id="showOptsBtn">Show options <kbd>Space</kbd></button>` : ""}
     <div class="options${gated ? " gated" : ""}">
       ${opts.map((o, i) => `<button class="opt" data-i="${i}"><kbd>${i + 1}</kbd>${qInline(optText(o))}<span class="mark"></span></button>`).join("")}
@@ -1113,6 +1243,10 @@ function renderQuestion() {
     b.addEventListener("click", () => answer(parseInt(b.dataset.i, 10))));
   if (gated) el("#showOptsBtn").addEventListener("click", revealHardOptions);
   if (item.status === "pending") el("#skipBtn").addEventListener("click", skipQuestion);
+  if (ddBar) {
+    el("#ddYes").addEventListener("click", () => { state._doubleDown = "accepted"; el("#ddBar")?.remove(); announce("Double down accepted."); });
+    el("#ddNo").addEventListener("click", () => { state._doubleDown = "declined"; el("#ddBar")?.remove(); });
+  }
   el("#nextBtn").addEventListener("click", nextQuestion);
   el("#qpauseBtn").addEventListener("click", () => openPauseSheet(null));
   app.focus({ preventScroll: true });              // keep keyboard + SR context on the new question
@@ -1158,6 +1292,7 @@ function clozeHTML(text, concepts) {
 function renderTeach(item) {
   const { q } = item;
   const idx = state.queue[state.cursor];
+  document.body.classList.remove("boss-mode");     // [B] teach card is never a boss screen
   state.inQuiz = true; state.answered = false; state.awaitingConf = false; state.curOptsLen = 0;
   state.qShownAt = performance.now();
   const hasCloze = (q.concepts || []).length > 0;
@@ -1223,9 +1358,10 @@ function pickConfidence(conf) {
 function gradeAnswer(i, conf) {
   if (state.answered) return;
   state.answered = true;
-  const item = state.deck[state.queue[state.cursor]];
+  const idx = state.queue[state.cursor];
+  const item = state.deck[idx];
   item.ms = Math.max(0, Math.round(performance.now() - (state.qShownAt || performance.now())));
-  const { opts } = item;
+  const { opts, q } = item;
   const testMode = item.status === "skipped";
   const retryMode = item.status === "wrong" && item.retry && !item.retried;
   const right = opts[i].ok;
@@ -1236,6 +1372,16 @@ function gradeAnswer(i, conf) {
     if (k === i && !opts[k].ok) { b.classList.add("wrong"); b.querySelector(".mark").textContent = "✗"; }
   });
   announce(right ? "Correct." : `Incorrect. The answer is: ${opts.find((o) => o.ok).t}`);
+
+  // [B] time capsules: this question was buried on a past flawless run and its
+  // 60-day due date has arrived. Clear the flag either way; only a correct
+  // answer earns the "it kept" moment (queued, played from finish()).
+  const rv0 = (state.progress.reviews || {})[q.id];
+  if (rv0 && rv0.capsule && todayISO() >= rv0.due) {
+    const plantedOn = rv0.capsule;
+    delete rv0.capsule;
+    if (right) state._capsuleReturns.push({ plantedOn, moduleName: q.moduleName });
+  }
 
   if (retryMode) {
     item.retried = true;
@@ -1249,22 +1395,41 @@ function gradeAnswer(i, conf) {
     if (right) {
       item.status = "correct";
       state.combo += 1; state.maxCombo = Math.max(state.maxCombo, state.combo);
-      const gain = Math.round(10 * comboMult() * (item.boss ? 2 : 1) * (state.hard ? 1.5 : 1));         // A3 recall pays 1.5x
+      let gain = Math.round(10 * comboMult() * (item.boss ? 2 : 1) * (state.hard ? 1.5 : 1));            // A3 recall pays 1.5x
+      // [B] comeback engine: a correct answer after >=2 consecutive misses recovers.
+      const recovered = (state._missStreak || 0) >= 2;
+      if (recovered) { gain += 5; item._recovered = true; }
       state.sessionXp += gain;
       floatXP(gain, optBtns[i]);
+      state._missStreak = 0;
+      state._answerLog.push("correct");
       if (state.combo === 3 || state.combo === 5 || state.combo >= 7) { sfx.combo(); ripple(optBtns[i]); }
+      else if (recovered) sfx.recovered();
       else sfx.correct();
     } else {
       item.status = "wrong"; item.picked = i; item.pickedOpt = opts[i];
       state.combo = 0; sfx.wrong();
+      state._missStreak = (state._missStreak || 0) + 1;
+      state._maxMissStreak = Math.max(state._maxMissStreak || 0, state._missStreak);
+      state._answerLog.push("wrong");
       if (!item.retry) {                             // A1 miss loop: one in-session redemption re-test
         item.retry = true;
         const at = Math.min(state.cursor + 3, state.queue.length);
         state.queue.splice(at, 0, state.queue[state.cursor]);
       }
     }
+    refreshComboSlot();                              // [B] update the HUD slot immediately, not next render
   }
+
+  // [B] double-down payout — applies once, to the exact item it was wagered on.
+  if (state._doubleDown === "accepted" && idx === state._doubleDownIdx && !item._ddApplied) {
+    item._ddApplied = true;
+    if (right) { const amt = state._doubleDownWager; state.sessionXp += amt; item._ddOutcome = { win: true, amount: amt }; }
+    else { const amt = Math.min(state._doubleDownWager, state.sessionXp); state.sessionXp -= amt; item._ddOutcome = { win: false, amount: amt }; }
+  }
+
   const sk = el("#skipBtn"); if (sk) sk.remove();
+  const ddBar = el("#ddBar"); if (ddBar) ddBar.remove();
   buildReveal(item, i, right, { testMode, retryMode, conf });
   el("#nextBtn").classList.add("show");
   saveDeckSnapshot();
@@ -1284,7 +1449,11 @@ function buildReveal(item, pickIdx, right, ctx) {
       <button class="deeper prov-read" data-mod="${esc(src.module)}" data-src="${esc(src.sourceFile || "README.md")}" data-name="${esc(src.moduleName)}">Read that instead &rarr;</button></div>`;
   }
   rev.className = "reveal show" + (hyper ? " hyper" : "");
-  rev.innerHTML = `${hyper ? `<div class="hyper-lead">High-confidence miss &mdash; worth a careful read.</div>` : ""}<b>Full answer:</b> ${qInline(q.answerFullMd || q.answerFull)}${prov}
+  // [B] comeback + double-down outcome chips, above the usual reveal content.
+  const recoveredChip = item._recovered ? `<span class="recovered-chip">Recovered.</span>` : "";
+  const ddNote = item._ddOutcome
+    ? `<div class="dd-outcome ${item._ddOutcome.win ? "win" : "lose"}">Double-down ${item._ddOutcome.win ? "paid" : "lost"}: ${item._ddOutcome.win ? "+" : "−"}${item._ddOutcome.amount}</div>` : "";
+  rev.innerHTML = `${recoveredChip}${ddNote}${hyper ? `<div class="hyper-lead">High-confidence miss &mdash; worth a careful read.</div>` : ""}<b>Full answer:</b> ${qInline(q.answerFullMd || q.answerFull)}${prov}
     <button class="deeper" id="deeperBtn">Dive deeper into ${esc(q.moduleName)} &rarr;</button>`;
   el("#deeperBtn").addEventListener("click", () => openReaderPath(`${q.module}/${q.sourceFile || "README.md"}`, q.moduleName));
   const pr = rev.querySelector(".prov-read");
@@ -1316,17 +1485,20 @@ function renderCard() {
   const idx = state.queue[state.cursor];
   const item = state.deck[idx];
   const { q } = item;
+  document.body.classList.remove("boss-mode");     // [B] flashcards never boss-stage
   state.inQuiz = true; state.answered = false; state.curOptsLen = 0;
   state.qShownAt = performance.now();
   const DONE = ["correct", "wrong", "learned"];
   const dots = state.deck.map((it, i) =>
     `<span class="dot ${DONE.includes(it.status) ? "done" : ""} ${i === idx ? "cur" : ""}"></span>`).join("");
+  // [B] recall-streak chip — accumulated Got-it/Easy grades in a row this deck.
+  const streakChip = state._cardStreak >= 2 ? ` <span class="card-streak">${state._cardStreak} in a row</span>` : "";
   app.innerHTML = `
     <div class="qhead">
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)}</span>
       <span class="qright"><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Card ${state.cursor + 1} of ${state.queue.length}">${dots}</span><span class="qnum">${state.cursor + 1}/${state.queue.length}</span></span>
     </div>
-    <div class="flash-label">Flashcard &middot; recall it, then grade yourself</div>
+    <div class="flash-label">Flashcard &middot; recall it, then grade yourself${streakChip}</div>
     <div class="qtext">${esc(q.question)}</div>
     <div class="reveal" id="reveal"></div>
     <div class="qactions" id="cardActions">
@@ -1346,6 +1518,7 @@ function revealCard() {
   rev.innerHTML = `<b>Answer:</b> ${qInline(q.answerFullMd || q.answerFull)}
     <button class="deeper" id="deeperBtn">Dive deeper into ${esc(q.moduleName)} &rarr;</button>`;
   rev.classList.add("show");
+  if (!REDUCED()) rev.classList.add("card-flip");  // [B] 3D flip; instant swap when reduced-motion
   announce(`Answer: ${q.answerFull}`);
   el("#deeperBtn").addEventListener("click", () => openReaderPath(`${q.module}/${q.sourceFile || "README.md"}`, q.moduleName));
   // A4: three-way self-grade folds into the confidence signal — Hard/Easy both
@@ -1366,8 +1539,16 @@ function gradeCard(got, conf) {
   if (!state.answered) return;
   const item = state.deck[state.queue[state.cursor]];
   item.ms = Math.max(0, Math.round(performance.now() - (state.qShownAt || performance.now())));
-  if (got) { item.status = "correct"; item.conf = conf || null; state.sessionXp += 10; sfx.correct(); floatXP(10, el("#easyBtn") || el("#hardBtn")); }
-  else { item.status = "wrong"; sfx.wrong(); }
+  if (got) {
+    item.status = "correct"; item.conf = conf || null; state.sessionXp += 10;
+    // [B] recall-streak: sfx.combo() at 3/5/7+, matching the quiz-mode milestone feel.
+    state._cardStreak = (state._cardStreak || 0) + 1;
+    if (state._cardStreak === 3 || state._cardStreak === 5 || state._cardStreak >= 7) sfx.combo();
+    else sfx.correct();
+    floatXP(10, el("#easyBtn") || el("#hardBtn"));
+  } else {
+    item.status = "wrong"; state._cardStreak = 0; sfx.wrong();
+  }
   state.cursor++;
   if (state.cursor < state.queue.length) renderCard();
   else finish();
@@ -1376,6 +1557,7 @@ function gradeCard(got, conf) {
 
 async function finish(opts = {}) {
   state.inQuiz = false;
+  document.body.classList.remove("boss-mode");     // [B] the deck is ending; drop the boss dim
   clearDeckSnapshot();                             // the deck is resolved; no resume
   app.innerHTML = `<div class="loading">Saving your progress&hellip;</div>`;
   const DONE = ["correct", "wrong", "learned"];
@@ -1386,23 +1568,60 @@ async function finish(opts = {}) {
   const correct = recorded.filter((d) => d.status === "correct").length;
   const learned = recorded.filter((d) => d.status === "learned").length;
   const bonusXp = Math.max(0, state.sessionXp - correct * 10);
+  // [B] comeback engine: a deep miss streak (>=3) recovered by the last 5 in a row.
+  const last5 = (state._answerLog || []).slice(-5);
+  const comeback = (state._maxMissStreak || 0) >= 3 && last5.length === 5 && last5.every((x) => x === "correct");
   const results = recorded.map((d) => ({ id: d.q.id, section: d.q.section, module: d.q.module, status: d.status, ms: d.ms || 0, conf: d.conf || null }));
   const durationSec = Math.max(0, Math.round((Date.now() - (state.startedAt || Date.now())) / 1000));
   const pre = progressSnapshot();                  // for the moments engine (before the save)
-  const { xp, freezeUsed } = saveSessionLocal({ date: todayISO(), section: state.section, results, bonusXp, durationSec });
-  await queueMoments(pre, progressSnapshot());     // celebrate milestones before the results
-  refreshStats();
+  const { xp, freezeUsed } = saveSessionLocal({ date: todayISO(), section: state.section, results, bonusXp, durationSec, comeback });
+  const post = progressSnapshot();                 // (after the save)
+  // [B] time-capsule returns: correct answers on questions whose 60-day capsule
+  // came due this session, celebrated before the general milestone moments.
+  for (const cr of state._capsuleReturns || [])
+    await moment({ tier: "capsule", icon: ICON("clock"), title: "Capsule recovered", sub: `You planted this on ${fmtDate(cr.plantedOn)}. It kept.`, play: () => sfx.chime() });
+  await queueMoments(pre, post);                   // celebrate milestones before the results
   const pct = total ? Math.round((correct / total) * 100) : 0;
   const flawless = pct === 100 && total > 0;
+  // [B] bury a new time capsule on a flawless, full-length, non-flash/non-hard blitz.
+  if (flawless && total === QUESTIONS_PER_BLITZ && !opts.early && state.mode !== "flash" && !state.hard
+      && state.section !== "review" && state.section !== "weakspots" && !state.deck.some((d) => d.retry)) {
+    maybeBuryCapsule();
+    if (state._capsuleBuried) {
+      await moment({ tier: "capsule", icon: ICON("clock"), title: "Time capsule buried", sub: `${state._capsuleBuried.moduleName}. Returns ${fmtDate(state._capsuleBuried.due)}.`, play: () => sfx.chime() });
+    }
+  }
+  refreshStats();
   if (flawless) { confetti(); sfx.finish(); }
   const cheer = flawless ? "Flawless! " : pct >= 70 ? "Strong work. " : pct >= 40 ? "Good progress. " : "Every rep counts. ";
   announce(`Blitz finished. ${correct} of ${total} correct. ${xp} XP earned.`);
   const freezeNote = freezeUsed
     ? `<div class="freeze-saved">${ICON("snow", "i-snow")} Streak saved &mdash; 1 freeze used (${state.progress.freezes || 0} left)</div>` : "";
   const backupNote = backupNudgeHTML();
+  // [B] boss/comeback badges alongside the existing learned/combo ones.
+  const bossItems = recorded.filter((d) => d.boss);
+  const bossCorrect = bossItems.filter((d) => d.status === "correct").length;
   const extraBadges =
     (learned ? `<div class="badge"><div class="n">${learned}</div><div class="l">Learned</div></div>` : "") +
-    (state.maxCombo >= 2 ? `<div class="badge"><div class="n">${state.maxCombo}&times;</div><div class="l">Best combo</div></div>` : "");
+    (state.maxCombo >= 2 ? `<div class="badge"><div class="n">${state.maxCombo}&times;</div><div class="l">Best combo</div></div>` : "") +
+    (bossItems.length ? `<div class="badge"><div class="n">${bossCorrect}/${bossItems.length}</div><div class="l">Boss cleared</div></div>` : "") +
+    (comeback ? `<div class="badge"><div class="n">&#8635;</div><div class="l">Comeback</div></div>` : "");
+  // [B] results reward moments: daily goal ring, elapsed stopwatch, streak-advance line.
+  const goalRemain = Math.max(0, DAILY_XP_GOAL - post.todaysXp);
+  const goalLineTxt = post.todaysXp >= DAILY_XP_GOAL
+    ? `Daily goal: complete &mdash; ${post.todaysXp} XP today`
+    : `Daily goal: ${post.todaysXp}/${DAILY_XP_GOAL} &mdash; ${goalRemain} to go`;
+  const mm = Math.floor(durationSec / 60), ss = durationSec % 60;
+  const elapsedStr = `${mm}:${String(ss).padStart(2, "0")}`;
+  const fastChip = durationSec > 0 && durationSec < 300 ? `<span class="fast-chip">under 5 minutes</span>` : "";
+  const streakAdvanceLine = post.streak > pre.streak
+    ? `<p class="streak-advance">+${post.streak - pre.streak} day &mdash; ${post.streak}-day streak</p>` : "";
+  const resultsMeta = `
+    <div class="results-meta">
+      <div class="goal-line">${goalRing()}<span>${goalLineTxt}</span></div>
+      <div class="elapsed-line">Finished in <b>${elapsedStr}</b> ${fastChip}</div>
+    </div>
+    ${streakAdvanceLine}`;
   // Post-round review: misses split into Redeemed (retry-correct) and Still
   // shaky, plus questions learned from a skip. Each is a <details> — summary is
   // the correct sentence, expanding reveals the full answer (+ honest provenance
@@ -1446,6 +1665,7 @@ async function finish(opts = {}) {
         <div class="scorering">${correct}<small>/${total}</small></div>
       </div>
       <p class="sub">${cheer}${pct}% known${learned ? ` &middot; ${learned} learned` : ""}</p>
+      ${resultsMeta}
       ${freezeNote}${backupNote}
       <div class="badges">
         <div class="badge"><div class="n" id="xpCount">+0</div><div class="l">XP</div></div>
@@ -1525,8 +1745,15 @@ function moment({ tier = "", title, sub = "", icon = "" }) {
 // sequentially. Later phases add more moment types; the diff shape stays.
 async function queueMoments(pre, post) {
   const list = [];
-  if (post.level > pre.level)
-    list.push({ tier: "level", icon: ICON("bolt"), title: `Level ${post.level}`, sub: "New level reached.", play: () => sfx.levelup() });
+  if (post.level > pre.level) {
+    // [B] career ladder: crossing a title band gets a bigger celebration than a plain level-up.
+    const preTitle = titleForLevel(pre.level), postTitle = titleForLevel(post.level);
+    if (postTitle !== preTitle) {
+      list.push({ tier: "title", icon: ICON("bolt"), title: `Level ${post.level} — ${postTitle}`, sub: `You made ${postTitle}.`, play: () => { sfx.levelup(); confetti(); } });
+    } else {
+      list.push({ tier: "level", icon: ICON("bolt"), title: `Level ${post.level}`, sub: "New level reached.", play: () => sfx.levelup() });
+    }
+  }
   let firstGold = post.anyGold && !pre.anyGold;
   for (const s of Object.keys(post.tiers)) {
     const before = TIER_RANK[pre.tiers[s]] || 0, after = TIER_RANK[post.tiers[s]] || 0;
@@ -1550,6 +1777,35 @@ async function queueMoments(pre, post) {
     m.play?.();
     await moment(m);
   }
+}
+
+/* ---------- [B] time capsules ---------- */
+const fmtDate = (iso) => new Date(iso + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+
+// On a flawless (10/10, no redemptions) quiz-mode blitz, bury the session's
+// hardest question 60 days out: due/interval jump ahead and rv.capsule marks
+// it. Guarded to at most one new capsule per day. Sets state._capsuleBuried
+// for finish() to celebrate; returns nothing (reviews are mutated in place —
+// saveSessionLocal has already persisted them by the time this runs).
+function maybeBuryCapsule() {
+  const today = todayISO();
+  const reviews = state.progress.reviews || {};
+  if (Object.values(reviews).some((rv) => rv.capsule === today)) return;   // 1/day guard
+  if (!state.deck.length) return;
+  const medMs = state._medMs != null ? state._medMs : medianReviewMs();
+  const scored = state.deck.map((d) => ({ d, pd: personalDifficulty(d.q, reviews[d.q.id], medMs) }));
+  const best = scored.filter((s) => s.pd != null).sort((a, b) => b.pd - a.pd)[0];
+  const pick = (best ? best.d : state.deck[Math.floor(Math.random() * state.deck.length)]).q;
+  const rv = reviews[pick.id] || { ease: 2.5, interval: 0, reps: 0, lapses: 0 };
+  rv.section = pick.section; rv.module = pick.module;
+  rv.interval = 60;
+  const due = new Date(today + "T00:00:00"); due.setDate(due.getDate() + 60);
+  rv.due = due.toLocaleDateString("en-CA");
+  rv.capsule = today;
+  reviews[pick.id] = rv;
+  state.progress.reviews = reviews;
+  localStorage.setItem("sd_progress", JSON.stringify(state.progress));
+  state._capsuleBuried = { moduleName: pick.moduleName, due: rv.due };
 }
 
 /* ---------- progress durability ---------- */
@@ -3479,6 +3735,10 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   const cur = state.deck[state.queue[state.cursor]];
+  // [B] double-down: D accepts the one-time offer whenever it's live.
+  if ((e.key === "d" || e.key === "D") && state._doubleDown === "offered") {
+    e.preventDefault(); el("#ddYes")?.click(); return;
+  }
   // A5 teach concept card: Enter/Space moves on (no answer to give here).
   if (cur && cur.status === "skipped" && !cur.taught) {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); teachDone(); }
@@ -3526,6 +3786,16 @@ function syncModeBtn() {
   b.title = flash ? "Flashcards mode (click for multiple-choice)" : "Multiple-choice mode (click for flashcards)";
   b.setAttribute("aria-pressed", flash ? "true" : "false");
   b.classList.toggle("on", flash);
+}
+
+// [B] QA-only debug handle, gated behind ?qa=1 — never exposed otherwise. Lets
+// an automated driver find the currently-correct option index (and other
+// internals) without guessing from the shuffled DOM. See qa_phaseB.mjs.
+if (new URLSearchParams(location.search).get("qa") === "1") {
+  window.__qa = {
+    state: () => state,
+    correctIdx: () => { const it = state.deck[state.queue[state.cursor]]; return it ? it.opts.findIndex((o) => o.ok) : -1; },
+  };
 }
 
 async function boot() {

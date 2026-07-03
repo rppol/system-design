@@ -555,7 +555,10 @@ button:active { transform: scale(0.98); }
   box-shadow: 0 6px 20px rgba(245, 158, 11, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.35);
 }
 
-.combo { font-family: var(--mono); font-size: 12.5px; font-weight: 700; color: var(--warn); margin-left: 8px; white-space: nowrap; animation: pop-in 0.3s var(--ease-out); }
+/* [B] combo now lives in the reserved .combo-slot (qhead), not inline in .qtext —
+   base color is accent-2, hue-shifting to warn only once the combo runs hot (5+). */
+.combo { font-family: var(--mono); font-size: 12.5px; font-weight: 700; color: var(--accent-2); white-space: nowrap; animation: pop-in 0.3s var(--ease-out); }
+.combo.hot { color: var(--warn); }
 @keyframes pop-in { from { opacity: 0; transform: scale(0.7); } }
 
 .flash-label {
@@ -1450,3 +1453,93 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
 @keyframes moment-burst { to { transform: scale(18); opacity: 0; } }
 @keyframes moment-in { from { opacity: 0; transform: scale(0.8); } }
 .moment.reduced .moment-card { animation: none; }
+
+/* ---------- 19. Phase B: ladder, boss staging, combo HUD, double-down, comeback, capsules ---------- */
+
+/* career ladder: 22px progress ring wrapping the Lv chip */
+.lvl-ring { transform: rotate(-90deg); flex: 0 0 auto; }
+.lvl-ring-bg { fill: none; stroke: var(--glass-brd-hi); stroke-width: 2; }
+.lvl-ring-fg {
+  fill: none; stroke: var(--accent-2); stroke-width: 2; stroke-linecap: round;
+  transition: stroke-dashoffset 0.6s var(--ease-out);
+}
+.stat.lvl { gap: 7px; }
+
+/* combo HUD slot: reserved width in .qhead so the question text never reflows */
+.combo-slot { display: inline-flex; align-items: center; justify-content: flex-end; min-width: 96px; }
+
+/* boss staging: full-screen interstitial + ambient warn/gold dim while it plays */
+body.boss-mode .mesh { filter: saturate(1.6) hue-rotate(-14deg) brightness(0.92); }
+.boss-intro {
+  position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(ellipse at center,
+    color-mix(in srgb, var(--warn) 16%, var(--bg)) 0%, color-mix(in srgb, var(--bg) 85%, transparent) 70%);
+  -webkit-backdrop-filter: blur(18px) saturate(1.5);
+  backdrop-filter: blur(18px) saturate(1.5);
+  animation: fade 0.2s ease; cursor: pointer; padding: 20px; text-align: center;
+}
+.boss-intro-card { display: flex; flex-direction: column; align-items: center; gap: 10px; animation: moment-in 0.5s var(--ease-out); }
+.boss-intro-title {
+  font-family: var(--mono); font-size: clamp(26px, 6vw, 42px); font-weight: 800; letter-spacing: 0.02em;
+  color: var(--warn); text-shadow: 0 0 30px color-mix(in srgb, var(--warn) 55%, transparent);
+}
+.boss-intro-sub { color: var(--text); font-weight: 700; font-size: 15px; }
+.boss-intro-combo { color: var(--accent-2); font-size: 13.5px; font-family: var(--mono); }
+.boss-intro-hint { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+
+/* double-down offer bar (above the question) + reveal outcome */
+.dd-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0 0 14px; padding: 11px 16px; border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+  font-size: 13.5px; color: var(--text);
+}
+.dd-bar b { font-family: var(--mono); color: var(--warn); }
+.dd-yes, .dd-no {
+  padding: 7px 14px; font-weight: 700; font-size: 13px; border-radius: var(--radius-sm);
+  border: 1px solid var(--glass-brd-hi); background: var(--glass);
+}
+.dd-yes { color: var(--accent-ink); background: linear-gradient(135deg, var(--warn), var(--accent-2)); border: none; }
+.dd-no { color: var(--muted); }
+.dd-no:hover { color: var(--text); background: var(--glass-2); }
+.dd-outcome { font-weight: 800; margin-bottom: 8px; font-family: var(--mono); font-size: 13.5px; }
+.dd-outcome.win { color: var(--good); }
+.dd-outcome.lose { color: var(--bad); }
+
+/* comeback engine: inline reveal chip */
+.recovered-chip {
+  display: inline-block; margin-bottom: 8px; padding: 3px 10px; border-radius: 999px;
+  font-family: var(--mono); font-size: 11.5px; font-weight: 800; letter-spacing: 0.04em;
+  color: color-mix(in srgb, var(--good) 70%, var(--text));
+  background: color-mix(in srgb, var(--good) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--good) 45%, transparent);
+  animation: pop-in 0.3s var(--ease-out);
+}
+
+/* flashcard juice: recall-streak chip + 3D flip reveal */
+.card-streak {
+  margin-left: 6px; font-family: var(--mono); font-size: 11.5px; font-weight: 700;
+  color: color-mix(in srgb, var(--accent-2) 70%, var(--text));
+}
+#app { perspective: 1000px; }
+/* NOTE: #app > * (base & backdrop) sets `animation` on every direct child of
+   #app, incl. #reveal, and an ID beats any number of classes in specificity —
+   ".reveal.card-flip" would be silently masked. Anchor on the element's own
+   #reveal id so this animation-name actually wins. */
+#reveal.card-flip { animation: card-flip-in 0.5s var(--ease-out); }
+@keyframes card-flip-in { from { transform: rotateY(90deg); opacity: 0; } to { transform: rotateY(0deg); opacity: 1; } }
+
+/* results reward moments: goal ring line, elapsed stopwatch, streak-advance */
+.results-meta { margin: 4px 0 6px; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.goal-line { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--text); }
+.elapsed-line { color: var(--muted); font-size: 13px; }
+.elapsed-line b { font-family: var(--mono); color: var(--text); }
+.fast-chip {
+  margin-left: 4px; padding: 2px 8px; border-radius: 999px;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 700;
+  color: color-mix(in srgb, var(--accent) 70%, var(--text));
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.streak-advance { color: var(--good); font-weight: 700; font-size: 13.5px; margin: 0 0 4px; }
