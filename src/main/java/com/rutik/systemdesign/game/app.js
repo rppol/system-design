@@ -178,7 +178,16 @@ const state = {
 };
 
 /* ---------- helpers ---------- */
-const todayISO = () => new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD, local
+// [D] QA seam: a ?qa_date=YYYY-MM-DD URL param overrides "today" everywhere date
+// math flows through this function (coach pick, streaks, debrief week bounds,
+// due reviews). Only honored when present and well-formed — normal play is
+// untouched. See qa_phaseD.mjs for how tests use it to force date-dependent
+// scenarios without changing the system clock.
+const todayISO = () => {
+  const qp = new URLSearchParams(location.search).get("qa_date");
+  if (qp && /^\d{4}-\d{2}-\d{2}$/.test(qp)) return qp;
+  return new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD, local
+};
 const el = (sel) => document.querySelector(sel);
 
 // Inline SVG icons (lucide-style paths) — consistent weight in every theme,
@@ -665,7 +674,10 @@ function renderHome() {
        </button>`
     : "";
   const due = dueReviews();
-  const reviewCard = due.length
+  /* [D] coach: reboarding protocol — a >2-day gap replaces the suggested card
+     and suppresses the separate due-review card below (its CTA already covers it). */
+  const reboard = reboardingInfo();
+  const reviewCard = (due.length && !reboard)
     ? `<button class="review-card" id="reviewBtn">
          <div><div class="eyebrow good">Spaced repetition</div>
          <h2>${due.length} question${due.length === 1 ? "" : "s"} due for review</h2>
@@ -698,29 +710,55 @@ function renderHome() {
       </button>`;
   }).join("");
   const dateLine = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+  /* [D] coach: the suggested card becomes either the reboarding card (calm,
+     non-red — "the reviews kept your place") or the normal coach-voice card
+     (eyebrow "Coach · <why-chip>", message = state.today.message). */
+  const whyChip = state.today && WHY_CHIP[state.today.why];
+  const topicCardHTML = reboard ? `
+    <div class="topic-card reboard">
+      <div class="eyebrow">Coach</div>
+      <h2>It&rsquo;s been ${reboard.days} days.</h2>
+      <p class="msg">Doesn&rsquo;t matter &mdash; the reviews kept your place. ${reboard.dueCount
+        ? `${reboard.dueCount} ${reboard.dueCount === 1 ? "is" : "are"} waiting. The oldest ten take about five minutes.`
+        : `Nothing waiting &mdash; ${esc(label(section))} picks up the rotation.`}</p>
+      <button class="cta" id="startBtn">${reboard.dueCount ? "Start review" : `Start &mdash; ${QUESTIONS_PER_BLITZ} questions`}<small>${reboard.dueCount ? `${Math.min(reboard.dueCount, QUESTIONS_PER_BLITZ)} questions &middot; ~5 min` : `~5 min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}`}</small></button>
+    </div>` : `
+    <div class="topic-card" data-coach-tpl="${state.today ? esc(state.today.templateId || "") : ""}">
+      <div class="eyebrow">${whyChip ? `Coach &middot; ${esc(whyChip)}` : "Suggested for today"}</div>
+      <h2>${esc(label(section))}</h2>
+      <p class="msg">${esc(coachMsg || `${QUESTIONS_PER_BLITZ} questions pulled from your ${label(section)} notes.`)}</p>
+      <button class="cta" id="startBtn">Start &mdash; ${QUESTIONS_PER_BLITZ} questions<small>~5 min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}</small></button>
+    </div>`;
+  /* [D] coach: Debrief-ready card + live quest chips */
+  const debriefCard = debriefReady() ? `
+    <button class="review-card debrief" id="debriefBtn">
+      <div><div class="eyebrow">Coach</div>
+      <h2>Debrief ready</h2>
+      <p class="msg">Your week, summarized &mdash; deltas, a held-memory highlight, three quests for next week.</p></div>
+      <span class="review-go">Open &rarr;</span>
+    </button>` : "";
+  const questRow = questChipsHTML(ensureQuests());
   app.innerHTML = `
     <div class="hero">
       <div class="hero-row">${goalRing()}<div>
         <div class="eyebrow date-eyebrow">${esc(dateLine)}</div>
         <h1>Today's 5-minute blitz</h1><p>${streakLine}</p></div></div>
     </div>
-    <div class="topic-card">
-      <div class="eyebrow">Suggested for today</div>
-      <h2>${esc(label(section))}</h2>
-      <p class="msg">${esc(coachMsg || `${QUESTIONS_PER_BLITZ} questions pulled from your ${label(section)} notes.`)}</p>
-      <button class="cta" id="startBtn">Start &mdash; ${QUESTIONS_PER_BLITZ} questions<small>~5 min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}</small></button>
-    </div>
+    ${topicCardHTML}
+    ${questRow}
     ${resumeCard}
+    ${debriefCard}
     ${reviewCard}
     ${weakCard}
     ${rustyNote}
     <h2 class="section-h">Or pick a section &mdash; then choose sub-topics</h2>
     <div class="grid">${tiles}</div>`;
-  el("#startBtn").addEventListener("click", () => startBlitz(section));
+  el("#startBtn").addEventListener("click", () => (reboard && reboard.dueCount ? startReview() : startBlitz(section)));
   if (resume) el("#resumeBtn").addEventListener("click", resumeDeck);
-  if (due.length) el("#reviewBtn").addEventListener("click", startReview);
+  if (due.length && !reboard) el("#reviewBtn").addEventListener("click", startReview);
   if (worst) el("#weakBtn").addEventListener("click", startWeakSpots);
   if (rusty) el("#rustyBtn").addEventListener("click", () => startBlitz(rusty.s));
+  if (debriefCard) el("#debriefBtn").addEventListener("click", () => go("#/debrief"));
   document.querySelectorAll(".tile").forEach((b) =>
     b.addEventListener("click", () => go("#/topics/" + b.dataset.section)));
   wireReveals();
@@ -3363,12 +3401,529 @@ function closeReader() {
   if (location.hash.startsWith("#/reader")) history.replaceState(null, "", state.underHash || "#/home");
 }
 
+/* ============================================================================
+   ---------- [D] Coach ----------
+   Everything below, up to the matching end marker, is the in-app coach
+   (Phase D): daily pick, the message bank + true-specifics voice, the
+   reboarding protocol, quest generation, the Friday Debrief, and the same-day
+   streak nudge. Persists to `sd_coach` (additive to `sd_progress`). Touches
+   the rest of app.js only via small blocks marked with a [D] comment tag
+   inside boot(), dispatch(), and renderHome() — everything else here is new,
+   self-contained code to keep this phase's merge surface small.
+   ========================================================================== */
+
+/* ---------- [D] date/time helpers ---------- */
+function toISO(d) { return d.toLocaleDateString("en-CA"); }
+function isoAdd(d, days) { const n = new Date(d); n.setDate(n.getDate() + days); return n; }
+function daysBetweenISO(aISO, bISO) {
+  return Math.round((new Date(bISO + "T00:00:00") - new Date(aISO + "T00:00:00")) / 86400000);
+}
+// Monday of the week containing `iso` (Date object).
+function weekStart(iso) {
+  const d = new Date(iso + "T00:00:00");
+  const day = d.getDay();                          // 0 Sun .. 6 Sat
+  return isoAdd(d, day === 0 ? -6 : 1 - day);
+}
+// ISO date of the most recent Friday on/before `iso` — the Debrief's week key.
+function mostRecentFriday(iso) {
+  const d = new Date(iso + "T00:00:00");
+  return toISO(isoAdd(d, -((d.getDay() + 2) % 7)));
+}
+function dayOfYear(iso) {
+  const d = new Date(iso + "T00:00:00");
+  return Math.floor((d - new Date(d.getFullYear(), 0, 0)) / 86400000);
+}
+function ordinal(n) {
+  const s = ["th", "st", "nd", "rd"], v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
+}
+function fmtDateShort(iso) { return `the ${ordinal(new Date(iso + "T00:00:00").getDate())}`; }
+// QA seam twin of todayISO(): a ?qa_time=HH:MM URL param overrides "now" for the
+// same-day nudge's local-time gate. Only honored when present and well-formed.
+function nowHM() {
+  const qp = new URLSearchParams(location.search).get("qa_time");
+  if (qp && /^\d{2}:\d{2}$/.test(qp)) return qp;
+  const d = new Date();
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+
+/* ---------- [D] coach memory (sd_coach) ---------- */
+// Additive to sd_progress. Shape: lastTemplates (cap 3, message-bank variety),
+// observations [{date, note}] (cap 12, general audit trail), lastComebackDate,
+// praisedSections {section: dateISO} (once-per-week-per-section gate for the
+// accuracy-delta observation), todayTemplate {date, id} (same-day stability),
+// lastDebrief (Friday key of the last-opened debrief), quests, nudgedOn.
+function loadCoach() {
+  let c = null;
+  try { c = JSON.parse(localStorage.getItem("sd_coach")); } catch { /* corrupt -> reseed */ }
+  return (c && typeof c === "object") ? c : {
+    lastTemplates: [], observations: [], lastComebackDate: null, praisedSections: {},
+    todayTemplate: null, lastDebrief: null, quests: [], nudgedOn: null,
+  };
+}
+function saveCoach(c) { localStorage.setItem("sd_coach", JSON.stringify(c)); }
+function pushObservation(coach, note) {
+  coach.observations = [{ date: todayISO(), note }, ...(coach.observations || [])].slice(0, 12);
+}
+function recentlyPraised(coach, section) {
+  const d = coach.praisedSections && coach.praisedSections[section];
+  return !!d && daysBetweenISO(d, todayISO()) < 7;
+}
+
+/* ---------- [D] daily pick — port of the old pick_today.py logic ---------- */
+// Priority: (a) never-played sections, alphabetical rotation by day; (b) lowest
+// accuracy among sections with seen >= 5; (c) least-seen. Never repeats
+// yesterday's section unless it is the only candidate left, in which case the
+// forced repeat is tagged why:"rotation" instead of whatever tier chose it.
+function coachPick() {
+  const avail = Object.keys((state.index && state.index.sections) || {}).sort();
+  if (!avail.length) return { section: null, why: "new" };
+  const seenMap = state.progress.sections || {};
+  const history = state.progress.history || [];
+  const lastSection = history.length ? history[history.length - 1].section : null;
+  const seen = (s) => (seenMap[s] && seenMap[s].seen) || 0;
+  const acc = (s) => (seenMap[s] && seenMap[s].seen ? seenMap[s].correct / seenMap[s].seen : null);
+  const day = dayOfYear(todayISO());
+
+  const rank = (pool, why) => {
+    if (!pool.length) return null;
+    let chosen;
+    if (why === "new") chosen = pool.slice().sort()[day % pool.length];
+    else if (why === "weak") chosen = pool.slice().sort((a, b) => acc(a) - acc(b) || seen(a) - seen(b))[0];
+    else chosen = pool.slice().sort((a, b) => seen(a) - seen(b) || a.localeCompare(b))[0];
+    return { section: chosen, why };
+  };
+  const tryPick = (excludeLast) => {
+    const base = excludeLast && lastSection ? avail.filter((s) => s !== lastSection) : avail;
+    if (!base.length) return null;
+    const unplayed = base.filter((s) => seen(s) === 0);
+    if (unplayed.length) return rank(unplayed, "new");
+    const weakPool = base.filter((s) => seen(s) >= 5);
+    if (weakPool.length) return rank(weakPool, "weak");
+    return rank(base, "least");
+  };
+
+  let pick = tryPick(true) || tryPick(false);
+  if (pick && pick.section === lastSection) pick = { section: pick.section, why: "rotation" };
+  return pick || { section: avail[0], why: "least" };
+}
+
+/* ---------- [D] true specifics computed from live progress ---------- */
+// Cumulative accuracy for a section using only direct-blitz history entries up
+// to and including dateISO (review/weak-spot sessions tag section as
+// "review"/"weakspots" and mix content sections, so they're not attributable
+// per-section here — an accepted approximation, same one the Debrief's
+// per-section deltas make).
+function accAsOf(section, dateISO) {
+  const rows = (state.progress.history || []).filter((h) => h.section === section && h.date <= dateISO);
+  const answered = rows.reduce((s, h) => s + (h.answered || 0), 0);
+  const correct = rows.reduce((s, h) => s + (h.correct || 0), 0);
+  return answered ? { acc: correct / answered, seen: answered } : null;
+}
+// >=10-point, 7-day accuracy climb for a section, or null if there isn't a
+// large-enough, clean-enough signal to say something true about it.
+function weeklyAccDelta(section) {
+  const today = todayISO();
+  const cutoffISO = toISO(isoAdd(new Date(today + "T00:00:00"), -7));
+  const now = accAsOf(section, today), then = accAsOf(section, cutoffISO);
+  if (!now || !then || then.seen < 5 || now.seen - then.seen < 3) return null;
+  return { deltaPts: Math.round((now.acc - then.acc) * 100), sinceLabel: fmtDateShort(cutoffISO) };
+}
+// Consecutive days (ending today if already met, else yesterday) at/above the
+// daily XP goal.
+function goalStreakDays() {
+  const map = {};
+  for (const h of state.progress.history || []) map[h.date] = (map[h.date] || 0) + (h.xp || 0);
+  const today = todayISO();
+  let d = new Date(today + "T00:00:00");
+  if (!(map[today] >= DAILY_XP_GOAL)) d = isoAdd(d, -1);
+  let count = 0;
+  for (let guard = 0; guard < 3650; guard++) {
+    const iso = toISO(d);
+    if ((map[iso] || 0) < DAILY_XP_GOAL) break;
+    count++; d = isoAdd(d, -1);
+  }
+  return count;
+}
+// The day right after a >2-day gap ends (compares the two most recent history
+// entries) — purely derived from history, so it needs no hook elsewhere.
+function detectComeback() {
+  const h = state.progress.history || [];
+  if (h.length < 2) return null;
+  const last = h[h.length - 1], prev = h[h.length - 2];
+  const gap = daysBetweenISO(prev.date, last.date);
+  const sinceLast = daysBetweenISO(last.date, todayISO());
+  if (gap > 2 && sinceLast === 1) {
+    return { gapDays: gap, yesterdayPct: last.answered ? Math.round((last.correct / last.answered) * 100) : null, date: last.date };
+  }
+  return null;
+}
+// Today, before playing: gap since lastPlayed > 2 days -> reboarding protocol.
+function reboardingInfo() {
+  const p = state.progress;
+  if (!p.lastPlayed) return null;
+  const gap = daysBetweenISO(p.lastPlayed, todayISO());
+  return gap > 2 ? { days: gap, dueCount: dueReviews().length } : null;
+}
+
+/* ---------- [D] the voice: ~30 message templates, true specifics only ---------- */
+// Selection: build the day's context, find the highest-priority group with an
+// eligible template, then seed-pick within that group (mulberry32(cyrb53(date
+// + streak))) so the choice is stable across reloads the same day but varies
+// day to day. Never repeats a template in sd_coach.lastTemplates when another
+// eligible one exists. NO exclamation marks; terse, specific, remembers.
+const WHY_CHIP = { new: "new territory", weak: "weak spot", least: "least practiced", rotation: "rotation" };
+const COACH_PRIORITY = ["firstEver", "comeback", "dueHigh", "streakMilestone", "goalStreak", "accDelta", "weekend", "byWhy"];
+const COACH_LINES = [
+  { id: "first1", group: "firstEver", when: (c) => c.isFirstEver, text: (c) => `First one. Ten questions, five minutes — start with ${label(c.section)}.` },
+  { id: "first2", group: "firstEver", when: (c) => c.isFirstEver, text: () => `Nothing recorded yet. No baseline to protect, so just answer.` },
+  { id: "first3", group: "firstEver", when: (c) => c.isFirstEver, text: (c) => `Day one. ${label(c.section)} is as good a place to start as any.` },
+
+  { id: "cb1", group: "comeback", when: (c) => !!c.comeback, text: (c) => `Back ${c.comeback.gapDays} days now. Yesterday: ${c.comeback.yesterdayPct}% cold. Memory held better than you feared.` },
+  { id: "cb2", group: "comeback", when: (c) => !!c.comeback, text: (c) => `${c.comeback.gapDays} days off, then ${c.comeback.yesterdayPct}% on the first try back. The spaced reviews did their job.` },
+  { id: "cb3", group: "comeback", when: (c) => !!c.comeback, text: (c) => `You came back after ${c.comeback.gapDays} days and still landed ${c.comeback.yesterdayPct}%. Keep going.` },
+
+  { id: "due1", group: "dueHigh", when: (c) => c.due >= 15, text: (c) => `${c.due} reviews stacked up. Clear the oldest ten before they compound further.` },
+  { id: "due2", group: "dueHigh", when: (c) => c.due >= 15, text: (c) => `${c.due} due for review. That backlog doesn't shrink on its own.` },
+  { id: "due3", group: "dueHigh", when: (c) => c.due >= 15, text: (c) => `${c.due} questions waiting on review. Ten minutes there clears most of it.` },
+
+  { id: "sm1", group: "streakMilestone", when: (c) => c.freezeAway, text: (c) => `Day ${c.streak} — one more for a freeze token.` },
+  { id: "sm2", group: "streakMilestone", when: (c) => c.milesAway === 1, text: (c) => `One more day puts you at a ${c.nextMile}-day streak.` },
+  { id: "sm3", group: "streakMilestone", when: (c) => c.milesAway != null && c.milesAway > 1 && c.milesAway <= 2, text: (c) => `${c.milesAway} days from a ${c.nextMile}-day streak.` },
+
+  { id: "gs1", group: "goalStreak", when: (c) => c.goalStreak >= 3, text: (c) => `${c.goalStreak} straight days at the XP goal. ${label(c.section)} keeps the run going.` },
+  { id: "gs2", group: "goalStreak", when: (c) => c.goalStreak >= 3, text: (c) => `${c.goalStreak} days hitting goal in a row. Numbers don't lie.` },
+
+  { id: "ad1", group: "accDelta", when: (c) => !!c.accDelta, text: (c) => `Your ${label(c.accDelta.section)} accuracy climbed ${c.accDelta.deltaPts} points since ${c.accDelta.sinceLabel}.` },
+  { id: "ad2", group: "accDelta", when: (c) => !!c.accDelta, text: (c) => `${label(c.accDelta.section)} is up ${c.accDelta.deltaPts} points since ${c.accDelta.sinceLabel}. That's real progress.` },
+
+  { id: "we1", group: "weekend", when: (c) => c.isWeekend, text: (c) => `Weekend or not, ten questions still count — ${label(c.section)}.` },
+  { id: "we2", group: "weekend", when: (c) => c.isWeekend, text: (c) => `Weekend pace is fine. ${label(c.section)}, whenever you get to it.` },
+  { id: "we3", group: "weekend", when: (c) => c.isWeekend, text: (c) => `No rush today. ${label(c.section)} will still be there in five minutes.` },
+
+  { id: "new1", group: "byWhy", why: "new", when: () => true, text: (c) => `Untouched section. ${label(c.section)} has nothing recorded yet.` },
+  { id: "new2", group: "byWhy", why: "new", when: () => true, text: (c) => `${label(c.section)} hasn't been touched. Today's as good a day as any.` },
+  { id: "new3", group: "byWhy", why: "new", when: () => true, text: (c) => `Fresh ground: ${label(c.section)}. No baseline yet, so anything right is a start.` },
+  { id: "new4", group: "byWhy", why: "new", when: () => true, text: (c) => `${label(c.section)} is new territory. Ten questions sets the first baseline.` },
+
+  { id: "wk1", group: "byWhy", why: "weak", when: () => true, text: (c) => `${label(c.section)} sits at ${c.acc}% over ${c.seen} questions — the softest spot right now.` },
+  { id: "wk2", group: "byWhy", why: "weak", when: () => true, text: (c) => `Lowest accuracy: ${label(c.section)} at ${c.acc}%. Ten more questions moves that number.` },
+  { id: "wk3", group: "byWhy", why: "weak", when: () => true, text: (c) => `${label(c.section)} is dragging at ${c.acc}%. Time to close the gap.` },
+  { id: "wk4", group: "byWhy", why: "weak", when: () => true, text: (c) => `${c.acc}% in ${label(c.section)} after ${c.seen} questions. Worth the ten minutes.` },
+
+  { id: "ls1", group: "byWhy", why: "least", when: () => true, text: (c) => `${label(c.section)} has the fewest reps of anything you've touched — ${c.seen} so far.` },
+  { id: "ls2", group: "byWhy", why: "least", when: () => true, text: (c) => `Least practiced: ${label(c.section)}, ${c.seen} questions in. Building the baseline.` },
+  { id: "ls3", group: "byWhy", why: "least", when: () => true, text: (c) => `${label(c.section)} trails everything else on reps. Ten more closes some of that.` },
+
+  { id: "rot1", group: "byWhy", why: "rotation", when: () => true, text: (c) => `Back to ${label(c.section)} — every other section was touched more recently.` },
+  { id: "rot2", group: "byWhy", why: "rotation", when: () => true, text: (c) => `${label(c.section)} again. The rotation loops here until something else opens up.` },
+];
+
+function buildCoachCtx(pick, coach) {
+  const p = state.progress, streak = p.streak || 0;
+  const history = p.history || [];
+  const today = todayISO();
+  const weekday = new Date(today + "T00:00:00").getDay();
+  const nextMile = STREAK_MILES.find((m) => m > streak) || null;
+  let accDelta = null;
+  for (const s of Object.keys((state.index && state.index.sections) || {})) {
+    if (recentlyPraised(coach, s)) continue;
+    const d = weeklyAccDelta(s);
+    if (d && d.deltaPts >= 10 && (!accDelta || d.deltaPts > accDelta.deltaPts)) accDelta = { section: s, ...d };
+  }
+  const st = p.sections && p.sections[pick.section];
+  return {
+    section: pick.section, why: pick.why, streak,
+    due: dueReviews().length,
+    isWeekend: weekday === 0 || weekday === 6,
+    isFirstEver: !p.lastPlayed && history.length === 0,
+    nextMile, milesAway: nextMile ? nextMile - streak : null,
+    freezeAway: streak > 0 && streak % 7 === 6,
+    goalStreak: goalStreakDays(),
+    comeback: detectComeback(),
+    accDelta,
+    acc: st && st.seen ? Math.round((st.correct / st.seen) * 100) : null,
+    seen: (st && st.seen) || 0,
+  };
+}
+
+// Returns { templateId, group, text }. Writes sd_coach (lastTemplates,
+// todayTemplate, and — only when that group is actually chosen — the
+// accDelta/comeback observation) exactly once per call.
+function coachMessage(pick) {
+  const coach = loadCoach();
+  const today = todayISO();
+  const ctx = buildCoachCtx(pick, coach);
+
+  // Same-day reload: reuse the exact template already chosen so the card is
+  // stable across reloads, rather than re-rolling the seeded pick.
+  if (coach.todayTemplate && coach.todayTemplate.date === today) {
+    const found = COACH_LINES.find((t) => t.id === coach.todayTemplate.id);
+    if (found && found.when(ctx) && (found.group !== "byWhy" || found.why === pick.why)) {
+      return { templateId: found.id, group: found.group, text: found.text(ctx) };
+    }
+  }
+
+  const groups = {};
+  for (const t of COACH_LINES) if (t.when(ctx)) (groups[t.group] = groups[t.group] || []).push(t);
+  const chosenGroup = COACH_PRIORITY.find((g) => groups[g] && groups[g].length) || "byWhy";
+  const pool = chosenGroup === "byWhy"
+    ? COACH_LINES.filter((t) => t.group === "byWhy" && t.why === pick.why)
+    : groups[chosenGroup];
+
+  const avoid = new Set(coach.lastTemplates || []);
+  const candidates = pool.filter((t) => !avoid.has(t.id));
+  const finalPool = candidates.length ? candidates : pool;   // everything eligible was used recently -> allow repeats
+  const rng = mulberry32(cyrb53(today + ":" + ctx.streak));
+  const chosen = finalPool[Math.floor(rng() * finalPool.length)];
+  const text = chosen.text(ctx);
+
+  if (chosenGroup === "accDelta" && ctx.accDelta) {
+    coach.praisedSections = { ...(coach.praisedSections || {}), [ctx.accDelta.section]: today };
+    pushObservation(coach, text);
+  } else if (chosenGroup === "comeback" && ctx.comeback) {
+    coach.lastComebackDate = ctx.comeback.date;
+    pushObservation(coach, text);
+  }
+  coach.lastTemplates = [chosen.id, ...(coach.lastTemplates || []).filter((id) => id !== chosen.id)].slice(0, 3);
+  coach.todayTemplate = { date: today, id: chosen.id };
+  saveCoach(coach);
+  return { templateId: chosen.id, group: chosenGroup, text };
+}
+
+/* ---------- [D] quests (generated on/after each Friday, expire the next) ---------- */
+const TIER_NEED = { Bronze: { seen: 8, acc: 0.50 }, Silver: { seen: 20, acc: 0.70 }, Gold: { seen: 40, acc: 0.85 } };
+const TIER_ORDER = [null, "Bronze", "Silver", "Gold"];
+
+function seededShuffle(arr, rng) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+// Section closest to its next mastery-tier boundary (smallest remaining `seen` gap).
+function pickTierQuestSection() {
+  const secs = state.progress.sections || {};
+  let best = null;
+  for (const s of Object.keys((state.index && state.index.sections) || {})) {
+    const st = secs[s] || { seen: 0, correct: 0 };
+    const idx = TIER_ORDER.indexOf(sectionTier(st));
+    const next = idx >= 0 && idx < TIER_ORDER.length - 1 ? TIER_ORDER[idx + 1] : null;
+    if (!next) continue;
+    const need = TIER_NEED[next], gap = Math.max(0, need.seen - st.seen);
+    if (!best || gap < best.gap) best = { section: s, nextTier: next, need, gap };
+  }
+  return best;
+}
+function generateQuests(friKey) {
+  const rng = mulberry32(cyrb53("quests-" + friKey));
+  const due = dueReviews().length;
+  const reviewsTarget = due > 0 ? due : 5;
+  const quests = [{
+    id: "q-reviews-" + friKey, type: "reviews", target: reviewsTarget, weekKey: friKey,
+    text: `Clear ${reviewsTarget} review${reviewsTarget === 1 ? "" : "s"}`,
+  }];
+  const tierPick = pickTierQuestSection();
+  if (tierPick) {
+    quests.push({
+      id: "q-tier-" + friKey, type: "tier", section: tierPick.section, nextTier: tierPick.nextTier,
+      target: tierPick.need.seen, weekKey: friKey, text: `Push ${label(tierPick.section)} to ${tierPick.nextTier}`,
+    });
+  }
+  const touched = new Set(Object.values(state.progress.reviews || {}).map((r) => r.module).filter(Boolean));
+  const untouched = Object.keys((state.index && state.index.files) || {}).filter((m) => !touched.has(m));
+  if (untouched.length) {
+    const n = Math.min(3, untouched.length);
+    const modules = seededShuffle(untouched, rng).slice(0, n);
+    quests.push({
+      id: "q-modules-" + friKey, type: "modules", modules, target: n, weekKey: friKey,
+      text: `Touch ${n} untouched module${n === 1 ? "" : "s"}`,
+    });
+  }
+  return quests;
+}
+// Regenerates on/after each Friday; lives until the next Friday replaces it.
+function ensureQuests() {
+  const coach = loadCoach();
+  const friKey = mostRecentFriday(todayISO());
+  if (!coach.quests || !coach.quests.length || coach.quests[0].weekKey !== friKey) {
+    coach.quests = generateQuests(friKey);
+    saveCoach(coach);
+  }
+  return coach.quests;
+}
+// Progress is always recomputed live from current state — quests store only
+// {type, target, section?, modules?}, never a serialized function.
+function questProgress(q) {
+  if (q.type === "reviews") {
+    const current = dueReviews().length;
+    return { done: Math.max(0, Math.min(q.target, q.target - current)), target: q.target };
+  }
+  if (q.type === "tier") {
+    const st = (state.progress.sections && state.progress.sections[q.section]) || { seen: 0, correct: 0 };
+    return { done: Math.min(q.target, st.seen), target: q.target };
+  }
+  if (q.type === "modules") {
+    const touched = new Set(Object.values(state.progress.reviews || {}).map((r) => r.module).filter(Boolean));
+    return { done: (q.modules || []).filter((m) => touched.has(m)).length, target: q.target };
+  }
+  return { done: 0, target: q.target || 1 };
+}
+function questChipsHTML(quests) {
+  if (!quests || !quests.length) return "";
+  const rows = quests.map((q) => {
+    const { done, target } = questProgress(q);
+    const pct = target ? Math.min(100, Math.round((done / target) * 100)) : 0;
+    return `<div class="quest-chip${done >= target ? " done" : ""}" data-qid="${esc(q.id)}">
+        <span class="qc-text">${esc(q.text)}</span>
+        <span class="qc-bar"><i style="width:${pct}%"></i></span>
+        <span class="qc-count">${done}/${target}</span>
+      </div>`;
+  }).join("");
+  return `<div class="quest-row">${rows}</div>`;
+}
+
+/* ---------- [D] Friday Debrief ---------- */
+function moduleLabel(moduleKey) {
+  const parts = (moduleKey || "").split("/");
+  return (parts[1] || parts[0] || moduleKey || "").replace(/_/g, " ");
+}
+function weekAgg(history, startISO, endISO, section) {
+  const rows = history.filter((h) => h.date >= startISO && h.date <= endISO && h.section === section);
+  const answered = rows.reduce((s, h) => s + (h.answered || 0), 0);
+  const correct = rows.reduce((s, h) => s + (h.correct || 0), 0);
+  return { answered, correct, acc: answered ? correct / answered : null };
+}
+function bestSessionThisWeek(startISO, endISO) {
+  const rows = (state.progress.history || []).filter((h) => h.date >= startISO && h.date <= endISO && h.answered > 0);
+  if (!rows.length) return null;
+  return rows.slice().sort((a, b) => (b.correct / b.answered) - (a.correct / a.answered) || b.xp - a.xp)[0];
+}
+// Reviews whose most recent correct answer (approximated as due - interval,
+// since review records don't log a per-event timestamp) fell inside the range.
+function reviewsAnsweredInRange(startISO, endISO) {
+  const out = [];
+  for (const rv of Object.values(state.progress.reviews || {})) {
+    if (!rv.due || !rv.interval) continue;
+    const answeredISO = toISO(isoAdd(new Date(rv.due + "T00:00:00"), -rv.interval));
+    if (answeredISO >= startISO && answeredISO <= endISO) out.push({ module: rv.module, section: rv.section, interval: rv.interval, answeredISO });
+  }
+  return out.sort((a, b) => b.interval - a.interval);
+}
+function debriefHeadline(deltas, held) {
+  const bestUp = deltas.find((d) => d.delta >= 5);
+  if (bestUp) return `${label(bestUp.section)} climbed ${bestUp.delta} points this week. That's the number that moved.`;
+  if (held.length) return `You held ${moduleLabel(held[0].module)} across a ${held[0].interval}-day gap. Spaced repetition, working as designed.`;
+  const worseDown = deltas.find((d) => d.delta <= -8);
+  if (worseDown) return `${label(worseDown.section)} slipped ${Math.abs(worseDown.delta)} points. Worth a look next week.`;
+  return `Quiet week by the numbers. Still logged, still counts.`;
+}
+// Home shows a "Debrief ready" card once a new week's debrief is available and
+// hasn't been opened yet — this naturally covers Fri-Sun of the current week
+// and every day after if a previous week's was never opened.
+function debriefReady() {
+  if (!(state.progress.history || []).length) return false;
+  return loadCoach().lastDebrief !== mostRecentFriday(todayISO());
+}
+
+function renderDebrief() {
+  state.inQuiz = false;
+  refreshStats();
+  const coach = loadCoach();
+  const today = todayISO();
+  coach.lastDebrief = mostRecentFriday(today);
+  saveCoach(coach);
+
+  const thisStart = weekStart(today), thisStartISO = toISO(thisStart), thisEndISO = toISO(isoAdd(thisStart, 6));
+  const lastStart = isoAdd(thisStart, -7), lastStartISO = toISO(lastStart), lastEndISO = toISO(isoAdd(lastStart, 6));
+  const history = state.progress.history || [];
+  const todayDate = new Date(today + "T00:00:00");
+
+  const dayCells = [];
+  for (let i = 0; i < 7; i++) {
+    const d = isoAdd(thisStart, i), iso = toISO(d);
+    const xp = history.filter((h) => h.date === iso).reduce((s, h) => s + (h.xp || 0), 0);
+    const future = d > todayDate;
+    const lvl = future ? -1 : xp === 0 ? 0 : xp < 30 ? 1 : xp < 70 ? 2 : xp < 120 ? 3 : 4;
+    dayCells.push({ iso, xp, lvl, label: d.toLocaleDateString("en-US", { weekday: "short" }) });
+  }
+
+  const deltas = Object.keys((state.index && state.index.sections) || {}).map((s) => {
+    const thisWk = weekAgg(history, thisStartISO, thisEndISO, s), lastWk = weekAgg(history, lastStartISO, lastEndISO, s);
+    if (thisWk.answered < 5 && lastWk.answered < 5) return null;
+    if (thisWk.acc == null || lastWk.acc == null) return null;
+    return { section: s, delta: Math.round((thisWk.acc - lastWk.acc) * 100), thisAcc: Math.round(thisWk.acc * 100), lastAcc: Math.round(lastWk.acc * 100) };
+  }).filter(Boolean).sort((a, b) => b.delta - a.delta);
+
+  const held = reviewsAnsweredInRange(thisStartISO, thisEndISO).filter((r) => r.interval >= 14);
+  const momentHTML = held.length
+    ? `You held <b>${esc(moduleLabel(held[0].module))}</b> across a ${held[0].interval}-day gap.`
+    : (() => {
+        const best = bestSessionThisWeek(thisStartISO, thisEndISO);
+        return best
+          ? `Best session this week: <b>${Math.round((best.correct / best.answered) * 100)}%</b> in ${esc(label(best.section))} (${best.correct}/${best.answered}).`
+          : `Quiet week &mdash; no sessions recorded yet.`;
+      })();
+
+  const headline = debriefHeadline(deltas, held);
+  const quests = ensureQuests();
+
+  const stripHTML = `<div class="week-strip">${dayCells.map((c) => `
+      <div class="week-cell ${c.lvl < 0 ? "wc-future" : "wc-l" + c.lvl}" title="${c.iso}: ${c.xp} XP">
+        <span class="wc-day">${c.label}</span>
+      </div>`).join("")}</div>`;
+  const deltaHTML = deltas.length ? deltas.map((d) => `
+      <div class="delta-row ${d.delta >= 0 ? "up" : "down"}">
+        <span class="dr-name">${esc(label(d.section))}</span>
+        <span class="dr-num">${d.delta >= 0 ? "+" : ""}${d.delta} pts</span>
+        <span class="dr-sub">${d.lastAcc}% &rarr; ${d.thisAcc}%</span>
+      </div>`).join("") : `<p class="hm-empty">Not enough volume in any section this week or last (5+ answers needed) to compare.</p>`;
+
+  app.innerHTML = `
+    <div class="hero"><h1>Friday Debrief</h1><p>${esc(headline)}</p></div>
+    <h2 class="section-h">This week</h2>
+    ${stripHTML}
+    <h2 class="section-h">Section deltas &mdash; this week vs last</h2>
+    <div class="delta-list">${deltaHTML}</div>
+    <h2 class="section-h">Moment of the week</h2>
+    <p class="moment-week">${momentHTML}</p>
+    <h2 class="section-h">Next week</h2>
+    ${questChipsHTML(quests)}
+    <div class="row" style="margin-top:18px"><button class="primary" id="debriefHome">Back to today</button></div>`;
+  el("#debriefHome").addEventListener("click", () => go("#/home"));
+  wireReveals();
+}
+
+/* ---------- [D] same-day streak nudge (tab-open only) ---------- */
+function maybeShowNudge() {
+  if (state.inQuiz || el("#nudgeToast")) return;
+  const coach = loadCoach();
+  const today = todayISO();
+  if (coach.nudgedOn === today) return;
+  const streak = state.progress.streak || 0;
+  if (streak < 3) return;
+  if ((state.progress.history || []).some((h) => h.date === today)) return;   // already played today
+  if (nowHM() < "16:00") return;
+  const o = document.createElement("div");
+  o.className = "nudge-toast"; o.id = "nudgeToast";
+  o.setAttribute("role", "status");
+  o.innerHTML = `<span>Your ${streak}-day streak ends at midnight. Ten questions cover it.</span>
+    <button class="nudge-dismiss" id="nudgeDismiss" aria-label="Dismiss">&times;</button>`;
+  document.body.appendChild(o);
+  el("#nudgeDismiss").addEventListener("click", () => {
+    const c = loadCoach(); c.nudgedOn = todayISO(); saveCoach(c);
+    o.classList.add("out");
+    setTimeout(() => o.remove(), REDUCED() ? 0 : 200);
+  });
+}
+/* ---------- end [D] Coach ---------- */
+
 /* ---------- hash router ---------- */
 // Screens are hash routes so browser Back/Forward, refresh, and shareable URLs
 // all work without a build step. go() sets the hash; a single hashchange
 // listener resolves the route -> screen render. _navLock swallows the one
 // programmatic hash write we make when restoring the quiz hash on a blocked Back.
-// Reserved for later phases: #/gauntlet #/codex #/insights #/interview/<sec> #/debrief.
+// Reserved for later phases: #/gauntlet #/codex #/insights #/interview/<sec>.
+// #/debrief is implemented — see [D] Coach above (renderDebrief).
 let _navLock = false;
 
 const readerHash = (path, frag) => "#/reader/" + encodeURIComponent(path) + (frag ? "@" + frag : "");
@@ -3440,6 +3995,7 @@ function dispatch(route) {
   if (route.startsWith("#/study/")) { openStudySection(route.slice("#/study/".length)); return; }
   if (route === "#/study") { renderStudy(); return; }
   if (route === "#/progress") { renderProgress(); return; }
+  if (route === "#/debrief") { renderDebrief(); return; }   /* [D] Friday Debrief */
   renderHome();                                     // #/home and any unknown route
 }
 
@@ -3536,7 +4092,10 @@ async function boot() {
   }
   el("#bankInfo").textContent = `${state.index.total} questions across ${Object.keys(state.index.sections).length} sections`;
   state.progress = loadProgress();
-  state.today = {};                                // reserved for the in-app coach (later phase)
+  /* [D] coach: daily pick + message, computed once per boot */
+  const todayPick = coachPick();
+  const todayMsg = coachMessage(todayPick);
+  state.today = { date: todayISO(), ...todayPick, message: todayMsg.text, templateId: todayMsg.templateId };
   el("#navProgress").addEventListener("click", () => guardedNav(() => go("#/progress")));
   const studyB = el("#navStudy");
   if (studyB) studyB.addEventListener("click", () => guardedNav(() => go("#/study")));
@@ -3565,6 +4124,10 @@ async function boot() {
   // history entry carries a real route and Back never lands on a hashless URL.
   if (!location.hash) history.replaceState(null, "", "#/home");
   onHashChange();                                  // dispatch the initial route
+  /* [D] coach: same-day streak nudge — check now (tab already visible at load)
+     and again whenever the tab regains visibility (no OS scheduler on Pages). */
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") maybeShowNudge(); });
+  maybeShowNudge();
 }
 
 // PWA: register the offline shell/bank cache. Only in secure contexts (https or

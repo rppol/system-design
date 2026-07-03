@@ -1450,3 +1450,90 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
 @keyframes moment-burst { to { transform: scale(18); opacity: 0; } }
 @keyframes moment-in { from { opacity: 0; transform: scale(0.8); } }
 .moment.reduced .moment-card { animation: none; }
+
+/* ---------- [D] Coach ---------- */
+
+/* reboarding card: calm and distinct from .topic-card — deliberately NOT
+   red/warn-tinted, since a gap is never treated as a failure. */
+.topic-card.reboard { border-color: color-mix(in srgb, var(--good) 38%, var(--glass-brd)); }
+.topic-card.reboard h2 { text-transform: none; }
+
+/* debrief-ready card: same family as .review-card, violet-tinted so it reads
+   distinct from the good (review) / warn (weak-spot) / accent (resume) cards. */
+.review-card.debrief {
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--accent-2) 14%, transparent),
+    color-mix(in srgb, var(--accent) 8%, transparent));
+  border-color: color-mix(in srgb, var(--accent-2) 45%, transparent);
+}
+.review-card.debrief:hover { border-color: var(--accent-2); }
+.review-card.debrief .review-go { color: var(--accent-2); }
+
+/* quest chips: compact live-progress pills under the suggested card (Home)
+   and a fuller row under "Next week" (Debrief) */
+.quest-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
+.quest-chip {
+  display: flex; flex-direction: column; gap: 5px; min-width: 168px; flex: 1 1 168px;
+  padding: 10px 14px; border-radius: var(--radius-sm);
+  background: var(--glass); border: 1px solid var(--glass-brd);
+}
+.quest-chip.done { border-color: color-mix(in srgb, var(--good) 55%, transparent); }
+.qc-text { font-size: 12.5px; color: var(--text); }
+.quest-chip.done .qc-text::before { content: "\2713  "; color: var(--good); }
+.qc-bar { display: block; height: 4px; border-radius: 999px; background: var(--glass-2); overflow: hidden; }
+.qc-bar i { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width 0.5s var(--ease-out); }
+.quest-chip.done .qc-bar i { background: var(--good); }
+.qc-count { font-family: var(--mono); font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* Debrief: week strip (7 mini cells, Mon-Sun) */
+.week-strip { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; margin: 0 0 20px; }
+.week-cell {
+  display: flex; align-items: flex-end; justify-content: center; height: 56px; border-radius: var(--radius-sm);
+  background: var(--glass-2); border: 1px solid var(--glass-brd); padding-bottom: 6px;
+}
+.wc-day { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+.wc-l0 { background: var(--glass-2); }
+.wc-l1 { background: color-mix(in srgb, var(--accent) 22%, var(--glass-2)); }
+.wc-l2 { background: color-mix(in srgb, var(--accent) 44%, var(--glass-2)); }
+.wc-l3 { background: color-mix(in srgb, var(--accent) 66%, var(--glass-2)); }
+.wc-l4 { background: color-mix(in srgb, var(--accent) 88%, var(--glass-2)); }
+.wc-l3 .wc-day, .wc-l4 .wc-day { color: var(--accent-ink); }
+.wc-future { opacity: 0.35; border-style: dashed; }
+
+/* Debrief: per-section accuracy deltas, this week vs last */
+.delta-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 20px; }
+.delta-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 14px; border-radius: var(--radius-sm);
+  background: var(--glass); border: 1px solid var(--glass-brd); font-size: 13.5px;
+}
+.dr-name { flex: 1 1 auto; color: var(--text); }
+.dr-num { font-family: var(--mono); font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.delta-row.up .dr-num { color: var(--good); }
+.delta-row.down .dr-num { color: var(--bad); }
+.dr-sub { font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.moment-week { color: var(--muted); font-size: 14.5px; margin: 0 0 20px; }
+.moment-week b { color: var(--text); }
+
+/* same-day streak nudge: dismissible glass bar, bottom of viewport */
+.nudge-toast {
+  position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 14px; z-index: 80; max-width: min(92vw, 420px);
+  padding: 12px 12px 12px 18px; border-radius: 999px;
+  background: var(--glass-2); border: 1px solid var(--glass-brd-hi);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4); backdrop-filter: blur(20px) saturate(1.4);
+  box-shadow: var(--shadow), var(--glass-hilite);
+  font-size: 13.5px; color: var(--text); animation: nudge-in 0.3s var(--ease-out);
+}
+.nudge-toast.out { animation: nudge-in 0.2s ease reverse forwards; }
+.nudge-dismiss {
+  flex: 0 0 auto; width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--glass-brd-hi);
+  background: transparent; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer;
+}
+.nudge-dismiss:hover { color: var(--text); background: var(--glass); }
+@keyframes nudge-in { from { opacity: 0; transform: translateX(-50%) translateY(14px); } }
+@media (prefers-reduced-motion: reduce) {
+  .nudge-toast, .nudge-toast.out { animation: none; }
+  .qc-bar i { transition: none; }
+}
