@@ -1570,6 +1570,10 @@ function finishPrime() {
   saveSessionLocal({ date: todayISO(), section: "prime", results, bonusXp: 0 }, { quiet: true });
   refreshStats();
   history.replaceState(null, "", "#/study/" + first.section);   // Back from the reader lands on the path, not #/quiz/prime
+  // Render the real underlayer before the reader opens: leaving the stale
+  // prime screen mounted let its leftover Finish button re-record the pretest
+  // as a graded session (XP/streak/SM-2 corruption) after the reader closed.
+  openStudySection(first.section);
   openReader(first.module, first.moduleName);
 }
 
@@ -1828,7 +1832,9 @@ function renderBossIntro(bossCount, cb) {
        (programmatic drivers can reach the buttons beneath the overlay). */
     if (state.inQuiz && state.deck[state.queue[state.cursor]]) cb();
   };
-  const onKey = (e) => { e.preventDefault(); go(); };
+  // stopImmediatePropagation: the dismiss key must never leak through to the
+  // quiz handler and answer the just-revealed boss question (keys 1-4).
+  const onKey = (e) => { e.preventDefault(); e.stopImmediatePropagation(); go(); };
   o.addEventListener("click", go);
   document.addEventListener("keydown", onKey, true);
   const timer = setTimeout(go, 1200);
@@ -5424,11 +5430,13 @@ function onHashChange() {
   const route = location.hash || "#/home";
   const isReaderRoute = route.startsWith("#/reader/");
 
-  // Reader is an overlay: any non-reader route while it's open just closes it
-  // (Back-to-close); the underlying screen DOM is still mounted underneath.
+  // Reader is an overlay: browser Back onto the live underlayer just closes it
+  // (the screen DOM is still mounted underneath). A code-driven jump to a
+  // DIFFERENT route must fall through so the quiz guard + dispatch complete it
+  // — returning early stranded the user on a stale screen with a new hash.
   if (document.body.classList.contains("reader-open") && !isReaderRoute) {
     closeReaderDom();
-    return;
+    if (route === (state.underHash || "#/home")) return;
   }
   // Leaving a live blitz: 0 answered -> leave silently; else restore the quiz
   // hash and raise the pause sheet with this route as the pending destination.
@@ -5485,6 +5493,9 @@ document.addEventListener("keydown", (e) => {
   const toggleEB = () => { const det = el(".explain-back"); if (det) { det.open = !det.open; if (det.open) det.querySelector(".eb-input")?.focus(); } };
   if (e.key === "Escape" && el("#helpOverlay")) { el("#helpOverlay").remove(); return; }
   if (e.key === "Escape" && el("#pauseSheet")) { el("#pauseSheet").remove(); return; }
+  // Any other key while a modal sheet is up must not fall through to the quiz
+  // handler below — it would lock/grade the question hidden behind the overlay.
+  if (el("#helpOverlay") || el("#pauseSheet")) return;
   // [E2] command palette: Cmd/Ctrl+K toggles anywhere; "/" opens when not typing.
   if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) { e.preventDefault(); _palette ? closePalette() : openPalette(); return; }
   if (e.key === "/" && !typing && !_palette) { e.preventDefault(); openPalette(); return; }
