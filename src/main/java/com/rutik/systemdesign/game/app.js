@@ -175,10 +175,22 @@ const state = {
   combo: 0, maxCombo: 0, sessionXp: 0, inQuiz: false, answered: false,
   curOptsLen: 0, replayFn: null,
   hard: false, awaitingConf: false, pendingPick: null,
+  // [B] per-deck session trackers — reset by resetPhaseBState() in startDeck/resumeDeck.
+  _bossIntroShown: false, _doubleDown: null, _doubleDownIdx: null, _doubleDownWager: 0,
+  _missStreak: 0, _maxMissStreak: 0, _answerLog: [], _cardStreak: 0, _capsuleReturns: [],
 };
 
 /* ---------- helpers ---------- */
-const todayISO = () => new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD, local
+// [D] QA seam: a ?qa_date=YYYY-MM-DD URL param overrides "today" everywhere date
+// math flows through this function (coach pick, streaks, debrief week bounds,
+// due reviews). Only honored when present and well-formed — normal play is
+// untouched. See qa_phaseD.mjs for how tests use it to force date-dependent
+// scenarios without changing the system clock.
+const todayISO = () => {
+  const qp = new URLSearchParams(location.search).get("qa_date");
+  if (qp && /^\d{4}-\d{2}-\d{2}$/.test(qp)) return qp;
+  return new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD, local
+};
 const el = (sel) => document.querySelector(sel);
 
 // Inline SVG icons (lucide-style paths) — consistent weight in every theme,
@@ -280,7 +292,7 @@ function toggleHelp() {
   o.innerHTML = `<div class="help-card">
     <h2>Keyboard shortcuts</h2>
     <div class="help-cols">
-      <div><h3>Quiz</h3>${row("1 2 3 4", "Answer")}${row("↵", "Next")}${row("S", "Skip for now")}</div>
+      <div><h3>Quiz</h3>${row("1 2 3 4", "Answer")}${row("↵", "Next")}${row("S", "Skip for now")}${row("D", "Double down")}</div>
       <div><h3>Cards</h3>${row("Space", "Reveal")}${row("1", "Missed it")}${row("2", "Got it")}</div>
       <div><h3>Reader</h3>${row("F", "Fullscreen")}${row("Esc", "Exit / close")}</div>
       <div><h3>Diagram zoom</h3>${row("+ −", "Zoom")}${row("0", "Fit")}${row("← →", "Pan")}</div>
@@ -496,6 +508,9 @@ const sfx = (() => {
     gold() { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.7, "sine", 0.055, i * 0.03)); },
     bell() { tone(1047, 1.3, "sine", 0.06); tone(2094, 1.1, "sine", 0.02, 0.01); },
     chime() { tone(784, 0.4, "sine", 0.045); tone(1175, 0.5, "sine", 0.035, 0.06); },
+    // --- [B] moment/feedback tones ---
+    bossSting() { tone(110, 0.4, "sawtooth", 0.05); tone(165, 0.4, "sawtooth", 0.04, 0.05); },
+    recovered() { tone(440, 0.14, "sine", 0.055); tone(660, 0.16, "sine", 0.05, 0.08); },
     isOn: on,
     toggle() { const wasOn = on(); localStorage.setItem("sd_mute", wasOn ? "1" : "0"); return !wasOn; },
   };
@@ -661,6 +676,7 @@ function saveSessionLocal(session, opts = {}) {
   (p.history = p.history || []).push({
     date: session.date, answered: (session.results || []).length, correct, xp,
     section: session.section || "unknown", durationSec: session.durationSec || 0,
+    comeback: !!session.comeback,                  // [B] comeback engine — see queueMoments/finish()
   });
   p.history = p.history.slice(-365);               // rolling one-year history cap
   localStorage.setItem("sd_progress", JSON.stringify(p));
@@ -702,6 +718,30 @@ function sectionTier(st) {
 }
 const levelFromXP = (xp) => Math.floor((xp || 0) / 250) + 1;
 
+/* ---------- [B] career ladder ---------- */
+// Level bands -> a job title, cosmetic on top of levelFromXP. Bands repeat the
+// same title until the next threshold (e.g. levels 6-9 are all "Mid-level Engineer").
+const LEVEL_TITLES = [
+  { at: 1, title: "Intern" }, { at: 3, title: "Junior Engineer" },
+  { at: 6, title: "Mid-level Engineer" }, { at: 10, title: "Senior Engineer" },
+  { at: 15, title: "Staff Engineer" }, { at: 21, title: "Senior Staff" },
+  { at: 28, title: "Principal" }, { at: 36, title: "Distinguished" }, { at: 45, title: "Fellow" },
+];
+function titleForLevel(lvl) {
+  let t = LEVEL_TITLES[0].title;
+  for (const b of LEVEL_TITLES) { if (lvl >= b.at) t = b.title; else break; }
+  return t;
+}
+// Progress ring in the topbar Lv chip: fraction of the way through the current level.
+function updateLevelRing() {
+  const ring = el("#lvlRingFg");
+  if (!ring) return;
+  const pct = ((state.progress.totalXP || 0) % 250) / 250;
+  const r = 9, circ = 2 * Math.PI * r;
+  ring.setAttribute("stroke-dasharray", circ.toFixed(1));
+  ring.setAttribute("stroke-dashoffset", (circ * (1 - pct)).toFixed(1));
+}
+
 // Most-invested section not practiced in a week, to nudge a refresh.
 function rustiestSection() {
   const secs = state.progress.sections || {};
@@ -730,6 +770,8 @@ function refreshStats() {
   set("#streakVal", state.progress.streak || 0);
   set("#xpVal", state.progress.totalXP || 0);
   set("#lvlVal", levelFromXP(state.progress.totalXP));
+  set("#lvlTitle", titleForLevel(levelFromXP(state.progress.totalXP)));  // [B] career ladder
+  updateLevelRing();
 }
 
 /* ---------- home ---------- */
@@ -774,7 +816,10 @@ function renderHome() {
        </button>`
     : "";
   const due = dueReviews();
-  const reviewCard = due.length
+  /* [D] coach: reboarding protocol — a >2-day gap replaces the suggested card
+     and suppresses the separate due-review card below (its CTA already covers it). */
+  const reboard = reboardingInfo();
+  const reviewCard = (due.length && !reboard)
     ? `<button class="review-card" id="reviewBtn">
          <div><div class="eyebrow good">Spaced repetition</div>
          <h2>${due.length} question${due.length === 1 ? "" : "s"} due for review</h2>
@@ -838,19 +883,44 @@ function renderHome() {
       </button>`;
   }).join("");
   const dateLine = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+  /* [D] coach: the suggested card becomes either the reboarding card (calm,
+     non-red — "the reviews kept your place") or the normal coach-voice card
+     (eyebrow "Coach · <why-chip>", message = state.today.message). */
+  const whyChip = state.today && WHY_CHIP[state.today.why];
+  const topicCardHTML = reboard ? `
+    <div class="topic-card reboard">
+      <div class="eyebrow">Coach</div>
+      <h2>It&rsquo;s been ${reboard.days} days.</h2>
+      <p class="msg">Doesn&rsquo;t matter &mdash; the reviews kept your place. ${reboard.dueCount
+        ? `${reboard.dueCount} ${reboard.dueCount === 1 ? "is" : "are"} waiting. The oldest ten take about five minutes.`
+        : `Nothing waiting &mdash; ${esc(label(section))} picks up the rotation.`}</p>
+      <button class="cta" id="startBtn">${reboard.dueCount ? "Start review" : `Start &mdash; ${QUESTIONS_PER_BLITZ} questions`}<small>${reboard.dueCount ? `${Math.min(reboard.dueCount, QUESTIONS_PER_BLITZ)} questions &middot; ~5 min` : `~5 min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}`}</small></button>
+    </div>` : `
+    <div class="topic-card" data-coach-tpl="${state.today ? esc(state.today.templateId || "") : ""}">
+      <div class="eyebrow">${whyChip ? `Coach &middot; ${esc(whyChip)}` : "Suggested for today"}</div>
+      <h2>${esc(label(section))}</h2>
+      <p class="msg">${esc(coachMsg || `${QUESTIONS_PER_BLITZ} questions pulled from your ${label(section)} notes.`)}</p>
+      <button class="cta" id="startBtn">Start &mdash; ${QUESTIONS_PER_BLITZ} questions<small>~5 min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}</small></button>
+    </div>`;
+  /* [D] coach: Debrief-ready card + live quest chips */
+  const debriefCard = debriefReady() ? `
+    <button class="review-card debrief" id="debriefBtn">
+      <div><div class="eyebrow">Coach</div>
+      <h2>Debrief ready</h2>
+      <p class="msg">Your week, summarized &mdash; deltas, a held-memory highlight, three quests for next week.</p></div>
+      <span class="review-go">Open &rarr;</span>
+    </button>` : "";
+  const questRow = questChipsHTML(ensureQuests());
   app.innerHTML = `
     <div class="hero">
       <div class="hero-row">${goalRing()}<div>
         <div class="eyebrow date-eyebrow">${esc(dateLine)}</div>
         <h1>Today's 5-minute blitz</h1><p>${streakLine}</p></div></div>
     </div>
-    <div class="topic-card">
-      <div class="eyebrow">Suggested for today</div>
-      <h2>${esc(label(section))}</h2>
-      <p class="msg">${esc(coachMsg || `${QUESTIONS_PER_BLITZ} questions pulled from your ${label(section)} notes.`)}</p>
-      <button class="cta" id="startBtn">Start &mdash; ${QUESTIONS_PER_BLITZ} questions<small>~5 min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}</small></button>
-    </div>
+    ${topicCardHTML}
+    ${questRow}
     ${resumeCard}
+    ${debriefCard}
     ${reviewCard}
     ${confCard}
     ${fadingCard}
@@ -858,13 +928,14 @@ function renderHome() {
     ${rustyNote}
     <h2 class="section-h">Or pick a section &mdash; then choose sub-topics</h2>
     <div class="grid">${tiles}</div>`;
-  el("#startBtn").addEventListener("click", () => startBlitz(section));
+  el("#startBtn").addEventListener("click", () => (reboard && reboard.dueCount ? startReview() : startBlitz(section)));
   if (resume) el("#resumeBtn").addEventListener("click", resumeDeck);
-  if (due.length) el("#reviewBtn").addEventListener("click", startReview);
+  if (due.length && !reboard) el("#reviewBtn").addEventListener("click", startReview);
   if (topPair) el("#confuseBtn").addEventListener("click", () => startConfusionDrill(topPair.k));   // [A2]
   if (fadingCard) el("#fadingBtn").addEventListener("click", () => startRefresh(fadingIds));        // [A2]
   if (worst) el("#weakBtn").addEventListener("click", startWeakSpots);
   if (rusty) el("#rustyBtn").addEventListener("click", () => startBlitz(rusty.s));
+  if (debriefCard) el("#debriefBtn").addEventListener("click", () => go("#/debrief"));
   document.querySelectorAll(".tile").forEach((b) =>
     b.addEventListener("click", () => go("#/topics/" + b.dataset.section)));
   wireReveals();
@@ -1000,12 +1071,25 @@ function makeItem(q, optOrder, flip) {
 // Quiz vs flashcard is a global, persisted preference toggled from the top bar.
 function deckMode() { return localStorage.getItem("sd_mode") === "flash" ? "flash" : "quiz"; }
 
+// [B] Reset every per-deck Phase B tracker (boss intro, double-down, comeback
+// engine, flashcard recall streak, time-capsule returns). Called at the start
+// of every fresh deck and on resume — a resumed deck restarts these counters,
+// which only cost a little mid-deck polish, never persisted progress.
+function resetPhaseBState() {
+  state._bossIntroShown = false;
+  state._doubleDown = null; state._doubleDownIdx = null; state._doubleDownWager = 0;
+  state._missStreak = 0; state._maxMissStreak = 0; state._answerLog = [];
+  state._cardStreak = 0;
+  state._capsuleReturns = [];
+}
+
 function startDeck(questions, replayFn, opts = {}) {
   state.prime = !!opts.prime;                    // [A2] pretest deck: no XP/combo/snapshot/confidence
   state.mode = opts.prime ? "quiz" : deckMode(); // [A2] prime always uses the MCQ path
   state.hard = !!opts.hard;
   state.awaitingConf = false;
   state._medMs = medianReviewMs();
+  resetPhaseBState();
   const flipSet = state.mode === "flash" ? null : opts.flip;   // [A2] Set of qids to flip
   const ilv = opts.interleave;                   // [A2] graph pairs ([] = module-only) or undefined
   const items = questions.map((q) => makeItem(q, null, flipSet && flipSet.has(q.id)));
@@ -1364,6 +1448,7 @@ async function resumeDeck() {
   const resolved = (it) => it.status !== "skipped" && !(it.status === "wrong" && it.retry && !it.retried) && DONE.includes(it.status);
   while (cursor < queue.length && resolved(deck[queue[cursor]])) cursor++;
   state.hard = !!snap.hard; state.prime = false; state.awaitingConf = false; state._medMs = medianReviewMs();
+  resetPhaseBState();                              // [B] a resumed deck restarts these session counters
   state.mode = snap.mode === "flash" ? "flash" : "quiz";
   state.deck = deck; state.queue = queue; state.cursor = cursor;
   state.combo = snap.combo || 0; state.maxCombo = snap.maxCombo || 0;
@@ -1398,6 +1483,71 @@ function dotsHTML(idx) {
     `<span class="dot ${DONE.includes(it.status) ? "done" : ""} ${it.boss ? "boss" : ""} ${i === idx ? "cur" : ""}"></span>`).join("");
 }
 
+/* ---------- [B] combo HUD slot ---------- */
+// Lives in .qhead's right cluster (reserved min-width — see style.css) so the
+// question text itself never reflows when a combo starts/ends. Shows the
+// multiplier the NEXT correct answer would pay, same math as the old inline chip.
+function comboChipHTML(combo) {
+  if (combo < 2) return "";
+  const nextMult = combo + 1 >= 5 ? 3 : combo + 1 >= 3 ? 2 : 1;
+  return `<span class="combo${combo >= 5 ? " hot" : ""}">${ICON("flame", "i-flame")} ${combo} combo &middot; ${nextMult}&times; XP</span>`;
+}
+function refreshComboSlot() {
+  const slot = el("#comboSlot");
+  if (slot) slot.innerHTML = comboChipHTML(state.combo);
+}
+
+/* ---------- [B] boss staging ---------- */
+// 1.2s interstitial the first time the cursor reaches a boss item in a deck.
+// Tap/keypress skips ahead; body.boss-mode dims the backdrop toward warn/gold
+// for the duration of the boss zone (toggled per-render in renderQuestion).
+function renderBossIntro(bossCount, cb) {
+  document.body.classList.add("boss-mode");
+  const comboLine = state.combo >= 3
+    ? `<div class="boss-intro-combo">Your x${comboMult()} combo carries in.</div>` : "";
+  // Appended to <body> (like moment()/the pause sheet), NOT app.innerHTML — a
+  // direct child of #app inherits the base screen-transition animation, which
+  // (ID beats classes) would silently mask anything this overlay declares.
+  const o = document.createElement("div");
+  o.className = "boss-intro"; o.id = "bossIntro";
+  o.setAttribute("role", "status");
+  o.innerHTML = `<div class="boss-intro-card">
+      <div class="boss-intro-title">${ICON("bolt")} BOSS ROUND</div>
+      <div class="boss-intro-sub">${bossCount} question${bossCount === 1 ? "" : "s"} &middot; 2&times; XP</div>
+      ${comboLine}
+      <div class="boss-intro-hint">tap or press any key to continue</div>
+    </div>`;
+  document.body.appendChild(o);
+  sfx.bossSting();
+  announce(`Boss round. ${bossCount} questions, double XP.`);
+  let done = false;
+  const go = () => {
+    if (done) return; done = true;
+    clearTimeout(timer);
+    document.removeEventListener("keydown", onKey, true);
+    o.remove();
+    cb();
+  };
+  const onKey = (e) => { e.preventDefault(); go(); };
+  o.addEventListener("click", go);
+  document.addEventListener("keydown", onKey, true);
+  const timer = setTimeout(go, 1200);
+}
+
+/* ---------- [B] double-down ---------- */
+// Session accuracy so far, over genuinely graded MCQ answers (correct/wrong —
+// "learned" lock-ins aren't a first-attempt pick and don't count toward this).
+function sessionAccuracySoFar() {
+  const graded = state.deck.filter((d) => d.status === "correct" || d.status === "wrong");
+  return { acc: graded.length ? graded.filter((d) => d.status === "correct").length / graded.length : 0, n: graded.length };
+}
+// Bonus XP earned so far this session (everything beyond the flat 10/correct) —
+// the same definition finish() uses, so "your bonus rides on this" is honest.
+function bonusXpSoFar() {
+  const correctSoFar = state.deck.filter((d) => d.status === "correct").length;
+  return Math.max(0, state.sessionXp - correctSoFar * 10);
+}
+
 function renderQuestion() {
   const idx = state.queue[state.cursor];
   const item = state.deck[idx];
@@ -1406,6 +1556,14 @@ function renderQuestion() {
   if (item.status === "skipped" && !item.taught) { renderTeach(item); return; }
   const testView = item.status === "skipped" && item.taught;                    // A5 lock-it-in test
   const retryView = item.status === "wrong" && item.retry && !item.retried;     // A1 redemption re-test
+  // [B] boss staging: 1.2s interstitial the first time the cursor reaches a boss
+  // item; body.boss-mode stays on for the whole boss zone, off outside it.
+  document.body.classList.toggle("boss-mode", !!item.boss && !testView && !retryView);
+  if (item.boss && !testView && !retryView && !state._bossIntroShown) {
+    state._bossIntroShown = true;
+    renderBossIntro(state.deck.filter((d) => d.boss).length, () => renderQuestion());
+    return;
+  }
   if (retryView) { shuffle(item.opts); item.optOrder = item.opts.map((o) => o.src); }  // fresh arrangement
   const opts = item.opts;
   state.inQuiz = true; state.answered = false; state.awaitingConf = false; state.curOptsLen = opts.length;
@@ -1421,27 +1579,38 @@ function renderQuestion() {
   const diffChip = pd != null && pd >= 0.55
     ? `<span class="diff d-personal">hard for you</span>`
     : `<span class="diff d-${esc(q.difficulty)}">${esc(q.difficulty)}</span>`;
-  const nextMult = state.combo + 1 >= 5 ? 3 : state.combo + 1 >= 3 ? 2 : 1;
-  const comboChip = !testView && !retryView && state.combo >= 2
-    ? `<span class="combo">${ICON("flame", "i-flame")} ${state.combo} combo &middot; ${nextMult}&times; XP</span>` : "";
+  // [B] combo HUD slot lives in .qhead (reserved width), not inline in .qtext.
+  const comboSlotHTML = !testView && !retryView ? comboChipHTML(state.combo) : "";
+  // [B] double-down: one-time offer before the LAST fresh question of a quiz deck.
+  if (!state.hard && item.status === "pending" && isLastInQueue() && state._doubleDown == null) {
+    const { acc, n } = sessionAccuracySoFar();
+    if (n >= 3 && acc >= 0.7) { state._doubleDown = "offered"; state._doubleDownIdx = idx; state._doubleDownWager = bonusXpSoFar(); }
+  }
+  const ddBar = (state._doubleDown === "offered" && state._doubleDownIdx === idx && state._doubleDownWager > 0)
+    ? `<div class="dd-bar" id="ddBar">Double down &mdash; your bonus XP (<b>${state._doubleDownWager}</b>) rides on this one.
+         <button class="dd-yes" id="ddYes">Double down <kbd>D</kbd></button>
+         <button class="dd-no" id="ddNo">No thanks</button>
+       </div>` : "";
   // Prefer the *Md display variant per option (src 0 = correct, i+1 = distractors[i]).
   // [A2] flip items carry their own option texts (questions), each with its md.
   const optText = (o) => item.flip ? (o.md || o.t)
     : o.src === 0 ? (q.correctMd || q.correct)
     : (q.distractorsMd && q.distractorsMd[o.src - 1]) || o.t;
   // [A2] flip prompt: the ANSWER is shown; the options are candidate questions.
+  // (Combo lives in the [B] #comboSlot in .qhead, not inline in .qtext.)
   const prompt = item.flip
     ? `<div class="flip-eyebrow">Which question does this answer?</div>
-       <div class="qtext flip-item">${qInline(q.correctMd || q.correct)} ${chip}${comboChip}</div>`
-    : `<div class="qtext">${qInline(q.questionMd || q.question)} ${chip}${comboChip}</div>`;
+       <div class="qtext flip-item">${qInline(q.correctMd || q.correct)} ${chip}</div>`
+    : `<div class="qtext">${qInline(q.questionMd || q.question)} ${chip}</div>`;
   const skippable = item.status === "pending" && !item.flip && !state.prime;   // [A2] no skip-teach on flips/prime
   app.innerHTML = `
     <div class="qhead">
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)} ${diffChip}</span>
-      <span class="qright"><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dotsHTML(idx)}</span><span class="qnum">${deckProgressCounter()}</span></span>
+      <span class="qright"><span class="combo-slot" id="comboSlot">${comboSlotHTML}</span><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dotsHTML(idx)}</span><span class="qnum">${deckProgressCounter()}</span></span>
     </div>
     ${bossBanner}
     ${prompt}
+    ${ddBar}
     ${gated ? `<button class="showopts" id="showOptsBtn">Show options <kbd>Space</kbd></button>` : ""}
     <div class="options${gated ? " gated" : ""}">
       ${opts.map((o, i) => `<button class="opt" data-i="${i}"><kbd>${i + 1}</kbd>${qInline(optText(o))}<span class="mark"></span></button>`).join("")}
@@ -1455,6 +1624,10 @@ function renderQuestion() {
     b.addEventListener("click", () => answer(parseInt(b.dataset.i, 10))));
   if (gated) el("#showOptsBtn").addEventListener("click", revealHardOptions);
   if (skippable) el("#skipBtn").addEventListener("click", skipQuestion);
+  if (ddBar) {
+    el("#ddYes").addEventListener("click", () => { state._doubleDown = "accepted"; el("#ddBar")?.remove(); announce("Double down accepted."); });
+    el("#ddNo").addEventListener("click", () => { state._doubleDown = "declined"; el("#ddBar")?.remove(); });
+  }
   el("#nextBtn").addEventListener("click", nextQuestion);
   el("#qpauseBtn").addEventListener("click", () => openPauseSheet(null));
   app.focus({ preventScroll: true });              // keep keyboard + SR context on the new question
@@ -1500,6 +1673,7 @@ function clozeHTML(text, concepts) {
 function renderTeach(item) {
   const { q } = item;
   const idx = state.queue[state.cursor];
+  document.body.classList.remove("boss-mode");     // [B] teach card is never a boss screen
   state.inQuiz = true; state.answered = false; state.awaitingConf = false; state.curOptsLen = 0;
   state.qShownAt = performance.now();
   const hasCloze = (q.concepts || []).length > 0;
@@ -1566,9 +1740,10 @@ function pickConfidence(conf) {
 function gradeAnswer(i, conf) {
   if (state.answered) return;
   state.answered = true;
-  const item = state.deck[state.queue[state.cursor]];
+  const idx = state.queue[state.cursor];
+  const item = state.deck[idx];
   item.ms = Math.max(0, Math.round(performance.now() - (state.qShownAt || performance.now())));
-  const { opts } = item;
+  const { opts, q } = item;
   const testMode = item.status === "skipped";
   const retryMode = item.status === "wrong" && item.retry && !item.retried;
   const right = opts[i].ok;
@@ -1587,6 +1762,16 @@ function gradeAnswer(i, conf) {
     const csrc = distractorSource(item.q, opts[i]);
     if (csrc && csrc.module !== item.q.module) item.confusion = [item.q.module, csrc.module].sort().join("|");
   }
+  // [B] time capsules: this question was buried on a past flawless run and its
+  // 60-day due date has arrived. Clear the flag either way; only a correct
+  // answer earns the "it kept" moment (queued, played from finish()).
+  const rv0 = (state.progress.reviews || {})[q.id];
+  if (rv0 && rv0.capsule && todayISO() >= rv0.due) {
+    const plantedOn = rv0.capsule;
+    delete rv0.capsule;
+    if (right) state._capsuleReturns.push({ plantedOn, moduleName: q.moduleName });
+  }
+
   if (state.prime) {
     // [A2] prime pretest: reveal-only grading — no XP, combo, or redemption loop.
     item.status = right ? "correct" : "wrong";
@@ -1604,22 +1789,41 @@ function gradeAnswer(i, conf) {
     if (right) {
       item.status = "correct";
       state.combo += 1; state.maxCombo = Math.max(state.maxCombo, state.combo);
-      const gain = Math.round(10 * comboMult() * (item.boss ? 2 : 1) * (state.hard ? 1.5 : 1));         // A3 recall pays 1.5x
+      let gain = Math.round(10 * comboMult() * (item.boss ? 2 : 1) * (state.hard ? 1.5 : 1));            // A3 recall pays 1.5x
+      // [B] comeback engine: a correct answer after >=2 consecutive misses recovers.
+      const recovered = (state._missStreak || 0) >= 2;
+      if (recovered) { gain += 5; item._recovered = true; }
       state.sessionXp += gain;
       floatXP(gain, optBtns[i]);
+      state._missStreak = 0;
+      state._answerLog.push("correct");
       if (state.combo === 3 || state.combo === 5 || state.combo >= 7) { sfx.combo(); ripple(optBtns[i]); }
+      else if (recovered) sfx.recovered();
       else sfx.correct();
     } else {
       item.status = "wrong"; item.picked = i; item.pickedOpt = opts[i];
       state.combo = 0; sfx.wrong();
+      state._missStreak = (state._missStreak || 0) + 1;
+      state._maxMissStreak = Math.max(state._maxMissStreak || 0, state._missStreak);
+      state._answerLog.push("wrong");
       if (!item.retry) {                             // A1 miss loop: one in-session redemption re-test
         item.retry = true;
         const at = Math.min(state.cursor + 3, state.queue.length);
         state.queue.splice(at, 0, state.queue[state.cursor]);
       }
     }
+    refreshComboSlot();                              // [B] update the HUD slot immediately, not next render
   }
+
+  // [B] double-down payout — applies once, to the exact item it was wagered on.
+  if (state._doubleDown === "accepted" && idx === state._doubleDownIdx && !item._ddApplied) {
+    item._ddApplied = true;
+    if (right) { const amt = state._doubleDownWager; state.sessionXp += amt; item._ddOutcome = { win: true, amount: amt }; }
+    else { const amt = Math.min(state._doubleDownWager, state.sessionXp); state.sessionXp -= amt; item._ddOutcome = { win: false, amount: amt }; }
+  }
+
   const sk = el("#skipBtn"); if (sk) sk.remove();
+  const ddBar = el("#ddBar"); if (ddBar) ddBar.remove();
   buildReveal(item, i, right, { testMode, retryMode, conf });
   el("#nextBtn").classList.add("show");
   saveDeckSnapshot();
@@ -1640,7 +1844,11 @@ function buildReveal(item, pickIdx, right, ctx) {
       <button class="deeper prov-read" data-mod="${esc(src.module)}" data-src="${esc(src.sourceFile || "README.md")}" data-name="${esc(src.moduleName)}">Read that instead &rarr;</button></div>`;
   }
   rev.className = "reveal show" + (hyper ? " hyper" : "");
-  rev.innerHTML = `${hyper ? `<div class="hyper-lead">High-confidence miss &mdash; worth a careful read.</div>` : ""}<b>Full answer:</b> ${qInline(q.answerFullMd || q.answerFull)}${prov}
+  // [B] comeback + double-down outcome chips, above the usual reveal content.
+  const recoveredChip = item._recovered ? `<span class="recovered-chip">Recovered.</span>` : "";
+  const ddNote = item._ddOutcome
+    ? `<div class="dd-outcome ${item._ddOutcome.win ? "win" : "lose"}">Double-down ${item._ddOutcome.win ? "paid" : "lost"}: ${item._ddOutcome.win ? "+" : "−"}${item._ddOutcome.amount}</div>` : "";
+  rev.innerHTML = `${recoveredChip}${ddNote}${hyper ? `<div class="hyper-lead">High-confidence miss &mdash; worth a careful read.</div>` : ""}<b>Full answer:</b> ${qInline(q.answerFullMd || q.answerFull)}${prov}
     <button class="deeper" id="deeperBtn">Dive deeper into ${esc(q.moduleName)} &rarr;</button>`;
   // [A2] explain-back on any wrong reveal (first attempt and failed redemption);
   // not on flips (prompt is the answer already) and not in prime (nothing counts).
@@ -1679,17 +1887,20 @@ function renderCard() {
   const idx = state.queue[state.cursor];
   const item = state.deck[idx];
   const { q } = item;
+  document.body.classList.remove("boss-mode");     // [B] flashcards never boss-stage
   state.inQuiz = true; state.answered = false; state.curOptsLen = 0;
   state.qShownAt = performance.now();
   const DONE = ["correct", "wrong", "learned"];
   const dots = state.deck.map((it, i) =>
     `<span class="dot ${DONE.includes(it.status) ? "done" : ""} ${i === idx ? "cur" : ""}"></span>`).join("");
+  // [B] recall-streak chip — accumulated Got-it/Easy grades in a row this deck.
+  const streakChip = state._cardStreak >= 2 ? ` <span class="card-streak">${state._cardStreak} in a row</span>` : "";
   app.innerHTML = `
     <div class="qhead">
       <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)}</span>
       <span class="qright"><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Card ${state.cursor + 1} of ${state.queue.length}">${dots}</span><span class="qnum">${state.cursor + 1}/${state.queue.length}</span></span>
     </div>
-    <div class="flash-label">Flashcard &middot; recall it, then grade yourself</div>
+    <div class="flash-label">Flashcard &middot; recall it, then grade yourself${streakChip}</div>
     <div class="qtext">${esc(q.question)}</div>
     <div class="reveal" id="reveal"></div>
     <div class="qactions" id="cardActions">
@@ -1712,6 +1923,7 @@ function revealCard() {
   rev.insertAdjacentHTML("beforeend", explainBackHTML(item));   // [A2] explain-back on card reveal
   wireExplainBack(rev, item);
   rev.classList.add("show");
+  if (!REDUCED()) rev.classList.add("card-flip");  // [B] 3D flip; instant swap when reduced-motion
   announce(`Answer: ${q.answerFull}`);
   el("#deeperBtn").addEventListener("click", () => openReaderPath(`${q.module}/${q.sourceFile || "README.md"}`, q.moduleName));
   // A4: three-way self-grade folds into the confidence signal — Hard/Easy both
@@ -1732,8 +1944,16 @@ function gradeCard(got, conf) {
   if (!state.answered) return;
   const item = state.deck[state.queue[state.cursor]];
   item.ms = Math.max(0, Math.round(performance.now() - (state.qShownAt || performance.now())));
-  if (got) { item.status = "correct"; item.conf = conf || null; state.sessionXp += 10; sfx.correct(); floatXP(10, el("#easyBtn") || el("#hardBtn")); }
-  else { item.status = "wrong"; sfx.wrong(); }
+  if (got) {
+    item.status = "correct"; item.conf = conf || null; state.sessionXp += 10;
+    // [B] recall-streak: sfx.combo() at 3/5/7+, matching the quiz-mode milestone feel.
+    state._cardStreak = (state._cardStreak || 0) + 1;
+    if (state._cardStreak === 3 || state._cardStreak === 5 || state._cardStreak >= 7) sfx.combo();
+    else sfx.correct();
+    floatXP(10, el("#easyBtn") || el("#hardBtn"));
+  } else {
+    item.status = "wrong"; state._cardStreak = 0; sfx.wrong();
+  }
   state.cursor++;
   if (state.cursor < state.queue.length) renderCard();
   else finish();
@@ -1742,6 +1962,7 @@ function gradeCard(got, conf) {
 
 async function finish(opts = {}) {
   state.inQuiz = false;
+  document.body.classList.remove("boss-mode");     // [B] the deck is ending; drop the boss dim
   clearDeckSnapshot();                             // the deck is resolved; no resume
   app.innerHTML = `<div class="loading">Saving your progress&hellip;</div>`;
   const DONE = ["correct", "wrong", "learned"];
@@ -1752,23 +1973,60 @@ async function finish(opts = {}) {
   const correct = recorded.filter((d) => d.status === "correct").length;
   const learned = recorded.filter((d) => d.status === "learned").length;
   const bonusXp = Math.max(0, state.sessionXp - correct * 10);
+  // [B] comeback engine: a deep miss streak (>=3) recovered by the last 5 in a row.
+  const last5 = (state._answerLog || []).slice(-5);
+  const comeback = (state._maxMissStreak || 0) >= 3 && last5.length === 5 && last5.every((x) => x === "correct");
   const results = recorded.map((d) => ({ id: d.q.id, section: d.q.section, module: d.q.module, status: d.status, ms: d.ms || 0, conf: d.conf || null, confusion: d.confusion }));   // [A2] confusion pair
   const durationSec = Math.max(0, Math.round((Date.now() - (state.startedAt || Date.now())) / 1000));
   const pre = progressSnapshot();                  // for the moments engine (before the save)
-  const { xp, freezeUsed } = saveSessionLocal({ date: todayISO(), section: state.section, results, bonusXp, durationSec });
-  await queueMoments(pre, progressSnapshot());     // celebrate milestones before the results
-  refreshStats();
+  const { xp, freezeUsed } = saveSessionLocal({ date: todayISO(), section: state.section, results, bonusXp, durationSec, comeback });
+  const post = progressSnapshot();                 // (after the save)
+  // [B] time-capsule returns: correct answers on questions whose 60-day capsule
+  // came due this session, celebrated before the general milestone moments.
+  for (const cr of state._capsuleReturns || [])
+    await moment({ tier: "capsule", icon: ICON("clock"), title: "Capsule recovered", sub: `You planted this on ${fmtDate(cr.plantedOn)}. It kept.`, play: () => sfx.chime() });
+  await queueMoments(pre, post);                   // celebrate milestones before the results
   const pct = total ? Math.round((correct / total) * 100) : 0;
   const flawless = pct === 100 && total > 0;
+  // [B] bury a new time capsule on a flawless, full-length, non-flash/non-hard blitz.
+  if (flawless && total === QUESTIONS_PER_BLITZ && !opts.early && state.mode !== "flash" && !state.hard
+      && state.section !== "review" && state.section !== "weakspots" && !state.deck.some((d) => d.retry)) {
+    maybeBuryCapsule();
+    if (state._capsuleBuried) {
+      await moment({ tier: "capsule", icon: ICON("clock"), title: "Time capsule buried", sub: `${state._capsuleBuried.moduleName}. Returns ${fmtDate(state._capsuleBuried.due)}.`, play: () => sfx.chime() });
+    }
+  }
+  refreshStats();
   if (flawless) { confetti(); sfx.finish(); }
   const cheer = flawless ? "Flawless! " : pct >= 70 ? "Strong work. " : pct >= 40 ? "Good progress. " : "Every rep counts. ";
   announce(`Blitz finished. ${correct} of ${total} correct. ${xp} XP earned.`);
   const freezeNote = freezeUsed
     ? `<div class="freeze-saved">${ICON("snow", "i-snow")} Streak saved &mdash; 1 freeze used (${state.progress.freezes || 0} left)</div>` : "";
   const backupNote = backupNudgeHTML();
+  // [B] boss/comeback badges alongside the existing learned/combo ones.
+  const bossItems = recorded.filter((d) => d.boss);
+  const bossCorrect = bossItems.filter((d) => d.status === "correct").length;
   const extraBadges =
     (learned ? `<div class="badge"><div class="n">${learned}</div><div class="l">Learned</div></div>` : "") +
-    (state.maxCombo >= 2 ? `<div class="badge"><div class="n">${state.maxCombo}&times;</div><div class="l">Best combo</div></div>` : "");
+    (state.maxCombo >= 2 ? `<div class="badge"><div class="n">${state.maxCombo}&times;</div><div class="l">Best combo</div></div>` : "") +
+    (bossItems.length ? `<div class="badge"><div class="n">${bossCorrect}/${bossItems.length}</div><div class="l">Boss cleared</div></div>` : "") +
+    (comeback ? `<div class="badge"><div class="n">&#8635;</div><div class="l">Comeback</div></div>` : "");
+  // [B] results reward moments: daily goal ring, elapsed stopwatch, streak-advance line.
+  const goalRemain = Math.max(0, DAILY_XP_GOAL - post.todaysXp);
+  const goalLineTxt = post.todaysXp >= DAILY_XP_GOAL
+    ? `Daily goal: complete &mdash; ${post.todaysXp} XP today`
+    : `Daily goal: ${post.todaysXp}/${DAILY_XP_GOAL} &mdash; ${goalRemain} to go`;
+  const mm = Math.floor(durationSec / 60), ss = durationSec % 60;
+  const elapsedStr = `${mm}:${String(ss).padStart(2, "0")}`;
+  const fastChip = durationSec > 0 && durationSec < 300 ? `<span class="fast-chip">under 5 minutes</span>` : "";
+  const streakAdvanceLine = post.streak > pre.streak
+    ? `<p class="streak-advance">+${post.streak - pre.streak} day &mdash; ${post.streak}-day streak</p>` : "";
+  const resultsMeta = `
+    <div class="results-meta">
+      <div class="goal-line">${goalRing()}<span>${goalLineTxt}</span></div>
+      <div class="elapsed-line">Finished in <b>${elapsedStr}</b> ${fastChip}</div>
+    </div>
+    ${streakAdvanceLine}`;
   // Post-round review: misses split into Redeemed (retry-correct) and Still
   // shaky, plus questions learned from a skip. Each is a <details> — summary is
   // the correct sentence, expanding reveals the full answer (+ honest provenance
@@ -1812,6 +2070,7 @@ async function finish(opts = {}) {
         <div class="scorering">${correct}<small>/${total}</small></div>
       </div>
       <p class="sub">${cheer}${pct}% known${learned ? ` &middot; ${learned} learned` : ""}</p>
+      ${resultsMeta}
       ${freezeNote}${backupNote}
       <div class="badges">
         <div class="badge"><div class="n" id="xpCount">+0</div><div class="l">XP</div></div>
@@ -1891,8 +2150,15 @@ function moment({ tier = "", title, sub = "", icon = "" }) {
 // sequentially. Later phases add more moment types; the diff shape stays.
 async function queueMoments(pre, post) {
   const list = [];
-  if (post.level > pre.level)
-    list.push({ tier: "level", icon: ICON("bolt"), title: `Level ${post.level}`, sub: "New level reached.", play: () => sfx.levelup() });
+  if (post.level > pre.level) {
+    // [B] career ladder: crossing a title band gets a bigger celebration than a plain level-up.
+    const preTitle = titleForLevel(pre.level), postTitle = titleForLevel(post.level);
+    if (postTitle !== preTitle) {
+      list.push({ tier: "title", icon: ICON("bolt"), title: `Level ${post.level} — ${postTitle}`, sub: `You made ${postTitle}.`, play: () => { sfx.levelup(); confetti(); } });
+    } else {
+      list.push({ tier: "level", icon: ICON("bolt"), title: `Level ${post.level}`, sub: "New level reached.", play: () => sfx.levelup() });
+    }
+  }
   let firstGold = post.anyGold && !pre.anyGold;
   for (const s of Object.keys(post.tiers)) {
     const before = TIER_RANK[pre.tiers[s]] || 0, after = TIER_RANK[post.tiers[s]] || 0;
@@ -1916,6 +2182,35 @@ async function queueMoments(pre, post) {
     m.play?.();
     await moment(m);
   }
+}
+
+/* ---------- [B] time capsules ---------- */
+const fmtDate = (iso) => new Date(iso + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+
+// On a flawless (10/10, no redemptions) quiz-mode blitz, bury the session's
+// hardest question 60 days out: due/interval jump ahead and rv.capsule marks
+// it. Guarded to at most one new capsule per day. Sets state._capsuleBuried
+// for finish() to celebrate; returns nothing (reviews are mutated in place —
+// saveSessionLocal has already persisted them by the time this runs).
+function maybeBuryCapsule() {
+  const today = todayISO();
+  const reviews = state.progress.reviews || {};
+  if (Object.values(reviews).some((rv) => rv.capsule === today)) return;   // 1/day guard
+  if (!state.deck.length) return;
+  const medMs = state._medMs != null ? state._medMs : medianReviewMs();
+  const scored = state.deck.map((d) => ({ d, pd: personalDifficulty(d.q, reviews[d.q.id], medMs) }));
+  const best = scored.filter((s) => s.pd != null).sort((a, b) => b.pd - a.pd)[0];
+  const pick = (best ? best.d : state.deck[Math.floor(Math.random() * state.deck.length)]).q;
+  const rv = reviews[pick.id] || { ease: 2.5, interval: 0, reps: 0, lapses: 0 };
+  rv.section = pick.section; rv.module = pick.module;
+  rv.interval = 60;
+  const due = new Date(today + "T00:00:00"); due.setDate(due.getDate() + 60);
+  rv.due = due.toLocaleDateString("en-CA");
+  rv.capsule = today;
+  reviews[pick.id] = rv;
+  state.progress.reviews = reviews;
+  localStorage.setItem("sd_progress", JSON.stringify(state.progress));
+  state._capsuleBuried = { moduleName: pick.moduleName, due: rv.due };
 }
 
 /* ---------- progress durability ---------- */
@@ -3741,12 +4036,529 @@ function closeReader() {
   if (location.hash.startsWith("#/reader")) history.replaceState(null, "", state.underHash || "#/home");
 }
 
+/* ============================================================================
+   ---------- [D] Coach ----------
+   Everything below, up to the matching end marker, is the in-app coach
+   (Phase D): daily pick, the message bank + true-specifics voice, the
+   reboarding protocol, quest generation, the Friday Debrief, and the same-day
+   streak nudge. Persists to `sd_coach` (additive to `sd_progress`). Touches
+   the rest of app.js only via small blocks marked with a [D] comment tag
+   inside boot(), dispatch(), and renderHome() — everything else here is new,
+   self-contained code to keep this phase's merge surface small.
+   ========================================================================== */
+
+/* ---------- [D] date/time helpers ---------- */
+function toISO(d) { return d.toLocaleDateString("en-CA"); }
+function isoAdd(d, days) { const n = new Date(d); n.setDate(n.getDate() + days); return n; }
+function daysBetweenISO(aISO, bISO) {
+  return Math.round((new Date(bISO + "T00:00:00") - new Date(aISO + "T00:00:00")) / 86400000);
+}
+// Monday of the week containing `iso` (Date object).
+function weekStart(iso) {
+  const d = new Date(iso + "T00:00:00");
+  const day = d.getDay();                          // 0 Sun .. 6 Sat
+  return isoAdd(d, day === 0 ? -6 : 1 - day);
+}
+// ISO date of the most recent Friday on/before `iso` — the Debrief's week key.
+function mostRecentFriday(iso) {
+  const d = new Date(iso + "T00:00:00");
+  return toISO(isoAdd(d, -((d.getDay() + 2) % 7)));
+}
+function dayOfYear(iso) {
+  const d = new Date(iso + "T00:00:00");
+  return Math.floor((d - new Date(d.getFullYear(), 0, 0)) / 86400000);
+}
+function ordinal(n) {
+  const s = ["th", "st", "nd", "rd"], v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
+}
+function fmtDateShort(iso) { return `the ${ordinal(new Date(iso + "T00:00:00").getDate())}`; }
+// QA seam twin of todayISO(): a ?qa_time=HH:MM URL param overrides "now" for the
+// same-day nudge's local-time gate. Only honored when present and well-formed.
+function nowHM() {
+  const qp = new URLSearchParams(location.search).get("qa_time");
+  if (qp && /^\d{2}:\d{2}$/.test(qp)) return qp;
+  const d = new Date();
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+
+/* ---------- [D] coach memory (sd_coach) ---------- */
+// Additive to sd_progress. Shape: lastTemplates (cap 3, message-bank variety),
+// observations [{date, note}] (cap 12, general audit trail), lastComebackDate,
+// praisedSections {section: dateISO} (once-per-week-per-section gate for the
+// accuracy-delta observation), todayTemplate {date, id} (same-day stability),
+// lastDebrief (Friday key of the last-opened debrief), quests, nudgedOn.
+function loadCoach() {
+  let c = null;
+  try { c = JSON.parse(localStorage.getItem("sd_coach")); } catch { /* corrupt -> reseed */ }
+  return (c && typeof c === "object") ? c : {
+    lastTemplates: [], observations: [], lastComebackDate: null, praisedSections: {},
+    todayTemplate: null, lastDebrief: null, quests: [], nudgedOn: null,
+  };
+}
+function saveCoach(c) { localStorage.setItem("sd_coach", JSON.stringify(c)); }
+function pushObservation(coach, note) {
+  coach.observations = [{ date: todayISO(), note }, ...(coach.observations || [])].slice(0, 12);
+}
+function recentlyPraised(coach, section) {
+  const d = coach.praisedSections && coach.praisedSections[section];
+  return !!d && daysBetweenISO(d, todayISO()) < 7;
+}
+
+/* ---------- [D] daily pick — port of the old pick_today.py logic ---------- */
+// Priority: (a) never-played sections, alphabetical rotation by day; (b) lowest
+// accuracy among sections with seen >= 5; (c) least-seen. Never repeats
+// yesterday's section unless it is the only candidate left, in which case the
+// forced repeat is tagged why:"rotation" instead of whatever tier chose it.
+function coachPick() {
+  const avail = Object.keys((state.index && state.index.sections) || {}).sort();
+  if (!avail.length) return { section: null, why: "new" };
+  const seenMap = state.progress.sections || {};
+  const history = state.progress.history || [];
+  const lastSection = history.length ? history[history.length - 1].section : null;
+  const seen = (s) => (seenMap[s] && seenMap[s].seen) || 0;
+  const acc = (s) => (seenMap[s] && seenMap[s].seen ? seenMap[s].correct / seenMap[s].seen : null);
+  const day = dayOfYear(todayISO());
+
+  const rank = (pool, why) => {
+    if (!pool.length) return null;
+    let chosen;
+    if (why === "new") chosen = pool.slice().sort()[day % pool.length];
+    else if (why === "weak") chosen = pool.slice().sort((a, b) => acc(a) - acc(b) || seen(a) - seen(b))[0];
+    else chosen = pool.slice().sort((a, b) => seen(a) - seen(b) || a.localeCompare(b))[0];
+    return { section: chosen, why };
+  };
+  const tryPick = (excludeLast) => {
+    const base = excludeLast && lastSection ? avail.filter((s) => s !== lastSection) : avail;
+    if (!base.length) return null;
+    const unplayed = base.filter((s) => seen(s) === 0);
+    if (unplayed.length) return rank(unplayed, "new");
+    const weakPool = base.filter((s) => seen(s) >= 5);
+    if (weakPool.length) return rank(weakPool, "weak");
+    return rank(base, "least");
+  };
+
+  let pick = tryPick(true) || tryPick(false);
+  if (pick && pick.section === lastSection) pick = { section: pick.section, why: "rotation" };
+  return pick || { section: avail[0], why: "least" };
+}
+
+/* ---------- [D] true specifics computed from live progress ---------- */
+// Cumulative accuracy for a section using only direct-blitz history entries up
+// to and including dateISO (review/weak-spot sessions tag section as
+// "review"/"weakspots" and mix content sections, so they're not attributable
+// per-section here — an accepted approximation, same one the Debrief's
+// per-section deltas make).
+function accAsOf(section, dateISO) {
+  const rows = (state.progress.history || []).filter((h) => h.section === section && h.date <= dateISO);
+  const answered = rows.reduce((s, h) => s + (h.answered || 0), 0);
+  const correct = rows.reduce((s, h) => s + (h.correct || 0), 0);
+  return answered ? { acc: correct / answered, seen: answered } : null;
+}
+// >=10-point, 7-day accuracy climb for a section, or null if there isn't a
+// large-enough, clean-enough signal to say something true about it.
+function weeklyAccDelta(section) {
+  const today = todayISO();
+  const cutoffISO = toISO(isoAdd(new Date(today + "T00:00:00"), -7));
+  const now = accAsOf(section, today), then = accAsOf(section, cutoffISO);
+  if (!now || !then || then.seen < 5 || now.seen - then.seen < 3) return null;
+  return { deltaPts: Math.round((now.acc - then.acc) * 100), sinceLabel: fmtDateShort(cutoffISO) };
+}
+// Consecutive days (ending today if already met, else yesterday) at/above the
+// daily XP goal.
+function goalStreakDays() {
+  const map = {};
+  for (const h of state.progress.history || []) map[h.date] = (map[h.date] || 0) + (h.xp || 0);
+  const today = todayISO();
+  let d = new Date(today + "T00:00:00");
+  if (!(map[today] >= DAILY_XP_GOAL)) d = isoAdd(d, -1);
+  let count = 0;
+  for (let guard = 0; guard < 3650; guard++) {
+    const iso = toISO(d);
+    if ((map[iso] || 0) < DAILY_XP_GOAL) break;
+    count++; d = isoAdd(d, -1);
+  }
+  return count;
+}
+// The day right after a >2-day gap ends (compares the two most recent history
+// entries) — purely derived from history, so it needs no hook elsewhere.
+function detectComeback() {
+  const h = state.progress.history || [];
+  if (h.length < 2) return null;
+  const last = h[h.length - 1], prev = h[h.length - 2];
+  const gap = daysBetweenISO(prev.date, last.date);
+  const sinceLast = daysBetweenISO(last.date, todayISO());
+  if (gap > 2 && sinceLast === 1) {
+    return { gapDays: gap, yesterdayPct: last.answered ? Math.round((last.correct / last.answered) * 100) : null, date: last.date };
+  }
+  return null;
+}
+// Today, before playing: gap since lastPlayed > 2 days -> reboarding protocol.
+function reboardingInfo() {
+  const p = state.progress;
+  if (!p.lastPlayed) return null;
+  const gap = daysBetweenISO(p.lastPlayed, todayISO());
+  return gap > 2 ? { days: gap, dueCount: dueReviews().length } : null;
+}
+
+/* ---------- [D] the voice: ~30 message templates, true specifics only ---------- */
+// Selection: build the day's context, find the highest-priority group with an
+// eligible template, then seed-pick within that group (mulberry32(cyrb53(date
+// + streak))) so the choice is stable across reloads the same day but varies
+// day to day. Never repeats a template in sd_coach.lastTemplates when another
+// eligible one exists. NO exclamation marks; terse, specific, remembers.
+const WHY_CHIP = { new: "new territory", weak: "weak spot", least: "least practiced", rotation: "rotation" };
+const COACH_PRIORITY = ["firstEver", "comeback", "dueHigh", "streakMilestone", "goalStreak", "accDelta", "weekend", "byWhy"];
+const COACH_LINES = [
+  { id: "first1", group: "firstEver", when: (c) => c.isFirstEver, text: (c) => `First one. Ten questions, five minutes — start with ${label(c.section)}.` },
+  { id: "first2", group: "firstEver", when: (c) => c.isFirstEver, text: () => `Nothing recorded yet. No baseline to protect, so just answer.` },
+  { id: "first3", group: "firstEver", when: (c) => c.isFirstEver, text: (c) => `Day one. ${label(c.section)} is as good a place to start as any.` },
+
+  { id: "cb1", group: "comeback", when: (c) => !!c.comeback, text: (c) => `Back ${c.comeback.gapDays} days now. Yesterday: ${c.comeback.yesterdayPct}% cold. Memory held better than you feared.` },
+  { id: "cb2", group: "comeback", when: (c) => !!c.comeback, text: (c) => `${c.comeback.gapDays} days off, then ${c.comeback.yesterdayPct}% on the first try back. The spaced reviews did their job.` },
+  { id: "cb3", group: "comeback", when: (c) => !!c.comeback, text: (c) => `You came back after ${c.comeback.gapDays} days and still landed ${c.comeback.yesterdayPct}%. Keep going.` },
+
+  { id: "due1", group: "dueHigh", when: (c) => c.due >= 15, text: (c) => `${c.due} reviews stacked up. Clear the oldest ten before they compound further.` },
+  { id: "due2", group: "dueHigh", when: (c) => c.due >= 15, text: (c) => `${c.due} due for review. That backlog doesn't shrink on its own.` },
+  { id: "due3", group: "dueHigh", when: (c) => c.due >= 15, text: (c) => `${c.due} questions waiting on review. Ten minutes there clears most of it.` },
+
+  { id: "sm1", group: "streakMilestone", when: (c) => c.freezeAway, text: (c) => `Day ${c.streak} — one more for a freeze token.` },
+  { id: "sm2", group: "streakMilestone", when: (c) => c.milesAway === 1, text: (c) => `One more day puts you at a ${c.nextMile}-day streak.` },
+  { id: "sm3", group: "streakMilestone", when: (c) => c.milesAway != null && c.milesAway > 1 && c.milesAway <= 2, text: (c) => `${c.milesAway} days from a ${c.nextMile}-day streak.` },
+
+  { id: "gs1", group: "goalStreak", when: (c) => c.goalStreak >= 3, text: (c) => `${c.goalStreak} straight days at the XP goal. ${label(c.section)} keeps the run going.` },
+  { id: "gs2", group: "goalStreak", when: (c) => c.goalStreak >= 3, text: (c) => `${c.goalStreak} days hitting goal in a row. Numbers don't lie.` },
+
+  { id: "ad1", group: "accDelta", when: (c) => !!c.accDelta, text: (c) => `Your ${label(c.accDelta.section)} accuracy climbed ${c.accDelta.deltaPts} points since ${c.accDelta.sinceLabel}.` },
+  { id: "ad2", group: "accDelta", when: (c) => !!c.accDelta, text: (c) => `${label(c.accDelta.section)} is up ${c.accDelta.deltaPts} points since ${c.accDelta.sinceLabel}. That's real progress.` },
+
+  { id: "we1", group: "weekend", when: (c) => c.isWeekend, text: (c) => `Weekend or not, ten questions still count — ${label(c.section)}.` },
+  { id: "we2", group: "weekend", when: (c) => c.isWeekend, text: (c) => `Weekend pace is fine. ${label(c.section)}, whenever you get to it.` },
+  { id: "we3", group: "weekend", when: (c) => c.isWeekend, text: (c) => `No rush today. ${label(c.section)} will still be there in five minutes.` },
+
+  { id: "new1", group: "byWhy", why: "new", when: () => true, text: (c) => `Untouched section. ${label(c.section)} has nothing recorded yet.` },
+  { id: "new2", group: "byWhy", why: "new", when: () => true, text: (c) => `${label(c.section)} hasn't been touched. Today's as good a day as any.` },
+  { id: "new3", group: "byWhy", why: "new", when: () => true, text: (c) => `Fresh ground: ${label(c.section)}. No baseline yet, so anything right is a start.` },
+  { id: "new4", group: "byWhy", why: "new", when: () => true, text: (c) => `${label(c.section)} is new territory. Ten questions sets the first baseline.` },
+
+  { id: "wk1", group: "byWhy", why: "weak", when: () => true, text: (c) => `${label(c.section)} sits at ${c.acc}% over ${c.seen} questions — the softest spot right now.` },
+  { id: "wk2", group: "byWhy", why: "weak", when: () => true, text: (c) => `Lowest accuracy: ${label(c.section)} at ${c.acc}%. Ten more questions moves that number.` },
+  { id: "wk3", group: "byWhy", why: "weak", when: () => true, text: (c) => `${label(c.section)} is dragging at ${c.acc}%. Time to close the gap.` },
+  { id: "wk4", group: "byWhy", why: "weak", when: () => true, text: (c) => `${c.acc}% in ${label(c.section)} after ${c.seen} questions. Worth the ten minutes.` },
+
+  { id: "ls1", group: "byWhy", why: "least", when: () => true, text: (c) => `${label(c.section)} has the fewest reps of anything you've touched — ${c.seen} so far.` },
+  { id: "ls2", group: "byWhy", why: "least", when: () => true, text: (c) => `Least practiced: ${label(c.section)}, ${c.seen} questions in. Building the baseline.` },
+  { id: "ls3", group: "byWhy", why: "least", when: () => true, text: (c) => `${label(c.section)} trails everything else on reps. Ten more closes some of that.` },
+
+  { id: "rot1", group: "byWhy", why: "rotation", when: () => true, text: (c) => `Back to ${label(c.section)} — every other section was touched more recently.` },
+  { id: "rot2", group: "byWhy", why: "rotation", when: () => true, text: (c) => `${label(c.section)} again. The rotation loops here until something else opens up.` },
+];
+
+function buildCoachCtx(pick, coach) {
+  const p = state.progress, streak = p.streak || 0;
+  const history = p.history || [];
+  const today = todayISO();
+  const weekday = new Date(today + "T00:00:00").getDay();
+  const nextMile = STREAK_MILES.find((m) => m > streak) || null;
+  let accDelta = null;
+  for (const s of Object.keys((state.index && state.index.sections) || {})) {
+    if (recentlyPraised(coach, s)) continue;
+    const d = weeklyAccDelta(s);
+    if (d && d.deltaPts >= 10 && (!accDelta || d.deltaPts > accDelta.deltaPts)) accDelta = { section: s, ...d };
+  }
+  const st = p.sections && p.sections[pick.section];
+  return {
+    section: pick.section, why: pick.why, streak,
+    due: dueReviews().length,
+    isWeekend: weekday === 0 || weekday === 6,
+    isFirstEver: !p.lastPlayed && history.length === 0,
+    nextMile, milesAway: nextMile ? nextMile - streak : null,
+    freezeAway: streak > 0 && streak % 7 === 6,
+    goalStreak: goalStreakDays(),
+    comeback: detectComeback(),
+    accDelta,
+    acc: st && st.seen ? Math.round((st.correct / st.seen) * 100) : null,
+    seen: (st && st.seen) || 0,
+  };
+}
+
+// Returns { templateId, group, text }. Writes sd_coach (lastTemplates,
+// todayTemplate, and — only when that group is actually chosen — the
+// accDelta/comeback observation) exactly once per call.
+function coachMessage(pick) {
+  const coach = loadCoach();
+  const today = todayISO();
+  const ctx = buildCoachCtx(pick, coach);
+
+  // Same-day reload: reuse the exact template already chosen so the card is
+  // stable across reloads, rather than re-rolling the seeded pick.
+  if (coach.todayTemplate && coach.todayTemplate.date === today) {
+    const found = COACH_LINES.find((t) => t.id === coach.todayTemplate.id);
+    if (found && found.when(ctx) && (found.group !== "byWhy" || found.why === pick.why)) {
+      return { templateId: found.id, group: found.group, text: found.text(ctx) };
+    }
+  }
+
+  const groups = {};
+  for (const t of COACH_LINES) if (t.when(ctx)) (groups[t.group] = groups[t.group] || []).push(t);
+  const chosenGroup = COACH_PRIORITY.find((g) => groups[g] && groups[g].length) || "byWhy";
+  const pool = chosenGroup === "byWhy"
+    ? COACH_LINES.filter((t) => t.group === "byWhy" && t.why === pick.why)
+    : groups[chosenGroup];
+
+  const avoid = new Set(coach.lastTemplates || []);
+  const candidates = pool.filter((t) => !avoid.has(t.id));
+  const finalPool = candidates.length ? candidates : pool;   // everything eligible was used recently -> allow repeats
+  const rng = mulberry32(cyrb53(today + ":" + ctx.streak));
+  const chosen = finalPool[Math.floor(rng() * finalPool.length)];
+  const text = chosen.text(ctx);
+
+  if (chosenGroup === "accDelta" && ctx.accDelta) {
+    coach.praisedSections = { ...(coach.praisedSections || {}), [ctx.accDelta.section]: today };
+    pushObservation(coach, text);
+  } else if (chosenGroup === "comeback" && ctx.comeback) {
+    coach.lastComebackDate = ctx.comeback.date;
+    pushObservation(coach, text);
+  }
+  coach.lastTemplates = [chosen.id, ...(coach.lastTemplates || []).filter((id) => id !== chosen.id)].slice(0, 3);
+  coach.todayTemplate = { date: today, id: chosen.id };
+  saveCoach(coach);
+  return { templateId: chosen.id, group: chosenGroup, text };
+}
+
+/* ---------- [D] quests (generated on/after each Friday, expire the next) ---------- */
+const TIER_NEED = { Bronze: { seen: 8, acc: 0.50 }, Silver: { seen: 20, acc: 0.70 }, Gold: { seen: 40, acc: 0.85 } };
+const TIER_ORDER = [null, "Bronze", "Silver", "Gold"];
+
+function seededShuffle(arr, rng) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+// Section closest to its next mastery-tier boundary (smallest remaining `seen` gap).
+function pickTierQuestSection() {
+  const secs = state.progress.sections || {};
+  let best = null;
+  for (const s of Object.keys((state.index && state.index.sections) || {})) {
+    const st = secs[s] || { seen: 0, correct: 0 };
+    const idx = TIER_ORDER.indexOf(sectionTier(st));
+    const next = idx >= 0 && idx < TIER_ORDER.length - 1 ? TIER_ORDER[idx + 1] : null;
+    if (!next) continue;
+    const need = TIER_NEED[next], gap = Math.max(0, need.seen - st.seen);
+    if (!best || gap < best.gap) best = { section: s, nextTier: next, need, gap };
+  }
+  return best;
+}
+function generateQuests(friKey) {
+  const rng = mulberry32(cyrb53("quests-" + friKey));
+  const due = dueReviews().length;
+  const reviewsTarget = due > 0 ? due : 5;
+  const quests = [{
+    id: "q-reviews-" + friKey, type: "reviews", target: reviewsTarget, weekKey: friKey,
+    text: `Clear ${reviewsTarget} review${reviewsTarget === 1 ? "" : "s"}`,
+  }];
+  const tierPick = pickTierQuestSection();
+  if (tierPick) {
+    quests.push({
+      id: "q-tier-" + friKey, type: "tier", section: tierPick.section, nextTier: tierPick.nextTier,
+      target: tierPick.need.seen, weekKey: friKey, text: `Push ${label(tierPick.section)} to ${tierPick.nextTier}`,
+    });
+  }
+  const touched = new Set(Object.values(state.progress.reviews || {}).map((r) => r.module).filter(Boolean));
+  const untouched = Object.keys((state.index && state.index.files) || {}).filter((m) => !touched.has(m));
+  if (untouched.length) {
+    const n = Math.min(3, untouched.length);
+    const modules = seededShuffle(untouched, rng).slice(0, n);
+    quests.push({
+      id: "q-modules-" + friKey, type: "modules", modules, target: n, weekKey: friKey,
+      text: `Touch ${n} untouched module${n === 1 ? "" : "s"}`,
+    });
+  }
+  return quests;
+}
+// Regenerates on/after each Friday; lives until the next Friday replaces it.
+function ensureQuests() {
+  const coach = loadCoach();
+  const friKey = mostRecentFriday(todayISO());
+  if (!coach.quests || !coach.quests.length || coach.quests[0].weekKey !== friKey) {
+    coach.quests = generateQuests(friKey);
+    saveCoach(coach);
+  }
+  return coach.quests;
+}
+// Progress is always recomputed live from current state — quests store only
+// {type, target, section?, modules?}, never a serialized function.
+function questProgress(q) {
+  if (q.type === "reviews") {
+    const current = dueReviews().length;
+    return { done: Math.max(0, Math.min(q.target, q.target - current)), target: q.target };
+  }
+  if (q.type === "tier") {
+    const st = (state.progress.sections && state.progress.sections[q.section]) || { seen: 0, correct: 0 };
+    return { done: Math.min(q.target, st.seen), target: q.target };
+  }
+  if (q.type === "modules") {
+    const touched = new Set(Object.values(state.progress.reviews || {}).map((r) => r.module).filter(Boolean));
+    return { done: (q.modules || []).filter((m) => touched.has(m)).length, target: q.target };
+  }
+  return { done: 0, target: q.target || 1 };
+}
+function questChipsHTML(quests) {
+  if (!quests || !quests.length) return "";
+  const rows = quests.map((q) => {
+    const { done, target } = questProgress(q);
+    const pct = target ? Math.min(100, Math.round((done / target) * 100)) : 0;
+    return `<div class="quest-chip${done >= target ? " done" : ""}" data-qid="${esc(q.id)}">
+        <span class="qc-text">${esc(q.text)}</span>
+        <span class="qc-bar"><i style="width:${pct}%"></i></span>
+        <span class="qc-count">${done}/${target}</span>
+      </div>`;
+  }).join("");
+  return `<div class="quest-row">${rows}</div>`;
+}
+
+/* ---------- [D] Friday Debrief ---------- */
+function moduleLabel(moduleKey) {
+  const parts = (moduleKey || "").split("/");
+  return (parts[1] || parts[0] || moduleKey || "").replace(/_/g, " ");
+}
+function weekAgg(history, startISO, endISO, section) {
+  const rows = history.filter((h) => h.date >= startISO && h.date <= endISO && h.section === section);
+  const answered = rows.reduce((s, h) => s + (h.answered || 0), 0);
+  const correct = rows.reduce((s, h) => s + (h.correct || 0), 0);
+  return { answered, correct, acc: answered ? correct / answered : null };
+}
+function bestSessionThisWeek(startISO, endISO) {
+  const rows = (state.progress.history || []).filter((h) => h.date >= startISO && h.date <= endISO && h.answered > 0);
+  if (!rows.length) return null;
+  return rows.slice().sort((a, b) => (b.correct / b.answered) - (a.correct / a.answered) || b.xp - a.xp)[0];
+}
+// Reviews whose most recent correct answer (approximated as due - interval,
+// since review records don't log a per-event timestamp) fell inside the range.
+function reviewsAnsweredInRange(startISO, endISO) {
+  const out = [];
+  for (const rv of Object.values(state.progress.reviews || {})) {
+    if (!rv.due || !rv.interval) continue;
+    const answeredISO = toISO(isoAdd(new Date(rv.due + "T00:00:00"), -rv.interval));
+    if (answeredISO >= startISO && answeredISO <= endISO) out.push({ module: rv.module, section: rv.section, interval: rv.interval, answeredISO });
+  }
+  return out.sort((a, b) => b.interval - a.interval);
+}
+function debriefHeadline(deltas, held) {
+  const bestUp = deltas.find((d) => d.delta >= 5);
+  if (bestUp) return `${label(bestUp.section)} climbed ${bestUp.delta} points this week. That's the number that moved.`;
+  if (held.length) return `You held ${moduleLabel(held[0].module)} across a ${held[0].interval}-day gap. Spaced repetition, working as designed.`;
+  const worseDown = deltas.find((d) => d.delta <= -8);
+  if (worseDown) return `${label(worseDown.section)} slipped ${Math.abs(worseDown.delta)} points. Worth a look next week.`;
+  return `Quiet week by the numbers. Still logged, still counts.`;
+}
+// Home shows a "Debrief ready" card once a new week's debrief is available and
+// hasn't been opened yet — this naturally covers Fri-Sun of the current week
+// and every day after if a previous week's was never opened.
+function debriefReady() {
+  if (!(state.progress.history || []).length) return false;
+  return loadCoach().lastDebrief !== mostRecentFriday(todayISO());
+}
+
+function renderDebrief() {
+  state.inQuiz = false;
+  refreshStats();
+  const coach = loadCoach();
+  const today = todayISO();
+  coach.lastDebrief = mostRecentFriday(today);
+  saveCoach(coach);
+
+  const thisStart = weekStart(today), thisStartISO = toISO(thisStart), thisEndISO = toISO(isoAdd(thisStart, 6));
+  const lastStart = isoAdd(thisStart, -7), lastStartISO = toISO(lastStart), lastEndISO = toISO(isoAdd(lastStart, 6));
+  const history = state.progress.history || [];
+  const todayDate = new Date(today + "T00:00:00");
+
+  const dayCells = [];
+  for (let i = 0; i < 7; i++) {
+    const d = isoAdd(thisStart, i), iso = toISO(d);
+    const xp = history.filter((h) => h.date === iso).reduce((s, h) => s + (h.xp || 0), 0);
+    const future = d > todayDate;
+    const lvl = future ? -1 : xp === 0 ? 0 : xp < 30 ? 1 : xp < 70 ? 2 : xp < 120 ? 3 : 4;
+    dayCells.push({ iso, xp, lvl, label: d.toLocaleDateString("en-US", { weekday: "short" }) });
+  }
+
+  const deltas = Object.keys((state.index && state.index.sections) || {}).map((s) => {
+    const thisWk = weekAgg(history, thisStartISO, thisEndISO, s), lastWk = weekAgg(history, lastStartISO, lastEndISO, s);
+    if (thisWk.answered < 5 && lastWk.answered < 5) return null;
+    if (thisWk.acc == null || lastWk.acc == null) return null;
+    return { section: s, delta: Math.round((thisWk.acc - lastWk.acc) * 100), thisAcc: Math.round(thisWk.acc * 100), lastAcc: Math.round(lastWk.acc * 100) };
+  }).filter(Boolean).sort((a, b) => b.delta - a.delta);
+
+  const held = reviewsAnsweredInRange(thisStartISO, thisEndISO).filter((r) => r.interval >= 14);
+  const momentHTML = held.length
+    ? `You held <b>${esc(moduleLabel(held[0].module))}</b> across a ${held[0].interval}-day gap.`
+    : (() => {
+        const best = bestSessionThisWeek(thisStartISO, thisEndISO);
+        return best
+          ? `Best session this week: <b>${Math.round((best.correct / best.answered) * 100)}%</b> in ${esc(label(best.section))} (${best.correct}/${best.answered}).`
+          : `Quiet week &mdash; no sessions recorded yet.`;
+      })();
+
+  const headline = debriefHeadline(deltas, held);
+  const quests = ensureQuests();
+
+  const stripHTML = `<div class="week-strip">${dayCells.map((c) => `
+      <div class="week-cell ${c.lvl < 0 ? "wc-future" : "wc-l" + c.lvl}" title="${c.iso}: ${c.xp} XP">
+        <span class="wc-day">${c.label}</span>
+      </div>`).join("")}</div>`;
+  const deltaHTML = deltas.length ? deltas.map((d) => `
+      <div class="delta-row ${d.delta >= 0 ? "up" : "down"}">
+        <span class="dr-name">${esc(label(d.section))}</span>
+        <span class="dr-num">${d.delta >= 0 ? "+" : ""}${d.delta} pts</span>
+        <span class="dr-sub">${d.lastAcc}% &rarr; ${d.thisAcc}%</span>
+      </div>`).join("") : `<p class="hm-empty">Not enough volume in any section this week or last (5+ answers needed) to compare.</p>`;
+
+  app.innerHTML = `
+    <div class="hero"><h1>Friday Debrief</h1><p>${esc(headline)}</p></div>
+    <h2 class="section-h">This week</h2>
+    ${stripHTML}
+    <h2 class="section-h">Section deltas &mdash; this week vs last</h2>
+    <div class="delta-list">${deltaHTML}</div>
+    <h2 class="section-h">Moment of the week</h2>
+    <p class="moment-week">${momentHTML}</p>
+    <h2 class="section-h">Next week</h2>
+    ${questChipsHTML(quests)}
+    <div class="row" style="margin-top:18px"><button class="primary" id="debriefHome">Back to today</button></div>`;
+  el("#debriefHome").addEventListener("click", () => go("#/home"));
+  wireReveals();
+}
+
+/* ---------- [D] same-day streak nudge (tab-open only) ---------- */
+function maybeShowNudge() {
+  if (state.inQuiz || el("#nudgeToast")) return;
+  const coach = loadCoach();
+  const today = todayISO();
+  if (coach.nudgedOn === today) return;
+  const streak = state.progress.streak || 0;
+  if (streak < 3) return;
+  if ((state.progress.history || []).some((h) => h.date === today)) return;   // already played today
+  if (nowHM() < "16:00") return;
+  const o = document.createElement("div");
+  o.className = "nudge-toast"; o.id = "nudgeToast";
+  o.setAttribute("role", "status");
+  o.innerHTML = `<span>Your ${streak}-day streak ends at midnight. Ten questions cover it.</span>
+    <button class="nudge-dismiss" id="nudgeDismiss" aria-label="Dismiss">&times;</button>`;
+  document.body.appendChild(o);
+  el("#nudgeDismiss").addEventListener("click", () => {
+    const c = loadCoach(); c.nudgedOn = todayISO(); saveCoach(c);
+    o.classList.add("out");
+    setTimeout(() => o.remove(), REDUCED() ? 0 : 200);
+  });
+}
+/* ---------- end [D] Coach ---------- */
+
 /* ---------- hash router ---------- */
 // Screens are hash routes so browser Back/Forward, refresh, and shareable URLs
 // all work without a build step. go() sets the hash; a single hashchange
 // listener resolves the route -> screen render. _navLock swallows the one
 // programmatic hash write we make when restoring the quiz hash on a blocked Back.
-// Reserved for later phases: #/gauntlet #/codex #/insights #/interview/<sec> #/debrief.
+// Reserved for later phases: #/gauntlet #/codex #/insights #/interview/<sec>.
+// #/debrief is implemented — see [D] Coach above (renderDebrief).
 let _navLock = false;
 
 const readerHash = (path, frag) => "#/reader/" + encodeURIComponent(path) + (frag ? "@" + frag : "");
@@ -3818,6 +4630,7 @@ function dispatch(route) {
   if (route.startsWith("#/study/")) { openStudySection(route.slice("#/study/".length)); return; }
   if (route === "#/study") { renderStudy(); return; }
   if (route === "#/progress") { renderProgress(); return; }
+  if (route === "#/debrief") { renderDebrief(); return; }   /* [D] Friday Debrief */
   renderHome();                                     // #/home and any unknown route
 }
 
@@ -3861,6 +4674,10 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   const cur = state.deck[state.queue[state.cursor]];
+  // [B] double-down: D accepts the one-time offer whenever it's live.
+  if ((e.key === "d" || e.key === "D") && state._doubleDown === "offered") {
+    e.preventDefault(); el("#ddYes")?.click(); return;
+  }
   // A5 teach concept card: Enter/Space moves on (no answer to give here).
   if (cur && cur.status === "skipped" && !cur.taught) {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); teachDone(); }
@@ -3911,6 +4728,16 @@ function syncModeBtn() {
   b.classList.toggle("on", flash);
 }
 
+// [B] QA-only debug handle, gated behind ?qa=1 — never exposed otherwise. Lets
+// an automated driver find the currently-correct option index (and other
+// internals) without guessing from the shuffled DOM. See qa_phaseB.mjs.
+if (new URLSearchParams(location.search).get("qa") === "1") {
+  window.__qa = {
+    state: () => state,
+    correctIdx: () => { const it = state.deck[state.queue[state.cursor]]; return it ? it.opts.findIndex((o) => o.ok) : -1; },
+  };
+}
+
 async function boot() {
   state.index = await fetchJSON("questions/index.json", null);
   if (!state.index) {
@@ -3919,7 +4746,10 @@ async function boot() {
   }
   el("#bankInfo").textContent = `${state.index.total} questions across ${Object.keys(state.index.sections).length} sections`;
   state.progress = loadProgress();
-  state.today = {};                                // reserved for the in-app coach (later phase)
+  /* [D] coach: daily pick + message, computed once per boot */
+  const todayPick = coachPick();
+  const todayMsg = coachMessage(todayPick);
+  state.today = { date: todayISO(), ...todayPick, message: todayMsg.text, templateId: todayMsg.templateId };
   el("#navProgress").addEventListener("click", () => guardedNav(() => go("#/progress")));
   const studyB = el("#navStudy");
   if (studyB) studyB.addEventListener("click", () => guardedNav(() => go("#/study")));
@@ -3952,6 +4782,10 @@ async function boot() {
   // history entry carries a real route and Back never lands on a hashless URL.
   if (!location.hash) history.replaceState(null, "", "#/home");
   onHashChange();                                  // dispatch the initial route
+  /* [D] coach: same-day streak nudge — check now (tab already visible at load)
+     and again whenever the tab regains visibility (no OS scheduler on Pages). */
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") maybeShowNudge(); });
+  maybeShowNudge();
 }
 
 // PWA: register the offline shell/bank cache. Only in secure contexts (https or
