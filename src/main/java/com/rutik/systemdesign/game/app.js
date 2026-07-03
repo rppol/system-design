@@ -4,6 +4,15 @@
 
 const QUESTIONS_PER_BLITZ = 10;
 const DAILY_XP_GOAL = 100;
+// [E1] session length: a 5/10/20 segmented control on the topic picker,
+// persisted as sd_deck_len. deckLen() replaces QUESTIONS_PER_BLITZ at every
+// deck-building/copy use site EXCEPT the Gauntlet (always 10 — a fixed daily
+// recipe) and the Interviewer (always 12 — core/intermediate/advanced escalation).
+function deckLen() {
+  const v = parseInt(localStorage.getItem("sd_deck_len"), 10);
+  return v === 5 || v === 10 || v === 20 ? v : QUESTIONS_PER_BLITZ;
+}
+const estMinutes = (n) => Math.max(1, Math.round(n * 0.5));   // ~30s/question, matches the original 10q/~5min ratio
 const SECTION_LABELS = {
   backend: "Backend Engineering", book: "Book Summaries",
   cs_fundamentals: "CS Fundamentals", database: "Databases", devops: "DevOps & Cloud",
@@ -168,6 +177,49 @@ function toggleThemePop() {
   document.addEventListener("keydown", dismiss, true);
 }
 
+/* ---------- [E1] streak detail popover ---------- */
+// Same glass-popover pattern as the theme picker, anchored under the topbar
+// flame chip instead of fixed to a corner (the chip isn't in the same spot in
+// every layout width).
+function closeStreakPop() {
+  const pop = document.getElementById("streakPop");
+  if (pop) pop.remove();
+  const chip = document.getElementById("streakChip");
+  if (chip) chip.setAttribute("aria-expanded", "false");
+}
+function toggleStreakPop() {
+  if (document.getElementById("streakPop")) { closeStreakPop(); return; }
+  const anchor = document.getElementById("streakChip");
+  if (!anchor) return;
+  const p = state.progress || {};
+  const lastFreezes = (p.freezeUsedOn || []).slice(-3).reverse();
+  const pop = document.createElement("div");
+  pop.className = "streak-pop"; pop.id = "streakPop";
+  pop.setAttribute("role", "dialog"); pop.setAttribute("aria-label", "Streak detail");
+  pop.innerHTML = `
+    <div class="tp-h">Streak</div>
+    <div class="sp-row"><span>Current</span><b>${p.streak || 0} day${(p.streak || 0) === 1 ? "" : "s"}</b></div>
+    <div class="sp-row"><span>Longest</span><b>${p.longestStreak || 0} day${(p.longestStreak || 0) === 1 ? "" : "s"}</b></div>
+    <div class="sp-row"><span>Freezes held</span><b>${ICON("snow", "i-snow")} ${p.freezes || 0}</b></div>
+    <div class="sp-rule">Earn one freeze every 7-day streak milestone, up to 3. A freeze auto-covers a single missed day.</div>
+    ${lastFreezes.length ? `<div class="sp-sub">Last used</div><div class="sp-dates">${lastFreezes.map((d) => `<span>${fmtDate(d)}</span>`).join("")}</div>` : ""}
+  `;
+  document.body.appendChild(pop);
+  anchor.setAttribute("aria-expanded", "true");
+  const r = anchor.getBoundingClientRect();
+  pop.style.top = (r.bottom + 8) + "px";
+  pop.style.left = Math.min(r.left, window.innerWidth - pop.offsetWidth - 12) + "px";
+  const dismiss = (e) => {
+    if (e.type === "keydown") { if (e.key !== "Escape") return; }
+    else if (pop.contains(e.target) || e.target.closest?.("#streakChip")) return;
+    closeStreakPop();
+    document.removeEventListener("pointerdown", dismiss, true);
+    document.removeEventListener("keydown", dismiss, true);
+  };
+  document.addEventListener("pointerdown", dismiss, true);
+  document.addEventListener("keydown", dismiss, true);
+}
+
 const app = document.getElementById("app");
 const state = {
   index: null, today: null, progress: null,
@@ -178,6 +230,7 @@ const state = {
   // [B] per-deck session trackers — reset by resetPhaseBState() in startDeck/resumeDeck.
   _bossIntroShown: false, _doubleDown: null, _doubleDownIdx: null, _doubleDownWager: 0,
   _missStreak: 0, _maxMissStreak: 0, _answerLog: [], _cardStreak: 0, _capsuleReturns: [],
+  _orphanToastShown: false,   // [E1] session-scoped (not persisted) — one orphan-cleanup toast per page load
 };
 
 /* ---------- helpers ---------- */
@@ -203,6 +256,8 @@ const ICON = (name, cls = "") => {
     clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
     soundOn: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>',
     soundOff: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/>',
+    star: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
+    copy: '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
   };
   return `<svg class="icon ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name]}</svg>`;
 };
@@ -225,7 +280,7 @@ function vt(fn) {
 /* ---------- ambient graphics: spotlight, parallax, scroll reveals ---------- */
 // Pointer spotlight: glass cards get a specular highlight that follows the
 // cursor (CSS paints a radial gradient at --mx/--my; see style.css §16).
-const SPOT_SEL = ".tile,.topic-card,.review-card,.badge,.opt,.studyrow,.modrow,.sectiontile,.miss-item,.pathnode";
+const SPOT_SEL = ".tile,.topic-card,.review-card,.badge,.opt,.modrow,.sectiontile,.miss-item,.pathnode";
 let _spotEv = null, _spotRaf = 0;
 document.addEventListener("pointermove", (e) => {
   _spotEv = e;
@@ -265,7 +320,7 @@ const _revealObs = "IntersectionObserver" in window
 function wireReveals() {
   if (!_revealObs || REDUCED()) return;
   // NOTE: utility class is "rise", NOT "reveal" — .reveal is the quiz answer panel.
-  document.querySelectorAll(".grid .tile, .sectiontile, .studyrow, .modrow, .miss-item").forEach((n, i) => {
+  document.querySelectorAll(".grid .tile, .sectiontile, .modrow, .miss-item").forEach((n, i) => {
     n.classList.add("rise");
     n.style.transitionDelay = (i % 8) * 30 + "ms";
     _revealObs.observe(n);
@@ -283,6 +338,68 @@ function floatXP(amount, anchor) {
   f.style.top = (r.top - 4) + "px";
   document.body.appendChild(f);
   setTimeout(() => f.remove(), 1000);
+}
+
+/* ---------- [E1] generic toast ---------- */
+// Ephemeral auto-dismissing status bar, bottom of viewport — visual language
+// borrowed from the [D] same-day nudge, but for one-shot confirmations (no
+// dismiss button; it clears itself). REDUCED-gated via the .toast media rule.
+function showToast(msg, ms = 3600) {
+  document.querySelectorAll(".toast").forEach((t) => t.remove());
+  const o = document.createElement("div");
+  o.className = "toast"; o.setAttribute("role", "status"); o.textContent = msg;
+  document.body.appendChild(o);
+  announce(msg);
+  setTimeout(() => {
+    o.classList.add("out");
+    setTimeout(() => o.remove(), REDUCED() ? 0 : 200);
+  }, ms);
+}
+
+/* ---------- [E1] first-run coach marks ---------- */
+// A single glass tooltip anchored under/near an element, shown once ever per
+// id (localStorage sd_cm_<id>), dismissed by any click/keydown anywhere.
+// First-run is detected as an empty progress.history at boot; veterans get
+// every id pre-seeded "seen" (see seedCoachMarksIfVeteran, called from boot())
+// so a long-time player never sees onboarding chrome.
+const COACH_MARK_IDS = ["first_question", "first_combo", "first_results", "first_cards"];
+function seedCoachMarksIfVeteran() {
+  if ((state.progress.history || []).length === 0) return;   // this IS a first-run: let marks fire
+  for (const id of COACH_MARK_IDS) {
+    const k = "sd_cm_" + id;
+    if (!localStorage.getItem(k)) localStorage.setItem(k, "1");
+  }
+}
+function coachMark(anchorSel, text, id) {
+  const key = "sd_cm_" + id;
+  if (localStorage.getItem(key) === "1") return;
+  const anchor = el(anchorSel);
+  if (!anchor || el(".coach-mark")) return;
+  localStorage.setItem(key, "1");                    // mark seen immediately — no re-show race
+  const tip = document.createElement("div");
+  tip.className = "coach-mark" + (REDUCED() ? " reduced" : "");
+  tip.setAttribute("role", "status");
+  tip.innerHTML = `<div class="cm-arrow"></div><div class="cm-body">${esc(text)}</div>`;
+  document.body.appendChild(tip);
+  const r = anchor.getBoundingClientRect();
+  const w = tip.offsetWidth;
+  let left = r.left + r.width / 2 - w / 2;
+  left = Math.min(Math.max(12, left), window.innerWidth - w - 12);
+  tip.style.left = left + "px";
+  tip.style.top = (r.bottom + 12) + "px";
+  const arrow = tip.querySelector(".cm-arrow");
+  arrow.style.left = Math.min(Math.max(14, r.left + r.width / 2 - left - 6), Math.max(14, w - 20)) + "px";
+  announce(text);
+  const dismiss = () => {
+    tip.remove();
+    document.removeEventListener("pointerdown", dismiss, true);
+    document.removeEventListener("keydown", dismiss, true);
+  };
+  // Deferred so the click/keypress that led here doesn't also dismiss it.
+  setTimeout(() => {
+    document.addEventListener("pointerdown", dismiss, true);
+    document.addEventListener("keydown", dismiss, true);
+  }, 0);
 }
 
 /* ---------- keyboard-shortcuts overlay ---------- */
@@ -706,7 +823,8 @@ function dueReviews() {
   const t = todayISO();
   return Object.entries(state.progress.reviews || {})
     .filter(([, r]) => r.due && r.due <= t)
-    .sort((a, b) => (a[1].due < b[1].due ? -1 : 1));
+    // [E1] manually flagged items sort first, then oldest-due first.
+    .sort((a, b) => (b[1].flagged ? 1 : 0) - (a[1].flagged ? 1 : 0) || (a[1].due < b[1].due ? -1 : 1));
 }
 
 function todaysXp() {
@@ -828,14 +946,27 @@ function renderHome() {
   /* [D] coach: reboarding protocol — a >2-day gap replaces the suggested card
      and suppresses the separate due-review card below (its CTA already covers it). */
   const reboard = reboardingInfo();
-  const reviewCard = (due.length && !reboard)
-    ? `<button class="review-card" id="reviewBtn">
+  // [E1] review backlog plan: a rounds-to-clear estimate + up to 3 per-section
+  // chips + a "+N due tomorrow" whisper, so the backlog reads as a plan, not
+  // just a number.
+  let reviewCard = "";
+  if (due.length && !reboard) {
+    const rounds = Math.ceil(due.length / deckLen());
+    const bySec = {};
+    due.forEach(([, r]) => { bySec[r.section] = (bySec[r.section] || 0) + 1; });
+    const chips = Object.entries(bySec).sort((a, b) => b[1] - a[1]).slice(0, 3)
+      .map(([s, n]) => `<span class="due-chip">${esc(label(s))} <b>${n}</b></span>`).join("");
+    const tomorrow = toISO(isoAdd(new Date(todayISO() + "T00:00:00"), 1));
+    const dueTomorrow = Object.values(state.progress.reviews || {}).filter((r) => r.due === tomorrow).length;
+    reviewCard = `<button class="review-card" id="reviewBtn">
          <div><div class="eyebrow good">Spaced repetition</div>
-         <h2>${due.length} question${due.length === 1 ? "" : "s"} due for review</h2>
-         <p class="msg">Resurface what you've missed before it fades. ~${Math.min(due.length, QUESTIONS_PER_BLITZ)} now.</p></div>
+         <h2>${due.length} due &mdash; ${rounds} round${rounds === 1 ? "" : "s"} clears it</h2>
+         <p class="msg">Resurface what you've missed before it fades.</p>
+         ${chips ? `<div class="due-chips">${chips}</div>` : ""}
+         ${dueTomorrow ? `<p class="due-tomorrow">+${dueTomorrow} due tomorrow</p>` : ""}</div>
          <span class="review-go">Review &rarr;</span>
-       </button>`
-    : "";
+       </button>`;
+  }
   const worst = weakSections().filter((x) => x.acc < 0.7)[0];
   const weakCard = worst
     ? `<button class="review-card weak" id="weakBtn">
@@ -902,15 +1033,15 @@ function renderHome() {
       <div class="eyebrow">Coach</div>
       <h2>It&rsquo;s been ${reboard.days} days.</h2>
       <p class="msg">Doesn&rsquo;t matter &mdash; the reviews kept your place. ${reboard.dueCount
-        ? `${reboard.dueCount} ${reboard.dueCount === 1 ? "is" : "are"} waiting. The oldest ten take about five minutes.`
+        ? `${reboard.dueCount} ${reboard.dueCount === 1 ? "is" : "are"} waiting. The oldest ${deckLen()} take about ${estMinutes(deckLen())} minutes.`
         : `Nothing waiting &mdash; ${esc(label(section))} picks up the rotation.`}</p>
-      <button class="cta" id="startBtn">${reboard.dueCount ? "Start review" : `Start &mdash; ${QUESTIONS_PER_BLITZ} questions`}<small>${reboard.dueCount ? `${Math.min(reboard.dueCount, QUESTIONS_PER_BLITZ)} questions &middot; ~5 min` : `~5 min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}`}</small></button>
+      <button class="cta" id="startBtn">${reboard.dueCount ? "Start review" : `Start &mdash; ${deckLen()} questions`}<small>${reboard.dueCount ? `${Math.min(reboard.dueCount, deckLen())} questions &middot; ~${estMinutes(deckLen())} min` : `~${estMinutes(deckLen())} min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}`}</small></button>
     </div>` : `
     <div class="topic-card" data-coach-tpl="${state.today ? esc(state.today.templateId || "") : ""}">
       <div class="eyebrow">${whyChip ? `Coach &middot; ${esc(whyChip)}` : "Suggested for today"}</div>
       <h2>${esc(label(section))}</h2>
-      <p class="msg">${esc(coachMsg || `${QUESTIONS_PER_BLITZ} questions pulled from your ${label(section)} notes.`)}</p>
-      <button class="cta" id="startBtn">Start &mdash; ${QUESTIONS_PER_BLITZ} questions<small>~5 min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}</small></button>
+      <p class="msg">${esc(coachMsg || `${deckLen()} questions pulled from your ${label(section)} notes.`)}</p>
+      <button class="cta" id="startBtn">Start &mdash; ${deckLen()} questions<small>~${estMinutes(deckLen())} min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}</small></button>
     </div>`;
   /* [D] coach: Debrief-ready card + live quest chips */
   const debriefCard = debriefReady() ? `
@@ -954,9 +1085,72 @@ function renderHome() {
   if (worst) el("#weakBtn").addEventListener("click", startWeakSpots);
   if (rusty) el("#rustyBtn").addEventListener("click", () => startBlitz(rusty.s));
   if (debriefCard) el("#debriefBtn").addEventListener("click", () => go("#/debrief"));
-  document.querySelectorAll(".tile").forEach((b) =>
-    b.addEventListener("click", () => go("#/topics/" + b.dataset.section)));
+  document.querySelectorAll(".tile").forEach((b) => {
+    b.addEventListener("click", () => go("#/topics/" + b.dataset.section));
+    // [E1] warm the bank cache on intent (hover/focus), before the click that needs it.
+    b.addEventListener("pointerenter", () => prefetchBank(b.dataset.section), { once: true });
+    b.addEventListener("focus", () => prefetchBank(b.dataset.section), { once: true });
+  });
   wireReveals();
+}
+
+/* ---------- [E1] friendly error screens + loading skeletons ---------- */
+// Full-app dead-end replacement for a bare `.error` div: a welcoming headline,
+// [Try again] (re-invokes the exact loader closure that failed) and [Home];
+// any developer command is demoted into a collapsed <details> so the message
+// stays readable for a non-maintainer.
+const devDetail = (innerHTML) => `<details class="error-detail"><summary>For the maintainer</summary>${innerHTML}</details>`;
+function errorScreen(title, hint, retryFn) {
+  app.innerHTML = `<div class="error-screen">
+      <div class="error-title">${esc(title)}</div>
+      <p class="error-hint">${hint}</p>
+      <div class="row">
+        <button class="primary" id="errRetry">Try again</button>
+        <button class="ghost" id="errHome">Home</button>
+      </div>
+    </div>`;
+  el("#errRetry").addEventListener("click", retryFn);
+  el("#errHome").addEventListener("click", () => go("#/home"));
+}
+
+// Glass placeholder blocks with a shimmer pulse (static under reduced motion),
+// replacing the bare ".loading" spinner on quiz/topics/study entry points —
+// the loads a slow/cold bank fetch actually delays.
+function skeletonHTML(kind) {
+  const st = REDUCED() ? " static" : "";
+  const block = (cls) => `<div class="sk-block ${cls}${st}"></div>`;
+  if (kind === "quiz") {
+    return `<div class="skeleton sk-quiz">${block("sk-head")}${block("sk-qtext")}${block("sk-opt")}${block("sk-opt")}${block("sk-opt")}${block("sk-opt")}</div>`;
+  }
+  if (kind === "topics") {
+    return `<div class="skeleton sk-topics">${block("sk-hero")}${Array.from({ length: 6 }, () => block("sk-row")).join("")}</div>`;
+  }
+  return `<div class="skeleton sk-study">${block("sk-hero")}<div class="sk-grid">${Array.from({ length: 8 }, () => block("sk-tile")).join("")}</div></div>`;
+}
+
+/* ---------- [E1] bank prefetch ---------- */
+// Fire-and-forget loadBank() on Home tile hover/focus, once per section per
+// session; plus an idle-time prefetch of today's suggested section right
+// after boot. Skipped entirely on a metered connection (Save-Data).
+const _prefetched = new Set();
+function prefetchBank(section) {
+  if (!section || _prefetched.has(section) || navigator.connection?.saveData) return;
+  _prefetched.add(section);
+  loadBank(section);
+}
+
+/* ---------- [E1] no-repeat sampling ---------- */
+// Per-section ring buffer of the last 30 served question ids (sd_recent_<section>)
+// so back-to-back blitzes in the same section don't keep re-serving the same
+// handful. Exempt: gauntlet/review/weak/drill/refresh — their selection is
+// already meaningful (spaced repetition, confusion pairs, weak spots).
+const recentKey = (section) => "sd_recent_" + section;
+function loadRecent(section) {
+  try { return JSON.parse(localStorage.getItem(recentKey(section))) || []; } catch { return []; }
+}
+function pushRecent(section, ids) {
+  const next = [...loadRecent(section), ...ids].slice(-30);
+  try { localStorage.setItem(recentKey(section), JSON.stringify(next)); } catch { /* quota */ }
 }
 
 /* ---------- bank loading / sub-topic picker ---------- */
@@ -1003,16 +1197,19 @@ function modulesOf(bank) {
 }
 
 async function openTopics(section) {
-  app.innerHTML = `<div class="loading">Loading ${esc(label(section))}&hellip;</div>`;
+  app.innerHTML = skeletonHTML("topics");
   const bank = await loadBank(section);
   if (!bank || !bank.length) {
-    app.innerHTML = `<div class="error">Couldn't load questions for ${esc(section)}. Run <code>python3 extract.py</code>.</div>`;
+    errorScreen(`Couldn't load ${label(section)}`, `Check your connection and try again.${devDetail(`Run <code>python3 extract.py</code>.`)}`, () => openTopics(section));
     return;
   }
   const mods = modulesOf(bank);
   const rows = mods.map((m) =>
     `<label class="modrow"><input type="checkbox" class="modcheck" value="${esc(m.module)}" checked />
        <span class="mname">${esc(m.name)}</span><span class="mcount">${m.count}</span></label>`).join("");
+  // [E1] session length: 5/10/20 segmented control, persisted as sd_deck_len.
+  const lenOpts = [5, 10, 20].map((n) =>
+    `<button class="lenopt${deckLen() === n ? " on" : ""}" role="radio" aria-checked="${deckLen() === n}" data-len="${n}">${n}</button>`).join("");
   app.innerHTML = `
     <div class="hero"><h1>${esc(label(section))}</h1><p>Pick the sub-topics to drill &mdash; or keep them all.</p></div>
     <div class="topicbar">
@@ -1020,6 +1217,9 @@ async function openTopics(section) {
       <button class="ghost" id="noneBtn">Clear</button>
       <input type="search" class="filter" id="modFilter" placeholder="Filter topics" aria-label="Filter topics" />
       <span class="selcount" id="selCount"></span>
+    </div>
+    <div class="lenbar" role="radiogroup" aria-label="Session length">
+      <span class="lenbar-label">Session length</span>${lenOpts}
     </div>
     <div class="modlist">${rows}</div>
     <div class="qactions">
@@ -1042,6 +1242,11 @@ async function openTopics(section) {
     document.querySelectorAll(".modrow").forEach((r) =>
       (r.style.display = r.querySelector(".mname").textContent.toLowerCase().includes(f) ? "" : "none"));
   });
+  document.querySelectorAll(".lenopt").forEach((b) => b.addEventListener("click", () => {
+    localStorage.setItem("sd_deck_len", b.dataset.len);
+    document.querySelectorAll(".lenopt").forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-checked", x === b ? "true" : "false"); });
+    announce(`Session length set to ${b.dataset.len} questions.`);
+  }));
   el("#backBtn").addEventListener("click", () => go("#/home"));
   el("#startSel").addEventListener("click", () => startBlitz(section, selected()));
   updateCount();
@@ -1149,16 +1354,23 @@ function startDeck(questions, replayFn, opts = {}) {
 }
 
 async function startBlitz(section, modules) {
-  app.innerHTML = `<div class="loading">Loading ${esc(label(section))}&hellip;</div>`;
+  app.innerHTML = skeletonHTML("quiz");
   let bank = await loadBank(section);
   if (!bank || !bank.length) {
-    app.innerHTML = `<div class="error">Couldn't load questions for ${esc(section)}. Run <code>python3 extract.py</code>.</div>`;
+    errorScreen(`Couldn't load ${label(section)}`, `Check your connection and try again.${devDetail(`Run <code>python3 extract.py</code>.`)}`, () => startBlitz(section, modules));
     return;
   }
   if (modules && modules.length) bank = bank.filter((q) => modules.includes(q.module));
   state.section = section;
   state.modules = modules && modules.length ? modules : null;
-  const picked = shuffle(bank.slice()).slice(0, QUESTIONS_PER_BLITZ);
+  // [E1] no-repeat sampling: prefer questions NOT in the last-30-served ring
+  // buffer for this section; only top up from the recent set if the fresh
+  // pool runs short (small module selections, tiny sections).
+  const recent = new Set(loadRecent(section));
+  const fresh = shuffle(bank.filter((q) => !recent.has(q.id)));
+  const stale = shuffle(bank.filter((q) => recent.has(q.id)));
+  const picked = [...fresh, ...stale].slice(0, deckLen());
+  pushRecent(section, picked.map((q) => q.id));
   // [A2] confusion-aware interleaving for multi-module decks: no two consecutive
   // questions share a module; graph-connected topics sit adjacent (A-B-A'-C).
   let interleave;
@@ -1170,11 +1382,12 @@ async function startBlitz(section, modules) {
 }
 
 async function startReview() {
-  app.innerHTML = `<div class="loading">Gathering your review deck&hellip;</div>`;
-  const due = dueReviews().slice(0, QUESTIONS_PER_BLITZ + 4);
+  app.innerHTML = skeletonHTML("quiz");
+  const due = dueReviews().slice(0, deckLen() + 4);
   const bySec = {};
   due.forEach(([id, r]) => (bySec[r.section] = bySec[r.section] || []).push(id));
   const items = [];
+  let orphaned = 0;
   for (const sec of Object.keys(bySec)) {
     const bank = await loadBank(sec);
     if (!bank) continue;
@@ -1184,12 +1397,21 @@ async function startReview() {
       if (q) items.push(q);
       // Orphaned review (question no longer in the bank): self-heal so the due
       // count stops advertising questions that can never be served again.
-      else delete state.progress.reviews[id];
+      else { delete state.progress.reviews[id]; orphaned++; }
+    }
+  }
+  // [E1] the self-heal above used to delete silently — persist it and surface a
+  // one-time-per-session toast so the count isn't a mystery drop.
+  if (orphaned) {
+    try { localStorage.setItem("sd_progress", JSON.stringify(state.progress)); } catch { /* quota */ }
+    if (!state._orphanToastShown) {
+      state._orphanToastShown = true;
+      showToast(`${orphaned} retired question${orphaned === 1 ? "" : "s"} removed from your queue.`);
     }
   }
   if (!items.length) { renderHome(); return; }
   state.section = "review"; state.modules = null;
-  const deck = items.slice(0, QUESTIONS_PER_BLITZ);
+  const deck = items.slice(0, deckLen());
   // [A2] flip rounds: ~30% of review items (deterministic per day+qid) whose 3
   // distractorIds all resolve become answer->question flips. Works with the
   // hard-deck recall gate and the confidence step unchanged.
@@ -1214,7 +1436,7 @@ function weakSections() {
 }
 
 async function startWeakSpots() {
-  app.innerHTML = `<div class="loading">Finding your weak spots&hellip;</div>`;
+  app.innerHTML = skeletonHTML("quiz");
   const weak = weakSections().filter((x) => x.acc < 0.7).slice(0, 4);
   const pool = (weak.length ? weak : weakSections().slice(0, 3));
   if (!pool.length) { renderHome(); return; }
@@ -1230,14 +1452,14 @@ async function startWeakSpots() {
   Object.entries(reviews)
     .filter(([, r]) => (r.lapses || 0) > 0 && byId[r.section])
     .sort((a, b) => (b[1].lapses || 0) - (a[1].lapses || 0))
-    .forEach(([id, r]) => { if (items.length < QUESTIONS_PER_BLITZ) add(byId[r.section].get(id)); });
+    .forEach(([id, r]) => { if (items.length < deckLen()) add(byId[r.section].get(id)); });
   // 2) fill with random questions from the weak sections
   const filler = [];
   for (const p of pool) if (banks[p.s]) filler.push(...banks[p.s]);
-  shuffle(filler).forEach((q) => { if (items.length < QUESTIONS_PER_BLITZ) add(q); });
+  shuffle(filler).forEach((q) => { if (items.length < deckLen()) add(q); });
   if (!items.length) { renderHome(); return; }
   state.section = "weakspots"; state.modules = null;
-  startDeck(items.slice(0, QUESTIONS_PER_BLITZ), startWeakSpots, { hard: true });
+  startDeck(items.slice(0, deckLen()), startWeakSpots, { hard: true });
 }
 
 /* ---------- [A2] confusion drill + fading refresh decks ---------- */
@@ -1245,21 +1467,21 @@ async function startWeakSpots() {
 // the pair may span sections). Alternate the two modules so the contrast is
 // front-and-center.
 async function startConfusionDrill(key) {
-  app.innerHTML = `<div class="loading">Building your mix-up drill&hellip;</div>`;
+  app.innerHTML = skeletonHTML("quiz");
   const items = [];
   for (const mod of key.split("|")) {
     const bank = await loadBank(mod.split("/")[0]);
     if (bank) items.push(...bank.filter((q) => q.module === mod));
   }
   if (!items.length) { renderHome(); return; }
-  const picked = shuffle(items).slice(0, QUESTIONS_PER_BLITZ);
+  const picked = shuffle(items).slice(0, deckLen());
   state.section = "drill"; state.modules = null;
   startDeck(picked, () => startConfusionDrill(key), { interleave: [] });
 }
 
-// Exactly the fading question ids, capped at 10; hard mode OFF.
+// Exactly the fading question ids, capped at the session length; hard mode OFF.
 async function startRefresh(ids) {
-  app.innerHTML = `<div class="loading">Gathering your refresh deck&hellip;</div>`;
+  app.innerHTML = skeletonHTML("quiz");
   const bySec = {};
   for (const id of ids) {
     const rv = (state.progress.reviews || {})[id];
@@ -1274,7 +1496,7 @@ async function startRefresh(ids) {
   }
   if (!items.length) { renderHome(); return; }
   state.section = "refresh"; state.modules = null;
-  startDeck(items.slice(0, QUESTIONS_PER_BLITZ), () => startRefresh(ids), { interleave: [] });
+  startDeck(items.slice(0, deckLen()), () => startRefresh(ids), { interleave: [] });
 }
 
 /* ---------- [A2] prime: pretest before reading ---------- */
@@ -1387,6 +1609,41 @@ function runExplainBack(det, item) {
       <div class="eb-ans"><b>Model answer:</b> ${ans}</div>`;
 }
 
+/* ---------- [E1] flag-for-review + copy question (reveal panel) ---------- */
+// Two small icon buttons pinned to the top of any reveal panel (quiz + card).
+function revealActionsHTML(item) {
+  const flagged = !!(state.progress.reviews || {})[item.q.id]?.flagged;
+  return `<div class="reveal-actions">
+      <button class="ra-btn ra-flag${flagged ? " on" : ""}" ${flagged ? "disabled" : ""} title="${flagged ? "Flagged for review" : "Flag for review"}" aria-label="Flag for review">${ICON("star", "i-star")}</button>
+      <button class="ra-btn ra-copy" title="Copy question and answer" aria-label="Copy question and answer">${ICON("copy", "i-copy")}</button>
+    </div>`;
+}
+function wireRevealActions(root, item) {
+  const flagBtn = root.querySelector(".ra-flag");
+  if (flagBtn && !flagBtn.disabled) flagBtn.addEventListener("click", () => flagForReview(item, flagBtn));
+  const copyBtn = root.querySelector(".ra-copy");
+  if (copyBtn) copyBtn.addEventListener("click", () => copyQuestion(item, copyBtn));
+}
+// Sets (or creates, with normal SM-2 defaults) the review record's due date to
+// today and flags it — dueReviews()/startReview() sort flagged items first.
+function flagForReview(item, btn) {
+  const p = state.progress;
+  const reviews = (p.reviews = p.reviews || {});
+  const rv = reviews[item.q.id] || { ease: 2.5, interval: 0, reps: 0, lapses: 0 };
+  rv.due = todayISO(); rv.flagged = 1; rv.section = item.q.section; rv.module = item.q.module;
+  reviews[item.q.id] = rv;
+  try { localStorage.setItem("sd_progress", JSON.stringify(p)); } catch { /* quota */ }
+  btn.classList.add("on"); btn.disabled = true; btn.title = "Flagged for review";
+  announce("Flagged — it'll appear in your next review.");
+}
+function copyQuestion(item, btn) {
+  const text = `Q: ${item.q.question}\nA: ${item.q.answerFull}`;
+  navigator.clipboard?.writeText(text).then(() => {
+    btn.classList.add("ok");
+    setTimeout(() => btn.classList.remove("ok"), 1400);
+  });
+}
+
 /* ---------- session guard: pause / resume ---------- */
 // A live deck is snapshotted to localStorage after every answer/skip/grade so a
 // refresh (or navigating away) can resume the exact same blitz. optOrder makes
@@ -1435,7 +1692,7 @@ function resumeSummary() {
 async function resumeDeck() {
   const snap = readDeckSnapshot();
   if (!snap) { renderHome(); return; }
-  app.innerHTML = `<div class="loading">Resuming your blitz&hellip;</div>`;
+  app.innerHTML = skeletonHTML("quiz");
   // Gather every bank the snapshot's questions live in (a review deck spans sections).
   const sections = new Set();
   const secOf = (id) => id.split("/")[0];
@@ -1523,6 +1780,7 @@ function comboChipHTML(combo) {
 function refreshComboSlot() {
   const slot = el("#comboSlot");
   if (slot) slot.innerHTML = comboChipHTML(state.combo);
+  if (state.combo >= 2) coachMark("#comboSlot", "Streak bonus. One more correct doubles the XP.", "first_combo");   // [E1]
 }
 
 /* ---------- [B] boss staging ---------- */
@@ -1664,6 +1922,7 @@ function renderQuestion() {
   if (state.interview) renderInterviewStage();
   else if (state.gauntlet && state.gauntlet.practice) renderPracticeBanner();
   app.focus({ preventScroll: true });              // keep keyboard + SR context on the new question
+  coachMark(".options", "Tap or press 1-4. Not sure? Skip — it returns as a lesson.", "first_question");   // [E1]
 }
 
 // A3: reveal the hidden options for a recall-first (hard-deck) question. Leave
@@ -1898,6 +2157,9 @@ function buildReveal(item, pickIdx, right, ctx) {
     ? `<div class="dd-outcome ${item._ddOutcome.win ? "win" : "lose"}">Double-down ${item._ddOutcome.win ? "paid" : "lost"}: ${item._ddOutcome.win ? "+" : "−"}${item._ddOutcome.amount}</div>` : "";
   rev.innerHTML = `${recoveredChip}${ddNote}${hyper ? `<div class="hyper-lead">High-confidence miss &mdash; worth a careful read.</div>` : ""}<b>Full answer:</b> ${qInline(q.answerFullMd || q.answerFull)}${prov}
     <button class="deeper" id="deeperBtn">Dive deeper into ${esc(q.moduleName)} &rarr;</button>`;
+  // [E1] flag-for-review + copy-question icons, pinned to the top of the panel.
+  rev.insertAdjacentHTML("afterbegin", revealActionsHTML(item));
+  wireRevealActions(rev, item);
   // [A2] explain-back on any wrong reveal (first attempt and failed redemption);
   // not on flips (prompt is the answer already) and not in prime (nothing counts).
   if (!right && !item.flip && !state.prime) {
@@ -1973,6 +2235,8 @@ function revealCard() {
   const rev = el("#reveal");
   rev.innerHTML = `<b>Answer:</b> ${qInline(q.answerFullMd || q.answerFull)}
     <button class="deeper" id="deeperBtn">Dive deeper into ${esc(q.moduleName)} &rarr;</button>`;
+  rev.insertAdjacentHTML("afterbegin", revealActionsHTML(item));   // [E1] flag + copy
+  wireRevealActions(rev, item);
   rev.insertAdjacentHTML("beforeend", explainBackHTML(item));   // [A2] explain-back on card reveal
   wireExplainBack(rev, item);
   rev.classList.add("show");
@@ -2042,6 +2306,18 @@ async function finish(opts = {}) {
   const results = recorded.map((d) => ({ id: d.q.id, section: d.q.section, module: d.q.module, status: d.status, ms: d.ms || 0, conf: d.conf || null, confusion: d.confusion }));   // [A2] confusion pair
   const durationSec = Math.max(0, Math.round((Date.now() - (state.startedAt || Date.now())) / 1000));
   const pre = progressSnapshot();                  // for the moments engine (before the save)
+  // [E1] Ghost: this section's previous-best run (highest correct, tie-break
+  // fastest), read from history BEFORE this session is pushed onto it. Only
+  // for real content sections — review/weak/drill/refresh/gauntlet/interview
+  // selection isn't a fair apples-to-apples rematch. Older entries without a
+  // recorded durationSec are skipped silently (nothing to compare).
+  let ghostBest = null;
+  if (state.index.sections && Object.prototype.hasOwnProperty.call(state.index.sections, state.section)) {
+    for (const h of state.progress.history || []) {
+      if (h.section !== state.section || !(h.durationSec > 0) || !(h.answered > 0)) continue;
+      if (!ghostBest || h.correct > ghostBest.correct || (h.correct === ghostBest.correct && h.durationSec < ghostBest.durationSec)) ghostBest = h;
+    }
+  }
   const { xp, freezeUsed } = saveSessionLocal({ date: todayISO(), section: state.section, results, bonusXp, durationSec, comeback });
   const cExtra = cAfterSave(cCtx, { correct, total });   // [C] seal gauntlet · resolve interview · detect ledger awards
   const post = progressSnapshot();                 // (after the save)
@@ -2053,7 +2329,7 @@ async function finish(opts = {}) {
   const pct = total ? Math.round((correct / total) * 100) : 0;
   const flawless = pct === 100 && total > 0;
   // [B] bury a new time capsule on a flawless, full-length, non-flash/non-hard blitz.
-  if (flawless && total === QUESTIONS_PER_BLITZ && !opts.early && state.mode !== "flash" && !state.hard
+  if (flawless && total === deckLen() && !opts.early && state.mode !== "flash" && !state.hard
       && state.section !== "review" && state.section !== "weakspots" && !state.deck.some((d) => d.retry)) {
     maybeBuryCapsule();
     if (state._capsuleBuried) {
@@ -2085,12 +2361,16 @@ async function finish(opts = {}) {
   const fastChip = durationSec > 0 && durationSec < 300 ? `<span class="fast-chip">under 5 minutes</span>` : "";
   const streakAdvanceLine = post.streak > pre.streak
     ? `<p class="streak-advance">+${post.streak - pre.streak} day &mdash; ${post.streak}-day streak</p>` : "";
+  // [E1] Ghost: "vs you, <date>: 6/10 in 5:40 -> 9/10 in 4:12."
+  const ghostLine = (ghostBest && durationSec > 0)
+    ? `<p class="ghost-line">vs you, ${fmtDate(ghostBest.date)}: ${ghostBest.correct}/${ghostBest.answered} in ${Math.floor(ghostBest.durationSec / 60)}:${String(ghostBest.durationSec % 60).padStart(2, "0")} &rarr; ${correct}/${total} in ${elapsedStr}</p>`
+    : "";
   const resultsMeta = `
     <div class="results-meta">
       <div class="goal-line">${goalRing()}<span>${goalLineTxt}</span></div>
       <div class="elapsed-line">Finished in <b>${elapsedStr}</b> ${fastChip}</div>
     </div>
-    ${streakAdvanceLine}`;
+    ${streakAdvanceLine}${ghostLine}`;
   // Post-round review: misses split into Redeemed (retry-correct) and Still
   // shaky, plus questions learned from a skip. Each is a <details> — summary is
   // the correct sentence, expanding reveals the full answer (+ honest provenance
@@ -2120,6 +2400,9 @@ async function finish(opts = {}) {
       ${group("Learned from a skip", "", learnedItems)}
     </div>` : "";
   const R = 56, CIRC = +(2 * Math.PI * R).toFixed(1);
+  // [E1] no-repeat sampling only reshuffles a real content-section blitz —
+  // review/weak/drill/refresh/gauntlet/interview replays aren't "a fresh mix".
+  const isContentSection = !!(state.index.sections && Object.prototype.hasOwnProperty.call(state.index.sections, state.section));
   app.innerHTML = `
     <div class="result">
       <div class="score-wrap">
@@ -2143,7 +2426,7 @@ async function finish(opts = {}) {
         <div class="badge"><div class="n">${state.progress.totalXP || 0}</div><div class="l">Total XP</div></div>
       </div>
       <div class="row">
-        <button class="primary" id="againBtn">Play another</button>
+        <button class="primary" id="againBtn">${isContentSection ? "Another round &middot; same mix" : "Play another"}</button>
         <button class="ghost" id="homeBtn">Home</button>
         <button class="ghost" id="progBtn">View progress</button>
       </div>
@@ -2161,6 +2444,7 @@ async function finish(opts = {}) {
     b.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); openReaderPath(`${b.dataset.mod}/${b.dataset.src}`, b.dataset.name); }));
   wireReveals();
   app.focus({ preventScroll: true });
+  coachMark(".result .sub", "Missed questions return on a schedule. Miss a day? A freeze covers you.", "first_results");   // [E1]
   /* [C] gauntlet / interviewer result banners, then drop the deck-scoped state */
   cApplyResults(cCtx, { correct });
   document.body.classList.remove("interview-mode");
@@ -2516,10 +2800,10 @@ function orthPath(raw, r = 10) {
 }
 
 async function openStudySection(section) {
-  app.innerHTML = `<div class="loading">Loading ${esc(label(section))}&hellip;</div>`;
+  app.innerHTML = skeletonHTML("study");
   const bank = await loadBank(section);
   if (!bank || !bank.length) {
-    app.innerHTML = `<div class="error">Couldn't load ${esc(section)}. Run <code>python3 extract.py</code>.</div>`;
+    errorScreen(`Couldn't load ${label(section)}`, `Check your connection and try again.${devDetail(`Run <code>python3 extract.py</code>.`)}`, () => openStudySection(section));
     return;
   }
   const mods = modulesOf(bank);
@@ -4123,7 +4407,15 @@ async function openReaderPath(path, title, navCtx, frag) {
     if (frag) { const t = main.querySelector("#" + CSS.escape(frag)); if (t) t.scrollIntoView({ block: "start" }); }
     localStorage.setItem("sd_last_read", JSON.stringify({ path, title: reader.titleText }));   // Study's "Continue reading"
   } catch {
-    const b = el("#readerBody"); if (b) b.innerHTML = `<div class="error">Couldn't load this page. Check your connection and try again.</div>`;
+    // [E1] reader failure keeps its own in-panel error (not the full errorScreen
+    // — the underlying screen is still live behind the pane) but gains a retry.
+    const b = el("#readerBody");
+    if (b) {
+      b.innerHTML = `<div class="error">Couldn't load this page. Check your connection and try again.
+          <div class="row" style="margin-top:10px"><button class="ghost" id="readerRetry">Try again</button></div>
+        </div>`;
+      el("#readerRetry").addEventListener("click", () => openReaderPath(path, title, navCtx, frag));
+    }
   }
 }
 
@@ -5446,11 +5738,12 @@ if (new URLSearchParams(location.search).get("qa") === "1") {
 async function boot() {
   state.index = await fetchJSON("questions/index.json", null);
   if (!state.index) {
-    app.innerHTML = `<div class="error">No question bank found. Run <code>python3 extract.py</code> then reload.</div>`;
+    errorScreen("No question bank found", `Check your connection, or the question bank hasn't been built yet.${devDetail(`Run <code>python3 extract.py</code> then reload.`)}`, () => location.reload());
     return;
   }
   el("#bankInfo").textContent = `${state.index.total} questions across ${Object.keys(state.index.sections).length} sections`;
   state.progress = loadProgress();
+  seedCoachMarksIfVeteran();                       // [E1] a non-empty history means every coach mark is pre-seen
   /* [D] coach: daily pick + message, computed once per boot */
   const todayPick = coachPick();
   const todayMsg = coachMessage(todayPick);
@@ -5464,6 +5757,8 @@ async function boot() {
   applyTheme(curTheme(), false);   // don't persist a ?theme= URL override
   const tb = el("#themeBtn");
   if (tb) tb.addEventListener("click", toggleThemePop);
+  const skb = el("#streakChip");                    // [E1] streak detail popover
+  if (skb) skb.addEventListener("click", toggleStreakPop);
   const mb = el("#muteBtn");
   if (mb) mb.addEventListener("click", () => { sfx.toggle(); syncMuteBtn(); });
   syncMuteBtn();
@@ -5473,6 +5768,8 @@ async function boot() {
       localStorage.setItem("sd_mode", deckMode() === "flash" ? "quiz" : "flash");
       syncModeBtn();
       if (!state.inQuiz) renderHome();        // refresh the CTA caption
+      // [E1] first-run coach mark (d): only on the switch INTO flashcards.
+      if (deckMode() === "flash") coachMark("#modeBtn", "Flashcards: recall, then self-grade. Flat 10 XP, no combos or bosses.", "first_cards");
     });
   }
   syncModeBtn();
@@ -5480,6 +5777,8 @@ async function boot() {
   // Additive: merges with the [C] and [B] handles instead of clobbering them.
   if (new URLSearchParams(location.search).get("qa") === "1") {
     Object.assign(window.__qa = window.__qa || {}, { state, moduleStats, orderInterleaved, distractorSource, flipOptsFor, loadGraph, loadBank, bankById, bankCache });
+    // [E1] additive QA surface for friction-kill features.
+    Object.assign(window.__qa, { deckLen, loadRecent, errorScreen, showToast, coachMarkSeen: (id) => localStorage.getItem("sd_cm_" + id) === "1" });
   }
   discardStaleDeck();                              // drop a previous-day resume snapshot
   registerServiceWorker();
@@ -5492,6 +5791,11 @@ async function boot() {
      and again whenever the tab regains visibility (no OS scheduler on Pages). */
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") maybeShowNudge(); });
   maybeShowNudge();
+  // [E1] idle-time prefetch of today's suggested section (skip on Save-Data).
+  if (state.today && state.today.section && !navigator.connection?.saveData) {
+    const ric = window.requestIdleCallback || ((cb) => setTimeout(cb, 300));
+    ric(() => prefetchBank(state.today.section));
+  }
 }
 
 // PWA: register the offline shell/bank cache. Only in secure contexts (https or

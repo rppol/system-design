@@ -291,6 +291,19 @@ The MVP was the multiple-choice blitz. Since then the following shipped:
   type-to-filter, `?` shortcuts overlay, mouse back/forward navigation, reader
   progress bar + font controls + back-to-top + sidebar tooltips. Reader hard limits
   locked in `CLAUDE.md`: pitch-black `#000` surface, `#e6e6e6` prose, every theme.
+- **Phase E1 (friction kills + QoL)** — first-run coach marks (4, shown once ever;
+  veterans pre-seeded so they never see onboarding chrome); friendly `errorScreen()`
+  (headline + Try again/Home + a collapsed maintainer `<details>`) at every load
+  dead-end, including the reader's in-panel retry; loading skeletons on quiz/topics/
+  study entry points; no-repeat sampling (`sd_recent_<section>` ring buffer) for plain
+  section blitzes, exempt for review/weak/drill/refresh/gauntlet/interview; bank
+  prefetch on tile hover/focus + idle-time prefetch of the suggested section; the
+  review backlog plan (rounds-to-clear + per-section chips + a "due tomorrow"
+  whisper) plus a one-time toast when orphaned reviews self-heal; flag-for-review
+  (a star on every reveal, sorts first in the review deck) and copy-question icons;
+  a 5/10/20 session-length control (`sd_deck_len`); a streak detail popover (current/
+  longest/freezes/last-3-freeze-dates); and the Ghost — a previous-best-run
+  comparison line on a section's results screen, derived from history alone.
 
 ## Planned / to be implemented
 
