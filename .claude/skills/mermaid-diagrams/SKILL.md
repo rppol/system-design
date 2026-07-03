@@ -222,11 +222,21 @@ The game reader's `renderMermaid()` in `game/app.js` does three things:
 
 ```js
 nodes.forEach(n => {
-  // Round node corners — no themeVariable exposes border-radius
-  n.querySelectorAll(".node rect").forEach(r => {
-    r.setAttribute("rx", "8"); r.setAttribute("ry", "8");
-  });
-  // Round subgraph cluster corners
+  // Widen sequence note/actor rects that under-measure their text (mermaid
+  // under-measures long monospace runs by a few %; text poking onto the
+  // black canvas is unreadable) — geometric fix, see mmRenderNode()
+  n.querySelectorAll("rect.note, rect.actor").forEach(/* measure text bbox, widen rect */);
+  // Round EVERY box ≥12px tall — flowchart nodes, sequence actors/notes,
+  // alt/opt frames, timeline periods. Chart DATA MARKS exempt (xychart bars,
+  // pie, quadrant fills): rx there reshapes the mark itself.
+  if (!["xychart", "pie", "quadrant"].includes(ctype)) {
+    n.querySelectorAll("svg rect").forEach(r => {
+      const h = r.height?.baseVal?.value || 0;
+      if (h < 12) return;
+      const rx = Math.min(8, Math.round(h / 3));
+      r.setAttribute("rx", rx); r.setAttribute("ry", rx);
+    });
+  }
   n.querySelectorAll(".cluster rect").forEach(r => {
     r.setAttribute("rx", "12"); r.setAttribute("ry", "12");
   });
@@ -238,6 +248,22 @@ nodes.forEach(n => {
   });
 });
 ```
+
+Two more reader-level behaviors (wired in `renderMermaid()`/`mmRenderNode()`,
+never per-diagram):
+
+- **Measurement fonts match the display font.** `themeVariables.fontFamily`
+  only *styles* the rendered SVG; the sequence renderer *measures* actor, note,
+  and message text with `sequence.actorFontFamily` / `noteFontFamily` /
+  `messageFontFamily` (proportional Open Sans/Trebuchet defaults). The reader
+  passes the same monospace stack to all four so measured width = drawn width.
+- **Fit-to-width pill.** Every diagram gets a `.mm-fit` button, CSS-shown only
+  while the container has `.h-scroll` (the diagram overflows its column).
+  Clicking scales the SVG to the live width between the sidebars and sets
+  `data-mm-fit` on the container; the ResizeObserver — which also watches
+  `.reader-modules`/`.reader-toc`, since collapsing a sidebar can change only
+  the gutters without resizing the column — keeps re-fitting on every layout
+  change. Grip double-click resets to auto sizing.
 
 CSS in `game/style.css` adds the remaining polish:
 ```css
@@ -265,8 +291,23 @@ above adds belt-and-suspenders to also nullify the SVG rect fill.
   reappear, check that `_mermaidReady` was reset (stale init from a previous page
   load may have the old value cached).
 - **Square boxy nodes** — Mermaid has no corner-radius themeVariable; JS
-  post-processing sets `rx=8` on `.node rect` after every `mermaid.run()` call.
-  Already in `renderMermaid()`; does not need to be added per-diagram.
+  post-processing sets `rx` on **every rect ≥12px tall** (flowchart nodes,
+  sequence actors/notes, alt/opt frames, timeline periods) after every render —
+  only chart data marks (xychart bars, pie, quadrant fills) stay square.
+  Already in `mmRenderNode()`; does not need to be added per-diagram.
+- **Sequence text spills out of actor/note boxes** (dark text on the black
+  canvas = unreadable) — TWO stacked causes, both fixed reader-side (2026-07-03):
+  1. *Measure/display font mismatch*: the sequence renderer sizes boxes with
+     `sequence.actorFontFamily`/`noteFontFamily`/`messageFontFamily` (default
+     proportional Open Sans/Trebuchet) while `themeVariables.fontFamily`
+     displays monospace — boxes ~25% too narrow. Fix: pass the same mono stack
+     to all four (done in `renderMermaid()`'s initialize).
+  2. *Intrinsic under-measurement*: even with matched fonts, mermaid measures
+     long monospace runs a few % narrow (same disease `mmFixViewBox` patches at
+     canvas level). Fix: post-render, each `rect.note`/`rect.actor` is widened
+     to cover its own text bbox (done in `mmRenderNode()`).
+  If a diagram still shows spill, do NOT hack the diagram source — check that
+  both fixes are intact in `game/app.js`.
 - **`classDef` must come before the first node definition** in the block. Mermaid
   parses classDef declarations top-down; placing them after node definitions causes
   silent failures where nodes get no class.

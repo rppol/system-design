@@ -239,11 +239,16 @@ CLAUDE.md files, skill files, or the `game/` tooling directory.
 **The game reader renders Mermaid** (`game/app.js` → `renderMermaid()` → CDN lazy
 import). GitHub renders mermaid fences natively. Both surfaces work without a build step.
 
-**Reader post-processing is already wired** — `renderMermaid()` rounds node corners
-(`rx=8` via JS after render, because Mermaid has no border-radius themeVariable),
-colors `<marker>` arrowheads blue (they ignore `lineColor` themeVariable — SVG `<defs>`
-elements must be patched via `setAttribute`), and makes edge label backgrounds
-transparent. Do not add per-diagram workarounds; these are handled globally.
+**Reader post-processing is already wired** — `renderMermaid()`/`mmRenderNode()`
+round ALL diagram boxes (flowchart nodes, sequence actors/notes, frames, timeline
+periods — chart data marks exempt; Mermaid has no border-radius themeVariable),
+match the sequence renderer's measurement fonts to the display font AND widen
+under-measured note/actor rects so text never spills onto the canvas, color
+`<marker>` arrowheads blue (they ignore `lineColor` themeVariable — SVG `<defs>`
+elements must be patched via `setAttribute`), make edge label backgrounds
+transparent, and add a fit-to-width button on any diagram that overflows its
+column (auto re-fits when sidebars collapse/expand). Do not add per-diagram
+workarounds; these are handled globally.
 
 ---
 
@@ -267,9 +272,12 @@ silently dropped from the game or renders wrong. These rules are derived from
   `CLAUDE.md` files. Case studies are still **reachable in the reader** via
   relative `.md` links (the `/content/` route serves any file) — so linking to a
   case study from a module is fine; its Q&As just never enter the quiz bank.
-- The bank is committed static JSON. After editing ANY Q&A or adding content you
-  **must re-run `python3 game/extract.py`** and reload the reader (`readerCache`
-  is per-session). **Every new module directory MUST be added to
+- The bank (`game/questions/*.json`) is **generated, not committed** — it is
+  gitignored; the Pages CI regenerates it fresh on every push (see
+  `.github/workflows/pages.yml`). For local play/testing, run
+  `python3 game/extract.py` after editing ANY Q&A or adding content, then reload
+  the reader (`readerCache` is per-session). **Every new module directory MUST be
+  added to
   `STUDY_ORDER["<section>"]` in `game/app.js`** at its correct learning-path
   position — a module absent from the array falls through the `indexOf === -1 →
   9999` fallback and sorts to the very end, breaking the learning order. (New

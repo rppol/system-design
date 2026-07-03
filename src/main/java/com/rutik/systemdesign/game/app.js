@@ -3941,9 +3941,30 @@ function mmAddGrip(n, sv) {
   grip.addEventListener("dblclick", (e) => {
     e.stopPropagation();
     delete sv.dataset.custom;
+    delete n.dataset.mmFit;                          // back to auto sizing (floors apply)
     const avail = mmAvailWide(n);
     mmLayout(n, sv, Math.min(+sv.dataset.natw || avail, Math.max(avail, +sv.dataset.minw || 0)));
   });
+}
+
+// "Fit width" pill — visible (via .h-scroll CSS) only while the diagram
+// overflows its column. Click scales the svg down to the live available
+// width between the sidebars; the choice sticks on the container
+// (data-mm-fit) so later resizes and sidebar collapses keep re-fitting.
+function mmAddFit(n, sv) {
+  const b = document.createElement("button");
+  b.className = "mm-fit";
+  b.textContent = "↔ fit";
+  b.title = "Scale diagram to fit the available width";
+  b.setAttribute("aria-label", "Fit diagram to available width");
+  b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    n.dataset.mmFit = "1";
+    delete sv.dataset.custom;                        // fit overrides a manual drag size
+    const avail = mmAvailWide(n);
+    mmLayout(n, sv, Math.min(+sv.dataset.natw || avail, avail));
+  });
+  n.appendChild(b);
 }
 
 // The orientation choice depends on the column width, so it is re-evaluated
@@ -3966,6 +3987,7 @@ function mmObserve(n) {
           const avail = mmAvailWide(el);
           const was = +el.dataset.mmAvail || avail;
           if (Math.abs(avail - was) / was > 0.15) mmRenderNode(el, src);       // re-choose orientation
+          else if (el.dataset.mmFit) mmLayout(el, sv, Math.min(+sv.dataset.natw || avail, avail));  // track live width, no floors
           else mmLayout(el, sv, Math.min(+sv.dataset.natw || avail,
                                          Math.max(avail, +sv.dataset.minw || 0)));  // re-clamp, honor floor
         });
@@ -3973,6 +3995,11 @@ function mmObserve(n) {
     });
   }
   _mmRO.observe(n);
+  // Sidebar collapse can change only the GUTTERS (mmExtra) while the prose
+  // column stays at its cap — the container never resizes, so watch the
+  // sidebars too. Re-observing the same element is a no-op.
+  n.closest(".reader-body")?.querySelectorAll(".reader-modules, .reader-toc")
+    .forEach((s) => _mmRO.observe(s));
 }
 
 // Render one diagram into its container: pick the orientation that reads best
@@ -4036,7 +4063,9 @@ async function mmRenderNode(n, src) {
   if (sv) { const fixed = mmFixViewBox(sv); if (fixed) d = fixed; }
   if (sv && d) {
     sv.dataset.natw = Math.round(d.w);
-    if (flipScale) {
+    if (n.dataset.mmFit) {
+      mmLayout(n, sv, Math.min(d.w, avail));         // user chose fit-to-width: no floors
+    } else if (flipScale) {
       sv.dataset.minw = Math.round(d.w * 0.7);           // readability floor for re-clamps
       mmLayout(n, sv, Math.round(d.w * flipScale));      // may exceed the column -> gutters, then h-scroll
     } else if (ctype === "timeline" && d.w > avail) {
@@ -4049,12 +4078,47 @@ async function mmRenderNode(n, src) {
       mmLayout(n, sv, Math.min(d.w, avail));
     }
     mmAddGrip(n, sv);
+    mmAddFit(n, sv);
   }
-  // Post-process SVG: round node corners + color arrowhead markers
-  // (Mermaid sets marker fill independently of lineColor themeVariable)
-  n.querySelectorAll(".node rect").forEach(r => { r.setAttribute("rx", "8"); r.setAttribute("ry", "8"); });
+  // Sequence notes/actors: even with matched measure/display fonts, mermaid
+  // under-measures long monospace lines by a few percent (same failure class
+  // mmFixViewBox patches at canvas level), so wrapped text can poke past its
+  // rect onto the black canvas where the dark text becomes unreadable. The
+  // rect is decorative background — widen it to cover its own text.
+  n.querySelectorAll("rect.note, rect.actor").forEach(r => {
+    const rb = r.getBoundingClientRect();
+    if (!rb.width) return;
+    const k = r.width.baseVal.value / rb.width;            // screen px -> svg units
+    let over = 0;
+    r.parentElement.querySelectorAll("text").forEach(t => {
+      const tb = t.getBoundingClientRect();
+      const cy = (tb.top + tb.bottom) / 2;
+      if (cy < rb.top || cy > rb.bottom) return;           // different row of the group
+      if (tb.right < rb.left || tb.left > rb.right) return; // unrelated column
+      over = Math.max(over, rb.left - tb.left, tb.right - rb.right);
+    });
+    if (over > 0.5) {
+      const pad = (over + 4) * k;
+      r.setAttribute("x", r.x.baseVal.value - pad);
+      r.setAttribute("width", r.width.baseVal.value + 2 * pad);
+    }
+  });
+  // Post-process SVG: round EVERY box — flowchart nodes, sequence actors and
+  // notes, alt/opt frames, timeline periods — not just .node rects. Chart data
+  // marks (xychart bars, pie slices, quadrant fills) keep square corners: rx
+  // there reshapes the mark itself. Tiny rects (<12px tall) are left alone.
+  if (!["xychart", "pie", "quadrant"].includes(ctype)) {
+    n.querySelectorAll("svg rect").forEach(r => {
+      const h = r.height?.baseVal?.value || 0;
+      if (h < 12) return;
+      const rx = Math.min(8, Math.round(h / 3));
+      r.setAttribute("rx", rx); r.setAttribute("ry", rx);
+    });
+  }
   n.querySelectorAll(".cluster rect").forEach(r => { r.setAttribute("rx", "12"); r.setAttribute("ry", "12"); });
+  // Color arrowhead markers (marker fill is independent of lineColor themeVariable)
   n.querySelectorAll("marker path, marker polygon").forEach(m => { m.setAttribute("fill", "#61afef"); m.removeAttribute("stroke"); });
+  if (sv) mmFixViewBox(sv);                              // widened rects may poke past the canvas
   mmTintPlain(n);
   if (!n.dataset.mmWired) {                              // once per container, not per render
     n.dataset.mmWired = "1";
@@ -4120,6 +4184,12 @@ async function renderMermaid(root) {
     if (!_mermaidReady) {
       _mermaidReady = import("https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs")
         .then(m => {
+          // One stack for BOTH measurement and display. themeVariables.fontFamily
+          // only styles the rendered SVG via CSS; the sequence renderer sizes its
+          // actor/note/message boxes with its own font settings (Open Sans /
+          // Trebuchet defaults — far narrower than monospace), so text drawn in
+          // mono spilled outside boxes sized for proportional metrics.
+          const mmFont = "ui-monospace, SFMono-Regular, Menlo, monospace";
           m.default.initialize({
             startOnLoad: false,
             theme: "dark",
@@ -4134,7 +4204,7 @@ async function renderMermaid(root) {
               clusterBorder:       "rgba(97,175,239,0.35)",
               titleColor:          "#e5c07b",
               labelBackground:     "#000000",
-              fontFamily:          "ui-monospace, SFMono-Regular, Menlo, monospace",
+              fontFamily:          mmFont,
               // Sequence diagrams can't use flowchart classDefs, so they sat
               // flat gray next to fully-colored flowcharts. Theme them from
               // the same One Dark palette: blue actors, gold notes/labels.
@@ -4203,9 +4273,13 @@ async function renderMermaid(root) {
             flowchart: { curve: "basis", padding: 20, nodeSpacing: 45, rankSpacing: 55 },
             // Sequence text rendered oversized relative to prose and long
             // notes overflowed their boxes; wrap + smaller fonts fix both.
+            // The font families MUST match themeVariables.fontFamily — these
+            // are what the renderer measures box widths with (defaults are
+            // proportional Open Sans/Trebuchet; the SVG displays monospace).
             sequence: {
               wrap: true,
               actorFontSize: 14, messageFontSize: 13, noteFontSize: 13,
+              actorFontFamily: mmFont, messageFontFamily: mmFont, noteFontFamily: mmFont,
               actorMargin: 60, noteMargin: 12, boxMargin: 8,
             },
             // Chart-family fonts sized to sit next to 14.5px prose. Widths

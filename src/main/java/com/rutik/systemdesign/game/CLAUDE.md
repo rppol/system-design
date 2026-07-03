@@ -9,9 +9,9 @@ The `game/` directory is an application, not study content — see
    Never translucent, never glass, never theme-tinted. The `--rd-bg` token in
    `style.css` must stay `#000000`, and no `[data-theme=...]` block may
    override the reader surface tokens.
-2. **Reader prose text is `#e6e6e6`** — exactly 10% below full white
-   (`--rd-text`). Code blocks, ASCII diagrams, and Mermaid canvases keep the
-   One Dark palette on their dark islands.
+2. **Reader prose text is pure white `#ffffff`** (`--rd-text`; changed from
+   `#e6e6e6` on 2026-07-03 by owner request). Code blocks, ASCII diagrams, and
+   Mermaid canvases keep the One Dark palette on their dark islands.
 
 ## Other invariants
 
