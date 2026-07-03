@@ -102,6 +102,17 @@ def strip_markdown(text):
     return text
 
 
+def md_inline(text, keep_bold):
+    """Markdown-preserving reduction: keep inline `code` (and optionally **bold**),
+    unwrap links to their text, collapse whitespace. The reader renders these."""
+    text = text.replace("\n", " ")
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)  # [t](url) -> t
+    if not keep_bold:
+        text = text.replace("**", "").replace("__", "")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def clean_question(line):
     """Turn a raw Q line into just the question text."""
     line = line.strip()
@@ -109,6 +120,14 @@ def clean_question(line):
     line = line.replace("**", "")
     line = re.sub(r"^Q\s*\d*\s*[:.]\s*", "", line)  # strip "Qn:" / "Q:" label if present
     return strip_markdown(line)
+
+
+def clean_question_md(line):
+    """Display variant of a Q line: drop the bold wrapper + Qn label, but keep
+    inline `code`. (Question bold is just the Q&A wrapper, so it is not preserved.)"""
+    line = line.strip().replace("**", "")
+    line = re.sub(r"^Q\s*\d*\s*[:.]\s*", "", line)
+    return md_inline(line, keep_bold=False)
 
 
 def first_sentence(text):
@@ -134,8 +153,10 @@ def first_sentence(text):
 
 
 def parse_md(path, section, module):
-    """Yield dicts {question, answerFull, answerShort, qIndex} from one .md file
-    (a module README or one of its deep-dive sub-files)."""
+    """Yield per-question dicts from one .md file (a module README or deep-dive
+    sub-file). Each dict carries both the stripped text (used for ids, options,
+    and distractors) and, when they differ, markdown-preserving display variants."""
+    source_file = os.path.basename(path)
     with open(path, encoding="utf-8") as fh:
         lines = fh.readlines()
     n = len(lines)
@@ -181,7 +202,9 @@ def parse_md(path, section, module):
                     break
                 q_parts.append(ln.strip())
                 k += 1
-        question = clean_question(" ".join(p.strip() for p in q_parts))
+        q_joined = " ".join(p.strip() for p in q_parts)
+        question = clean_question(q_joined)
+        question_md = clean_question_md(q_joined)
 
         # Collect answer lines (after the question's closing line) until the next boundary.
         j = k + 1
@@ -191,8 +214,9 @@ def parse_md(path, section, module):
                 break
             answer_lines.append(lines[j])
             j += 1
-        answer_full = strip_markdown(" ".join(answer_lines))
-        answer_full = re.sub(r"^A\s*[:.]\s*", "", answer_full)  # drop a leading "A:" label
+        answer_raw = " ".join(answer_lines)
+        answer_full = re.sub(r"^A\s*[:.]\s*", "", strip_markdown(answer_raw))  # drop a leading "A:" label
+        answer_full_md = re.sub(r"^\*{0,2}A\s*[:.]\*{0,2}\s*", "", md_inline(answer_raw, keep_bold=True))
         i = j
 
         if not question or not answer_full:
@@ -200,13 +224,21 @@ def parse_md(path, section, module):
         short = first_sentence(answer_full)
         if not (SHORT_MIN <= len(short) <= SHORT_MAX):
             continue
+        # Display variants: emitted only when they differ from the stripped text.
+        short_md = first_sentence(answer_full_md)
+        if strip_markdown(short_md) != short:        # sentence split disagreed -> can't align
+            short_md = None
         results.append({
             "section": section,
             "module": module,
+            "sourceFile": source_file,
             "qIndex": q_index,
             "question": question,
+            "questionMd": question_md if question_md != question else None,
             "answerFull": answer_full,
+            "answerFullMd": answer_full_md if answer_full_md != answer_full else None,
             "answerShort": short,
+            "answerShortMd": short_md if (short_md is not None and short_md != short) else None,
         })
     return results
 
@@ -217,6 +249,14 @@ def difficulty(q_index):
     if q_index <= 10:
         return "intermediate"
     return "advanced"
+
+
+def qid(module, question):
+    """Content-stable id: hashes module + STRIPPED question text, so re-extracting
+    after unrelated content edits does NOT orphan spaced-repetition state. Used for
+    both a question's own id and the distractorIds pointing back to source questions."""
+    h = hashlib.md5(f"{module}|{question}".encode("utf-8")).hexdigest()[:12]
+    return f"{module}#{h}"
 
 
 def main():
@@ -276,6 +316,13 @@ def main():
         by_module.setdefault(q["module"], []).append(i)
         by_section.setdefault(q["section"], []).append(i)
 
+    # Map a distractor TEXT back to its source question (first occurrence within
+    # the section, deterministic), so every distractor can carry a distractorId and
+    # a markdown display variant — including last-resort pool fills.
+    text2j = {}
+    for j, q in enumerate(raw):
+        text2j.setdefault(q["section"], {}).setdefault(q["answerShort"], j)
+
     def jaccard(a, b):
         return len(a & b) / len(a | b) if (a or b) else 0.0
 
@@ -303,16 +350,16 @@ def main():
             if jaccard(ans_toks[idx], ans_toks[j]) > 0.7:
                 continue  # too close to the correct answer -> could read as also-correct
             score = sum(idf.get(t, 1.0) for t in (signature & ans_toks[j]))
-            scored.append((score, text))
+            scored.append((score, text, j))
         scored.sort(key=lambda x: (-x[0], x[1]))  # tie-break on text -> fully deterministic
 
-        related = [t for s, t in scored if s > 0]
+        related = [t for s, t, j in scored if s > 0]
         if len(related) >= 3:
             # sample from the most-related band so replays vary but stay on-topic
             distractors = rng.sample(related[: max(3, min(8, len(related)))], 3)
         else:
             distractors = related[:]
-            for _, t in scored:                    # fill from any same-pool candidate
+            for _, t, j in scored:                 # fill from any same-pool candidate
                 if len(distractors) >= 3:
                     break
                 if t not in distractors:
@@ -328,22 +375,49 @@ def main():
         if len(distractors) < 3:
             continue  # cannot form a clean 4-option MCQ
         module_name = q["module"].split("/")[-1].replace("_", " ")
-        # Content-stable id: hashes module + question text, so re-extracting after
-        # unrelated content edits does NOT orphan spaced-repetition state (a
-        # position-based id shifted for every question after any edit repo-wide).
-        qhash = hashlib.md5(f"{q['module']}|{q['question']}".encode("utf-8")).hexdigest()[:12]
-        questions.append({
-            "id": f"{q['module']}#{qhash}",
+
+        # Per-distractor: id of the source question and its markdown variant (if any),
+        # aligned with the distractors list order.
+        sec_map = text2j.get(q["section"], {})
+        distractor_ids, distractors_md = [], []
+        for d in distractors:
+            sj = sec_map.get(d)
+            if sj is None:
+                distractor_ids.append(None)
+                distractors_md.append(None)
+                continue
+            src = raw[sj]
+            distractor_ids.append(qid(src["module"], src["question"]))
+            smd = src.get("answerShortMd")
+            distractors_md.append(smd if (smd and smd != d) else None)
+
+        # Top concepts: question + answer tokens ranked by IDF, ties alphabetical.
+        concepts = sorted(q_toks[idx] | ans_toks[idx], key=lambda t: (-idf.get(t, 1.0), t))[:6]
+
+        entry = {
+            "id": qid(q["module"], q["question"]),
             "section": q["section"],
             "module": q["module"],
             "moduleName": module_name,
-            "qIndex": q["qIndex"],
+            "sourceFile": q["sourceFile"],
             "difficulty": difficulty(q["qIndex"]),
             "question": q["question"],
             "answerFull": q["answerFull"],
             "correct": correct,
             "distractors": distractors,
-        })
+            "distractorIds": distractor_ids,
+            "concepts": concepts,
+        }
+        # Markdown display variants — emitted only when they differ (size discipline).
+        if q.get("questionMd"):
+            entry["questionMd"] = q["questionMd"]
+        if q.get("answerShortMd"):
+            entry["correctMd"] = q["answerShortMd"]
+        if q.get("answerFullMd"):
+            entry["answerFullMd"] = q["answerFullMd"]
+        if any(x is not None for x in distractors_md):
+            entry["distractorsMd"] = distractors_md
+        questions.append(entry)
 
     # Group per section and write one file per section + a small index manifest.
     per_section = {}
