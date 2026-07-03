@@ -174,6 +174,7 @@ const state = {
   deck: [], queue: [], cursor: 0, section: null, modules: null,
   combo: 0, maxCombo: 0, sessionXp: 0, inQuiz: false, answered: false,
   curOptsLen: 0, replayFn: null,
+  hard: false, awaitingConf: false, pendingPick: null,
 };
 
 /* ---------- helpers ---------- */
@@ -317,6 +318,15 @@ document.addEventListener("mousedown", (e) => {   // suppress browser history na
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const label = (s) => SECTION_LABELS[s] || s;
 
+// Inline markdown for quiz surfaces: escape first, then render only `code` and
+// **bold** (the two constructs the *Md display variants use). Callers pass the
+// *Md field when present, falling back to the plain field.
+function qInline(t) {
+  return esc(t == null ? "" : t)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+}
+
 function shuffle(a) {
   for (let i = a.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -449,16 +459,21 @@ function loadProgress() {
 
 // SM-2-lite spaced-repetition scheduler. `ms` (time-to-answer, optional) is
 // tracked as an EMA so future difficulty tuning has a per-question latency signal.
-function scheduleReview(rv, status, today, ms) {
+function scheduleReview(rv, status, today, ms, conf) {
   if (status === "correct") {
     rv.reps = (rv.reps || 0) + 1;
     rv.ease = Math.min(3.0, (rv.ease || 2.5) + 0.1);
     const r = rv.reps;
-    rv.interval = r === 1 ? 1 : r === 2 ? 3 : Math.max(1, Math.round((rv.interval || 1) * rv.ease));
+    // Desirable difficulty: a low-confidence (or slow) correct grows slower —
+    // the 0.75 factor applies only inside the growth branch (reps >= 3).
+    rv.interval = r === 1 ? 1 : r === 2 ? 3
+      : Math.max(1, Math.round((rv.interval || 1) * rv.ease * (conf === "low" ? 0.75 : 1)));
   } else {
     rv.reps = 0;
     rv.lapses = (rv.lapses || 0) + (status === "wrong" ? 1 : 0);
-    rv.ease = Math.max(1.3, (rv.ease || 2.5) - (status === "wrong" ? 0.2 : 0.05));
+    // Hypercorrection: a high-confidence miss cuts ease harder than a low one.
+    const drop = status === "wrong" ? (conf === "high" ? 0.3 : 0.2) : 0.05;
+    rv.ease = Math.max(1.3, (rv.ease || 2.5) - drop);
     rv.interval = 1;
   }
   if (ms > 0) rv.ms = rv.ms ? Math.round(0.7 * rv.ms + 0.3 * ms) : Math.round(ms);
@@ -468,22 +483,50 @@ function scheduleReview(rv, status, today, ms) {
   return rv;
 }
 
+// Median of the stored per-question answer-time EMAs across all reviews with
+// telemetry — the reference "typical" latency for the slowness signal below.
+function medianReviewMs() {
+  const arr = Object.values(state.progress.reviews || {}).map((r) => r.ms).filter((m) => m > 0).sort((a, b) => a - b);
+  return arr.length ? arr[arr.length >> 1] : 0;
+}
+
+// 0..1 "hard for you" score from spaced-repetition telemetry, or null when a
+// question has no review record yet. Combines lapses (0.5), inverse ease (0.3),
+// and slowness vs the typical answer time (0.2).
+function personalDifficulty(q, rv, medMs) {
+  if (!rv) return null;
+  const lapses = Math.min(1, (rv.lapses || 0) / 3);
+  const invEase = Math.min(1, Math.max(0, (3.0 - (rv.ease || 2.5)) / 1.7));   // ease 1.3..3.0 -> 1..0
+  const slow = medMs && rv.ms && rv.ms > 2 * medMs ? 1 : 0;
+  return Math.min(1, 0.5 * lapses + 0.3 * invEase + 0.2 * slow);
+}
+
 // Streak-freeze + SM-2 progress update. Writes localStorage sd_progress.
 function saveSessionLocal(session) {
   const p = state.progress;
   if (p.freezes == null) p.freezes = 2;
   if (!p.freezeUsedOn) p.freezeUsedOn = [];
   const reviews = (p.reviews = p.reviews || {});
+  // Session median of correct-answer times: a much-slower-than-typical correct
+  // schedules like a low-confidence one (A6 slow-correct desirable difficulty).
+  const cms = (session.results || []).filter((r) => r.status === "correct" && r.ms > 0).map((r) => r.ms).sort((a, b) => a - b);
+  const medCorrect = cms.length ? cms[cms.length >> 1] : 0;
   let correct = 0;
   for (const res of session.results || []) {
     const sec = (p.sections[res.section] = p.sections[res.section] || { seen: 0, correct: 0 });
     sec.seen += 1;
     sec.lastPlayed = session.date;
     if (res.status === "correct") { sec.correct += 1; correct += 1; }
+    // Confidence calibration tallies (A4) — only first-attempt picks carry conf.
+    if (res.conf === "high") { sec.sureSeen = (sec.sureSeen || 0) + 1; if (res.status === "correct") sec.sureCorrect = (sec.sureCorrect || 0) + 1; }
+    else if (res.conf === "low") { sec.unsureSeen = (sec.unsureSeen || 0) + 1; if (res.status === "correct") sec.unsureCorrect = (sec.unsureCorrect || 0) + 1; }
     if (res.id) {
       const rv = reviews[res.id] || { ease: 2.5, interval: 0, reps: 0, lapses: 0 };
       rv.section = res.section; rv.module = res.module;
-      scheduleReview(rv, res.status, session.date, res.ms);
+      // Slow correct -> schedule like low confidence; never double-shrink.
+      let eff = res.conf;
+      if (res.status === "correct" && medCorrect && res.ms > 2 * medCorrect) eff = "low";
+      scheduleReview(rv, res.status, session.date, res.ms, eff);
       reviews[res.id] = rv;
     }
   }
@@ -692,6 +735,26 @@ async function loadBank(section) {
   return bankCache[section];
 }
 
+// id -> question map per section, built lazily from the cached bank. Lets a
+// picked distractor be traced back to the question its answer came from (A2).
+const _bankById = {};
+function bankById(section) {
+  const bank = bankCache[section];
+  if (!bank) return null;
+  if (!_bankById[section] || _bankById[section].size !== bank.length)
+    _bankById[section] = new Map(bank.map((q) => [q.id, q]));
+  return _bankById[section];
+}
+// The question whose answer became this (wrong) option, or null if the id is no
+// longer in the bank. distractorIds are aligned with distractors and same-section.
+function distractorSource(q, opt) {
+  if (!opt || opt.src <= 0) return null;             // src 0 = the correct answer
+  const id = (q.distractorIds || [])[opt.src - 1];
+  if (!id) return null;
+  const byId = bankById(q.section);
+  return (byId && byId.get(id)) || null;
+}
+
 function modulesOf(bank) {
   const map = new Map();
   for (const q of bank) {
@@ -777,15 +840,28 @@ function makeItem(q, optOrder) {
 // Quiz vs flashcard is a global, persisted preference toggled from the top bar.
 function deckMode() { return localStorage.getItem("sd_mode") === "flash" ? "flash" : "quiz"; }
 
-function startDeck(questions, replayFn) {
+function startDeck(questions, replayFn, opts = {}) {
   state.mode = deckMode();
+  state.hard = !!opts.hard;
+  state.awaitingConf = false;
+  state._medMs = medianReviewMs();
   const items = questions.map(makeItem);
   if (state.mode === "flash") {
     state.deck = shuffle(items);                 // no boss ordering for self-grade cards
+  } else if (state.hard) {
+    state.deck = shuffle(items);                 // recall-first review: plain shuffle, no boss
   } else {
-    // boss round: advanced-difficulty questions go last and are worth 2x
-    const normal = items.filter((it) => it.q.difficulty !== "advanced");
-    const boss = items.filter((it) => it.q.difficulty === "advanced");
+    // Boss round: the hardest questions go last (2x XP). "Hardest" = calibrated
+    // personal difficulty >= 0.55, or advanced-tagged when there's no telemetry
+    // yet. Capped at the 3 hardest so a deck can't be all-boss.
+    const reviews = state.progress.reviews || {};
+    const scored = items.map((it) => {
+      const pd = personalDifficulty(it.q, reviews[it.q.id], state._medMs);
+      return { it, boss: (pd != null && pd >= 0.55) || (pd == null && it.q.difficulty === "advanced"), rank: pd == null ? -1 : pd };
+    });
+    const bossSet = new Set(scored.filter((s) => s.boss).sort((a, b) => b.rank - a.rank).slice(0, 3).map((s) => s.it));
+    const normal = items.filter((it) => !bossSet.has(it));
+    const boss = items.filter((it) => bossSet.has(it));
     boss.forEach((it) => (it.boss = true));
     state.deck = [...normal, ...boss];
   }
@@ -832,7 +908,7 @@ async function startReview() {
   }
   if (!items.length) { renderHome(); return; }
   state.section = "review"; state.modules = null;
-  startDeck(items.slice(0, QUESTIONS_PER_BLITZ), startReview);
+  startDeck(items.slice(0, QUESTIONS_PER_BLITZ), startReview, { hard: true });
 }
 
 /* ---------- weak spots ---------- */
@@ -869,7 +945,7 @@ async function startWeakSpots() {
   shuffle(filler).forEach((q) => { if (items.length < QUESTIONS_PER_BLITZ) add(q); });
   if (!items.length) { renderHome(); return; }
   state.section = "weakspots"; state.modules = null;
-  startDeck(items.slice(0, QUESTIONS_PER_BLITZ), startWeakSpots);
+  startDeck(items.slice(0, QUESTIONS_PER_BLITZ), startWeakSpots, { hard: true });
 }
 
 /* ---------- session guard: pause / resume ---------- */
@@ -879,8 +955,11 @@ async function startWeakSpots() {
 function saveDeckSnapshot() {
   if (!state.inQuiz || !state.deck.length) return;
   const snap = {
-    date: todayISO(), section: state.section, modules: state.modules, mode: state.mode,
-    items: state.deck.map((d) => ({ id: d.q.id, optOrder: d.optOrder, status: d.status, boss: d.boss })),
+    date: todayISO(), section: state.section, modules: state.modules, mode: state.mode, hard: state.hard,
+    items: state.deck.map((d) => ({
+      id: d.q.id, optOrder: d.optOrder, status: d.status, boss: d.boss,
+      retry: d.retry, retried: d.retried, redeemed: d.redeemed, taught: d.taught, revealed: d.revealed, conf: d.conf, picked: d.picked,
+    })),
     queue: state.queue, cursor: state.cursor,
     combo: state.combo, maxCombo: state.maxCombo, sessionXp: state.sessionXp,
     startedAt: state.startedAt,
@@ -931,6 +1010,10 @@ async function resumeDeck() {
     if (!q) return;                                // orphaned question: drop gracefully
     const item = makeItem(q, it.optOrder);
     item.status = it.status; item.boss = !!it.boss;
+    item.retry = !!it.retry; item.retried = !!it.retried; item.redeemed = !!it.redeemed;
+    item.taught = !!it.taught; item.revealed = !!it.revealed;
+    if (it.conf) item.conf = it.conf;
+    if (it.picked != null) { item.picked = it.picked; item.pickedOpt = item.opts[it.picked]; }
     idxMap.set(oldIdx, deck.length);
     deck.push(item);
   });
@@ -941,7 +1024,12 @@ async function resumeDeck() {
   for (let k = 0; k < (snap.cursor || 0) && k < (snap.queue || []).length; k++)
     if (idxMap.has(snap.queue[k])) cursor++;
   const DONE = ["correct", "wrong", "learned"];
-  while (cursor < queue.length && DONE.includes(deck[queue[cursor]].status)) cursor++;
+  // A pending redemption re-test (wrong + retry) and a skipped teach/test slot
+  // aren't "resolved" even though the item carries a terminal-ish status, so the
+  // leading-skip must stop on them.
+  const resolved = (it) => it.status !== "skipped" && !(it.status === "wrong" && it.retry && !it.retried) && DONE.includes(it.status);
+  while (cursor < queue.length && resolved(deck[queue[cursor]])) cursor++;
+  state.hard = !!snap.hard; state.awaitingConf = false; state._medMs = medianReviewMs();
   state.mode = snap.mode === "flash" ? "flash" : "quiz";
   state.deck = deck; state.queue = queue; state.cursor = cursor;
   state.combo = snap.combo || 0; state.maxCombo = snap.maxCombo || 0;
@@ -962,33 +1050,59 @@ function isLastInQueue() { return state.cursor >= state.queue.length - 1; }
 
 function comboMult() { return state.combo >= 5 ? 3 : state.combo >= 3 ? 2 : 1; }
 
+// Progress counter over the stable deck (queue length lies once items requeue
+// for redemption / teach-then-test): answered-of-total, plus pending redos.
+function deckProgressCounter() {
+  const DONE = ["correct", "wrong", "learned"];
+  const answered = state.deck.filter((it) => DONE.includes(it.status)).length;
+  const redo = state.deck.filter((it) => it.retry && !it.retried).length;
+  return `${answered}/${state.deck.length}${redo ? ` &middot; ${redo} redo` : ""}`;
+}
+function dotsHTML(idx) {
+  const DONE = ["correct", "wrong", "learned"];
+  return state.deck.map((it, i) =>
+    `<span class="dot ${DONE.includes(it.status) ? "done" : ""} ${it.boss ? "boss" : ""} ${i === idx ? "cur" : ""}"></span>`).join("");
+}
+
 function renderQuestion() {
   const idx = state.queue[state.cursor];
   const item = state.deck[idx];
-  const { q, opts } = item;
-  const teach = item.status === "skipped";
-  state.inQuiz = true; state.answered = false; state.curOptsLen = opts.length;
+  const { q } = item;
+  // A skipped question is taught first (concept card), then tested later.
+  if (item.status === "skipped" && !item.taught) { renderTeach(item); return; }
+  const testView = item.status === "skipped" && item.taught;                    // A5 lock-it-in test
+  const retryView = item.status === "wrong" && item.retry && !item.retried;     // A1 redemption re-test
+  if (retryView) { shuffle(item.opts); item.optOrder = item.opts.map((o) => o.src); }  // fresh arrangement
+  const opts = item.opts;
+  state.inQuiz = true; state.answered = false; state.awaitingConf = false; state.curOptsLen = opts.length;
   state.qShownAt = performance.now();
-  const DONE = ["correct", "wrong", "learned"];
-  const dots = state.deck.map((it, i) =>
-    `<span class="dot ${DONE.includes(it.status) ? "done" : ""} ${it.boss ? "boss" : ""} ${i === idx ? "cur" : ""}"></span>`).join("");
-  const bossBanner = item.boss && !teach
+  const gated = state.hard && !item.revealed;                                    // A3 recall-first reveal gate
+  const bossBanner = item.boss && !testView && !retryView
     ? `<div class="boss-banner">&#9889; BOSS QUESTION &middot; 2&times; XP</div>` : "";
-  const teachBlock = teach
-    ? `<div class="teach-banner">Concept review &middot; you skipped this earlier. Learn it, then lock it in.</div>
-       <div class="reveal concept show"><b>Concept:</b> ${esc(q.answerFull)}</div>` : "";
-  // Show what the NEXT correct answer pays (gain is computed after combo+1).
+  const chip = retryView ? `<span class="redo-chip">Redemption round</span>`
+    : testView ? `<span class="lockin-chip">Lock it in</span>` : "";
+  // "hard for you" (calibrated) overrides the positional difficulty label.
+  if (state._medMs == null) state._medMs = medianReviewMs();
+  const pd = personalDifficulty(q, (state.progress.reviews || {})[q.id], state._medMs);
+  const diffChip = pd != null && pd >= 0.55
+    ? `<span class="diff d-personal">hard for you</span>`
+    : `<span class="diff d-${esc(q.difficulty)}">${esc(q.difficulty)}</span>`;
   const nextMult = state.combo + 1 >= 5 ? 3 : state.combo + 1 >= 3 ? 2 : 1;
-  const comboChip = state.combo >= 2 ? `<span class="combo">${ICON("flame", "i-flame")} ${state.combo} combo &middot; ${nextMult}&times; XP</span>` : "";
+  const comboChip = !testView && !retryView && state.combo >= 2
+    ? `<span class="combo">${ICON("flame", "i-flame")} ${state.combo} combo &middot; ${nextMult}&times; XP</span>` : "";
+  // Prefer the *Md display variant per option (src 0 = correct, i+1 = distractors[i]).
+  const optText = (o) => o.src === 0 ? (q.correctMd || q.correct)
+    : (q.distractorsMd && q.distractorsMd[o.src - 1]) || o.t;
   app.innerHTML = `
     <div class="qhead">
-      <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)} <span class="diff d-${esc(q.difficulty)}">${esc(q.difficulty)}</span></span>
-      <span class="qright"><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dots}</span><span class="qnum">${state.cursor + 1}/${state.queue.length}</span></span>
+      <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)} ${diffChip}</span>
+      <span class="qright"><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dotsHTML(idx)}</span><span class="qnum">${deckProgressCounter()}</span></span>
     </div>
-    ${bossBanner}${teachBlock}
-    <div class="qtext">${esc(q.question)} ${comboChip}</div>
-    <div class="options">
-      ${opts.map((o, i) => `<button class="opt" data-i="${i}"><kbd>${i + 1}</kbd>${esc(o.t)}<span class="mark"></span></button>`).join("")}
+    ${bossBanner}
+    <div class="qtext">${qInline(q.questionMd || q.question)} ${chip}${comboChip}</div>
+    ${gated ? `<button class="showopts" id="showOptsBtn">Show options <kbd>Space</kbd></button>` : ""}
+    <div class="options${gated ? " gated" : ""}">
+      ${opts.map((o, i) => `<button class="opt" data-i="${i}"><kbd>${i + 1}</kbd>${qInline(optText(o))}<span class="mark"></span></button>`).join("")}
     </div>
     <div class="reveal" id="reveal"></div>
     <div class="qactions">
@@ -997,63 +1111,198 @@ function renderQuestion() {
     </div>`;
   document.querySelectorAll(".opt").forEach((b) =>
     b.addEventListener("click", () => answer(parseInt(b.dataset.i, 10))));
+  if (gated) el("#showOptsBtn").addEventListener("click", revealHardOptions);
   if (item.status === "pending") el("#skipBtn").addEventListener("click", skipQuestion);
   el("#nextBtn").addEventListener("click", nextQuestion);
   el("#qpauseBtn").addEventListener("click", () => openPauseSheet(null));
   app.focus({ preventScroll: true });              // keep keyboard + SR context on the new question
 }
 
+// A3: reveal the hidden options for a recall-first (hard-deck) question. Leave
+// qShownAt untouched so the recorded time spans think + answer as one number.
+function revealHardOptions() {
+  const item = state.deck[state.queue[state.cursor]];
+  if (!item || item.revealed) return;
+  item.revealed = true;
+  const wrap = el(".options"); if (wrap) wrap.classList.remove("gated");
+  const btn = el("#showOptsBtn"); if (btn) btn.remove();
+  const first = document.querySelector(".opt"); if (first) first.focus();
+  announce("Options shown.");
+}
+
+// A5: full-width concept card for a skipped question. Its key concept tokens
+// become blurred cloze chips the learner taps to reveal (first occurrence each,
+// max 5, word-boundary, case-insensitive).
+function clozeHTML(text, concepts) {
+  let html = qInline(text);
+  const seen = new Set();
+  let made = 0;
+  for (const raw of concepts || []) {
+    if (made >= 5) break;
+    const tok = String(raw || "").trim();
+    if (tok.length < 3 || seen.has(tok.toLowerCase())) continue;
+    seen.add(tok.toLowerCase());
+    const re = new RegExp(`\\b(${tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})\\b`, "i");
+    let hit = false;
+    html = html.replace(re, (m, g1, off, str) => {
+      // Skip matches that fall inside an html tag or entity we just emitted.
+      const before = str.slice(0, off);
+      if (/<[^>]*$/.test(before) || /&[^;]*$/.test(before)) return m;
+      hit = true;
+      return `<button class="cloze" type="button">${g1}</button>`;
+    });
+    if (hit) made++;
+  }
+  return html;
+}
+function renderTeach(item) {
+  const { q } = item;
+  const idx = state.queue[state.cursor];
+  state.inQuiz = true; state.answered = false; state.awaitingConf = false; state.curOptsLen = 0;
+  state.qShownAt = performance.now();
+  const hasCloze = (q.concepts || []).length > 0;
+  app.innerHTML = `
+    <div class="qhead">
+      <span class="module">${esc(label(q.section))} &middot; ${esc(q.moduleName)}</span>
+      <span class="qright"><button class="qpause" id="qpauseBtn" title="Pause this blitz" aria-label="Pause this blitz">II</button><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dotsHTML(idx)}</span><span class="qnum">${deckProgressCounter()}</span></span>
+    </div>
+    <div class="teach-chip">Concept preview &middot; you skipped this &mdash; learn it, we quiz you shortly</div>
+    <div class="qtext teach-head">${qInline(q.questionMd || q.question)}</div>
+    <div class="reveal concept show teach-concept">${clozeHTML(q.answerFullMd || q.answerFull, q.concepts)}${hasCloze ? `<div class="cloze-hint">Tap the blurred terms to reveal them</div>` : ""}</div>
+    <div class="qactions">
+      <span></span>
+      <button class="next show" id="gotItBtn">Got it &mdash; quiz me later (↵)</button>
+    </div>`;
+  document.querySelectorAll(".cloze").forEach((c) => c.addEventListener("click", () => c.classList.add("shown")));
+  el("#gotItBtn").addEventListener("click", teachDone);
+  el("#qpauseBtn").addEventListener("click", () => openPauseSheet(null));
+  app.focus({ preventScroll: true });
+}
+function teachDone() {
+  const item = state.deck[state.queue[state.cursor]];
+  if (!item || item.status !== "skipped" || item.taught) return;
+  item.taught = true;                              // the next skipped encounter is the test
+  nextQuestion();
+  saveDeckSnapshot();                              // teach records nothing beyond "taught"
+}
+
+// A4: first tap on an option locks the pick and asks for confidence; grading
+// waits until the learner says how sure they were. testMode / retryMode grade
+// immediately (no calibration on lock-ins or redemption re-tests).
 function answer(i) {
+  if (state.answered || state.awaitingConf) return;
+  const item = state.deck[state.queue[state.cursor]];
+  const testMode = item.status === "skipped";
+  const retryMode = item.status === "wrong" && item.retry && !item.retried;
+  if (!testMode && !retryMode) { lockChoice(i); return; }
+  gradeAnswer(i, null);
+}
+function lockChoice(i) {
+  state.awaitingConf = true; state.pendingPick = i;
+  document.querySelectorAll(".opt").forEach((b, k) => {
+    b.disabled = true;
+    b.classList.add(k === i ? "picked" : "dim");
+  });
+  const bar = document.createElement("div");
+  bar.className = "confbar"; bar.id = "confBar";
+  bar.innerHTML = `<span class="conf-q">How sure?</span>
+    <button class="conf-btn" id="confSure"><kbd>1</kbd> Sure</button>
+    <button class="conf-btn" id="confUnsure"><kbd>2</kbd> Not sure</button>`;
+  el(".options").insertAdjacentElement("afterend", bar);
+  el("#confSure").addEventListener("click", () => pickConfidence("high"));
+  el("#confUnsure").addEventListener("click", () => pickConfidence("low"));
+  announce("Choice locked. How sure are you?");
+}
+function pickConfidence(conf) {
+  if (!state.awaitingConf) return;
+  state.awaitingConf = false;
+  const bar = el("#confBar"); if (bar) bar.remove();
+  gradeAnswer(state.pendingPick, conf);
+}
+
+function gradeAnswer(i, conf) {
   if (state.answered) return;
   state.answered = true;
   const item = state.deck[state.queue[state.cursor]];
   item.ms = Math.max(0, Math.round(performance.now() - (state.qShownAt || performance.now())));
-  const { q, opts } = item;
-  const teach = item.status === "skipped";
+  const { opts } = item;
+  const testMode = item.status === "skipped";
+  const retryMode = item.status === "wrong" && item.retry && !item.retried;
+  const right = opts[i].ok;
   const optBtns = document.querySelectorAll(".opt");
   optBtns.forEach((b, k) => {
-    b.disabled = true;
+    b.disabled = true; b.classList.remove("dim", "picked");
     if (opts[k].ok) { b.classList.add("correct"); b.querySelector(".mark").textContent = "✓"; }
     if (k === i && !opts[k].ok) { b.classList.add("wrong"); b.querySelector(".mark").textContent = "✗"; }
   });
-  const right = opts[i].ok;
-  announce(teach
-    ? "Locked in."
-    : right ? "Correct." : `Incorrect. The answer is: ${opts.find((o) => o.ok).t}`);
-  if (teach) {
-    item.status = "learned";
-  } else if (right) {
-    item.status = "correct";
-    state.combo += 1; state.maxCombo = Math.max(state.maxCombo, state.combo);
-    const gain = 10 * comboMult() * (item.boss ? 2 : 1);
-    state.sessionXp += gain;
-    floatXP(gain, optBtns[i]);
-    if (state.combo === 3 || state.combo === 5 || state.combo >= 7) { sfx.combo(); ripple(optBtns[i]); }
-    else sfx.correct();
+  announce(right ? "Correct." : `Incorrect. The answer is: ${opts.find((o) => o.ok).t}`);
+
+  if (retryMode) {
+    item.retried = true;
+    if (right) { item.redeemed = true; state.sessionXp += 5; floatXP(5, optBtns[i]); sfx.correct(); }  // flat bonus, no combo
+    else sfx.wrong();                                                                                   // still shaky
+  } else if (testMode) {
+    if (right) { item.status = "learned"; sfx.correct(); }                                              // no XP for a lock-in
+    else { item.status = "wrong"; item.picked = i; item.pickedOpt = opts[i]; sfx.wrong(); }
   } else {
-    item.status = "wrong";
-    state.combo = 0;
-    sfx.wrong();
+    item.conf = conf;
+    if (right) {
+      item.status = "correct";
+      state.combo += 1; state.maxCombo = Math.max(state.maxCombo, state.combo);
+      const gain = Math.round(10 * comboMult() * (item.boss ? 2 : 1) * (state.hard ? 1.5 : 1));         // A3 recall pays 1.5x
+      state.sessionXp += gain;
+      floatXP(gain, optBtns[i]);
+      if (state.combo === 3 || state.combo === 5 || state.combo >= 7) { sfx.combo(); ripple(optBtns[i]); }
+      else sfx.correct();
+    } else {
+      item.status = "wrong"; item.picked = i; item.pickedOpt = opts[i];
+      state.combo = 0; sfx.wrong();
+      if (!item.retry) {                             // A1 miss loop: one in-session redemption re-test
+        item.retry = true;
+        const at = Math.min(state.cursor + 3, state.queue.length);
+        state.queue.splice(at, 0, state.queue[state.cursor]);
+      }
+    }
   }
   const sk = el("#skipBtn"); if (sk) sk.remove();
-  if (!teach) {
-    const rev = el("#reveal");
-    rev.innerHTML = `<b>Full answer:</b> ${esc(q.answerFull)}
-      <button class="deeper" id="deeperBtn">Dive deeper into ${esc(q.moduleName)} &rarr;</button>`;
-    rev.classList.add("show");
-    el("#deeperBtn").addEventListener("click", () => openReader(q.module, q.moduleName));
-  }
+  buildReveal(item, i, right, { testMode, retryMode, conf });
   el("#nextBtn").classList.add("show");
   saveDeckSnapshot();
 }
 
+// The reveal panel: full answer (A2 honest provenance for a wrong pick, plus a
+// hypercorrection lead on a high-confidence miss), and dive-deeper to the exact
+// source file the Q&A came from.
+function buildReveal(item, pickIdx, right, ctx) {
+  const { q, opts } = item;
+  const rev = el("#reveal");
+  const hyper = !right && ctx.conf === "high";                     // wrong + sure
+  let prov = "";
+  if (!right) {
+    const src = distractorSource(q, opts[pickIdx]);
+    if (src) prov = `<div class="prov">You picked the answer to: <span class="prov-q">${qInline(src.questionMd || src.question)}</span> &mdash; from ${esc(src.moduleName)}.
+      <button class="deeper prov-read" data-mod="${esc(src.module)}" data-src="${esc(src.sourceFile || "README.md")}" data-name="${esc(src.moduleName)}">Read that instead &rarr;</button></div>`;
+  }
+  rev.className = "reveal show" + (hyper ? " hyper" : "");
+  rev.innerHTML = `${hyper ? `<div class="hyper-lead">High-confidence miss &mdash; worth a careful read.</div>` : ""}<b>Full answer:</b> ${qInline(q.answerFullMd || q.answerFull)}${prov}
+    <button class="deeper" id="deeperBtn">Dive deeper into ${esc(q.moduleName)} &rarr;</button>`;
+  el("#deeperBtn").addEventListener("click", () => openReaderPath(`${q.module}/${q.sourceFile || "README.md"}`, q.moduleName));
+  const pr = rev.querySelector(".prov-read");
+  if (pr) pr.addEventListener("click", () => openReaderPath(`${pr.dataset.mod}/${pr.dataset.src}`, pr.dataset.name));
+}
+
+// A5: skip now teaches then re-tests. The teach card is rendered next; the test
+// (a normal MCQ with no answer shown) returns at least 3 items later.
 function skipQuestion() {
   const idx = state.queue[state.cursor];
-  if (state.deck[idx].status !== "pending") return;  // double-click guard
-  state.deck[idx].status = "skipped";
-  state.queue.push(idx); // returns at the end in teach mode
+  const item = state.deck[idx];
+  if (item.status !== "pending") return;             // double-click guard
+  item.status = "skipped"; item.taught = false;
+  state.queue.splice(state.cursor + 1, 0, idx);      // TEACH: render next
+  const testAt = Math.min(state.cursor + 4, state.queue.length);
+  state.queue.splice(testAt, 0, idx);                // TEST: at least 3 items later (else end)
   nextQuestion();
-  saveDeckSnapshot();                              // reflects the advanced cursor + re-queued skip
+  saveDeckSnapshot();                                // reflects the advanced cursor + re-queued teach/test
 }
 
 function nextQuestion() {
@@ -1094,26 +1343,30 @@ function revealCard() {
   state.answered = true;
   const { q } = state.deck[state.queue[state.cursor]];
   const rev = el("#reveal");
-  rev.innerHTML = `<b>Answer:</b> ${esc(q.answerFull)}
+  rev.innerHTML = `<b>Answer:</b> ${qInline(q.answerFullMd || q.answerFull)}
     <button class="deeper" id="deeperBtn">Dive deeper into ${esc(q.moduleName)} &rarr;</button>`;
   rev.classList.add("show");
   announce(`Answer: ${q.answerFull}`);
-  el("#deeperBtn").addEventListener("click", () => openReader(q.module, q.moduleName));
+  el("#deeperBtn").addEventListener("click", () => openReaderPath(`${q.module}/${q.sourceFile || "README.md"}`, q.moduleName));
+  // A4: three-way self-grade folds into the confidence signal — Hard/Easy both
+  // count correct, but record how sure the recall felt.
   el("#cardActions").innerHTML = `
-    <button class="grade miss" id="missBtn"><kbd>1</kbd> Missed it</button>
-    <button class="grade got" id="gotBtn"><kbd>2</kbd> Got it</button>`;
-  el("#missBtn").addEventListener("click", () => gradeCard(false));
-  el("#gotBtn").addEventListener("click", () => gradeCard(true));
+    <button class="grade miss" id="missBtn"><kbd>1</kbd> Missed</button>
+    <button class="grade hard" id="hardBtn"><kbd>2</kbd> Hard</button>
+    <button class="grade got" id="easyBtn"><kbd>3</kbd> Easy</button>`;
+  el("#missBtn").addEventListener("click", () => gradeCard(false, null));
+  el("#hardBtn").addEventListener("click", () => gradeCard(true, "low"));
+  el("#easyBtn").addEventListener("click", () => gradeCard(true, "high"));
 }
 
 // Self-grade feeds the SAME results pipeline as the MCQ blitz, so it drives the
 // existing SM-2 schedule. XP is flat (no combo/boss) so self-grading can't inflate
 // score versus the verifiable multiple-choice path.
-function gradeCard(got) {
+function gradeCard(got, conf) {
   if (!state.answered) return;
   const item = state.deck[state.queue[state.cursor]];
   item.ms = Math.max(0, Math.round(performance.now() - (state.qShownAt || performance.now())));
-  if (got) { item.status = "correct"; state.sessionXp += 10; sfx.correct(); floatXP(10, el("#gotBtn")); }
+  if (got) { item.status = "correct"; item.conf = conf || null; state.sessionXp += 10; sfx.correct(); floatXP(10, el("#easyBtn") || el("#hardBtn")); }
   else { item.status = "wrong"; sfx.wrong(); }
   state.cursor++;
   if (state.cursor < state.queue.length) renderCard();
@@ -1133,7 +1386,7 @@ async function finish(opts = {}) {
   const correct = recorded.filter((d) => d.status === "correct").length;
   const learned = recorded.filter((d) => d.status === "learned").length;
   const bonusXp = Math.max(0, state.sessionXp - correct * 10);
-  const results = recorded.map((d) => ({ id: d.q.id, section: d.q.section, module: d.q.module, status: d.status, ms: d.ms || 0 }));
+  const results = recorded.map((d) => ({ id: d.q.id, section: d.q.section, module: d.q.module, status: d.status, ms: d.ms || 0, conf: d.conf || null }));
   const durationSec = Math.max(0, Math.round((Date.now() - (state.startedAt || Date.now())) / 1000));
   const pre = progressSnapshot();                  // for the moments engine (before the save)
   const { xp, freezeUsed } = saveSessionLocal({ date: todayISO(), section: state.section, results, bonusXp, durationSec });
@@ -1150,16 +1403,33 @@ async function finish(opts = {}) {
   const extraBadges =
     (learned ? `<div class="badge"><div class="n">${learned}</div><div class="l">Learned</div></div>` : "") +
     (state.maxCombo >= 2 ? `<div class="badge"><div class="n">${state.maxCombo}&times;</div><div class="l">Best combo</div></div>` : "");
-  // Post-round review: every miss (and teach-mode learn) with its correct answer.
-  const misses = state.deck.filter((d) => d.status === "wrong" || d.status === "learned");
-  const missList = misses.length ? `
+  // Post-round review: misses split into Redeemed (retry-correct) and Still
+  // shaky, plus questions learned from a skip. Each is a <details> — summary is
+  // the correct sentence, expanding reveals the full answer (+ honest provenance
+  // for a wrong pick). Redeemed items still recorded their first-attempt wrong.
+  const wrongs = recorded.filter((d) => d.status === "wrong");
+  const redeemed = wrongs.filter((d) => d.redeemed);
+  const shaky = wrongs.filter((d) => !d.redeemed);
+  const learnedItems = recorded.filter((d) => d.status === "learned");
+  const missItem = (m) => {
+    let body = qInline(m.q.answerFullMd || m.q.answerFull);
+    if (m.status === "wrong" && m.pickedOpt) {
+      const src = distractorSource(m.q, m.pickedOpt);
+      if (src) body += `<div class="prov">You picked the answer to: <span class="prov-q">${qInline(src.questionMd || src.question)}</span> &mdash; from ${esc(src.moduleName)}.</div>`;
+    }
+    return `<details class="miss-item ${m.status}${m.redeemed ? " redeemed" : ""}">
+        <summary class="miss-q">${qInline(m.q.correctMd || m.q.correct)}</summary>
+        <div class="miss-a">${body}</div>
+        <button class="deeper miss-deeper" data-mod="${esc(m.q.module)}" data-src="${esc(m.q.sourceFile || "README.md")}" data-name="${esc(m.q.moduleName)}">Dive deeper into ${esc(m.q.moduleName)} &rarr;</button>
+      </details>`;
+  };
+  const group = (title, cls, arr) => arr.length ? `<h3 class="miss-group ${cls}">${title}</h3>${arr.map(missItem).join("")}` : "";
+  const missList = (wrongs.length || learnedItems.length) ? `
     <div class="miss-wrap">
       <h2 class="section-h">Review this round</h2>
-      ${misses.map((m, k) => `<div class="miss-item ${m.status}">
-        <div class="miss-q">${esc(m.q.question)}</div>
-        <div class="miss-a">${esc(m.q.correct)}</div>
-        <button class="deeper miss-deeper" data-k="${k}">Dive deeper into ${esc(m.q.moduleName)} &rarr;</button>
-      </div>`).join("")}
+      ${group("Redeemed", "good", redeemed)}
+      ${group("Still shaky", "warn", shaky)}
+      ${group("Learned from a skip", "", learnedItems)}
     </div>` : "";
   const R = 56, CIRC = +(2 * Math.PI * R).toFixed(1);
   app.innerHTML = `
@@ -1199,7 +1469,7 @@ async function finish(opts = {}) {
   el("#homeBtn").addEventListener("click", () => go("#/home"));
   el("#progBtn").addEventListener("click", () => go("#/progress"));
   document.querySelectorAll(".miss-deeper").forEach((b) =>
-    b.addEventListener("click", () => { const m = misses[+b.dataset.k]; openReader(m.q.module, m.q.moduleName); }));
+    b.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); openReaderPath(`${b.dataset.mod}/${b.dataset.src}`, b.dataset.name); }));
   wireReveals();
   app.focus({ preventScroll: true });
 }
@@ -3203,8 +3473,27 @@ document.addEventListener("keydown", (e) => {
   if (state.mode === "flash") {
     if (!state.answered) {
       if (e.key === " " || e.key === "Enter") { e.preventDefault(); revealCard(); }
-    } else if (e.key === "1") { e.preventDefault(); gradeCard(false); }
-    else if (e.key === "2" || e.key === "Enter") { e.preventDefault(); gradeCard(true); }
+    } else if (e.key === "1") { e.preventDefault(); gradeCard(false, null); }      // Missed
+    else if (e.key === "2") { e.preventDefault(); gradeCard(true, "low"); }         // Hard
+    else if (e.key === "3" || e.key === "Enter") { e.preventDefault(); gradeCard(true, "high"); }  // Easy
+    return;
+  }
+  const cur = state.deck[state.queue[state.cursor]];
+  // A5 teach concept card: Enter/Space moves on (no answer to give here).
+  if (cur && cur.status === "skipped" && !cur.taught) {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); teachDone(); }
+    return;
+  }
+  // A3 recall-first gate: Space reveals the hidden options; block option keys
+  // until then so a blind 1-4 can't answer an unseen list.
+  if (state.hard && cur && !cur.revealed && !state.answered) {
+    if (e.key === " ") { e.preventDefault(); revealHardOptions(); }
+    return;
+  }
+  // A4 confidence step: after locking a pick, 1 = sure, 2 = not sure.
+  if (state.awaitingConf) {
+    if (e.key === "1") { e.preventDefault(); pickConfidence("high"); }
+    else if (e.key === "2") { e.preventDefault(); pickConfidence("low"); }
     return;
   }
   if (state.answered) {
@@ -3215,8 +3504,7 @@ document.addEventListener("keydown", (e) => {
     const i = +e.key - 1;
     if (i < state.curOptsLen) { e.preventDefault(); answer(i); }
   } else if (e.key.toLowerCase() === "s") {
-    const item = state.deck[state.queue[state.cursor]];
-    if (item && item.status === "pending") { e.preventDefault(); skipQuestion(); }
+    if (cur && cur.status === "pending") { e.preventDefault(); skipQuestion(); }
   }
 });
 

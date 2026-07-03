@@ -445,6 +445,89 @@ button:active { transform: scale(0.98); }
 .reveal b { color: var(--text); }
 @keyframes fade { from { opacity: 0; transform: translateY(5px); } }
 
+/* Phase A: inline `code` chips inside quiz surfaces (from *Md display variants) */
+.qtext code, .opt code, .reveal code, .miss-a code, .prov-q code, .teach-concept code {
+  font-family: var(--mono); font-size: 0.88em; padding: 1px 5px; border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/* A4: locked pick + confidence bar (two-step answering) */
+.opt.picked {
+  border-color: color-mix(in srgb, var(--accent) 75%, transparent); background: var(--glass-2);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent) inset;
+}
+.opt.dim { opacity: 0.5; }
+.confbar {
+  display: flex; align-items: center; gap: 10px; margin-top: 12px;
+  padding: 9px 14px; border-radius: var(--radius-sm);
+  background: var(--glass); border: 1px solid var(--glass-brd);
+  animation: fade 0.2s var(--ease-out);
+}
+.conf-q { color: var(--muted); font-size: 13.5px; font-weight: 600; margin-right: auto; }
+.conf-btn { padding: 8px 16px; font-weight: 700; font-size: 13.5px; background: var(--glass); color: var(--text); border: 1px solid var(--glass-brd); }
+.conf-btn:hover { border-color: color-mix(in srgb, var(--accent) 60%, transparent); background: var(--glass-2); }
+.conf-btn kbd {
+  display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px;
+  margin-right: 7px; border-radius: 5px; background: var(--glass-2); border: 1px solid var(--glass-brd);
+  font-family: var(--mono); font-size: 10.5px; color: var(--muted); vertical-align: middle;
+}
+
+/* A4: high-confidence miss ("hypercorrection") gets a stronger, warmer panel */
+.reveal.hyper { border-color: color-mix(in srgb, var(--warn) 60%, transparent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--warn) 30%, transparent) inset; }
+.hyper-lead { color: var(--warn); font-weight: 700; margin-bottom: 8px; }
+
+/* A2: honest provenance block for a wrong pick */
+.prov {
+  margin-top: 10px; padding: 9px 12px; border-radius: var(--radius-sm); font-size: 13.5px; color: var(--muted);
+  background: color-mix(in srgb, var(--warn) 8%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+}
+.prov-q { color: var(--text); font-style: italic; }
+.prov .prov-read { margin-top: 6px; display: inline-block; }
+
+/* A1 redemption chip / A5 lock-it-in chip */
+.redo-chip, .lockin-chip {
+  display: inline-block; margin-left: 8px; padding: 2px 10px; border-radius: 999px;
+  font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 0.03em; vertical-align: middle;
+}
+.redo-chip { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent); }
+.lockin-chip { color: color-mix(in srgb, var(--accent-2) 75%, var(--text)); background: color-mix(in srgb, var(--accent-2) 14%, transparent); border: 1px solid color-mix(in srgb, var(--accent-2) 45%, transparent); }
+
+/* A3: recall-first "Show options" gate */
+.showopts {
+  display: block; margin: 10px auto 4px; padding: 13px 26px; font-weight: 700;
+  color: var(--accent-ink); background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: 0 10px 30px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.showopts kbd { margin-left: 8px; padding: 1px 6px; border-radius: 5px; background: rgba(0, 0, 0, 0.18); font-family: var(--mono); font-size: 11px; }
+.options.gated { display: none; }
+@media (prefers-reduced-motion: no-preference) {
+  .showopts { animation: showopts-pulse 1.8s ease-in-out infinite; }
+}
+@keyframes showopts-pulse {
+  0%, 100% { transform: scale(1); box-shadow: 0 10px 30px color-mix(in srgb, var(--accent) 30%, transparent); }
+  50% { transform: scale(1.03); box-shadow: 0 12px 38px color-mix(in srgb, var(--accent) 48%, transparent); }
+}
+
+/* A5: teach concept card + cloze chips */
+.teach-chip {
+  margin: 4px 0 14px; padding: 9px 14px; border-radius: var(--radius-sm);
+  font-size: 13.5px; font-weight: 600; display: inline-block;
+  color: color-mix(in srgb, var(--accent-2) 65%, var(--text));
+  background: color-mix(in srgb, var(--accent-2) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-2) 50%, transparent);
+}
+.teach-concept { font-size: 15px; line-height: 1.6; }
+.teach-concept .cloze-hint { margin-top: 12px; font-size: 12.5px; color: var(--faint); font-family: var(--mono); }
+.cloze {
+  font: inherit; color: var(--text); padding: 0 3px; border-radius: 5px; cursor: pointer;
+  background: color-mix(in srgb, var(--accent-2) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-2) 40%, transparent);
+  filter: blur(4.5px); transition: filter 0.2s var(--ease-out);
+}
+.cloze:hover { border-color: var(--accent-2); }
+.cloze.shown { filter: none; background: color-mix(in srgb, var(--accent-2) 10%, transparent); cursor: default; }
+
 .qactions { display: flex; align-items: center; justify-content: space-between; margin-top: 18px; min-height: 46px; gap: 10px; }
 .skip { padding: 11px 18px; background: var(--glass); color: var(--muted); border: 1px solid var(--glass-brd); font-weight: 600; }
 .skip:hover { color: var(--text); border-color: color-mix(in srgb, var(--accent-2) 60%, transparent); }
@@ -485,6 +568,8 @@ button:active { transform: scale(0.98); }
 .grade { padding: 12px 22px; font-weight: 700; border: 1px solid var(--glass-brd); }
 .grade.miss { background: color-mix(in srgb, var(--bad) 12%, transparent); color: color-mix(in srgb, var(--bad) 60%, var(--text)); border-color: color-mix(in srgb, var(--bad) 55%, transparent); }
 .grade.miss:hover { border-color: var(--bad); }
+.grade.hard { background: color-mix(in srgb, var(--warn) 12%, transparent); color: color-mix(in srgb, var(--warn) 65%, var(--text)); border-color: color-mix(in srgb, var(--warn) 55%, transparent); }
+.grade.hard:hover { border-color: var(--warn); }
 .grade.got { background: color-mix(in srgb, var(--good) 12%, transparent); color: color-mix(in srgb, var(--good) 60%, var(--text)); border-color: color-mix(in srgb, var(--good) 55%, transparent); }
 .grade.got:hover { border-color: var(--good); }
 
@@ -1082,18 +1167,32 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .diff.d-core { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
 .diff.d-intermediate { color: color-mix(in srgb, var(--accent-2) 75%, var(--text)); background: color-mix(in srgb, var(--accent-2) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent-2) 40%, transparent); }
 .diff.d-advanced { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent); }
+/* A6: calibrated "hard for you" difficulty chip (mixed-case, warn-toned) */
+.diff.d-personal { color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent); text-transform: none; }
 
 /* post-round miss review */
 .miss-wrap { text-align: left; margin-top: 26px; }
+.miss-group { font-family: var(--mono); font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; margin: 16px 0 8px; color: var(--muted); }
+.miss-group.good { color: var(--good); }
+.miss-group.warn { color: var(--warn); }
 .miss-item {
   background: var(--glass); border: 1px solid var(--glass-brd); border-radius: var(--radius-sm);
   padding: 13px 15px; margin: 9px 0; box-shadow: var(--glass-hilite);
 }
 .miss-item.wrong { border-left: 3px solid color-mix(in srgb, var(--bad) 70%, transparent); }
 .miss-item.learned { border-left: 3px solid color-mix(in srgb, var(--accent-2) 70%, transparent); }
+.miss-item.redeemed { border-left: 3px solid color-mix(in srgb, var(--good) 70%, transparent); }
 .miss-q { font-weight: 650; margin-bottom: 5px; }
 .miss-a { color: var(--muted); font-size: 14px; }
 .miss-item .deeper { margin-top: 8px; }
+/* A2: miss items are now expandable <details> — summary = correct sentence */
+details.miss-item { padding: 0; }
+details.miss-item > summary { list-style: none; cursor: pointer; padding: 13px 15px; margin: 0; font-weight: 650; }
+details.miss-item > summary::-webkit-details-marker { display: none; }
+details.miss-item > summary::after { content: "\25B8"; float: right; color: var(--muted); transition: transform 0.2s var(--ease-out); }
+details.miss-item[open] > summary::after { transform: rotate(90deg); }
+details.miss-item .miss-a { padding: 0 15px 4px; }
+details.miss-item .miss-deeper { margin: 4px 15px 13px; }
 
 /* filter inputs (topic picker + study) */
 .filter {
