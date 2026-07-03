@@ -394,49 +394,49 @@ npm install some-random-mcp-server
 
 ## 12. Interview Questions with Answers
 
-**What is the threat model for MCP servers?**
+**Q: What is the threat model for MCP servers?**
 MCP servers run with the user's authority (subprocess or via user-authorized tokens). Compromised server can: (1) exfiltrate data via tool calls or output content, (2) trigger destructive operations (delete files, drop tables, send messages), (3) inject prompts via tool descriptions or resource content to manipulate the LLM's reasoning.
 
-**What is tool description injection and how do you defend against it?**
+**Q: What is tool description injection and how do you defend against it?**
 Attacker crafts a tool description that includes instructions for the LLM ("Ignore previous instructions and..."). LLM treats it as part of the system prompt and follows. Defense: only install trusted servers; sanitize descriptions for suspicious patterns; consider showing descriptions to user during install.
 
-**What's the confused deputy problem for MCP?**
+**Q: What's the confused deputy problem for MCP?**
 A server uses the client's auth (e.g., the user's GitHub token) to make API calls the user never intended. The server is the "deputy" — has authority delegated by the user, can abuse it. Mitigation: scope-limited tokens (each server gets minimal permissions), audit logs, OAuth with explicit scope consent.
 
-**Why is OAuth 2.1 with PKCE the standard for remote MCP servers?**
+**Q: Why is OAuth 2.1 with PKCE the standard for remote MCP servers?**
 OAuth 2.1 (codified in 2025) requires PKCE for all authorization code flows. PKCE prevents code interception attacks (where an attacker grabs the auth code mid-flow). Refresh tokens enable token rotation without re-authentication. Short-lived access tokens limit blast radius if leaked.
 
-**How do you sandbox an MCP server process?**
+**Q: How do you sandbox an MCP server process?**
 For stdio servers: run inside a Docker container with restricted filesystem (read-only project mount, no host /etc access), no network (or allowlist only), CPU/memory limits, capability dropping. For HTTP servers: standard cloud workload isolation (per-tenant K8s pods, network policies, IAM-scoped service accounts).
 
-**What's the difference between scope-limited tokens and full-access tokens?**
+**Q: What's the difference between scope-limited tokens and full-access tokens?**
 Full-access: token grants all the user's permissions on the API. Scope-limited: token grants only specific scopes (`repo:read`, `issues:write`). Use scope-limited per MCP server, granting only what the server's documented tools need. Reduces blast radius on compromise.
 
-**How do you detect prompt injection in tool descriptions?**
+**Q: How do you detect prompt injection in tool descriptions?**
 Heuristics: regex patterns for "ignore previous", "override", "as an authorized", "system override", "compliance requirement". Better: LLM-based classifier (run tool descriptions through a safety LLM). Best: review tool descriptions manually during server install. None is perfect — defense in depth.
 
-**What's the right credential rotation policy for MCP servers?**
+**Q: What's the right credential rotation policy for MCP servers?**
 Short-lived access tokens (1 hour TTL is common). Refresh tokens rotated on each use (refresh token rotation pattern). If using long-lived API keys (legacy): rotate quarterly minimum, immediately on suspected compromise. Per-server keys (not shared across servers).
 
-**How do you audit MCP tool usage?**
+**Q: How do you audit MCP tool usage?**
 Log every tool call: timestamp, user, server, tool name, input parameters (sanitize sensitive), result size, outcome (success/error). Ship logs to SIEM (Splunk, Datadog). Set alerts on: per-user anomalies (3σ from baseline), high-risk tool calls (delete, send, exfiltrate), tool calls outside normal hours.
 
-**What's a "supply chain attack" in MCP context and how do you defend?**
+**Q: What's a "supply chain attack" in MCP context and how do you defend?**
 Trusted server's published package is compromised — new version has malware. Recent history of npm/PyPI events shows this is real. Defenses: pin versions exactly, review changelogs before upgrading, prefer signed packages (Sigstore), monitor for unexpected version updates, treat MCP server installs like adding native dependencies.
 
-**Should you trust local stdio MCP servers more than remote HTTP ones?**
+**Q: Should you trust local stdio MCP servers more than remote HTTP ones?**
 Slightly, but not entirely. Local stdio servers run as user; can read local files, run any process the user can. They're not network-exposed (smaller attack surface) but malicious code still runs locally. Remote HTTP servers add network risk but are typically more sandboxed (isolated cloud workloads). Both warrant trust review.
 
-**How do you handle MCP server-issued sampling requests securely?**
+**Q: How do you handle MCP server-issued sampling requests securely?**
 Sampling lets a server ask the client to call its LLM. Risk: server's prompt could exfiltrate data or trigger expensive calls. Defense: (1) display the prompt to user for approval (or at least notify), (2) rate-limit sampling per server, (3) cost-cap sampling, (4) sanitize the prompt content for obvious injection.
 
-**What's the role of OAuth scope in MCP security?**
+**Q: What's the role of OAuth scope in MCP security?**
 Scopes are permissions: `mcp.tools.read` (list tools only), `mcp.tools.execute` (call tools), `mcp.resources.read`, etc. Servers should accept tokens with only the scopes they need. Clients should request only what they need. Limits damage from token compromise.
 
-**How do you respond to a suspected MCP server compromise?**
+**Q: How do you respond to a suspected MCP server compromise?**
 (1) Disable the server immediately in client config. (2) Rotate all tokens that were granted to it. (3) Audit logs for suspicious tool calls during the compromise window. (4) Notify users who had the server installed. (5) Coordinate with the server publisher (if community-maintained). (6) Patch and revert if appropriate.
 
-**What's coming in MCP security spec evolution?**
+**Q: What's coming in MCP security spec evolution?**
 Signed servers (cryptographic publisher verification), unified server health/safety attestations, standardized PII detection in tool outputs, formal capability scopes (more granular than OAuth scopes today), client-side sandboxing primitives (run untrusted server in WASM).
 
 ---

@@ -464,25 +464,25 @@ Do NOT use too many feature flags simultaneously — each flag doubles the code 
 
 ## 12. Interview Questions with Answers
 
-**What is the bulkhead pattern and how does it differ from a circuit breaker?**
+**Q: What is the bulkhead pattern and how does it differ from a circuit breaker?**
 The bulkhead pattern isolates resources to prevent a failure in one area from exhausting resources needed by other areas. In software, this means separate thread pools or connection pools per downstream service. If one dependency is slow, only its thread pool fills up; other dependencies remain available. A circuit breaker monitors failure rates for a specific dependency and opens (stops sending requests) when the failure rate exceeds a threshold. They complement each other: circuit breakers detect and stop failures, bulkheads limit the blast radius when failures do occur. Use both: circuit breaker for fast failure detection, bulkhead for resource isolation.
 
-**What is the strangler fig pattern and what are the key implementation steps?**
+**Q: What is the strangler fig pattern and what are the key implementation steps?**
 The strangler fig pattern incrementally replaces a monolith by building new functionality as separate services and routing traffic to them, gradually strangling the monolith. Steps: (1) introduce a facade (API gateway or reverse proxy) in front of the monolith — all traffic routes through it to the monolith initially; (2) identify the first bounded context to extract (choose high-value, low-coupling); (3) build the new service independently with its own data store; (4) route specific paths/features to the new service via the gateway; (5) migrate data using CDC sync during the parallel-run period; (6) cut over and decommission monolith code. Critical: each step must be independently rollbackable (change routing back at the gateway).
 
-**What is an anti-corruption layer (ACL) and when do you need it?**
+**Q: What is an anti-corruption layer (ACL) and when do you need it?**
 An ACL is a translation layer that converts between a legacy system's (or external system's) data model and your internal domain model. You need it when integrating with systems that have different naming conventions, data formats, or domain concepts that would pollute your clean domain if imported directly. Without an ACL, legacy field names (`cust_no`, `order_total_amount`) leak into your domain classes, and future changes to the legacy system require changes throughout your codebase. The ACL encapsulates all translation logic in one place; your domain never imports legacy types.
 
-**How do you propagate correlation IDs across service boundaries including async messaging?**
+**Q: How do you propagate correlation IDs across service boundaries including async messaging?**
 HTTP: implement `OncePerRequestFilter` that reads `X-Correlation-ID` from incoming request (or generates a UUID if absent), puts it in MDC, and adds it to the outgoing response header. Inject the correlation ID into outgoing HTTP calls via RestTemplate interceptor or WebClient filter. Kafka: when publishing, add the correlation ID as a Kafka message header. When consuming, extract the header and put it in MDC before processing. Async tasks: capture `MDC.getCopyOfContextMap()` before submitting to an executor, restore it at the start of the task. The key constraint: the same correlation ID must flow through the entire request path across all services.
 
-**What is the difference between sidecar and ambassador patterns?**
+**Q: What is the difference between sidecar and ambassador patterns?**
 Both patterns deploy a helper container alongside the main application, but they serve different purposes. The sidecar extends or enhances the main application's capabilities: log shipping, config sync, distributed tracing agent, service mesh proxy. The sidecar is specific to this application's infrastructure needs. The ambassador acts as a proxy for outbound connections from the main application: it handles retry logic, circuit breaking, and service discovery on behalf of the main container. Ambassador is useful when the main container is a legacy application that cannot be modified — the ambassador adds modern networking capabilities transparently. In practice, Envoy in a service mesh acts as both sidecar (receives inbound) and ambassador (handles outbound).
 
-**What is graceful shutdown and why is the preStop hook important in Kubernetes?**
+**Q: What is graceful shutdown and why is the preStop hook important in Kubernetes?**
 Graceful shutdown ensures that when a pod is terminated, it completes in-flight requests before shutting down. In Spring Boot, `server.shutdown=graceful` stops the Tomcat acceptor from accepting new connections and waits for active requests to complete (up to `timeout-per-shutdown-phase`). The Kubernetes preStop hook is important because Kubernetes sends SIGTERM to the container and simultaneously removes the pod from Service endpoints. iptables rules take 1-5 seconds to propagate across all nodes. Without a preStop sleep (typically 5-10 seconds), traffic continues arriving at the pod from load balancers that haven't yet received the endpoint update, resulting in connection reset errors for in-flight requests.
 
-**How do you implement feature flags safely at scale?**
+**Q: How do you implement feature flags safely at scale?**
 Use a dedicated feature flag service (Unleash, LaunchDarkly) that evaluates flags server-side based on context (user ID, percentage, environment). The application makes an SDK call that evaluates the flag locally against downloaded rules — no network call per request. Implement per-user or percentage-based targeting for gradual rollouts. Each flag must have: an owner, a description, an expected removal date, and a default value for when the flag service is unavailable. Use flags for dark launches (deployed but off), canary releases (10% of users), and kill switches (disable a misbehaving feature without a deployment). Clean up flags after full rollout — stale flags are technical debt.
 
 ---

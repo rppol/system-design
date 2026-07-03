@@ -353,14 +353,14 @@ SELECT 'orders', id FROM mysql.orders;
 
 ## Interview Discussion Points
 
-**How do you handle the initial data migration for 500M rows without downtime?**
+**Q: How do you handle the initial data migration for 500M rows without downtime?**
 The initial migration runs offline (no application downtime required): (1) Use `mydumper` for parallel MySQL dump (8 threads, no table locks on InnoDB). Duration: ~7 hours for 5TB. (2) Load into PostgreSQL with `pgloader` (concurrent, 5M rows/minute). Duration: ~100 minutes for 500M orders. (3) During the dump and load, Debezium is simultaneously streaming new changes from the MySQL binlog. By the time the load completes, PostgreSQL may be 8 hours behind MySQL. (4) Debezium catches up the remaining 8 hours of changes (time-series: delta is proportional to new writes, not historical data). This catch-up takes minutes, not hours. Application traffic still hits MySQL; PostgreSQL is a shadow database until validated.
 
-**What rollback triggers should be set up and how does rollback work?**
+**Q: What rollback triggers should be set up and how does rollback work?**
 Automated rollback triggers: (1) PostgreSQL error rate > 0.1% for 5 consecutive minutes (measured per request). (2) Shadow read discrepancy rate > 0.01% (Prometheus counter on shadow comparison failures). (3) P99 latency regression > 50% vs baseline. Rollback mechanism: feature flags stored in Redis, read on every request with 1-second TTL. Setting `migration.pg.read.percentage = 0` routes all reads back to MySQL within 1 second of Redis propagation. Dual-write is independently controlled — stop dual-write to MySQL or PostgreSQL independently. The rollback procedure is practiced in staging before production cutover, with all engineers on-call during the migration window.
 
-**How do you validate data parity between MySQL and PostgreSQL?**
+**Q: How do you validate data parity between MySQL and PostgreSQL?**
 Multi-level validation: (1) Row count comparison per table every 15 minutes — counts should match within Debezium lag (typically < 100 rows difference). (2) Business invariant queries: "every order has at least one order_item," "sum of payments for each order matches order total" — run against both databases, results must match. (3) Random sample checksums: select 100K random order IDs, compute MD5 of critical fields, compare between MySQL and PostgreSQL. Tolerance: 0% discrepancy (any mismatch investigated before increasing traffic percentage). (4) Shadow reads: 1% of production reads are answered by both MySQL and PostgreSQL; responses are compared. Discrepancy triggers an alert and is logged for investigation.
 
-**What happens to MySQL after the full cutover?**
+**Q: What happens to MySQL after the full cutover?**
 MySQL is kept in read-only mode for 4 weeks (the rollback window). The application no longer writes to MySQL. MySQL continues receiving CDC from PostgreSQL via a reverse CDC setup (Debezium tailing PostgreSQL WAL → MySQL) during the rollback window. This ensures MySQL stays current in case rollback is needed. After 4 weeks without rollback triggers: (1) Decommission the reverse CDC. (2) Take a final MySQL backup for archival (7-year retention for compliance). (3) Remove MySQL from the application configuration. (4) Terminate the MySQL RDS instances. (5) Close the migration project.

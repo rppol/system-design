@@ -359,49 +359,49 @@ except (asyncio.TimeoutError, ConnectionError):
 
 ## 12. Interview Questions with Answers
 
-**Why does an MCP client need to call `initialize` first?**
+**Q: Why does an MCP client need to call `initialize` first?**
 The initialize handshake negotiates protocol version and capabilities. Both sides learn what the other supports (e.g., does client support sampling? does server support notifications?). Without it, the connection is undefined.
 
-**How do you avoid tool name collisions across multiple MCP servers?**
+**Q: How do you avoid tool name collisions across multiple MCP servers?**
 Prefix each tool name with the server's logical name: `github_create_issue` from GitHub server, `gitlab_create_issue` from GitLab server. Routes calls by parsing the prefix. Standard pattern in Claude Desktop, Cursor.
 
-**When should the client re-list tools?**
+**Q: When should the client re-list tools?**
 Once at session start (cache the list). Refresh when the server sends `notifications/tools/list_changed`. Some servers add tools dynamically (e.g., a database server adds a tool per available stored procedure).
 
-**What's sampling and how does the client handle it?**
+**Q: What's sampling and how does the client handle it?**
 Sampling lets a server request the client to make an LLM call on its behalf. The server sends `sampling/createMessage` with a prompt; the client calls its LLM (Claude, GPT-4o, etc); returns the result to the server. Useful when the server needs AI capability without bundling its own model access.
 
-**How do clients handle long-running server operations?**
+**Q: How do clients handle long-running server operations?**
 Per spec, tool calls should return within a reasonable timeout. For long ops, two patterns: (1) server returns a task_id quickly + provides a polling tool to check status; (2) server supports progress notifications during the call.
 
-**What's the right timeout for tool calls?**
+**Q: What's the right timeout for tool calls?**
 60 seconds default in most SDKs. Configurable per call. For known long operations, increase. For interactive UIs, may want 5-10s with progress indication. Always have a hard cap to detect server hangs.
 
-**How do you handle a server that crashes?**
+**Q: How do you handle a server that crashes?**
 Detect via timeout or connection error on call. Restart the server subprocess (for stdio) or reconnect (for HTTP). Re-initialize. Optionally re-list tools (the new server instance may have different version). Implement backoff to avoid restart loops.
 
-**Can one client connect to both stdio and HTTP servers?**
+**Q: Can one client connect to both stdio and HTTP servers?**
 Yes — different connection methods, same `ClientSession` API afterward. Common in production: local filesystem servers via stdio + remote SaaS servers via HTTP, all managed by one client.
 
-**How does Claude Desktop discover servers to load?**
+**Q: How does Claude Desktop discover servers to load?**
 Reads `claude_desktop_config.json` (path varies by OS — `~/Library/Application Support/Claude/` on macOS). The config lists servers with command/args/env. Claude Desktop spawns each at startup.
 
-**What auth methods do MCP clients support?**
+**Q: What auth methods do MCP clients support?**
 For stdio: server inherits subprocess auth (e.g., env vars passed at launch with API keys). For HTTP: per 2025 spec, OAuth 2.0 with PKCE for user-authorized servers. Custom: server-specific auth via headers in HTTP transport.
 
-**How do you debug MCP client issues?**
+**Q: How do you debug MCP client issues?**
 (1) Use MCP Inspector to verify the server works in isolation. (2) Enable verbose logging on the client (`MCP_LOG_LEVEL=debug`). (3) Inspect JSON-RPC traffic with a proxy or stdio interceptor. (4) Try Claude Desktop as a reference client — if it works there but not in your client, the bug is yours.
 
-**Should the client validate tool args before calling?**
+**Q: Should the client validate tool args before calling?**
 Optionally — the server should validate too. Client-side validation (against the tool's `inputSchema`) catches errors earlier, gives better LLM feedback. Frameworks like Pydantic-AI do this automatically.
 
-**Can clients run servers as untrusted code?**
+**Q: Can clients run servers as untrusted code?**
 For stdio, the server runs as a subprocess in your trust boundary — treat carefully. For HTTP (remote servers), the server is fully isolated but you must trust their tool descriptions (could contain prompt injection). Production: only install servers from trusted sources.
 
-**How do you scale a client connecting to many servers?**
+**Q: How do you scale a client connecting to many servers?**
 Use async I/O so connections multiplex; each session is lightweight. For 50+ servers, lazy-connect (only when first tool from that server is called). Monitor per-server health; isolate failures.
 
-**What happens if a tool result is too large?**
+**Q: What happens if a tool result is too large?**
 The MCP spec allows up to whatever the transport supports (HTTP: typically multi-MB; stdio: limited by pipe buffer). But large results bloat LLM context. Client should truncate before passing to LLM (50KB typical) or convert to a resource URI for on-demand reads.
 
 ---

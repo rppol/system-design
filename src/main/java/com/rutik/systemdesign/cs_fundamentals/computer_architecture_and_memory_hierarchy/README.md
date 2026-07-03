@@ -799,52 +799,52 @@ For production systems, launch the entire process with `numactl --cpunodebind=0 
 
 ## 12. Interview Questions with Answers
 
-**Why does sorting data before a branch-heavy loop speed it up?**
+**Q: Why does sorting data before a branch-heavy loop speed it up?**
 Sorting places all values that satisfy a branch condition contiguously, so the CPU's branch predictor learns the pattern (long run of "not taken" → long run of "taken"). With random data, the predictor mispredicts ~50% of branches; with sorted data, it mispredicts only at the transition point. Each misprediction flushes the pipeline — ~15-cycle penalty on modern CPUs. At millions of iterations, this compounds to a measurable speedup, often 3–6× in C/C++ benchmarks. The canonical example (std::sort before a branch loop) is a standard interview gotcha.
 
-**What is false sharing, and how do you detect and fix it?**
+**Q: What is false sharing, and how do you detect and fix it?**
 False sharing occurs when two threads on different cores write to different variables that happen to occupy the same 64-byte cache line. Thread A's write invalidates Thread B's cache-line copy (MESI protocol), forcing Thread B to re-fetch the line — even though Thread B's variable never changed. Symptom: correct results but poor multi-threaded scalability. Detected with `perf c2c` (Linux), Intel VTune Memory Access analysis, or by padding structs and observing throughput change. Fixed by aligning each independently-written variable to a cache-line boundary (64 bytes on x86-64): C `alignas(64)`, Java `@Contended`, Rust `#[repr(align(64))]`.
 
-**What is a cache miss penalty, and what are the three types of cache misses?**
+**Q: What is a cache miss penalty, and what are the three types of cache misses?**
 A cache miss forces the CPU to stall (or switch to other independent instructions) while fetching data from a lower cache level or DRAM. Penalty: L1 miss → L2 hit: ~6 extra cycles; L2 miss → L3 hit: ~20 extra cycles; L3 miss → DRAM: ~200–300 cycles. The three types: (1) Compulsory (cold) miss — first access to a line that was never in cache; unavoidable. (2) Capacity miss — working set exceeds cache size; reduce working set or improve temporal locality. (3) Conflict miss — two frequently-used addresses map to the same cache set in a set-associative cache; resolve with data padding or changing array sizes.
 
-**Explain the MESI protocol and why it is necessary.**
+**Q: Explain the MESI protocol and why it is necessary.**
 In a multi-core CPU, each core has its own L1/L2 cache. Without coordination, two cores could hold contradictory values for the same address. MESI is a cache coherence protocol with four states per cache line: Modified (dirty, only copy), Exclusive (clean, only copy), Shared (clean, multiple copies), Invalid (stale/absent). When a core wants to write a Shared line, it broadcasts an invalidation to all other cores; they transition to Invalid. When they next read the line, they get the updated value. MESI ensures cache coherence with minimal bus traffic.
 
-**What is the difference between spatial and temporal locality?**
+**Q: What is the difference between spatial and temporal locality?**
 Spatial locality: if you access address A, you are likely to access addresses near A (A+1, A+2, ...) soon. The CPU exploits this by loading a full 64-byte cache line on each miss. Sequential array traversal achieves near-perfect spatial locality. Temporal locality: if you access address A, you are likely to access A again soon. Loop bodies, counters, and frequently-used objects exhibit temporal locality and stay in L1/L2 cache between accesses.
 
-**What is a pipeline hazard, and how do modern CPUs handle data hazards?**
+**Q: What is a pipeline hazard, and how do modern CPUs handle data hazards?**
 A pipeline hazard is a situation that prevents the next instruction from executing in the next cycle. Data hazard (RAW — Read After Write): instruction i+1 reads a register that instruction i has not yet written. Solution: register forwarding (bypass) — the output of the Execute stage is wired directly to the input of the next Execute stage, skipping Writeback→Decode. Without forwarding, 1–2 stall cycles are inserted. Modern out-of-order processors also reorder instructions to find independent ones that can execute while a dependent instruction waits.
 
-**What is branch misprediction, and what is its cost?**
+**Q: What is branch misprediction, and what is its cost?**
 Branch misprediction occurs when the CPU's branch predictor guesses the wrong path for a conditional branch. The CPU has been executing instructions on the wrong path speculatively; when the branch resolves, the pipeline is flushed and those instructions are discarded. Cost: ~15 cycles on modern Intel/AMD (varies 10–20 cycles by microarchitecture). Modern predictors (TAGE) achieve ~97–99% accuracy in benchmarks. Misprediction rate spikes with random/unpredictable branches (e.g., a search loop terminating at a random position).
 
-**What is a cache line, and how large is it on modern hardware?**
+**Q: What is a cache line, and how large is it on modern hardware?**
 A cache line is the minimum unit of data transfer between cache levels and between cache and DRAM. On all modern x86-64 (Intel, AMD) and ARM (Cortex-A, Apple M-series) processors, the cache line size is 64 bytes. When you read one byte, the CPU fetches the entire aligned 64-byte block. When you write one byte, the entire line is loaded (write-allocate policy), modified, and marked dirty. Cache-line alignment is why struct padding and `alignas(64)` matter for false sharing.
 
-**Explain NUMA and why it matters for multi-socket servers.**
+**Q: Explain NUMA and why it matters for multi-socket servers.**
 Non-Uniform Memory Access (NUMA): in a multi-socket server, each CPU socket has its own memory controller and local DRAM. Accessing local memory takes ~100 ns; accessing the other socket's DRAM crosses an inter-socket interconnect (Intel QPI/UPI, AMD Infinity Fabric) and costs ~200–300 ns. A process running threads across both sockets with memory allocated on one socket will incur ~2× memory latency for cross-socket accesses. On 2-socket servers running Elasticsearch, PostgreSQL, or Redis, `numactl --interleave=all` spreads memory round-robin across nodes; for latency-critical workloads, `--membind=0 --cpunodebind=0` keeps everything local.
 
-**Why are linked lists often slower than arrays in practice, even when O(n) in both cases?**
+**Q: Why are linked lists often slower than arrays in practice, even when O(n) in both cases?**
 Each node in a linked list is independently heap-allocated at an arbitrary address. Traversal is a pointer-chase: you cannot know the address of node n+1 until you have loaded node n (pointer field). This defeats spatial prefetching — the hardware prefetcher cannot predict the next address. Each node access is a potential L3 miss (~40 ns) or DRAM miss (~100 ns). A sequentially-allocated array allows the prefetcher to stream ahead, keeping data in L1/L2. Traversing 1 million linked-list nodes can be 5–20× slower than traversing an equivalent array, despite identical O(n) complexity.
 
-**What is write-through vs write-back caching, and which does x86-64 use?**
+**Q: What is write-through vs write-back caching, and which does x86-64 use?**
 Write-through: every store writes simultaneously to the cache and to the next level of the hierarchy (L2 or DRAM). Simpler to implement and always consistent, but generates high write bandwidth. Write-back: the store writes only to the cache; the line is marked "dirty." The dirty line is written back to the next level only when evicted. Generates far less write traffic. Modern x86-64 processors use write-back for L2 and L3; L1 may use write-through to L2 (implementation-specific). DRAM writes happen only on cache eviction or explicit `clflush`.
 
-**How does the hardware prefetcher work, and what patterns does it handle poorly?**
+**Q: How does the hardware prefetcher work, and what patterns does it handle poorly?**
 The hardware prefetcher monitors the stream of cache miss addresses. If it detects a stride pattern (e.g., misses at +64, +128, +192 bytes), it issues speculative DRAM reads ahead of time, filling the cache before the CPU explicitly requests the data. It handles sequential access and fixed-stride access well. It handles poorly: pointer chasing (linked lists, trees) where the next address is unknown until the current load completes; irregular strides; access patterns that switch stride mid-stream. Software prefetch (`__builtin_prefetch` in GCC, `_mm_prefetch` intrinsic) can compensate for pointer-chase patterns in performance-critical code.
 
-**What is the Branch Target Buffer (BTB)?**
+**Q: What is the Branch Target Buffer (BTB)?**
 The BTB is a CPU cache that stores recent branch instruction addresses mapped to their predicted target addresses. When the CPU fetches a branch instruction, it looks it up in the BTB before even fully decoding the instruction. If found, the CPU immediately starts fetching from the predicted target. The BTB handles both conditional branches (predicting not-taken/taken) and indirect branches (e.g., virtual function calls, function pointers), where the target address is computed at runtime. Spectre variant 2 (branch target injection) exploits the BTB to leak data across process boundaries.
 
-**How does row-major vs column-major storage affect NumPy performance?**
+**Q: How does row-major vs column-major storage affect NumPy performance?**
 NumPy defaults to C-order (row-major) storage: elements of a row are contiguous in memory. Iterating row-by-row achieves sequential memory access (spatial locality). Column-by-column iteration jumps by `ncols * 8` bytes between accesses — almost certainly a cache miss for large arrays. For column-heavy workloads, use Fortran-order: `np.array(data, order='F')` or `np.asfortranarray(arr)`. For mixed-access patterns, explicit transposition `arr.T` returns a Fortran-order view with zero data copy. NumPy's vectorized operations (`.sum()`, `.mean()`) internally stride optimally and use SIMD regardless of order for simple reductions.
 
-**What are the concrete latency numbers for each level of the memory hierarchy?**
+**Q: What are the concrete latency numbers for each level of the memory hierarchy?**
 Registers: < 1 ns (0–1 cycle). L1 cache: 1–4 ns (4–12 cycles), 32–64 KB per core. L2 cache: ~10 ns (30–40 cycles), 256 KB–1 MB per core. L3 cache: ~40 ns (100–130 cycles), 4–32 MB shared. DRAM: ~100 ns (~300 cycles at 3 GHz). NVMe SSD: ~100 µs (100,000 ns). SATA SSD: ~500 µs. HDD: ~10 ms (10,000,000 ns). These numbers vary slightly by microarchitecture (Intel Golden Cove, AMD Zen 4, Apple M3) but the ratios are stable: L1 is ~100× faster than DRAM; DRAM is ~1000× faster than HDD.
 
-**What is out-of-order execution, and how does it relate to the memory hierarchy?**
+**Q: What is out-of-order execution, and how does it relate to the memory hierarchy?**
 Out-of-order (OoO) execution: the CPU does not execute instructions in strict program order. Instead, a scheduler (reservation station) tracks which instructions have all their operands ready and issues them to execution units as soon as they are ready, regardless of program order. The reorder buffer (ROB) holds results until they can be committed in program order (ensuring precise exceptions). OoO execution hides memory latency: while an L3-miss load is pending (~130 cycles), the CPU finds other independent instructions to execute, keeping execution units busy. Without OoO, a single L3 miss would stall the pipeline for 130 cycles.
 
 ---

@@ -767,41 +767,41 @@ Across the whole estate the **peak** parallel cost is ~2.05× source, but becaus
 
 ## 11. Interview Discussion Points
 
-**How do you guarantee zero user-visible downtime when the database itself must move?**
+**Q: How do you guarantee zero user-visible downtime when the database itself must move?**
 You never have a "down" moment because the source remains the system of record until the instant of cutover, and the cutover is a *weighted shift*, not a flip. Backfill (Snowball) + CDC keep the target hot and converged; dual-write bridges the final transition window so both estates are current; then traffic shifts in 1/5/25/50/100 increments with the source still serving the rest. The user always hits a healthy estate; the switch is invisible because at no point is any portion of traffic pointed at an unready target.
 
-**Why CDC *and* dual-write — isn't one enough?**
+**Q: Why CDC *and* dual-write — isn't one enough?**
 They solve different time horizons. CDC converges the *historical and ongoing* delta non-invasively (no app change, captures out-of-band writes), but it has lag and can't make the target instantly authoritative. Dual-write makes the *active transition window* seamless by writing both estates synchronously-enough that a flip loses nothing. Use CDC for the long backlog, dual-write only for the short final window per service to bound its risk and cost.
 
-**How do you achieve RPO 0 on rollback after some writes have already landed on the target?**
+**Q: How do you achieve RPO 0 on rollback after some writes have already landed on the target?**
 Reverse CDC during the bake period. After a shift makes the target authoritative, any write that landed only on the target is streamed *back* to the source continuously. So if you roll back, the source already has (or quickly receives) those deltas — no acknowledged write is lost. Without reverse CDC, rollback would silently drop target-only writes, violating RPO 0 for payment/order data.
 
-**Why is DNS a poor primary mechanism for traffic shifting?**
+**Q: Why is DNS a poor primary mechanism for traffic shifting?**
 Resolver caching. A high TTL means clients keep resolving to a stale (possibly unhealthy) target for up to the TTL, so rollback is TTL-bound — a 1-hour TTL turns a 1-second decision into a 1-hour outage. DNS is fine as a *coarse* cross-estate failover at low TTL (30s), but the surgical per-request shift belongs in the mesh, where weight changes take effect in under a second and you can mirror traffic for validation first.
 
-**What is the single most important component, and why?**
+**Q: What is the single most important component, and why?**
 Reconciliation. Replication is mechanical; *proving the two estates agree* is what lets you trust the cutover. Count + chunked checksum + sampled deep-compare + shadow-read diff produce the parity gate that blocks the shift until divergence is provably zero. Segment and Stripe both emphasize that the validation layer mattered more than the replication itself — you can re-run a copy, but you cannot un-corrupt data you cut over to blindly.
 
-**How do you prevent dual-write from corrupting data?**
+**Q: How do you prevent dual-write from corrupting data?**
 Idempotency plus versioned conflict resolution. Every write carries a deterministic idempotency key, the target apply is an `ON CONFLICT DO UPDATE ... WHERE write_id < EXCLUDED.write_id` upsert (so replays and out-of-order applies are harmless and never regress newer data), and target writes go through a durable outbox so a failure is reconcilable, never silently swallowed. The broken version that swallowed target errors produced 0.8% divergence and an 11-day repair — see §4.2 and §9.
 
-**Why Snowball instead of just streaming 200TB over Direct Connect?**
+**Q: Why Snowball instead of just streaming 200TB over Direct Connect?**
 WAN contention. Streaming 200TB at 70% of a 10 Gbps link takes ~2.8 days of *full* pipe, during which CDC and dual-write would be starved, adding hundreds of ms to live latency. Snowball moves the cold historical bulk physically (zero production bandwidth) and you reserve the WAN for the live delta. The trade is 5–7 days of shipping latency and the discipline of recording the snapshot LSN so CDC resumes from exactly the right point.
 
-**How do you bound the blast radius of a bad cutover?**
+**Q: How do you bound the blast radius of a bad cutover?**
 Two levers: increment size and per-service scope. Each shift moves at most 1% of a single service's traffic before a soak-and-gate check, and services migrate independently rather than in a flag day. So a bad target affects at most 1% of one service for the soak duration, and auto-rollback (mesh weight → 0 in < 1s) drains it. The whole estate is never exposed at once — that's the strangler-fig discipline.
 
-**How do you decide migration order across 4000 services?**
+**Q: How do you decide migration order across 4000 services?**
 Dependency order, stateless-first. Migrate leaf/stateless services first to build operational muscle and prove the pipeline cheaply, then services with simple state, and stateful/transactional systems (billing, payments) last — exactly Netflix's published sequence. Within that, respect the dependency graph: never cut over a service before the dependencies it calls are reachable cross-estate, or you reproduce the 25%-shift connectivity incident in §9.
 
-**What gates must pass before you advance a traffic-shift increment?**
+**Q: What gates must pass before you advance a traffic-shift increment?**
 Parity = 100% (count + checksum + sample + zero shadow diffs over the soak window), CDC lag p99 < 5s, and target error/latency no worse than source baseline (within +0.1%). All three are automated control-plane gates — if any fails, the shift holds or rolls back. Human judgment sets the soak duration per service tier; the gates themselves are machine-enforced because 20,000 shift operations cannot be hand-verified.
 
-**How do you keep observability cardinality sane with 4000 services across two estates?**
+**Q: How do you keep observability cardinality sane with 4000 services across two estates?**
 Label the long-lived metrics by `service` × `estate` only, and keep high-cardinality dimensions (`chunk`, per-row ids) out of Prometheus entirely — they live in reconciliation job logs. `service` (4000) × `estate` (2) is ~8,000 series per metric, which is fine; adding `chunk` (1000s) would multiply that into the millions and melt the TSDB. The cardinality discipline and federation approach follow [`cross_cutting/prometheus_cardinality_and_scale.md`](./cross_cutting/prometheus_cardinality_and_scale.md).
 
-**How do you control the cost of running two estates for six months?**
+**Q: How do you control the cost of running two estates for six months?**
 Minimize the *overlap window per service*. Peak dual-running is ~2.05× source, but because you only dual-run the in-flight fraction and decommission source immediately after each service's bake, the 6-month average lands ~1.55×. The biggest single lever is the cross-estate CDC transfer bill (~$9K/mo for one cluster at 15 TB/day), so keep the dual-write window short and tear down replication the moment parity is proven and bake completes.
 
-**When would you accept a big-bang cutover instead?**
+**Q: When would you accept a big-bang cutover instead?**
 Only for small, low-traffic, non-critical estates where a short maintenance window is acceptable and the data fits a single copy faster than the rollback risk of a long overlap. For anything resembling 4000 services + 200TB with a 24/7 product, big-bang is infeasible: there is no global freeze window, blast radius is the entire estate, and rollback means a multi-hour full restore. The cost of phased overlap buys you per-service, sub-10-minute reversibility — a price worth paying for a live business.

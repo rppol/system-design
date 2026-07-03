@@ -1032,52 +1032,52 @@ def safe_orchestrate(objective: str, retry: bool = True) -> list[dict] | None:
 
 ## 12. Interview Questions with Answers
 
-**What is the core difference between a workflow and an agent in Anthropic's taxonomy?**
+**Q: What is the core difference between a workflow and an agent in Anthropic's taxonomy?**
 In a workflow, the developer defines the control flow in code — which LLM calls happen, in what order, based on what conditions. In an agent, the LLM itself decides the control flow at runtime — it determines what to do next based on observations. Workflows are predictable and debuggable; agents are flexible but harder to constrain. Choose workflows by default and promote to agents only when the task structure cannot be known in advance.
 
-**Why does prompt chaining reduce hallucination rates?**
+**Q: Why does prompt chaining reduce hallucination rates?**
 Each LLM call in a chain operates on a smaller, more focused input. A single monolithic prompt asking an LLM to extract entities, normalize them, and classify their relationships is asking three cognitively distinct tasks simultaneously. Breaking this into three sequential calls means each LLM receives a clean, well-defined input and produces a focused output. Anthropic's internal benchmarks show approximately 70% hallucination reduction on long-document tasks when using chaining versus single-call approaches.
 
-**What is a gate in a prompt chain and why is it necessary?**
+**Q: What is a gate in a prompt chain and why is it necessary?**
 A gate is a validation check between steps in a prompt chain. It can be programmatic (parse JSON, check numeric range, run a regex) or LLM-based (ask a cheap model "does this output satisfy criterion X?"). Gates are necessary because errors in step N amplify through subsequent steps. A malformed JSON extraction at step 1 that passes unchecked will corrupt every downstream step. Gates fail fast and prevent cascading garbage.
 
-**How does routing reduce cost and what is the key risk?**
+**Q: How does routing reduce cost and what is the key risk?**
 Routing reduces cost by directing low-complexity queries to cheaper models (e.g., claude-haiku-4-5 at $0.08/1M tokens) and reserving expensive models (claude-opus-4-5 at $3/1M tokens) for complex queries. A system routing 60% of traffic to the cheap model saves roughly 50-60% on inference cost. The key risk is classifier error: if 10% of complex queries are misclassified as simple and sent to the cheap model, those 10% get degraded quality. The classifier must be validated on a representative sample with precision and recall measured per route.
 
-**What is the difference between sectioning and voting in parallelization?**
+**Q: What is the difference between sectioning and voting in parallelization?**
 Sectioning splits a single large input into N independent chunks, processes each in parallel, and merges results. It reduces latency by N× without increasing cost. Voting sends the same prompt to the LLM N times with non-zero temperature and picks the majority result. It does not reduce latency (all calls start at the same time and finish at similar times) but reduces variance — it is useful when a single call might produce different correct-looking but wrong answers due to sampling randomness.
 
-**When does voting fail to improve accuracy?**
+**Q: When does voting fail to improve accuracy?**
 Voting reduces variance but does not fix bias. If the model systematically makes the same type of error on a particular input (e.g., consistently misidentifying a rare ICD-10 code), all N votes will agree on the same wrong answer. Majority vote in this case confidently returns the wrong answer. Voting is only effective when errors are random (stochastic) rather than systematic.
 
-**What is the orchestrator-workers pattern and how does it differ from prompt chaining?**
+**Q: What is the orchestrator-workers pattern and how does it differ from prompt chaining?**
 In prompt chaining, the decomposition is static and defined by the developer in code — step 1 always does X, step 2 always does Y. In orchestrator-workers, the orchestrator LLM dynamically decides the decomposition at runtime — it reads the task and decides which subtasks to create, how many workers to spawn, and how to assign responsibilities. Orchestrator-workers is more flexible but more expensive and harder to debug because the control flow is not fixed.
 
-**How many rounds does an evaluator-optimizer loop typically take to converge?**
+**Q: How many rounds does an evaluator-optimizer loop typically take to converge?**
 On well-defined tasks with crisp evaluation criteria — code correctness, factual accuracy against a reference, adherence to a style guide — evaluator-optimizer loops typically converge in 2-4 rounds. On subjective tasks — creative quality, tone, elegance — convergence is slower and less reliable because the evaluator's criteria are inconsistent across rounds. Production systems should set a hard cap of 4-5 rounds and return the best available output on timeout.
 
-**What is the cost multiplier for an evaluator-optimizer loop with 3 rounds?**
+**Q: What is the cost multiplier for an evaluator-optimizer loop with 3 rounds?**
 Each round costs 1 generation call + 1 evaluation call = 2 calls. Three rounds = 6 calls total versus 1 call for a naive single-prompt approach. If generation and evaluation use similar models, the cost is approximately 6×. In practice, evaluation calls use shorter prompts (the output being evaluated plus criteria) and shorter responses (JSON with score and feedback), so the actual token cost is roughly 4-5× for a 3-round loop.
 
-**How do you handle orchestrator output that is not valid JSON?**
+**Q: How do you handle orchestrator output that is not valid JSON?**
 Parse the orchestrator output with a try/except around json.loads(). On ParseError, retry the orchestration call once with an explicit instruction appended to the prompt ("respond with JSON only, no prose"). Log the raw string that failed to parse for debugging. If the retry also fails, either raise to the caller or fall back to a hardcoded default decomposition. Never pass invalid JSON downstream — it will silently corrupt every worker.
 
-**What concurrency primitive should you use for parallel LLM calls in Python?**
+**Q: What concurrency primitive should you use for parallel LLM calls in Python?**
 Use `concurrent.futures.ThreadPoolExecutor` for synchronous calls or `asyncio.gather()` with `AsyncAnthropic` for async calls. Both release the GIL during network I/O, so multiple threads or coroutines can make LLM API calls truly concurrently. Do not use `multiprocessing` — the overhead of spawning processes and serializing LLM client state is not justified for I/O-bound network calls. Set max_workers to a value that respects your API rate limit: at 2000 RPM, 8 workers each taking 400ms averages 8/0.4 = 20 RPS = 1200 RPM — safely under the limit.
 
-**How do you decide which pattern to use for a new task?**
+**Q: How do you decide which pattern to use for a new task?**
 Start with a single prompt. If it fails due to context confusion on long inputs, use prompt chaining. If the task population has distinct complexity tiers, add routing. If the bottleneck is latency and the input is large, use sectioning parallelization. If the task is high-stakes and variance is the problem, use voting. If the decomposition varies per input and cannot be hardcoded, use orchestrator-workers. If quality is the bottleneck and cost budget allows iteration, use evaluator-optimizer. Apply the simplest pattern that solves the observed failure mode.
 
-**What are the signs that an orchestrator-workers pattern is overengineered for a task?**
+**Q: What are the signs that an orchestrator-workers pattern is overengineered for a task?**
 If the orchestrator consistently produces the same decomposition across diverse inputs, the decomposition should be hardcoded in a prompt chain — the orchestrator LLM call is wasted cost. If workers are always the same three types in the same order, it is a prompt chain with extra steps. The orchestrator-workers pattern adds value only when the structure of the task itself varies significantly across inputs.
 
-**How do you instrument a multi-step workflow for observability?**
+**Q: How do you instrument a multi-step workflow for observability?**
 Assign a trace ID to the entire pipeline at entry. Assign a span ID to each step. Log: step name, trace ID, span ID, model, input token count, output token count, latency, gate outcome (pass/fail), and any retry count. Emit spans to an LLM observability tool (Langfuse, Arize Phoenix) so you can filter by trace and see the full chain for any given request. Alert on gate failure rate > 5% and on evaluator-optimizer round count > 3.
 
-**What is the risk of using the same model for both generation and evaluation in evaluator-optimizer?**
+**Q: What is the risk of using the same model for both generation and evaluation in evaluator-optimizer?**
 When the generator and evaluator are the same model, the evaluator tends to approve outputs that match its own generation style — even if those outputs violate the intended criteria. It is a form of self-affirmation. The evaluator should ideally use a different model or a different temperature/system-prompt configuration. At minimum, the evaluator prompt should include specific, objective criteria (a rubric with numeric thresholds) rather than asking for general quality assessment.
 
-**How does the evaluator-optimizer pattern relate to RLHF?**
+**Q: How does the evaluator-optimizer pattern relate to RLHF?**
 The evaluator-optimizer inference loop is a lightweight, inference-time analog of [RLHF](../alignment_and_rlhf/README.md)'s training-time reward model loop. In RLHF, a reward model scores candidate outputs and a PPO step updates the generator's weights to maximize the reward. In evaluator-optimizer, a critic LLM scores the output and the generator is called again with the feedback in context — no weight updates, just in-context steering. Evaluator-optimizer is cheaper and faster to deploy but relies on the generator's instruction-following ability; RLHF produces a model that internalizes the reward signal and generalizes beyond in-context feedback.
 
 ---

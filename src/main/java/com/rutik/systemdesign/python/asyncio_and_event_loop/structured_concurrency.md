@@ -697,71 +697,71 @@ async def collect_results(items: list[str]) -> list[dict]:
 
 ## 12. Interview Questions with Answers
 
-**What is structured concurrency and how does it differ from unstructured concurrency?**
+**Q: What is structured concurrency and how does it differ from unstructured concurrency?**
 Structured concurrency means every spawned task has a well-defined scope: the scope does not exit
 until all tasks inside it complete or are cancelled. Unstructured concurrency (bare `create_task`)
 lets tasks outlive their launch site, silently swallowing exceptions and preventing reliable
 cancellation. The difference is analogous to structured vs `goto`-based control flow in imperative
 code.
 
-**Why is `asyncio.create_task()` dangerous without tracking?**
+**Q: Why is `asyncio.create_task()` dangerous without tracking?**
 `create_task` schedules a coroutine as a Task but does not hold a reference to the Task object if
 the caller discards it. Python's garbage collector can destroy the Task before it completes, and any
 exception raised by the Task is only logged to stderr via a warning — it is never raised to the
 caller. Use `TaskGroup` or explicitly store and await task handles to avoid this.
 
-**What does `asyncio.TaskGroup` do when one task raises an exception?**
+**Q: What does `asyncio.TaskGroup` do when one task raises an exception?**
 It immediately schedules cancellation of all remaining tasks, waits for each to acknowledge
 cancellation (`CancelledError`), then raises an `ExceptionGroup` containing all exceptions (the
 original one plus any raised by tasks that failed before cancellation). If exactly one task failed,
 the `ExceptionGroup` contains one exception.
 
-**What is `ExceptionGroup` and how do you handle it with `except*`?**
+**Q: What is `ExceptionGroup` and how do you handle it with `except*`?**
 `ExceptionGroup` [3.11] is a new built-in that wraps multiple exceptions into a single value.
 `except* ValueError as eg` catches all `ValueError` instances inside any nested `ExceptionGroup`
 (recursively), giving them to you as `eg.exceptions` — a tuple of matching exceptions. Multiple
 `except*` clauses can handle different types from the same group. Unlike regular `except`, `except*`
 does not short-circuit after the first match; all clauses run.
 
-**How does `asyncio.timeout()` [3.11] differ from `asyncio.wait_for()`?**
+**Q: How does `asyncio.timeout()` [3.11] differ from `asyncio.wait_for()`?**
 `asyncio.timeout()` is a context manager (a cancel scope) that can wrap any block of code,
 including a `TaskGroup`. `wait_for()` is a function that wraps a single coroutine and does not
 compose well with `TaskGroup`. Additionally, `timeout()` correctly interacts with the cancellation
 mechanism — it translates only its own cancellation to `TimeoutError`, not external cancellations,
 avoiding double-cancel edge cases present in older `wait_for` implementations.
 
-**What happens to a `TaskGroup` when the outer task is cancelled (e.g., client disconnects)?**
+**Q: What happens to a `TaskGroup` when the outer task is cancelled (e.g., client disconnects)?**
 `CancelledError` is delivered to the task currently awaiting inside the `TaskGroup`. The
 `TaskGroup.__aexit__` handler catches this, cancels all child tasks, waits for them to finish, then
 re-raises `CancelledError`. The result is that client disconnect reliably cleans up all in-flight
 sub-tasks — database cursors, HTTP connections, locks — before the request coroutine exits.
 
-**What is `anyio.CancelScope` and when should you use it over `asyncio.timeout()`?**
+**Q: What is `anyio.CancelScope` and when should you use it over `asyncio.timeout()`?**
 `anyio.CancelScope` is anyio's cancel scope primitive. Use it when you need: (a) backend-agnostic
 code (anyio supports both asyncio and Trio), (b) `scope.cancel()` to cancel a block from within
 (early-exit pattern), (c) `scope.shield = True` to protect from external cancellation, or (d)
 `move_on_after` / `fail_after` convenience wrappers. Use `asyncio.timeout()` in asyncio-only code
 where anyio is not a dependency.
 
-**How do you run tasks with bounded concurrency using TaskGroup?**
+**Q: How do you run tasks with bounded concurrency using TaskGroup?**
 Combine `asyncio.Semaphore` with `TaskGroup`. The semaphore limits how many tasks run concurrently
 while the TaskGroup ensures all tasks complete before the scope exits. Do not use a separate
 semaphore in conjunction with `gather`; that pattern does not propagate exceptions reliably.
 
-**What is the `tg.start()` pattern in anyio and when is it needed?**
+**Q: What is the `tg.start()` pattern in anyio and when is it needed?**
 `anyio.TaskGroup.start(coro)` is an awaitable that starts `coro` and waits until the coroutine
 calls `task_status.started(value)`. This is the standard pattern for servers and background workers
 that need to signal "I am ready and listening" before the caller proceeds. `asyncio.TaskGroup` does
 not have a direct equivalent; the closest is using an `asyncio.Event` to synchronize readiness.
 
-**Why should `asyncio.shield` not be used for long operations?**
+**Q: Why should `asyncio.shield` not be used for long operations?**
 `asyncio.shield` prevents the inner coroutine from receiving `CancelledError`, but the outer
 awaiter does receive it. If the outer task is cancelled, the awaiter exits immediately; the shielded
 task continues running as a detached fire-and-forget task. This is exactly the unstructured
 concurrency problem `TaskGroup` is designed to prevent. Use `shield` only for short, critical
 cleanup operations (milliseconds, not seconds).
 
-**How do you detect that a `CancelScope` absorbed a cancellation in anyio?**
+**Q: How do you detect that a `CancelScope` absorbed a cancellation in anyio?**
 Check `scope.cancelled_caught` after the `with` block exits. If `True`, the scope's deadline or
 explicit cancel absorbed a cancellation. Use this to implement fallback logic:
 
@@ -772,13 +772,13 @@ if scope.cancelled_caught:
     result = default_value  # Deadline hit; use fallback
 ```
 
-**What is the difference between `start_soon` and `create_task` return values?**
+**Q: What is the difference between `start_soon` and `create_task` return values?**
 `asyncio.TaskGroup.create_task()` returns an `asyncio.Task` handle; call `.result()` after the
 group exits to get the return value. `anyio.TaskGroup.start_soon()` returns `None` — there is no
 handle. To collect results with anyio, use a shared container (list, dict) mutated from inside
 each task, which is safe because asyncio is single-threaded and tasks only run one at a time.
 
-**How does TaskGroup interact with `asyncio.timeout()` when both are nested?**
+**Q: How does TaskGroup interact with `asyncio.timeout()` when both are nested?**
 `asyncio.timeout()` creates a cancel scope that, when its deadline expires, cancels the current
 task. If the current task is waiting inside a `TaskGroup`, the TaskGroup's `__aexit__` receives the
 `CancelledError`, cancels all child tasks, waits for them, then re-raises `CancelledError`. The
@@ -786,14 +786,14 @@ task. If the current task is waiting inside a `TaskGroup`, the TaskGroup's `__ae
 deadline) into `TimeoutError`. The result: a single `TimeoutError` is raised to the caller with
 all child tasks cleanly cancelled.
 
-**In production, how do you prevent a single slow downstream from holding up all tasks in a group?**
+**Q: In production, how do you prevent a single slow downstream from holding up all tasks in a group?**
 Apply `asyncio.timeout()` inside each individual task's coroutine, not around the entire
 `TaskGroup`. Each task gets its own deadline. If one task times out, it raises `TimeoutError`
 inside the group, which cancels all siblings — the caller gets an `ExceptionGroup` containing one
 `TimeoutError`. If you want the group to complete even when one task times out, use
 `return_exceptions`-style try/except inside each task and collect errors manually.
 
-**What changed in Python 3.11 that makes it the baseline for structured concurrency?**
+**Q: What changed in Python 3.11 that makes it the baseline for structured concurrency?**
 Three features landed simultaneously: (1) `asyncio.TaskGroup` — the structured concurrency
 primitive, (2) `asyncio.timeout()` — composable cancel scope, (3) `ExceptionGroup` and `except*` —
 multi-exception handling syntax. All three are interdependent; `TaskGroup` raises `ExceptionGroup`,

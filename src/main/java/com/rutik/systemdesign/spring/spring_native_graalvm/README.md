@@ -445,7 +445,7 @@ for.
 
 ## 12. Interview Questions with Answers
 
-**Why can't GraalVM native image just use reflection like the JVM does?**
+**Q: Why can't GraalVM native image just use reflection like the JVM does?**
 Native image uses a closed-world assumption: it statically analyzes everything
 reachable from `main` at build time and discards the rest to produce a small, fast
 executable. Reflection (and dynamic proxies, JNI, runtime resource loading) reaches
@@ -454,7 +454,7 @@ declare it via reachability metadata (hints). The JVM, by contrast, loads and li
 classes lazily at runtime, so reflection just works. Native trades that runtime
 dynamism for startup speed and small footprint.
 
-**What does Spring Boot's AOT engine actually do?**
+**Q: What does Spring Boot's AOT engine actually do?**
 At build time it processes the `ApplicationContext` — resolving bean definitions,
 configuration classes, and proxies — and emits generated Java code plus GraalVM hint
 files (`reflect-config.json`, etc.). At runtime the context replays this generated
@@ -463,7 +463,7 @@ moves the expensive context-building work from startup to build time, which is w
 collapses startup from seconds to tens of milliseconds, and it auto-generates most of
 the metadata GraalVM needs.
 
-**What is reachability metadata and what are the kinds of hints?**
+**Q: What is reachability metadata and what are the kinds of hints?**
 Reachability metadata tells GraalVM about dynamic behavior its static analysis cannot
 see, so the affected code is retained and configured in the image. The main kinds are
 reflection hints (classes/methods/fields accessed reflectively), resource hints
@@ -471,7 +471,7 @@ reflection hints (classes/methods/fields accessed reflectively), resource hints
 and serialization hints. Spring auto-generates most from its annotations; you add the
 rest via `RuntimeHintsRegistrar`/`@ImportRuntimeHints` or `@RegisterReflectionForBinding`.
 
-**What is the difference between build-time and runtime initialization?**
+**Q: What is the difference between build-time and runtime initialization?**
 Build-time initialization runs a class's static initializer during the native build
 and bakes the resulting state into the image heap, giving faster startup. Runtime
 initialization defers it to when the executable starts. The danger is initializing at
@@ -479,7 +479,7 @@ build time something that depends on the runtime environment — a random seed, 
 current time, an open file/socket — which then freezes a build-time value into every
 deployment. Such classes must be marked `--initialize-at-run-time`.
 
-**Why is peak throughput often lower for a native image than a warmed-up JVM?**
+**Q: Why is peak throughput often lower for a native image than a warmed-up JVM?**
 A native image has no runtime JIT compiler, so it cannot profile hot paths and
 re-optimize them with aggressive inlining and speculative optimizations the way
 HotSpot does after warmup. AOT compiles ahead of time with less runtime profile
@@ -487,7 +487,7 @@ information, so steady-state throughput is typically lower (often ~70-85% of a w
 JVM). Profile-Guided Optimization narrows the gap by feeding a profiling run back into
 the build, but native's strength is startup and memory, not peak throughput.
 
-**When would you choose native over the JVM, and when not?**
+**Q: When would you choose native over the JVM, and when not?**
 Choose native when startup latency and memory dominate cost or SLA — serverless/FaaS,
 scale-to-zero, high-density containers, CLIs, short-lived jobs. Avoid it for
 long-lived, throughput-bound services where a warm JIT wins, for apps that depend
@@ -495,7 +495,7 @@ heavily on runtime reflection/agents that are hard to hint, and where slow build
 less-mature debugging tooling would hurt. The slogan: native optimizes the first
 second of the process; the JVM optimizes the millionth request.
 
-**How do you discover the hints your application needs?**
+**Q: How do you discover the hints your application needs?**
 First rely on Spring AOT (covers Spring's own annotations) and the GraalVM
 Reachability Metadata Repository (covers many popular libraries). For your own
 reflective code, run your application/tests on the JVM under the GraalVM tracing
@@ -504,7 +504,7 @@ Crucially, the agent only captures paths your tests execute, so you must exercis
 code paths and back it up with native tests — uncovered paths produce no hints and
 fail at runtime.
 
-**Why might a native app build successfully but crash at runtime?**
+**Q: Why might a native app build successfully but crash at runtime?**
 Because missing reachability metadata is not a build error — the build simply omits
 the un-referenced (reflective) code. The failure surfaces only when execution first
 reaches a reflective/resource path that was never hinted, throwing
@@ -512,7 +512,7 @@ reaches a reflective/resource path that was never hinted, throwing
 specific request. This is why native tests and full-coverage tracing-agent runs
 matter: the goal is to fail at build/test time, not on a production request.
 
-**How are `@Transactional` and other proxies handled in native image?**
+**Q: How are `@Transactional` and other proxies handled in native image?**
 Spring normally creates CGLIB/JDK dynamic proxies at runtime; under native that is
 impossible (no runtime bytecode generation for CGLIB and proxies must be known up
 front). The AOT engine generates the required proxy classes and proxy hints at build
@@ -520,14 +520,14 @@ time, so the proxy exists in the image. For JDK dynamic proxies you may need to
 register the interface set via a proxy hint if it is not auto-detected. The behavior
 is the same; only the *when* of proxy creation moves to build time.
 
-**What happens to `@ConditionalOnClass` and profiles in a native image?**
+**Q: What happens to `@ConditionalOnClass` and profiles in a native image?**
 They are evaluated at build time, not runtime, because the set of beans is frozen
 into the image. So a conditional that depends on a class being present, or a
 profile-specific bean graph, is decided when the image is built — flipping a profile
 at runtime will not re-wire the context. If you need different wiring per environment,
 decide it at build time or produce separate per-profile images.
 
-**What is the GraalVM tracing agent and its main limitation?**
+**Q: What is the GraalVM tracing agent and its main limitation?**
 It is a JVM agent (`native-image-agent`) that observes a normal JVM run and records
 all reflective, resource, proxy, and serialization access, writing the corresponding
 metadata JSON files. Its main limitation is coverage: it only records code paths that
@@ -535,14 +535,14 @@ actually execute during the run, so any branch your tests miss yields no metadat
 breaks in the native image. You therefore run it under the full test suite and treat
 its output as a starting point, not a guarantee.
 
-**How does native image reduce memory footprint so much?**
+**Q: How does native image reduce memory footprint so much?**
 There is no JVM: no separate interpreter/JIT/metaspace overhead, no large reusable
 runtime, and the closed-world cut removes unreachable classes so only what you use is
 included. The application's initialized heap can also be partly built at image-build
 time. The result is an RSS measured in tens of MB versus hundreds for an equivalent
 JVM process, which is what enables high pod density.
 
-**What is Profile-Guided Optimization (PGO) in the native context?**
+**Q: What is Profile-Guided Optimization (PGO) in the native context?**
 PGO is a two-step build: you first produce an instrumented native image, run it under
 representative load to collect a profile, then rebuild using that profile so the AOT
 compiler can optimize hot paths (inlining, layout) the way a JIT would. It recovers
@@ -550,14 +550,14 @@ much of the peak-throughput gap with the JVM. It costs an extra build cycle and 
 representative workload, so it is used when native is chosen but throughput still
 matters.
 
-**Why does the build take so long and what can you do about it?**
+**Q: Why does the build take so long and what can you do about it?**
 Native compilation runs whole-program static analysis (points-to analysis across the
 entire reachable graph) and then AOT-compiles everything, which is far heavier than
 javac and memory-hungry. Mitigations: dedicate a native build stage in CI with ample
 RAM, cache aggressively, use buildpacks for reproducible builds, and only build native
 images for the artifacts that need them rather than every commit/branch.
 
-**How is Spring's native support different from Quarkus/Micronaut?**
+**Q: How is Spring's native support different from Quarkus/Micronaut?**
 Quarkus and Micronaut were designed native-first: they do dependency injection and
 metadata generation at compile time and avoid runtime reflection by architecture, so
 they need fewer hints and build leaner. Spring retained its powerful runtime
@@ -566,7 +566,7 @@ the closed world. The tradeoff: Spring keeps its rich ecosystem and runtime
 flexibility (on the JVM) while supporting native; the others start leaner but with a
 different (compile-time) programming model.
 
-**Can you use the JVM's full reflection and dynamic features and still go native later?**
+**Q: Can you use the JVM's full reflection and dynamic features and still go native later?**
 Not freely — code that relies on unbounded runtime reflection, dynamic class
 generation, or JVM agents is hostile to the closed world and will need extensive
 hints or refactoring. The pragmatic approach is to write "native-friendly" code from

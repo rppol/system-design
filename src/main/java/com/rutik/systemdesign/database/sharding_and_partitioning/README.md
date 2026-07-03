@@ -325,52 +325,52 @@ Cost                 | Lower                    | Higher
 
 ## 12. Interview Questions with Answers
 
-**How do you choose a shard key for a multi-tenant SaaS database?**
+**Q: How do you choose a shard key for a multi-tenant SaaS database?**
 Use `tenant_id` as the shard key. All data belonging to a tenant is co-located on one shard, eliminating cross-shard joins for the overwhelming majority of queries (which are tenant-scoped). Write distribution depends on tenant size distribution — if a few enterprise tenants generate 80% of writes, use directory-based sharding to assign dedicated shards to large tenants and share a shard among small tenants. Avoid shard keys based on sequential IDs or timestamps — they create hotspots on the most recently written shard.
 
-**Explain consistent hashing and why virtual nodes solve the uneven distribution problem.**
+**Q: Explain consistent hashing and why virtual nodes solve the uneven distribution problem.**
 Consistent hashing maps both keys and nodes to a circular ring using a hash function. A key is assigned to the first node clockwise on the ring. When a node joins or leaves, only the keys between it and its predecessor move. Without virtual nodes (3 physical nodes = 3 points on the ring), ring arcs are unequal in size, causing uneven data distribution. With 150 virtual nodes per physical node, each physical node has 150 random positions, making arc lengths statistically uniform. Adding a new node means giving it virtual nodes taken evenly from all existing nodes, moving ~1/N of total data with each addition.
 
-**How does Vitess enable online resharding without downtime?**
+**Q: How does Vitess enable online resharding without downtime?**
 Vitess MoveTables copies data from source shards to target shards in the background using VReplication (which reads the MySQL binlog as a change stream). During the copy: (1) Historical data is bulk-copied. (2) Incremental changes are captured via binlog and applied to target. (3) Once the target catches up (lag < 1 second), a brief "traffic cutover" switches reads and writes to the new shards. The cutover involves a short read-only window (typically < 5 seconds) to drain in-flight transactions, then atomically updating VTGate's routing table. The old shards are kept for a rollback window before being decommissioned.
 
-**What is the celebrity shard problem and how do you handle it?**
+**Q: What is the celebrity shard problem and how do you handle it?**
 A celebrity user (10M followers, high activity) generates orders of magnitude more read/write traffic than average users. Since all their data is on one shard, that shard becomes a bottleneck regardless of cluster size. Solutions: (1) Dedicated shard with additional replicas for heavy reads. (2) Write sharding with random suffix keys for fan-out data (posts, activity) — writes go to N sub-shards randomly, reads scatter-gather. (3) Application-level caching (Redis) absorbs celebrity read traffic before it hits the database shard. (4) Hybrid fan-out: pre-compute and push celebrity posts to follower feeds at write time, so feed reads are local to each follower's shard.
 
-**What is the difference between vertical and horizontal partitioning?**
+**Q: What is the difference between vertical and horizontal partitioning?**
 Vertical partitioning splits a table by columns: frequently accessed columns stay in one table, rarely accessed or large columns (e.g., BLOB, large TEXT) move to a separate table joined by primary key. This reduces I/O for queries that don't need the large columns and keeps hot data dense in pages. Horizontal partitioning (sharding) splits a table by rows: all columns for a row stay together, but different rows go to different partitions/shards based on a partition key. Both can be combined: a sharded table can also vertically separate columns (e.g., user profile vs user settings vs user media).
 
-**How do you handle cross-shard joins in a sharded system?**
+**Q: How do you handle cross-shard joins in a sharded system?**
 Options in order of preference: (1) Redesign schema to co-locate related data on the same shard (denormalization, embedding). (2) Application-layer join: fetch data from shard A, extract IDs, query shard B by those IDs (two sequential queries). (3) Scatter-gather: send the join query to all shards, aggregate results in the application or proxy layer. (4) Use a distributed SQL layer (Vitess, Citus) that handles scatter-gather automatically. (5) Maintain a read-optimized denormalized view in a separate query database (Elasticsearch, data warehouse) that is updated via CDC. The goal is to make cross-shard operations rare by aligning shard keys with the primary access pattern.
 
-**What is consistent hashing's key advantage over mod-N hashing when adding nodes?**
+**Q: What is consistent hashing's key advantage over mod-N hashing when adding nodes?**
 With mod-N hashing (`hash(key) % N`), adding a new node changes N, causing almost all keys to remap to different nodes — effectively requiring a full data migration. With consistent hashing, adding a node to the ring moves only the keys in the arc between the new node and its predecessor (approximately 1/N of total keys). For a 10-node cluster adding the 11th node, only ~9% of keys move instead of ~91%.
 
-**How does PostgreSQL partition pruning work and what are its limitations?**
+**Q: How does PostgreSQL partition pruning work and what are its limitations?**
 The query planner examines the partition key's constraint exclusion metadata. If a query's WHERE clause includes a condition on the partition key that can exclude certain partitions (e.g., `created_at >= '2024-01-01'` excludes all partitions with upper bounds before 2024), those partitions are not scanned. Limitations: (1) Partition pruning requires the partition key in the WHERE clause — queries without it access all partitions. (2) Dynamic pruning at execution time (for parameterized queries) was added in PostgreSQL 11. (3) With 1000+ partitions, planning overhead increases noticeably. (4) Partitioned table inheritance trees have planner overhead proportional to partition count.
 
-**How do you perform zero-downtime re-partitioning of a large table?**
+**Q: How do you perform zero-downtime re-partitioning of a large table?**
 Use the following approach: (1) Create the new partitioned table structure alongside the existing table. (2) Use `INSERT INTO new_table SELECT ... FROM old_table` in batches during off-peak hours (or use `pg_partman` for managed migration). (3) After historical data is loaded, set up logical replication or triggers to capture ongoing changes from old_table to new_table. (4) Once new_table is fully caught up, swap the tables using a brief lock window: rename old_table to old_table_archive, rename new_table to the production name. (5) Update application queries if needed (partition key now required for pruning). Alternative: use `ATTACH PARTITION` to attach existing table segments as partitions of a new partitioned parent, which is instantaneous.
 
-**What metrics indicate a sharding hotspot?**
+**Q: What metrics indicate a sharding hotspot?**
 Watch per-shard metrics: (1) CPU utilization per shard node — one shard at 90% while others are at 20% indicates a hotspot. (2) QPS (queries per second) per shard — compare max to average; max:average ratio > 3x is a hotspot. (3) Replication lag on the hot shard's replica — high write throughput increases lag. (4) Lock wait time on the hot shard. (5) `pg_stat_user_tables.n_tup_ins` per partition — one partition with 10x more inserts than others. Alert on per-shard CPU variance: if standard deviation across shards exceeds 30% of mean, investigate.
 
-**How does DynamoDB handle sharding internally?**
+**Q: How does DynamoDB handle sharding internally?**
 DynamoDB partitions data using a hash of the partition key. Each partition holds up to 10GB of data and handles up to 3000 Read Capacity Units and 1000 Write Capacity Units. When a partition exceeds these limits, DynamoDB automatically splits it, migrating data in the background transparently to the user. DynamoDB Adaptive Capacity (enabled by default) redistributes throughput from underutilized partitions to overloaded ones to handle moderate hotspots. For extreme hotspots (one partition key generating 100% of traffic), DynamoDB Adaptive Capacity cannot help — schema redesign (sharding key at application level with random suffix) is required.
 
-**What is the difference between application-level sharding and middleware-level sharding?**
+**Q: What is the difference between application-level sharding and middleware-level sharding?**
 Application-level sharding: the application code contains the shard routing logic — it hashes the key, connects to the appropriate database shard directly. Advantages: no extra network hop through a proxy, full control. Disadvantages: every service that touches sharded data must implement shard routing; schema changes and re-sharding require coordinated application deployments. Middleware-level sharding (Vitess, ProxySQL, Citus): a proxy layer handles routing, appearing as a single database to the application. Advantages: application code is shard-unaware, schema changes can be managed centrally. Disadvantages: additional network hop through the proxy, proxy becomes a bottleneck and single point of failure (requires its own HA).
 
-**How do you handle global sequence generation across shards?**
+**Q: How do you handle global sequence generation across shards?**
 Options: (1) UUID v4 (random): guaranteed globally unique, no coordination needed, but non-sortable and larger than BIGINT. (2) ULID: globally unique, time-sortable (milisecond precision + random suffix). (3) Twitter Snowflake: 64-bit ID = timestamp (41 bits) + machine ID (10 bits) + sequence (12 bits) = 4096 IDs/ms/machine, globally unique with no coordination. (4) Dedicated sequence service: a lightweight service hands out blocks of IDs (e.g., 1000 at a time) from a Redis `INCR` counter; each shard preallocates a block. Avoid: a centralized database sequence — it becomes a hotspot and single point of failure for the entire cluster.
 
-**What is Citus and how does it extend PostgreSQL for sharding?**
+**Q: What is Citus and how does it extend PostgreSQL for sharding?**
 Citus is a PostgreSQL extension (now open source, by Microsoft) that transforms PostgreSQL into a distributed database. A Citus cluster has one coordinator node and N worker nodes. The coordinator stores table distribution metadata (shard key → worker node mapping). Tables are distributed across workers using hash or range distribution. Queries arrive at the coordinator, which creates a distributed execution plan, sends sub-queries to the relevant worker nodes, and aggregates results. Colocation groups ensure that tables sharded on the same key store matching rows on the same worker, enabling co-located joins without cross-node data transfer. Citus is particularly popular for multi-tenant SaaS workloads where `tenant_id` is the distribution column.
 
-**How does re-sharding differ from initial sharding?**
+**Q: How does re-sharding differ from initial sharding?**
 Initial sharding: data migration from an unsharded system to a sharded one. Typically a one-time bulk migration with a cutover window. Re-sharding: changing the number of shards in an already-sharded system (e.g., 4 → 8 shards). Every key's assignment changes. With mod-N hashing, this means moving ~50% of data (split each shard). With consistent hashing + virtual nodes, only ~12.5% of data moves (new node takes from each existing node evenly). The operational challenge is doing this without downtime: dual-write to old and new location during migration, then cut over routing, then clean up old locations. Vitess MoveTables and Citus's shard rebalancing automate this.
 
-**Explain partition-wise joins in PostgreSQL and when they help.**
+**Q: Explain partition-wise joins in PostgreSQL and when they help.**
 Partition-wise joins (PostgreSQL 11+, enabled with `enable_partitionwise_join = on`) allow the query planner to join two partitioned tables by matching partition pairs locally rather than assembling all data first. If orders and order_items are both partitioned by `month` with the same partition bounds, and you join them with a filter on month, PostgreSQL can join `orders_2024_01` with `order_items_2024_01` locally (both partitions on the same server), avoiding full table scans. This is most effective when both tables are co-partitioned on the same column and the query filters on the partition key. Without it, the planner must process all partition combinations.
 
 ---

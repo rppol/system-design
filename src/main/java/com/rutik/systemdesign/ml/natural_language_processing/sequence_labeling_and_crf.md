@@ -657,7 +657,7 @@ for word_id in encoding.word_ids():
 
 ## 12. Interview Questions with Answers
 
-**Why add a CRF layer on top of a neural encoder instead of a plain softmax head?**
+**Q: Why add a CRF layer on top of a neural encoder instead of a plain softmax head?**
 A CRF decodes the whole sequence jointly so it can never emit an invalid tag transition like
 `I-PER` after `O`, whereas an independent softmax argmax can. The softmax head scores each token
 independently; the CRF adds a learned transition matrix and runs Viterbi to find the globally
@@ -665,7 +665,7 @@ best *valid* path. It costs a `(K, K)` matrix and `O(T·K^2)` decoding but buys 
 and +2–4 F1 on domain corpora with ambiguous boundaries. Use it whenever downstream code assumes
 well-formed BIO spans.
 
-**What is the label-bias problem and which model suffers from it?**
+**Q: What is the label-bias problem and which model suffers from it?**
 Label bias is when a locally-normalized model funnels probability toward states with few outgoing
 transitions regardless of the observation, and it afflicts MEMMs (and any per-step-normalized
 model). Because each MEMM step is a proper distribution over next states, a state with one arc must
@@ -673,7 +673,7 @@ forward all its mass, so its emission is effectively ignored. CRFs avoid this by
 globally with `Z(x)`, letting the observation at every position influence the whole path. This is
 the historical reason CRFs replaced MEMMs (Lafferty et al., 2001).
 
-**What is the difference between an HMM and a CRF?**
+**Q: What is the difference between an HMM and a CRF?**
 An HMM is generative — it models the joint `P(x, y)` with emission and transition probabilities —
 while a CRF is discriminative and models `P(y | x)` directly. The practical consequence: an HMM's
 emissions are single-token multinomials, so it cannot use overlapping features (word shape,
@@ -681,7 +681,7 @@ suffixes, neighbor words), whereas a CRF's feature functions can be arbitrary an
 need less data and train by counting; CRFs need more data but train a convex objective and reach
 higher accuracy with rich features.
 
-**What is the partition function Z(x) in a CRF and how is it computed?**
+**Q: What is the partition function Z(x) in a CRF and how is it computed?**
 `Z(x)` is the sum of `exp(score)` over all `K^T` possible tag sequences, and it normalizes the path
 scores into a probability distribution. You never enumerate the sequences — the forward algorithm
 computes `log Z(x)` in `O(T·K^2)` by carrying a `(K,)` vector of log-sum-exp accumulated scores
@@ -689,7 +689,7 @@ left to right. It appears in the loss as `log Z(x) − score(gold)`, which is th
 log-likelihood of the gold labeling. Getting `Z` right (in log-space) is what makes CRF training
 numerically stable.
 
-**When do you use Viterbi versus the forward-backward algorithm?**
+**Q: When do you use Viterbi versus the forward-backward algorithm?**
 Use Viterbi to find the single most probable label sequence (MAP decoding at inference). Use
 forward-backward to compute per-position posterior marginals and the total likelihood, needed for
 training gradients and per-token confidence. They share the same trellis but differ in the
@@ -697,14 +697,14 @@ operator: Viterbi takes a `max` (keeps the best path), forward-backward takes a 
 over all paths). Both are `O(T·K^2)`. In a CRF, training uses forward (for `Z`) + backward (for
 expected feature counts); inference uses Viterbi.
 
-**Why must the forward algorithm run in log-space?**
+**Q: Why must the forward algorithm run in log-space?**
 Multiplying many probabilities underflows to zero after a few dozen steps, making the likelihood
 `-inf` and gradients useless. Working in log-space replaces products with sums and uses `logsumexp`
 (which subtracts the max before exponentiating) to stay numerically stable. This is why every
 from-scratch forward/Viterbi implementation stores log-probabilities, not probabilities. Forgetting
 this is the most common bug in hand-rolled HMM/CRF code.
 
-**What are BIO and BIOES tagging schemes and why does the prefix matter?**
+**Q: What are BIO and BIOES tagging schemes and why does the prefix matter?**
 BIO marks each token as `B-TYPE` (begin an entity), `I-TYPE` (inside/continue), or `O` (outside),
 which lets multi-token spans and adjacent same-type entities be represented unambiguously. BIOES
 adds `E-TYPE` (end) and `S-TYPE` (single-token) for sharper boundary signals, at the cost of
@@ -712,7 +712,7 @@ doubling the tag count (`4K+1` vs `2K+1`). BIO is the default; BIOES buys ~0.5�
 to learn and expands the CRF transition matrix. The prefix is what turns a flat classification into
 a span structure.
 
-**What are feature functions in a linear-chain CRF?**
+**Q: What are feature functions in a linear-chain CRF?**
 Feature functions `f_k(y_{t-1}, y_t, x, t)` return a value (usually 0/1) capturing a pattern, and
 the CRF scores a labeling as the weighted sum of all active features. They split into transition
 features (depend on the adjacent tag pair, e.g. "prev=B-PER and cur=I-PER") and state features
@@ -720,14 +720,14 @@ features (depend on the adjacent tag pair, e.g. "prev=B-PER and cur=I-PER") and 
 correlated features are allowed — impossible in an HMM — which is the CRF's core advantage. The
 learned weights `λ_k` are directly interpretable.
 
-**How is a linear-chain CRF trained?**
+**Q: How is a linear-chain CRF trained?**
 It maximizes the conditional log-likelihood `Σ score(gold) − log Z(x)`, a convex objective solved
 with L-BFGS (or SGD in neural CRFs). The gradient of each feature weight is
 `observed_count − expected_count`, where expected counts under the model come from forward-backward.
 Convexity means there is a single global optimum — no bad local minima. L1 (`c1`) and L2 (`c2`)
 regularization control sparsity and overfitting.
 
-**In a BiLSTM-CRF, what does each component contribute?**
+**Q: In a BiLSTM-CRF, what does each component contribute?**
 The BiLSTM produces context-aware emission scores — a per-token `(K,)` vector that sees the whole
 sentence from both directions. The CRF contributes a learned transition matrix plus Viterbi
 decoding for valid sequences. The LSTM answers "what does this token look like in context"; the CRF
@@ -735,35 +735,35 @@ answers "which tag orderings are legal". Neither alone is enough: a BiLSTM with 
 emit invalid spans, and a CRF alone has weak, hand-crafted emissions. Together they reached ~90.94
 F1 on CoNLL-2003 without gazetteers (Lample et al., 2016).
 
-**What is the time complexity of Viterbi and the forward algorithm?**
+**Q: What is the time complexity of Viterbi and the forward algorithm?**
 Both are `O(T · K^2)` time and `O(T · K)` memory, where `T` is sequence length and `K` is the
 number of tags. The `K^2` factor comes from considering every (previous tag, current tag) pair at
 each step; the `T` factor from sweeping the sequence once. This is why NER with ~9–23 BIO tags is
 cheap (`K` small) but a POS/morphology task with hundreds of tags is noticeably slower. Beam search
 can approximate Viterbi when `K` is very large.
 
-**Do you still need a CRF layer on top of BERT?**
+**Q: Do you still need a CRF layer on top of BERT?**
 Often not much — BERT's self-attention already captures long-range dependencies, so a plain
 softmax token-classification head reaches ~92.8 F1 on CoNLL, and adding a CRF may only gain ~+0.2
 F1. The CRF still helps meaningfully on small datasets, domain corpora with long ambiguous spans,
 and any pipeline that requires *guaranteed* valid BIO output. Rule: start with the softmax head,
 add the CRF if you see invalid spans or need the last couple of F1 points on domain data.
 
-**When would you choose a span-based model over BIO tagging?**
+**Q: When would you choose a span-based model over BIO tagging?**
 Choose span-based (or pointer) models when entities can nest or overlap, because flat BIO assigns
 each token exactly one tag and cannot represent "Bank of America" as a LOC inside an ORG. Span
 models enumerate candidate `(start, end)` spans, score each for an entity type, and permit
 overlapping predictions. The cost is `O(n^2)` spans per sentence, mitigated by capping span length
 (e.g. 10). For flat, non-nested NER, BIO + CRF is simpler and usually as accurate.
 
-**How do you evaluate a sequence labeler correctly, and what is the common mistake?**
+**Q: How do you evaluate a sequence labeler correctly, and what is the common mistake?**
 Use entity-level F1 via seqeval, where a predicted span counts as correct only if its type and both
 boundaries exactly match the gold span. The common mistake is token-level accuracy, which the
 dominant `O` class inflates — a model predicting all `O` can score 90%+ token accuracy while
 finding zero entities. Report a per-type breakdown too, since aggregate F1 hides weak entity types
 (e.g. a rare `MISC` or `CASE_NUMBER` class collapsing to near-zero recall).
 
-**What is the difference between Viterbi (MAP) decoding and marginal (posterior) decoding?**
+**Q: What is the difference between Viterbi (MAP) decoding and marginal (posterior) decoding?**
 Viterbi returns the single highest-probability *sequence* as a whole, while marginal decoding picks,
 independently at each position, the tag with the highest posterior marginal from forward-backward.
 Viterbi guarantees a globally-consistent, valid path but may not maximize per-token accuracy;

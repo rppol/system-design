@@ -392,28 +392,28 @@ EXPLAIN without ANALYZE shows estimated costs only. EXPLAIN ANALYZE actually exe
 
 ## 12. Interview Questions with Answers
 
-**Walk me through how the query planner decides between hash join and nested loop.**
+**Q: Walk me through how the query planner decides between hash join and nested loop.**
 The planner estimates cost for each join algorithm using statistics. Nested loop: outer_rows × inner_index_cost — excellent when outer is small (< 1000 rows) and inner has an index. Hash join: cost to build hash table from smaller input + cost to probe with larger input — excellent when both tables are large and no sorting is needed. The planner compares: if nested loop cost < hash join cost → nested loop; otherwise hash join. It also considers the available `work_mem` — a hash join that spills to disk costs much more. Merge join is chosen when both inputs are already sorted on the join key (index scan output in sorted order).
 
-**How does keyset pagination outperform OFFSET/LIMIT at scale?**
+**Q: How does keyset pagination outperform OFFSET/LIMIT at scale?**
 OFFSET N requires the database to fetch and discard N rows before returning the requested page. At page 1000 of 20 results, that's discarding 20,000 rows — O(n) per page request. With an index on the sort column, the database still does an index scan to position N entries and then discards them. Keyset pagination: stores the last-seen values (e.g., `created_at` and `id`) as a cursor. The next query uses `WHERE (created_at, id) < (cursor_ts, cursor_id)` — the planner seeks directly to that position in the index using O(log n) traversal, then returns the next 20 rows. Constant time regardless of page depth.
 
-**What is the N+1 problem and how do you detect it in production ORM code?**
+**Q: What is the N+1 problem and how do you detect it in production ORM code?**
 The N+1 problem: loading N parent records, then executing one query per parent to load associated child records. Example: fetching 100 orders then loading the product for each → 1 + 100 = 101 queries. Detection: (1) Enable SQL logging — look for the same query repeated N times with different IDs. (2) Database-side: `pg_stat_statements` — queries with 1000+ calls and identical normalized form. (3) APM tools (DataDog, New Relic) — N+1 detection alerts. (4) In tests: assert that only N queries fired for an operation. Fix: use JOIN FETCH (JPA), select_related/prefetch_related (Django), includes (ActiveRecord), or DataLoader pattern (GraphQL). The DataLoader batches N individual loads into one batch query per tick.
 
-**What are window functions and when do they replace subqueries?**
+**Q: What are window functions and when do they replace subqueries?**
 Window functions compute aggregations over a sliding window of rows related to the current row, without collapsing rows (unlike GROUP BY). They replace correlated subqueries that scan the same table multiple times: `ROW_NUMBER() OVER (PARTITION BY category ORDER BY revenue DESC)` replaces "SELECT MAX(revenue) FROM products WHERE category = t.category" repeated per row. Common functions: `ROW_NUMBER()` (unique sequential number), `RANK()` (handles ties), `DENSE_RANK()` (rank without gaps), `LAG(col, n)` (value from n rows before), `LEAD(col, n)` (value from n rows after), `SUM/AVG/MAX OVER (PARTITION BY ... ORDER BY ... ROWS ...)`. A correlated subquery with N rows executes N subqueries; the equivalent window function executes one pass.
 
-**What are the performance implications of CTEs in PostgreSQL?**
+**Q: What are the performance implications of CTEs in PostgreSQL?**
 PostgreSQL < 12: CTEs (WITH clauses) are always materialized — the CTE result is computed once and stored in a temporary structure. The planner cannot push predicates from the outer query into the CTE, preventing index use. A query like `WITH base AS (SELECT * FROM large_table) SELECT * FROM base WHERE id = 42` results in a full scan of `large_table` regardless of the index on `id`. PostgreSQL 12+: CTEs are automatically inlined (treated like a subquery) unless you specify `WITH ... AS MATERIALIZED (...)`. Best practice for PostgreSQL < 12: use subqueries in FROM clause instead of CTEs for queries where predicate pushdown is needed.
 
-**How does the hash join use work_mem and what happens when it spills?**
+**Q: How does the hash join use work_mem and what happens when it spills?**
 The planner allocates `work_mem` (default 4MB) for the hash table of the smaller input. If the smaller input fits in `work_mem`, all rows are in memory and the probe phase is pure memory operations. If the input exceeds `work_mem`, PostgreSQL uses "batch hashing": splits the hash table into batches that fit in memory, processes one batch at a time (requires re-reading the probe side multiple times). EXPLAIN output: `Batches: 8` means 8 rounds, which means disk I/O for 7 re-reads of the probe side. Fix: `SET work_mem = 'N MB'` for the session before the query. Warning: work_mem applies per sort/hash operation, per query. At 100 concurrent sessions, global `work_mem = 1GB` could allocate 100GB.
 
-**What is the difference between EXISTS and IN for subqueries in performance terms?**
+**Q: What is the difference between EXISTS and IN for subqueries in performance terms?**
 For correlated subqueries: EXISTS short-circuits (returns immediately when first match found), while IN must scan all rows. `WHERE id IN (SELECT user_id FROM premium_users)` — scans all premium_users rows and builds a hash set. `WHERE EXISTS (SELECT 1 FROM premium_users WHERE user_id = o.id)` — for each outer row, stops at the first match. Modern PostgreSQL optimizes both to hash semi-joins for non-correlated cases, so the performance difference is minimal for simple cases. The critical behavioral difference: `NOT IN` with NULLs in the subquery returns no results (NULL semantics), while `NOT EXISTS` handles NULLs correctly. Always prefer NOT EXISTS over NOT IN.
 
-**Explain lateral joins and when to use them.**
+**Q: Explain lateral joins and when to use them.**
 A lateral join allows a subquery in the FROM clause to reference columns from tables to its left. Without LATERAL, a subquery cannot reference outer columns. Use case: top-N per group without window functions, or calling a set-returning function per row. Example:
 ```sql
 SELECT u.id, recent.title, recent.created_at
@@ -429,25 +429,25 @@ CROSS JOIN LATERAL (
 ```
 LATERAL is essential when the subquery result depends on the outer row.
 
-**How do you identify and fix a query causing excessive disk reads (Buffers: read=N in EXPLAIN)?**
+**Q: How do you identify and fix a query causing excessive disk reads (Buffers: read=N in EXPLAIN)?**
 High `shared read` in EXPLAIN BUFFERS means pages were fetched from disk (not from buffer pool). Steps: (1) Check if the table/index fits in `shared_buffers` — if not, the working set doesn't fit in memory. (2) Check if this is a first run (cold cache) vs steady-state — warm the cache with a dummy query or `pg_prewarm`. (3) Check index usage — seq scan reads entire table (all pages from disk); index scan reads only needed pages. (4) Check for unnecessary columns in SELECT — `SELECT *` reads more pages than `SELECT id, status`. Fix: add index, increase `shared_buffers`, or use a covering index so fewer pages are needed.
 
-**What is the purpose of ANALYZE and when should you run it manually?**
+**Q: What is the purpose of ANALYZE and when should you run it manually?**
 ANALYZE collects statistics about column distributions and stores them in `pg_statistic`. The planner uses these to estimate result sizes and choose optimal plans. Run manually: (1) After bulk loads (`COPY`, large INSERT) — autovacuum won't fire quickly enough. (2) After `pg_upgrade` — statistics are not transferred. (3) After changing `default_statistics_target` or per-column statistics. (4) When EXPLAIN shows estimate vs actual rows differ by >10x. In production, autovacuum handles ANALYZE automatically when `n_mod_since_analyze` > `autovacuum_analyze_threshold + autovacuum_analyze_scale_factor × reltuples`. Do not disable autovacuum for ANALYZE.
 
-**How do you optimize a GROUP BY query that runs too slowly?**
+**Q: How do you optimize a GROUP BY query that runs too slowly?**
 Analysis steps: (1) Check if there's an index on the GROUP BY + WHERE columns. If not, add one. (2) EXPLAIN: if "HashAggregate" node shows large memory usage or "Disk: NNN bytes" → increase `work_mem`. (3) If aggregating over nearly all rows, consider a materialized view that pre-aggregates and refreshes periodically. (4) Check if a partial aggregate pushdown is possible (PostgreSQL supports parallel aggregation). (5) For real-time dashboard queries, consider moving to ClickHouse or TimescaleDB continuous aggregates for heavy OLAP. (6) Ensure statistics are up-to-date — wrong cardinality estimate causes wrong join order in GROUP BY + JOIN queries.
 
-**What is the difference between seq_page_cost and random_page_cost in PostgreSQL?**
+**Q: What is the difference between seq_page_cost and random_page_cost in PostgreSQL?**
 `seq_page_cost` (default 1.0) and `random_page_cost` (default 4.0) are cost model constants in arbitrary units. They represent the planner's estimate of I/O cost: sequential I/O (reading pages in order) vs random I/O (seeking to a random page). The ratio random/sequential = 4.0 reflects HDD seek time. For SSD storage, random I/O is much cheaper (10-50x faster than HDD random I/O). Set `random_page_cost = 1.1` for SSDs, `1.5` for NVMe RAID. Impact: with `random_page_cost=4`, the planner prefers sequential scans for queries touching > ~25% of rows. With `random_page_cost=1.1`, it prefers index scans for much lower selectivities — often the right choice for column-store-cached working sets.
 
-**What is partial aggregate and how does it enable parallel query?**
+**Q: What is partial aggregate and how does it enable parallel query?**
 Parallel query: PostgreSQL spawns N worker processes to scan table partitions in parallel. Each worker computes a partial aggregate over its data (e.g., partial SUM, partial COUNT). The gather node in the leader process merges partial aggregates into the final result (e.g., SUM all partial SUMs). This enables linear speedup for aggregation queries proportional to the number of workers (`max_parallel_workers_per_gather`). Partial aggregate is only useful if the aggregate function is associative and commutative (SUM, COUNT, MIN, MAX are; user-defined aggregates may not be). `EXPLAIN` shows `Partial Aggregate` and `Gather` nodes.
 
-**How do you analyze and fix a query that performs well in development but slowly in production?**
+**Q: How do you analyze and fix a query that performs well in development but slowly in production?**
 Common causes: (1) Data volume: dev has 10K rows, prod has 100M. Plans that work for small data (sequential scan) are catastrophic for large data. Fix: always test with production-scale data or statistics-only clone. (2) Statistics difference: dev data is uniform, prod data is skewed. Fix: `ANALYZE` prod regularly, increase statistics target. (3) Connection pool settings: dev uses 5 connections, prod uses 200 — different `work_mem` effective usage. (4) Concurrent load: dev is single-user, prod has 500 concurrent. Lock waits, buffer contention. Fix: load test in staging with realistic concurrency. (5) Planner settings difference: dev uses defaults, prod uses custom settings. Always maintain parity.
 
-**What is the cost of a count(*) on a large table and how do you optimize it?**
+**Q: What is the cost of a count(*) on a large table and how do you optimize it?**
 `SELECT COUNT(*) FROM large_table` requires scanning all visible rows to count non-deleted ones (MVCC requirement: deleted rows are still physically present). For a 100M-row table, this can take 30-60 seconds. Optimizations: (1) Use `pg_class.reltuples` for approximate count (updated by VACUUM/ANALYZE, not exact): `SELECT reltuples::BIGINT FROM pg_class WHERE relname = 'large_table'`. (2) Add a WHERE clause so an index can narrow the scan: `SELECT COUNT(*) WHERE status = 'active' AND created_at > now() - interval '7 days'` — can use a partial index. (3) Maintain a counter table with triggers. (4) Use TimescaleDB continuous aggregates or materialized views for periodic count refreshes.
 
 ---

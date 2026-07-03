@@ -632,63 +632,63 @@ idempotency keys is the standard production pattern and costs only one Redis GET
 
 ## Interview Discussion Points
 
-**Why not use FastAPI's built-in BackgroundTasks for the order tasks?**
+**Q: Why not use FastAPI's built-in BackgroundTasks for the order tasks?**
 `BackgroundTasks` runs inside the Uvicorn process on the same event loop. If the process is killed
 by a deploy, OOM, or crash, every pending background task is lost with no retry and no record.
 For non-critical fire-and-forget work (e.g., incrementing a hit counter) it is acceptable. For
 business-critical tasks like invoice generation and ERP updates it is not — those require a durable
 broker.
 
-**How do you prevent a retried task from sending the email twice?**
+**Q: How do you prevent a retried task from sending the email twice?**
 Before doing any work, the handler checks a Redis key `idem:{order_id}:{task_name}` using a GET.
 If the key exists (set by a previous successful run), the handler returns immediately without
 calling SendGrid. The key is set atomically with `SET key 1 EX 172800` only after the downstream
 call succeeds. The 48-hour TTL covers all realistic retry windows.
 
-**What is the retry delay formula and why add jitter?**
+**Q: What is the retry delay formula and why add jitter?**
 Delay = `min(5 * 2^(attempt-1), 60) + uniform(0, 10)`. Without jitter, all workers that fail on
 the same upstream outage wake up at the same instant, causing a retry thundering herd that can
 overwhelm the recovering service. Uniform jitter spreads the load across a 10-second window.
 
-**What happens when a job exceeds max retries?**
+**Q: What happens when a job exceeds max retries?**
 The handler catches the terminal exception, pushes a JSON metadata record onto the Redis list
 `arq:dlq`, stores a `dead_lettered` result record, and returns a value instead of re-raising.
 Returning (not raising) prevents ARQ from scheduling further retries. The DLQ list is inspectable
 via `GET /admin/dlq` and items can be re-enqueued after manual investigation via
 `POST /admin/dlq/requeue`.
 
-**How do you scale the worker pool under load?**
+**Q: How do you scale the worker pool under load?**
 Each ARQ worker runs `max_jobs=50` concurrent async tasks (I/O-bound, so no thread contention).
 Horizontal scaling is straightforward: add worker replicas as Kubernetes Deployments. Workers
 compete on the same Redis queue; no coordination is needed. Monitor queue depth with
 `LLEN arq:default` and add replicas when depth stays above 1000 for more than 60 seconds.
 
-**What is the ordering guarantee across the three tasks?**
+**Q: What is the ordering guarantee across the three tasks?**
 None — they are enqueued independently and may complete in any order. This is intentional: email,
 invoice generation, and ERP update have no mutual dependency. If ordering were required (e.g.,
 invoice must complete before emailing the download link), the tasks would be chained by having
 `generate_invoice` enqueue `send_confirmation_email` upon success.
 
-**How would you migrate from Redis to a more durable broker like SQS?**
+**Q: How would you migrate from Redis to a more durable broker like SQS?**
 ARQ is Redis-only. Migration would require replacing ARQ with Celery (configured for SQS) or a
 purpose-built SQS consumer. The task handler logic (idempotency, retry, DLQ) is broker-agnostic
 and transfers unchanged. The primary driver for switching would be Redis availability concerns or
 a requirement for at-least-once delivery guaranteed by SQS's visibility timeout mechanism.
 
-**How do you test the retry and DLQ logic without hitting real external services?**
+**Q: How do you test the retry and DLQ logic without hitting real external services?**
 Use `pytest-asyncio` with `dependency_overrides` to inject a fake ARQ pool. The task handler
 function is a plain async function and can be called directly in tests — pass a mock `ctx` dict
 containing a fake Redis client (via `fakeredis.aioredis.FakeRedis`) and a stub HTTP session. Inject
 an exception on the first N calls to simulate failures, then assert the DLQ list length after the
 final attempt equals 1.
 
-**How would you add task prioritization?**
+**Q: How would you add task prioritization?**
 ARQ supports multiple queues: `queue_name` parameter on `enqueue_job` and a `queue_read_burst_limit`
 in `WorkerSettings`. Define `arq:high` and `arq:default`. Invoice generation (user-visible) goes to
 `arq:high`; ERP updates (internal) go to `arq:default`. Workers poll `arq:high` first, falling back
 to `arq:default` when it is empty.
 
-**What observability would you add in production?**
+**Q: What observability would you add in production?**
 Structured log lines at task start and completion (order_id, task_name, attempt, duration_ms,
 status). A Prometheus counter `task_executions_total{task,status}` and histogram
 `task_duration_seconds{task}`. A Grafana panel alerting when `task_executions_total{status="dead_lettered"}`

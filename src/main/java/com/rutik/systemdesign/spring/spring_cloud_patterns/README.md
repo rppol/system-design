@@ -895,31 +895,31 @@ public class OrderService {
 
 ## 12. Interview Questions with Answers
 
-**What is the role of Spring Cloud Gateway and how does it differ from a traditional reverse proxy like Nginx?**
+**Q: What is the role of Spring Cloud Gateway and how does it differ from a traditional reverse proxy like Nginx?**
 Spring Cloud Gateway is a programmatic, reactive API gateway built on Spring WebFlux and Project Reactor. Unlike Nginx, which is configured with static declarative rules, Spring Cloud Gateway executes Java code in filters and predicates, enabling dynamic routing, deep Spring Security integration, service-discovery-aware load balancing via `lb://` URIs, and full access to the Spring application context. The tradeoff is performance: Nginx has lower latency (C vs JVM) for simple proxying. Gateway is preferred when routing logic requires custom Java code or deep Spring ecosystem integration.
 
-**Explain the difference between GlobalFilter and GatewayFilter in Spring Cloud Gateway.**
+**Q: Explain the difference between GlobalFilter and GatewayFilter in Spring Cloud Gateway.**
 A `GlobalFilter` applies to all routes defined in the gateway. It is implemented as a Spring bean and executes for every matched request. Common uses: authentication, correlation ID injection, request/response logging. A `GatewayFilter` applies only to specific routes where it is declared in the route configuration. Built-in `GatewayFilter` implementations (RewritePath, AddRequestHeader, CircuitBreaker, RequestRateLimiter) are configured per-route in `application.yml` or Java route definitions. Custom `GatewayFilter` implementations can be reused across routes by referencing them by name in the filter configuration.
 
-**Describe the circuit breaker states and the role of the HALF_OPEN state.**
+**Q: Describe the circuit breaker states and the role of the HALF_OPEN state.**
 A Resilience4j circuit breaker has three states. CLOSED is the normal operating state: all calls proceed and results are measured against the sliding window. OPEN means the failure (or slow-call) rate has crossed the configured threshold: all calls fail immediately without reaching the downstream service, and the configured fallback is returned. After `waitDurationInOpenState` elapses, the circuit automatically transitions to HALF_OPEN. In HALF_OPEN, a limited number of test calls (`permittedNumberOfCallsInHalfOpenState`, e.g., 5) are allowed through. If the failure rate among test calls is below the threshold, the circuit closes; otherwise it returns to OPEN. HALF_OPEN implements the probe-and-recover pattern: it avoids thundering herd on a recovering service by limiting test traffic.
 
-**How does Spring Cloud LoadBalancer work and what replaced Netflix Ribbon?**
+**Q: How does Spring Cloud LoadBalancer work and what replaced Netflix Ribbon?**
 Spring Cloud LoadBalancer is the official replacement for Netflix Ribbon (removed in Spring Cloud 2020.0). When a `RestClient`, `WebClient`, or Feign client uses a `lb://service-name` URI, Spring Cloud LoadBalancer intercepts the request, queries the local service instance cache (populated from Eureka, Consul, or Kubernetes), selects an instance using the configured strategy (default: RoundRobin), and substitutes the real host/port. The instance list is cached locally and refreshed from the registry at a configurable interval (default 35 seconds). Custom strategies (zone-aware, response-time-weighted) are implemented by providing a custom `ReactorLoadBalancer<ServiceInstance>` bean.
 
-**How do you configure OpenFeign to integrate with Resilience4j circuit breaker?**
+**Q: How do you configure OpenFeign to integrate with Resilience4j circuit breaker?**
 Set `spring.cloud.openfeign.circuitbreaker.enabled=true`. This wraps every `@FeignClient` method with a Resilience4j circuit breaker named by the pattern `<FeignClientName>#<methodName>(<paramTypes>)`. Override the default name by adding `@CircuitBreaker(name = "customName")` on the interface method. Provide a fallback by setting `fallback = FallbackClass.class` or `fallbackFactory = FallbackFactory.class` on the `@FeignClient` annotation. The fallback class must implement the Feign interface and be registered as a Spring bean. Timeouts are configured separately via `feign.client.config.<clientName>.connect-timeout` and `read-timeout`.
 
-**Why is Eureka described as an AP system in CAP theorem terms?**
+**Q: Why is Eureka described as an AP system in CAP theorem terms?**
 Eureka prioritizes Availability and Partition Tolerance over Consistency. Each Eureka server node maintains a full copy of the registry and replicates to peers. During a network partition, nodes do not stop serving registry data — they continue serving potentially stale information rather than refusing responses (which would sacrifice Availability). This is the correct trade-off for service discovery: a client that receives a stale (but mostly correct) registry and has a circuit breaker is more resilient than a client that gets no registry data at all. Eureka's self-preservation mode further reinforces the AP stance by refusing to evict instances when heartbeat loss exceeds a threshold, assuming a network issue rather than mass instance failure.
 
-**What is the difference between Micrometer Tracing and Spring Cloud Sleuth?**
+**Q: What is the difference between Micrometer Tracing and Spring Cloud Sleuth?**
 Spring Cloud Sleuth (Spring Cloud 2020.x and earlier) provided distributed tracing by auto-configuring Brave (B3 propagation) and automatically injecting trace and span IDs into log MDC and HTTP headers. From Spring Boot 3.0 and Spring Cloud 2022.0 onward, Sleuth is replaced by Micrometer Tracing. Micrometer Tracing is vendor-neutral: it supports both Brave (Zipkin/B3) and OpenTelemetry bridges. The API (`Tracer`, `Span`, `Observation`) is part of Micrometer core. Auto-configuration is handled by Spring Boot actuator auto-configuration, not a separate Spring Cloud module. Migration from Sleuth to Micrometer Tracing requires changing dependencies and replacing `spring.sleuth.*` properties with `management.tracing.*`.
 
-**How does B3 propagation work and what headers are involved?**
+**Q: How does B3 propagation work and what headers are involved?**
 B3 is a trace context propagation format originated by Zipkin. Four headers carry context across HTTP calls: `X-B3-TraceId` — a 64-bit or 128-bit hex string identifying the entire distributed trace (same across all services for one logical request); `X-B3-SpanId` — a 64-bit hex string identifying the current unit of work (changes at each service boundary); `X-B3-ParentSpanId` — the span ID of the caller (used to build the trace tree); `X-B3-Sampled` — 1 or 0, indicating whether this trace should be recorded. Every service must propagate these headers to all downstream calls; missing propagation creates disconnected traces. In async code (CompletableFuture, reactive pipelines), the trace context must be explicitly transferred to the new thread/scheduler.
 
-**How would you implement weighted canary routing in Spring Cloud Gateway?**
+**Q: How would you implement weighted canary routing in Spring Cloud Gateway?**
 Use the Weight predicate. Define two routes with the same path predicate but different URIs and weights:
 ```yaml
 routes:
@@ -936,16 +936,16 @@ routes:
 ```
 Gateway distributes 90% of traffic to v1 and 10% to v2. The weight is resolved per-request using a consistent random selection within the group. This enables incremental rollout: start at 5%, monitor error rates and latency via Micrometer metrics, increase to 50%, then 100%.
 
-**What is a Bulkhead in Resilience4j and when would you use it over a circuit breaker?**
+**Q: What is a Bulkhead in Resilience4j and when would you use it over a circuit breaker?**
 A Bulkhead limits the number of concurrent calls to a dependency. The semaphore bulkhead blocks callers that exceed the limit (up to a configurable wait duration) and rejects them with `BulkheadFullException`. The thread pool bulkhead provides isolation via a dedicated thread pool (similar to Hystrix). A circuit breaker is reactive — it opens after failures are detected. A bulkhead is proactive — it prevents thread pool exhaustion before failures occur. Use both together: the bulkhead prevents the thread pool from being consumed by slow calls; the circuit breaker stops calling a service that has started failing. For services with high latency variance, a bulkhead with a tight concurrency limit (10–20) combined with a circuit breaker provides defense in depth.
 
-**How does the RequestRateLimiter filter work in Spring Cloud Gateway?**
+**Q: How does the RequestRateLimiter filter work in Spring Cloud Gateway?**
 The built-in `RequestRateLimiter` filter uses a token bucket algorithm backed by Redis (via `spring-boot-starter-data-redis-reactive`). Configuration: `replenishRate` (tokens added per second), `burstCapacity` (maximum tokens in the bucket), `requestedTokens` (tokens consumed per request, default 1). A `KeyResolver` bean determines the rate limit key (by IP, by user ID, by API key). The filter uses a Lua script in Redis to atomically check and decrement the token count. Requests that exceed the rate return 429 Too Many Requests. Redis ensures consistent rate limiting across multiple Gateway instances sharing the same Redis instance.
 
-**What happens when a Feign client method throws an exception vs. returns an error HTTP response?**
+**Q: What happens when a Feign client method throws an exception vs. returns an error HTTP response?**
 By default, Feign maps HTTP 4xx/5xx responses to `FeignException` subclasses. This does NOT trigger Resilience4j retry by default because `FeignException` is not in the `retry-exceptions` list. To retry on 503, you must configure a custom `ErrorDecoder` that maps 503 to a `RetryableException`. Conversely, if the underlying HTTP connection throws a `SocketTimeoutException` (checked exception wrapping), Feign propagates it, and if `SocketTimeoutException` is in `retry-exceptions`, Resilience4j will retry. The gotcha: if you configure retry on `FeignException`, ALL Feign errors trigger retry, including 400 Bad Request — which is never retryable and will just waste resources. Always configure specific exception types and ignore client-error exceptions explicitly.
 
-**How would you implement rate limiting per user rather than per IP in Spring Cloud Gateway?**
+**Q: How would you implement rate limiting per user rather than per IP in Spring Cloud Gateway?**
 Implement a custom `KeyResolver` bean that extracts the user identifier from the request context. If the gateway validates JWT tokens (via a GlobalFilter), the user ID is available as a request attribute:
 ```java
 @Bean
@@ -962,7 +962,7 @@ public KeyResolver userKeyResolver() {
 ```
 Configure the `RequestRateLimiter` filter to reference this bean via SpEL: `key-resolver: "#{@userKeyResolver}"`. Authenticated users get per-user limits (e.g., 100 req/s); anonymous requests get per-IP limits.
 
-**How do you test a Spring Cloud Gateway route without starting a real downstream service?**
+**Q: How do you test a Spring Cloud Gateway route without starting a real downstream service?**
 Use `@WebFluxTest` with `WebTestClient` and mock the downstream service using `WireMock` (via `spring-cloud-contract-wiremock`) or a mock bean. Spring Cloud Gateway supports `MockWebServer` (OkHttp) for unit tests of individual filters. For integration testing the full filter chain:
 ```java
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -980,16 +980,16 @@ class GatewayRouteTest {
 }
 ```
 
-**Explain the concept of slow call circuit breaking and why it matters for production.**
+**Q: Explain the concept of slow call circuit breaking and why it matters for production.**
 In addition to failure rate thresholds, Resilience4j allows configuring a `slowCallRateThreshold` and `slowCallDurationThreshold`. A call is considered "slow" (and counted as a negative signal) if it exceeds the duration threshold (e.g., 2000ms) even if it returns a 200 OK. This matters because a dependency that consistently responds in 3 seconds is effectively a failure from the caller's perspective — it ties up resources, adds latency to the user response, and can exhaust thread pools just as a full failure would. By treating slow calls like failures, the circuit breaker opens before the downstream service fully fails, enabling the fallback to serve fast degraded responses rather than slow partial responses.
 
-**What's the difference between Resilience4j's semaphore bulkhead and thread-pool bulkhead, and which should you default to?**
+**Q: What's the difference between Resilience4j's semaphore bulkhead and thread-pool bulkhead, and which should you default to?**
 The semaphore bulkhead limits concurrent calls with an in-memory counter, while the thread-pool bulkhead isolates calls onto a dedicated thread pool. The semaphore variant is cheap — no thread creation, sub-microsecond overhead — but the caller's own thread still waits for a permit up to `maxWaitDuration`, so a genuinely hung call can still tie up caller threads once that wait elapses. The thread-pool variant fully decouples the caller from a stuck call: the caller gets a `Future` back immediately and the bulkhead's own pool absorbs the block, at the cost of thread-context-switch overhead and a fixed memory footprint per pool. Resilience4j defaults to the semaphore bulkhead because most Spring MVC/WebFlux call sites are already synchronous or reactive and don't want another thread hop; reserve the thread-pool bulkhead for unavoidable blocking calls (e.g., a legacy JDBC call invoked from a reactive pipeline) where true thread isolation outweighs the extra overhead.
 
-**What is the risk of retrying a non-idempotent operation like a POST that creates an order, and how do you make it safe?**
+**Q: What is the risk of retrying a non-idempotent operation like a POST that creates an order, and how do you make it safe?**
 Retrying a non-idempotent POST can create duplicate side effects, such as two orders billed for one purchase. Resilience4j's `@Retry` annotation and Spring Cloud Gateway's Retry filter both retry blindly by exception type or HTTP status — neither has any concept of whether the first attempt already reached the server and mutated state before the connection dropped. The safe pattern is to restrict automatic retries to safe methods (`GET`, `HEAD`) by default, and for POST/PUT operations that must be retried, require an idempotency key: the client generates a unique key per logical operation, the server persists `key -> result`, and a retried request carrying the same key returns the cached result instead of re-executing the side effect. In Spring Cloud Gateway, configure the Retry filter's `methods` argument to `GET, HEAD` and only extend it to write methods once the downstream service implements idempotency-key deduplication.
 
-**Why was Netflix Hystrix retired in favor of Resilience4j, and what changed architecturally?**
+**Q: Why was Netflix Hystrix retired in favor of Resilience4j, and what changed architecturally?**
 Netflix put Hystrix into maintenance-only mode in 2018, and Resilience4j replaced it as the actively maintained standard. Architecturally, Hystrix isolated every command in its own dedicated thread pool by default, giving strong isolation but adding thread-context-switch overhead and memory cost per command; Resilience4j defaults to a lightweight semaphore-based bulkhead and composes circuit breaker, retry, rate limiter, bulkhead, and time limiter as separate, independently configurable decorators instead of one monolithic command object. Resilience4j also has first-class support for Java 8+ functional interfaces (`Supplier`, `CompletionStage`) and integrates natively with Micrometer for metrics, whereas Hystrix predates both and only reaches Spring Boot through the deprecated `spring-cloud-netflix` bridge. In practice this means any new Spring Boot 3 project should use Resilience4j exclusively — Hystrix has no Spring Boot 3 / Jakarta EE support path.
 
 ---

@@ -381,52 +381,52 @@ The broken version cost 12 × $3.27/hr ≈ $39/hr; the fix runs the same 12 repl
 
 ## 12. Interview Questions with Answers
 
-**Why can't you request a fraction of a GPU like you request 0.5 CPU in Kubernetes?**
+**Q: Why can't you request a fraction of a GPU like you request 0.5 CPU in Kubernetes?**
 Because GPUs are exposed as **extended resources**, which Kubernetes only supports as non-overcommittable integers — request must equal limit and must be a whole number. CPU and memory are first-class divisible resources the kubelet can throttle via cgroups; a GPU has no equivalent kernel-level fractional throttling that K8s understands. Fractional sharing is therefore faked at the device-plugin layer: MIG advertises smaller named resources (`nvidia.com/mig-1g.10gb`), and time-slicing advertises N integer replicas of one physical card. In practice you pick MIG when you need isolation and time-slicing when you need packing.
 
-**Walk me through what the NVIDIA GPU Operator installs and why the order matters.**
+**Q: Walk me through what the NVIDIA GPU Operator installs and why the order matters.**
 It installs, as DaemonSets gated by node labels: the kernel **driver**, the **container toolkit** (so containerd injects `/dev/nvidia*` and CUDA libs into Pods), the **device plugin** (advertises `nvidia.com/gpu`), **DCGM + exporter** (metrics), and the **MIG manager** (partitioning). Order matters because each layer depends on the previous: the device plugin can't enumerate GPUs until the driver loads, and the toolkit must be present before any GPU container can run. The operator uses init-container validation and labels like `nvidia.com/gpu.deploy.driver` to sequence this, which is why a fresh node reports `nvidia.com/gpu: 0` for the first 1–2 minutes. The practical payoff is that GPU nodes become cattle, not hand-built pets.
 
-**MIG vs time-slicing — when do you choose each?**
+**Q: MIG vs time-slicing — when do you choose each?**
 MIG gives **hardware-enforced** memory and fault isolation by physically partitioning the GPU into fixed-size instances (e.g., seven 1g.10gb slices on an A100). Time-slicing gives **no isolation** — it oversubscribes one GPU as N logical replicas that share all memory and SMs, round-robin time-multiplexed. Choose MIG for multi-tenant production inference where one tenant must never crash or read another's memory, accepting fixed slice sizes and some fragmentation. Choose time-slicing for trusted, bursty, or dev/notebook workloads where you want maximum packing and can tolerate noisy-neighbor latency variance. Never time-slice a strict-latency-SLA endpoint — p99 becomes unpredictable.
 
-**A 4-worker distributed training job is stuck with 3 Pods Running and 1 Pending. What's happening and how do you fix it?**
+**Q: A 4-worker distributed training job is stuck with 3 Pods Running and 1 Pending. What's happening and how do you fix it?**
 This is a classic **gang-scheduling deadlock**: the default scheduler placed Pods one at a time, the first three grabbed their GPUs, and there's no capacity left for the fourth — but NCCL all-reduce needs all four simultaneously, so the three running Pods make zero progress while holding GPUs hostage. The fix is a gang scheduler (Volcano or Kueue) that does **all-or-nothing admission**: the job is only placed when all four Pods' GPUs are simultaneously available, and they're released together. As a stopgap you can also reduce contention with dedicated quota per team so jobs don't interleave.
 
-**Your GPU dashboard shows 100% allocation but the ML team complains training is slow. How do you diagnose?**
+**Q: Your GPU dashboard shows 100% allocation but the ML team complains training is slow. How do you diagnose?**
 Allocation (`nvidia.com/gpu` checked out) is not utilization. I'd look at DCGM: `DCGM_FI_DEV_GPU_UTIL` (SM busy %) and `DCGM_FI_DEV_FB_USED` (memory). If GPU util is low (say 15%) while allocated, the bottleneck is upstream — usually the **data pipeline** (CPU-bound preprocessing, slow storage reads starving the GPU) or small batch sizes. I'd check the input pipeline throughput, dataloader worker count, and whether data sits on slow EBS vs a local NVMe/FSx cache. The card is reserved but starved; the fix is feeding it faster, not adding more GPUs.
 
-**How does Karpenter decide which GPU instance to launch, and how do you stop it from killing training jobs?**
+**Q: How does Karpenter decide which GPU instance to launch, and how do you stop it from killing training jobs?**
 Karpenter watches for unschedulable Pods, reads their `nvidia.com/gpu` requirements and any node selectors/affinities, then provisions the **cheapest instance type** from the NodePool's allowed set that satisfies them — preferring Spot if configured. To protect training: set `consolidationPolicy: WhenEmpty` (so it never disrupts a node that still has running Pods) on the training NodePool, annotate long jobs with `karpenter.sh/do-not-disrupt: "true"`, and use a separate On-Demand NodePool for serving so consolidation churn doesn't touch latency-sensitive endpoints.
 
-**Why separate training and serving onto different node pools?**
+**Q: Why separate training and serving onto different node pools?**
 They have opposite profiles. Training is long, bursty, fault-tolerant, wants whole/many GPUs, and is happy on cheap Spot. Serving is steady, latency-sensitive, wants fractional GPUs (MIG), and needs stable On-Demand capacity. On a shared pool, a big training job either starves serving of GPUs or forces you to over-provision; Spot interruptions meant for training would kill serving Pods; and consolidation churn destabilizes endpoints. Separate pools let you price each correctly (Spot for training, On-Demand/Savings Plans for serving) and isolate their failure modes.
 
-**What's the risk of running GPUs on Spot for training, and how do you mitigate it?**
+**Q: What's the risk of running GPUs on Spot for training, and how do you mitigate it?**
 Spot instances can be reclaimed with a 2-minute warning, which would otherwise throw away hours of training. Mitigation is **checkpointing**: save model + optimizer state to durable storage (S3/FSx) every N steps or minutes, and on restart resume from the latest checkpoint. Combine with Karpenter's Spot handling and a node-termination handler that catches the interruption signal and triggers a final checkpoint. For very large jobs use elastic training (PyTorch Elastic / torchrun) so the job survives losing a worker by rescaling rather than dying. The ~70% Spot discount is worth it precisely because training is restartable; serving usually is not.
 
-**How do you do multi-tenancy and chargeback on a shared GPU cluster?**
+**Q: How do you do multi-tenancy and chargeback on a shared GPU cluster?**
 Namespaces per team with **ResourceQuotas** capping `nvidia.com/gpu`, **Kueue** ClusterQueues for fair-share and queuing across teams, and **labels/cost-allocation tags** propagated from Pods to nodes so a cost tool (Kubecost, or cloud cost allocation by tag) can attribute GPU-hours per team. The key subtlety: bill on **GPU-hours allocated** (and ideally weight by utilization to discourage hoarding), and enforce quotas at admission so one team can't starve others. DCGM utilization per namespace turns "you reserved 40 GPU-hours but used 8%" into an actionable chargeback conversation.
 
-**Why does the GPU control plane become the bottleneck before the GPUs at very large scale?**
+**Q: Why does the GPU control plane become the bottleneck before the GPUs at very large scale?**
 At thousands of nodes, etcd write throughput, API-server request latency, kube-scheduler decision time, CoreDNS QPS, and CNI IP allocation all hit limits — OpenAI documented exactly this past ~7,500 nodes. GPU scheduling is low-volume but the surrounding churn (Pod creates/deletes, status updates, DNS lookups, metrics scrapes) scales with node and Pod count. Mitigations: tune etcd (separate disks, raise quota), shard or scale the API server, reduce scheduler load with gang scheduling, cap metrics cardinality, and move heavy DNS to NodeLocal DNSCache. The lesson: a GPU cluster is a Kubernetes-control-plane scaling problem wearing a GPU costume.
 
-**What is NVLink and why should the scheduler care about GPU topology?**
+**Q: What is NVLink and why should the scheduler care about GPU topology?**
 NVLink is NVIDIA's high-bandwidth GPU-to-GPU interconnect — ~600 GB/s on A100 vs ~64 GB/s over PCIe Gen4. For multi-GPU jobs doing frequent all-reduce (data-parallel training), GPUs connected by NVLink exchange gradients ~10× faster than over PCIe or across nodes via the network. So a topology-unaware scheduler that scatters a 4-GPU Pod across PCIe-only or cross-node placements can bottleneck on interconnect. Topology-aware scheduling (Volcano, or the device plugin's topology hints) packs co-dependent GPUs onto the same NVLink domain. For single-GPU inference, topology is irrelevant.
 
-**How do KServe and Triton differ for serving?**
+**Q: How do KServe and Triton differ for serving?**
 KServe is a Kubernetes-native serving layer: an `InferenceService` CRD that gives you autoscaling (including scale-to-zero via Knative), canary rollout, and a standard predict/explain interface across frameworks — it's the platform-standardization choice. Triton is NVIDIA's inference *server*: it runs inside a serving Pod and maximizes GPU throughput via dynamic batching, concurrent model execution, and multi-framework backends (TensorRT, ONNX, PyTorch). They compose — you often run Triton *as* the model server inside a KServe InferenceService, getting KServe's K8s lifecycle plus Triton's raw GPU efficiency. Choose KServe alone for simple Python models, add Triton when you need to saturate the GPU with batching and multi-model packing.
 
-**What does scale-to-zero mean for GPU serving and what's the catch?**
+**Q: What does scale-to-zero mean for GPU serving and what's the catch?**
 Scale-to-zero (via KServe/Knative) removes all replicas of an idle model endpoint so you stop paying for the GPU when there's no traffic — essential when you serve hundreds of rarely-used models. The catch is **cold start**: the first request after scale-down must wait for a Pod to schedule, a GPU node to possibly be provisioned by Karpenter (minutes), the driver to load, and the multi-GB model weights to download and load into VRAM — easily tens of seconds to minutes. Mitigations: keep a warm pool of GPU nodes, pre-stage images and weights on the node (or a fast FSx/EFS cache), and use a minReplicas=1 for latency-critical models while letting the long tail scale to zero. It's a cost-vs-cold-start tradeoff decided per model.
 
-**How do you detect and respond to a failing GPU in production?**
+**Q: How do you detect and respond to a failing GPU in production?**
 DCGM exports health signals: ECC double-bit errors (`DCGM_FI_DEV_ECC_DBE_VOL_TOTAL`), XID errors, throttling (`DCGM_FI_DEV_CLOCK_THROTTLE_REASONS`), and temperature. A rising uncorrectable ECC count or repeated XID 79 (GPU has fallen off the bus) means the card is degrading. The response: cordon the node, drain GPU Pods (rescheduled elsewhere by the operator/controllers), label it for the GPU Operator's health checks to keep it out of rotation, and replace the instance. NVIDIA's GPU feature discovery + the operator's validation can auto-taint unhealthy GPUs. The principle is the same as any SRE practice — detect via metrics, fence the bad resource, reschedule, replace — but the blast radius is bigger because each card is so expensive.
 
-**MPS vs MIG — when would you use Multi-Process Service instead of MIG?**
+**Q: MPS vs MIG — when would you use Multi-Process Service instead of MIG?**
 MPS (Multi-Process Service) lets multiple processes share a single GPU context with spatial SM partitioning, so co-located processes run concurrently rather than time-multiplexed — useful when you control all the tenants (e.g., several inference workers from the *same* trusted service) and want better throughput than time-slicing without MIG's fixed slice sizes. The catch is weak isolation: MPS processes share memory and a fault in one can affect others, so it's only safe for trusted, co-operative workloads. MIG, by contrast, gives hardware-enforced memory and fault isolation suitable for untrusted multi-tenancy, but only on A100/H100/A30 and only in fixed partition sizes. Rule of thumb: MIG for cross-tenant isolation on supported hardware; MPS for trusted same-service concurrency on any Volta+ GPU; time-slicing for the loosest dev/bursty case.
 
-**How do you observe an ML platform's GPU fleet, and which metric do you put on the exec dashboard?**
+**Q: How do you observe an ML platform's GPU fleet, and which metric do you put on the exec dashboard?**
 The headline metric is **DCGM GPU utilization** (`DCGM_FI_DEV_GPU_UTIL`) — SM-busy percentage averaged across the fleet — because it's the direct measure of dollar efficiency, and it's the number that exposes the allocation-vs-utilization gap finance cares about. Below it: framebuffer memory used (`DCGM_FI_DEV_FB_USED`) to spot over- or under-sized slices, ECC/XID error counts and throttle reasons for health, power draw and temperature, and per-team GPU-hours allocated vs utilized for chargeback. You feed DCGM into Prometheus/Thanos and build per-team Grafana dashboards, but watch cardinality: per-MIG-slice metrics across hundreds of GPUs can explode series counts and OOM Prometheus (use recording rules and drop high-cardinality labels). Allocation goes on the capacity dashboard; *utilization* goes on the exec one, because that's the metric a platform's success is judged by.
 
 ---

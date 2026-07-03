@@ -433,7 +433,7 @@ because the key format changed after a refactor. Fix: expose cache hit rate as a
 
 ## 12. Interview Questions with Answers
 
-**What are the five layers of LLM caching and what does each optimize?**
+**Q: What are the five layers of LLM caching and what does each optimize?**
 (1) Exact-match response cache: returns a stored response when the exact input repeats; maximizes
 savings for identical queries. (2) Semantic cache: returns a cached response when the input is
 semantically similar above a cosine threshold; handles paraphrased queries. (3) Provider prompt
@@ -443,13 +443,13 @@ KV-prefix caching (vLLM APC, SGLang RadixAttention): GPU-resident LRU cache of K
 reduces time-to-first-token for requests sharing a prefix. (5) Embedding cache: avoids re-embedding
 unchanged documents; critical for RAG performance.
 
-**How do you design the cache key for a multi-model, multi-prompt-version system?**
+**Q: How do you design the cache key for a multi-model, multi-prompt-version system?**
 Include all dimensions that affect the output: model name, model version, prompt version (or hash),
 and the input content hash. A minimal key: `{model_name}:{model_version}:{prompt_hash}:{sha256(sorted_messages)}`.
 Omitting any dimension causes incorrect cache hits. User-specific content must either be excluded
 from cacheable content or used as an additional key segment to prevent cross-user sharing.
 
-**What is the false-positive problem in semantic caching and how do you tune the threshold?**
+**Q: What is the false-positive problem in semantic caching and how do you tune the threshold?**
 A false positive occurs when two queries have high cosine similarity but require different answers
 — e.g., "refund policy in the US" and "refund policy in Germany." Tune the threshold by: sampling
 production query pairs with known different correct answers; computing their cosine similarity;
@@ -457,7 +457,7 @@ setting the threshold above the 95th percentile of that distribution. In practic
 the typical range. For high-stakes domains, use metadata filters as hard secondary keys rather than
 relying on similarity alone.
 
-**Why can provider prompt caching only cache a prefix, never a middle or suffix segment?**
+**Q: Why can provider prompt caching only cache a prefix, never a middle or suffix segment?**
 KV tensors are position-dependent: each token's keys and values are computed from all preceding
 tokens through causal attention, so a cached segment is only valid if every byte before it is
 identical. Changing one character at position 0 invalidates everything after it, and a stable
@@ -466,7 +466,7 @@ decision: system prompt and tool definitions first, retrieved context next, user
 ordered from most to least stable. Audit prompt-assembly code for anything dynamic (timestamps,
 request IDs, shuffled few-shot examples) that sneaks in before the intended cache breakpoint.
 
-**Does response caching break sampling semantics when temperature > 0?**
+**Q: Does response caching break sampling semantics when temperature > 0?**
 Yes — a cached response replays a single draw from the output distribution, making the endpoint
 deterministic for repeated queries even though callers requested sampled diversity. For FAQ
 answers this is usually desirable (consistency builds trust); for brainstorming or creative
@@ -475,7 +475,7 @@ temperature and other sampling parameters in the cache key, and skip response ca
 for endpoints where output diversity is part of the product. Prompt (KV) caching has no such
 problem — it reuses input computation while the model still samples fresh output.
 
-**How does Anthropic prompt caching work and how do you maximize hit rate?**
+**Q: How does Anthropic prompt caching work and how do you maximize hit rate?**
 Anthropic caches the KV-attention tensors for any content block marked with
 `cache_control: {"type": "ephemeral"}`. The minimum cacheable prefix is 1,024 tokens; the TTL is
 5 minutes. To maximize hit rate: place the system prompt and tool definitions in cached blocks at
@@ -484,28 +484,28 @@ user IDs, or dynamic content; track `cache_read_input_tokens` vs `cache_creation
 usage metadata. The discount is 90% on cached input tokens ($3.00 → $0.30/1M for Claude 3.5
 Sonnet).
 
-**How does vLLM automatic prefix caching (APC) work?**
+**Q: How does vLLM automatic prefix caching (APC) work?**
 vLLM's APC maintains a GPU-resident LRU cache of KV tensors keyed by the SHA-256 of the token
 sequence of each block (typically 16-32 tokens per block). When a new request shares a prefix with
 a cached entry, vLLM skips the prefill computation for the cached blocks, reducing time-to-first-
 token by up to 60-80% for long shared prefixes. APC provides no benefit when every request has a
 unique prefix.
 
-**How do you prevent cache poisoning in a semantic cache?**
+**Q: How do you prevent cache poisoning in a semantic cache?**
 (1) Validate and sanitize all responses before caching — run through the same guardrail pipeline
 used for production outputs. (2) Only cache responses to queries that pass input classification
 (not jailbreaks or adversarial inputs). (3) Add a staleness timestamp and cap cache entry lifetime
 so poisoned entries expire. (4) Monitor cache hit responses with a quality sampler to detect
 anomalies.
 
-**How do you handle cache invalidation for a RAG system where the knowledge base updates?**
+**Q: How do you handle cache invalidation for a RAG system where the knowledge base updates?**
 Use event-driven invalidation: when a document is updated, identify cached queries whose
 top-retrieved document includes the changed document, and evict those entries. This requires
 provenance logging (tracking which documents contributed to each cached response). For simpler
 systems, use TTL-based invalidation calibrated to the update frequency (daily updates → TTL of
 23h). For real-time data, do not use semantic caching at all.
 
-**What is the difference between prompt caching and response caching?**
+**Q: What is the difference between prompt caching and response caching?**
 Provider prompt caching saves the computation of processing input tokens — the KV tensors are
 reused, reducing TTFT and input token cost; the model still generates a fresh output each time.
 Response caching saves the output — the same generated text is returned without any model call.
@@ -513,14 +513,14 @@ Response caching is cheaper (zero inference cost for hits) but deterministic. Us
 for truly static, idempotent queries; use prompt caching for all requests with shared system
 prompts regardless of whether the output is dynamic.
 
-**How would you instrument a multi-layer cache to understand its effectiveness?**
+**Q: How would you instrument a multi-layer cache to understand its effectiveness?**
 Track per-layer metrics: (1) hit rate per layer; (2) latency distribution (p50/p95/p99) for hits
 vs misses; (3) cost savings in dollars per day (tokens served from cache * price delta); (4)
 false-positive rate for semantic cache (sampled LLM-as-judge: "is this cached response correct
 for this query?"). Alert on hit rate drop >10pp (suggests key schema change) and false-positive
 rate >2% (threshold needs tightening).
 
-**How do you handle user-personalized responses and caching safely?**
+**Q: How do you handle user-personalized responses and caching safely?**
 Personalized responses must not be shared across users. Options: (1) strip personalization from
 the prompt and inject it post-generation (cache the generic response, then string-substitute);
 (2) use per-user cache namespaces (key includes user ID) — hit rate is lower but safe; (3) do not
@@ -528,7 +528,7 @@ cache personalized responses at all — only cache generic portions. The semanti
 serve user A's personalized response to user B; add a user_id metadata filter as a hard equality
 constraint in the vector search.
 
-**What happens to an Anthropic cache entry after the 5-minute TTL, and how do you keep it warm?**
+**Q: What happens to an Anthropic cache entry after the 5-minute TTL, and how do you keep it warm?**
 Each cache read refreshes the 5-minute TTL, so steady traffic (more than one request per 5 minutes
 per unique prefix) keeps the entry alive indefinitely; a traffic gap lets it expire, and the next
 request pays the write price again. Writes carry a 25% premium over normal input ($3.75 vs
@@ -539,7 +539,7 @@ re-writes of a 10k-token prefix; Anthropic also offers a 1-hour TTL tier at a hi
 Track spikes in `cache_creation_input_tokens` as the signal that your prefix is churning or your
 traffic has gaps.
 
-**How does SGLang's RadixAttention differ from vLLM's automatic prefix caching?**
+**Q: How does SGLang's RadixAttention differ from vLLM's automatic prefix caching?**
 vLLM's APC hashes fixed-size token blocks (16-32 tokens) and reuses KV tensors for exact
 block-aligned prefix matches. RadixAttention instead organizes cached prefixes in a radix tree
 over token sequences, so requests can share any common prefix at token granularity, and the tree
@@ -549,7 +549,7 @@ tree-of-thought search, batched evals — where many requests share deep, branch
 plain chat traffic with one shared system prompt, both give similar wins; the difference shows up
 when prefixes branch.
 
-**How do you cache effectively in multi-turn conversations where the context grows every turn?**
+**Q: How do you cache effectively in multi-turn conversations where the context grows every turn?**
 Exact and semantic response caches are nearly useless mid-conversation (each turn's context is
 unique), but KV-prefix caching is ideal: the conversation history is an append-only prefix, so
 turn N reuses everything computed for turns 1..N-1. With Anthropic, move the cache breakpoint
@@ -560,7 +560,7 @@ load-balancing choice. Budget for the growing prefix: a 50-turn conversation sti
 price on the full history every turn, which is why history summarization or truncation remains
 necessary beyond the cache.
 
-**Where does caching fit when responses are streamed?**
+**Q: Where does caching fit when responses are streamed?**
 For cache hits there is no token stream — only a stored string — so either return it at once (a
 different UX than token-by-token rendering) or replay it as a synthetic stream for visual
 consistency. On the write side, buffer the full streamed response and insert it into the cache

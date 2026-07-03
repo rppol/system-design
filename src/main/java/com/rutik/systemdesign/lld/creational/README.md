@@ -253,37 +253,37 @@ Questions ordered by interview frequency — gotchas and traps first, then inter
 
 ---
 
-**Why is Singleton considered an anti-pattern in modern Java?**
+**Q: Why is Singleton considered an anti-pattern in modern Java?**
 Singleton introduces global mutable state: any class can access it without declaring the dependency, making code hard to test (can't inject a test double), hard to reason about (hidden coupling), and thread-unsafe if state is mutable. The fix is dependency injection — inject the single instance via constructor, letting the DI container manage its lifecycle. The instance is still effectively singleton in scope, but the dependency is now explicit and injectable.
 
-**Thread-safe Singleton: DCL + volatile, enum, or Holder idiom — which is correct?**
+**Q: Thread-safe Singleton: DCL + volatile, enum, or Holder idiom — which is correct?**
 All three are correct in Java 5+, but enum is the preferred idiom (Effective Java Item 3): it handles serialization automatically, prevents reflection-based instantiation, and requires no volatile. The Holder idiom (`static class Holder { static final X INSTANCE = new X(); }`) achieves lazy initialization via class-loading semantics without synchronization overhead. DCL + volatile is correct but verbose. Never use DCL without volatile — without it, the JVM's instruction reordering can publish a partially-constructed instance.
 
-**What is the "Cloneable problem" in Java, and how does Prototype avoid it?**
+**Q: What is the "Cloneable problem" in Java, and how does Prototype avoid it?**
 `Cloneable` is a marker interface that changes the behavior of `Object.clone()` — but `clone()` is defined on `Object`, not `Cloneable`, so there's no type contract. `clone()` performs a shallow copy by default (references are copied, not objects), throws `CloneNotSupportedException` (a checked exception on a `protected` method), and requires covariant return type overriding to be usable. The idiomatic Java fix: use a copy constructor (`new Foo(Foo other)`) or a static factory (`Foo.copyOf(Foo other)`). Both give explicit control over deep vs shallow copy without the `Cloneable` contract problems.
 
-**Factory Method vs Abstract Factory — when does a factory of factories make sense?**
+**Q: Factory Method vs Abstract Factory — when does a factory of factories make sense?**
 Use Abstract Factory when you need to create families of related objects that must be compatible with each other. Example: a UI library with `Button`, `Checkbox`, and `Dialog` — you want either all Windows-style or all Linux-style widgets, never a mix. Factory Method creates ONE type of product; the subclass decides the concrete class. Abstract Factory creates MULTIPLE types of products that belong to the same family. Abstract Factory is often implemented by composing multiple Factory Methods.
 
-**Builder vs telescoping constructors — what's the Effective Java argument?**
+**Q: Builder vs telescoping constructors — what's the Effective Java argument?**
 Effective Java Item 2: when a class has many optional parameters, the telescoping constructor pattern (one constructor per combination of parameters) is hard to read and easy to get wrong (two adjacent parameters of the same type are silently swappable). The JavaBeans pattern (no-arg constructor + setters) is readable but leaves the object in an inconsistent intermediate state and prevents immutability. Builder gives you: readable construction, validation at `build()` time, and an immutable product. Cost: more verbose code (extra Builder class); worth it for 4+ parameters.
 
-**What is the static factory method idiom (Effective Java Item 1) and how does it differ from GoF Factory Method?**
+**Q: What is the static factory method idiom (Effective Java Item 1) and how does it differ from GoF Factory Method?**
 Static factory method (Item 1) is naming a static method `of()`, `from()`, `valueOf()`, `newInstance()`, etc. to create instances — `LocalDate.of(2024, 1, 1)`, `Optional.of(x)`, `List.of(...)`. Benefits: descriptive names, ability to return cached instances, can return a subtype. GoF Factory Method is a class-hierarchy pattern: a base class defines a `createProduct()` method that subclasses override to vary the concrete product type. These are unrelated patterns that share a naming similarity.
 
-**How does Spring use the Prototype pattern?**
+**Q: How does Spring use the Prototype pattern?**
 Spring beans are singleton-scoped by default. With `@Scope("prototype")`, every `getBean()` call returns a new instance — the bean is "prototyped" from its definition. This is used for stateful beans that must not be shared (e.g., a per-request helper with mutable state). Gotcha: injecting a prototype bean into a singleton bean breaks the prototype behavior — the singleton holds one reference, so the prototype is only created once. Fix: inject `ApplicationContext` and call `getBean()` each time, or use `@Lookup` method injection.
 
-**Abstract Factory vs Strategy — both select an implementation at runtime. What's different?**
+**Q: Abstract Factory vs Strategy — both select an implementation at runtime. What's different?**
 Strategy selects an algorithm (behavior). Abstract Factory selects a family of object creators (construction). A Strategy doesn't create objects — it performs an operation on objects that already exist. An Abstract Factory creates objects but doesn't define what to do with them. The confusion arises because Abstract Factory is often selected at runtime based on configuration (e.g., "Linux" vs "Windows") — which looks like Strategy's algorithm selection — but the output is factories, not computed results.
 
-**When does a Builder become over-engineering?**
+**Q: When does a Builder become over-engineering?**
 When the object has 2–3 non-optional parameters and no future extensibility requirement. A plain constructor is more readable and avoids the boilerplate of a separate Builder class. Builder shines for: 4+ parameters (especially optional ones), immutable objects, objects requiring validation across fields at construction time, and objects where construction order matters. Lombok's `@Builder` annotation generates the Builder class automatically, which makes it low-overhead when using Lombok.
 
-**How does the Prototype pattern enable the "object pool" pattern?**
+**Q: How does the Prototype pattern enable the "object pool" pattern?**
 An object pool maintains a collection of pre-initialized objects (prototypes) and leases them to callers. When the caller returns the object, the pool resets it (restores to prototype state) and returns it to the pool. `HikariCP` connection pooling, thread pool reuse, and Netty ByteBuf pooling all apply this principle. Prototype provides the initial template; the pool manages the lifecycle of copies.
 
-**What is the Holder idiom for Singleton and why does it work without synchronization?**
+**Q: What is the Holder idiom for Singleton and why does it work without synchronization?**
 
 ```java
 public class Singleton {
@@ -297,16 +297,16 @@ public class Singleton {
 
 The JVM guarantees that static initializers run exactly once, in a thread-safe manner, when the class is first loaded. `Holder` is only loaded when `getInstance()` is called — providing lazy initialization. The initialization happens inside the class loader's lock, so no explicit synchronization is needed. This is the preferred Singleton implementation after enum.
 
-**Prototype deep copy vs shallow copy — what breaks with shallow?**
+**Q: Prototype deep copy vs shallow copy — what breaks with shallow?**
 Shallow copy copies references, not the referenced objects. If the original and the copy share a `List<Order>` reference, modifying one's list modifies both. This is a classic defensive copy failure. Fix: implement deep copy manually — clone each mutable field recursively, or serialize/deserialize the object. Immutable fields (String, Integer, LocalDate) are safe to share. Mutable fields (List, Map, Date, arrays) must be deep-copied. The alternative: make the shared state immutable by design, making shallow copy safe.
 
-**How does Java's enum-based Singleton handle serialization?**
+**Q: How does Java's enum-based Singleton handle serialization?**
 `Enum` serialization is handled by the JVM itself — the serialized form is just the enum name, and deserialization always returns the existing instance via `Enum.valueOf()`. You never get a second instance through deserialization. With a traditional Singleton, you must implement `readResolve()` to return the existing instance after deserialization, or a deserialized copy breaks the single-instance guarantee. Enum eliminates this requirement entirely.
 
-**When would you choose Abstract Factory over a dependency injection framework?**
+**Q: When would you choose Abstract Factory over a dependency injection framework?**
 Abstract Factory is useful when: (a) the factory itself must be swappable at runtime (e.g., switching between a mock factory in tests and a real factory in production), (b) the creation logic is complex and must stay in the domain layer (not the DI container's scope), or (c) the system has no DI framework. In practice, most modern Java applications use Spring's DI container as the Abstract Factory — `@Profile("test")` selects the test factory, `@Profile("prod")` selects the prod factory. Pure Abstract Factory code is more common in library design (where you can't assume a DI framework).
 
-**Why does adding a new product type require modifying all Abstract Factories?**
+**Q: Why does adding a new product type require modifying all Abstract Factories?**
 Abstract Factory defines the set of products it creates (e.g., `createButton()`, `createCheckbox()`). Adding a new product (e.g., `createDialog()`) requires adding that method to the factory interface AND to every concrete factory. This is the "Open/Closed Principle violation" in Abstract Factory — it's closed to modification (you can add new concrete factories freely) but not open to new product types without modifying the interface. Mitigation: use a generic factory (`create(Class<T> type)`) or accept that product type extension is rare and the modification cost is justified.
 
 ---

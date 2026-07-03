@@ -288,49 +288,49 @@ MySQL/InnoDB uses REPEATABLE READ by default. A long-running reporting query tak
 
 ## 12. Interview Questions with Answers
 
-**What are the four ACID properties and what failure does each prevent?**
+**Q: What are the four ACID properties and what failure does each prevent?**
 Atomicity prevents partial writes (all-or-nothing). Consistency prevents constraint violations. Isolation prevents concurrency anomalies (dirty reads, lost updates). Durability prevents data loss after commit. Each is implemented by a different mechanism: undo logs for atomicity, constraint checking for consistency, MVCC/locking for isolation, WAL for durability.
 
-**Explain CAP theorem with a concrete production scenario.**
+**Q: Explain CAP theorem with a concrete production scenario.**
 During a network partition in a Cassandra cluster with RF=3, CL=QUORUM requires 2/3 nodes. If the partition splits into [2 nodes] and [1 node], the minority partition cannot form a quorum and must choose: go unavailable (CP behavior) or serve stale reads with CL=ONE (AP behavior). Cassandra defaults to AP — it returns stale data rather than erroring. Zookeeper makes the opposite choice: minority nodes stop serving reads to preserve consistency.
 
-**What is PACELC and why is it a better model than CAP?**
+**Q: What is PACELC and why is it a better model than CAP?**
 CAP only describes behavior during network partitions. PACELC extends it: when there IS a partition (P), choose A or C; ELSE (no partition), choose between Latency and Consistency. Most production systems face the latency vs consistency tradeoff far more often than actual partitions. PACELC reveals that synchronous replication (low latency sacrifice for consistency) vs asynchronous (low latency, eventual consistency) is an ELC tradeoff.
 
-**What is the difference between READ COMMITTED and REPEATABLE READ isolation levels?**
+**Q: What is the difference between READ COMMITTED and REPEATABLE READ isolation levels?**
 READ COMMITTED takes a new snapshot before each statement in a transaction — reads see committed data from concurrent transactions. REPEATABLE READ takes a snapshot at transaction start — all reads in the transaction see the same consistent view regardless of concurrent commits. In practice, PostgreSQL REPEATABLE READ implements snapshot isolation; MySQL InnoDB implements it using next-key locks to additionally prevent phantom reads.
 
-**What is write skew and how do you prevent it?**
+**Q: What is write skew and how do you prevent it?**
 Write skew occurs when two concurrent transactions read overlapping data and make decisions that together violate a constraint, even though each transaction individually is consistent. Classic example: two doctors both check "at least one on-call" and both go off-call. Prevention options: (1) SERIALIZABLE isolation (PostgreSQL uses Serializable Snapshot Isolation, SSI), (2) explicit locking with SELECT FOR UPDATE, (3) application-level coordination.
 
-**When is eventual consistency acceptable, and when is it dangerous?**
+**Q: When is eventual consistency acceptable, and when is it dangerous?**
 Acceptable when: stale data causes only a degraded user experience (social like counts, feed order, search index lag). Dangerous when: stale data causes financial loss (balance reads), security bypass (permission checks), or inventory oversell (stock reads). The test: ask "what is the worst case if two clients see different values simultaneously?" If the answer involves money or safety, require strong consistency.
 
-**How does MVCC differ from pessimistic locking for concurrency control?**
+**Q: How does MVCC differ from pessimistic locking for concurrency control?**
 MVCC maintains multiple row versions — readers see a consistent snapshot without blocking writers; writers create new versions without blocking readers. Pessimistic locking blocks reads when a write lock is held (in 2PL) — readers wait for writers and vice versa. MVCC has lower contention but higher storage cost (dead tuples require VACUUM). Pessimistic locking has higher contention but simpler storage. PostgreSQL and MySQL InnoDB use MVCC.
 
-**What is linearizability and why is it expensive?**
+**Q: What is linearizability and why is it expensive?**
 Linearizability guarantees that every operation appears to take effect atomically at some point between its start and completion, and the global order is consistent with real time. It's expensive because: every write must be seen by all nodes before acknowledging, requiring at minimum one round-trip to a majority of nodes (Raft commit). This adds latency proportional to network RTT — typically 1–10ms in a local cluster, 50–200ms across regions.
 
-**Explain read-your-writes consistency and when it breaks.**
+**Q: Explain read-your-writes consistency and when it breaks.**
 Read-your-writes guarantees that after you write, you always see your own write. It breaks with: (1) load balancers routing your read to a replica that hasn't received the write yet (replication lag), (2) session cookie loss (server-side state cleared), (3) switching from session-sticky read routing to round-robin. Fix: route reads for same user session to primary for a short TTL after writes, or use synchronous replication.
 
-**What is the difference between durability and availability?**
+**Q: What is the difference between durability and availability?**
 Durability: once committed, a write survives any single-node crash (WAL ensures this). Availability: the system can serve requests at any time. They are orthogonal — a system can be durable but unavailable (committed writes survive crash but system is down for recovery), or available but not durable (in-memory store loses data on crash but was always responsive).
 
-**How does the 2PC protocol relate to ACID and what is its failure mode?**
+**Q: How does the 2PC protocol relate to ACID and what is its failure mode?**
 2PC (two-phase commit) implements distributed atomicity. Phase 1: coordinator sends PREPARE to all participants, each votes yes/no. Phase 2: if all voted yes, coordinator sends COMMIT. Failure mode: coordinator crashes after PREPARE but before COMMIT — participants are stuck in uncertain state (holding locks) until coordinator recovers. This blocking window is typically 30 seconds to 5 minutes depending on timeout settings.
 
-**What is the difference between soft state and eventual consistency in BASE?**
+**Q: What is the difference between soft state and eventual consistency in BASE?**
 Soft state means the state of the system can change over time without any input, due to replication processes converging in the background. Eventual consistency is the guarantee that this convergence will eventually reach the same value across all replicas given no new updates. Soft state describes the mechanism; eventual consistency is the liveness guarantee.
 
-**In PostgreSQL, what is the MVCC visibility rule for a row?**
+**Q: In PostgreSQL, what is the MVCC visibility rule for a row?**
 A row version R is visible to transaction T if: xmin(R) is committed AND xmin(R) < txid_snapshot_min(T's snapshot) AND (xmax(R) = 0 OR xmax(R) is not committed in T's snapshot OR xmax(R) > txid_snapshot_max). In plain terms: the inserting transaction committed before this snapshot, and the deleting transaction (if any) either hasn't committed yet or committed after this snapshot.
 
-**What is causal consistency and how is it stronger than eventual consistency?**
+**Q: What is causal consistency and how is it stronger than eventual consistency?**
 Causal consistency preserves happens-before relationships: if operation A causally preceded operation B (A's result influenced B), then all nodes see A before B. But concurrent operations (no causal link) can be seen in different orders. Stronger than eventual because it prevents read-your-own-writes violations and "going back in time" anomalies. MongoDB sessions provide causal consistency within a session.
 
-**How do you choose between SERIALIZABLE and REPEATABLE READ in production?**
+**Q: How do you choose between SERIALIZABLE and REPEATABLE READ in production?**
 Use REPEATABLE READ (or Snapshot Isolation) for: reporting queries needing a consistent view, typical OLTP workloads without cross-row constraint invariants. Use SERIALIZABLE for: financial transactions, booking systems, any logic like "if count < N then insert." PostgreSQL's SSI (Serializable Snapshot Isolation) adds minimal overhead for non-conflicting transactions; only truly conflicting transactions are aborted and retried.
 
 ---

@@ -318,49 +318,49 @@ A batch job ran a single transaction deleting 50M rows. The undo log grew to 120
 
 ## 12. Interview Questions with Answers
 
-**Why does InnoDB have two separate logs (redo and undo)?**
+**Q: Why does InnoDB have two separate logs (redo and undo)?**
 They serve orthogonal purposes. The redo log ensures committed writes survive crashes: it records physical page changes and is replayed during crash recovery to restore committed transactions. The undo log enables rollback and MVCC: it records the logical inverse of each operation ("balance was 500") so transactions can be reverted and old row versions can be served to concurrent readers without blocking. Redo is forward-looking (what to apply after crash), undo is backward-looking (what to revert or show old state). Combining them would complicate both recovery and MVCC garbage collection.
 
-**What is the performance impact of innodb_flush_log_at_trx_commit=1 vs 2?**
+**Q: What is the performance impact of innodb_flush_log_at_trx_commit=1 vs 2?**
 `=1` (default): every commit triggers an fsync of the redo log buffer to disk. An fsync on HDD takes 1-10ms; on NVMe SSD, 0.05-0.3ms. At 1000 TPS, this adds 50-10,000ms of I/O per second. `=2`: every commit flushes to OS page cache (no fsync); fsync happens once per second. This means the OS can batch multiple writes, dramatically reducing I/O — typically 2-5x higher throughput. Durability difference: `=1` guarantees zero data loss on any crash (hardware included). `=2` loses up to 1 second of commits on hardware failure, but not on mysqld crash (OS cache survives). For most applications, `=2` with `sync_binlog=1` provides good balance: MySQL crash-safe via binlog, hardware-crash loses at most 1s.
 
-**How does the InnoDB buffer pool LRU work with young and old sublists?**
+**Q: How does the InnoDB buffer pool LRU work with young and old sublists?**
 The buffer pool is split: young sublist (5/8 of pool) for frequently accessed pages, old sublist (3/8) for recently accessed pages. New pages are inserted at the midpoint (start of old sublist) rather than the head. A page stays in the old sublist for at least `innodb_old_blocks_time` (default 1 second). If it's accessed again within that second, it stays in old (not promoted). If accessed after 1 second (genuine "hot" page), it's promoted to the young sublist head. This protects hot pages from large sequential scans: a full table scan loads thousands of pages into the old sublist, they're accessed once each (<1s apart), so they never pollute the young sublist.
 
-**What is a gap lock in InnoDB and how does it prevent phantom reads?**
+**Q: What is a gap lock in InnoDB and how does it prevent phantom reads?**
 A gap lock locks the range between two index values, preventing inserts into that range. At REPEATABLE READ isolation: `SELECT * FROM t WHERE id BETWEEN 10 AND 20 FOR UPDATE` locks: the gap before 10, records 10-20, and the gap after 20. No other transaction can INSERT id=15 or id=22 until this lock is released. This prevents phantom reads: re-executing the same range query in the same transaction returns the same set of rows. Gap locks don't exist at READ COMMITTED — that isolation level accepts phantom reads in exchange for better INSERT concurrency.
 
-**How does InnoDB's MVCC provide read consistency without blocking?**
+**Q: How does InnoDB's MVCC provide read consistency without blocking?**
 Each transaction starts with a view (snapshot) of committed data. The view is defined by the "read view": a set of active (uncommitted) transaction IDs at snapshot time. When reading a row, InnoDB checks the row's trx_id against the read view: if the row was created by a transaction committed before the snapshot, it's visible; if created by an active or future transaction, InnoDB traverses the undo log chain to find the last version that was committed before the snapshot. Readers never acquire locks and never block writers. Writers don't block readers. This is why InnoDB can sustain high read concurrency — each reader gets a consistent snapshot view without locking.
 
-**What is the difference between MySQL binary log and InnoDB redo log?**
+**Q: What is the difference between MySQL binary log and InnoDB redo log?**
 Binary log: MySQL server-level log, records all data changes (INSERT/UPDATE/DELETE) in statement or row format. Used for replication (shipped to replicas) and PITR (point-in-time recovery by replaying binlog events after a base backup restore). Sequential files, not circular. InnoDB redo log: engine-level circular log recording physical page changes (byte-level). Used for crash recovery only — on startup, replays uncommitted redo records to restore state. Not used for replication. Not human-readable. The two are separate and must both be flushed for full ACID: `innodb_flush_log_at_trx_commit=1` for redo log, `sync_binlog=1` for binary log.
 
-**How does gh-ost perform online schema changes without taking table locks?**
+**Q: How does gh-ost perform online schema changes without taking table locks?**
 gh-ost (GitHub's Online Schema Change) works by: (1) Creating a new shadow table with the desired schema. (2) Setting up a binary log listener to capture changes to the original table. (3) Copying rows from original to shadow in batches (low-priority). (4) Applying binlog events (new INSERTs/UPDATEs/DELETEs) to the shadow table in real-time. (5) When shadow table catches up to original (within a few seconds), performing an atomic table swap: `RENAME TABLE original TO original_del, shadow TO original`. The swap requires a brief metadata lock (milliseconds), not a full table lock. Unlike `pt-online-schema-change` which uses triggers (risky for high-write tables), gh-ost uses binlog tailing — safer and lower overhead.
 
-**What is the purpose of the InnoDB change buffer?**
+**Q: What is the purpose of the InnoDB change buffer?**
 The change buffer is an area in the buffer pool that caches changes to non-unique secondary index pages that are not currently in memory. Without the change buffer, every secondary index update would require reading the index page from disk (random I/O), updating it, and writing it back. With the change buffer, the update is recorded in memory and the actual index page update is deferred until the page is next read into the buffer pool (merge on read). This reduces random I/O for write-heavy workloads. Limitation: only non-unique indexes (InnoDB cannot determine if a unique constraint is violated without reading the index page). If the buffer pool is large enough to contain all frequently accessed index pages, the change buffer provides minimal benefit.
 
-**What is GTID replication and why is it preferred over binlog file/position replication?**
+**Q: What is GTID replication and why is it preferred over binlog file/position replication?**
 GTID (Global Transaction Identifier) replication assigns a unique ID (source_server_uuid:transaction_number) to every committed transaction. Benefits: (1) No need to specify binlog file and position during replication setup — replica uses `SOURCE_AUTO_POSITION=1` and MySQL figures out what's been applied. (2) Failover is simpler: promoting a replica requires no manual binlog position calculation — just point other replicas to the new primary and they auto-detect their GTID position. (3) Safety: GTID prevents replaying the same transaction twice (idempotent). (4) Monitoring: easily see replication lag by comparing GTID sets. Limitation: all statements in a transaction must be binlog-compatible with GTIDs (no non-transactional temporary tables mixed with transactional operations).
 
-**How do you perform a zero-downtime column type change in MySQL?**
+**Q: How do you perform a zero-downtime column type change in MySQL?**
 A direct `ALTER TABLE t MODIFY COLUMN name VARCHAR(200)` (expanding size) may be INSTANT in MySQL 8 for some operations, or may require INPLACE (online) or COPY (blocking). For changes requiring table rebuild (type change from INT to BIGINT): use gh-ost or pt-online-schema-change. Example with gh-ost: `gh-ost --alter="MODIFY COLUMN user_id BIGINT NOT NULL" --table=users --database=mydb --execute`. gh-ost creates shadow table, copies rows, applies binlog changes in parallel, then swaps — total time proportional to table size but no downtime. Monitor with `gh-ost --status-interval=30`.
 
-**What happens when the InnoDB redo log runs out of space?**
+**Q: What happens when the InnoDB redo log runs out of space?**
 The redo log is a fixed-size circular buffer. If dirty pages are not flushed fast enough, the write position circles around to the checkpoint position — the oldest committed changes are still in the redo log because their pages haven't been flushed to disk yet. InnoDB must trigger a "sharp checkpoint": flush all dirty pages immediately before the redo log position wraps. This causes a massive I/O spike and can stall all writes for seconds. Prevention: set redo log large enough (`innodb_log_file_size = 1-4GB` in MySQL 5.7) to give the background flusher time to flush dirty pages before the log wraps. MySQL 8 automatically sizes the redo log based on write throughput.
 
-**How does InnoDB handle concurrent INSERTs and what is the auto-increment lock?**
+**Q: How does InnoDB handle concurrent INSERTs and what is the auto-increment lock?**
 MySQL 8 default `innodb_autoinc_lock_mode=2` (interleaved): AUTO_INCREMENT values are allocated without table-level locks using a lightweight mutex. Concurrent INSERT statements get non-overlapping ranges of auto-increment values instantly. Gaps in auto-increment values can occur (e.g., a batch INSERT gets IDs 100-200, another gets 201-300, but the first rollsback — gap at 100-200). For statement-based replication, mode=2 requires row-based binlog (not statement-based), otherwise non-deterministic. MySQL 5.7 default was mode=1 (sequential for single-row inserts, table lock for bulk inserts). Always use mode=2 with row-based replication for best performance.
 
-**What is the InnoDB buffer pool instance and why use multiple instances?**
+**Q: What is the InnoDB buffer pool instance and why use multiple instances?**
 `innodb_buffer_pool_instances` (default 8 for buffer pool >= 1GB): splits the buffer pool into N separate instances, each with its own LRU list, mutex, and flush threads. Benefit: reduces lock contention on the global buffer pool mutex at high concurrency. Each access to the buffer pool takes a mutex on the corresponding instance (keyed by page address). With 1 instance, all threads contend for one mutex — bottleneck at >16 concurrent connections. With 8 instances, contention is 8x lower. Recommendation: 1 instance per 1GB of buffer pool, up to the number of CPU cores.
 
-**Explain InnoDB's doublewrite buffer and when you can disable it.**
+**Q: Explain InnoDB's doublewrite buffer and when you can disable it.**
 The doublewrite buffer is a sequential area in the system tablespace where InnoDB writes complete 16KB pages before writing them to their actual locations. This prevents "torn pages": if a crash occurs during the 16KB page write (OS writes in 4KB chunks), the doublewrite copy is intact and used for recovery. Disable safely when: using enterprise SSDs or NVMe drives with "power-loss data protection" (PLP) — battery-backed write cache or capacitor ensures in-flight writes complete even on power failure. Disable with `innodb_doublewrite=OFF`. Performance gain: ~5-10% write throughput improvement. Never disable on consumer SSDs without PLP.
 
-**What is the InnoDB locking model at REPEATABLE READ vs READ COMMITTED?**
+**Q: What is the InnoDB locking model at REPEATABLE READ vs READ COMMITTED?**
 REPEATABLE READ (default): uses record locks + gap locks + next-key locks. Gap locks prevent phantom reads by blocking INSERTs in locked ranges. Semi-consistent reads for UPDATE/DELETE (reads a fresh committed version, not the snapshot version, before acquiring the row lock). READ COMMITTED: only record locks (no gap locks, no next-key locks). Better INSERT concurrency. Allows phantom reads (same range query can return different rows if another transaction committed between reads). Semi-consistent reads for all DML. For applications that never re-read the same range within a transaction, READ COMMITTED is often preferred for better concurrency. OLAP/reporting connections on replicas typically use READ COMMITTED.
 
 ---

@@ -444,52 +444,52 @@ quality_checker = Agent(
 
 ## 12. Interview Questions with Answers
 
-**What is the difference between a handoff and a tool call?**
+**Q: What is the difference between a handoff and a tool call?**
 A tool call returns a result to the calling agent, which then continues processing. A handoff transfers control — the target agent becomes the active agent, sees the conversation history, applies its own instructions, and runs to completion. After a handoff, the original agent is no longer running. Tool calls are for getting data; handoffs are for delegating responsibility.
 
-**How does the Runner decide when an agent is done?**
+**Q: How does the Runner decide when an agent is done?**
 The Runner loops until the active agent returns a final output (not a tool call or handoff), or `max_turns` is exceeded. A "final output" is detected when the agent's response contains no tool_call blocks and no handoff. If `output_type` is set, the runner additionally validates the output against the Pydantic schema.
 
-**What is RunContextWrapper and why is it generic?**
+**Q: What is RunContextWrapper and why is it generic?**
 RunContextWrapper[T] is a typed wrapper around your context object that's passed to every tool and guardrail. The generic parameter T enforces type safety — `Agent[MyContext]` and tools annotated with `RunContextWrapper[MyContext]` get static type checking via mypy/pyright. The wrapper provides `.context` (your typed object) plus runtime metadata (current agent name, turn count).
 
-**How do input and output guardrails differ?**
+**Q: How do input and output guardrails differ?**
 Input guardrails run BEFORE the LLM call on the input — used to reject prompt injections, PII, off-topic requests. They can prevent the LLM call entirely. Output guardrails run AFTER the LLM call on the final output — used to validate response quality, check for hallucinations, enforce format. Both can be sync or async; both raise `GuardrailTripwireTriggered` to abort the run.
 
-**What happens to conversation history during a handoff?**
+**Q: What happens to conversation history during a handoff?**
 The full conversation history travels with the handoff. The target agent sees everything that came before (user input, prior agent's tool calls, prior reasoning). It only differs in active instructions and tools. This means handoffs are "stateful" — the next agent has full context, not a fresh start. You can customize this with `handoff(input_filter=...)` to filter what the target agent sees.
 
-**How does the Agents SDK compare to Swarm?**
+**Q: How does the Agents SDK compare to Swarm?**
 Swarm (2024) was a synchronous educational reference — no async, no streaming, no persistence, no tracing, no guardrails. The Agents SDK (March 2025) is async-first, supports streaming, has built-in tracing to OpenAI dashboard, native guardrails, retry/rate limit handling, and typed context. Swarm is for learning the handoff pattern; Agents SDK is for production deployment.
 
-**Can you use Claude or Gemini with the Agents SDK?**
+**Q: Can you use Claude or Gemini with the Agents SDK?**
 Yes — via the `agents.extensions.models` adapters. There's a LiteLLM adapter that proxies any provider through LiteLLM, and a direct Anthropic adapter. However, some features (tracing dashboard, parallel tool calls) are OpenAI-native — using non-OpenAI models loses these. For mixed-provider stacks, LangGraph is typically a better fit.
 
-**How does streaming work in the Agents SDK?**
+**Q: How does streaming work in the Agents SDK?**
 `Runner.run_streamed()` returns a `StreamedRunResult` with `.stream_events()` async generator. Events include: `raw_response_event` (raw LLM tokens), `run_item_stream_event` (tool calls, tool outputs, final messages), `agent_updated_stream_event` (when handoff switches active agent). Use raw_response_event for token-by-token display; use run_item events for higher-level state changes.
 
-**What does `output_type` do and how is it enforced?**
+**Q: What does `output_type` do and how is it enforced?**
 `output_type=MyPydanticModel` forces the model to return JSON matching the Pydantic schema, validated before the runner returns. The SDK injects schema description into the system prompt and uses the OpenAI structured output feature. After the LLM call, the output is validated against the schema — if invalid, the SDK retries up to 3 times with feedback. Access typed output via `result.final_output_as(MyPydanticModel)`.
 
-**How are tools defined in the Agents SDK?**
+**Q: How are tools defined in the Agents SDK?**
 Use the `@function_tool` decorator on an async function. The function's signature (parameters and type hints) becomes the JSON schema. The docstring becomes the tool description. The first parameter must be `RunContextWrapper[T]` if the tool needs context access. Tools can be sync or async; async is recommended for I/O operations.
 
-**What is the cost difference between the Agents SDK and writing on the Responses API directly?**
+**Q: What is the cost difference between the Agents SDK and writing on the Responses API directly?**
 Zero cost difference at the API level — the SDK calls the same Responses API. The "cost" is the dependency on the SDK and its opinions. The benefit is significantly reduced code volume (typically 60-70% less code vs custom orchestration) and built-in features (tracing, guardrails, retries) that you'd otherwise build yourself.
 
-**How do you test agents built with the Agents SDK?**
+**Q: How do you test agents built with the Agents SDK?**
 Use the `agents.testing` module which provides `FakeModel` (returns canned responses) and `FakeTracingProcessor`. Mock the model with `Agent(model=FakeModel([response_1, response_2]))`. Run with `Runner.run()` and assert on tool calls, handoffs, and final output. For end-to-end tests, use the real models with cheap variants (gpt-4o-mini) and limited inputs.
 
-**What is the role of the OpenAI Tracing Dashboard?**
+**Q: What is the role of the OpenAI Tracing Dashboard?**
 Every Runner.run automatically emits trace events to the OpenAI tracing dashboard (platform.openai.com/traces). The dashboard shows the full execution tree: agent invocations, model calls, tool calls, handoffs, guardrails, and timings. Critical for debugging agent behavior — you can see exactly why an agent made a decision, what tools it called, and where it spent time.
 
-**How do you handle expensive tools (e.g., $5 per API call)?**
+**Q: How do you handle expensive tools (e.g., $5 per API call)?**
 Wrap the tool with an explicit confirmation pattern: the tool first returns a "preview" without executing, the agent shows the preview to the user (in your UI), and only on user approval does the tool execute. Implement via two tools (`preview_expensive_op` and `execute_expensive_op`), or via a confirmation argument in one tool. Combine with guardrails to enforce per-conversation cost caps.
 
-**What is the recommended pattern for shared state across multiple runs (e.g., conversation memory)?**
+**Q: What is the recommended pattern for shared state across multiple runs (e.g., conversation memory)?**
 The Agents SDK is stateless — each `Runner.run()` is a fresh execution. For multi-turn conversations, you maintain conversation history yourself and pass it as input to each run. For long-lived state, use a database (Postgres, Redis) and access it via tools or context dependencies. The SDK does not provide built-in memory primitives.
 
-**How does the Agents SDK handle rate limits?**
+**Q: How does the Agents SDK handle rate limits?**
 The underlying OpenAI Python SDK auto-retries on 429 with exponential backoff (default max_retries=2). The Agents SDK inherits this behavior. For production, customize via `openai.OpenAI(max_retries=5)` and consider client-side rate limit budgeting if you have strict throughput SLAs. Tracing shows retry events.
 
 ---

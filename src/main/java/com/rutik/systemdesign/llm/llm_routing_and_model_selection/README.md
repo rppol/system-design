@@ -524,49 +524,49 @@ A team's rule-based router sent all short queries (<500 tokens) to the cheap mod
 
 ## 12. Interview Questions with Answers
 
-**What is LLM routing and why does it matter in production?**
+**Q: What is LLM routing and why does it matter in production?**
 LLM routing is a system that dynamically selects the optimal model for each query based on its complexity, task type, and quality requirements. It matters because frontier models cost 10–50x more per token than small models, yet 70–80% of production queries are simple enough for cheap models to handle adequately. Routing can reduce inference costs by 50–80% with minimal quality degradation at scale.
 
-**What is the difference between cascade routing and classifier-based routing?**
+**Q: What is the difference between cascade routing and classifier-based routing?**
 Cascade routing sends the query to the cheapest model first and escalates only if a confidence check fails; the routing decision happens after seeing the cheap model's output. Classifier-based routing makes the routing decision before any model call, using a lightweight classifier trained on query features to predict the best target model. Cascade routing has higher accuracy for ambiguous queries but accumulates latency at the tail (P99); classifier routing has lower and more predictable latency but requires labeled training data and may misroute edge cases.
 
-**Why is using an LLM as the router usually a net loss, even though it is the most accurate option?**
+**Q: Why is using an LLM as the router usually a net loss, even though it is the most accurate option?**
 Because the router's overhead is paid on 100% of traffic while savings only materialize on correctly down-routed queries. An LLM router (e.g., GPT-4o-mini classifying each query) reaches ~90% routing accuracy but adds 300–800ms of latency and its own token cost to every request — including the 70–80% of queries a <1ms rule or a 5–15ms DistilBERT classifier would have routed identically. At 10M queries/day, even a fraction of a cent of router cost per query adds thousands of dollars daily before any inference savings, and the latency alone can blow a sub-second SLA. Use LLM-based routing offline — to label training data for a cheap classifier — never in the request path.
 
-**A cascade's cheap model passes the logprob confidence check but the answer is factually wrong — why, and what do you do about it?**
+**Q: A cascade's cheap model passes the logprob confidence check but the answer is factually wrong — why, and what do you do about it?**
 Token log-probabilities measure the model's fluency-level certainty about its wording, not the correctness of the claim — hallucinated answers are routinely emitted with high confidence, so a mean-logprob threshold (e.g., -0.5) happily passes a confidently wrong response. This is the cascade's structural blind spot: escalation triggers on hesitation, not on error. Mitigate with task-grounded checks wherever they exist — JSON schema validation for structured output, compilation or unit-test execution for code, retrieval-grounding checks for factual Q&A — and backstop with per-route LLM-as-judge sampling (1–5% of responses) so confidently-wrong patterns surface in quality dashboards rather than only in user complaints.
 
-**How do you estimate confidence in a cascade routing system when logprobs are not available?**
+**Q: How do you estimate confidence in a cascade routing system when logprobs are not available?**
 Three approaches work without logprobs. First, self-assessment prompting: append "Rate your confidence as LOW, MEDIUM, or HIGH" to the prompt and parse the label. Second, format validation: for structured-output tasks, validate the response against a JSON schema or regex pattern — a parse failure signals low confidence. Third, output heuristics: responses that are far shorter than expected, contain hedge phrases like "I'm not sure," or fail to answer the question structure (missing required sections) trigger escalation. Self-assessment is the most general but adds tokens to every cheap-model call.
 
-**How do you collect training data for a routing classifier?**
+**Q: How do you collect training data for a routing classifier?**
 Run in shadow mode: send every query to both cheap and frontier models simultaneously, score each response pair using LLM-as-judge or task-specific metrics (ROUGE, pass@1, human eval), and label each query with the cheapest model whose score meets the quality threshold. Collect at least 10,000 labeled examples per model tier for reliable classifier performance. Critically, collect data from real production traffic — synthetic data causes distribution mismatch and classifier underperformance in production.
 
-**How would you handle model deprecation in a routing system?**
+**Q: How would you handle model deprecation in a routing system?**
 Abstract model identifiers behind a configuration layer so that deprecations are configuration changes, not code changes. Maintain a model registry mapping logical tier names (tier-cheap, tier-mid, tier-frontier) to concrete model identifiers. When a deprecation notice arrives, update the registry, run quality benchmarks on the replacement model, re-evaluate routing thresholds, and retrain the classifier if the replacement model's behavioral characteristics differ meaningfully from its predecessor.
 
-**What quality metrics do you use to evaluate a routing system?**
+**Q: What quality metrics do you use to evaluate a routing system?**
 At the system level: average response quality score (LLM-as-judge, 1–10 scale), per-route quality breakdown, misroute rate (queries sent to wrong tier), and cost per query. At the application level: task-specific metrics (ROUGE for summarization, pass@1 for code, F1 for extraction). For user-facing quality: CSAT, thumbs up/down rate segmented by routed model tier. Alert on routing-tier quality regression exceeding 5% relative to the no-routing baseline.
 
-**How do you set cost-quality optimization thresholds for routing?**
+**Q: How do you set cost-quality optimization thresholds for routing?**
 Define a minimum acceptable quality score Q_min per task type based on business requirements (e.g., code generation requires pass@1 >= 0.80; FAQ answering requires accuracy >= 0.90). Sample each task type from the validation set and measure quality for each model tier. Select the cheapest model whose empirical quality meets Q_min. Re-evaluate quarterly because model updates, pricing changes, and query distribution drift all shift the optimal threshold.
 
-**How do you handle latency budgets in a routing system?**
+**Q: How do you handle latency budgets in a routing system?**
 Map out the full latency budget: total P99 SLA minus network overhead minus model inference time leaves the router's allowed overhead. A 500ms P99 SLA with 150ms for cheap model inference and 20ms for network leaves 330ms for the router — enough for DistilBERT. A 200ms SLA may leave only 30ms, forcing a logistic regression or rule-based router. For cascade routing, enforce a hard timeout on the cheap model response: if the cheap model has not responded within N milliseconds, skip the confidence check and route to the frontier model directly to bound tail latency.
 
-**How does semantic routing differ from classifier-based routing and when would you use it?**
+**Q: How does semantic routing differ from classifier-based routing and when would you use it?**
 Semantic routing clusters queries by embedding similarity and assigns each cluster to a model tier; it is unsupervised and does not require labeled training data. Classifier-based routing is supervised and learns discriminative features from labeled (query, model) pairs. Use semantic routing when you have semantically distinct task types (code, creative writing, factual Q&A) but lack labeled data or when you need to add a new task type without retraining a classifier. Classifier-based routing achieves higher accuracy when sufficient labeled data is available because it directly optimizes the routing decision.
 
-**How do you implement multi-provider fallback and what are the failure modes to handle?**
+**Q: How do you implement multi-provider fallback and what are the failure modes to handle?**
 Implement a fallback chain: primary provider → secondary provider → tertiary provider. Failure modes to handle: HTTP 429 (rate limit — retry with exponential backoff on the same provider before falling back), HTTP 503/504 (service outage — fall back immediately), context length exceeded (route to a model with a larger context window), response timeout (fall back after a deadline), and content policy rejection (fall back or return a safe default response). Track per-provider error rates and circuit-break a provider that exceeds a threshold (e.g., >10% error rate in a 60-second window) before falling back.
 
-**How do you prevent a routing system from degrading silently over time?**
+**Q: How do you prevent a routing system from degrading silently over time?**
 Implement three monitoring layers. First, per-route quality sampling: randomly sample 1–5% of responses per routing tier and score them with LLM-as-judge daily; alert if quality drops more than 5% relative to the baseline. Second, classifier drift detection: monitor the distribution of routing decisions (fraction going to each tier) and alert if it shifts significantly, which indicates either query distribution drift or classifier degradation. Third, A/B shadow mode: periodically route a small fraction of queries to a higher tier and compare quality scores to confirm the router is not under-routing.
 
-**How does routing accuracy translate into end-user quality impact?**
+**Q: How does routing accuracy translate into end-user quality impact?**
 Only downward misroutes hurt quality: an 85%-accurate classifier misroutes 15% of queries, but misroutes upward (simple query sent to a frontier model) cost money without hurting quality, while misroutes downward (complex query sent to a cheap model) directly degrade responses. Approximate the quality impact as downward-misroute rate × the quality gap between tiers on those queries — at a 7.5% downward-misroute rate on 10M queries/day, 750K users per day see a degraded answer, which is how the Pitfall-2 startup lost 12 satisfaction points running a 75%-accurate classifier at 90% cheap-routing. Report the routing confusion matrix per tier rather than a single accuracy number, and bias the classifier's decision threshold to trade extra upward misroutes (bounded cost) for fewer downward misroutes (unbounded quality risk).
 
-**What is the RouteLLM project and what does it contribute to the routing field?**
+**Q: What is the RouteLLM project and what does it contribute to the routing field?**
 RouteLLM is an open-source project from LMSYS that provides trained cascade routers and standardized benchmarks for evaluating routing accuracy. It introduces the concept of a routing preference dataset where human raters indicate which model tier is needed for a given query. Its main contribution is providing pre-trained routers (including a BERT-based classifier and a matrix factorization router) that teams can use without collecting their own labeled data, and a benchmark (based on Chatbot Arena data) for comparing routing strategies on cost-quality tradeoffs.
 
 ---

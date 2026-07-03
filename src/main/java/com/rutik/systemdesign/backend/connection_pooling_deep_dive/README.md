@@ -358,43 +358,43 @@ Monitoring:
 
 ## 12. Interview Questions with Answers
 
-**What is a connection pool and why is it necessary?**
+**Q: What is a connection pool and why is it necessary?**
 A connection pool pre-establishes and maintains a set of database connections for reuse. Creating a JDBC connection involves TCP handshake, TLS (if SSL is enabled), authentication (username/password), session setup — totaling 20–100ms. For applications handling 100+ requests/second, creating a connection per request is prohibitively expensive. A pool reduces this to microseconds per borrow by reusing established connections.
 
-**How does HikariCP's ConcurrentBag work?**
+**Q: How does HikariCP's ConcurrentBag work?**
 ConcurrentBag is a custom concurrent data structure optimized for borrow/return patterns. It uses three tiers: a ThreadLocal list of previously used connections (first check for fast, uncontested borrow), a CopyOnWriteArrayList of all connections (scanned with CAS operations), and a SynchronousTransferQueue for threads waiting when all connections are in use (direct handoff from returning thread to waiter without queue traversal). This design minimizes lock contention and achieves microsecond borrow times.
 
-**What is the optimal database connection pool size?**
+**Q: What is the optimal database connection pool size?**
 The HikariCP formula is: `pool_size = (core_count * 2) + effective_spindle_count`. For a 4-core database server with SSD (effective_spindle = 1), optimal pool ≈ 9 connections per application server. This is based on research showing that more connections than ~2x cores causes database context switching overhead that reduces overall throughput. The default HikariCP maximumPoolSize of 10 is deliberately conservative and appropriate for most workloads.
 
-**What happens when the connection pool exhausts?**
+**Q: What happens when the connection pool exhausts?**
 When all connections are in use (count == maximumPoolSize), new borrow requests wait up to connectionTimeout (default 30s). If no connection becomes available within that time, HikariCP throws CannotGetJdbcConnectionException. The application should treat this as a 503 Service Unavailable, not a retriable error. Pool exhaustion indicates either the pool is too small (increase if DB can handle it) or queries are too slow (optimize queries or fix downstream issue).
 
-**How does HikariCP detect connection leaks?**
+**Q: How does HikariCP detect connection leaks?**
 When leakDetectionThreshold is set (e.g., 10000 ms), HikariCP starts a timer when a connection is borrowed. If the connection is not returned within the threshold, HikariCP logs a warning with the stack trace of where the connection was borrowed. This identifies code paths that hold connections too long (transaction spanning external HTTP calls, forgot close, caught exception before finally). The connection continues to function; the leak detection only warns.
 
-**What is the maxLifetime setting and why is it important?**
+**Q: What is the maxLifetime setting and why is it important?**
 maxLifetime sets the maximum age of a connection in the pool. When a connection reaches its maxLifetime, HikariCP retires it and creates a new one. This prevents accumulation of ancient connections that may have accumulated state, and prevents connections from being closed mid-request by load balancers or firewalls that have their own idle connection timeouts. maxLifetime must be set shorter than the database firewall or load balancer idle timeout to avoid getting a connection closed just as it is being handed out.
 
-**What is PgBouncer and when should you use it?**
+**Q: What is PgBouncer and when should you use it?**
 PgBouncer is a PostgreSQL connection pooler that sits between application servers and PostgreSQL. In transaction mode, it borrows a PostgreSQL connection only for the duration of a transaction and returns it immediately — allowing thousands of application connections to multiplex through tens of PostgreSQL connections. Use PgBouncer when you have many application server instances, each with its own HikariCP pool, and the total connection count would exceed PostgreSQL's maximum (~100-500 connections for good performance).
 
-**How should HikariCP be configured to work behind AWS RDS?**
+**Q: How should HikariCP be configured to work behind AWS RDS?**
 AWS RDS has a connection idle timeout (default varies, but commonly 3600s for RDS Proxy, shorter for direct connections). Configure: `maxLifetime = 1740000` (29 min, safely below RDS's 30-min idle timeout), `keepaliveTime = 60000` (60s keepalive prevents idle connection death from RDS side), `connectionTimeout = 5000` (fail fast, do not wait 30s). For RDS Proxy: the proxy manages connection pooling, so application pool can be smaller; ensure `maxLifetime` < RDS Proxy's `connectionBorrowTimeout`.
 
-**What metrics should you monitor for a HikariCP pool?**
+**Q: What metrics should you monitor for a HikariCP pool?**
 Key Micrometer metrics: `hikaricp_connections` (total), `hikaricp_connections_active` (in use), `hikaricp_connections_idle` (available), `hikaricp_connections_pending` (waiting threads), `hikaricp_connections_creation_seconds` (time to create connections), `hikaricp_connections_acquire_seconds` (time to borrow from pool). Alert on: pending > 0 consistently (pool exhaustion starting), acquire_seconds p99 > 100ms (contention), active approaching pool size (near exhaustion).
 
-**Why should you avoid holding connections during external service calls?**
+**Q: Why should you avoid holding connections during external service calls?**
 Database connections are a scarce resource (pool of 10). If a `@Transactional` method calls an external HTTP API that takes 500ms, the connection is held idle during that 500ms. With 10 connections and 500ms lock time, the service can only process 10 / 0.5 = 20 requests/second through this code path — even if the database could handle 1,000. This is connection pool starvation from external latency. Keep transactions short: fetch data, close transaction, call external service, open new transaction to save results.
 
-**How does connection validation work in HikariCP?**
+**Q: How does connection validation work in HikariCP?**
 HikariCP validates connections before handing them out if the connection has been idle for more than 500ms. Validation uses JDBC4's `Connection.isValid(timeoutSeconds)` which is a lightweight network round-trip to check liveness. If `isValid()` returns false, the connection is closed and a new one is created. For drivers that do not support JDBC4 isValid(), set `connectionTestQuery = "SELECT 1"`. With `keepaliveTime` set, HikariCP also validates idle connections periodically, proactively replacing stale ones before they are borrowed.
 
-**What causes "Apparent connection leak detected" in HikariCP?**
+**Q: What causes "Apparent connection leak detected" in HikariCP?**
 This warning fires when a borrowed connection is not returned within `leakDetectionThreshold` milliseconds. Common causes: (1) Code path exits via exception without closing the connection (fix: try-with-resources); (2) Long-running transaction (heavy computation or external calls inside @Transactional, fix: minimize transaction scope); (3) Forgotten close in unit tests (fix: @Transactional on test method or explicit cleanup). The stack trace in the warning points to the exact location where the connection was borrowed.
 
-**How does read replica routing work with connection pooling?**
+**Q: How does read replica routing work with connection pooling?**
 Use separate HikariCP pools — one for the primary (read-write), one per read replica (read-only). Route read-only queries (SELECT without transaction) to the read pool and writes to the primary pool. In Spring: configure two DataSources and use an AbstractRoutingDataSource with a ThreadLocal to switch. Alternatively, PgBouncer or ProxySQL can do read/write splitting at the proxy layer based on SQL parsing. Ensure the read pool's maxLifetime is shorter than the replication lag threshold (a connection pointing to a replica that has fallen behind should be detected).
 
 ---

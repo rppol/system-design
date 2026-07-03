@@ -359,40 +359,40 @@ Hibernate/JPA batched updates in arbitrary entity ordering. Two transactions upd
 
 ## 12. Interview Questions with Answers
 
-**What is the difference between pessimistic and optimistic concurrency control, and when does each win?**
+**Q: What is the difference between pessimistic and optimistic concurrency control, and when does each win?**
 Pessimistic: acquire locks before reading/writing to prevent conflicts. Optimistic: read without locks, validate at commit that no conflicts occurred, retry if conflict detected. Pessimistic wins when: conflict rate is high (many transactions compete for the same rows), retry cost is high (external side effects), transaction duration is long. Optimistic wins when: conflict rate is low (most transactions touch different rows), reads greatly outnumber writes, retry cost is low (pure DB operations). MVCC databases (PostgreSQL, InnoDB) implement optimistic concurrency for reads and pessimistic only when explicitly requested (SELECT FOR UPDATE).
 
-**Explain the MVCC xmin/xmax visibility mechanism in PostgreSQL.**
+**Q: Explain the MVCC xmin/xmax visibility mechanism in PostgreSQL.**
 Every row version has xmin (ID of the transaction that inserted it) and xmax (ID of the transaction that deleted/updated it, or 0 if still current). A reading transaction takes a snapshot at start: it sees rows where xmin is committed before the snapshot AND xmax is either 0 or not committed yet in the snapshot. This means: reads never block on writes (reader sees old version while writer creates new version). Dead tuples (with committed xmax) accumulate until VACUUM reclaims them. The overhead: storage for multiple versions and background VACUUM process.
 
-**What is SELECT FOR UPDATE SKIP LOCKED and why is it ideal for job queues?**
+**Q: What is SELECT FOR UPDATE SKIP LOCKED and why is it ideal for job queues?**
 SELECT FOR UPDATE SKIP LOCKED atomically locks and returns the first N rows not currently locked by another transaction. In a job queue: worker A runs `SELECT * FROM jobs WHERE status='pending' ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED` — gets job 1, locks it. Concurrently, worker B runs the same query — skips locked job 1, gets job 2. No worker waits, no deadlocks, no double-processing. Without SKIP LOCKED, all workers would queue on the same lock. This pattern scales linearly with worker count up to the number of pending jobs.
 
-**How does PostgreSQL detect and resolve deadlocks?**
+**Q: How does PostgreSQL detect and resolve deadlocks?**
 PostgreSQL runs a deadlock detector when a lock wait exceeds `deadlock_timeout` (default 1 second). The detector builds a wait-for graph: directed edges from "waiting transaction" to "transaction it waits for." If the graph has a cycle, a deadlock is detected. PostgreSQL selects a victim transaction (based on lock count and priority) and aborts it with "ERROR: deadlock detected." The victim's transaction is rolled back, releasing its locks, allowing the cycle to break. Best practice: design transactions to acquire locks in a consistent global order to prevent cycles from forming.
 
-**What is write skew and what are the two ways to prevent it?**
+**Q: What is write skew and what are the two ways to prevent it?**
 Write skew: two concurrent transactions each read a set of rows, make decisions based on the total state, and write changes that are individually consistent but together violate an invariant. Example: two concurrent doctor go-offline requests each see "2 doctors on call" and both proceed — result is 0 doctors on call. Prevention: (1) SERIALIZABLE isolation — PostgreSQL's Serializable Snapshot Isolation (SSI) tracks rw-antidependencies and aborts one of the conflicting transactions with "could not serialize access due to concurrent update." Application must retry. (2) SELECT FOR UPDATE on the rows that represent the shared state — both transactions contend for the same lock, serializing execution.
 
-**Explain gap locks in InnoDB and when they cause problems.**
+**Q: Explain gap locks in InnoDB and when they cause problems.**
 Gap locks in InnoDB (at REPEATABLE READ) lock the gap between index entries, preventing phantom inserts. Example: `SELECT * FROM t WHERE id BETWEEN 10 AND 20 FOR UPDATE` locks the gap before 10, each gap between rows 10-20, and the gap after 20 — preventing any INSERT into this range until the transaction commits. Problem: a long-running OLAP query with FOR UPDATE (accidentally or intentionally) holding gap locks across large ranges blocks all new inserts for that range. Fix: (1) Use READ COMMITTED isolation for reporting — no gap locks. (2) Remove unintended FOR UPDATE from read queries. (3) Reduce transaction duration.
 
-**What are advisory locks and how would you use them to prevent duplicate cron job execution?**
+**Q: What are advisory locks and how would you use them to prevent duplicate cron job execution?**
 Advisory locks are application-defined integer locks (not tied to table rows) managed by PostgreSQL. `pg_advisory_lock(key)` acquires a session-level lock — blocks if another session holds it. `pg_try_advisory_lock(key)` is non-blocking. Pattern for cron job exclusion: `SELECT pg_try_advisory_lock(hashtext('generate_daily_report'))`. If returns true: this instance got the lock, proceed with job, lock auto-releases when session ends. If returns false: another instance is running, exit. This is safe: the lock is held for the duration of the database session (or until explicitly released), preventing concurrent execution even across multiple application servers.
 
-**How does InnoDB's next-key lock differ from a record lock?**
+**Q: How does InnoDB's next-key lock differ from a record lock?**
 A record lock locks exactly one row. A next-key lock = record lock on an existing row + gap lock on the gap before that row. InnoDB uses next-key locks at REPEATABLE READ to prevent phantom reads: `SELECT * FROM t WHERE id = 5` locks the record with id=5 AND the gap before 5, preventing insert of any row that would return under this query if re-executed. Record locks exist in all isolation levels. Next-key locks only at REPEATABLE READ and above. READ COMMITTED: only record locks (no gap locks) — allows phantom reads but better INSERT concurrency.
 
-**What is a lost update anomaly and how do three different mechanisms prevent it?**
+**Q: What is a lost update anomaly and how do three different mechanisms prevent it?**
 Lost update: T1 and T2 both read a value (V=10), both compute new value (T1: V-1=9, T2: V+1=11), T2 commits V=11, T1 commits V=9 — T2's update is lost. Prevention mechanisms: (1) Atomic UPDATE: `UPDATE SET stock = stock - 1 WHERE id=? AND stock > 0` — no separate read; the modification is atomic at the engine level. (2) SELECT FOR UPDATE: T1 reads with exclusive lock — T2 blocks until T1 commits. (3) Optimistic concurrency with version: T1 updates WHERE version=N, T2 updates WHERE version=N — one gets rows_affected=0 and retries with new version.
 
-**What happens to MVCC row versions when a long-running transaction holds an old snapshot?**
+**Q: What happens to MVCC row versions when a long-running transaction holds an old snapshot?**
 Old row versions (dead tuples) cannot be cleaned up by VACUUM while any active transaction's snapshot is older than the xmin of those rows. The oldest active transaction ID (xmin horizon) determines how far back VACUUM can clean. A 4-hour reporting transaction that started at xid=1000 prevents VACUUM from cleaning any dead tuples from transactions 1000+. During those 4 hours, all UPDATE/DELETE operations accumulate dead tuples. Table size grows. Eventually, the table bloats to 2-5x its normal size. Fix: set `idle_in_transaction_session_timeout = '5min'` to abort stale transactions. Use read replicas for long-running reports (they have their own xmin, not affecting primary).
 
-**Explain the difference between row-level, page-level, and table-level locking.**
+**Q: Explain the difference between row-level, page-level, and table-level locking.**
 Row-level locks: finest granularity, maximum concurrency. Lock only the specific rows being accessed. Memory overhead: ~40 bytes per lock in PostgreSQL's lock table (pg_locks). Table-level locks: entire table blocked. Used for DDL (ALTER TABLE takes ACCESS EXCLUSIVE), explicit LOCK TABLE, or bulk operations. Page-level locks: intermediate, used by some systems (SQL Server's lock escalation) when row lock count gets too high. PostgreSQL: row locks + intent locks at table level (IS/IX) — no page-level locks. InnoDB: row locks + intent locks at table level. SQL Server: row → page → table escalation at 5,000+ locks per statement.
 
-**How do you find and kill blocking queries in PostgreSQL?**
+**Q: How do you find and kill blocking queries in PostgreSQL?**
 ```sql
 -- Find blocking and blocked queries:
 SELECT
@@ -418,13 +418,13 @@ SELECT pg_cancel_backend(blocking_pid);
 SELECT pg_terminate_backend(blocking_pid);
 ```
 
-**What is two-phase locking (2PL) and how does it guarantee serializability?**
+**Q: What is two-phase locking (2PL) and how does it guarantee serializability?**
 2PL: a transaction acquires locks as needed (growing phase) and releases them only after all locks are acquired and operations complete (shrinking phase). No lock is released before the transaction commits or aborts. This guarantees serializability: if two transactions conflict, one must wait for the other to complete before acquiring the conflicting lock, creating a serial order. Strict 2PL (used by most databases): all locks held until commit/abort, preventing cascading aborts. Downside: high lock contention, possible deadlocks, reduced concurrency vs MVCC for read-heavy workloads.
 
-**How does SELECT FOR UPDATE interact with MVCC in PostgreSQL?**
+**Q: How does SELECT FOR UPDATE interact with MVCC in PostgreSQL?**
 Under MVCC, a SELECT normally reads a snapshot without acquiring any locks. SELECT FOR UPDATE adds an explicit exclusive row lock on the current (latest committed) version of each selected row — regardless of the snapshot. This means: even in REPEATABLE READ, SELECT FOR UPDATE sees the current committed state of the rows being locked (not the snapshot state), preventing a lock on a stale version that another transaction has already updated. If the locked row has been updated by a concurrent transaction that committed after your snapshot, PostgreSQL re-evaluates the query on the new version and either locks it or applies the filter predicates to the new version.
 
-**What is the difference between lock_timeout and statement_timeout in PostgreSQL?**
+**Q: What is the difference between lock_timeout and statement_timeout in PostgreSQL?**
 `lock_timeout`: if a statement cannot acquire a lock within this duration, it fails with "ERROR: canceling statement due to lock timeout." The transaction is not rolled back (only that statement fails). Use to prevent long blocking: `SET lock_timeout = '5s'` in application connections. `statement_timeout`: if a statement takes longer than this (including lock wait time), it is canceled. More aggressive — also catches long-running queries. `idle_in_transaction_session_timeout`: cancels sessions that have been in a transaction without activity for this long. Use all three together in production: lock_timeout prevents indefinite lock waits, statement_timeout prevents long queries, idle_in_transaction prevents zombie transactions holding locks.
 
 ---

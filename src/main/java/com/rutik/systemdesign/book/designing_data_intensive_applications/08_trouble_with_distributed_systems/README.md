@@ -339,52 +339,52 @@ synchronous** model using **safety** (always) and **liveness** (under good condi
 
 ## Interview Questions
 
-**Why is a timeout fundamentally unable to distinguish a failed node from a slow one?**
+**Q: Why is a timeout fundamentally unable to distinguish a failed node from a slow one?**
 Because over an asynchronous network, the absence of a reply is consistent with many different realities: the request was lost, the node crashed, the node is alive but slow (a GC pause or a busy queue), the reply was lost, or the reply is merely delayed. The timeout forces a single binary decision — "assume failed" — onto these very different situations, so it will sometimes be wrong. There's no length of timeout that eliminates this ambiguity, only one that trades slow detection against false positives.
 
-**What is partial failure, and why does it make distributed systems harder than single machines?**
+**Q: What is partial failure, and why does it make distributed systems harder than single machines?**
 Partial failure is when some components of a system fail while others keep working, and crucially you often can't tell which — and the same operation may succeed sometimes and fail other times nondeterministically. A single machine is mostly deterministic: it works or it cleanly crashes. Distributed systems remove that certainty, so you can't assume an operation either fully happened or fully didn't; you must design every protocol to cope with "I don't know whether that succeeded," which is the root of most distributed-systems complexity.
 
-**What is the difference between a time-of-day clock and a monotonic clock, and what is each for?**
+**Q: What is the difference between a time-of-day clock and a monotonic clock, and what is each for?**
 A time-of-day (wall-clock) clock reports the current date and time relative to an epoch and is synchronized by NTP, but it can jump forward or backward when NTP corrects drift or on a leap second, making it unsuitable for measuring elapsed time or ordering events. A monotonic clock only ever moves forward and is meant for measuring durations and timeouts; its absolute value is meaningless, but the difference between two readings on the same machine is reliable. Using a wall clock to measure a duration is a classic bug because it can go backward mid-measurement.
 
-**Why is using last-write-wins with wall-clock timestamps dangerous across nodes?**
+**Q: Why is using last-write-wins with wall-clock timestamps dangerous across nodes?**
 Because clocks on different nodes disagree (NTP accuracy is only tens of milliseconds at best), so a write that genuinely happened *later* can receive a *smaller* timestamp if it came from a node whose clock is behind. Last-write-wins then keeps the write with the larger timestamp and silently discards the other, losing data that was actually the most recent — and the loss is invisible and unattributable. Ordering causally related events by wall clock across nodes is unreliable; logical clocks or bounded-uncertainty clocks are needed instead.
 
-**Explain the GC-pause-and-lease problem and how fencing tokens solve it.**
+**Q: Explain the GC-pause-and-lease problem and how fencing tokens solve it.**
 A leader checks that it still holds a time-limited lease and decides to write, but then a stop-the-world GC pause (or VM migration) freezes it past the lease expiry; meanwhile the cluster elects a new leader, and the old node wakes still believing it's leader and issues a write — two leaders writing means corruption. Fencing tokens fix it: the lock service hands out a monotonically increasing token with each grant, every write carries its token, and the storage rejects any write whose token is lower than the highest it has seen — so the woken old leader's stale, lower token is refused.
 
-**Why is "truth defined by the majority" the foundation of distributed correctness?**
+**Q: Why is "truth defined by the majority" the foundation of distributed correctness?**
 Because no individual node can reliably know the global state — it may have been wrongly declared dead during a pause, or it may wrongly believe it's the leader — so trusting any single node's self-assessment is unsafe. Requiring a majority (quorum) to agree on decisions means that even if a minority of nodes are faulty, partitioned, or confused, there's exactly one authoritative version of truth, and a node out of touch with the majority must stop acting unilaterally. This majority principle underpins leader election and consensus in Chapter 9.
 
-**What causes variable delay in packet-switched networks, and why don't we just use bounded-delay networks?**
+**Q: What causes variable delay in packet-switched networks, and why don't we just use bounded-delay networks?**
 The main cause is queueing: when a network link, switch, or receiver is busy, packets wait in queues for an unpredictable time, and TCP's retransmission and congestion control add further variable delay. Packet switching is used because it's optimized for bursty traffic like web requests and file transfers, where it would be wasteful to reserve a fixed slice of bandwidth end-to-end as circuit-switched networks (the old telephone system) do. Bounded-delay networks are technically possible but uneconomical, so datacenters accept asynchronous, best-effort networks and engineer around the variability.
 
-**What is a process pause, and why can't a node detect that it was paused?**
+**Q: What is a process pause, and why can't a node detect that it was paused?**
 A process pause is an unbounded freeze of execution — a stop-the-world garbage collection (sometimes seconds), the OS suspending or live-migrating the VM, the thread being descheduled, blocking on disk I/O or a page fault, or a SIGSTOP. The node can't detect it because, from its own perspective, no time passed: it resumes exactly where it left off, unaware that the wall clock advanced and the rest of the cluster moved on (possibly electing a new leader). This is why a node can never trust that a fact it verified a moment ago is still true.
 
-**What is a network partition, and what's the right way to deal with one?**
+**Q: What is a network partition, and what's the right way to deal with one?**
 A network partition (netsplit) is when the network is otherwise functioning but communication between some sets of nodes is cut off, so each side sees the other as unreachable. The right approach isn't necessarily to keep operating fully on both sides (that risks split-brain), but to *know and deliberately decide* how your system behaves under a partition — and to test that behavior with fault injection (Jepsen-style). Pretending partitions won't happen leads to silent data loss or two-leaders corruption when they inevitably do.
 
-**What is a Byzantine fault, and when is it worth defending against?**
+**Q: What is a Byzantine fault, and when is it worth defending against?**
 A Byzantine fault is a node behaving arbitrarily — lying, sending corrupted or contradictory messages, or actively trying to deceive others — as opposed to merely crashing or being slow. Byzantine fault tolerance is worth the cost in adversarial or trustless settings: aerospace systems where radiation can flip bits, and blockchains where mutually distrusting parties have no central authority (typically requiring more than two-thirds honest nodes). In a normal datacenter where you control all the nodes, full BFT is usually too expensive; you instead assume honest-but-faulty nodes and defend against accidental corruption with checksums and validation.
 
-**Define safety and liveness, and explain the typical guarantee an algorithm makes about each.**
+**Q: Define safety and liveness, and explain the typical guarantee an algorithm makes about each.**
 Safety means "nothing bad ever happens" — for example, no two nodes are leader at once, or no fencing token is issued twice; once violated, a safety property can't be undone. Liveness means "something good eventually happens" — for example, a request eventually receives a response. The typical design goal is to guarantee safety *always*, even when timing assumptions break down (network slow, clocks off), while guaranteeing liveness only *under certain conditions*, such as while a majority of nodes are reachable — because you can't promise progress during an indefinite partition.
 
-**What are the three timing models, and which one reflects reality?**
+**Q: What are the three timing models, and which one reflects reality?**
 The synchronous model assumes bounded network delay, bounded clock drift, and bounded process pauses — clean but unrealistic. The asynchronous model assumes no timing guarantees at all and can't even use timeouts — very restrictive and overly pessimistic. The partially synchronous model assumes the system behaves synchronously *most* of the time but occasionally exceeds the bounds — and this is the realistic, commonly used model for designing real distributed algorithms, because it captures networks that are usually fine but sometimes spike.
 
-**What are the crash-stop, crash-recovery, and Byzantine node models?**
+**Q: What are the crash-stop, crash-recovery, and Byzantine node models?**
 Crash-stop assumes a node fails only by crashing and then never comes back — the simplest model. Crash-recovery assumes a node may crash and later restart, losing its in-memory state but retaining data on stable storage — the model that matches most real databases, since servers do reboot. Byzantine assumes nodes may behave arbitrarily or maliciously. The model you choose determines what your algorithm must tolerate; most practical systems target crash-recovery with non-Byzantine assumptions.
 
-**How does Google Spanner's TrueTime use clock uncertainty instead of pretending it away?**
+**Q: How does Google Spanner's TrueTime use clock uncertainty instead of pretending it away?**
 TrueTime represents the current time not as a single value but as an interval `[earliest, latest]` with a known, narrow bound on uncertainty, achieved using GPS receivers and atomic clocks in each datacenter. To order transactions consistently, Spanner deliberately *waits out* the uncertainty: after a transaction gets its timestamp, it sleeps for the width of the interval before committing, guaranteeing that any later transaction's interval starts after this one's ended. This converts the unavoidable clock uncertainty into a correctness mechanism rather than a hidden source of bugs.
 
-**Why does the book advocate a "pessimistic and paranoid" engineering mindset for distributed systems?**
+**Q: Why does the book advocate a "pessimistic and paranoid" engineering mindset for distributed systems?**
 Because the building blocks are fundamentally unreliable — networks drop and delay messages, clocks drift and jump, processes pause arbitrarily, and nodes can't directly observe each other — so anything that can go wrong eventually will, often in combinations you didn't anticipate. Optimistic assumptions ("the network is fast," "clocks agree," "I'm still the leader") become silent data-corruption bugs under rare-but-inevitable conditions. The reliable approach is to assume faults, design protocols that stay *safe* under them, and deliberately inject faults to verify the system survives.
 
-**Why is detecting a failed node with too short a timeout sometimes worse than a slow detection?**
+**Q: Why is detecting a failed node with too short a timeout sometimes worse than a slow detection?**
 Because a short timeout produces false positives: a node that's merely slow (a GC pause, a transient network blip) gets declared dead while it's actually still doing work. The system then duplicates that work elsewhere, may let the "dead" node's in-flight actions still take effect, and redistributes its load onto other nodes that may already be near capacity — which can overload them, trigger more false-positive timeouts, and cascade into a system-wide outage. So aggressive failure detection can manufacture the very failure it was trying to handle.
 
 ---

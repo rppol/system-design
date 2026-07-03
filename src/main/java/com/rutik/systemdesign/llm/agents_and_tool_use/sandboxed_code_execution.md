@@ -413,49 +413,49 @@ sandbox.upload_file(sample_data_bytes, "/data/sample.csv")
 
 ## 11. Interview Questions with Answers
 
-**Why is running LLM-generated code with subprocess dangerous even if you trust the LLM?**
+**Q: Why is running LLM-generated code with subprocess dangerous even if you trust the LLM?**
 LLMs are susceptible to prompt injection — malicious content in retrieved documents or tool outputs can cause the model to generate harmful code. Even a well-intentioned LLM can produce code with bugs that cause accidental file deletion or network exposure. Defense-in-depth requires assuming the generated code is untrusted regardless of the LLM's intent.
 
-**What is the difference between E2B and Riza, and when would you choose each?**
+**Q: What is the difference between E2B and Riza, and when would you choose each?**
 E2B uses Linux microVMs (Firecracker) — real OS, persistent filesystem, configurable network, ~500ms startup, $0.10/hr. Riza uses WebAssembly — no OS, no filesystem, no network by default, <100ms startup, cheaper per-call. Choose E2B when the code needs pip installs, file I/O, or network access. Choose Riza when you need deterministic data processing with no external dependencies and maximum isolation.
 
-**What resource limits should you set on a code execution sandbox?**
+**Q: What resource limits should you set on a code execution sandbox?**
 At minimum: execution timeout (15-60s for most tasks), memory limit (512MB-4GB), CPU limit (1-2 cores), and output size limit (50KB stdout to prevent token flooding). Additionally: disk quota (1-10GB), network egress ACL (allowlist-only or blocked), and a maximum number of concurrent sandboxes per user to prevent cost abuse.
 
-**How do you prevent the sandbox from being used as an exfiltration channel?**
+**Q: How do you prevent the sandbox from being used as an exfiltration channel?**
 Block outbound network at the network layer (not just the application layer). Use a dedicated network namespace with no external routes, or an explicit allowlist of permitted domains. Log all network attempts. Additionally, limit the size of output the agent can return — even with no network, an agent can "exfiltrate" data by including it in its response text.
 
-**What is RestrictedPython and when is it appropriate?**
+**Q: What is RestrictedPython and when is it appropriate?**
 RestrictedPython is an in-process Python sandbox that compiles code with an AST transformer that blocks dangerous constructs (file access, import restrictions). It has near-zero startup latency but provides weaker isolation than a VM or WASM runtime — a sufficiently clever exploit can escape. Appropriate for trusted-but-untested code (e.g., user-written formulas) in internal tools, but not for fully LLM-generated code in production.
 
-**How should database connections be handled in sandboxed environments?**
+**Q: How should database connections be handled in sandboxed environments?**
 Never pass production database connections into sandboxes. Instead: (1) pre-extract sample data before the sandbox runs and mount it as a file; (2) if the agent needs to query, have the agent generate SQL that is reviewed (by human or another LLM) before execution against production; (3) use a read-only replica with row-level security to limit blast radius. The sandbox is not a substitute for data access controls.
 
-**What is Firecracker and why do microVM-based sandboxes use it?**
+**Q: What is Firecracker and why do microVM-based sandboxes use it?**
 Firecracker is an open-source VMM (Virtual Machine Monitor) from AWS, designed for serverless workloads. It starts VMs in 125ms from a pre-built snapshot, uses 5MB of memory overhead per VM (vs 100MB+ for QEMU), and provides hardware-level isolation (separate kernel, separate memory space). Sandbox providers like E2B use Firecracker to start hundreds of VMs per second economically.
 
-**How do you handle the case where LLM-generated code has an infinite loop?**
+**Q: How do you handle the case where LLM-generated code has an infinite loop?**
 Set a hard execution timeout enforced by the sandbox provider — not a Python signal handler (which can be bypassed). E2B and Modal both enforce timeouts at the VM/container level (SIGKILL). The sandbox returns an error when timeout is exceeded; the agent receives this error and can either retry with fixed code or report failure. Never rely on `sys.setrecursionlimit` or Python-level guards alone.
 
-**What is the cold start problem and how do sandbox providers solve it?**
+**Q: What is the cold start problem and how do sandbox providers solve it?**
 Cold start is the time to provision a fresh execution environment. For microVMs, this is VM boot time (typically 1-3 seconds from scratch). E2B solves it with pre-warmed Firecracker snapshots — a pool of paused VMs ready to resume in ~500ms. Riza solves it by using WASM runtimes that initialize in under 100ms. Modal solves it by keeping containers warm for frequently used functions.
 
-**How do you test an agent's code execution behavior?**
+**Q: How do you test an agent's code execution behavior?**
 (1) Test with malicious inputs (path traversal, network calls, file deletion) and assert that the sandbox blocks them. (2) Test with infinite loops and assert that the timeout fires correctly. (3) Test with large outputs and assert truncation works. (4) Test error propagation — assert that execution errors are returned to the agent correctly so it can self-correct. Use pytest with real sandbox calls in integration tests; mock for unit tests.
 
-**What is the cost model for cloud sandbox providers and how do you control costs?**
+**Q: What is the cost model for cloud sandbox providers and how do you control costs?**
 E2B charges by sandbox uptime (seconds of VM running, not CPU used). Control costs by: (1) using short timeouts; (2) destroying sandboxes immediately after use (context manager pattern); (3) reusing sandboxes within a session rather than creating new ones per code execution; (4) limiting concurrent sandboxes per user with a semaphore. Riza charges per execution call — cheaper for infrequent use, more expensive at high volume.
 
-**Can a sandbox escape? What are known escape vectors?**
+**Q: Can a sandbox escape? What are known escape vectors?**
 MicroVM sandboxes are resistant to escapes because the guest kernel is fully isolated from the host kernel. Known historical vectors: Firecracker had one privilege escalation CVE in 2022 (patched). WASM sandboxes have had spec-compliance bugs in runtimes (e.g., Wasmer). In-process sandboxes (RestrictedPython) have multiple known bypasses via `__subclasses__`, `ctypes`, or C extension modules. Defense: use microVMs or WASM for LLM-generated code; apply defense-in-depth (run sandbox provider as unprivileged user, network-isolated host).
 
-**How should output from the sandbox be validated before feeding back to the agent?**
+**Q: How should output from the sandbox be validated before feeding back to the agent?**
 (1) Truncate to a maximum length (50KB) to prevent context overflow. (2) Sanitize control characters that could break JSON serialization. (3) If the output is supposed to be structured (JSON, CSV), validate the format before passing to the agent — malformed output causes parsing errors downstream. (4) Flag high-risk patterns in output (base64-encoded strings, URLs, credentials patterns) for logging even if you allow them through.
 
-**What is the difference between sandbox isolation and data access control?**
+**Q: What is the difference between sandbox isolation and data access control?**
 Sandbox isolation prevents code from accessing the host filesystem, network, and processes. Data access control (RBAC, row-level security) limits what data the code can query. Both are necessary: sandbox prevents escape, data access control limits what can be queried even within the allowed execution scope. A sandboxed agent with a production DB connection can still query all rows — you need both layers.
 
-**How do you implement a per-user sandbox concurrency limit?**
+**Q: How do you implement a per-user sandbox concurrency limit?**
 Use a semaphore per user (stored in Redis for distributed enforcement): `async with redis_semaphore(user_id, max_concurrent=3): execute_in_sandbox()`. Return HTTP 429 when the limit is exceeded. Set limits based on your cost model — at $0.10/hr per sandbox, 3 concurrent sandboxes per user costs $0.30/hr. Log semaphore wait time to detect user frustration and tune limits.
 
 ---

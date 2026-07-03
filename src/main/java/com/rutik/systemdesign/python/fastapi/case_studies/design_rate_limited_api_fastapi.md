@@ -504,35 +504,35 @@ async def test_fail_open_on_redis_error() -> None:
 
 ## Interview Discussion Points
 
-**Why use a Lua script instead of separate GET + INCR commands?**
+**Q: Why use a Lua script instead of separate GET + INCR commands?**
 The separate approach has a TOCTOU race: two concurrent requests can both read `count = N`, both pass the `N < limit` check, and both increment — writing `N+1` and `N+2` while one of them should have been rejected. The Lua script runs as a single atomic operation on the Redis server (which is single-threaded for command execution), so no other command can interleave. It also saves one network round-trip compared to a GET + INCR + EXPIRE sequence.
 
-**What is the sliding window counter algorithm and how does it differ from a true sliding window log?**
+**Q: What is the sliding window counter algorithm and how does it differ from a true sliding window log?**
 The sliding window counter buckets time into discrete windows (e.g., each 60-second interval). All requests in the same window share one counter. At the exact second a new window starts, the counter resets. A true sliding window log stores the timestamp of every request in a sorted set; to check the limit you count entries from `now - 60s` to `now` and evict the rest. The log gives perfect accuracy but uses O(requests) memory per key and requires two Redis commands (`ZREMRANGEBYSCORE` + `ZCARD`). The counter approximation uses O(1) memory but can allow a small overcount if requests cluster near a window boundary.
 
-**How would you add per-IP limits alongside per-API-key limits?**
+**Q: How would you add per-IP limits alongside per-API-key limits?**
 Add a second `RateLimiter` variant that keys on `request.client.host` instead of the `X-Api-Key` header. Apply it as an additional dependency or stack both: `dependencies=[Depends(ip_limiter), Depends(key_limiter)]`. The two limiters are independent; either one can trigger a 429. Use separate key namespaces — `rate::ip::{ip}::minute::...` — to avoid collisions.
 
-**What happens if Redis goes down mid-deployment?**
+**Q: What happens if Redis goes down mid-deployment?**
 The `except aioredis.RedisError` block in `__call__` catches all connection errors, timeouts, and cluster failures. It logs a warning (which should trigger a PagerDuty alert via your log aggregator) and returns without raising, allowing the request to proceed to the route handler. This means the API stays up but rate limiting is suspended. If you prefer fail-closed, replace the `logger.warning` with `raise HTTPException(status_code=503)`.
 
-**How would you implement burst capacity (token bucket) on top of this?**
+**Q: How would you implement burst capacity (token bucket) on top of this?**
 Store two values per key: `tokens_remaining` and `last_refill_timestamp`. In the Lua script: compute `elapsed = now - last_refill`; compute `refill = elapsed * refill_rate`; set `tokens = min(bucket_capacity, tokens_remaining + refill)`; if `tokens >= 1`, decrement and allow; otherwise deny. The Lua script must be updated to accept `bucket_capacity` and `refill_rate` as arguments. Token bucket allows short bursts up to `bucket_capacity` while still enforcing a long-run average rate.
 
-**How do you test a rate limiter reliably in pytest?**
+**Q: How do you test a rate limiter reliably in pytest?**
 Inject a mock Redis into `app_state.redis` before each test. Use `AsyncMock` with `eval` returning a controlled `[count, exceeded]` tuple. This avoids spinning up a real Redis in CI. For integration tests, use `fakeredis` (an in-process Redis emulator with Lua support) or Testcontainers with a real Redis image. Never rely on `time.sleep` loops in tests — they are flaky; instead mock `time.time` or use `freezegun`.
 
-**How would you add `X-RateLimit-Remaining` and `X-RateLimit-Reset` headers to every successful response?**
+**Q: How would you add `X-RateLimit-Remaining` and `X-RateLimit-Reset` headers to every successful response?**
 Add an ASGI middleware that runs after the `RateLimiter` dependency has populated `request.state`. The middleware calls `await call_next(request)` and then inspects `request.state.rate_limit_minute` and `request.state.rate_limit_minute_limit` to compute `remaining = limit - used`. Set the headers on the `Response` object before returning. The middleware runs globally so all routes get the headers without per-route wiring.
 
-**What is the difference between HTTP 429 and HTTP 503?**
+**Q: What is the difference between HTTP 429 and HTTP 503?**
 429 (Too Many Requests) means the client has exceeded the rate limit defined by the server's policy — the server is healthy, but this specific client is making requests too frequently. The `Retry-After` header tells the client exactly when it may retry. 503 (Service Unavailable) means the server itself is overloaded or temporarily down — it communicates nothing about the client's behavior. Returning 503 from a rate limiter is technically incorrect; 429 is the proper status code (RFC 6585).
 
-**Why use `RateLimiter` as a class with `__call__` rather than a plain async function?**
+**Q: Why use `RateLimiter` as a class with `__call__` rather than a plain async function?**
 A class instance can hold configuration (`minute_limit`, `day_limit`) set at construction time. A plain function has a fixed signature; to parameterize it you need `functools.partial` or a closure factory, both of which are harder to read and introspect. `Depends(RateLimiter(minute_limit=10))` reads as a self-documenting declaration. FastAPI resolves callable instances exactly like coroutine functions.
 
-**If you need rate limiting at 50,000 req/s across 20 pods, does a single Redis instance hold up?**
+**Q: If you need rate limiting at 50,000 req/s across 20 pods, does a single Redis instance hold up?**
 A single Redis node handles roughly 100,000 simple SET/GET operations per second on commodity hardware. A Lua script is slightly heavier — benchmark at ~60,000–80,000 eval/s. At 50,000 req/s across 20 pods each doing one `eval` call per request, that is 50,000 Redis operations/s — within single-node headroom. For headroom beyond that, shard by API key prefix across a Redis Cluster (use consistent hashing so the same key always lands on the same shard). Avoid cross-slot Lua scripts; ensure each key touches exactly one hash slot.
 
-**How would you handle a Redis Cluster where Lua scripts cannot span multiple keys?**
+**Q: How would you handle a Redis Cluster where Lua scripts cannot span multiple keys?**
 Each rate-limit key (`rate::{api_key}::minute::...`) is a single key, not a multi-key operation, so there is no cross-slot problem. If you needed to atomically update two keys (e.g., minute key and day key in one script), you would have to use Redis hash tags — `{api_key}` — to force both keys onto the same slot. The current design runs two independent Lua scripts (one per window) and accepts that they are not atomically linked; the practical risk (one window passes, the other fails, leaving a partial increment) is acceptable because each window's counter is independently consistent.

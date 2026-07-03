@@ -492,49 +492,49 @@ mvn dependency-check:check
 
 ## 12. Interview Questions with Answers
 
-**What is the difference between authentication and authorization, and how does OWASP A01 relate?**
+**Q: What is the difference between authentication and authorization, and how does OWASP A01 relate?**
 Authentication verifies identity — who you are. Authorization verifies what you are allowed to do. A01 (Broken Access Control) specifically covers authorization failures: a user is authenticated but can access resources or perform actions beyond their permitted scope. Examples include IDOR, privilege escalation via URL manipulation, and missing function-level access checks.
 
-**Explain SQL injection with an example and give two prevention strategies.**
+**Q: Explain SQL injection with an example and give two prevention strategies.**
 SQL injection occurs when user-supplied input is concatenated into an SQL query, allowing the attacker to alter the query's logic. Example: `SELECT * FROM users WHERE name = '' OR '1'='1'` returns all rows when the attacker supplies `' OR '1'='1`. Prevention: (1) use PreparedStatement with parameter binding — the driver escapes input so it is treated as data, not syntax; (2) use an ORM like Hibernate that uses parameterized queries by default. Input validation as a secondary control (allowlist characters) but never as the primary defense.
 
-**What is SSRF and how do you prevent it?**
+**Q: What is SSRF and how do you prevent it?**
 SSRF (Server-Side Request Forgery) occurs when an attacker controls a URL that the server fetches, allowing requests to internal services, cloud metadata endpoints (169.254.169.254), or other restricted targets. Prevention: (1) allowlist of permitted target hosts; (2) block private IP ranges after DNS resolution; (3) use an egress proxy with enforced allowlist; (4) apply IMDSv2 on AWS (requires session token, so simple HTTP fetches to metadata endpoint fail).
 
-**Why should you use BCrypt for password hashing rather than SHA-256?**
+**Q: Why should you use BCrypt for password hashing rather than SHA-256?**
 SHA-256 is a fast cryptographic hash designed for high throughput — GPUs can compute 10+ billion SHA-256 hashes per second, making brute-force attacks feasible. BCrypt is a deliberately slow adaptive hash: cost factor 12 means 2^12 = 4096 rounds, yielding ~300-400ms per hash on modern hardware. GPUs cannot parallelize BCrypt efficiently due to its sequential nature. As hardware improves, increase the cost factor to maintain the same work factor. Argon2id is the current recommendation for new systems (winner of the Password Hashing Competition), but BCrypt at cost factor 12 remains secure and widely supported.
 
-**What is the alg:none attack on JWT and how do you prevent it?**
+**Q: What is the alg:none attack on JWT and how do you prevent it?**
 JWT headers contain an `alg` field. If a server accepts `alg: none`, an attacker can remove the signature, set `alg` to `none`, and modify claims (e.g., elevate role to admin). The server verifies a "signature" that is an empty string — which always passes. Prevention: when decoding a JWT, explicitly specify the expected algorithm(s) rather than reading it from the token header. Libraries like `java-jwt` and `nimbus-jose-jwt` accept an algorithm parameter; never use overloads that accept any algorithm.
 
-**Explain CSRF and two ways to prevent it.**
+**Q: Explain CSRF and two ways to prevent it.**
 CSRF (Cross-Site Request Forgery) tricks an authenticated user's browser into submitting a state-changing request to a site where the user is logged in, without the user's knowledge. Since the browser automatically includes cookies, the server cannot distinguish the legitimate user from the attacker's forged request. Prevention: (1) SameSite=Strict or SameSite=Lax cookie attribute — browsers refuse to send the session cookie on cross-origin requests; (2) CSRF synchronizer token — a random token included in every state-changing form/request, verified server-side. For REST APIs using Bearer token authentication (no cookies), CSRF is not applicable.
 
-**What is the difference between SAST and DAST?**
+**Q: What is the difference between SAST and DAST?**
 SAST (Static Application Security Testing) analyzes source code or bytecode without executing the application. It runs in the IDE or CI pipeline against code at rest — detects SQL injection patterns, hardcoded secrets, insecure API usage. Examples: SonarQube, Semgrep. DAST (Dynamic Application Security Testing) tests a running application by sending attack payloads to HTTP endpoints. It finds runtime issues that SAST cannot — authentication bypasses, server-side logic flaws, misconfigured headers. Examples: OWASP ZAP, Burp Suite. Best practice: both in CI, with SAST on every commit and DAST on the deployed staging environment.
 
-**How would you manage secrets in a Spring Boot microservice deployed to Kubernetes?**
+**Q: How would you manage secrets in a Spring Boot microservice deployed to Kubernetes?**
 Mount secrets from a dedicated secrets manager — not from environment variables baked into container images. Options: (1) HashiCorp Vault with the Vault Agent Injector — injects secrets as files into the pod at startup; Spring Cloud Vault reads them via `spring.cloud.vault.kv`; (2) AWS Secrets Manager with AWS Secrets and Configuration Provider — mounts secrets as files via a CSI driver; (3) Kubernetes Secrets (encrypted at rest with KMS) — use External Secrets Operator to sync from Vault or AWS SM. Never hardcode secrets in `application.properties`, never log them, and set `JAVA_TOOL_OPTIONS` to mask secrets from heap dumps.
 
-**What is dependency confusion / supply chain attack and how do you defend against it?**
+**Q: What is dependency confusion / supply chain attack and how do you defend against it?**
 In a dependency confusion attack, an attacker publishes a malicious package to a public registry (npm, PyPI, Maven Central) with the same name as an internal private package, but a higher version number. Build tools that check public registries first download the malicious package. Defense: (1) pin exact versions and verify checksums; (2) use a private artifact proxy (Nexus, Artifactory) configured to prefer internal packages; (3) publish namespace-protected packages in the public registry to claim the name; (4) use Sigstore/cosign to verify artifact provenance.
 
-**Explain Content Security Policy (CSP) and when it mitigates XSS.**
+**Q: Explain Content Security Policy (CSP) and when it mitigates XSS.**
 CSP is an HTTP response header that specifies which sources the browser is allowed to load scripts, styles, images, and other resources from. `Content-Security-Policy: default-src 'self'; script-src 'self'` tells the browser to only execute scripts loaded from the same origin — even if an attacker injects `<script src="https://evil.com/steal.js">`, the browser refuses to load it. CSP mitigates reflected and stored XSS where the attacker can inject script tags, but does not help if the attacker can inject inline event handlers without `unsafe-inline` being blocked. The most effective CSP uses nonces or hashes instead of `unsafe-inline`.
 
-**What is the principle of least privilege and give three concrete examples in a backend system?**
+**Q: What is the principle of least privilege and give three concrete examples in a backend system?**
 Least privilege means every entity operates with only the minimum permissions required for its function. Examples: (1) Database account for the user-service has SELECT/INSERT/UPDATE on the `users` table only — not DROP, not access to other schemas; (2) IAM role for an EC2 instance running the payments service has GetSecret on the specific Secrets Manager ARN, not `secretsmanager:*`; (3) Kubernetes service account has get/list on its own ConfigMap only, not cluster-wide access. When a component is compromised, least privilege limits the blast radius to what that component actually needed.
 
-**How do you prevent log injection attacks?**
+**Q: How do you prevent log injection attacks?**
 Log injection occurs when unsanitized user input is logged and the logging system interprets special characters as log delimiters (allowing fake log entries) or, in Log4j's case, as JNDI lookup expressions (enabling RCE). Prevention: (1) use parameterized logging — `log.info("User: {}", username)` instead of `log.info("User: " + username)`; (2) sanitize newline characters from input before logging (`\n`, `\r`, `%0a`, `%0d`); (3) use a JSON-structured logging format so there is no line-delimiter concept; (4) upgrade Log4j to 2.17.1+ which disables JNDI by default.
 
-**What are the risks of verbose error messages and how do you handle errors securely?**
+**Q: What are the risks of verbose error messages and how do you handle errors securely?**
 Verbose error messages expose stack traces, class names, DB table names, SQL queries, framework versions, and internal hostnames — all of which aid an attacker during reconnaissance. Secure error handling: (1) catch all unhandled exceptions at a global handler (`@ControllerAdvice` with `@ExceptionHandler(Exception.class)`); (2) log the full stack trace internally with a correlation ID; (3) return only a generic error code and the correlation ID to the client (`{"error":"INTERNAL_ERROR","traceId":"abc123"}`); (4) never return raw exception messages or stack traces in API responses; (5) configure Spring to disable the `/error` Whitelabel Error Page in production.
 
-**What is HTTP Strict Transport Security (HSTS) and what is HSTS preloading?**
+**Q: What is HTTP Strict Transport Security (HSTS) and what is HSTS preloading?**
 HSTS tells browsers to only access the site over HTTPS for a specified duration. The header `Strict-Transport-Security: max-age=31536000; includeSubDomains` means: for the next year, never send HTTP requests to this domain or any subdomain — upgrade them to HTTPS automatically. HSTS preloading goes further: the domain is submitted to a browser-maintained list (hstspreload.org) that is shipped with Chrome, Firefox, and Safari. Even on first visit (before the HSTS header is received), the browser uses HTTPS. This eliminates the first-connection vulnerability. Warning: preloading is very difficult to undo — all subdomains must support HTTPS before submitting.
 
-**Describe a security review checklist for a new REST API endpoint.**
+**Q: Describe a security review checklist for a new REST API endpoint.**
 (1) Authentication: is a valid token required? (2) Authorization: does server-side code verify the caller owns the resource? (3) Input validation: are all parameters validated for type, length, format, and range before use? (4) Parameterized queries: no string concatenation in SQL? (5) Output encoding: are responses correctly encoded to prevent XSS if rendered in a browser? (6) Rate limiting: is there a per-user or per-IP rate limit to prevent brute force or abuse? (7) Sensitive data: does the response include fields the caller should not see (PII, hashed passwords, internal IDs)? (8) Error handling: do errors return generic messages? (9) Logging: is there an audit log entry for sensitive actions? (10) SSRF: if this endpoint fetches external URLs, is there an allowlist?
 
 ---

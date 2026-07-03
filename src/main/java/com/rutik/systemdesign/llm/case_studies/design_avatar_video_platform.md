@@ -939,7 +939,7 @@ Cross-reference: [./cross_cutting/streaming_at_scale.md](./cross_cutting/streami
 
 ## 11. Interview Discussion Points
 
-**Why is an avatar video pipeline inherently sequential rather than parallelizable?**
+**Q: Why is an avatar video pipeline inherently sequential rather than parallelizable?**
 Each stage consumes the output of the previous stage as a required input: the lip-sync renderer
 needs the audio waveform (from TTS) to know what mouth positions to generate, and the compositor
 needs the lip-synced frame sequence to overlay on the background. There is no way to run these
@@ -948,14 +948,14 @@ pipelining (overlapping stages via streaming), not parallelism: as TTS produces 
 chunk, the lip-sync stage immediately begins rendering that segment while TTS continues generating
 the next chunk.
 
-**How does streaming TTS enable pipeline pipelining, and what is the latency benefit?**
+**Q: How does streaming TTS enable pipeline pipelining, and what is the latency benefit?**
 Without streaming, a 60-second video requires 10 seconds of TTS compute to complete before
 lip-sync can begin. With streaming in 3-second chunks, lip-sync starts rendering the first chunk
 after only 3 seconds of TTS compute. The two stages overlap for the remaining 57 seconds of audio.
 For a 60-second video the wall-clock saving is approximately 7 seconds (70% of the TTS stage
 duration), reducing p50 pipeline time from ~30s to ~23s.
 
-**Why is the choice between Wav2Lip and SadTalker a business tier decision, not a quality decision?**
+**Q: Why is the choice between Wav2Lip and SadTalker a business tier decision, not a quality decision?**
 Both models are technically capable of producing acceptable output. The decision is driven by unit
 economics: Wav2Lip at 3 ms/frame costs 5x less GPU than SadTalker at 15 ms/frame. If all users
 ran SadTalker, the GPU fleet cost would be approximately $140,000/day instead of $28,000/day at
@@ -963,7 +963,7 @@ current volume. Offering Wav2Lip to free-tier users lets the platform acquire us
 marginal cost while using the quality gap as an upsell lever. This is the same tiering logic as
 compression quality tiers in image platforms (JPEG quality 60 vs 90).
 
-**How do C2PA watermarks enable deepfake attribution rather than just prevention?**
+**Q: How do C2PA watermarks enable deepfake attribution rather than just prevention?**
 C2PA does not prevent a deepfake from being created or shared — a bad actor can strip the manifest
 with standard video editing tools. Its value is in the chain of custody it provides to investigators:
 a C2PA manifest records the platform identity, job ID, timestamp, and model version in a
@@ -972,7 +972,7 @@ encounters a suspected deepfake, they can query the platform for the job ID foun
 to identify the account that generated the content. This shifts deepfake accountability from
 "impossible to trace" to "traceable to a specific user account within seconds."
 
-**Why does consent verification require a live selfie match rather than just face detection on the uploaded video?**
+**Q: Why does consent verification require a live selfie match rather than just face detection on the uploaded video?**
 Face detection on the uploaded video only confirms there is a human face in the video. It does not
 confirm that the person uploading the video is the person in the video. A bad actor could upload a
 video of a celebrity (detected face: celebrity) and pass detection trivially. The selfie match adds
@@ -981,7 +981,7 @@ their device (session-bound, OTP-gated), which is then compared against the domi
 uploaded video. A cosine similarity score > 0.85 between the two FaceNet embeddings provides
 reasonable confidence that the uploader and the video subject are the same person.
 
-**How does chroma key compositing fail when clothing matches the key color, and how is it detected?**
+**Q: How does chroma key compositing fail when clothing matches the key color, and how is it detected?**
 The FFmpeg chromakey filter removes pixels whose HSV hue falls within a configurable similarity
 radius of the key color. It has no concept of "foreground" vs "background" — it removes any pixel
 matching the key color regardless of position. If a user wears green clothing against a green screen,
@@ -990,7 +990,7 @@ sampling the average hue within the avatar bounding box (the lower 60% of the fr
 the angular distance between that hue and the chroma key color on the HSV wheel. A warning is issued
 if the distance is less than 15 degrees.
 
-**What causes lip-sync drift on long videos and how does re-anchoring fix it?**
+**Q: What causes lip-sync drift on long videos and how does re-anchoring fix it?**
 Drift accumulates from floating-point rounding in frame-count arithmetic. Each 3-second audio chunk
 maps to exactly `3.0 * 30 = 90 frames`. But if the TTS duration for a sentence is 3.013 seconds,
 the segment is 90.39 frames. Integer truncation discards 0.39 frames per segment. Over 100 segments
@@ -999,7 +999,7 @@ the timeline while audio continues normally, producing perceived drift. Re-ancho
 uses audio onset detection (librosa) to find the nearest hard onset point (a consonant burst, silence
 start) and realigns the frame pointer to that timestamp, resetting the accumulated error to zero.
 
-**Why is CDN egress often more expensive than GPU compute for video generation platforms at scale?**
+**Q: Why is CDN egress often more expensive than GPU compute for video generation platforms at scale?**
 At $0.02/GB and an average file size of 150 MB, each video download costs $0.003. At 1.5M downloads
 per day, CDN egress totals $4,500/day — which is comparable to the TTS fleet GPU cost ($1,300/day)
 and roughly 30% of the lip-sync fleet GPU cost ($15,000/day). For platforms where most content is
@@ -1009,7 +1009,7 @@ requires either compressing outputs more aggressively (CRF 28 instead of 23 cuts
 reduces visual quality), tiering CDN regions to serve EU traffic from eu-west-1 at lower inter-region
 transfer rates, or pushing enterprise bulk consumers to use S3 direct download.
 
-**How does HeyGen justify a $500M valuation against open-source Wav2Lip?**
+**Q: How does HeyGen justify a $500M valuation against open-source Wav2Lip?**
 Open-source Wav2Lip requires significant MLOps infrastructure to operate reliably at scale: GPU
 provisioning, job queuing, CDN delivery, storage management, consent verification, abuse detection,
 and multi-language support must all be built and maintained. HeyGen's value is the integrated
@@ -1020,7 +1020,7 @@ for enterprise customers whose training videos represent their brand. Additional
 integrations with Salesforce, HubSpot, and major CRM platforms create switching costs that
 open-source tools cannot replicate.
 
-**What makes Synthesia's enterprise avatar video defensible against consumer tools like HeyGen?**
+**Q: What makes Synthesia's enterprise avatar video defensible against consumer tools like HeyGen?**
 Synthesia's defensibility rests on three pillars: compliance posture (SOC 2 Type II, ISO 27001,
 GDPR data residency, no voice cloning on standard plans — all required for enterprise procurement),
 LMS integration depth (SCORM and xAPI output that slots directly into Workday Learning and
@@ -1030,7 +1030,7 @@ like HeyGen optimize for feature velocity and user virality, which creates a dif
 (more likely to introduce controversial features like voice cloning that enterprise security teams
 will block). This market segmentation means both can grow simultaneously targeting different buyers.
 
-**What is the correct autoscaling signal for avatar video GPU fleets, and why is raw GPU utilization misleading?**
+**Q: What is the correct autoscaling signal for avatar video GPU fleets, and why is raw GPU utilization misleading?**
 Raw GPU utilization is misleading because it spikes to 100% during active rendering segments and
 drops to near 0% between jobs (during S3 upload, job state transitions, Python orchestration).
 The correct signal is job queue depth divided by average throughput per GPU, which predicts the time

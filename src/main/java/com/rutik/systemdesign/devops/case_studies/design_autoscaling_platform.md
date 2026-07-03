@@ -848,53 +848,53 @@ See [`cross_cutting/kubernetes_production_hardening.md`](cross_cutting/kubernete
 
 ## 11. Interview Discussion Points
 
-**Why is "fast up, slow down" the cardinal rule of HPA tuning?**
+**Q: Why is "fast up, slow down" the cardinal rule of HPA tuning?**
 Because scaling up protects users (latency) while scaling down only saves cost, and cost can wait. Reacting up instantly with zero stabilization absorbs spikes; shrinking slowly with a 300s window prevents the oscillation where each scale-down re-spikes load. Asymmetric `behavior` blocks are the mechanism — set `scaleUp.stabilizationWindowSeconds: 0` and `scaleDown` to 300s.
 
-**How do you hit a 90-second SLO for a 10x spike when nodes take time to provision?**
+**Q: How do you hit a 90-second SLO for a 10x spike when nodes take time to provision?**
 The pod loop reacts in 15s (HPA) but pods go Pending until hardware exists, so the node provisioner's latency dominates. Karpenter's ~40s provision (vs CAS 3–5 min) plus a small warm-pool/overprovisioning buffer of pause-pods (low-priority placeholder pods that get evicted instantly to make room) hides the tail and keeps you under 90s. Pre-warming for predictable peaks removes the cold-start entirely.
 
-**Why Karpenter over Cluster Autoscaler?**
+**Q: Why Karpenter over Cluster Autoscaler?**
 Karpenter provisions right-sized instances just-in-time across the whole instance family and consolidates fragmentation, while CAS scales fixed node groups slowly. The cost win is from instance flexibility (pick the cheapest fit, spot-first) and consolidation, not just node count. The tradeoff is cloud lock-in and a hard dependency on disciplined PDBs.
 
-**When do you reach for KEDA instead of HPA?**
+**Q: When do you reach for KEDA instead of HPA?**
 When the scaling signal is an external event backlog (Kafka lag, SQS depth, cron) or when you need scale-to-zero, which HPA cannot do (its floor is 1 replica). KEDA wraps HPA for the 1..N range and handles 0..1 itself via `activationLagThreshold`. For plain CPU/RPS sync services, HPA alone is simpler.
 
-**How do you prevent consolidation from causing an outage?**
+**Q: How do you prevent consolidation from causing an outage?**
 Three controls: a mandatory PodDisruptionBudget on every workload (the Eviction API enforces it server-side so a drain can't breach `minAvailable`), a Karpenter disruption budget capping concurrent disruptions (e.g., 10% of nodes), and a consolidation freeze during peak windows and active rollouts (`do-not-disrupt`). Missing the PDB is the classic cause of consolidation-induced downtime.
 
-**What's the right spot/on-demand mix and how do you keep spot safe?**
+**Q: What's the right spot/on-demand mix and how do you keep spot safe?**
 Roughly 70% spot for interruption-tolerant stateless workloads, 30% on-demand for stateful/critical, with on-demand fallback. Safety comes from diversification — at least 6 instance types across 3 AZs — so a capacity reclaim in one type doesn't take a correlated chunk of the fleet. Each spot node must drain PDB-safely inside the 120s warning, which means `terminationGracePeriodSeconds <= 90s`.
 
-**Why do VPA and HPA conflict, and how do you run them together?**
+**Q: Why do VPA and HPA conflict, and how do you run them together?**
 If both act on CPU they fight: VPA raises per-pod requests while HPA adds replicas, so per-pod utilization never reaches target and the Deployment over-scales. The fix is to separate dimensions — HPA on a custom RPS metric, VPA on memory or in recommendation-only mode — so each owns a distinct lever. Never let both auto-act on the same resource.
 
-**How do you measure whether the platform is actually saving money?**
+**Q: How do you measure whether the platform is actually saving money?**
 Track average node utilization against the 65% target, the pending-pod backlog (should be near zero), and consolidation-decision counts, then attribute cost per namespace via Kubecost-style allocation. The headline KPI is spend-vs-static-baseline; the leading indicators are utilization and the spot fraction. A platform "saving money" while running at 35% utilization is lying.
 
-**What is the failure mode of scaling on a bad metric?**
+**Q: What is the failure mode of scaling on a bad metric?**
 A stuck or stale metric drives scaling to its ceiling and parks there — a crashed Kafka lag exporter reporting max-int lag makes KEDA scale to `maxReplicaCount` and stay, dragging the node autoscaler with it. Defenses are metric sanity bounds, a hard `maxReplicas`/NodePool `limits.cpu` cost ceiling, and an alert on `desired == max` sustained beyond 10 minutes.
 
-**How does predictive scaling complement reactive scaling?**
+**Q: How does predictive scaling complement reactive scaling?**
 Reactive (HPA/KEDA) is self-correcting and handles novel spikes, but it always pays the node-provision latency on the way up. Predictive pre-warm — a scheduled scale-up before a known 9am peak — hides that latency for seasonal traffic, at the cost of some idle capacity if the forecast is wrong. Use predictive only where seasonality is strong and the cold-start cliff is expensive; never rely on it alone for unpredictable bursts.
 
-**How do you bound the blast radius of an autoscaler bug across 4000 services?**
+**Q: How do you bound the blast radius of an autoscaler bug across 4000 services?**
 Per-tenant and per-NodePool hard limits: `maxReplicas` on every HPA, `limits.cpu` on every NodePool, disruption budgets, and a policy gate in CI that rejects configs violating these. The autoscaler control plane itself is run at 99.95% but is designed so that if it dies, workloads keep running at their current scale — autoscaling failure must degrade to "no scaling," never to "mass eviction."
 
-**What's the difference between cluster utilization and cost efficiency?**
+**Q: What's the difference between cluster utilization and cost efficiency?**
 Utilization measures how packed your nodes are; cost efficiency measures whether you're using the cheapest correct capacity for that packing. You can be 90% utilized entirely on on-demand and still overspend by 60% versus a spot mix. True cost-awareness optimizes both axes — pack tightly (consolidation, VPA-accurate requests) *and* buy cheaply (spot-first, right instance family) — which is why this platform couples node packing with instance selection rather than treating them separately. See [`../kubernetes_scheduling_and_autoscaling/README.md`](../kubernetes_scheduling_and_autoscaling/README.md).
 
-**Why is the Eviction API critical, and what breaks if you use raw delete?**
+**Q: Why is the Eviction API critical, and what breaks if you use raw delete?**
 The Eviction API (`POST .../pods/{name}/eviction`) checks PodDisruptionBudgets server-side and refuses to evict if it would breach `minAvailable`, whereas a raw `DELETE` bypasses the PDB entirely and removes the pod unconditionally. Any drain path — Karpenter consolidation, spot reclaim, node recycling, `kubectl drain` — must use eviction, or a "safe" scale-down silently becomes an outage. This is the single most common root cause of consolidation-induced downtime: tooling that deletes instead of evicts.
 
-**How do you scale a service whose bottleneck is not CPU?**
+**Q: How do you scale a service whose bottleneck is not CPU?**
 Scale on the metric that actually reflects saturation — queue depth for workers, in-flight requests or p99 latency for I/O-bound services, GPU utilization or tokens-in-flight for inference. CPU is a poor proxy for queue-driven or I/O-bound work, so a CPU-based HPA will under-scale a service that is latency-bound while sitting at 30% CPU. Expose the real saturation signal via prometheus-adapter (custom metric) or KEDA (external metric) and target that; Grafana Labs scaling queriers on in-flight queries rather than CPU is the canonical example.
 
-**What happens to autoscaling if Prometheus or the metrics adapter goes down?**
+**Q: What happens to autoscaling if Prometheus or the metrics adapter goes down?**
 HPA stops getting fresh custom metrics and, per its design, holds the last known replica count rather than scaling to zero — but it cannot react to new spikes, so a metrics outage during a traffic surge means under-provisioning. The mitigations are: run the metrics adapter with >=3 replicas behind the aggregation layer, fall back to a CPU-based HPA as a safety floor if the custom metric is stale, and alert on metric staleness. The principle is fail-static: a monitoring outage must freeze scaling, never trigger a runaway scale-down or scale-up.
 
-**How do you handle stateful workloads that can't tolerate spot interruption?**
+**Q: How do you handle stateful workloads that can't tolerate spot interruption?**
 Pin them to a dedicated on-demand NodePool via node affinity / a `capacity-type: on-demand` requirement, give them a PDB with `minAvailable` that preserves quorum (e.g., 2 of 3 for a Raft cluster), and set a generous `terminationGracePeriodSeconds` so graceful handoff completes. Stateful sets also need PodDisruptionBudgets that account for ordered rollout — disrupting the leader and a follower simultaneously can break quorum even if the raw replica math looks fine. The rule: spot is for stateless burst; anything with durable local state or quorum semantics stays on-demand.
 
-**Would you ever scale to zero a synchronous HTTP service?**
+**Q: Would you ever scale to zero a synchronous HTTP service?**
 Only with a request-buffering proxy in front, because a cold HTTP service can't hold the inbound request while the first pod starts. KEDA's HTTP add-on does exactly this — it holds the connection at the proxy, triggers the 0->1 scale, and forwards once a pod is Ready, trading ~1–3s of added first-request latency for zero idle cost. For latency-critical user-facing paths the cold-start penalty usually isn't worth it; scale-to-zero is best reserved for async workers and rarely-hit internal endpoints.

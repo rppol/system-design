@@ -664,7 +664,7 @@ Enforce post-hoc citation verification: after generating a response, use a secon
 
 ### Chunking Strategy Deep Dive
 
-**Type-aware chunking by document type:**
+**Q: Type-aware chunking by document type:**
 ```python
 from __future__ import annotations
 import re
@@ -741,7 +741,7 @@ class TypeAwareChunker:
 
 ### Multi-Tenant RAG Architecture
 
-**Tenant isolation strategy:**
+**Q: Tenant isolation strategy:**
 
 ```
 Enterprise Customer A (Legal Documents)

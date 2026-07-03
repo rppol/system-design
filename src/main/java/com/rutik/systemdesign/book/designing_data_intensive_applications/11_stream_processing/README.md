@@ -352,55 +352,55 @@ atomic output+offset commits.
 
 ## Interview Questions
 
-**How does a log-based message broker like Kafka differ from a traditional broker like RabbitMQ?**
+**Q: How does a log-based message broker like Kafka differ from a traditional broker like RabbitMQ?**
 A traditional broker (JMS/AMQP) holds messages in a queue and *deletes* each one once a consumer acknowledges it, using per-message acknowledgment and redelivery, so messages are transient and can't be replayed. A log-based broker keeps an append-only, partitioned, durable log where messages are *retained* (until a retention limit) and each consumer simply tracks its own offset (position). The crucial difference is replayability: with Kafka a new consumer can read all history and you can reprocess from any past offset, which traditional brokers can't do because the message is gone after acknowledgment.
 
-**What is an offset, and why is it a better acknowledgment mechanism for high-throughput streams?**
+**Q: What is an offset, and why is it a better acknowledgment mechanism for high-throughput streams?**
 An offset is a monotonically increasing position number identifying a consumer's place within a partition's log. It's a better acknowledgment than per-message acks because a consumer only needs to periodically record a single number ("I've processed up to offset N") rather than track and acknowledge each message individually, which is far cheaper and enables sequential, high-throughput reads. The offset also doubles as a replay pointer: to reprocess, you simply reset it backward, something per-message acknowledgment can't support.
 
-**What is change data capture, and what problem does it solve?**
+**Q: What is change data capture, and what problem does it solve?**
 Change data capture (CDC) taps a database's own change log (its logical replication log) and turns every committed write into an ordered event stream that downstream systems — search indexes, caches, data warehouses — consume to stay in sync. It solves the dual-write problem: if application code writes to the database *and* separately to the search index, races and partial failures leave them permanently inconsistent. With CDC there's a single source of truth (the database of record) and every other store is a derived, eventually-consistent follower of its change stream, so no dual writes are needed.
 
-**What is event sourcing, and how does it differ from storing current state?**
+**Q: What is event sourcing, and how does it differ from storing current state?**
 Event sourcing stores the full, immutable, append-only sequence of state-*changing* events as the source of truth — "item added to cart," "item removed," "order placed" — rather than storing and overwriting the current state. Current state is then a derived view obtained by replaying the events. It differs from the conventional approach in that you never update or delete records; you only append new events. This yields a complete audit trail and history, the ability to reconstruct any past state, the freedom to build new derived views retroactively by replaying, and a record of user *intent* rather than just outcomes.
 
-**Explain the principle "state is a materialized view of an immutable event log."**
+**Q: Explain the principle "state is a materialized view of an immutable event log."**
 It means the authoritative truth is an append-only log of change events, and any "current state" is just what you get by folding (replaying) those events up to now — exactly like accounting, where the immutable list of transactions is the truth and an account balance is merely a derived summary. Because the log is immutable and retained, you can derive *multiple different* read-optimized views from the same log (a relational table, a search index, a cache), each rebuildable from scratch. This cleanly separates writes (append to the log) from reads (any number of derived views), the foundation for "unbundling the database" in Chapter 12.
 
-**What is the difference between event time and processing time, and why does it matter?**
+**Q: What is the difference between event time and processing time, and why does it matter?**
 Event time is when an event actually occurred (stamped by the producer); processing time is when the stream processor handles it. They diverge because of network delays, broker backlogs, and especially consumer restarts that suddenly process a burst of buffered events. It matters because windowed aggregations (counts, rates over the last 5 minutes) computed by *processing* time are simply wrong whenever there's lag — a backlog drains thousands of old events into the "current" window. Correct results require bucketing by event time, which then forces you to handle late-arriving events.
 
-**What is a watermark, and what problem does it address?**
+**Q: What is a watermark, and what problem does it address?**
 A watermark is a marker in the stream asserting "all events with an event-time earlier than T have now arrived," which lets the processor decide when it's reasonable to consider an event-time window complete and emit its result. It addresses the fundamental "when is a window done?" problem: because events can arrive late (a phone that was offline), you can never be certain you've seen them all, so a watermark provides a principled, if approximate, cutoff. Events arriving after the watermark are stragglers, handled by either dropping them (and counting drops) or emitting a correction to the already-published result.
 
-**Describe the three types of stream joins.**
+**Q: Describe the three types of stream joins.**
 A stream-stream (window) join correlates two event streams over a time window — e.g. matching a search-results event with a click event for the same query within N minutes — by keeping recent events from both streams in state and expiring them as the window passes. A stream-table join enriches each event with reference data (e.g. attaching a user profile to an activity event) by keeping a local copy of the table updated via the table's CDC change stream, avoiding a database lookup per event. A table-table join takes two change streams and continuously maintains the change stream of their joined materialized view.
 
-**Why are stream joins time-dependent, and what's the implication for reprocessing?**
+**Q: Why are stream joins time-dependent, and what's the implication for reprocessing?**
 They're time-dependent because the data being joined against can change over time: when you enrich an event with "the user's profile," the correct answer depends on which version of the profile was current *at the event's time*. The implication is that replaying the same stream later can produce different results if the reference table has since changed, breaking deterministic reprocessing. To make reprocessing reproducible, you must join against the version of the reference data that was valid at each event's timestamp (e.g. by versioning the table changes alongside the stream), rather than always using the latest.
 
-**What does exactly-once (effectively-once) semantics mean, and why is it hard in streaming?**
+**Q: What does exactly-once (effectively-once) semantics mean, and why is it hard in streaming?**
 It means that even though a processor may crash and reprocess some events, the *effect* on the output is as if each event were processed exactly once — no lost and no duplicated effects. It's hard because streams are unbounded, so unlike batch you can't just "wait for the job to finish and retry"; a crash mid-stream forces you to resume and reprocess events that may have already had side effects (a written row, a sent email). Achieving it requires the input to be replayable and the output to be idempotent or committed transactionally, so reprocessing doesn't double-apply.
 
-**What techniques achieve exactly-once semantics in stream processors?**
+**Q: What techniques achieve exactly-once semantics in stream processors?**
 Microbatching (Spark Streaming) splits the stream into small batches and applies batch-style retry to each, trading some latency for simplicity. Checkpointing (Flink) periodically snapshots operator state and input offsets durably, so after a crash it restarts from the last checkpoint and replays the log from the saved offset. Idempotence makes reprocessing harmless by keying writes so duplicates overwrite rather than accumulate (or by deduplicating on event ID). Atomic commit (Kafka transactions, Flink) commits the output and the consumed offset together, so a failure can't leave output emitted without the offset advanced or vice versa.
 
-**Why does fault-tolerant stream processing require a replayable log?**
+**Q: Why does fault-tolerant stream processing require a replayable log?**
 Because recovering from a crash means resuming processing from a known-good point and re-reading the events that hadn't been durably accounted for — which is only possible if those events are still available to read again. A traditional broker that deletes messages on acknowledgment can't provide this: once consumed, the message is gone, so a crashed processor can't replay it. A log-based broker retains events and lets the processor reset its offset backward to a checkpoint, replaying from there, which is what makes checkpoint-based exactly-once recovery feasible.
 
-**What is complex event processing (CEP), and how is it "inverted" compared to a normal database?**
+**Q: What is complex event processing (CEP), and how is it "inverted" compared to a normal database?**
 CEP searches a stream for specific *patterns* of events — such as three failed logins followed by a success, or a temperature reading above a threshold sustained for five minutes — and emits a match when the pattern occurs. It's inverted relative to a normal database because in a database the data sits still and you run transient queries against it, whereas in CEP the *query* (the pattern) is long-lived and persistent while the *data* flows past it continuously. The processor maintains the query's matching state as events stream through, firing whenever the pattern completes.
 
-**What are the main window types in stream processing?**
+**Q: What are the main window types in stream processing?**
 Tumbling windows are fixed-length and non-overlapping, so each event falls into exactly one (e.g. one-minute buckets). Hopping windows are fixed-length but overlap by advancing in steps smaller than their length, so an event can belong to several. Sliding windows group events that fall within a moving interval of each other rather than fixed boundaries. Session windows group a user's events together until a gap of inactivity longer than a timeout, then start a new session — useful for analyzing bursts of related activity like a browsing session.
 
-**What does log compaction do, and why is it useful for CDC?**
+**Q: What does log compaction do, and why is it useful for CDC?**
 Log compaction is a Kafka retention policy that, instead of deleting old messages by age, keeps only the *latest* value for each key and discards superseded older values for that key. It's useful for CDC because it lets a change-log topic double as a complete, current snapshot of the source table: replaying the compacted topic from the beginning reconstructs the latest state of every key, so a new or rebuilt derived store (a fresh search index or cache) can be fully populated by reading the topic, without needing a separate full database dump.
 
-**How do databases and streams turn out to be "two sides of the same coin"?**
+**Q: How do databases and streams turn out to be "two sides of the same coin"?**
 Because a write to a database *is* an event, and a database's replication log *is* a stream of those events — so the two are dual representations of the same information. You can go from database to stream via change data capture (emit each write as an event) and from stream to database by materializing the stream into a table (apply each event to build current state). Recognizing this unifies the worlds: the immutable event log is the primary truth, and tables, indexes, and caches are all derived, rebuildable materialized views of it — the conceptual bridge to unbundling the database in Chapter 12.
 
-**Why are dual writes from application code dangerous, and what's the correct alternative?**
+**Q: Why are dual writes from application code dangerous, and what's the correct alternative?**
 Dual writes — having the application write the same change to two systems, like the database and the search index — are dangerous because the two writes aren't atomic: they can race (concurrent updates applied in different orders to each store) or partially fail (one succeeds, the other doesn't), leaving the systems permanently inconsistent with no easy way to detect or repair the drift. The correct alternative is to write only to a single source-of-truth database and propagate changes to all other stores via that database's ordered change log (CDC), so every derived store applies the same changes in the same order and converges.
 
 ---

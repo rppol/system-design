@@ -307,52 +307,52 @@ operations are common.
 
 ## Interview Questions
 
-**Why should you report response times as percentiles rather than as an average?**
+**Q: Why should you report response times as percentiles rather than as an average?**
 Because response-time distributions are heavily skewed by outliers, so the mean describes no actual user — a few very slow requests drag it up while still understating the worst case. The median (p50) tells you the typical experience and the tail (p95/p99/p999) tells you the worst, which is what users actually complain about. SLOs are therefore written as "p99 < 200 ms," never as an average.
 
-**What is the difference between a fault and a failure, and which one do you design to eliminate?**
+**Q: What is the difference between a fault and a failure, and which one do you design to eliminate?**
 A fault is one component deviating from spec (a disk dies); a failure is the whole system stopping service. You do *not* try to eliminate faults — they're inevitable — you build fault-tolerance so faults don't escalate into failures. Netflix's Chaos Monkey deliberately injects faults in production to verify the system absorbs them.
 
-**In the Twitter timeline example, what is the real load parameter, and why does it determine the architecture?**
+**Q: In the Twitter timeline example, what is the real load parameter, and why does it determine the architecture?**
 The real load parameter is the *fan-out* — the distribution of how many followers each user has — not the raw tweet rate. Tweets arrive at only ~5k/s, but timeline reads run ~300k/s, so the cost is in delivering each tweet to all followers. This drives the choice between fan-out-on-read (cheap writes, expensive reads) and fan-out-on-write (expensive writes, cheap reads); Twitter uses a hybrid because celebrities make pure fan-out-on-write explode.
 
-**Why do tail latencies (p99/p999) matter more than the median in a system with high fan-out?**
+**Q: Why do tail latencies (p99/p999) matter more than the median in a system with high fan-out?**
 Because a single user-facing request often fans out to many backend services in parallel, and the user waits for the *slowest* of them. The more backends, the higher the probability that at least one is in its slow tail — so even if each service has a good p99, the user-perceived p99 is much worse. This is why services that fan out heavily must drive down tail latency, not just the median.
 
-**Why can't you average the p99 values reported by ten different servers to get the cluster p99?**
+**Q: Why can't you average the p99 values reported by ten different servers to get the cluster p99?**
 Percentiles are not linear, so averaging them is mathematically meaningless — a server handling few requests and one handling many contribute unequally. You must aggregate the raw response-time *histograms* (using structures like HdrHistogram or t-digest) and compute the percentile from the combined distribution. Averaging percentiles is a common and silent monitoring bug.
 
-**What is head-of-line blocking and how does it inflate tail latency?**
+**Q: What is head-of-line blocking and how does it inflate tail latency?**
 Head-of-line blocking is when one slow request occupies the server (or sits at the front of a queue) and stalls all the requests queued behind it, even if those would have been fast. The result is that a single slow operation makes many requests report high latency. It's a major contributor to tail latency and is why queueing delay must be measured on the client side, where the full wait is visible.
 
-**Distinguish the three categories of faults and the main mitigation for each.**
+**Q: Distinguish the three categories of faults and the main mitigation for each.**
 Hardware faults (disk/RAM/power) are mostly uncorrelated and handled by redundancy and, increasingly, software fault-tolerance enabling rolling restarts. Software faults are systematic and *correlated* (a bug that hits all nodes on a trigger), mitigated by testing, process isolation, monitoring, and crash-restart. Human errors are the largest source of outages, mitigated by well-designed interfaces, sandboxes, easy/fast rollback, and detailed telemetry.
 
-**Why are correlated software faults more dangerous than uncorrelated hardware faults?**
+**Q: Why are correlated software faults more dangerous than uncorrelated hardware faults?**
 Hardware faults are largely independent — one disk dying doesn't make another die, so redundancy (RAID, replicas) works well. Software faults are correlated: a leap-second bug or a bad input pattern hits every node simultaneously, so your redundant copies all fail at once and redundancy gives no protection. Correlation defeats the statistical independence that hardware redundancy relies on.
 
-**What are the three components of maintainability?**
+**Q: What are the three components of maintainability?**
 Operability (making it easy for operations to keep the system running smoothly — monitoring, good defaults, predictability), simplicity (managing complexity so new engineers can understand it, chiefly by removing accidental complexity through abstraction), and evolvability (making it easy to change as requirements evolve). Maintenance dominates total lifetime cost, so these are economically the most important properties.
 
-**What is accidental complexity, and what is the primary tool for reducing it?**
+**Q: What is accidental complexity, and what is the primary tool for reducing it?**
 Accidental complexity is complexity that arises from the implementation rather than being inherent in the problem the software solves — tangled dependencies, special cases, inconsistent naming. The primary tool against it is good abstraction: a clean, reusable interface that hides implementation detail (SQL hiding storage engines, a high-level language hiding machine code). Removing accidental complexity is the essence of "simplicity."
 
-**Compare scaling up and scaling out; when would you still choose to scale up?**
+**Q: Compare scaling up and scaling out; when would you still choose to scale up?**
 Scaling up (a bigger machine) is operationally simple and avoids distributed-systems complexity but is expensive at the high end and has a hard ceiling. Scaling out (more commodity machines, shared-nothing) is cost-effective and tolerates machine loss but imports all the hard problems of Parts II–III. You scale up when the workload fits comfortably on one machine and you value simplicity and strong single-node consistency over a distributed system's complexity.
 
-**What does Kleppmann mean by "there is no magic scalable architecture"?**
+**Q: What does Kleppmann mean by "there is no magic scalable architecture"?**
 He means scalability is always relative to specific load parameters, so an architecture is designed around which operations are common and which are rare — not adopted as a universal recipe. A system tuned for 100k small requests/sec looks nothing like one tuned for a few multi-gigabyte requests per minute, even at the same nominal throughput. Copying another company's stack without matching its load profile is how you scale the wrong dimension.
 
-**Why does measuring response time on the client matter more than measuring it on the server?**
+**Q: Why does measuring response time on the client matter more than measuring it on the server?**
 Because the server's view excludes queueing delay, network transit, and time the request spent waiting to be accepted — exactly the components that head-of-line blocking and load inflate. The client sees the full response time the user actually experiences. Server-side timing can look healthy while clients are timing out.
 
-**What is the relationship between throughput and response time, and why keep them separate?**
+**Q: What is the relationship between throughput and response time, and why keep them separate?**
 Throughput measures work completed per unit time (jobs/sec, records/sec) and is the natural metric for batch systems; response time measures how long an individual request takes and is the natural metric for online systems. They can move in opposite directions — pushing throughput by batching often raises individual response times. Conflating them leads to optimizing one while silently degrading the other.
 
-**How does the load parameter you choose change as a system's architecture changes?**
+**Q: How does the load parameter you choose change as a system's architecture changes?**
 The relevant load parameter is whatever best captures the dominant stress for *that* architecture: requests/sec for a stateless web tier, read:write ratio for a database, simultaneous connections for a chat server, cache hit rate for a read-through cache, fan-out for a social feed. As you redesign the system, the binding constraint shifts, so the parameter you track must shift with it; tracking the wrong one hides the real bottleneck.
 
-**Why does the chapter say good operations can work around bad software but not vice versa?**
+**Q: Why does the chapter say good operations can work around bad software but not vice versa?**
 Because operability — monitoring, runbooks, fast rollback, capacity headroom — lets a skilled ops team contain and recover from a flawed system, keeping it serving users. But no amount of elegant software survives an environment with no monitoring, no rollback path, and unpredictable manual changes; the software will eventually hit a condition operations can't see or recover from. Hence investing in operability pays off even for imperfect code.
 
 ---

@@ -387,49 +387,49 @@ logging.basicConfig(stream=sys.stderr)  # NOT sys.stdout!
 
 ## 12. Interview Questions with Answers
 
-**What's the difference between a request and a notification in JSON-RPC?**
+**Q: What's the difference between a request and a notification in JSON-RPC?**
 Requests have an `id` field; the receiver MUST send a response with the same id. Notifications have no `id`; no response expected. The MCP `notifications/initialized` message is a notification (no id, no response). Mixing them up causes deadlocks (one party waits forever).
 
-**Why does MCP use JSON-RPC 2.0 specifically?**
+**Q: Why does MCP use JSON-RPC 2.0 specifically?**
 JSON-RPC 2.0 is mature (2010), simple, language-agnostic, supports requests/responses/notifications/batching. Alternatives (gRPC, custom protocols) would add weight without benefit. JSON is human-readable for debugging.
 
-**When should you use stdio vs HTTP transport?**
+**Q: When should you use stdio vs HTTP transport?**
 Stdio for local tools (filesystem, local DB) — fastest, most secure, single-user per server. HTTP (Streamable HTTP) for shared cloud services, multi-tenant, requires network — adds 10-50ms RTT but enables scale.
 
-**What replaced the legacy SSE-only HTTP transport?**
+**Q: What replaced the legacy SSE-only HTTP transport?**
 Streamable HTTP (2025 spec). The legacy design had two endpoints (`/sse` for events, `/messages` for requests) which was complex to deploy and limited stateless usage. Streamable HTTP uses a single endpoint that handles both stateless one-shots (JSON response) and streaming (SSE response) based on content type negotiation.
 
-**What's the role of the `Mcp-Session-Id` header?**
+**Q: What's the role of the `Mcp-Session-Id` header?**
 For stateful sessions over Streamable HTTP. Server returns an Mcp-Session-Id on the first response; client echoes it on subsequent requests in the same session. Lets the server route requests to the right session state (e.g., conversation memory).
 
-**How does ping/pong keepalive work?**
+**Q: How does ping/pong keepalive work?**
 Either party can send a `ping` request; the other responds with an empty `pong`. Default interval: 30 seconds. Detects dead connections. Most SDK implementations handle automatically; only matters when you implement manually.
 
-**What does the initialize handshake negotiate?**
+**Q: What does the initialize handshake negotiate?**
 Protocol version (both parties must agree on a compatible version), capabilities (client says "I support sampling"; server says "I have tools and resources"). After initialize, both know what the other supports.
 
-**What's the typical latency for each transport?**
+**Q: What's the typical latency for each transport?**
 Stdio: 1-2ms per message (in-process pipe + JSON parse). Streamable HTTP local: ~5-10ms (loopback + HTTP overhead). Streamable HTTP across internet: 30-100ms (network RTT + TLS + HTTP). Stdio is essentially free latency-wise.
 
-**How is JSON-RPC batching used in MCP?**
+**Q: How is JSON-RPC batching used in MCP?**
 Send an array of requests instead of one; server responds with an array of responses. Useful at startup when you want to list tools, resources, and prompts in one round-trip. Most servers support; not all clients use it.
 
-**What happens if the same id is used twice in JSON-RPC?**
+**Q: What happens if the same id is used twice in JSON-RPC?**
 Spec says don't do it (id should be unique per session). In practice: response for the second request may overwrite the first, or be misrouted. Use a monotonically increasing counter for ids.
 
-**Can the server send requests to the client?**
+**Q: Can the server send requests to the client?**
 Yes — bidirectional. The main use case is `sampling/createMessage` (server asks client to call its LLM). Notifications can also flow both ways. JSON-RPC supports this naturally; clients must be prepared to receive and handle.
 
-**Why must stdio MCP servers log to stderr only?**
+**Q: Why must stdio MCP servers log to stderr only?**
 Stdout is the JSON-RPC channel; any non-JSON output breaks the parser. Stderr is for diagnostics/logs and is read separately (or not at all) by the client. All MCP SDK implementations set up logging to stderr by default; custom implementations must do the same.
 
-**How does graceful shutdown work?**
+**Q: How does graceful shutdown work?**
 Client sends shutdown notification or closes the connection. Server cleans up resources. For stdio: client closes stdin → server detects EOF → exits gracefully. For HTTP: client sends a DELETE on the session URL (per spec).
 
-**What error codes does JSON-RPC define?**
+**Q: What error codes does JSON-RPC define?**
 -32700 Parse error, -32600 Invalid Request, -32601 Method not found, -32602 Invalid params, -32603 Internal error, -32000 to -32099 Server error (application-defined). MCP defines additional codes for protocol-specific errors.
 
-**How do you debug JSON-RPC traffic?**
+**Q: How do you debug JSON-RPC traffic?**
 (1) MCP Inspector for interactive debugging. (2) Log all messages with timestamps in your client. (3) For stdio: intercept the pipes with a logging proxy. (4) For HTTP: standard HTTP debugging (Charles Proxy, mitmproxy, browser network tab).
 
 ---

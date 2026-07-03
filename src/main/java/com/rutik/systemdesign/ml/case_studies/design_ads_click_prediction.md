@@ -572,16 +572,16 @@ class EmbeddingStore:
 
 ## Interview Discussion Points
 
-**Why is calibration critical for an ad CTR model and how do you achieve it?**
+**Q: Why is calibration critical for an ad CTR model and how do you achieve it?**
 Ad auctions use Vickrey-Clarke-Groves (second-price) mechanics. The winning advertiser pays the second-highest bid weighted by CTR (effective CPC = bid / CTR). If the model predicts 2% CTR but the true rate is 1%, the system charges half the correct price — destroying revenue. If it predicts 1% but true rate is 2%, advertisers are overcharged and reduce bids, reducing fill rate. Calibration is achieved by (1) training with proper loss (log-loss directly optimizes calibration), (2) applying Platt scaling on a held-out set to correct systematic over/under-confidence, and (3) monitoring calibration ratio hourly — alert if predicted/actual deviates beyond 5% in any score bucket.
 
-**How does feature hashing work and what are its failure modes?**
+**Q: How does feature hashing work and what are its failure modes?**
 Feature hashing maps a string feature value to an integer bucket via h = hash(field_name + str(value)) % bucket_count. Advantages: no vocabulary needed, handles arbitrary new values, constant memory regardless of cardinality. The failure mode is hash collisions: two different values mapping to the same bucket. At 2^24 = 16M buckets with 1M unique ad IDs, the birthday paradox gives collision probability of ~3% — acceptable because the embedding for the colliding pair is simply a noisy average of what the two individual embeddings would have been. Using the field name in the hash key prevents cross-field collisions (user_id:123 ≠ ad_id:123).
 
-**How do you handle the latency requirement of 10ms at 1M QPS?**
+**Q: How do you handle the latency requirement of 10ms at 1M QPS?**
 The 10ms budget breaks down as: network + load balancing 1ms, feature hashing (in-memory, microseconds) <0.1ms, Redis embedding batch GET 1-2ms, ONNX GPU inference for batch of 100 ads 2-3ms, Platt calibration (scalar multiply, microseconds) <0.1ms, response serialization 0.5ms = ~5ms P50, 8ms P99. The critical optimizations are: (1) batch all ads in one auction together (one Redis call, one GPU kernel launch), (2) keep embeddings in Redis Cluster with consistent hashing so each key always hits the same shard (no cross-shard scatter-gather), (3) use ONNX INT8 quantization for the MLP — reduces inference from 3ms to 1.5ms with <0.1% NE degradation.
 
-**How do you handle model staleness as new ad campaigns launch throughout the day?**
+**Q: How do you handle model staleness as new ad campaigns launch throughout the day?**
 A campaign launched at 9 AM will not appear in training data until the nightly retrain, meaning predictions for its ads use only the hashed bucket embedding (which may collide with other ads). Strategy: (1) hourly fine-tuning on the latest 3 hours of impression data — new campaigns see their first gradient update within 1 hour. (2) Cold-start CTR: for ads with fewer than 100 impressions, blend the model prediction with the advertiser's historical average CTR (beta distribution conjugate prior), weighted by impression count. This provides a reasonable estimate for new campaigns before enough data exists to rely on the model.
 
 ---
@@ -903,17 +903,17 @@ Monthly        Scheduled                                  Full calibration audit
 
 ## Additional Interview Questions
 
-**How does the FM (Factorization Machine) component capture 2nd-order feature interactions efficiently?**
+**Q: How does the FM (Factorization Machine) component capture 2nd-order feature interactions efficiently?**
 A naive approach to 2nd-order interactions requires learning a weight for every pair of features: with 100 feature fields, that is 100×99/2 = 4,950 parameters — manageable for few features but explodes with hashing to millions of dimensions. FM replaces this with embedding vectors: each feature field i has an embedding v_i of dimension k (k=16 in practice). The interaction between fields i and j is approximated as v_i · v_j (dot product), requiring only n×k parameters (n features × k dims) instead of n^2. The computational trick: sum_over_pairs(v_i · v_j) = 0.5 × (||sum(v_i)||^2 - sum(||v_i||^2)), computable in O(n×k) time instead of O(n^2×k). This is the key efficiency of FM that makes it practical with 100+ feature fields and millions of sparse IDs.
 
-**How would you extend this system to support conversion prediction (P(purchase | click)) in addition to CTR?**
+**Q: How would you extend this system to support conversion prediction (P(purchase | click)) in addition to CTR?**
 Conversion prediction requires predicting a much sparser signal (purchase rate ~1-5% of clicks, vs click rate 1-2% of impressions). Architecture extensions: (1) Multi-task learning: add a conversion prediction head alongside the CTR head, sharing the lower-level embeddings and MLP layers but with task-specific output layers. The shared representation transfers click behavior knowledge to the sparser conversion signal. (2) Survival modeling: predict time-to-conversion (some purchases happen days after click) rather than binary next-click conversion. (3) Join time: conversion labels arrive with 7-day delay (attribution window); training data must be held for 7 days before conversion labels are final — this means the conversion model lags the CTR model by 7 days. The final auction score is then: effective_value = bid × P(click) × P(conversion | click), used for value-based bidding.
 
-**What is Normalized Entropy (NE) and why is it preferred over AUC for CTR model evaluation?**
+**Q: What is Normalized Entropy (NE) and why is it preferred over AUC for CTR model evaluation?**
 NE (Normalized Entropy) = cross-entropy of the model / cross-entropy of a baseline predictor (e.g., predicting the global average CTR for every impression). NE = 1.0 means the model is no better than predicting the mean; NE < 1.0 means the model improves on the baseline (lower cross-entropy = better calibration and ranking). AUC only measures ranking quality (which ad is more likely clicked) but ignores calibration — a miscalibrated model can have high AUC but NE close to 1.0 if its rankings are correct but predictions are systematically biased. For ad auction economics, calibration matters more than ranking; hence NE is the primary metric. Industry benchmark: a NE improvement of 1% (NE from 0.80 to 0.79) is considered significant and typically corresponds to meaningful revenue lift.
 
-**How do you handle the exploration-exploitation tradeoff in a CTR prediction system serving a live auction?**
+**Q: How do you handle the exploration-exploitation tradeoff in a CTR prediction system serving a live auction?**
 The serving system only observes outcomes for ads that win auctions — ads that are consistently outbid never accumulate data, creating a feedback loop where underexplored ads remain underexplored. Strategies: (1) epsilon-greedy exploration: for 2% of auctions, randomly select a winning ad independent of CTR prediction, observe the outcome, and use it as exploration data. (2) Thompson sampling: model CTR as a Beta distribution per ad, sample one CTR from the distribution, use the sample in the auction. Ads with fewer impressions have higher variance, giving them more exploration opportunity. (3) Upper Confidence Bound (UCB): boost predicted CTR by a term proportional to 1/sqrt(impressions), so new ads with high uncertainty get exploration chance. In practice, epsilon-greedy is simplest and lowest-risk; Thompson sampling provides better exploration efficiency but requires distributional modeling of CTR uncertainty.
 
-**How does the hourly incremental fine-tuning avoid catastrophic forgetting of long-term patterns?**
+**Q: How does the hourly incremental fine-tuning avoid catastrophic forgetting of long-term patterns?**
 Hourly fine-tuning on only 3 hours of data risks the model forgetting longer-term user behavior patterns that are not represented in the short window (e.g., weekly cyclicality, long-term user interest evolution). Mitigations: (1) Experience replay: mix 30% of training examples from a random sample of the 30-day archive into each hourly fine-tuning batch — the model retains long-term knowledge. (2) Low learning rate for fine-tuning (lr = initial_lr × 0.1): large updates are more likely to destroy learned representations. (3) Elastic Weight Consolidation (EWC): penalize changes to parameters that were most important for previous tasks, measured by the Fisher information matrix. In practice, experience replay alone is sufficient and EWC adds implementation complexity without significant benefit for CTR prediction.

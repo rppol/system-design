@@ -376,14 +376,14 @@ public class TenantMigrationService {
 
 ## Interview Discussion Points
 
-**How do you choose between shared schema, schema-per-tenant, and database-per-tenant?**
+**Q: How do you choose between shared schema, schema-per-tenant, and database-per-tenant?**
 The choice is driven by tenant size, isolation requirements, and operational cost: (1) Shared schema + RLS for small tenants (SMB) — minimal operational overhead, good isolation via RLS, limited customization. (2) Schema-per-tenant for medium tenants — allows per-tenant schema customization (custom columns), schema-level isolation without full database overhead, manageable at a few thousand schemas per cluster. (3) Database-per-tenant for large tenants — full isolation (separate process, storage, HA), HIPAA/FedRAMP compliance, custom PostgreSQL extensions, dedicated performance. The tiering approach is common in production SaaS: auto-upgrade tenants as they grow.
 
-**How do you handle connection pooling for 10,000 tenants?**
+**Q: How do you handle connection pooling for 10,000 tenants?**
 PgBouncer in transaction mode is essential. Without it: 10K tenants × 10 connections each = 100K PostgreSQL backends — impossible (max_connections=500, and each backend uses 5–10MB RAM). With PgBouncer: 100K client connections → 100 PostgreSQL server connections (1000:1 multiplexing). Transaction mode enables this because a server connection is released after each transaction and reused by another client. The RLS tenant context (`SET LOCAL app.current_org_id`) must be set within the transaction (not the session) because transaction mode does not guarantee the same server connection across transactions.
 
-**What happens if a tenant's data needs to be deleted (GDPR right to erasure)?**
+**Q: What happens if a tenant's data needs to be deleted (GDPR right to erasure)?**
 For SMB (shared schema): `DELETE FROM all_tables WHERE org_id = ?` — requires careful ordering to respect foreign keys; use CASCADE or deferred constraints. Then delete the organization record. Historical data in ClickHouse: same `WHERE org_id = ?` deletion, but ClickHouse bulk deletion is expensive — use TTL with the erasure date or mark the partition for deletion. For mid-market (schema-per-tenant): `DROP SCHEMA tenant_abc123 CASCADE` — instant, removes all tenant data atomically. For enterprise (database-per-tenant): `DROP DATABASE; terminate RDS instance; delete S3 backup prefix`. Document: GDPR erasure is effective immediately in live data; backup data erased within retention window (verified to compliance team).
 
-**How do you perform cross-tenant analytics for the platform operator without exposing tenant data to tenants?**
+**Q: How do you perform cross-tenant analytics for the platform operator without exposing tenant data to tenants?**
 CDC pipeline: Debezium tails the WAL of all database tiers and publishes change events to Kafka, keyed by org_id. A ClickHouse consumer aggregates events in a separate, operator-only database partitioned by org_id. ClickHouse queries always filter by org_id — but platform operators can query across all org_ids. Tenant users never have access to this ClickHouse instance (separate credentials, separate network segment, separate API). The ClickHouse instance contains only aggregated metrics (event counts, record counts, usage patterns) — not raw customer record data. This addresses both privacy (no raw CRM data in analytics) and compliance (platform operators see only aggregated metrics, not individual contact records).

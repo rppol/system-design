@@ -346,37 +346,37 @@ A migration created a new NOT NULL column. The deployment was rolled back due to
 
 ## 12. Interview Questions with Answers
 
-**How do you add a NOT NULL column to a 500M-row production table without downtime?**
+**Q: How do you add a NOT NULL column to a 500M-row production table without downtime?**
 In PostgreSQL 11+: `ALTER TABLE t ADD COLUMN col TYPE NOT NULL DEFAULT value` is instant — PostgreSQL stores the default in the catalog (pg_attrdef) and returns the default for any existing row that doesn't have the value stored yet, without rewriting the table. In PostgreSQL 10 and below, or when the default is not constant: (1) Add column as nullable (instant). (2) Backfill in batches with commit every 10,000 rows (no long transaction). (3) After all rows populated, add NOT NULL constraint — PostgreSQL 12+ can use `NOT VALID` first to skip the full scan, then `VALIDATE CONSTRAINT` during a low-traffic window. (4) After validation, add `SET NOT NULL` (fast on PG 11+ since it checks pg_statistic for null fractions).
 
-**What is the expand-contract pattern and which schema operations require it?**
+**Q: What is the expand-contract pattern and which schema operations require it?**
 Expand-contract: (1) Expand: add new schema elements that both old and new code can coexist with. (2) Contract: remove old elements after all code is updated. Required for: renaming columns (add new name, write both, remove old), changing column type incompatibly (add new column with new type, migrate data, switch reads, drop old), removing columns or tables (stop writing, verify no reads, then drop). Not required for: adding a nullable column, adding an index, adding a new table. The key rule: a migration that can cause existing queries to fail is not zero-downtime without the expand-contract pattern.
 
-**What is the expand-contract pattern and which schema operations require it?**
+**Q: What is the expand-contract pattern and which schema operations require it?**
 [Same as above — answered once]
 
-**How does gh-ost avoid the full table lock that ALTER TABLE causes?**
+**Q: How does gh-ost avoid the full table lock that ALTER TABLE causes?**
 gh-ost (GitHub's Online Schema Change) avoids locks by never using `ALTER TABLE` directly. Instead: (1) Creates a "ghost" table with the desired schema. (2) Listens to the binary log for all changes to the original table. (3) Copies data from original → ghost in small chunks at low priority. (4) Applies all binlog changes (new inserts/updates/deletes during copy) to the ghost table in real-time. (5) When the ghost table is fully caught up (< a few seconds behind), executes an atomic `RENAME TABLE original → _original_del, ghost → original`. The rename takes a metadata lock for milliseconds, not the full copy duration. This is safer than pt-online-schema-change which uses triggers (can cause issues with high-write tables and row-based replication).
 
-**What is schema registry and why is it important for event-driven systems?**
+**Q: What is schema registry and why is it important for event-driven systems?**
 A schema registry (e.g., Confluent Schema Registry) stores the schema definitions for messages produced to a message broker (Kafka). Producers include a schema ID in each message; consumers use the ID to fetch the schema and deserialize. Importance: (1) Enforces schema evolution rules (BACKWARD, FORWARD, FULL compatibility) — rejects incompatible changes at producer time. (2) Enables consumers to handle older and newer message versions gracefully. (3) Eliminates schema embedded in every message (bandwidth savings). (4) Required for zero-downtime microservice deployments where producers and consumers are deployed independently. Without schema registry: a producer schema change breaks all existing consumers immediately.
 
-**What are Flyway and Liquibase and how do they differ?**
+**Q: What are Flyway and Liquibase and how do they differ?**
 Both are database migration tools that track which migrations have been applied (stored in a version table) and apply pending ones in order. Flyway: SQL-first, simple, each migration is a `.sql` file named with version prefix (V1__, V2__). Very opinionated, minimal configuration, excellent Spring Boot integration. Does not support rollback (undo migrations require manual reverse SQL). Liquibase: supports XML/YAML/JSON/SQL changelog formats, supports rollback tags, more flexible change tracking (each changeSet has an id, author, and checksum). More complex to set up. Liquibase supports "diff" against database to generate migrations. Choice: use Flyway for simplicity in new projects; Liquibase for complex enterprise projects needing rollback or multi-format changelogs.
 
-**How do you handle a migration that must run on a table receiving 50,000 writes per second?**
+**Q: How do you handle a migration that must run on a table receiving 50,000 writes per second?**
 For index creation: `CREATE INDEX CONCURRENTLY` — takes 3x longer but allows continuous writes. For column addition (PostgreSQL 11+): instant for constant defaults. For column type changes: use gh-ost. Deploy gh-ost during the lowest write period. gh-ost self-throttles when replication lag or system load exceeds thresholds — it will pause and resume automatically. For table rebuilds: test gh-ost on a staging environment first. Plan for gh-ost to take 2-4 hours for large tables at high write rates. Communicate expected duration to on-call team. Have a rollback plan (gh-ost creates a separate ghost table — the original is untouched until the final rename, making rollback trivial: just drop the ghost table).
 
-**What happens if a Flyway migration fails midway through?**
+**Q: What happens if a Flyway migration fails midway through?**
 Flyway marks the migration as failed in the `flyway_schema_history` table (`success = false`). On next startup, Flyway sees the failed migration and refuses to start the application (fail-fast behavior). Manual recovery: (1) Assess the state — how much of the migration ran before failure. (2) Manually apply the remaining SQL or roll back the partial changes. (3) After the database is in a consistent state, run `flyway repair` to either mark the migration as successful (if the final state is correct) or delete the failed entry (to allow re-running the migration). (4) Fix the root cause of the failure (disk full, permission error, constraint violation). Lesson: always test migrations against a production-sized database copy before deploying.
 
-**How do you perform a zero-downtime major database version upgrade (e.g., PostgreSQL 14 → 16)?**
+**Q: How do you perform a zero-downtime major database version upgrade (e.g., PostgreSQL 14 → 16)?**
 Logical replication approach: (1) Set up a PostgreSQL 16 instance. (2) Create a logical replication publication on PG14 for all tables. (3) Create a subscription on PG16 — it copies all data and applies ongoing changes. (4) Verify PG16 is caught up (replication lag < 1s). (5) Stop all write traffic to PG14 (maintenance page, load balancer cutover). (6) Wait for PG16 to apply remaining lag (< 1s). (7) Promote PG16 to primary. (8) Update application connection string to PG16. (9) Resume traffic. Downtime: seconds. Alternative: `pg_upgrade --link` (hard links, fast) but requires stopping PG14 first (longer downtime). The logical replication approach enables sub-minute downtime for any table sizes.
 
-**How do you validate that a migration didn't break anything before rolling it to production?**
+**Q: How do you validate that a migration didn't break anything before rolling it to production?**
 Pre-production validation: (1) Run migration against a production data clone (real data volumes and distributions). (2) Verify query plans didn't regress: capture EXPLAIN output for top-20 queries before and after migration — compare plans. (3) Run the application's test suite (integration tests, acceptance tests) against the migrated schema. (4) Check for INVALID indexes after CONCURRENTLY operations. (5) Run `ANALYZE` and compare row estimates. Production validation: (1) Canary deployment: apply migration to 10% of read replicas, observe error rates and query latency. (2) Monitor `pg_stat_statements` for new slow queries. (3) Check `pg_stat_user_tables` for bloat after migration (large updates can create dead tuples). (4) Alert threshold: rollback if p99 latency increases > 50%.
 
-**What is the minimum downtime approach for renaming a table in production?**
+**Q: What is the minimum downtime approach for renaming a table in production?**
 Renaming a table causes immediate breakage for any query using the old name. Zero-downtime approach: (1) Create a view with the old name pointing to the new table: `CREATE VIEW old_name AS SELECT * FROM new_name`. This allows all SELECT queries to continue working through the view. (2) Deploy new code that writes to `new_name`. (3) For writes through old name: either use a INSTEAD OF trigger on the view to redirect writes, or update all write paths simultaneously with the view creation. (4) After all code updated, drop the view. The view approach works for reads but write compatibility requires either triggers (complex) or simultaneous code + schema change (requires careful coordination). Most teams accept a brief maintenance window for table renames because triggers add complexity.
 
 ---

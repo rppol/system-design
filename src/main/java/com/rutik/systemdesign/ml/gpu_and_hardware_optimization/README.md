@@ -681,22 +681,22 @@ MFU = (measured FLOP/s) / (peak hardware FLOP/s). Measured FLOP/s is estimated a
 **Q: How do you detect and fix GPU memory fragmentation in PyTorch?**
 PyTorch's caching allocator maintains a pool of freed tensors to avoid repeated CUDA allocation calls (cudaMalloc is slow, ~1-10 ms). Memory fragmentation occurs when many small tensors are allocated and freed in random order, leaving holes in the memory pool that cannot satisfy larger allocations — a cudaOutOfMemoryError at 70% "reported" memory usage is a classic fragmentation symptom. Detection: `torch.cuda.memory_stats()` shows `"fragmentation"` ratio. Fixes: (1) call `torch.cuda.empty_cache()` to release cached but freed memory back to CUDA (warning: this slows subsequent allocations); (2) use fixed-size tensor allocations across training steps (consistent batch size); (3) set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (PyTorch 2.1+) — new allocator strategy that handles fragmentation much better by using expandable memory segments.
 
-**Why does BF16 not require loss scaling while FP16 does?**
+**Q: Why does BF16 not require loss scaling while FP16 does?**
 BF16 keeps FP32's 8-bit exponent range, so small gradients do not underflow the way they do in FP16. FP16 has only 5 exponent bits and overflows above 65,504, which forces GradScaler to multiply the loss up before backward and divide the gradients back down — extra machinery that can still diverge. BF16 trades mantissa bits (7 vs FP16's 10) for that dynamic range, which matters far more for training stability on large models. Use BF16 on Ampere/Hopper/Ada (A100, H100, RTX 30/40); fall back to FP16 only on Volta/Turing (V100, T4) where BF16 hardware is absent.
 
-**Why can in-place operations like x.relu_() break autograd?**
+**Q: Why can in-place operations like x.relu_() break autograd?**
 An in-place op overwrites a tensor value that the backward pass still needs, so autograd raises a version-counter error or computes wrong gradients. Many gradients are functions of the layer's output (ReLU's gradient needs the sign of its input/output), and mutating that buffer destroys the information. In-place ops (`add_`, `mul_`, `relu_`) are safe only on leaf tensors or tensors not part of the autograd graph — for example post-processing under `torch.no_grad()`. For training, prefer `torch.compile()`, which fuses the elementwise chain and reclaims the memory without the correctness risk.
 
-**Why does a validation loop OOM when the training loop does not?**
+**Q: Why does a validation loop OOM when the training loop does not?**
 Appending model outputs that still carry their autograd graph accumulates activation memory across every batch, and nothing is ever freed. Each stored `outputs` tensor keeps its `grad_fn`, which pins the whole forward graph in HBM, so a loop that concatenates predictions blows up even though a single training step fits. Wrap evaluation in `torch.no_grad()` (or `inference_mode()`) to stop graph construction, and move results off-GPU immediately with `.cpu()`. This is the single most common eval-time OOM and it never surfaces during training because the graph is discarded each step.
 
-**Why can use_reentrant=True gradient checkpointing silently disable torch.compile?**
+**Q: Why can use_reentrant=True gradient checkpointing silently disable torch.compile?**
 The reentrant checkpoint implementation cannot be traced by TorchDynamo, so the compiler hits the checkpoint boundary and falls back to slow eager mode — losing every fusion benefit with no error. It also requires inputs to have `requires_grad=True`, which is easy to violate. Always pass `use_reentrant=False`; the non-reentrant path is compatible with `torch.compile`, does not need the requires_grad hack, and is the documented default going forward. The failure is silent, so verify by checking that compiled speedups actually appear in the profiler.
 
-**How much extra memory does Adam consume versus SGD, and why does it dominate for large models?**
+**Q: How much extra memory does Adam consume versus SGD, and why does it dominate for large models?**
 Adam stores two FP32 moment buffers per parameter (8 bytes) versus SGD-momentum's single buffer (4 bytes), so optimizer state alone is 8x the parameter count in bytes. For a 7B-parameter model that is 56 GB just for Adam's m and v tensors — more than the parameters (14 GB in BF16) and gradients (28 GB in FP32) combined. This is why full fine-tuning of large models needs sharding (FSDP/ZeRO) or 8-bit optimizers (bitsandbytes), which quantize the moments and cut optimizer memory ~4x. Always budget optimizer state, not just weights, when sizing a GPU.
 
-**How do you confirm the DataLoader is the training bottleneck rather than the GPU?**
+**Q: How do you confirm the DataLoader is the training bottleneck rather than the GPU?**
 If GPU utilization sits below 80% while a CPU core is pegged at 100%, the data pipeline — not the GPU — is the limit. Do not guess: benchmark the loader in isolation (iterate N batches, measure samples/sec) and compare against the GPU's step time; if the loader is slower, the GPU is starving between batches. The fix is parallel prefetch (`num_workers=4`, `pin_memory=True`, `persistent_workers=True`, `prefetch_factor=2`) plus `non_blocking=True` transfers, which routinely lifts utilization from ~65% to >90% with zero extra hardware. Adding GPUs before checking this just doubles the cost of a CPU-bound job.
 
 ---

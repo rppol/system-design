@@ -367,97 +367,97 @@ Q&As ordered by interview frequency: gotchas and traps first, internals second, 
 
 ---
 
-**How do you start a 30-minute LLD interview? What's your first sentence?**
+**Q: How do you start a 30-minute LLD interview? What's your first sentence?**
 
 Ask clarifying questions before drawing anything. "Before I start, I want to make sure I'm solving the right problem — can I ask a few questions about scope?" Then: single machine or distributed? How many concurrent users? What are the must-have use cases vs nice-to-haves? Is this interview more interested in class design, state machine, or concurrency handling? This opening shows senior-level judgment — junior candidates jump straight to coding.
 
 ---
 
-**Parking Lot: how do you handle two cars arriving simultaneously for the last spot?**
+**Q: Parking Lot: how do you handle two cars arriving simultaneously for the last spot?**
 
 If on a single machine: use `AtomicReference<SpotStatus>` with `compareAndSet(AVAILABLE, OCCUPIED)` — only one thread wins the CAS; the other retries and finds no available spot. If distributed: use optimistic locking in the database (add a `version` column; `UPDATE spot SET status='OCCUPIED', version=version+1 WHERE id=? AND version=?` — exactly one update succeeds). The key insight: spot assignment must be atomic. Do NOT check availability and then reserve in two separate operations — this is a classic check-then-act race condition.
 
 ---
 
-**Vending Machine: why is the State pattern better than a switch statement for state transitions?**
+**Q: Vending Machine: why is the State pattern better than a switch statement for state transitions?**
 
 A switch statement puts all state logic in one class, violating OCP — adding a new state requires modifying the switch. As states accumulate, the switch becomes unreadable and error-prone. State pattern: each state is a class; transitions are method calls that replace the current state object. Adding a new state means adding a new class and modifying only the states that transition to it — not the entire machine. The State pattern also makes illegal transitions explicit: an `OutOfStockState` simply doesn't implement `acceptMoney()` with success behavior.
 
 ---
 
-**Chess: how does the Command pattern enable undo of moves?**
+**Q: Chess: how does the Command pattern enable undo of moves?**
 
 Each move is a `Command` object: `MoveCommand(piece, fromSquare, toSquare, capturedPiece)`. `execute()` moves the piece; `undo()` moves it back and restores the captured piece. A `Deque<MoveCommand>` is the history stack. Ctrl+Z pops the stack and calls `undo()`. The benefit: the `Board` class doesn't need any undo logic — it just responds to `move()` and `restore()` calls. The history management is entirely in the `MoveCommand` and the client. Chess engines also use this for "what-if" analysis: execute a speculative move, evaluate the board, undo it.
 
 ---
 
-**ATM: what happens if power fails mid-transaction? How do you design for recovery?**
+**Q: ATM: what happens if power fails mid-transaction? How do you design for recovery?**
 
 Each transaction must be idempotent: if the ATM dispenses cash and then power fails before writing the debit to the ledger, the debit should be recorded on recovery. Design: log the transaction intent to durable storage (a transaction log) BEFORE dispensing cash. On power-on, replay uncommitted transactions. This is the same write-ahead log (WAL) pattern used by databases. For the interview: mention that the ATM state machine must have a `DISPENSING` state that, on recovery, either completes the dispense or rolls back the debit — never leaves the account in an ambiguous state.
 
 ---
 
-**Online Booking System: how do you prevent double-booking of the same seat?**
+**Q: Online Booking System: how do you prevent double-booking of the same seat?**
 
 Option 1 (optimistic locking): add a `version` field to the seat record; the booking transaction does `UPDATE seat SET status='BOOKED', version=version+1 WHERE id=? AND status='AVAILABLE' AND version=?`. If 0 rows updated, another transaction won the race — return a conflict error. Option 2 (pessimistic locking): `SELECT * FROM seat WHERE id=? FOR UPDATE` — acquires a row-level lock, serializing concurrent bookings. Optimistic is preferred for high read-to-write ratios; pessimistic is preferred when conflicts are frequent. For the interview: mention both and explain the tradeoff.
 
 ---
 
-**Library Management: how do you notify members about overdue books without polling the database?**
+**Q: Library Management: how do you notify members about overdue books without polling the database?**
 
 Schedule a daily job (Spring `@Scheduled`, cron, or a batch job) that queries all unreturned books past their due date and publishes overdue events. Observers (email sender, SMS sender, in-app notification) consume the events. Decoupling: adding a new notification channel (push notification) means adding a new Observer — no change to the scheduler or query logic. Alternative: event-driven — on each book checkout, schedule a future event (`ScheduledExecutorService.schedule()` or a job queue) that fires on the due date. The event-driven approach doesn't require daily polling.
 
 ---
 
-**Elevator System: what scheduling algorithm should you use?**
+**Q: Elevator System: what scheduling algorithm should you use?**
 
 SCAN (also called the "elevator algorithm"): the elevator moves in one direction, stopping at all requested floors, then reverses. LOOK variant: reverse when no more requests in the current direction (don't go to the top floor if the last request is floor 7). FCFS (First Come First Served) is simple but causes large variance in wait time. For the interview: mention SCAN as the baseline, note that modern elevators use destination dispatch (you enter your destination floor before entering the elevator, grouping passengers going to the same floor). The State pattern models the elevator's direction (MOVING_UP, MOVING_DOWN, IDLE) and door state (DOOR_OPEN, DOOR_CLOSED).
 
 ---
 
-**How do you represent money in ATM or Booking System? Why not float?**
+**Q: How do you represent money in ATM or Booking System? Why not float?**
 
 Use `BigDecimal` for exact decimal arithmetic, or represent money as the smallest currency unit in a `long` (e.g., cents for USD). `float` and `double` are binary floating-point and cannot represent 0.1 exactly (`0.1 + 0.2 != 0.3` in IEEE 754). For monetary calculations, rounding errors compound: a 0.0001 error per transaction multiplied by 10 million transactions equals thousands of dollars in discrepancy. `BigDecimal(String)` (not `BigDecimal(double)`) is precise; `RoundingMode.HALF_EVEN` (banker's rounding) minimizes systematic bias. The Money pattern (Fowler) wraps `BigDecimal` with a `Currency` to prevent mixing USD and EUR accidentally.
 
 ---
 
-**When asked to "add a feature" mid-interview, how do you handle it gracefully?**
+**Q: When asked to "add a feature" mid-interview, how do you handle it gracefully?**
 
 Show that the design is open for extension without modification (OCP). Example: "add a premium parking spot tier." If the design uses a `SpotType` enum + Strategy for pricing, adding premium means: add `PREMIUM` to the enum, add a `PremiumPricingStrategy` class — nothing else changes. If the design used `if (type == COMPACT) price = 2` hard-coded, adding premium requires touching that method. Use the "add a feature" moment to demonstrate OCP compliance, not to improvise. The best answer: "I anticipated extensibility here — let me show you how this works."
 
 ---
 
-**How do you handle the Library Management "search" feature in the class design?**
+**Q: How do you handle the Library Management "search" feature in the class design?**
 
 Use the Strategy pattern for search: `SearchStrategy` interface with implementations like `TitleSearch`, `AuthorSearch`, `ISBNSearch`, `GenreSearch`. The `Library.search(String query, SearchStrategy strategy)` method delegates to the strategy. Adding a new search type (publication year, keywords) means adding a new strategy class — no change to `Library`. Alternative for simple cases: one `Catalog` class with multiple overloaded `findBy*()` methods. The Strategy approach is justified when search algorithms differ significantly in implementation (linear scan vs inverted index vs external search engine).
 
 ---
 
-**Ride Sharing: how do you design driver-matching, and why is the naive approach a problem at scale?**
+**Q: Ride Sharing: how do you design driver-matching, and why is the naive approach a problem at scale?**
 
 The naive approach scans every available driver and computes Euclidean distance to the rider's pickup location, picking the nearest one — O(N) per request. This is fine for a 30-minute interview demo with a handful of drivers, but at city scale (tens of thousands of drivers) it's too slow. The production fix is geo-indexing: bucket drivers into geohash cells or an S2/quadtree grid, then only scan drivers in the rider's cell and its neighbors. For the interview: implement the O(N) scan, but explicitly call out the geo-indexing upgrade path — see [design_uber](../../hld/case_studies/design_uber.md) and [design_proximity_service](../../hld/case_studies/design_proximity_service.md) for the HLD-scale answer. Also discuss the `RideState` machine — every transition (`REQUESTED -> ACCEPTED -> DRIVER_ARRIVED -> IN_PROGRESS -> COMPLETED`) should be validated server-side to reject out-of-order client messages.
 
 ---
 
-**LRU Cache: why do you need a doubly-linked list AND a HashMap — why not just one?**
+**Q: LRU Cache: why do you need a doubly-linked list AND a HashMap — why not just one?**
 
 A HashMap alone gives O(1) key lookup but no ordering — you can't efficiently find "the least recently used entry" without an O(n) scan. A linked list alone gives ordering (move-to-front on access, evict from the tail) but O(n) lookup by key. Combining them gives O(1) for both: the HashMap maps `key -> Node`, and the node is already wired into the doubly-linked list, so `get()` does a HashMap lookup then an O(1) pointer-relinking to move the node to the front. A *singly*-linked list doesn't work either — removing a node from the middle requires its `prev` pointer to relink `prev.next`, which a singly-linked list doesn't have without an O(n) walk. This is the detail that separates a working O(1) LRU from an accidentally-O(n) one.
 
 ---
 
-**Rate Limiter: which of the four algorithms would you pick for a public API, and why?**
+**Q: Rate Limiter: which of the four algorithms would you pick for a public API, and why?**
 
 Token Bucket is the most common production choice because it allows controlled bursts (a client that's been idle can "save up" tokens) while still enforcing a steady-state average rate, and it's O(1) memory per client (just `tokens` and `lastRefillTimestamp`). Fixed Window Counter is simplest but allows up to 2x the limit at window boundaries (a burst at 11:59:59 and another at 12:00:00 both succeed). Sliding Window Log is the most accurate but costs O(N) memory per client where N = requests per window — at 1000 req/min that's 1000 timestamps per client, which doesn't scale to millions of clients. Sliding Window Counter (the Cloudflare/Kong approach — weighted average of current and previous fixed windows) is the pragmatic middle ground: O(1) memory, smooths boundary bursts, slightly approximate. For the interview: name all four, then justify Token Bucket or Sliding Window Counter as the default, falling back to Sliding Window Log only if exact accuracy is a hard requirement.
 
 ---
 
-**Tic-Tac-Toe: how do you make win-checking work for an NxN board without it becoming the bottleneck?**
+**Q: Tic-Tac-Toe: how do you make win-checking work for an NxN board without it becoming the bottleneck?**
 
 The naive approach rescans the entire board after every move — O(N^2) per move, so O(N^2) work just to check 4 lines through the last-placed cell. The fix is incremental counters: maintain `rowCounts[N]`, `colCounts[N]`, and two diagonal counters, each storing a running sum where X contributes +1 and O contributes -1 (or separate counters per symbol). Placing a move updates at most 4 counters in O(1), and a win is detected the instant `|counter| == N`. At N=1000, that's the difference between 1,000,000 cell reads per move and 4 integer increments. This incremental-counter technique generalizes to any "check all lines through a point" problem — it's the same idea as maintaining row/column sums for a live spreadsheet.
 
 ---
 
-**Splitwise: what does "debt simplification" mean, and is it guaranteed to find the minimum number of transactions?**
+**Q: Splitwise: what does "debt simplification" mean, and is it guaranteed to find the minimum number of transactions?**
 
 Debt simplification takes a tangle of pairwise debts within a group (Alice owes Bob $10, Bob owes Carol $10) and reduces it to the minimum set of direct payments that settle everyone's net balance (Alice pays Carol $10 directly — Bob is removed from the chain entirely). The standard interview-feasible algorithm computes each user's net balance, then greedily matches the largest creditor with the largest debtor using two max-heaps, repeating until all balances are zero — this runs in O(N log N) and produces at most N-1 transactions for N participants. It is NOT guaranteed to find the absolute theoretical minimum in every case (that variant is NP-hard, related to subset-sum partitioning), but the greedy max-heap approach is the answer interviewers expect and performs well in practice. Mention `BigDecimal` throughout — splitting `$100.00` three ways produces `$33.33 + $33.33 + $33.34` (the extra cent goes to the first payer), never `double` arithmetic.
 

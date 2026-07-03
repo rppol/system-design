@@ -428,49 +428,49 @@ async def send_email(to: str, body: str, idempotency_key: str) -> str:
 
 ## 12. Interview Questions with Answers
 
-**Why do long-running agents need externalized state?**
+**Q: Why do long-running agents need externalized state?**
 Processes die — from OOM kills, deployments, spot termination, network failures. Long-running agents (>5 minutes) have non-trivial crash probability. Externalized state (database checkpoints, event sourcing) means crash recovery loads the last checkpoint and resumes; without it, every crash loses all work and money spent.
 
-**What does idempotency mean for an agent tool call and why is it required?**
+**Q: What does idempotency mean for an agent tool call and why is it required?**
 Idempotency means executing a tool call twice produces the same result as executing once. Required because durable systems (Temporal, Inngest) may retry tool activities if the worker crashes mid-execution. Non-idempotent tools (send email, charge card, create record) cause duplicates on retry. Solution: use idempotency keys (unique per logical call), check key before execution, cache results by key.
 
-**How does LangGraph's checkpointing work?**
+**Q: How does LangGraph's checkpointing work?**
 LangGraph compiles a StateGraph with a `checkpointer` (SqliteSaver, RedisSaver, etc). At every node transition, the checkpointer saves the entire state to storage, keyed by `thread_id`. To resume after crash, call the compiled graph with `config={"configurable": {"thread_id": "abc"}}` and a `None` input — it loads the last checkpoint and continues from there.
 
-**What is the difference between Temporal workflows and activities?**
+**Q: What is the difference between Temporal workflows and activities?**
 Workflows are the deterministic orchestration code (must be replay-safe — no random, no IO, no time). Activities are the actual side-effecting work (LLM calls, tool execution). Workflows survive crashes via event-sourcing replay (replay the events, skip already-completed activities). Activities are retried per their retry policy.
 
-**How do you handle a long human-in-the-loop pause (e.g., wait days for user input)?**
+**Q: How do you handle a long human-in-the-loop pause (e.g., wait days for user input)?**
 Durable workflow waits via `workflow.wait_condition(lambda: state.user_responded)` (Temporal) or `interrupt_before` in LangGraph + external resume signal. During the wait, no process is running — zero compute cost. When the user responds (via API call that signals the workflow), a worker picks up the workflow and continues. Critical: never use `asyncio.sleep(86400)` in a real process — that wastes a worker for a day.
 
-**What is context compaction and when does an agent need it?**
+**Q: What is context compaction and when does an agent need it?**
 Context compaction is summarizing the early conversation history to free up tokens when approaching the model's context window limit. Needed when agent runs many iterations (>30) with growing tool results. Trigger at 70% of window. Strategy: summarize all-but-last-N tool result pairs into 5-10 bullets using a cheaper model, replace early history with summary.
 
-**How do you cap cost on a long-running agent?**
+**Q: How do you cap cost on a long-running agent?**
 Track cumulative cost in state (input_tokens × input_price + output_tokens × output_price + cache costs). Before every LLM call, check if cost exceeds budget; if so, terminate gracefully with partial result. For multi-day workflows, also cap per-day spend (catch a runaway loop) and total budget (catch overall scope creep).
 
-**What's the difference between Temporal signals and queries?**
+**Q: What's the difference between Temporal signals and queries?**
 Signals: asynchronous external input to a running workflow (e.g., "user approved"). Buffered if workflow not actively receiving. Queries: synchronous read of workflow state (e.g., "what's the current step?"). Both are essential for human-in-the-loop patterns.
 
-**Can you debug a durable workflow that's been running for days?**
+**Q: Can you debug a durable workflow that's been running for days?**
 Yes — that's a key advantage. Temporal UI shows the full event history (every activity execution, signal, query, current state). Replay locally with the same workflow code and event history to debug deterministically. LangGraph: inspect the checkpoint at any thread_id to see current state.
 
-**How does Inngest differ from Temporal for agent workflows?**
+**Q: How does Inngest differ from Temporal for agent workflows?**
 Inngest is serverless-first — write a function with `step.run()` blocks; Inngest invokes the function on event/schedule; each step's result is cached. Simpler to start (no cluster setup), good for webhook-driven flows. Temporal is more powerful (custom retry policies, complex orchestration, child workflows) but requires more setup.
 
-**What is event sourcing in the context of durable agents?**
+**Q: What is event sourcing in the context of durable agents?**
 Event sourcing means the agent's state is reconstructed from a log of events (tool calls made, results received, signals received). On crash recovery, replay all events from the log to reconstruct state. Temporal uses event sourcing for workflow state. Critical implication: workflow code must be deterministic (replay produces same result).
 
-**How do you handle a tool that fails non-deterministically (transient network errors)?**
+**Q: How do you handle a tool that fails non-deterministically (transient network errors)?**
 Configure retry policies on the tool/activity: exponential backoff (e.g., 1s, 2s, 4s, 8s), max attempts (3-5), max total elapsed time (60s). The workflow framework retries automatically. After max attempts, the workflow gets an exception and can decide: bubble up, fall back to alternative tool, or skip the step.
 
-**Should agent state include the full conversation history or just summaries?**
+**Q: Should agent state include the full conversation history or just summaries?**
 For short agents (<20 iterations): full history. For long agents: combine — keep recent 5-10 turns verbatim, summarize older history. The state schema should include both `messages` (recent verbatim) and `history_summary` (compacted older). LangGraph supports this with custom state schemas.
 
-**What's the storage overhead of checkpointing every step?**
+**Q: What's the storage overhead of checkpointing every step?**
 Per checkpoint: ~5-50KB (messages + state). For an agent running 50 iterations: 250KB-2.5MB total checkpoint storage. For 10K agents/day: 2.5-25GB/day. Plan storage (Postgres, S3, etc) accordingly. SqliteSaver is fine for single-instance; PostgresSaver for distributed.
 
-**How do you migrate from in-memory agents to durable agents?**
+**Q: How do you migrate from in-memory agents to durable agents?**
 (1) Pick a framework (LangGraph easiest if already on LangChain). (2) Refactor agent loop into discrete steps (each becomes a node or activity). (3) Add idempotency keys to all side-effecting tools. (4) Configure checkpointer/storage. (5) Run shadow mode (durable agent runs alongside, compare results). (6) Cut over feature flag. Typical migration: 1-3 sprints for a moderately complex agent.
 
 ---

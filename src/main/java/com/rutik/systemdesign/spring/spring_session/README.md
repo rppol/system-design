@@ -586,58 +586,58 @@ Putting large collections, entire entity graphs, or file blobs into session attr
 
 ## 12. Interview Questions with Answers
 
-**Why does the default `HttpSession` break when you scale a Spring Boot app to multiple instances?**
+**Q: Why does the default `HttpSession` break when you scale a Spring Boot app to multiple instances?**
 The default `HttpSession` lives in the JVM heap of the single instance that created it, so a request the load balancer routes to a different instance cannot see it. That node finds no session, so the user's cart empties or they appear logged out, and if the original node restarts every session it held is lost. Spring Session fixes this by moving session state to an external shared store (Redis) that every instance can read. Reach for it the moment you run more than one instance.
 
-**Why aren't sticky sessions a real solution to multi-instance session loss?**
+**Q: Why aren't sticky sessions a real solution to multi-instance session loss?**
 Sticky sessions pin a user to one node, so they "work" until that node fails or is redeployed, at which point all its sessions vanish and the balancer cannot fail those users over. Affinity makes every node a single point of failure for its pinned users and blocks zero-downtime rolling deploys. The correct fix is externalizing session state to a shared store so any node can serve any request. Use sticky sessions only as a stopgap, never as the architecture.
 
-**What is the core trick Spring Session uses to replace the container's session?**
+**Q: What is the core trick Spring Session uses to replace the container's session?**
 `SessionRepositoryFilter` wraps the incoming `HttpServletRequest` and overrides `getSession()` so it resolves against a `SessionRepository` instead of the servlet container. Because it wraps the request very early — before Spring Security and your controllers — all downstream code keeps calling the standard Servlet API while transparently reading and writing the external store. The container's own `HttpSession` is never used. This is why adopting Spring Session needs no application code changes.
 
-**What is the default cookie name Spring Session uses, and why did it change from `JSESSIONID`?**
+**Q: What is the default cookie name Spring Session uses, and why did it change from `JSESSIONID`?**
 Spring Session's `CookieHttpSessionIdResolver` uses a cookie named `SESSION` holding a Base64-encoded id, not the container's `JSESSIONID`. The rename makes explicit that the container is no longer managing the session and avoids confusion with any residual container cookie. The default max inactive interval is 1800 seconds (30 minutes). You can switch the id to a header (`X-Auth-Token`) for non-browser clients.
 
-**Why might a `SessionExpiredEvent` never fire even though sessions do expire?**
+**Q: Why might a `SessionExpiredEvent` never fire even though sessions do expire?**
 Because `RedisIndexedSessionRepository` publishes expiration events from Redis keyspace notifications, which are disabled by default (`notify-keyspace-events` is empty). The session data still expires via TTL, but no event reaches your `@EventListener`. Enable notifications with `notify-keyspace-events Egx` and use the indexed repository (`repository-type=indexed`); the plain `RedisSessionRepository` publishes no events at all. Also note Redis delivers expired notifications lazily, so never rely on them for precise real-time timing.
 
-**What is the difference between `RedisSessionRepository` and `RedisIndexedSessionRepository`?**
+**Q: What is the difference between `RedisSessionRepository` and `RedisIndexedSessionRepository`?**
 `RedisSessionRepository` (the Spring Session 3.0 default) stores one key per session and relies purely on Redis TTL — it is cheapest but offers no principal index, no expiration events, and no concurrent-session control. `RedisIndexedSessionRepository` stores extra index keys and runs a cleanup task, enabling `findByPrincipalName`, `SessionExpiredEvent`, max-sessions, and logout-everywhere, at the cost of more Redis writes and required keyspace notifications. Choose indexed only when you need those cluster-wide features.
 
-**How does Spring Session protect against session fixation, and does `changeSessionId` work with an external store?**
+**Q: How does Spring Session protect against session fixation, and does `changeSessionId` work with an external store?**
 On login, Spring Security's default `sessionFixation().changeSessionId()` rotates the session id, defeating fixation. Spring Session implements that rotation against the external store by generating a new id, copying attributes, deleting the old Redis key, and saving under the new one, so any id an attacker fixed before login is discarded. Modern Spring Session fully supports `changeSessionId()`; you do not need to fall back to `migrateSession()`. The rotated id then resolves from Redis on subsequent requests on any node.
 
-**How do you enforce "at most one active session per user" across a cluster of instances?**
+**Q: How do you enforce "at most one active session per user" across a cluster of instances?**
 Back Spring Security's concurrent-session control with a `SpringSessionBackedSessionRegistry` instead of the default `SessionRegistryImpl`. The default registry only tracks sessions in the local JVM, so `maximumSessions(1)` is meaningless across nodes; the Spring Session-backed registry reads the principal index (`findByPrincipalName`) from Redis, making the limit cluster-wide. This requires the indexed Redis repository. Set `maxSessionsPreventsLogin(false)` to evict the oldest session rather than block the new login.
 
-**How do you implement "log out everywhere" for a user?**
+**Q: How do you implement "log out everywhere" for a user?**
 Use `FindByIndexNameSessionRepository.findByPrincipalName(username)` to enumerate all of that user's session ids across the cluster, then call `deleteById` on each. Because the sessions are deleted from the shared store, revocation is instant and global — no blacklist and no waiting for token expiry. This requires the indexed repository, which maintains the principal-to-sessions index. This instant revocation is a headline advantage of stateful sessions over JWT.
 
-**What is the tradeoff between stateless JWT and stateful Spring Session?**
+**Q: What is the tradeoff between stateless JWT and stateful Spring Session?**
 JWT is stateless (no server store, trivial scaling, ~0.1ms local verification) but hard to revoke, larger on the wire (500–2000 bytes per request), and needs a blacklist for early invalidation. Spring Session keeps a small opaque id client-side and full state server-side, giving instant revocation, logout-everywhere, and tiny client payloads, at the cost of a shared store on the request path and one ~0.5–1ms round-trip per request. Choose sessions when revocation and server-side state matter; choose JWT for stateless machine-to-machine APIs.
 
-**What does `flush-mode` control and when would you change it from the default?**
+**Q: What does `flush-mode` control and when would you change it from the default?**
 `flush-mode` controls when session changes are written to Redis. The default `ON_SAVE` buffers all attribute changes and writes once when the request completes (via `commitSession()`), while `IMMEDIATE` writes through on every `setAttribute`. `ON_SAVE` minimizes Redis round-trips and is right for most apps; switch to `IMMEDIATE` only when you must not lose an attribute set mid-request if the node crashes before the response commits. `IMMEDIATE` is markedly chattier on Redis.
 
-**How does Spring Session support SPA and mobile clients that do not want cookies?**
+**Q: How does Spring Session support SPA and mobile clients that do not want cookies?**
 Register `HeaderHttpSessionIdResolver.xAuthToken()`, which transports the session id in the `X-Auth-Token` header instead of the `SESSION` cookie. The server returns the id in that header on session creation; the client stores it (keychain, memory) and echoes it on each request. This keeps server-side session state while avoiding cookie, CSRF, and CORS friction for non-browser clients.
 
-**How is Java serialization a deploy-time risk with Spring Session, and how do you avoid it?**
+**Q: How is Java serialization a deploy-time risk with Spring Session, and how do you avoid it?**
 With the default `JdkSerializationRedisSerializer`, session attributes are stored as Java binary, so a class change between deploys can raise `InvalidClassException`. It happens when old sessions in Redis are deserialized into the new class shape (serialVersionUID mismatch), 500-ing already-logged-in users. Avoid it by using `GenericJackson2JsonRedisSerializer` (tolerant of additive field changes and language-neutral) or, if you keep JDK serialization, pinning `serialVersionUID` and making only backward-compatible changes. Never store non-`Serializable` attributes under JDK serialization.
 
-**Where is the CSRF token stored with Spring Session, and does it survive node failover?**
+**Q: Where is the CSRF token stored with Spring Session, and does it survive node failover?**
 With `HttpSessionCsrfTokenRepository`, the CSRF token lives inside the Spring Session in Redis, so it survives node failover. A form submitted after the user's request is rerouted to a different instance still validates because the token travels with the shared session. A `CookieCsrfTokenRepository` also survives failover but stores the token on the client instead. Either way, moving the session to a shared store is what keeps CSRF protection intact across a scaled-out cluster.
 
-**How does WebFlux session support differ from the servlet model?**
+**Q: How does WebFlux session support differ from the servlet model?**
 WebFlux uses `WebSession` (not `HttpSession`) accessed non-blockingly via `exchange.getSession()`, which returns a `Mono<WebSession>`, backed by a `ReactiveSessionRepository`. You enable it with `@EnableRedisWebSession` and a `ReactiveRedisSessionRepository`, and a `WebSessionManager` coordinates resolution. The storage concept is identical — externalized, shared session state — but the API is reactive end to end so no thread blocks on the Redis round-trip.
 
-**Why must `SessionRepositoryFilter` run before Spring Security's filters?**
+**Q: Why must `SessionRepositoryFilter` run before Spring Security's filters?**
 Spring Security reads the `SecurityContext` from the session, so the session must already be swapped to the repository-backed one before Security runs. Otherwise `SecurityContextHolderFilter` reads the container session (or nothing) and the user appears unauthenticated despite a valid `SESSION` cookie. Spring Boot wires `springSessionRepositoryFilter` at `SessionRepositoryFilter.DEFAULT_ORDER` (`Integer.MIN_VALUE + 50`), well ahead of the security chain. Do not override this ordering unless you fully understand the filter chain.
 
-**Why does `RedisIndexedSessionRepository` keep the main session key alive ~5 minutes past its TTL?**
+**Q: Why does `RedisIndexedSessionRepository` keep the main session key alive ~5 minutes past its TTL?**
 The session data key (`spring:session:sessions:<id>`) is given a TTL of the max inactive interval plus a 5-minute buffer, while a separate `expires:<id>` key holds the exact TTL and triggers the expiration event. The buffer guarantees the session data is still retrievable when the expiration event fires, so the `@EventListener` can inspect the expiring principal instead of finding an already-deleted key. It is a deliberate consequence of Redis not deleting keys at the precise expiry instant. This is why observed Redis memory holds sessions slightly longer than their nominal timeout.
 
-**Can multiple applications share one Spring Session store, and what controls isolation?**
+**Q: Can multiple applications share one Spring Session store, and what controls isolation?**
 Yes — apps pointing at the same Redis with the same namespace (default `spring:session`) read the same sessions, which enables lightweight shared-session SSO across a trusted cluster. Isolation is controlled by the `namespace` (and the Redis instance/database): give unrelated apps distinct namespaces so their session keys never collide. Sharing sessions this way requires compatible serialization and attribute classes on both sides, so it is best kept within a single team's trusted apps rather than as a general SSO mechanism.
 
 ---

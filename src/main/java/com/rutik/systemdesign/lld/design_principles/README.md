@@ -239,61 +239,61 @@ Q&As ordered by interview frequency: gotchas and traps first, internals second, 
 
 ---
 
-**DRY says "don't repeat yourself" — when is duplication actually acceptable?**
+**Q: DRY says "don't repeat yourself" — when is duplication actually acceptable?**
 
 When two pieces of code happen to look the same but represent different concepts that will evolve independently — forcing them into one abstraction creates unwanted coupling. The Rule of Three: wait for the third occurrence before abstracting. Example: two HTTP error handlers may look identical today but handle different business contexts; abstracting too early means every future change must accommodate both. DRY is about knowledge, not text — the test is "if the rule changes, how many places must I update?"
 
 ---
 
-**What is the Law of Demeter violation in `user.getAddress().getCity().getName()`?**
+**Q: What is the Law of Demeter violation in `user.getAddress().getCity().getName()`?**
 
 Each `.get()` call adds a dependency to an object you didn't directly receive. If `Address` changes to store `city` differently, `User`'s callers break even though `User` didn't change. Fix: add `user.getCityName()` — delegate the traversal to `User`, which owns the navigation path. Benefit: callers are decoupled from `Address` and `City` internals. In practice, LoD violations are detected by "train wreck" chains and are the root cause of "fragile code that breaks in unexpected places."
 
 ---
 
-**YAGNI vs forward compatibility — how do you know what NOT to build?**
+**Q: YAGNI vs forward compatibility — how do you know what NOT to build?**
 
 Build what solves the current known requirement. Don't build generalization, configurability, or extensibility points until a second concrete use case arrives. The cost of premature abstraction is high: the wrong abstraction is worse than duplication — you can remove duplication; you can't easily remove a load-bearing wrong abstraction. Exception: genuinely irreversible decisions (public API contracts, database schema) — there, some forward-thinking is justified because the cost of changing later is extreme.
 
 ---
 
-**Composition over Inheritance: give a concrete Java example where inheritance breaks and composition fixes it.**
+**Q: Composition over Inheritance: give a concrete Java example where inheritance breaks and composition fixes it.**
 
 `Stack extends Vector` in Java is the canonical failure. `Stack` inherits all of `Vector`'s mutation methods (`add()`, `set()`, `remove()`) even though a stack should only expose `push()`/`pop()`/`peek()`. Callers can bypass the stack discipline via inherited Vector methods. Fix: `Stack` should have a `Vector` field (`has-a`) and only expose stack-appropriate operations, delegating to the field internally. Effective Java Item 18: prefer composition over inheritance when a subclass would inherit methods it shouldn't expose.
 
 ---
 
-**Program to Interface: when does coding to an interface actually hurt?**
+**Q: Program to Interface: when does coding to an interface actually hurt?**
 
 When the interface has exactly one implementation and no conceivable second implementation in any realistic future — the interface adds indirection without value. Example: `UserRepositoryInterface` with only `JpaUserRepository` as the implementation, in a codebase that will never use anything other than JPA. Fix: code directly to the concrete class until a second implementation emerges. The test: "Would I ever inject a different implementation in production or in tests?" If yes (test doubles count), the interface is justified.
 
 ---
 
-**KISS vs abstraction: how do you argue for simplicity when stakeholders want "extensible architecture"?**
+**Q: KISS vs abstraction: how do you argue for simplicity when stakeholders want "extensible architecture"?**
 
 Frame simplicity as reversibility: "a simple implementation is easy to extend when the requirement arrives; a complex premature architecture is hard to change because it's load-bearing." Measure complexity in cognitive overhead: every abstraction a new developer must understand before making a change is a cost. Ask: "what is the current business case for this abstraction?" If the answer is hypothetical ("we might need it"), KISS wins. If the answer is concrete ("we need to swap this implementation in 3 months"), PtI wins.
 
 ---
 
-**How do DRY violations compound over time in a codebase?**
+**Q: How do DRY violations compound over time in a codebase?**
 
 Each copy drifts independently: a bug fixed in one copy isn't fixed in the others. After 18 months, you have 5 slightly different versions of the same logic, each with its own bugs. The team doesn't know which is canonical. Adding a feature requires updating all 5 — but developers only find 3. This is "shotgun surgery" (Martin Fowler): a single change requires edits in many places. DRY violations are detected by asking "if this rule changed, how many files would I need to touch?"
 
 ---
 
-**Law of Demeter in Spring: why is `applicationContext.getBean(MyService.class)` everywhere a violation?**
+**Q: Law of Demeter in Spring: why is `applicationContext.getBean(MyService.class)` everywhere a violation?**
 
 It's service-locator pattern: every class that calls `getBean()` depends on the entire ApplicationContext (a global registry). The dependencies are hidden — you can't see from the constructor what a class needs. Fix: constructor injection. The class declares its dependencies explicitly; Spring injects them. `getBean()` is legitimate only in framework code or in cases where the dependency cannot be known at startup (e.g., a factory that creates instances with runtime-determined types).
 
 ---
 
-**Composition over Inheritance and the "fragile base class" problem.**
+**Q: Composition over Inheritance and the "fragile base class" problem.**
 
 When a base class is modified, subclasses break even though they didn't change — because they inherited implementation details that the base class author didn't intend to expose. `super.method()` calls mean subclasses are coupled to the order of operations in the base class. Composition avoids this: the component (the "has-a") has no access to the outer class's internals; the outer class calls the component's public API only. Changes to the component are encapsulated.
 
 ---
 
-**DRY applied to configuration and data — not just code.**
+**Q: DRY applied to configuration and data — not just code.**
 
 DRY applies to knowledge, not just code. A database schema that stores the same customer address in three tables violates DRY (update one, get inconsistency). A configuration file that hard-codes port 8080 in 12 places violates DRY. A validation rule that exists in the UI, the service layer, AND the database trigger violates DRY. The fix: single source of truth. For config: a single constants class or environment variable. For validation: server-side as the authoritative source; client-side as a UX convenience only.
 

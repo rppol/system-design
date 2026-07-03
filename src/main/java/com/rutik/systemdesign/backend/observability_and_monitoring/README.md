@@ -393,46 +393,46 @@ management:
 
 ## 12. Interview Questions with Answers
 
-**What are the three pillars of observability and how do they differ?**
+**Q: What are the three pillars of observability and how do they differ?**
 Metrics are aggregated numeric measurements (counters, gauges, histograms) with low cardinality labels — cheap to store, fast to query, but lose per-request detail. Logs are discrete timestamped events with arbitrary fields — rich detail but expensive to index and query at scale. Distributed traces track a single request's path through multiple services — essential for latency attribution but require context propagation and sampling to be practical. The key is to use all three together: metrics for alerting, traces for diagnosis, logs for detailed investigation.
 
-**Why is cardinality so important in metrics?**
+**Q: Why is cardinality so important in metrics?**
 Each unique combination of label values creates a separate time series. A metric with labels `{status="200", method="GET", userId="12345"}` creates one series per user. With 1 million users, that's 1 million time series. Prometheus stores each series in memory; high cardinality exhausts heap, increases scrape latency, and can crash the TSDB. Solution: only use low-cardinality, finite-set values as metric labels. High-cardinality values belong in trace span attributes or structured log fields.
 
-**What is the difference between head-based and tail-based sampling in distributed tracing?**
+**Q: What is the difference between head-based and tail-based sampling in distributed tracing?**
 Head-based sampling makes the decision at the trace root (the first span): sample this trace or not. It has low overhead since downstream services inherit the decision. However, it samples blindly — a 1% rate may miss the one slow request in 1000. Tail-based sampling buffers the entire trace and makes the decision after all spans arrive: always keep error traces and traces over p99 latency threshold, sample normal traces at 1%. It has higher memory cost but ensures important traces are always retained. Jaeger Collector supports tail-based sampling via the adaptive sampler.
 
-**How do you propagate trace context across service boundaries?**
+**Q: How do you propagate trace context across service boundaries?**
 The trace context (trace ID, span ID, sampling flag) is injected into outgoing requests as HTTP headers. B3 propagation uses `X-B3-TraceId`, `X-B3-SpanId`, `X-B3-ParentSpanId`, `X-B3-Sampled`. W3C TraceContext (standardized) uses a single `traceparent: 00-{traceId}-{parentSpanId}-{flags}` header. OpenTelemetry Java auto-instrumentation handles propagation automatically for RestTemplate, WebClient, HttpClient, and Kafka. For custom transports, use `W3CTraceContextPropagator.inject(context, carrier, setter)` manually.
 
-**What is the difference between SLI, SLO, and SLA?**
+**Q: What is the difference between SLI, SLO, and SLA?**
 SLI (Service Level Indicator) is the actual measured metric — e.g., 99.95% of requests returned 2xx status in the last 30 days. SLO (Service Level Objective) is the internal target — e.g., maintain 99.9% success rate. SLA (Service Level Agreement) is the contractual commitment with customers, with defined remedies for violations — e.g., if monthly availability drops below 99.5%, customers receive a 25% service credit. SLOs should be stricter than SLAs to give an error budget buffer. The error budget (1 - SLO = 0.1%) determines how aggressively you can deploy changes.
 
-**How do you implement MDC-based correlation ID propagation across async boundaries?**
+**Q: How do you implement MDC-based correlation ID propagation across async boundaries?**
 MDC is ThreadLocal, so it does not propagate across thread switches automatically. When using `CompletableFuture.supplyAsync()` or `@Async`, the new thread has a blank MDC. Solution: copy MDC context explicitly. Create a wrapper: `Map<String, String> context = MDC.getCopyOfContextMap(); CompletableFuture.supplyAsync(() -> { MDC.setContextMap(context); try { return doWork(); } finally { MDC.clear(); } })`. Spring's `TaskDecorator` interface allows configuring a thread pool to automatically copy MDC: implement `TaskDecorator` and set it on the `ThreadPoolTaskExecutor`.
 
-**What is the coordinated omission problem in performance monitoring?**
+**Q: What is the coordinated omission problem in performance monitoring?**
 When measuring latency, if the system under test is too slow, the measurement tool may wait before sending the next request. This makes the system appear faster than it is because slow requests prevent new requests from piling up. Real users do not wait — they keep arriving regardless. Tools like wrk2 and Gatling use a constant arrival rate to avoid this. When analyzing latency percentiles from load tests, verify the test tool was sending at a constant rate, not waiting for each response before sending the next.
 
-**How would you instrument a Kafka consumer for observability?**
+**Q: How would you instrument a Kafka consumer for observability?**
 Track consumer lag via `kafka.consumer.fetch-manager-metrics` exposed through Micrometer's Kafka metrics binder. Alert when `records-lag-max` exceeds threshold (e.g., > 10000 messages). For tracing, extract the B3/W3C trace context from Kafka message headers using `TextMapGetter` and create a child span per message. For logging, put the topic, partition, offset, and key in MDC. Monitor: messages consumed per second, processing duration per message (Timer), error rate (Counter), and consumer group rebalances.
 
-**What log level should you use for which scenarios?**
+**Q: What log level should you use for which scenarios?**
 TRACE: every method entry/exit, variable values — development only, never production (too verbose). DEBUG: conditional decision points, cache hit/miss, DB query parameters — can enable in production temporarily for debugging with dynamic log level via `/actuator/loggers`. INFO: meaningful business events (order created, user logged in, payment processed) — always on in production. WARN: unexpected but handled situations (retry attempt, degraded mode, deprecated API call) — always on. ERROR: unexpected failures requiring attention (unhandled exception, external service down, data corruption) — triggers alerts. Never log sensitive data (passwords, tokens, PII) at any level.
 
-**How does distributed tracing work with async messaging (Kafka)?**
+**Q: How does distributed tracing work with async messaging (Kafka)?**
 When a service publishes to Kafka, it injects the trace context into Kafka message headers using OpenTelemetry's `TextMapSetter`. When the consumer reads the message, it extracts the context using `TextMapGetter` and creates a new root span with a `FOLLOWS_FROM` link to the producer span (not a parent-child relationship, since the consumer may run minutes later). This links the producer and consumer traces in the UI for async correlation. Micrometer Tracing handles this automatically with Spring Kafka when using the OTel bridge.
 
-**What is the difference between Grafana Loki and Elasticsearch for logs?**
+**Q: What is the difference between Grafana Loki and Elasticsearch for logs?**
 Elasticsearch indexes every field of every log entry — enabling fast full-text search on any field. This makes it powerful but expensive: indexing overhead, high disk usage (inverted index), and significant memory. Loki only indexes configured labels (service, environment, log level) and stores log content as compressed chunks. Querying log content requires scanning compressed chunks (slower for regex across large volumes). Loki is 10x cheaper to operate than Elasticsearch for log aggregation where most queries filter by label first. Choose Elasticsearch for compliance log search (complex queries), Loki for operational troubleshooting (label-filtered queries).
 
-**How do you avoid creating dashboards that look healthy during incidents?**
+**Q: How do you avoid creating dashboards that look healthy during incidents?**
 Avoid using averages — a p50 latency of 50ms looks fine even if p99 is 5 seconds (5% of users experience 5s latency). Always show p95 and p99. Avoid success-rate dashboards that aggregate across services — a healthy service can mask a broken one. Show error rates per service and endpoint. Include the error budget burn rate — if the error budget is burning 3x faster than expected, alert before the SLO is breached. Use multi-window burn rate alerts (short window for fast detection, long window for sustained burn) per the Google SRE workbook.
 
-**What is OpenTelemetry and why was it created?**
+**Q: What is OpenTelemetry and why was it created?**
 OpenTelemetry (OTel) is a vendor-neutral CNCF project providing a single SDK for metrics, traces, and logs that can export to any observability backend (Prometheus, Jaeger, Datadog, etc.). Before OTel, each vendor had its own SDK — switching from Jaeger to Zipkin required code changes. OTel's auto-instrumentation Java agent instruments popular frameworks (Spring MVC, Kafka, JDBC, gRPC, Redis) with zero code changes using bytecode manipulation. The OTel Collector acts as a pipeline: receives OTLP from services, processes (batch, filter, enrich), exports to multiple backends simultaneously.
 
-**How do you monitor JVM health in production?**
+**Q: How do you monitor JVM health in production?**
 Key JVM metrics via Micrometer: `jvm.memory.used` / `jvm.memory.max` per pool (heap, non-heap, G1 Eden, G1 Old Gen), `jvm.gc.pause` (duration and count per GC cause), `jvm.threads.live` / `jvm.threads.daemon` / `jvm.threads.states` (BLOCKED count indicates contention), `jvm.classes.loaded`. Alert on: heap usage > 80% of max (GC pressure), GC pause time increasing trend, BLOCKED thread count > 0 (deadlock risk), metaspace > 90% (class loading leak). Correlate GC pauses with latency spikes in Grafana by overlaying JVM metrics on API latency panels.
 
 ---

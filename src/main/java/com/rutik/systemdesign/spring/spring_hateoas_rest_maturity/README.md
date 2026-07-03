@@ -469,55 +469,55 @@ Once clients navigate by `rel`, a `rel` name is part of your contract. Renaming 
 
 ## 12. Interview Questions with Answers
 
-**What does HATEOAS actually add over a normal REST API, and why is it Level 3?**
+**Q: What does HATEOAS actually add over a normal REST API, and why is it Level 3?**
 HATEOAS adds hypermedia links to responses so the client discovers available actions instead of hardcoding URLs. In the Richardson Maturity Model, Level 1 adds resource URIs, Level 2 adds proper verbs and status codes, and Level 3 (HATEOAS) adds the `_links` that let the response itself drive the client's next request. The practical payoff is that the server can relocate endpoints or gate transitions by state without breaking clients — but only if the client is written to follow links.
 
-**Why is hardcoding `"/orders/" + id` in a response body considered broken in Spring HATEOAS?**
+**Q: Why is hardcoding `"/orders/" + id` in a response body considered broken in Spring HATEOAS?**
 Because a concatenated string bakes in the host, scheme, and context path, so it breaks behind a load balancer, under a different context path, or when versioning changes the route. `linkTo(methodOn(OrderController.class).getOrder(id)).withSelfRel()` instead reads the mapping off the controller method and resolves the current request's base URL, producing a correct absolute href everywhere. This is the single most common HATEOAS mistake in code review.
 
-**Most APIs call themselves REST but sit at Level 2 — what does that mean and is it wrong?**
+**Q: Most APIs call themselves REST but sit at Level 2 — what does that mean and is it wrong?**
 It means they use resource URIs plus correct HTTP verbs and status codes but do not return hypermedia links, so clients still template URLs. It is not wrong: Level 2 is a perfectly reasonable, widely-recommended target, and HATEOAS is only worth its extra payload and client complexity when you have a real state machine or evolvability requirement. Roy Fielding argues true REST requires Level 3, but pragmatically most teams stop at Level 2 deliberately.
 
-**What is the difference between `EntityModel`, `CollectionModel`, and `PagedModel`?**
+**Q: What is the difference between `EntityModel`, `CollectionModel`, and `PagedModel`?**
 `EntityModel<T>` wraps a single resource plus its links, `CollectionModel<T>` wraps a list of models, and `PagedModel<T>` adds page metadata plus navigation links. `CollectionModel` carries collection-level links, while `PagedModel` extends it with a `page` block (`size`, `totalElements`, `totalPages`, `number`) and `first`/`prev`/`next`/`last` links. You return `EntityModel` from a single-item GET, `CollectionModel` from a list, and `PagedModel` (via `PagedResourcesAssembler`) from a paginated list — the client pages by following `next` rather than constructing `?page=N`.
 
-**What does `linkTo(methodOn(...))` do under the hood, and what is its main limitation?**
+**Q: What does `linkTo(methodOn(...))` do under the hood, and what is its main limitation?**
 `methodOn` returns a proxy that records a dummy invocation of the controller method without running its body, letting `linkTo` read the method's `@RequestMapping` metadata and build the URL. The limitation is that anything the real method computes from the current request or thread (SecurityContext, request attributes) is invisible, because the body never executes. Pass all URL-affecting values as method arguments, or fall back to `linkTo(Controller.class).slash(id)`.
 
-**What is the difference between HAL and HAL-FORMS, and which media type triggers each?**
+**Q: What is the difference between HAL and HAL-FORMS, and which media type triggers each?**
 HAL (`application/hal+json`) describes *where* you can go via `_links` and embeds related resources in `_embedded`. HAL-FORMS (`application/prs.hal-forms+json`) adds `_templates` that describe *how* to invoke an action — its HTTP method, target URL, and expected input fields. You get HAL-FORMS only when the client sends `Accept: application/prs.hal-forms+json` and you attached affordances to the link; otherwise you get plain HAL.
 
-**What is `RepresentationModelAssembler` and why use it instead of building links in the controller?**
+**Q: What is `RepresentationModelAssembler` and why use it instead of building links in the controller?**
 It is an interface with a `toModel(entity)` method that centralizes conversion of a domain object into a linked `EntityModel`, keeping link logic out of controllers. This avoids duplicating link-building across every endpoint that returns the same resource and gives you one place to encode state-dependent links (show `pay`/`cancel` only when NEW). Controllers then just call `assembler.toModel(order)` and stay thin.
 
-**What is `ProblemDetail` and what problem does it solve?**
+**Q: What is `ProblemDetail` and what problem does it solve?**
 `ProblemDetail` (Spring 6 / Boot 3) is Spring's implementation of RFC 7807, a standardized JSON error body with `type`, `title`, `status`, `detail`, and `instance`, served as `application/problem+json`. It replaces every team inventing its own error shape, so a client writes one error parser for all endpoints. You create one with `ProblemDetail.forStatus(...)` in an `@ExceptionHandler` and can add custom properties like a `fieldErrors` map.
 
-**When would you choose `RestClient` over `RestTemplate` or `WebClient`?**
+**Q: When would you choose `RestClient` over `RestTemplate` or `WebClient`?**
 Use `RestClient` (GA in Boot 3.2) for synchronous, blocking HTTP in a servlet application — it is the modern fluent replacement for `RestTemplate`, which is now in maintenance mode. Use `WebClient` when you need reactive, non-blocking calls or very high concurrency fan-out. `RestTemplate` is only for legacy code you are not modernizing; it is supported but receives no new features.
 
-**How does `@HttpExchange` create a declarative HTTP client, and what backs it?**
+**Q: How does `@HttpExchange` create a declarative HTTP client, and what backs it?**
 You declare a Java interface with methods annotated `@GetExchange`/`@PostExchange`, and `HttpServiceProxyFactory` generates an implementation at runtime. The factory is given an adapter — `RestClientAdapter` (Spring 6.1 / Boot 3.2), `WebClientAdapter`, or `RestTemplateAdapter` — which determines the underlying transport. This gives you a typed, testable client contract, analogous to Spring Data repositories or OpenFeign, without hand-writing HTTP calls.
 
-**What are the three main API versioning strategies and their tradeoffs?**
+**Q: What are the three main API versioning strategies and their tradeoffs?**
 URI versioning (`/api/v2/orders`) is the most visible and cache-friendly but puts a version in the resource identity, which purists dislike. Header versioning (`X-API-Version: 2`) keeps URLs clean but is invisible in logs and needs `Vary` for caching. Media-type versioning (`Accept: application/vnd.acme.v2+json`) is the most RESTful because the representation, not the resource, is versioned, but it is the most complex to tool. Most teams pick URI versioning for pragmatism.
 
-**How does the presence or absence of a link encode authorization or state?**
+**Q: How does the presence or absence of a link encode authorization or state?**
 In a hypermedia API the assembler adds a `cancel` or `pay` link only when the resource's current state (and the caller's permissions) actually allow that action, so the link set *is* the state machine. A client reads what it may do off `_links` instead of hardcoding business rules, and an already-shipped order simply stops offering `cancel`. This keeps transition logic on the server and prevents clients from attempting illegal actions.
 
-**Why is renaming a link `rel` a breaking change?**
+**Q: Why is renaming a link `rel` a breaking change?**
 Once clients navigate by relation name, a `rel` like `pay` is part of the published contract exactly as a URL is, so renaming it to `payment` breaks every client that looked up `_links.pay`. Hypermedia moves the coupling from URLs to `rel` names — it does not eliminate coupling. Treat `rel` names with the same versioning discipline you apply to endpoints.
 
-**Can you have a Level 3 server with a Level 2 client, and what happens?**
+**Q: Can you have a Level 3 server with a Level 2 client, and what happens?**
 Yes, and it is a common anti-pattern: the server emits `_links` but the client ignores them and templates URLs itself. You then pay the full cost of HATEOAS — larger payloads, assembler complexity, link maintenance — while getting none of the decoupling benefit, because the client is still hardwired to your URL layout. Decide whether the client will genuinely follow links *before* committing to Level 3.
 
-**How does Spring Data REST relate to Spring HATEOAS?**
+**Q: How does Spring Data REST relate to Spring HATEOAS?**
 Spring Data REST is built on Spring HATEOAS and auto-exposes JPA/Mongo repositories as a HAL API, generating `_links`, `_embedded`, pagination links, and an ALPS/HAL-FORMS profile with no hand-written assemblers. It is the fastest way to ship a Level 3 API, at the cost of tightly coupling your HTTP surface to your persistence model. For a curated public API you usually still hand-write assemblers to control the exposed shape.
 
-**What is Traverson and when would you use it?**
+**Q: What is Traverson and when would you use it?**
 Traverson is Spring HATEOAS's Java client for navigating a HAL API by following `rel` names rather than building URLs, e.g. `traverson.follow("orders", "pay")`. You use it on the consumer side to write a genuinely hypermedia-driven client that only knows the API root and traverses links from there. It is the client-side counterpart that makes a Level 3 server actually pay off.
 
-**Does adding HATEOAS change your status codes or verbs?**
+**Q: Does adding HATEOAS change your status codes or verbs?**
 No — HATEOAS sits on top of Level 2, so you still return 201 on create, 200 on read, 404 on missing, 409 on conflict, and use GET/POST/PUT/PATCH/DELETE correctly. HATEOAS only adds the `_links` (and optionally HAL-FORMS `_templates`) to the body; it does not replace correct HTTP semantics. A broken Level 2 API does not become correct by bolting links onto it.
 
 ---

@@ -362,43 +362,43 @@ The broken config silently loses acknowledged messages on leader failure — the
 
 ## 12. Interview Questions with Answers
 
-**How do you guarantee no acknowledged message is ever lost in Kafka?**
+**Q: How do you guarantee no acknowledged message is ever lost in Kafka?**
 Three settings must align: replication factor 3, `min.insync.replicas=2` on the topic, and `acks=all` on the producer. With `acks=all`, the producer's write is only acknowledged once all *in-sync* replicas have it; `min.insync.replicas=2` means the broker refuses the write unless at least 2 replicas are in sync, so an acked message lives on ≥2 brokers. Lose one broker and the data survives and the topic stays writable; lose two and writes block (correctly — blocking beats silent data loss). The classic bug is RF=3 with `min.insync.replicas=1`: a leader can ack a write it hasn't replicated, then die, and the message is gone despite `acks=all`.
 
-**How do you decide how many partitions a topic needs?**
+**Q: How do you decide how many partitions a topic needs?**
 Take the max of two requirements: throughput and consumer parallelism. For throughput, divide target peak write rate by a measured per-partition write limit (often ~10–25 MB/s) — 600 MB/s ÷ 20 = 30 partitions. For parallelism, partitions must be ≥ the maximum number of consumers you want active in any one group, since a partition is consumed by exactly one consumer in a group. Round up for headroom because *increasing* partitions later is disruptive (it breaks key-to-partition ordering and triggers reassignment). But don't over-provision: each partition costs open file handles, memory, replication traffic, and longer rebalance/leader-election times, with a practical ceiling around a few thousand partitions per broker.
 
-**What is consumer lag and why is it the most important streaming metric?**
+**Q: What is consumer lag and why is it the most important streaming metric?**
 Lag is `log-end-offset − committed-offset` summed across a group's partitions — how many messages the consumer is behind the head of the log. It's the key metric because it directly measures whether consumers are keeping up: flat near zero is healthy, steadily rising means consume rate < produce rate. The danger is hitting the **retention edge** — if lag grows until the oldest un-consumed messages expire past `retention.ms`, you permanently lose data the consumer never read. So you alert on rising lag *before* it approaches the retention window, which buys time to scale consumers or fix the bottleneck. Throughput alone can look healthy while lag silently grows.
 
-**Explain what happens during a consumer-group rebalance and why frequent rebalances hurt.**
+**Q: Explain what happens during a consumer-group rebalance and why frequent rebalances hurt.**
 A rebalance triggers whenever group membership changes — a consumer joins, leaves, crashes, or a deploy restarts pods. With the default eager protocol, the group coordinator revokes **all** partition assignments from **all** consumers, then reassigns them; during this stop-the-world pause, no one consumes, so lag spikes. Frequent rebalances (e.g., on every deploy of a large group) cause repeated pauses and unstable consumption. Mitigations: cooperative/incremental rebalancing (only the moving partitions are revoked, not all), and static membership (`group.instance.id`) so a consumer that briefly restarts rejoins with its old assignment without triggering a reassignment at all.
 
-**Why is rack awareness critical and what breaks without it?**
+**Q: Why is rack awareness critical and what breaks without it?**
 Rack awareness tells Kafka which AZ each broker is in (`broker.rack`), so it places the replicas of a partition across *different* racks/AZs. Without it, Kafka can place all 3 replicas of a partition on brokers in the same AZ — so when that AZ fails (a common cloud event), the partition goes fully offline despite RF=3, and you've paid for replication that bought you nothing. With rack awareness, RF=3 across 3 AZs survives a whole-AZ outage with 2 ISR remaining and the topic still writable. In Strimzi you set `rack.topologyKey: topology.kubernetes.io/zone`.
 
-**How do you add a broker and rebalance data without impacting clients?**
+**Q: How do you add a broker and rebalance data without impacting clients?**
 A new broker starts empty — it holds no partitions until you reassign some to it. The reassignment copies partition data over the network, which, unthrottled, saturates NICs and starves producer/consumer traffic. The safe procedure: use Cruise Control (or `kafka-reassign-partitions.sh`) to generate a balanced plan, execute it with a **replication throttle** (e.g., `--throttle 50000000` for 50 MB/s) so client traffic is preserved, and let it move gradually. Cruise Control automates this with capacity/rack goals and built-in throttling, which is why LinkedIn built it. Verify under-replicated partitions return to zero before removing the throttle.
 
-**Why do you keep the Kafka JVM heap small on a large-memory broker?**
+**Q: Why do you keep the Kafka JVM heap small on a large-memory broker?**
 Because Kafka's read performance comes from the **OS page cache**, not the JVM heap — recently written segments stay in page cache and are served to consumers without disk I/O. If you set the heap to most of the machine's RAM (say `-Xmx24g` on 32GB), you starve the page cache, force disk reads, and tank throughput, while also creating long GC pauses. The standard guidance is a modest heap (~6–8 GB) and leaving the bulk of RAM to the page cache. This is counterintuitive to people who tune other JVM apps by maximizing heap.
 
-**KRaft vs ZooKeeper — what changed and why does it matter operationally?**
+**Q: KRaft vs ZooKeeper — what changed and why does it matter operationally?**
 KRaft replaces the external ZooKeeper ensemble with an internal Raft-based controller quorum that stores cluster metadata in a Kafka log itself. Operationally it means one fewer distributed system to run, secure, and upgrade; faster controller failover and metadata propagation; and a much higher partition ceiling (millions cluster-wide) because metadata is no longer bottlenecked on ZK. KRaft is the default since Kafka 3.5+, and ZooKeeper support was **removed in Kafka 4.0**, so all new clusters should be KRaft. The migration path for existing ZK clusters is a documented, staged process — but greenfield is always KRaft now.
 
-**How does tiered storage change capacity planning?**
+**Q: How does tiered storage change capacity planning?**
 Tiered storage (KIP-405; MSK Tiered Storage) lets brokers keep only recent ("hot") segments on local EBS/NVMe and offload older segments to object storage (S3). This decouples retention from broker disk: you can keep months of data cheaply in S3 while broker disks stay small (hours of hot data). Capacity planning splits into hot disk sizing (`avg_ingest × hot_window × RF`) and cold object-storage cost (cheap per GB). The tradeoff is that reads of cold data are slower (fetched from S3) — fine for replay/backfill, not for latency-critical consumers. It's the standard way to offer long retention without a fleet of huge, expensive broker disks.
 
-**A consumer group's lag suddenly spiked across all partitions at the same time. What are the likely causes?**
+**Q: A consumer group's lag suddenly spiked across all partitions at the same time. What are the likely causes?**
 Simultaneous spike across all partitions points to a group-wide event, not a single slow partition. Most likely: (1) a rebalance — a deploy or a crashed consumer triggered a stop-the-world reassignment that paused everyone; (2) a downstream dependency the consumers all write to (a database, an API) slowed or went down, so processing stalled uniformly; (3) a poison message or code bug causing all consumers to retry/block. I'd check rebalance metrics and consumer logs first (was there a deploy?), then downstream health. A single-partition lag spike, by contrast, suggests a hot key or one stuck consumer. The diagnostic split — all partitions vs one — immediately narrows the cause.
 
-**How do you do a zero-downtime Kafka version upgrade?**
+**Q: How do you do a zero-downtime Kafka version upgrade?**
 Roll the brokers one at a time, waiting for full ISR recovery between each, so the cluster never drops below `min.insync.replicas`. Strimzi automates this respecting PodDisruptionBudgets and ISR — it restarts a broker, waits until all its partitions are back in-sync, then moves to the next. You also stage the `inter.broker.protocol.version` and `log.message.format.version`: upgrade binaries first while keeping the old protocol version, confirm stability, then bump the protocol version in a second roll. The cardinal sin is restarting two brokers of an RF=3/min-ISR=2 topic simultaneously — that drops ISR below the minimum and blocks writes. The whole point of the slow, one-at-a-time roll is preserving the ISR invariant.
 
-**When would you choose MSK/Confluent Cloud over self-managed Strimzi Kafka?**
+**Q: When would you choose MSK/Confluent Cloud over self-managed Strimzi Kafka?**
 Choose managed (MSK, MSK Serverless, Confluent Cloud) when the operational burden of running stateful Kafka — capacity planning, upgrades, rebalancing, broker repair, on-call — outweighs the cost premium and you'd rather your team build on top of streaming than operate it. Managed is especially compelling for smaller teams, spiky/unknown load (MSK Serverless auto-scales), or when you want bundled Schema Registry/connectors (Confluent). Choose self-managed Strimzi when you need fine-grained tuning control, are already deep in Kubernetes and want GitOps-managed topics as CRDs, want to avoid per-GB managed pricing at very high volume, or have data-residency/network constraints. It's the classic build-vs-buy: managed trades money and control for less ops.
 
-**Why does a streaming platform need a Schema Registry, and what breaks without one?**
+**Q: Why does a streaming platform need a Schema Registry, and what breaks without one?**
 A Schema Registry (Confluent, Apicurio, AWS Glue Schema Registry) stores the Avro/Protobuf/JSON schema for each topic and enforces **compatibility rules** as producers evolve their data. Without it, a producer that adds a required field or renames one silently ships messages that every consumer fails to deserialize — a cluster-wide outage triggered by one team's deploy, discovered only when consumers start erroring. The registry prevents this by rejecting incompatible schema changes at publish time (e.g., `BACKWARD` compatibility means new schemas can read old data, so consumers can upgrade after producers). Operationally it decouples producer and consumer release cycles, which is the entire point of an event-streaming platform — teams evolve independently. It also shrinks messages (the schema ID replaces inline schema) and gives you a governance audit trail. Skipping it works until the first breaking change, then it's a painful incident.
 
 ---

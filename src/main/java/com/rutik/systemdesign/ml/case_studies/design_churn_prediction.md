@@ -449,35 +449,35 @@ At 400k churners/month and 5% intervention conversion rate, the model prevents 2
 
 ## 11. Interview Discussion Points
 
-**Why use LightGBM instead of a neural network for churn prediction on 5M customers?**
+**Q: Why use LightGBM instead of a neural network for churn prediction on 5M customers?**
 LightGBM wins on three dimensions for this problem: (1) tabular data with engineered features — GBDT's tree-based inductive bias matches tabular data better than DNN's at <100M rows; (2) inference latency — LightGBM scores 5M customers in 20 minutes; a 3-layer MLP would take 2+ hours on CPU; (3) native SHAP support via TreeExplainer — exact SHAP values in O(TL) vs hours for KernelSHAP on a DNN. The 0.5pp AUC advantage of the DNN does not justify the tradeoffs. See [Model Selection](../../model_selection_and_algorithm_choice/README.md).
 
-**How do you validate the churn model before deploying it?**
+**Q: How do you validate the churn model before deploying it?**
 Three-layer validation: (1) offline temporal CV — 5-fold TimeSeriesSplit, no data leak, target AUC ≥ 0.82; (2) calibration check — ECE ≤ 0.08 on time-based holdout after isotonic calibration; (3) online holdback experiment — 90% of users get the new model, 10% holdback stays on the previous model; OEC is 90-day subscription renewal rate; run for 12 weeks to capture full renewal cycle. See [Experimentation](./cross_cutting/experimentation_and_online_evaluation.md).
 
-**How does a customer move from "churn risk" to "intervention target"?**
+**Q: How does a customer move from "churn risk" to "intervention target"?**
 The system applies a two-step filter. First filter: churn probability > threshold_p (e.g., p > 0.40 for email, p > 0.65 for phone outreach — higher probability justifies higher intervention cost). Second filter: uplift score > threshold_u (e.g., T-learner uplift > 0.05 — customer is responsive to retention offers). The intersection of high churn risk and positive uplift is the intervention target set. This avoids wasting budget on the two failure modes: customers who won't churn regardless (low churn risk, positive uplift → offer unnecessary) and customers who will churn regardless of intervention (high churn risk, zero uplift → offer wasted).
 
-**What happens to the model when the churn rate changes seasonally?**
+**Q: What happens to the model when the churn rate changes seasonally?**
 Two things degrade: (a) calibration — the model's predicted probabilities are calibrated for the training-period churn rate; if the churn rate doubles in Q4 (high attrition season), predicted probabilities will systematically underestimate actual risk; (b) feature importance may shift (e.g., holiday-season subscription holders have different engagement patterns). Mitigation: recalibrate monthly using the most recent 30-day labeled cohort; retrain quarterly using a rolling 12-month window that includes seasonal data. Monitor ECE monthly and PSI weekly. See [Drift Monitoring](./cross_cutting/drift_monitoring_and_retraining.md) and [Calibration](./cross_cutting/model_calibration_and_thresholding.md).
 
-**How do you measure the business impact of the churn model?**
+**Q: How do you measure the business impact of the churn model?**
 Holdback A/B experiment: 10% of high-risk customers continue to receive the previous model's interventions; 90% receive the new model's interventions. Measure 90-day renewal rate delta (treatment - holdback). Multiply by: (high_risk_customers_count × avg_subscription_revenue × retention_probability_delta) to get monthly revenue impact. This converts model AUC into a dollar figure. Secondary measurement: cost per retained customer (intervention spend / retained customers) — the new model should reduce this.
 
-**How do you handle class imbalance in churn prediction (8% positive rate)?**
+**Q: How do you handle class imbalance in churn prediction (8% positive rate)?**
 Scale_pos_weight = negative_count / positive_count = 11.5 in LightGBM (equivalent to class-weighted cross-entropy). This is the simplest and most effective approach for GBDT — it adjusts the leaf weight update to penalize FN more than FP. Do not oversample (SMOTE) for GBDT — it does not improve GBDT performance and increases training time by 10x. Do not undersample — it discards 90% of negative examples and wastes data. After training with scale_pos_weight, check calibration (ECE) — scale_pos_weight affects the raw output scale, so isotonic calibration is always needed post-training.
 
-**Walk me through how SHAP is used in this system beyond model debugging.**
+**Q: Walk me through how SHAP is used in this system beyond model debugging.**
 SHAP serves three roles: (1) model validation — mean absolute SHAP confirms that the top features (recency, frequency, CSAT score) are business-sensible and that the model has not learned spurious signals; (2) personalized messaging — the top 2 SHAP features for each customer drive the retention message copy: "We noticed you haven't logged in recently (recency=45 days)" vs "We saw you had a recent billing issue (payment_failure=2)"; (3) fairness audit — SHAP values by demographic group ensure no protected attribute is implicitly encoded (e.g., if zip_code SHAP is high, it may be a proxy for ethnicity in markets with residential segregation). See [Responsible AI](./cross_cutting/responsible_ai_fairness_and_explainability.md).
 
-**What does T-learner uplift modeling add over churn scoring alone, and what are its limitations?**
+**Q: What does T-learner uplift modeling add over churn scoring alone, and what are its limitations?**
 T-learner uplift adds an estimate of treatment effect: P(retained|offer) - P(retained|no offer) for each customer. The three customer segments it identifies: (a) "sure thing" — low churn risk, will stay regardless; (b) "lost cause" — high churn risk, won't respond to any offer; (c) "persuadable" — moderate churn risk, responds to the right offer. Churn scoring alone cannot distinguish (b) from (c). Limitation of T-learner: it requires randomized historical data (customers who did and did not receive offers); if offers were given only to high-risk customers in the past (selection bias), the T-learner is trained on a biased treatment population. Fix: ensure a randomized holdout (5% of high-risk customers receive no offer) exists in the training data.
 
-**How do you retrain the churn model without introducing the past's mistakes?**
+**Q: How do you retrain the churn model without introducing the past's mistakes?**
 Four-gate champion/challenger pipeline: (1) data quality gate — validate training data with Great Expectations (schema, value ranges, label rate within expected bounds); fail pipeline if any check fails. (2) Temporal holdout gate — challenger AUC on the most recent 90-day holdout must be ≥ champion AUC - 0.005. (3) Calibration gate — challenger ECE ≤ 0.10 after isotonic calibration. (4) Shadow period — 7-day shadow scoring where challenger and champion both score production customers; compare score distributions (KS test); promote only if distributions are consistent. See [Drift Monitoring](./cross_cutting/drift_monitoring_and_retraining.md).
 
-**What would you change if churn label latency was 90 days instead of 30 days?**
+**Q: What would you change if churn label latency was 90 days instead of 30 days?**
 Three things change: (1) retraining cadence drops to quarterly (minimum label lag for fresh labels = 90 days); (2) survival analysis becomes more attractive — a Cox Proportional Hazards model over a 90-day time-to-event is more informative than a 90-day binary label, and can produce weekly hazard rates that enable earlier intervention; (3) feature window alignment changes — features computed for 90-day labels should use a 90-day lookback (RFM over 90 days, not 30 days) to capture the full behavioral arc leading to the longer-horizon churn event. Monitoring becomes label-lagged: input PSI and score distribution remain real-time; AUC is only computable quarterly.
 
-**How do you present the churn model to a business stakeholder who doesn't understand ML?**
+**Q: How do you present the churn model to a business stakeholder who doesn't understand ML?**
 Focus on business outcomes, not model mechanics. Present: (1) "The model identifies customers who are likely to cancel in the next 30 days, ranked by risk level." (2) "It explains the top 3 reasons for each customer — so marketing can send a personalized message rather than a generic offer." (3) "In our A/B test, using the model for targeting saved $X in churn losses vs using no model." Avoid: AUC, feature importance charts, cross-validation splits. If they ask how it works: "The model learns from 24 months of behavioral patterns — how often customers log in, whether they've had billing issues, how their usage has changed — to predict who is most at risk." Frame every metric in business terms: AUC 0.84 → "The model correctly identifies 84% of churners in the top 15% of the risk score distribution."

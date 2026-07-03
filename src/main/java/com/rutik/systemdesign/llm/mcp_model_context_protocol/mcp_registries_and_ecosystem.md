@@ -326,49 +326,49 @@ npx @modelcontextprotocol/inspector @random/social-server
 
 ## 12. Interview Questions with Answers
 
-**What is Smithery and what role does it play in the MCP ecosystem?**
+**Q: What is Smithery and what role does it play in the MCP ecosystem?**
 Smithery (smithery.ai) is the leading MCP server registry — analogous to npm for Node, PyPI for Python. Hosts 3000+ servers, supports both stdio (auto-installed via CLI) and hosted HTTP servers. Provides search, versioning, publisher accounts. Most MCP users discover servers via Smithery.
 
-**Where do I find Anthropic's official MCP servers?**
+**Q: Where do I find Anthropic's official MCP servers?**
 GitHub at `modelcontextprotocol/servers`. Includes: filesystem, github, gitlab, sqlite, postgres, brave-search, sequential-thinking, slack, puppeteer, memory, and others. These are reference implementations — the canonical "how to build this kind of server."
 
-**How do I install an MCP server for Claude Desktop?**
+**Q: How do I install an MCP server for Claude Desktop?**
 Either: (1) use Smithery CLI: `npx -y @smithery/cli install @author/server --client claude`. (2) Manually edit `claude_desktop_config.json` — add server entry with command/args/env. Restart Claude Desktop to load.
 
-**Why pin MCP server versions?**
+**Q: Why pin MCP server versions?**
 Server upgrades may add/remove/rename tools, changing your agent's behavior. Pin to known-good version to lock behavior. Bump deliberately after review. Without pinning, an automated server update can break production overnight.
 
-**What's the difference between stdio and hosted Smithery servers?**
+**Q: What's the difference between stdio and hosted Smithery servers?**
 Stdio: server is an npm/pip package that the Smithery CLI installs and configures to run locally as subprocess. Hosted: server runs in Smithery's cloud; you connect via URL. Stdio offers more control (server runs in your environment); hosted is zero-infra for the user.
 
-**How do I publish a server to Smithery?**
+**Q: How do I publish a server to Smithery?**
 (1) Build server as a package (typically npm with `@modelcontextprotocol/sdk`). (2) Publish to npm with public access. (3) Submit to Smithery via their submission UI — provide package name, install command, config schema, capability description. Smithery reviews and indexes.
 
-**What's signed servers and when will it be standard?**
+**Q: What's signed servers and when will it be standard?**
 Proposed MCP spec extension: servers cryptographically signed by publisher (Sigstore-based). Clients verify signature on install. Defeats supply-chain attacks (tampered packages). Active discussion in MCP working group; likely standard in 2025-2026 spec revision.
 
-**How do enterprises manage MCP server adoption?**
+**Q: How do enterprises manage MCP server adoption?**
 Internal registry (private Smithery deployment or internal artifact server). Allowlist of approved servers. Security review process per server (review tool descriptions, audit code, check publisher). Centralized auth via OAuth gateway. Audit logging of all MCP calls.
 
-**What's the "memory" MCP server and what's it for?**
+**Q: What's the "memory" MCP server and what's it for?**
 Persistent memory store for agents — exposes tools to read/write knowledge across sessions. Common use: agent stores user preferences, facts learned, ongoing project context. Available in official servers list and several community variants (with different backends — JSON file, SQLite, vector DB).
 
-**How do you discover which MCP server to use for a given integration?**
+**Q: How do you discover which MCP server to use for a given integration?**
 (1) Search Smithery by keyword. (2) Check Anthropic's official servers list. (3) Browse "awesome-mcp-servers" GitHub. (4) Check the SaaS tool's docs — many list MCP servers. If nothing exists, you'll likely need to build one.
 
-**Can MCP servers self-update?**
+**Q: Can MCP servers self-update?**
 No automatic self-update mechanism per spec. Updates happen via the package manager (`npm update`, `pip install --upgrade`). Some clients (Smithery) help facilitate. Manual config edits do not auto-update.
 
-**What's the lifecycle of an MCP server you've installed?**
+**Q: What's the lifecycle of an MCP server you've installed?**
 (1) Spawned by client at session start (stdio) or connected to (HTTP). (2) Initialize handshake. (3) Used for tool/resource calls. (4) On client shutdown, stdio servers terminate; HTTP sessions close. Per-server: typically lives for one client session.
 
-**How are MCP server bugs typically reported and fixed?**
+**Q: How are MCP server bugs typically reported and fixed?**
 GitHub issues against the server's repo (Smithery links to repos). Maintainers fix and publish new versions. Users update via package manager. For official servers: Anthropic's team triages. Critical bugs (security) get fast fixes; long tail may sit for weeks.
 
-**What's the role of the MCP Inspector in the ecosystem?**
+**Q: What's the role of the MCP Inspector in the ecosystem?**
 MCP Inspector (`npx @modelcontextprotocol/inspector <server-cmd>`) is the standard tool to: test servers locally, inspect tool/resource lists, manually call tools, view JSON-RPC traffic. Essential for both server developers (verify their server) and integrators (preview a server before integrating).
 
-**Are there enterprise MCP server marketplaces?**
+**Q: Are there enterprise MCP server marketplaces?**
 Emerging. Smithery has a paid tier for enterprises. Companies are starting to publish official MCP servers for their products (e.g., commercial Linear MCP server, paid Atlassian MCP). Expect rapid commercialization through 2025-2026.
 
 ---

@@ -356,49 +356,49 @@ private String encodeCursor(Long id) {
 
 ## 12. Interview Questions with Answers
 
-**What are the REST architectural constraints?**
+**Q: What are the REST architectural constraints?**
 Stateless (no server-side session), uniform interface (standard HTTP methods and status codes, resource-based URLs), client-server separation (independent evolution), cacheable (responses declare cacheability), layered system (client does not know about intermediaries), and optionally code-on-demand (server-provided executable code). The most important for API design are stateless, uniform interface, and cacheable.
 
-**What is the difference between PUT and PATCH?**
+**Q: What is the difference between PUT and PATCH?**
 PUT replaces the entire resource with the provided representation — fields not included in the request are set to null/default. PATCH applies a partial update — only the fields provided are changed. PUT is idempotent; PATCH can be idempotent or not depending on the patch format (JSON Patch per RFC 6902 is idempotent; a "increment counter" PATCH is not). For most REST APIs, PATCH is more practical for updates.
 
-**How do you version a REST API and what are the tradeoffs?**
+**Q: How do you version a REST API and what are the tradeoffs?**
 URI versioning (/v1/, /v2/) is most common: visible, easy to route at the CDN/load balancer, easy to test in a browser. Header versioning (Accept: application/vnd.api.v2+json) is more RESTful but harder to test and less visible. Query parameter (?version=2) is easy to add but not standard. For public APIs, URI versioning is the pragmatic choice. Never remove a version without at least 6-12 months deprecation notice with Sunset headers.
 
-**What is idempotency and why does it matter for API design?**
+**Q: What is idempotency and why does it matter for API design?**
 Idempotency means sending the same request N times has the same side effect as sending it once. GET, PUT, DELETE are idempotent. POST is not. Idempotency matters because network timeouts can cause clients to retry — a non-idempotent POST retry creates duplicate resources. Adding an Idempotency-Key header to POST endpoints allows clients to safely retry: the server deduplicates based on the key and returns the original response for subsequent calls.
 
-**What is the difference between 401 and 403?**
+**Q: What is the difference between 401 and 403?**
 401 Unauthorized means the client is not authenticated — no valid credentials were provided (missing or invalid token). Despite the name, it really means "unauthenticated." The client should authenticate and retry. 403 Forbidden means the client is authenticated but not authorized — the identity is known but lacks permission for the requested resource. The client should not retry with the same credentials.
 
-**How would you design pagination for a high-volume feed?**
+**Q: How would you design pagination for a high-volume feed?**
 Use cursor-based (keyset) pagination: instead of OFFSET N, use WHERE id > last_seen_id LIMIT 20. This is O(1) regardless of page depth. The cursor is an opaque base64-encoded value (e.g., JSON with id and timestamp) so the implementation can change. Provide a next_cursor field in responses. This is what Twitter/X, Instagram, and GitHub use for their feed APIs.
 
-**What is RFC 7807 Problem Details?**
+**Q: What is RFC 7807 Problem Details?**
 RFC 7807 defines a standard error response format for HTTP APIs. It includes: type (URI identifying the error class), title (human-readable summary), status (HTTP status code), detail (specific explanation for this occurrence), and instance (URI of the specific request). Additional fields can be added. Using Problem Details ensures all errors have a consistent, machine-parseable format across endpoints.
 
-**How do you design a REST API for a file upload?**
+**Q: How do you design a REST API for a file upload?**
 For small files (<10 MB): multipart/form-data POST with the file as a form field. For large files: use a signed URL pattern — client requests a signed upload URL from the API, uploads directly to object storage (S3, GCS), then notifies the API of completion. This offloads bandwidth from the API server and enables resumable uploads. Never buffer large files in the API server's memory.
 
-**What HTTP caching headers should a REST API set?**
+**Q: What HTTP caching headers should a REST API set?**
 For mutable resources: `ETag` (version identifier) + `Cache-Control: no-cache` (must revalidate, but can store) or `Cache-Control: max-age=60, private`. For immutable versioned resources: `Cache-Control: max-age=31536000, immutable`. For sensitive data: `Cache-Control: no-store`. Always set `Vary: Accept-Encoding` if responses are compressed. The `Vary` header tells caches which request headers affect the response.
 
-**What is HATEOAS and is it practical?**
+**Q: What is HATEOAS and is it practical?**
 HATEOAS (Hypermedia As The Engine Of Application State) means responses include links to related resources and available actions, enabling clients to navigate the API without out-of-band documentation. In theory it allows client-server evolution. In practice it is rarely implemented because: (1) generating links is complex, especially for conditional actions; (2) most clients use generated SDKs from OpenAPI specs rather than following links; (3) it does not solve versioning problems. Understand it for interviews; use OpenAPI in production.
 
-**How do you design an async long-running operation endpoint?**
+**Q: How do you design an async long-running operation endpoint?**
 POST /jobs returns 202 Accepted with a Location header pointing to a job status URL (/jobs/123). The client polls GET /jobs/123 until status is "completed" or "failed". The response includes the result URL when done. Alternative: use webhooks — client registers a callback URL, server POSTs the result when done. Webhooks require the client to have a publicly accessible endpoint.
 
-**What is the N+1 problem in REST APIs?**
+**Q: What is the N+1 problem in REST APIs?**
 Clients need a user and their 50 orders. Naive approach: GET /users/123, then GET /orders/123, GET /orders/124... = 51 requests. Solutions: (1) include sub-resources in the response via an `include` or `embed` query parameter; (2) provide a batch endpoint (POST /orders/batch with list of IDs); (3) switch to GraphQL which resolves this structurally. The N+1 problem in REST APIs is the main argument for GraphQL in complex data-access scenarios.
 
-**How do you handle breaking changes in a REST API?**
+**Q: How do you handle breaking changes in a REST API?**
 (1) Add fields without removing (clients ignore unknown fields if using lenient deserialization). (2) Never change field types. (3) Never remove required request fields. (4) Deprecate via Sunset header: `Sunset: Sat, 01 Jan 2027 00:00:00 GMT` + `Deprecation: true`. (5) When breaking changes are unavoidable, increment the major version (/v2/). (6) Run both versions in parallel for at least 6 months. (7) Monitor usage of deprecated endpoints via metrics.
 
-**What is content negotiation in REST?**
+**Q: What is content negotiation in REST?**
 The client uses the Accept header to specify acceptable response formats: `Accept: application/json, application/xml;q=0.9`. The server responds with the best match and includes `Content-Type` in the response. This allows one endpoint to serve multiple formats without separate URLs. Java Spring MVC's content negotiation via `produces` on @RequestMapping handles this automatically.
 
-**How do you implement rate limiting in a REST API?**
+**Q: How do you implement rate limiting in a REST API?**
 Implement at the API gateway or a filter/middleware layer. Return 429 Too Many Requests when the limit is exceeded, with headers: `X-RateLimit-Limit: 100`, `X-RateLimit-Remaining: 0`, `X-RateLimit-Reset: 1735689600` (epoch when window resets), `Retry-After: 60` (seconds). Use sliding window or token bucket algorithms. Limit by API key, user ID, or IP depending on the use case.
 
 ---

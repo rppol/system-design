@@ -305,52 +305,52 @@ tier — a service-discovery problem underpinned by the consensus machinery of C
 
 ## Interview Questions
 
-**What is the difference between key-range and hash partitioning, and what does each give up?**
+**Q: What is the difference between key-range and hash partitioning, and what does each give up?**
 Key-range partitioning assigns contiguous ranges of keys to partitions, which keeps keys sorted within a partition and makes range scans efficient, but it's prone to hot spots when access is sequential (all of today's timestamped writes hitting one partition). Hash partitioning assigns keys by the hash of the key, spreading them evenly and eliminating sequential hot spots, but it scatters adjacent keys across partitions so range scans become inefficient (you must query every partition). You trade range-scan ability for even distribution, or vice versa.
 
-**Why must you never define a partition as `hash(key) mod N`?**
+**Q: Why must you never define a partition as `hash(key) mod N`?**
 Because the partition number then depends on N, the node count, so adding or removing a single node changes the modulus and reassigns *nearly every* key to a different partition — forcing an almost total data reshuffle that floods the network and disrupts the database during rebalancing. The fix is to decouple the key-to-partition mapping from the node count: assign keys to a fixed set of partitions (e.g. a large fixed number) and rebalance by moving whole partitions between nodes, so only a fraction of data moves.
 
-**What is a hot spot, and why doesn't hash partitioning solve every hot-spot problem?**
+**Q: What is a hot spot, and why doesn't hash partitioning solve every hot-spot problem?**
 A hot spot is a partition or key that receives disproportionately more load than others, bottlenecking the system on one node and defeating the purpose of partitioning. Hash partitioning evens out load across *different* keys, but it can't help when a *single* key is extremely hot — a celebrity account or a viral post — because all requests for that one key hash to the same partition. No system auto-corrects this; the application must split the hot key (e.g. append a random suffix) and fan out reads across the resulting keys.
 
-**Compare document-partitioned (local) and term-partitioned (global) secondary indexes.**
+**Q: Compare document-partitioned (local) and term-partitioned (global) secondary indexes.**
 A local (document-partitioned) index keeps each partition's own index of only its documents, so writes update just one partition (cheap), but a read by the indexed attribute must query every partition and merge results — scatter/gather, which is slow and tail-latency-prone. A global (term-partitioned) index partitions the index by the term value itself, so a read goes straight to the one partition holding that term (fast), but a single document write may update several index partitions, making writes slower and usually asynchronous, so the index can lag the data.
 
-**What is scatter/gather, and why does its latency get worse as you add partitions?**
+**Q: What is scatter/gather, and why does its latency get worse as you add partitions?**
 Scatter/gather is the read pattern of a local secondary index: the query is sent to all partitions ("scatter"), each searches its local index, and the results are merged ("gather"). Its latency is governed by the *slowest* partition to respond, so as the number of partitions grows, the probability that at least one is slow (GC pause, hot, degraded) rises, pushing up the overall p99. This is why secondary-index reads on heavily partitioned local indexes can have surprisingly bad tail latency.
 
-**Describe the three main rebalancing strategies and when you'd use each.**
+**Q: Describe the three main rebalancing strategies and when you'd use each.**
 Fixed number of partitions: create many more partitions than nodes up front and rebalance by moving whole partitions to new nodes — simple and predictable, but you must guess the count and can't exceed it in node scale (Riak, Elasticsearch). Dynamic partitioning: partitions split when they grow too large and merge when they shrink, adapting to data volume — good for unknown/growing datasets (HBase). Proportional to nodes: a fixed number of partitions per node, with new nodes splitting and stealing partitions — keeps partition size stable as cluster and data grow together (Cassandra).
 
-**Why is fully automatic rebalancing risky, and what's the usual mitigation?**
+**Q: Why is fully automatic rebalancing risky, and what's the usual mitigation?**
 Because rebalancing is expensive — it moves large amounts of data and reroutes requests — and when coupled with automatic failure detection it can trigger cascading failures: a node that looks slow gets work shifted onto it, becomes more overloaded, and triggers further rebalancing, spiraling the cluster into instability. The usual mitigation is to keep a human in the loop: the system can *propose* a rebalancing plan automatically, but an operator reviews and commits it, preventing surprise data movements during incidents.
 
-**How does request routing work, and what role does ZooKeeper play?**
+**Q: How does request routing work, and what role does ZooKeeper play?**
 Request routing directs a client's request to the node currently holding the relevant partition, which is a service-discovery problem because partitions move during rebalancing. The three shapes are: any node forwards to the right one, a routing tier forwards on the client's behalf, or partition-aware clients connect directly. ZooKeeper acts as the authoritative registry of the partition-to-node mapping — nodes register there and routing components subscribe to changes — so everyone shares a consistent, current view; Cassandra and Riak instead gossip this state peer-to-peer.
 
-**How is partitioning related to and combined with replication?**
+**Q: How is partitioning related to and combined with replication?**
 They're largely independent techniques used together: partitioning decides which records go on which node, while replication keeps multiple copies of each partition for fault tolerance. A record belongs to exactly one partition, but that partition is replicated to several nodes; a node typically stores some partitions as leader and others as follower. Because the two concerns compose cleanly, you can reason about partitioning scheme and replication scheme separately, then combine them (e.g. hash-partitioned with a single leader per partition replicated three ways).
 
-**How does a compound primary key (as in Cassandra) get the best of both partitioning schemes?**
+**Q: How does a compound primary key (as in Cassandra) get the best of both partitioning schemes?**
 A compound primary key hashes only the first column to choose the partition, then stores the remaining columns *sorted* within that partition. This spreads different partition keys evenly across nodes (avoiding sequential hot spots) while still allowing efficient range scans on the sorted columns *within* a single partition. For example, partition by user ID but sort that user's updates by timestamp — so "give me this user's posts from last week" is a fast in-partition range scan, not a scatter/gather.
 
-**Why does keying a time-series database purely by timestamp cause problems, and how do you fix it?**
+**Q: Why does keying a time-series database purely by timestamp cause problems, and how do you fix it?**
 Because timestamps are monotonically increasing, all writes for the current time fall into the single partition owning the "now" range while every other partition sits idle — a write hot spot that bottlenecks ingestion on one node. The fix is to prefix the key with another value such as the sensor or device name, so concurrent writes from different sources spread across partitions. The tradeoff is that a query for a time range across all sensors must now issue a separate range scan per prefix and combine the results.
 
-**Why do global (term-partitioned) secondary index updates often have to be asynchronous?**
+**Q: Why do global (term-partitioned) secondary index updates often have to be asynchronous?**
 Because a single document can have several indexed attribute values, and in a term-partitioned index each of those values may live on a *different* index partition, so writing one document requires updating multiple index partitions — a distributed, multi-node operation. Doing that synchronously would require a distributed transaction across index partitions on every write, which is slow and reduces availability. So systems typically apply index updates asynchronously, accepting that the global index briefly lags the underlying data.
 
-**What is skew, and how does it undermine the benefits of partitioning?**
+**Q: What is skew, and how does it undermine the benefits of partitioning?**
 Skew is an uneven distribution of data or query load across partitions, where some partitions hold far more data or serve far more requests than others. It undermines partitioning because the whole point is to spread work across nodes for scalability; if one partition is a hot spot, that node becomes the bottleneck and the system performs no better than a single machine for that workload, while other nodes sit underused. Avoiding skew — through good key/hash choice and hot-key handling — is central to effective partitioning.
 
-**What is the cold-start problem in dynamic partitioning, and how is it addressed?**
+**Q: What is the cold-start problem in dynamic partitioning, and how is it addressed?**
 With dynamic partitioning, a brand-new database begins as a single partition (since there's no data to split yet), so all initial writes and reads hit one node until enough data accumulates to trigger the first split — leaving the rest of the cluster idle during early load. It's addressed by pre-splitting: the operator configures an initial set of partitions up front (using knowledge of the expected key distribution) so the load is spread across nodes from the start rather than waiting for organic splits.
 
-**What is massively parallel processing (MPP), and how does it relate to request routing?**
+**Q: What is massively parallel processing (MPP), and how does it relate to request routing?**
 MPP is a technique used by analytic databases where a single complex query is decomposed into stages executed in parallel across many partitions/nodes, with intermediate results combined — as opposed to simple key-value access that routes to just one partition. It relates to routing because, unlike a point lookup, an MPP query deliberately fans out across partitions, and the system must coordinate which nodes run which stage. It foreshadows the batch and stream processing frameworks of Part III, which generalize this distributed-execution idea.
 
-**How do gossip protocols differ from a ZooKeeper-based approach for tracking partition assignments?**
+**Q: How do gossip protocols differ from a ZooKeeper-based approach for tracking partition assignments?**
 A ZooKeeper-based approach centralizes the partition-to-node mapping in a dedicated, consensus-backed coordination service that nodes register with and routing components subscribe to, giving a single authoritative source of truth (used by HBase, Kafka, SolrCloud). A gossip protocol instead has nodes share cluster-membership and partition-assignment state peer-to-peer, so every node eventually learns the full mapping without a central coordinator (used by Cassandra and Riak). Gossip avoids a dependency on a separate service at the cost of eventual (not instantaneous) convergence of the cluster view.
 
 ---

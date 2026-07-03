@@ -294,35 +294,35 @@ def longest_consecutive_fixed(nums: list[int]) -> int:
 
 ## 11. Interview Q&A
 
-**Why is the average-case time complexity of hashmap operations O(1), and when does it degrade?**
+**Q: Why is the average-case time complexity of hashmap operations O(1), and when does it degrade?**
 A hash table maps keys to "buckets" via a hash function; with a good hash function and a reasonable load factor (Python/Java resize around 0.66–0.75), each bucket holds O(1) elements on average, so insert/lookup/delete touch O(1) elements. It degrades to O(n) in the worst case if many keys hash to the same bucket (hash collisions) — either due to a poor/malicious hash function (hash-flooding attacks) or a pathological key distribution. Java 8+ HashMap mitigates this by treeifying buckets with 8+ collisions into red-black trees, bounding worst-case lookups to O(log n).
 
-**Two Sum: why can't you just sort the array and use two pointers if the problem requires returning indices?**
+**Q: Two Sum: why can't you just sort the array and use two pointers if the problem requires returning indices?**
 Sorting rearranges elements, destroying the mapping from value to original index. You'd need to store `(value, original_index)` pairs and sort those — which works, but then the two-pointer scan finds a pair of *sorted-position* pointers, and you still need O(n) to extract their original indices, plus the sort itself is O(n log n) vs the hashmap's O(n). If indices aren't needed (just "does a pair exist"), sort + two pointers is a valid O(n log n) / O(1)-extra-space alternative to hashing's O(n) / O(n).
 
-**What's the difference between using a `dict` and a `Counter` for frequency problems?**
+**Q: What's the difference between using a `dict` and a `Counter` for frequency problems?**
 `Counter` is a `dict` subclass specialized for counting: `Counter(iterable)` builds frequency counts in one call, supports arithmetic (`counter1 - counter2`), and returns 0 (not `KeyError`) for missing keys via `counter[missing_key]`. For frequency-based problems, `Counter` is more idiomatic and less error-prone than manually initializing a `defaultdict(int)`, though both are O(1) amortized per operation.
 
-**How do you choose a "canonical key" for grouping (e.g., Group Anagrams)? What makes a good canonical key?**
+**Q: How do you choose a "canonical key" for grouping (e.g., Group Anagrams)? What makes a good canonical key?**
 A canonical key must be (1) **identical** for all items that should be grouped together, and (2) **different** (with very high probability) for items that shouldn't. For anagrams, `sorted(word)` (or a tuple of character counts) satisfies both: anagrams produce the same sorted string, non-anagrams produce different ones. The key must also be **hashable** (immutable) — a `list` can't be a dict key, but a `str` (from `''.join(sorted(...))`) or a `tuple` can.
 
-**In "Longest Consecutive Sequence," why does checking `num - 1 not in num_set` guarantee O(n) overall?**
+**Q: In "Longest Consecutive Sequence," why does checking `num - 1 not in num_set` guarantee O(n) overall?**
 Without this check, every number triggers an inner "count forward" loop, and for a single long run of length `n`, this sums to O(n^2) (the 1st number counts n steps, the 2nd counts n-1, etc.). With the check, only numbers that are the *start* of a run (no predecessor in the set) trigger the inner loop. Each run is "counted forward" exactly once, by its start — so across all runs, the total work done by all inner loops combined is at most `n` (every number belongs to exactly one run and is visited by exactly one inner loop). Outer loop is O(n), inner loops sum to O(n) — total O(n).
 
-**What's the "two-hashmap meet-in-the-middle" technique used in 4Sum II?**
+**Q: What's the "two-hashmap meet-in-the-middle" technique used in 4Sum II?**
 Given four arrays `A, B, C, D`, you want to count tuples `(a,b,c,d)` where `a+b+c+d == 0`. Brute force is O(n^4). Instead, precompute all pairwise sums `a+b` for `A x B` into a hashmap (`sumAB -> count`), O(n^2). Then for each pair `(c,d)` from `C x D`, look up `-(c+d)` in that hashmap, O(n^2) total. This reduces O(n^4) to O(n^2) — "meet in the middle" by splitting the problem into two halves joined via a hashmap.
 
-**How would you implement "Insert Delete GetRandom O(1)" — what's the role of the hashmap?**
+**Q: How would you implement "Insert Delete GetRandom O(1)" — what's the role of the hashmap?**
 Maintain a dynamic array (`list`) for O(1) random access (`getRandom` picks `random.choice` by index) and a hashmap `value -> index_in_array`. Insert: append to the array, record its index in the hashmap, O(1). Delete: look up the index of the value to delete, swap it with the *last* element in the array (update the swapped element's index in the hashmap), pop the last element, remove from hashmap — all O(1). The hashmap is what makes "find the index of an arbitrary value" O(1) instead of O(n), enabling the swap-and-pop deletion.
 
-**Why might an interviewer ask you to solve Two Sum without extra space (O(1))? Is that possible?**
+**Q: Why might an interviewer ask you to solve Two Sum without extra space (O(1))? Is that possible?**
 If the array is **unsorted** and indices must be preserved, O(1) space is *not* achievable in general — you fundamentally need to remember "what have I seen" which requires O(n) state in the worst case (this is provable via an information-theoretic argument: distinguishing all possible "first occurrence" positions requires that much state). If the interviewer allows **sorting** (and doesn't need original indices), you can do it in O(1) extra space with two pointers after an O(n log n) in-place sort. Always clarify whether index preservation is required.
 
-**What's a hash collision, and how do hash tables handle it?**
+**Q: What's a hash collision, and how do hash tables handle it?**
 A collision is when two different keys hash to the same bucket/slot. Two main resolution strategies: **chaining** (each bucket holds a linked list or, in Java 8+, a tree once it has 8+ entries, of all keys hashing there) and **open addressing** (probe for the next empty slot — used by Python's `dict`/`set`). Both add O(1) amortized overhead in the average case but can degrade toward O(n) per operation if collisions are frequent (e.g., adversarial inputs designed to collide, a known DoS vector mitigated by randomized hash seeds).
 
-**How does a rolling hash (Rabin-Karp) avoid re-hashing the entire window on each shift?**
+**Q: How does a rolling hash (Rabin-Karp) avoid re-hashing the entire window on each shift?**
 A rolling hash is computed such that `hash(window[1:] + new_char) ` can be derived from `hash(window)` in O(1), typically via polynomial hashing: `hash = (hash - old_char * base^(k-1)) * base + new_char (mod M)`. This removes the contribution of the character leaving the window and adds the new character, all in O(1), instead of recomputing the hash of all `k` characters from scratch (O(k) per shift, O(n*k) total). This makes substring search/matching O(n + m) instead of O(n*m).
 
-**If two objects are equal (`==`), must their hash values be equal? What happens if you violate this?**
+**Q: If two objects are equal (`==`), must their hash values be equal? What happens if you violate this?**
 Yes — this is the **hash-equality contract**: if `a == b`, then `hash(a) == hash(b)` must hold (the converse is not required — different objects can have the same hash, a collision). Violating this (e.g., overriding `__eq__` without overriding `__hash__` in Python, or `equals()` without `hashCode()` in Java) causes silent bugs: two "equal" objects could be placed in different buckets of a `dict`/`HashMap`, so `obj in some_set` could return `False` even when an "equal" object is present — a notoriously hard-to-debug class of issue.

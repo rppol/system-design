@@ -751,41 +751,41 @@ The decisive lever remains node bin-packing: improving average pods/node from 40
 
 ## 11. Interview Discussion Points
 
-**Why not give every team its own cluster — isn't that the cleanest isolation?**
+**Q: Why not give every team its own cluster — isn't that the cleanest isolation?**
 It is the cleanest isolation and the worst operability. 200 clusters means 200 control planes to patch, 200 CNI upgrades, 200 etcd databases, and 200× the surface for a 12-person team — the upgrade treadmill alone (a minor every ~4 months) becomes a full-time job per handful of clusters. Namespaces give ~90% of the isolation (RBAC + NetworkPolicy + ResourceQuota + PSA) at ~1% of the operational cost, and you reserve real clusters for the few regulated tenants where a compliance boundary actually requires separate etcd. The deciding factor is team size, not isolation theory.
 
-**A tenant complains a neighbor is starving them. What design elements prevent and diagnose this?**
+**Q: A tenant complains a neighbor is starving them. What design elements prevent and diagnose this?**
 Prevention is `ResourceQuota` (caps total CPU/memory/pods/Jobs per namespace) plus `LimitRange` (forces requests so QoS is never accidentally BestEffort) plus PriorityClasses so platform-critical pods preempt correctly. Diagnosis is per-tenant saturation metrics labeled by `team`/`cost-center` and `scheduler_pending_pods`. The classic failure (§9 #2) is a missing quota letting one Job balloon the cluster; the fix is shipping quota + `count/jobs.batch` in the tenant template so it is impossible to onboard without it. Quota is a guardrail you render, never a thing tenants are trusted to add.
 
-**How do you upgrade 50 clusters without a fleet-wide outage?**
+**Q: How do you upgrade 50 clusters without a fleet-wide outage?**
 Treat clusters as canaries and gate on error budget. A bot bumps the version field in one dev cluster's manifest; CI runs `kubent` (deprecated-API scan), re-validates all policies against the new API, and a conformance smoke deploy; the canary bakes 48h while you watch control-plane error rate, scheduler latency, and webhook p99; an error-budget fast-burn gate auto-pauses the rollout. Then you stage dev → staging → prod, one region/cluster per day, with node pools surge-upgraded respecting PDBs. The key is that no upgrade is a fleet-wide simultaneous event — blast radius stays at one cluster.
 
-**Namespace vs vcluster — when do you actually reach for vcluster?**
+**Q: Namespace vs vcluster — when do you actually reach for vcluster?**
 When namespaces leak the abstraction. Namespaces share cluster-scoped objects: CRDs, ClusterRoles, and a tenant can `list` namespace metadata they shouldn't. If a tenant genuinely needs cluster-admin semantics (installs their own operators/CRDs), or runs untrusted code, or must not even *see* other tenants' API objects, you give them a vcluster — their own API server as pods, with a syncer translating workloads to the host. The cost is ~150–300 MiB and a few ms of latency per tenant, so you keep it to the ~10% that need it; everyone else stays on namespaces.
 
-**Why Cilium over Calico or the AWS VPC CNI?**
+**Q: Why Cilium over Calico or the AWS VPC CNI?**
 At 12,000 pods/cluster, iptables-based dataplanes degrade because rule evaluation is roughly O(n) in services/endpoints; Cilium's eBPF dataplane stays flat. Cilium also gives ClusterMesh for cross-cluster global services (the multi-region requirement), Hubble for per-flow visibility the security team needs, and L7-aware policy. The AWS VPC CNI specifically hits ENI/IP-per-node limits at high pod density (§9 #3), leaving nodes with spare CPU but no IPs. The tradeoff is Cilium needs newer kernels and more operational expertise.
 
-**The management cluster is a single point of failure for provisioning — how do you mitigate?**
+**Q: The management cluster is a single point of failure for provisioning — how do you mitigate?**
 Make it tier-0: HA across 3 AZs, its own SLO, backed up, and recoverable from Git (it is itself defined as CAPI/Crossplane manifests, so you can rebuild it). Critically, decouple the *data plane* from the *control of the platform*: if the management cluster dies, already-running workload clusters keep serving traffic and Argo CD on each cluster keeps reconciling its last-known state — you only lose the ability to *provision new* clusters/tenants until it is restored. You never put tenant workloads on it, so its blast radius is bounded to platform operations.
 
-**How does cost attribution actually work, and why is 95% accuracy the bar?**
+**Q: How does cost attribution actually work, and why is 95% accuracy the bar?**
 Every namespace carries mandatory `team` and `cost-center` labels (enforced by Kyverno admission — you cannot create a namespace without them), and a cost tool (Kubecost/OpenCost or cloud cost allocation tags) joins namespace resource usage to those labels, allocating node cost by requests/usage and adding storage + a share of cross-AZ egress. You never hit 100% because shared system overhead (the management plane, monitoring, idle headroom) isn't owned by one tenant — that goes to a platform cost center. 95% means almost all *variable* spend is attributable, which is enough to drive team behavior (right-sizing requests) without litigating pennies.
 
-**A Kyverno webhook with failurePolicy: Fail can take down a whole cluster. So why use Fail at all?**
+**Q: A Kyverno webhook with failurePolicy: Fail can take down a whole cluster. So why use Fail at all?**
 Because `failurePolicy: Ignore` means a policy bypass is one webhook crash away — an attacker (or a bug) can ship a privileged pod the moment the webhook blinks, which defeats the point of enforcement. So security-critical policies run `Fail` but with compensating controls: the webhook is HA (3 replicas, PDB, spread across AZs), excludes `kube-system` via `namespaceSelector` so it can never block core control-plane writes, has a tested break-glass to flip to `Ignore`, and is monitored on p99 latency as a first-class SLI. It's a deliberate availability-vs-enforcement tradeoff, made safe by hardening rather than by weakening the policy. See [cross_cutting/kubernetes_production_hardening.md](cross_cutting/kubernetes_production_hardening.md).
 
-**What's the etcd ceiling and how does it shape cluster sizing?**
+**Q: What's the etcd ceiling and how does it shape cluster sizing?**
 etcd's default backend quota is 8 GiB, and beyond ~75% it slows and eventually goes read-only (`NOSPACE` alarm). But raw bytes rarely bind first — steady-state for a 12,000-pod cluster is only ~220 MiB. What actually strains etcd is write throughput and un-compacted MVCC history: event floods, leaking controllers, or `kubectl apply` loops spike fsync latency and apply p99. So you size clusters by control-plane signals (apiserver p99 < 1 s, etcd fsync p99 < 25 ms, node count < 1,000) and shard before any of those breach, rather than chasing the theoretical 5,000-node limit.
 
-**How do you do self-service onboarding in under 5 minutes without a platform engineer in the loop?**
+**Q: How do you do self-service onboarding in under 5 minutes without a platform engineer in the loop?**
 The onboarding *is* a Git merge. A tenant opens a PR adding a `Tenant` custom resource; CI validates it against schema and org policy (Kyverno CLI/conftest); on merge, Argo CD applies the CR and a Tenant controller expands it into namespace + quota + limits + default-deny NetworkPolicy + RBAC + dashboards via an ApplicationSet onto the placement-selected cluster. No human approves the K8s plumbing — the policy engine *is* the reviewer. Backstage fronts this with a software template so the developer fills a form rather than writing YAML, and gets a "ready" tile in p95 < 5 min.
 
-**How do you handle cross-cluster service discovery and regional failover?**
+**Q: How do you handle cross-cluster service discovery and regional failover?**
 We use Cilium ClusterMesh to expose `global` services: the same service name exists in multiple clusters, annotated `service.cilium.io/global: "true"` with `affinity: local` so traffic prefers same-cluster endpoints and only spills cross-region when local endpoints are unhealthy. That gives automatic failover (a dead local backend routes to the remote cluster) and keeps ~70% of traffic local, which is also the cross-AZ cost lever. The alternative for heterogeneous CNIs is Submariner. The operational risk is silent tunnel failure, so ClusterMesh tunnel health is an alert, per [cross_cutting/multi_cluster_networking.md](cross_cutting/multi_cluster_networking.md).
 
-**Cluster API vs Terraform for cluster lifecycle — what's the real difference?**
+**Q: Cluster API vs Terraform for cluster lifecycle — what's the real difference?**
 Terraform is apply-once imperative-ish state; Cluster API is a continuous reconciliation loop where "a cluster" is a Kubernetes object the management cluster actively keeps converged. CAPI self-heals drift (a manually deleted node pool comes back), makes upgrades a declarative field bump, and makes the fleet a queryable set of CRDs you can policy-check and GitOps. Terraform tends toward drift, manual `apply` runs, and per-cluster state-file sprawl. The tradeoff is CAPI/CAPA is younger and the management cluster becomes tier-0; many teams use Crossplane alongside it precisely to also pull non-K8s infra (VPC, IAM, RDS) into the same reconciliation model.
 
-**How do you keep fleet observability from melting under cardinality?**
+**Q: How do you keep fleet observability from melting under cardinality?**
 Each cluster runs Prometheus in agent mode and `remote_write`s to a central Mimir/Thanos, but the cardinality math is brutal — 50 clusters × ~12,000 pods × dozens of series each is easily 100M+ active series, which blows up memory and query cost. So you drop high-cardinality labels at the agent (pod UID, ephemeral suffixes, container IDs) via `metric_relabel_configs`, keep only the SLI histograms you actually alert on, and use recording rules for dashboards. Local scrape also survives network partitions, and global query gives one pane of glass. The discipline is covered in [cross_cutting/prometheus_cardinality_and_scale.md](cross_cutting/prometheus_cardinality_and_scale.md), and the SLO/error-budget gating in [cross_cutting/slo_error_budget_math.md](cross_cutting/slo_error_budget_math.md).

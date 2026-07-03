@@ -346,55 +346,55 @@ avoid silently losing data (as LWW does).
 
 ## Interview Questions
 
-**What is the difference between synchronous and asynchronous replication, and what does each risk?**
+**Q: What is the difference between synchronous and asynchronous replication, and what does each risk?**
 Synchronous replication makes the leader wait for a follower to confirm a write before acknowledging success, guaranteeing the follower is up to date but blocking all writes if that follower is slow or down. Asynchronous replication has the leader acknowledge immediately and propagate changes in the background, giving low latency and resilience to slow followers but risking the loss of recently acknowledged writes if the leader fails before they propagate. Semi-synchronous is the common compromise: one synchronous follower guarantees two copies, the rest async.
 
-**Why is leader failover so error-prone?**
+**Q: Why is leader failover so error-prone?**
 Because you can't reliably distinguish a dead leader from a slow one, so failover detection relies on timeouts that are guesses; the newly promoted follower may be missing writes the old leader acknowledged (async data loss); discarded writes can violate invariants shared with other systems (GitHub's reused primary keys corrupting Redis); two nodes may both think they're leader (split brain); and a too-short timeout causes spurious failovers that can cascade under load. Each step has a failure mode, which is why managed failover is notoriously tricky.
 
-**What does "w + r > n" guarantee in a leaderless quorum, and what does it NOT guarantee?**
+**Q: What does "w + r > n" guarantee in a leaderless quorum, and what does it NOT guarantee?**
 It guarantees that the set of replicas a write touched and the set a read consults overlap in at least one node, so the read sees at least one replica holding the latest write — i.e. reads are reasonably fresh. It does NOT guarantee linearizability: concurrent writes (which value wins?), writes that partially succeed and aren't rolled back, sloppy quorums during partitions, and a node being restored from a stale replica can all still surface stale or conflicting values. Quorums give strong-ish, not strong, consistency.
 
-**Explain read-your-writes consistency and how you'd implement it.**
+**Q: Explain read-your-writes consistency and how you'd implement it.**
 Read-your-writes (read-after-write) consistency guarantees that a user always sees updates they themselves just made, though not necessarily other users' updates, preventing the alarming "I submitted it but it's gone" experience caused by reading a lagging follower. You implement it by reading anything the user might have modified from the leader (e.g. their own profile), or by tracking the log position/timestamp of the user's last write and only serving their reads from a follower that has caught up to it, or by pinning the user's reads to the replica they wrote to.
 
-**What is monotonic reads, and what anomaly does it prevent?**
+**Q: What is monotonic reads, and what anomaly does it prevent?**
 Monotonic reads guarantees a user never sees data move *backward* in time across successive reads — once they've seen a value, later reads won't show an older state. It prevents the anomaly where a first read hits an up-to-date follower (showing a new comment) and a second read hits a more-lagging follower (the comment disappears). It's achieved by routing each user consistently to the same replica, for example by hashing the user ID, so they don't bounce between followers at different lag.
 
-**What is consistent-prefix reads, and why are partitioned databases especially prone to violating it?**
+**Q: What is consistent-prefix reads, and why are partitioned databases especially prone to violating it?**
 Consistent-prefix reads guarantees that if a sequence of writes happens in a causal order, any reader sees them in that same order — never an answer before its question. Partitioned (sharded) databases are especially prone to violating it because different partitions replicate independently at different speeds, so causally related writes that landed on different partitions can become visible out of order. Preventing it requires tracking causal relationships (e.g. version vectors) so related writes are ordered consistently.
 
-**When is multi-leader replication worth its complexity, and what is its defining problem?**
+**Q: When is multi-leader replication worth its complexity, and what is its defining problem?**
 It's worth it for multi-datacenter deployments (a local leader per datacenter gives low write latency and tolerance of a datacenter outage), for clients needing offline writes (a phone's local database acts as a leader and syncs later), and for real-time collaborative editing. Its defining problem is write conflicts: two leaders can concurrently modify the same record, and the conflict only surfaces when the writes replicate to each other, requiring resolution by avoidance, last-write-wins, or application-level merging — complexity single-leader avoids entirely.
 
-**Why is "last write wins" dangerous as a conflict-resolution strategy?**
+**Q: Why is "last write wins" dangerous as a conflict-resolution strategy?**
 Because "last" is decided by a timestamp, and when two writes are genuinely concurrent, LWW keeps one and silently discards the other with no error — that's data loss, not conflict resolution. It also depends on clock synchronization across nodes, and clock skew can make a logically earlier write win or an earlier one lose. It's acceptable only when losing concurrent writes is tolerable (e.g. caching); for data you can't afford to drop, use version vectors to preserve siblings or design keys so writes never conflict.
 
-**Explain "happens-before" and concurrency, and why concurrency (not wall-clock time) defines a conflict.**
+**Q: Explain "happens-before" and concurrency, and why concurrency (not wall-clock time) defines a conflict.**
 Operation A happens-before B if B could have known about or depended on A (e.g. A's result was read before B was issued); if neither operation knew about the other, they are concurrent. A conflict is defined by concurrency, not real time, because two operations issued at different wall-clock moments can still be concurrent if neither had seen the other — and conversely, true ordering is about causal dependence, which clocks can't reliably capture. The system must therefore track causal history, not timestamps, to know what actually conflicts.
 
-**What is a version vector and what problem does it solve that a single version number can't?**
+**Q: What is a version vector and what problem does it solve that a single version number can't?**
 A version vector is a set of version numbers, one per replica, that together capture the causal history of a value across all replicas. A single version number works when one node assigns it, but with multiple replicas accepting writes you need to know what each replica had seen to determine whether two writes are causally ordered or concurrent. The version vector lets the system detect concurrent writes and retain them as siblings for later merging, rather than a single counter forcing it to wrongly conclude one write supersedes another and dropping data.
 
-**What are read repair and anti-entropy in leaderless systems?**
+**Q: What are read repair and anti-entropy in leaderless systems?**
 They are the two mechanisms that make replicas converge after a node was unavailable for some writes. Read repair happens during normal reads: when a client reads from multiple replicas and detects one returned a stale value, it writes the newer value back to that replica. Anti-entropy is a continuous background process that compares data between replicas and copies over anything missing, independent of reads. Read repair fixes frequently read keys quickly; anti-entropy ensures even rarely read keys eventually converge.
 
-**What are sloppy quorums and hinted handoff, and how do they affect the quorum guarantee?**
+**Q: What are sloppy quorums and hinted handoff, and how do they affect the quorum guarantee?**
 A sloppy quorum accepts a write on whatever w reachable nodes exist during a network partition, even nodes outside the key's designated home replicas, to keep accepting writes when the home replicas are unreachable. Hinted handoff is the follow-up: those temporary nodes hold the write and forward it to the proper home replicas once the partition heals. They increase write availability but weaken the w+r>n guarantee, because during the partition the read set and the write set may no longer overlap, so reads can miss recent writes.
 
-**Compare the replication-log implementations and say which feeds change data capture.**
+**Q: Compare the replication-log implementations and say which feeds change data capture.**
 Statement-based logs ship the SQL statements but break on nondeterministic functions and side effects, so they're mostly abandoned. WAL shipping sends the storage engine's low-level byte log — efficient but tightly coupled to the storage format and DB version, blocking zero-downtime upgrades. Logical (row-based) logs describe changes at the row level, decoupled from the storage engine, allowing heterogeneous replica versions; this is what change data capture consumes to feed downstream systems like search indexes and stream processors. Trigger-based replication runs in the application layer for flexibility at higher overhead.
 
-**How does a new follower bootstrap without locking the leader?**
+**Q: How does a new follower bootstrap without locking the leader?**
 The leader takes a consistent snapshot of its database at a particular point in the replication log (most databases can do this without locking, using MVCC). That snapshot is copied to the new follower, which records the exact log position the snapshot corresponds to. The follower then connects to the leader and requests all changes that occurred *since* that position, replaying them to catch up to the current state, after which it stays current by continuously applying the live replication stream.
 
-**What replication topologies exist for multi-leader setups, and what are their tradeoffs?**
+**Q: What replication topologies exist for multi-leader setups, and what are their tradeoffs?**
 All-to-all has every leader send its writes to every other leader, which is robust to a single node failing but can deliver causally related writes out of order at different nodes, requiring version vectors to order them. Circular and star topologies pass writes along a defined path, which reduces redundant traffic but introduces a single point of failure — if one node goes down, the propagation path is broken until it's reconfigured. All-to-all is generally more fault tolerant at the cost of ordering complexity.
 
-**Why does the book warn against ignoring replication lag, and what's the practical takeaway?**
+**Q: Why does the book warn against ignoring replication lag, and what's the practical takeaway?**
 Because "eventual" consistency offers no bound on how stale a read can be — under load or failure, lag can be seconds or minutes, long enough to break user expectations and cause bugs reported as data loss. The practical takeaway is to explicitly decide which operations require freshness and engineer the specific guarantee they need (read-your-writes, monotonic reads, consistent prefix) or route them to the leader, rather than assuming asynchronous followers will "always be fast enough."
 
-**What is split brain, and how should systems guard against it?**
+**Q: What is split brain, and how should systems guard against it?**
 Split brain is when two nodes both believe they are the leader and both accept writes, leading to divergent, conflicting data that's hard to reconcile. Systems guard against it by ensuring only one leader can be active — using a consensus-backed source of truth for leadership, fencing tokens that let downstream resources reject writes from a deposed leader, and careful failover logic. Naive mitigations (like automatically shutting down any node that detects a conflict) can backfire by killing the whole cluster, so the mechanism must be principled.
 
 ---

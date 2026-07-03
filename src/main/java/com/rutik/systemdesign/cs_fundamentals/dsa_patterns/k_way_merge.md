@@ -390,7 +390,7 @@ pass small hand-written test cases and fail on real data.
 
 ## 11. Interview Q&A
 
-**Why a heap of size k instead of just concatenating all lists and sorting?**
+**Q: Why a heap of size k instead of just concatenating all lists and sorting?**
 Concatenating and sorting is `O(N log N)` and throws away the fact that each
 input is *already sorted*. A heap of size k exploits that: at any moment, the
 global minimum among all unconsumed elements must be the minimum of the `k`
@@ -398,7 +398,7 @@ global minimum among all unconsumed elements must be the minimum of the `k`
 elements deeper in any list. This gives `O(N log k)`, which is asymptotically
 better whenever `k < N`.
 
-**Why does pushing `(node.val, node)` into a heap crash on duplicate values, and how do you fix it?**
+**Q: Why does pushing `(node.val, node)` into a heap crash on duplicate values, and how do you fix it?**
 `heapq` compares tuples element-by-element; if the first elements
 (`node.val`) are equal, it falls through to comparing the second elements —
 here, `ListNode` objects, which have no `__lt__` defined, raising
@@ -408,7 +408,7 @@ the *second* tuple element: `(node.val, i, node)`. Ties on `node.val` then
 resolve via `i` (always distinct), and Python never needs to compare the
 `ListNode`s themselves.
 
-**For k = 2, why is a two-pointer merge better than a 2-element heap?**
+**Q: For k = 2, why is a two-pointer merge better than a 2-element heap?**
 A 2-element heap still pays `O(log 2) = O(1)` overhead per operation plus the
 constant-factor cost of heap push/pop machinery (list operations,
 sift-up/down). A direct `if a[i] <= b[j]` comparison is a single branch with
@@ -417,7 +417,7 @@ no auxiliary data structure — strictly cheaper in practice, and for
 it also enables an in-place merge (writing from the back) that a heap-based
 approach can't easily replicate.
 
-**Smallest Range Covering Elements from K Lists — how do you track the range without re-scanning the heap?**
+**Q: Smallest Range Covering Elements from K Lists — how do you track the range without re-scanning the heap?**
 Maintain the heap minimum (via `heap[0]`) as the range's lower bound, and
 separately maintain a variable `current_max` updated incrementally every time
 you push a new frontier element (`current_max = max(current_max, new_val)`).
@@ -425,7 +425,7 @@ The candidate range at each step is `[heap[0][0], current_max]` — both
 endpoints available in O(1) without scanning. Compare this candidate's width
 to the best-so-far and update if smaller.
 
-**How is "the n-th ugly number" a k-way merge problem when there's only one input array?**
+**Q: How is "the n-th ugly number" a k-way merge problem when there's only one input array?**
 There is no input array — the "lists" are *generated on the fly* as multiples
 of the result sequence itself. Maintain three pointers `p2, p3, p5` into the
 growing `result` array; the next ugly number is
@@ -434,7 +434,7 @@ produced that minimum advance by one. This is k-way merge with `k=3` streams
 where each stream's "next element" is computed lazily instead of read from a
 pre-built array.
 
-**Kth Smallest in a Sorted Matrix — heap-based partial merge vs. binary search on the answer: when is each better?**
+**Q: Kth Smallest in a Sorted Matrix — heap-based partial merge vs. binary search on the answer: when is each better?**
 The heap approach (`kth_smallest_in_sorted_matrix`) is `O(k log n)` — great
 when `k` is small relative to `n^2`. Binary search on the value range is
 `O(n log(max-min))` (using a per-row binary search to count elements `<=
@@ -442,20 +442,20 @@ mid`) — its cost is *independent of k*, so it wins when `k` is large (close
 to `n^2`). If asked "what if k is `n^2 / 2`?", binary search on the answer is
 the better follow-up.
 
-**What if one of the k input lists/arrays is empty?**
+**Q: What if one of the k input lists/arrays is empty?**
 Skip it during heap seeding — only push frontier elements for non-empty
 sources (`if node:` / `if arr:` in the templates above). An empty source
 contributes nothing to the heap and is naturally never selected; no special
 casing is needed beyond the initial guard.
 
-**Why is the heap's space complexity O(k) and not O(N)?**
+**Q: Why is the heap's space complexity O(k) and not O(N)?**
 The heap holds exactly one element per *currently active* source — never
 more than `k` regardless of how large each individual list is. Each pop
 immediately triggers at most one push (the popped source's next element), so
 the heap size is invariant at `<= k` throughout. The `O(N)` cost is for the
 *output*, not the heap.
 
-**How does this generalize to external (disk-based) sorting?**
+**Q: How does this generalize to external (disk-based) sorting?**
 Split data too large for memory into chunks that fit, sort each chunk
 in-memory (`O(chunk log chunk)`), and write each sorted chunk to disk as a
 "run." Then open all `k` runs simultaneously and k-way merge them with a
@@ -463,7 +463,7 @@ single sequential pass — `O(N log k)` comparisons, `O(N)` sequential disk I/O
 (no random access). This is the standard algorithm behind large-scale
 external sorts and the merge phase of MapReduce-style shuffles.
 
-**Could you parallelize a k-way merge across machines?**
+**Q: Could you parallelize a k-way merge across machines?**
 Partition the value range into disjoint buckets (e.g., by a hash or range
 partitioner), have each machine independently sort the elements that fall
 into its bucket, and concatenate the per-bucket sorted results in bucket
@@ -473,7 +473,7 @@ runs, the k-way merge heap still applies. This bucket-then-sort approach is
 how distributed sorts (e.g., Spark's `sortByKey`) avoid a single-machine
 k-way merge bottleneck.
 
-**Is a heap always required, or can k-way merge be done with k pointers and a linear scan?**
+**Q: Is a heap always required, or can k-way merge be done with k pointers and a linear scan?**
 For small, fixed `k` (say `k <= 4`), a linear scan over `k` pointers to find
 the minimum each step is `O(N * k)` — simpler code, and for small constant
 `k`, `O(N * k)` and `O(N log k)` are both effectively `O(N)`. The heap only

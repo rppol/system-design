@@ -354,61 +354,61 @@ echo 65535 > /proc/sys/net/ipv4/tcp_max_syn_backlog
 
 ## 12. Interview Questions with Answers
 
-**Describe the TCP 3-way handshake and why each step is necessary.**
+**Q: Describe the TCP 3-way handshake and why each step is necessary.**
 Client sends SYN with its initial sequence number. Server responds with SYN+ACK, acknowledging the client's sequence and sending its own sequence. Client sends ACK, acknowledging the server's sequence. Three steps are required because both sides need to agree on initial sequence numbers independently. A 2-way handshake would not establish the server's sequence number acknowledgment before data flows.
 
-**What is TIME_WAIT and why does it exist?**
+**Q: What is TIME_WAIT and why does it exist?**
 TIME_WAIT is the state the active closer enters after sending the final ACK, lasting 2*MSL (60–240 seconds on Linux). It serves two purposes: ensuring the final ACK reaches the other side (if lost, the passive closer retransmits FIN and the active closer re-sends ACK), and ensuring all duplicate packets from the previous connection expire before the port pair is reused (preventing data corruption in a new connection).
 
-**How does TIME_WAIT cause problems on busy servers and how do you fix it?**
+**Q: How does TIME_WAIT cause problems on busy servers and how do you fix it?**
 High-throughput servers making many short-lived outbound connections accumulate TIME_WAIT sockets that hold ports until expiry. If the ephemeral port range is exhausted, new connections fail with EADDRNOTAVAIL. Fix: (1) use persistent connections/connection pooling to reduce connection churn; (2) widen ephemeral port range to 1024–65000; (3) enable tcp_tw_reuse=1 for outbound connections; (4) never use tcp_tw_recycle (broken with NAT).
 
-**What is Nagle's algorithm and when should you disable it?**
+**Q: What is Nagle's algorithm and when should you disable it?**
 Nagle's algorithm holds small TCP writes in a buffer until a full MSS is available or all outstanding data is ACKed, reducing small-packet overhead. Disable it (TCP_NODELAY=true) for request-response protocols like Redis, JDBC, or gRPC, where a single small request must be sent immediately. Without TCP_NODELAY, Nagle's interacts with delayed ACK to add 40ms of artificial latency to every request.
 
-**Explain TCP slow start and congestion avoidance.**
+**Q: Explain TCP slow start and congestion avoidance.**
 Slow start begins each new connection with cwnd=1 MSS and doubles it per RTT until reaching the slow start threshold (ssthresh). This avoids overwhelming the network immediately. Once ssthresh is reached, congestion avoidance takes over and increases cwnd by 1 MSS per RTT (linear). On packet loss (triple duplicate ACK), ssthresh is halved and cwnd is reduced; on timeout, cwnd is reset to 1 MSS (full slow start restart).
 
-**What is the difference between FIN and RST?**
+**Q: What is the difference between FIN and RST?**
 FIN initiates a graceful close: the sender has finished sending but can still receive data. The other side may still send data. RST is an abrupt close: immediately terminates the connection with no data loss tolerance. RST is sent when a packet arrives for a closed socket, when a connection must be immediately aborted (e.g., SO_LINGER with l_onoff=1, l_linger=0), or to reject a SYN for a port with no listener.
 
-**What is the SYN backlog and how does SYN flooding exploit it?**
+**Q: What is the SYN backlog and how does SYN flooding exploit it?**
 The SYN backlog holds half-open connections (SYN received, SYN+ACK sent, waiting for final ACK). A SYN flood attack sends many SYNs from spoofed IPs without completing handshakes, exhausting the backlog so legitimate connections are rejected. Defense: SYN cookies (tcp_syncookies=1) encode connection state in the ISN so no queue entry is needed until the ACK arrives.
 
-**How does TCP flow control work?**
+**Q: How does TCP flow control work?**
 The receiver advertises its available buffer space as the window size (rwnd) in each ACK. The sender never sends more bytes than the current rwnd. If rwnd reaches 0, the sender stops and sends 1-byte probes (window probes) periodically. Once the receiver drains its buffer and sends a window update with rwnd > 0, the sender resumes. This prevents the sender from overwhelming the receiver's buffer.
 
-**What is TCP Keep-Alive and when should you use it?**
+**Q: What is TCP Keep-Alive and when should you use it?**
 TCP Keep-Alive sends probe packets on idle connections to detect if the other end is still alive. Configured via tcp_keepalive_time (default 7200s), tcp_keepalive_intvl (probe interval, default 75s), tcp_keepalive_probes (number of probes before declaring dead, default 9). Use it when connections must traverse stateful firewalls or NAT gateways that expire idle sessions, and when detecting half-open connections from crashed peers. Application-level heartbeats are more reliable and should be preferred.
 
-**What is BBR and how does it differ from CUBIC?**
+**Q: What is BBR and how does it differ from CUBIC?**
 CUBIC (Linux default) reacts to packet loss as a congestion signal — it reduces cwnd on each loss event. BBR (Bottleneck Bandwidth and RTT) probes for available bandwidth and RTT to model the network's operating point, then maintains cwnd at the bandwidth-delay product. BBR handles high-latency, high-bandwidth links better because it does not interpret every packet loss as congestion. On lossy wireless links, BBR can be too aggressive and crowd out loss-based algorithms.
 
-**What is the difference between SO_REUSEADDR and SO_REUSEPORT?**
+**Q: What is the difference between SO_REUSEADDR and SO_REUSEPORT?**
 SO_REUSEADDR allows binding a socket to a port that is in TIME_WAIT state (common for servers restarting quickly — without it, bind fails for 60–240 seconds). SO_REUSEPORT allows multiple sockets (in different processes or threads) to bind to the same IP:port; the kernel load-balances incoming connections across them. Nginx and modern Java servers use SO_REUSEPORT for worker-per-core architectures.
 
-**What are half-open connections and how do they cause memory leaks?**
+**Q: What are half-open connections and how do they cause memory leaks?**
 A half-open connection occurs when one end has closed (process crash, network partition) but the other end's socket is still ESTABLISHED. The OS holds the socket and its buffers indefinitely because no signal (FIN or RST) was received. This leaks file descriptors and memory. Detection: `ss -tan | grep ESTABLISHED` growing without bound. Fix: TCP Keep-Alive with aggressive timers, application heartbeats, and connection idle timeouts.
 
-**What happens to in-flight data during a server restart?**
+**Q: What happens to in-flight data during a server restart?**
 If the server process exits without calling close() on sockets, the OS sends RST to all connected clients. If the server calls close() gracefully (sends FIN), clients receive the FIN and can read remaining buffered data. For zero-downtime restarts: (1) stop accepting new connections but finish processing in-flight requests; (2) use SO_REUSEPORT for the new process to accept new connections immediately; (3) drain the old process with a timeout.
 
-**What is ECN (Explicit Congestion Notification)?**
+**Q: What is ECN (Explicit Congestion Notification)?**
 ECN is a mechanism where routers mark packets (setting ECE/CWR bits in the IP header) to signal congestion before dropping packets. TCP supports ECN (IANA-registered TCP option). Benefits: faster congestion response without packet loss, lower latency. Requirement: both endpoints and all routers in the path must support ECN. In practice, some routers drop ECN-marked packets, requiring fallback. Linux enables ECN via `net.ipv4.tcp_ecn=1`.
 
-**How does TCP handle out-of-order delivery?**
+**Q: How does TCP handle out-of-order delivery?**
 TCP buffers out-of-order segments at the receiver. The receiver sends ACKs for the last contiguous byte received. If segment 1000–1999 arrives, then 3000–3999 arrives before 2000–2999, the receiver ACKs only 2000 (edge of contiguous delivery) but buffers 3000–3999. With SACK, the receiver can also report 3000–3999 as received, allowing the sender to retransmit only 2000–2999.
 
-**What is the significance of the sequence number space and why are initial sequence numbers (ISN) random?**
+**Q: What is the significance of the sequence number space and why are initial sequence numbers (ISN) random?**
 The 32-bit sequence number wraps around at 4 GB. ISNs are randomized to prevent blind packet injection attacks: an attacker who knows the IP:port pair cannot inject forged segments without guessing the current sequence number. The ISN randomization makes this guessing computationally infeasible, preventing TCP hijacking attacks.
 
-**What happens when a server calls listen(sockfd, backlog) with a small backlog?**
+**Q: What happens when a server calls listen(sockfd, backlog) with a small backlog?**
 The second argument to listen() sets the maximum length of the accept queue (completed connections waiting for accept()). If the backlog is 5 and 10 connections complete the handshake before the application calls accept(), 5 will be queued and the other 5 will have their final ACKs silently dropped (or RST sent). The client will see a timeout or reset. Under burst traffic, a small backlog causes connection failures even when the server is healthy. Always set backlog to at least 1024, and increase somaxconn/tcp_max_syn_backlog accordingly.
 
-**Why do load balancers sometimes send RST to upstream connections?**
+**Q: Why do load balancers sometimes send RST to upstream connections?**
 Load balancers have idle connection timeouts. When a backend connection has been idle for the configured timeout (commonly 60–300 seconds), the load balancer closes it, often by sending RST. If the backend application has no connection validation and reuses the connection, the next request will fail with a broken pipe error. This is why connection pools should have maxLifetime shorter than the LB idle timeout, and why keepalive probes should be shorter than the LB timeout.
 
-**Explain the relationship between TCP window size and throughput.**
+**Q: Explain the relationship between TCP window size and throughput.**
 Throughput = window_size / RTT. A TCP window of 64 KB over a 100ms RTT link gives 640 KB/s maximum throughput, regardless of bandwidth. The TCP window scale option (RFC 1323) extends the window to 1 GB. For high-BDP (bandwidth-delay product) links, increasing socket buffers is critical. `net.core.rmem_max` and `net.core.wmem_max` control maximum buffer sizes.
 
 ---

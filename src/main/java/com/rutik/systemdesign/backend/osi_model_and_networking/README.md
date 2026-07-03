@@ -292,49 +292,49 @@ Last host: 192.168.10.254
 
 ## 12. Interview Questions with Answers
 
-**What are the 7 layers of the OSI model and what does each do?**
+**Q: What are the 7 layers of the OSI model and what does each do?**
 Physical (bits on wire), Data Link (frame delivery within segment, MAC), Network (IP routing between networks), Transport (end-to-end delivery with TCP/UDP), Session (session management), Presentation (encoding, encryption), Application (HTTP, DNS, user-facing protocols). In practice, TCP/IP collapses Session and Presentation into Application.
 
-**What is the difference between a hub, switch, and router?**
+**Q: What is the difference between a hub, switch, and router?**
 A hub is a Layer 1 device — it broadcasts all traffic to all ports. A switch is a Layer 2 device — it forwards frames only to the MAC address destination, learning the MAC-to-port mapping. A router is a Layer 3 device — it forwards packets between different networks using IP routing tables.
 
-**How does ARP work and what is a gratuitous ARP?**
+**Q: How does ARP work and what is a gratuitous ARP?**
 ARP resolves an IP address to a MAC address within a subnet. A host broadcasts "who has IP X?" and the owner replies with its MAC. A gratuitous ARP is an unsolicited ARP reply announcing an IP-to-MAC mapping — used by hosts to update ARP caches during IP changes (e.g., failover) or by attackers for ARP poisoning.
 
-**What is MTU and why does it matter for backend services?**
+**Q: What is MTU and why does it matter for backend services?**
 MTU is the maximum frame size a link can carry. Ethernet MTU is 1500 bytes. TCP MSS is 1460 bytes (1500 - 20 IP - 20 TCP). If PMTUD is broken (ICMP filtered), large TCP transfers silently hang. Backend services doing bulk data transfers should verify MTU discovery works end-to-end.
 
-**What is the difference between a Layer 4 and Layer 7 load balancer?**
+**Q: What is the difference between a Layer 4 and Layer 7 load balancer?**
 A Layer 4 LB routes TCP/UDP flows based on IP:port without inspecting payload — faster and protocol-agnostic. A Layer 7 LB parses the application protocol (HTTP headers, URLs, cookies) — enables intelligent routing but has higher CPU overhead. Use Layer 7 for HTTP services needing content-based routing or SSL termination.
 
-**How does DNS resolution work, and what is a DNS TTL?**
+**Q: How does DNS resolution work, and what is a DNS TTL?**
 A client queries a recursive resolver, which follows the chain: root → TLD → authoritative nameserver. The authoritative server returns the record with a TTL. The resolver caches the result for TTL seconds. Clients should not cache TTLs longer than the record specifies. Before migration, lower TTL to 60–300s to enable fast cutover.
 
-**What is IP fragmentation and when does it occur?**
+**Q: What is IP fragmentation and when does it occur?**
 When an IP packet exceeds the MTU of the outgoing link, IP fragments it into multiple smaller packets (if the DF bit is not set). Reassembly happens at the destination. Fragmentation is expensive and fragmented UDP is common in DNS over UDP (responses >512 bytes, though EDNS0 allows up to ~4096 bytes).
 
-**What is NAT and what are its limitations?**
+**Q: What is NAT and what are its limitations?**
 NAT (Network Address Translation) allows multiple internal hosts to share a single public IP by maintaining a port-mapping table. Limitations: breaks protocols that embed IP addresses in payload (FTP active mode, SIP), connection table exhaustion under high load, complicates peer-to-peer connectivity, prevents unsolicited inbound connections (which is also a benefit).
 
-**What is ICMP and why should backends care about it?**
+**Q: What is ICMP and why should backends care about it?**
 ICMP carries control messages: ping (Echo Request/Reply), traceroute (TTL Exceeded), and — critically for backends — Fragmentation Needed (Type 3 Code 4) for PMTUD. Blocking all ICMP at firewalls breaks PMTUD, causing mysterious connection hangs for large payloads. Only block ICMP flood attacks, not diagnostic ICMP.
 
-**What is a VLAN and how does it differ from a subnet?**
+**Q: What is a VLAN and how does it differ from a subnet?**
 A VLAN is a Layer 2 logical segmentation — it separates broadcast domains on the same physical switch infrastructure using 802.1Q tags in Ethernet frames. A subnet is a Layer 3 construct — an IP address range. VLANs typically correspond to subnets but they are distinct concepts. Traffic between VLANs must pass through a Layer 3 router or firewall.
 
-**What is the difference between unicast, multicast, and broadcast?**
+**Q: What is the difference between unicast, multicast, and broadcast?**
 Unicast: one sender, one receiver (specific MAC/IP). Broadcast: one sender, all receivers in a segment (MAC: FF:FF:FF:FF:FF:FF, IP: 255.255.255.255 or subnet broadcast). Multicast: one sender, a group of receivers that have subscribed (MAC range 01:00:5E:xx:xx:xx, IP range 224.0.0.0–239.255.255.255). Switches flood broadcasts; multicast requires IGMP snooping to avoid flooding.
 
-**How does traceroute work?**
+**Q: How does traceroute work?**
 Traceroute sends UDP or ICMP packets with incrementing TTL values (1, 2, 3, ...). Each router that decrements TTL to 0 sends back an ICMP "TTL Exceeded" message revealing its IP. This maps the path. Each hop typically shows 3 probes for RTT measurement. Firewalls that block ICMP cause "* * *" in the output.
 
-**What is the CAM table on a network switch?**
+**Q: What is the CAM table on a network switch?**
 The Content Addressable Memory (CAM) table maps MAC addresses to switch ports. When a frame arrives, the switch records source MAC → incoming port. When forwarding, it looks up destination MAC. If not found, it floods the frame out all ports except the incoming one. CAM table overflow (via MAC flooding attack) causes the switch to flood all traffic like a hub.
 
-**What is BGP and why does it matter for backend engineers?**
+**Q: What is BGP and why does it matter for backend engineers?**
 BGP (Border Gateway Protocol) is the routing protocol that runs the internet — it exchanges reachability information between autonomous systems (large networks like ISPs, cloud providers). Backend engineers care because anycast routing (used by CDNs, DNS providers, Cloudflare) uses BGP to route requests to the geographically nearest node sharing the same IP prefix.
 
-**What happens at the network level when you type a URL in a browser?**
+**Q: What happens at the network level when you type a URL in a browser?**
 DNS resolution (recursive lookup to get IP), TCP three-way handshake to the server IP on port 443, TLS handshake (certificate verification, key exchange), HTTP request sent within TLS session, server processes request and sends HTTP response, TCP connection kept alive for reuse. Total: involves Layers 1–7 sequentially with ARP for the next-hop MAC, IP routing at each gateway, and TCP/TLS at the edge.
 
 ---

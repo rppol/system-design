@@ -330,52 +330,52 @@ LSM-style, and caching results in **materialized views and data cubes**.
 
 ## Interview Questions
 
-**What is the fundamental tradeoff between LSM-trees and B-trees?**
+**Q: What is the fundamental tradeoff between LSM-trees and B-trees?**
 LSM-trees optimize writes and B-trees optimize reads. LSM-trees turn all writes into sequential appends (memtable flush plus WAL) and defer cleanup to background compaction, giving very high write throughput; reads may have to consult the memtable plus several SSTable levels. B-trees update pages in place with random I/O, giving lower write throughput but a single, predictable read path down the tree. So you pick LSM for write-heavy workloads and B-trees for read-heavy or latency-sensitive ones.
 
-**What is write amplification, and how does it differ between the two engine families?**
+**Q: What is write amplification, and how does it differ between the two engine families?**
 Write amplification is the number of physical writes caused by one logical write, and it limits sustainable write throughput while wearing out SSDs. B-trees write each datum at least twice — once to the WAL and once to the page — plus extra writes when pages split. LSM-trees write once sequentially but then rewrite the same data repeatedly during compaction as segments merge. Both pay it; LSM usually still sustains higher write throughput because its writes are sequential and its compaction is tunable.
 
-**Why does an LSM-tree need Bloom filters, especially for keys that don't exist?**
+**Q: Why does an LSM-tree need Bloom filters, especially for keys that don't exist?**
 Because an LSM read that misses the memtable must check SSTable segments from newest to oldest, and a key that doesn't exist anywhere forces it to check *every* segment before concluding "not found" — extremely slow under not-found-heavy patterns like cache misses. A Bloom filter is a compact probabilistic structure that answers "this key is definitely not in this SSTable" cheaply, letting the read skip segments that can't contain the key and avoid the full scan.
 
-**Why are all writes in a log-structured store appends, and why is that fast?**
+**Q: Why are all writes in a log-structured store appends, and why is that fast?**
 Appending writes the data to the end of a file (and to the WAL) sequentially, never seeking to overwrite existing data in place. Sequential writes are dramatically faster than random writes on spinning disks and are also gentler on SSDs (fewer erase cycles, less wear). The cost is deferred: overwritten and deleted values accumulate until background compaction reclaims the space.
 
-**What does compaction do in an LSM-tree, and what happens if it can't keep up?**
+**Q: What does compaction do in an LSM-tree, and what happens if it can't keep up?**
 Compaction merges SSTable segments, discarding overwritten and deleted keys so that only the latest value per key survives, which bounds disk usage and keeps read paths short. If compaction falls behind sustained heavy writes, unmerged segments accumulate, so reads must scan more segments and latency degrades; eventually disk fills. This makes compaction backlog a critical metric to monitor, and it's why LSM tail latency can spike when compaction competes with foreground I/O.
 
-**Why do B-trees keep a write-ahead log if they update pages in place?**
+**Q: Why do B-trees keep a write-ahead log if they update pages in place?**
 Because some operations touch multiple pages — most importantly a page split, which splits one full page into two and updates the parent. A crash partway through would leave the tree corrupted (a dangling or orphaned page). The WAL (redo log) records the intended changes before they're applied so that recovery after a crash can replay the log to complete or roll back the multi-page operation and restore a consistent tree.
 
-**How can a B-tree with 4 KB pages index a 256 TB dataset in only four levels?**
+**Q: How can a B-tree with 4 KB pages index a 256 TB dataset in only four levels?**
 Because each page holds a large number of child references — the branching factor — typically several hundred. With a branching factor of 500, one level addresses 500 pages, two levels 500², three levels 500³, and four levels 500⁴ pages; at 4 KB per page that's on the order of hundreds of terabytes. The high branching factor keeps the tree shallow, so a lookup follows only about four page reads regardless of dataset size.
 
-**What is a clustered index versus a heap file with a non-clustered index?**
+**Q: What is a clustered index versus a heap file with a non-clustered index?**
 A clustered index stores the actual row data *within* the index structure ordered by the index key — MySQL InnoDB stores rows in the primary-key B-tree, so a primary-key lookup returns the row directly. The alternative stores rows in a separate heap file and has the index hold a reference (pointer) into the heap; this avoids duplicating row data across multiple secondary indexes but adds an indirection hop. Clustered indexes speed reads on the clustering key but make secondary-index lookups go through it.
 
-**What is a covering index and what problem does it solve?**
+**Q: What is a covering index and what problem does it solve?**
 A covering index stores some of a row's columns directly in the index, so a query that needs only those columns is answered entirely from the index without reading the row from the heap or clustered store. It solves the extra-I/O problem of index-then-fetch: the second lookup into the table is eliminated. The cost is a larger index and more write overhead, so it's worth it for hot queries on a stable set of columns.
 
-**Why do analytic workloads use column-oriented storage instead of row-oriented?**
+**Q: Why do analytic workloads use column-oriented storage instead of row-oriented?**
 Analytic queries typically aggregate over millions of rows but touch only a handful of a fact table's many columns. Row-oriented storage forces the engine to read every column of every row off disk and then discard the unneeded ones, wasting most of the I/O. Column-oriented storage keeps each column's values together, so the query reads only the columns it references — often a 90%+ reduction in disk I/O — and the similar values within a column compress extremely well.
 
-**How does bitmap encoding compress a column, and why is it good for analytics?**
+**Q: How does bitmap encoding compress a column, and why is it good for analytics?**
 For a column with few distinct values (like country or product category), bitmap encoding stores one bitmap per distinct value, where bit *i* indicates whether row *i* has that value. These bitmaps are tiny and often further run-length compressed. They make filters like `WHERE product_id IN (30, 68, 69)` fast: load those three bitmaps and OR them together to get all matching rows, with no row scan — a perfect fit for analytic filtering on low-cardinality columns.
 
-**How do you write to a column store given that in-place row inserts are hard?**
+**Q: How do you write to a column store given that in-place row inserts are hard?**
 You use the same trick as LSM-trees: buffer incoming writes in an in-memory row-oriented structure (a sorted store), and periodically merge that buffer into the on-disk column files in bulk. Queries read both the in-memory buffer and the column files and combine the results. This keeps writes cheap and amortized while preserving the column files' read efficiency, which is why systems like Vertica adopt an LSM-style write path.
 
-**What are a star schema and a snowflake schema, and how do they differ?**
+**Q: What are a star schema and a snowflake schema, and how do they differ?**
 A star schema centers on a large fact table (one row per event, like a sale) with foreign keys radiating out to dimension tables describing the who/what/where/when (product, customer, store, date) — drawn as a star. A snowflake schema goes further and normalizes those dimensions into sub-dimension tables (e.g. product → brand and category tables), which reduces redundancy but adds joins. Star is more common in warehouses because it's simpler and analysts find it easier to query.
 
-**Why did OLTP and OLAP split into separate systems instead of sharing one database?**
+**Q: Why did OLTP and OLAP split into separate systems instead of sharing one database?**
 Because their access patterns conflict: OLTP needs low-latency point reads/writes from user requests, while OLAP runs heavy ad-hoc scan-and-aggregate queries over huge datasets. Running analytics on the OLTP database makes those expensive scans compete for resources and spike user-facing latency. So companies extract data into a separate read-only data warehouse via ETL, optimized (column storage, star schemas) for analytics without endangering the transactional system.
 
-**What actually makes in-memory databases fast, given that the OS already caches disk pages?**
+**Q: What actually makes in-memory databases fast, given that the OS already caches disk pages?**
 The main speedup is *not* avoiding disk reads — the OS page cache already serves hot data from RAM in disk-backed databases. It's that an in-memory database avoids the overhead of encoding/decoding its in-memory data structures into a disk-friendly byte format. It can also offer data models that are awkward on disk, like Redis's sets and priority queues. Durability is added separately via append-only logs, periodic snapshots, or replication to other nodes.
 
-**What is a materialized view (or data cube), and what is its tradeoff?**
+**Q: What is a materialized view (or data cube), and what is its tradeoff?**
 A materialized view is a precomputed, on-disk copy of a query's result (often an aggregate) that is refreshed when underlying data changes, so repeated queries read the cached result instantly instead of recomputing it; a data cube generalizes this to a grid of aggregates summarized along several dimensions at once. The tradeoff is flexibility: the cube/view answers the precomputed rollups very fast but can't easily answer queries that need a dimension it didn't materialize, and it adds maintenance cost on writes.
 
 ---

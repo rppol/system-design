@@ -472,14 +472,14 @@ by different neighbors before it's ever processed.
 
 ## 11. Interview Q&A
 
-**Why do graph traversals need a `visited` set but tree traversals don't?**
+**Q: Why do graph traversals need a `visited` set but tree traversals don't?**
 A tree has no cycles and exactly one path from the root to any node, so a
 recursive/BFS walk can never revisit a node. A graph (and a grid, which is
 just a graph) can have cycles — e.g., a 2x2 block of land has 4 cells each
 adjacent to 2 others, forming a cycle. Without marking visited cells, a
 traversal would loop forever, which is exactly the bug in §8.
 
-**When do you use BFS vs. DFS for grid problems?**
+**Q: When do you use BFS vs. DFS for grid problems?**
 For *counting* connected components (islands) or *generating a path*
 (backtracking-style), DFS is simpler and uses less code. For finding the
 *shortest* path/distance in an unweighted grid, or for "spreads simultaneously
@@ -507,7 +507,7 @@ decreasing quantity (no "smaller subproblem"), so the recursion never reaches
 a base case — it's not just slow, it never terminates (until Python's stack
 limit raises `RecursionError`).
 
-**Why does Clone Graph need a hashmap instead of just a `visited` set?**
+**Q: Why does Clone Graph need a hashmap instead of just a `visited` set?**
 A `visited` set only answers "have I processed this node?" — it doesn't tell
 you *what the corresponding new node is*. When neighbor B's clone needs to
 point back to neighbor A's clone (a cycle), you need to look up "the new node
@@ -524,7 +524,7 @@ total — and a hash-set lookup confirms whether the generated word exists in
 the dictionary. For n in the thousands, this is the difference between
 roughly 10^7 and 10^10+ operations.
 
-**How do you choose between 4-directional and 8-directional movement?**
+**Q: How do you choose between 4-directional and 8-directional movement?**
 Read the problem statement's definition of "adjacent" — it will explicitly
 say "horizontally or vertically adjacent" (4-directional, the overwhelming
 majority of problems) or mention diagonal connections (8-directional). When

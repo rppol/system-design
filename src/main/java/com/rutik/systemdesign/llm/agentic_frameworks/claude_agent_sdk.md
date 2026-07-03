@@ -445,52 +445,52 @@ system = [{
 
 ## 12. Interview Questions with Answers
 
-**What is the tool use loop in the Anthropic API?**
+**Q: What is the tool use loop in the Anthropic API?**
 The tool use loop is the canonical agent pattern: send messages to Claude, receive a response with text and/or tool_use content blocks, execute each tool_use, append matching tool_result blocks to a user message, and repeat. The loop terminates when Claude returns only text (stop_reason="end_turn"). Each iteration is one API call.
 
-**How do you execute multiple Claude tool calls in parallel?**
+**Q: How do you execute multiple Claude tool calls in parallel?**
 Use `asyncio.gather()` over the tool_use blocks: `results = await asyncio.gather(*[execute_tool(tu.name, tu.input) for tu in tool_uses])`. Always pass `return_exceptions=True` so one failing tool doesn't break the others — handle each result individually and convert exceptions to tool_result blocks with `is_error=True`.
 
-**Why must every tool_use block have a corresponding tool_result?**
+**Q: Why must every tool_use block have a corresponding tool_result?**
 The Anthropic API enforces this — if you send a follow-up user message missing a tool_result for a previously returned tool_use_id, you get a 400 error. The model needs to see the outcome of every tool it called to update its reasoning. Always produce a tool_result, even on tool errors (use `is_error=True` so the model can self-correct).
 
-**How does prompt caching work for agents and what does it save?**
+**Q: How does prompt caching work for agents and what does it save?**
 Prompt caching marks a prefix of the prompt (system prompt + tool definitions + early conversation turns) as cacheable with `cache_control: {"type": "ephemeral"}`. The cache is keyed by the exact prefix content and lives for 5 minutes. Cache writes cost 1.25× base input price; cache reads cost 0.1× base price. For agents with 2-3K token system prompts called 5-20 times in a session, caching saves 60-80% of input token cost.
 
-**What is the difference between standard mode and extended thinking mode?**
+**Q: What is the difference between standard mode and extended thinking mode?**
 Standard mode returns content as text or tool_use blocks immediately. Extended thinking mode (Opus 4.7, Sonnet 4.6+) adds a "thinking" phase before the response — Claude produces internal reasoning content blocks before deciding on tools or final answer. Thinking tokens are billed at output token price. Enable with `thinking={"type": "enabled", "budget_tokens": N}`. Use for complex problems where reasoning quality matters more than latency.
 
-**How do you implement subagent spawning with the native API?**
+**Q: How do you implement subagent spawning with the native API?**
 Define a `dispatch_subagent` tool with parameters {task, allowed_tools}. When the parent calls it, your code starts a fresh `run_agent()` call with a focused system prompt, the requested tool subset, and the task as user message. Run the subagent loop to completion. Return the subagent's final text as the tool_result. For parallel subagents, your parent's tool_use loop will gather them automatically via `asyncio.gather()`.
 
-**What stop_reasons can the API return and what do they mean?**
+**Q: What stop_reasons can the API return and what do they mean?**
 `end_turn` (model finished naturally — extract final text), `tool_use` (model wants to call tools — execute and loop), `max_tokens` (hit the max_tokens limit — usually retry with larger limit), `stop_sequence` (matched a stop sequence — rare in agents), `pause_turn` (long-running operation paused — resume by sending an empty user turn). The loop logic branches on stop_reason.
 
-**How do you handle a tool that returns 500KB of output?**
+**Q: How do you handle a tool that returns 500KB of output?**
 Truncate at the tool execution layer, not at the API layer. Cap at 50KB-100KB max, and add a marker like "[Truncated: 500000 chars total]" so Claude knows the data was cut off. If the tool is something like `read_file`, prefer adding a grep/extract parameter so Claude can request specific sections instead of dumping the whole file.
 
-**What is the cost difference between Haiku, Sonnet, and Opus for the same agent task?**
+**Q: What is the cost difference between Haiku, Sonnet, and Opus for the same agent task?**
 Approximately 5× between adjacent tiers. Haiku 4.5: $0.80/M input, $4/M output. Sonnet 4.6: $3/M input, $15/M output (3.75× Haiku). Opus 4.7: $15/M input, $75/M output (5× Sonnet). For tool-heavy agents where reasoning quality matters, Sonnet is the typical sweet spot. Use Opus only for the hardest reasoning steps via cascading. Haiku for routing/classification.
 
-**How do you stream tool use to the user?**
+**Q: How do you stream tool use to the user?**
 Use `client.messages.stream(...)` which yields events. Watch for `content_block_start` (with type=tool_use — start showing "Calling tool X..."), `content_block_delta` (with input_json_delta — progressively reveal the JSON arguments), and `content_block_stop` (tool args complete). Useful for UX where users want to see what the agent is doing before tools execute.
 
-**How does the computer use tool work?**
+**Q: How does the computer use tool work?**
 The `computer` tool has actions: screenshot, mouse_move, left_click, right_click, double_click, type, key. Claude calls these to interact with a desktop environment. Your code must provide a real desktop (typically Docker container with Xvfb display) and execute the actions via pyautogui or similar. Each screenshot is returned as image content. Latency is high (5-10s per action) so use sparingly — prefer DOM-based browser tools when possible.
 
-**When should you NOT use the native API and use a framework instead?**
+**Q: When should you NOT use the native API and use a framework instead?**
 When you need: (a) rapid prototyping across providers (LangChain abstracts model selection), (b) built-in observability without setup (LangSmith integrates with LangChain immediately), (c) complex stateful workflows with branching and persistence (LangGraph), (d) the team is unfamiliar with async Python. For production agents where cost, latency, and reliability dominate, native is usually better.
 
-**How do you test an agent built on the native API?**
+**Q: How do you test an agent built on the native API?**
 Mock the `client.messages.create` to return canned responses (mock the AsyncAnthropic class with `unittest.mock.AsyncMock`). Pre-record the sequence of tool_use blocks and final text for known scenarios. Assert that your tool execution code produces the expected tool_results. For end-to-end tests, use the real API with small inputs and assert on tool call counts and final answer patterns. Use `pytest-asyncio` for async test support.
 
-**How do you handle rate limits from the API?**
+**Q: How do you handle rate limits from the API?**
 The SDK auto-retries on 429 with exponential backoff (configurable via `max_retries`). For high-volume agents, implement your own queue with token bucket per minute (Anthropic rate limits are typically per-minute on tokens and per-minute on requests). Monitor 429 rates — if frequently rate-limited, request higher limits via Anthropic support or shift load with Batch API for non-real-time work (50% cost discount).
 
-**What is the right way to handle conversation history that exceeds the context window?**
+**Q: What is the right way to handle conversation history that exceeds the context window?**
 Claude has 200K token context. Track conversation token count after each response (`usage.input_tokens` tells you the full conversation size). When approaching 140K (70% of window), trigger compaction: summarize the early conversation turns with a separate LLM call and replace them with the summary. Keep the last N (typically 5-10) tool result pairs verbatim since they're often the most relevant.
 
-**Why is parallel tool execution often a 2-3× speedup vs sequential?**
+**Q: Why is parallel tool execution often a 2-3× speedup vs sequential?**
 Tools spend most of their time waiting on I/O (HTTP requests, database queries, file reads). Sequential execution serializes the waits — 3 tools of 1.5s each = 4.5s total. Parallel execution overlaps the waits — 3 tools of 1.5s each = ~1.5s total. The model can request 3-5 parallel tools in one response, so the savings compound across the conversation. Without parallel execution, multi-tool agents feel sluggish even when the model decisions are fast.
 
 ---

@@ -570,29 +570,29 @@ The background-task approach is the right default for general chat. The outbox p
 
 ## Interview Discussion Points
 
-**Why must the ConnectionManager use Redis pub/sub instead of an in-process dict in a horizontally scaled deployment?**
+**Q: Why must the ConnectionManager use Redis pub/sub instead of an in-process dict in a horizontally scaled deployment?**
 Each pod maintains its own in-memory dict of WebSocket connections. A message received by pod 1 is only delivered to connections on pod 1. Users connected to pods 2 through N never see it. Redis pub/sub acts as a shared message bus — any pod publishes to a channel, and all pods receive the broadcast and forward it to their local connections.
 
-**What happens if Redis goes down?**
+**Q: What happens if Redis goes down?**
 New messages cannot be published or delivered. Existing WebSocket connections remain open but messages are silently dropped. On reconnect after Redis recovery, clients should request message history via a REST endpoint backed by PostgreSQL. To reduce the blast radius, use Redis Sentinel (automatic failover in ~5-10 seconds) or Redis Cluster. The app should catch `aioredis.ConnectionError` and either enqueue messages locally for retry or immediately return an error frame to the sender.
 
-**How does the per-connection asyncio.Queue solve the slow consumer problem?**
+**Q: How does the per-connection asyncio.Queue solve the slow consumer problem?**
 Without a queue, the Redis subscriber coroutine calls `await ws.send_text()` directly on each connection. A slow client causes this await to block, stalling delivery for all other connections in the room. The queue decouples publishing from delivery: the subscriber does a non-blocking `put_nowait()` into each connection's queue. A separate writer coroutine per connection drains the queue. If the queue is full (`maxsize=64`), the message is dropped and the connection is eventually evicted — this is the correct backpressure response.
 
-**Why is JWT passed in the first WebSocket message rather than as a query parameter?**
+**Q: Why is JWT passed in the first WebSocket message rather than as a query parameter?**
 Query parameters appear in URL form and are logged by every proxy, load balancer, and web server between client and backend — a token in a URL is a credential in a log file. They also appear in browser history. The WebSocket HTTP upgrade request does not support the `Authorization` header in browser clients. Sending the token as the first frame after the handshake keeps it inside the encrypted WebSocket channel and out of logs.
 
-**How do you handle the case where a client reconnects after being disconnected?**
+**Q: How do you handle the case where a client reconnects after being disconnected?**
 On reconnect, the client re-authenticates and re-joins the room. It should include a `last_message_id` in the auth frame. The server queries PostgreSQL for messages newer than that ID and sends them as a replay burst before resuming live delivery. This pattern is called "catch-up on reconnect" and prevents message gaps during brief disconnections.
 
-**What is the durability gap in the broadcast-first persistence design, and how do you close it?**
+**Q: What is the durability gap in the broadcast-first persistence design, and how do you close it?**
 Between `await manager.publish()` and the background task writing to PostgreSQL, a pod crash loses that message permanently — typically a window of 10-50 ms. For general chat this is acceptable. To close the gap, use an outbox pattern: write the message to a `message_outbox` table in PostgreSQL atomically with the chat record (single transaction), then have a separate process tail the outbox and publish to Redis. On crash, the outbox tails from the last committed row.
 
-**How would you scale to 100k concurrent connections?**
+**Q: How would you scale to 100k concurrent connections?**
 Scale horizontally to 10 pods (10k connections per pod). Each pod runs a single asyncio event loop — there is no GIL contention for I/O-bound WebSocket operations. Ensure Redis pub/sub capacity: a single Redis node handles ~1M pub/sub messages per second, well above 100k connected users sending messages at typical chat rates (1-5 msg/min average). For connection memory, each asyncio WebSocket plus a 64-item queue costs roughly 50-100 KB — 10k connections per pod is approximately 500 MB-1 GB of RAM, within a standard 2-4 GB pod allocation.
 
-**How do you detect and clean up zombie connections (client crash without sending a CLOSE frame)?**
+**Q: How do you detect and clean up zombie connections (client crash without sending a CLOSE frame)?**
 The TCP FIN/RST may not arrive if the client's network disappears (mobile, NAT timeout). The server-side ping-pong loop sends a JSON `{"type":"ping"}` every 20 seconds. If no `{"type":"pong"}` arrives within 10 seconds, the server closes the WebSocket with code 1001 and calls `manager.disconnect()`. This bounds the zombie window to at most 30 seconds (20 s interval + 10 s timeout), which satisfies the 30-second cleanup requirement.
 
-**What changes are needed to support direct messages (DMs) in addition to rooms?**
+**Q: What changes are needed to support direct messages (DMs) in addition to rooms?**
 Model a DM as a room with exactly two participants. Generate a canonical DM room ID from the two user IDs (e.g., `dm:{min(uid_a,uid_b)}:{max(uid_a,uid_b)}`). The WebSocket endpoint, ConnectionManager, and Redis pub/sub channel all remain identical — only the room ID format changes. Access control (verifying the requesting user is one of the two participants) is enforced during the auth phase by checking the JWT `sub` against the room membership in PostgreSQL.

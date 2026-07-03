@@ -1057,46 +1057,46 @@ Break-even task volume (at $5/task pricing):
 
 ## 11. Interview Discussion Points
 
-**Why is SWE-bench Verified the right benchmark for autonomous SWE agents rather than HumanEval or MBPP?**
+**Q: Why is SWE-bench Verified the right benchmark for autonomous SWE agents rather than HumanEval or MBPP?**
 
 SWE-bench Verified consists of 300 real GitHub issues from production open-source repositories, each with a hidden test suite that was validated by human annotators to correctly test the issue's requirement. HumanEval and MBPP test isolated function implementations from scratch — there is no existing codebase, no context window challenge, no repo navigation, no multi-file edit. An autonomous SWE agent that scores 90% on HumanEval may score 5% on SWE-bench because the hard problems are repo-level context, understanding existing code conventions, and not breaking adjacent tests. Use SWE-bench Verified for autonomous agents and HumanEval only for evaluating raw code generation quality in isolation.
 
-**How do you prevent sandbox escape — what layers of defense does the system have?**
+**Q: How do you prevent sandbox escape — what layers of defense does the system have?**
 
 Three layers: (1) Firecracker microVM provides kernel-level isolation — each task runs in a dedicated Linux kernel; even a full VM escape only reaches the Firecracker process, which runs as an unprivileged user with seccomp-BPF filtering. (2) Network egress allowlist — outbound connections are restricted to PyPI, npm, and GitHub API via iptables rules enforced at the VMM layer, not inside the sandbox (agent-generated code cannot modify iptables). (3) Minimal credential injection — only a short-lived, scoped GitHub App token (read-only or repo-specific write) is injected, never a long-lived personal access token or AWS credentials. Defense in depth: if any one layer fails, the remaining two limit blast radius.
 
-**Why checkpoint every tool call rather than every N=10 calls?**
+**Q: Why checkpoint every tool call rather than every N=10 calls?**
 
 At 50 tool calls per task and $1.52 cost per task, each tool call costs ~$0.03. Checkpointing every N=10 means a crash at step 9 wastes $0.27 and 5.4 minutes. At 100,000 tasks/day with 1% crash rate, N=10 wastes $270/day and 54,000 minutes of latency. Per-call checkpointing adds 5 ms × 50 calls = 250 ms overhead per task — a correct tradeoff. Consider N>1 only for sub-1ms in-memory tools where checkpoint cost exceeds tool cost.
 
-**How does the self-correction loop know when to give up?**
+**Q: How does the self-correction loop know when to give up?**
 
 Three independent stopping conditions: (1) max_iterations exceeded (hard limit of 5); (2) cost ceiling reached ($5 in correction spend, which is approximately 3.3 correction LLM calls at typical context size — if 3 full iterations have not resolved the issue, additional iterations are statistically unlikely to succeed based on SWE-bench empirical data); (3) patch apply failure (if `git apply` rejects the LLM's patch due to context mismatch, the loop cannot make progress and must fail immediately). The flakiness guard prevents the loop from entering at all if the test failure is not reproducible on 2 of 3 runs. Together these conditions ensure the loop terminates in bounded time and cost.
 
-**What is the context budget allocation strategy for a 500,000-file monorepo?**
+**Q: What is the context budget allocation strategy for a 500,000-file monorepo?**
 
 The allocation is 60/20/10/10: 60% task context (issue, system prompt, conversation), 20% relevant source files, 10% test files, 10% meta files (README, dependency manifests, lint config). File selection uses three signals: (1) LSP symbol resolution — highest signal, definitively locates `src/auth/user_auth_service.py` when the issue mentions `UserAuthService`; (2) embedding similarity over pre-indexed file chunks; (3) BM25 keyword search. Combined score: LSP 50%, embedding 30%, BM25 20%. Files are loaded greedily until the 20% budget is exhausted. A 500,000-file monorepo contributes at most ~25,000 tokens to a 128K window — the remaining 475,000 files are filtered out before the agent begins.
 
-**Why choose Firecracker over Docker for sandbox isolation in a production SWE agent?**
+**Q: Why choose Firecracker over Docker for sandbox isolation in a production SWE agent?**
 
 The threat model is adversarial: agents execute arbitrary code derived from user-submitted issue descriptions. A crafted issue could cause the agent to run `cat /proc/1/environ` to exfiltrate host credentials. Docker's shared-kernel model means a runc exploit grants host-level access affecting all concurrent tasks. Firecracker's dedicated-kernel model confines the same exploit to the Firecracker process running unprivileged under seccomp-BPF. Boot time difference (125 ms vs 800 ms) is a benefit: Firecracker's smaller attack surface comes directly from having fewer enabled kernel features. For untrusted code execution at scale, the security tradeoff is non-negotiable.
 
-**How do you handle flaky tests in the self-correction loop to avoid wasting the correction budget?**
+**Q: How do you handle flaky tests in the self-correction loop to avoid wasting the correction budget?**
 
 The flakiness guard runs each failing test suite 3 times. A test is only classified as "failing due to agent changes" if it fails on 2 or more of 3 runs (66%+ failure rate). A test that fails 1 of 3 times is classified as flaky and excluded from the correction prompt. This costs 2 additional test suite executions (typically 30-90 seconds each) but prevents the correction loop from spending $5 attempting to fix a test that is probabilistically broken independent of the agent's changes. Additionally, a per-repo flakiness database records historically flaky tests across all tasks; known-flaky tests are excluded from correction consideration without requiring the 3-run confirmation.
 
-**What makes a system an "autonomous agent" versus an "assistant" in the coding context?**
+**Q: What makes a system an "autonomous agent" versus an "assistant" in the coding context?**
 
 An assistant (Cursor, Copilot) generates suggestions for a human to review and apply — the human is the correctness gatekeeper. An autonomous agent is required to be correct before the PR is opened, with no human review of intermediate steps. This distinction drives every architectural difference: the self-correction loop (agents must validate their own work), the $20 cost ceiling (agents must bound their resource consumption), durable checkpointing (agents run for 30 minutes unattended), and the draft PR gate (agents open a PR but humans merge — this is the autonomy boundary the system respects). The bar for "autonomous" is correctness-by-the-time-of-PR, not correctness-eventually-with-human-help.
 
-**How do you enforce the $20 per task cost ceiling mid-execution?**
+**Q: How do you enforce the $20 per task cost ceiling mid-execution?**
 
 The cost ceiling is enforced in the `DurableTaskRunner.run()` method before every LLM API call. The running cost accumulator `checkpoint.cost_usd` is updated after every tool call with the actual token count from the LLM response and the provider's current per-token price. Before the next LLM call, if `cost_usd >= COST_CEILING_USD`, the task status is set to `FAILED`, the checkpoint is written, and a `CostCeilingExceededError` is raised — the sandbox is destroyed and the task is marked failed in the API. The ceiling check occurs before the LLM call (not after) to avoid overshoot: a 50,000-token completion at $0.015/1K = $0.75 could push a $19.50 task over the ceiling if the check is post-call. Users see a `task.status=failed` with `failure_reason=cost_ceiling_exceeded` and the amount spent.
 
-**What is the PR quality bar before the agent opens it?**
+**Q: What is the PR quality bar before the agent opens it?**
 
 Four gates must all pass before the agent calls the GitHub API to create a PR: (1) full test suite passes with exit code 0 on 3 of 3 runs (flakiness-guarded); (2) `git diff --stat` confirms at most 500 lines changed across at most 20 files (diff size cap prevents runaway refactors); (3) linter exits clean with no new errors compared to the base commit (`git stash && lint → baseline errors; git stash pop && lint → current errors; delta must be 0`); (4) task cost is under $20 ceiling. If any gate fails and max correction iterations are exhausted, the task is marked failed and no PR is opened. A partial PR (failing tests, lint errors) is never opened — it would damage the agent's credibility with the repo maintainer and create noise in the PR queue.
 
-**How does the agent handle a repo it has never seen before with no pre-indexed embeddings?**
+**Q: How does the agent handle a repo it has never seen before with no pre-indexed embeddings?**
 
 On the first task against a new repo, the embedding index does not exist. The system falls back to BM25 keyword search over file content (no pre-indexing required, built inline in ~10 seconds for a 10,000-file repo) and LSP cold-start (pylsp or typescript-language-server indexing the repo in 5-30 seconds inside the sandbox). The first task against a new repo is slower (context build 20-40 seconds instead of 2 seconds) but functional. A background job concurrently indexes the repo for embedding search so subsequent tasks use the full three-signal relevance strategy.

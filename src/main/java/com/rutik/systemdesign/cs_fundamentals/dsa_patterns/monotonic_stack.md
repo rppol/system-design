@@ -312,35 +312,35 @@ def daily_temperatures_fixed(temperatures: list[int]) -> list[int]:
 
 ## 11. Interview Q&A
 
-**Why is a monotonic stack O(n) when there's a `while` loop inside a `for` loop?**
+**Q: Why is a monotonic stack O(n) when there's a `while` loop inside a `for` loop?**
 Each element is **pushed exactly once** (once per iteration of the outer loop) and **popped at most once** (across the entire algorithm's lifetime, total pops <= total pushes <= n). So the total number of stack operations (pushes + pops) is bounded by `2n`, regardless of how the pops are distributed across iterations of the outer loop. This is the same amortized argument used in sliding window and cyclic sort.
 
-**What's the difference between an "increasing" and "decreasing" monotonic stack, and how do you choose?**
+**Q: What's the difference between an "increasing" and "decreasing" monotonic stack, and how do you choose?**
 A **decreasing stack** (top-to-bottom values decrease, i.e., pop when a *larger* element arrives) is used to find **next greater elements** — when you pop, the new element is the popped one's "next greater". An **increasing stack** (pop when a *smaller* element arrives) finds **next smaller elements**. Choose based on what you're looking for: "next greater" → decreasing stack; "next smaller" / "largest rectangle" (which needs "next/previous *smaller*" to bound width) → increasing stack.
 
-**In "Next Greater Element," does it matter whether you scan left-to-right or right-to-left?**
+**Q: In "Next Greater Element," does it matter whether you scan left-to-right or right-to-left?**
 Both work, but the bookkeeping differs. Left-to-right (as in the template): when you pop an element, the *current* element is its "next greater" — you resolve answers for *past* elements as you go. Right-to-left: the stack represents "candidates for *my* next greater", and when you process element `i`, you pop everything `<= nums[i]` (they can never be the answer for anything to `i`'s left, since `nums[i]` is closer and at least as large), then the new stack top (if any) is `nums[i]`'s next greater, then push `nums[i]`. Both are O(n); left-to-right is more common because it resolves answers eagerly.
 
-**Why does Largest Rectangle in Histogram append a sentinel value of 0?**
+**Q: Why does Largest Rectangle in Histogram append a sentinel value of 0?**
 The algorithm only computes the area for a bar when a *shorter* bar causes it to be popped. Without a sentinel, bars that are part of an increasing sequence at the *end* of the array (e.g., `[1,2,3]`) are never popped — their rectangles are never computed. Appending a `0` (shorter than any real height) guarantees that every remaining bar on the stack gets popped and evaluated during the final iteration, "flushing" the stack.
 
-**How do you compute the "width" when popping a bar in Largest Rectangle in Histogram?**
+**Q: How do you compute the "width" when popping a bar in Largest Rectangle in Histogram?**
 `width = i - stack[-1] - 1` if the stack is non-empty after popping (where `stack[-1]` is the new top — the previous *smaller* element's index, and `i` is the current index — the next *smaller* element's index); the `-1` excludes both boundary indices, leaving only the bars strictly between them, which are all `>= ` the popped bar's height. If the stack is empty after popping, the popped bar extends all the way from index 0 to `i-1`, so `width = i`.
 
-**What's a monotonic deque, and how does it differ from a monotonic stack?**
+**Q: What's a monotonic deque, and how does it differ from a monotonic stack?**
 A monotonic deque is "open at both ends": you can push/pop from the back (like a stack, to maintain monotonicity when adding new elements) AND pop from the front (to remove elements that have "expired" — fallen outside a sliding window). A monotonic stack only needs the back operations. The front-popping is what enables "sliding window maximum" — the front of the deque is always the index of the current window's maximum, and it gets evicted once the window slides past it.
 
-**In Sliding Window Maximum, why do we check `dq[0] <= i - k` (expiry) AFTER pushing the new element, not before?**
+**Q: In Sliding Window Maximum, why do we check `dq[0] <= i - k` (expiry) AFTER pushing the new element, not before?**
 Order doesn't actually matter for correctness here (the new element's index `i` is always `> i - k`, so pushing it can't itself be "expired"), but checking after is slightly more natural in code flow: first maintain monotonicity (pop smaller elements from the back, then push), then handle window-boundary expiry (pop the front if it's now out of range), then record the result if the window is fully formed (`i >= k-1`). Some implementations check expiry before pushing — both orderings are correct as long as all three steps happen each iteration.
 
-**Can a monotonic stack solve "previous smaller element" and "next smaller element" simultaneously in one pass?**
+**Q: Can a monotonic stack solve "previous smaller element" and "next smaller element" simultaneously in one pass?**
 Yes, for "Largest Rectangle in Histogram" specifically: when bar `j` is popped because bar `i` (current) is smaller, bar `i` is `j`'s "next smaller", AND the new stack top after popping `j` is `j`'s "previous smaller" (because the stack is maintained in increasing order — everything below `j` on the stack is smaller than `j`, and the closest one is the new top). This is why the single-pass histogram algorithm works — both boundaries for each bar's rectangle are determined at the moment that bar is popped.
 
-**How would "Remove K Digits" use a monotonic stack?**
+**Q: How would "Remove K Digits" use a monotonic stack?**
 To form the smallest possible number by removing `k` digits, greedily maintain an increasing stack of digits: for each new digit, while the stack's top digit is *greater* than the new digit AND `k > 0` (removals remaining), pop the top (this is a "removal") and decrement `k`. Push the new digit. After processing all digits, if `k > 0` still, remove the last `k` digits (they're the largest remaining, at the end). Finally, strip leading zeros. This greedily ensures the most significant digits are as small as possible.
 
-**What's the "132 Pattern" problem, and why does it need a non-trivial monotonic stack variant?**
+**Q: What's the "132 Pattern" problem, and why does it need a non-trivial monotonic stack variant?**
 "132 Pattern" asks: does there exist `i < j < k` with `nums[i] < nums[k] < nums[j]`? The trick: scan **right to left**, maintaining a decreasing stack AND a variable `third = -infinity` representing the best candidate for "nums[k]" (the "2" in "132"). When popping elements smaller than `nums[i]` from the stack (because they're smaller than the current element, meaning the current element could be a "3" for them), update `third = max(third, popped_value)`. If at any point `nums[i] < third`, you've found `nums[i]` as the "1" with valid "3" and "2" to its right — pattern found. This shows monotonic stacks can track auxiliary "best discarded value" state, not just the stack contents themselves.
 
-**Is the monotonic stack pattern ever combined with binary search?**
+**Q: Is the monotonic stack pattern ever combined with binary search?**
 Yes — since the stack maintains a sorted (monotonic) sequence of values, you *can* binary search within it. A canonical example is "Longest Increasing Subsequence" (patience sorting): maintain a list of "pile tops" that is sorted, and binary search for where each new element belongs (`bisect_left`) — this is structurally similar to a monotonic stack but the "pop" is replaced with "overwrite at the binary-searched position", giving O(n log n) instead of O(n^2).

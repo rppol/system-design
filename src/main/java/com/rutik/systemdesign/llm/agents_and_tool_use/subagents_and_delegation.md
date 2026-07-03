@@ -368,49 +368,49 @@ result = json.loads(sub_output)  # Reliable
 
 ## 12. Interview Questions with Answers
 
-**Why is context isolation the main benefit of subagents?**
+**Q: Why is context isolation the main benefit of subagents?**
 Subagent context isolation prevents the parent's accumulating history from polluting subagent reasoning. A 20-step parent has 100K+ tokens of context (prior tool results, intermediate reasoning) — passing all of this to a subagent costs money and confuses the model with irrelevant information. Isolated subagents see only their assigned task, focusing their attention and minimizing token cost.
 
-**How much wall-clock speedup do parallel subagents give?**
+**Q: How much wall-clock speedup do parallel subagents give?**
 Speedup is approximately N for N independent subagents if each takes similar time. Real-world example: 5 research subagents each taking ~30s complete in ~30s total (max), vs ~150s sequential. Diminishing returns above 10-20 parallel subagents due to API rate limits and parent's downstream synthesis time.
 
-**What is the right return contract for a subagent?**
+**Q: What is the right return contract for a subagent?**
 Structured JSON with at minimum: `result` (string or structured data), `confidence` (0-1 numeric), `artifacts` (list of URLs/file paths/IDs the subagent produced), `errors` (list of strings). Optional: `tokens_used` for budget tracking. The contract should be defined in the subagent's system prompt and validated by the parent before incorporating into context.
 
-**How do you handle a subagent failure?**
+**Q: How do you handle a subagent failure?**
 Use `asyncio.gather(*coros, return_exceptions=True)` so one subagent's failure doesn't abort others. The parent then inspects each result: for exceptions, decide retry (transient) vs fallback (permanent) vs propagate. For partial results across many subagents, often "fail open" — proceed with the successful subagents' results, mark the failed ones in the final synthesis with confidence reduction.
 
-**When should a subagent itself spawn further subagents?**
+**Q: When should a subagent itself spawn further subagents?**
 Rarely. Recursive subagents create debugging nightmares — when something goes wrong at depth 3, the trace is hard to follow. Limit depth to 2 (parent → subagent). For genuinely recursive tasks, prefer a single dispatcher that flattens the recursion: collect all subtasks at any depth, dispatch them in one parallel batch.
 
-**How does the parent decide what to delegate vs handle inline?**
+**Q: How does the parent decide what to delegate vs handle inline?**
 Delegate when the subtask: (a) is independent (parent doesn't need to interleave with other steps), (b) uses different tools than the parent's current step, (c) benefits from context isolation, OR (d) can run in parallel with other subtasks. Handle inline when: (a) subtask is small (<5 tool calls), (b) subtask depends on the parent's accumulating reasoning, (c) the subagent dispatch overhead (1-2s + system prompt tokens) exceeds the subtask's own cost.
 
-**What is the typical cost overhead of using subagents vs inline execution?**
+**Q: What is the typical cost overhead of using subagents vs inline execution?**
 Each subagent re-pays for its system prompt and tool definitions on its first API call (or first cache-miss). Typical overhead: 1500-3000 tokens × subagent count × input price. For a parent dispatching 5 subagents on Sonnet: ~$0.045 in subagent prompt overhead. This is paid back by reduced parent context bloat — net savings appear at >10 inline tool calls per equivalent task.
 
-**Should subagents share state or remain stateless?**
+**Q: Should subagents share state or remain stateless?**
 Stateless is the default and recommended pattern. Stateful subagents create concurrency bugs (race conditions on shared store) and break parallel execution. If subagents truly need to coordinate, prefer the parent passing summarized state in subtask descriptions, not direct shared mutable state.
 
-**How do you assign different models to subagents based on difficulty?**
+**Q: How do you assign different models to subagents based on difficulty?**
 Static heuristic: hard subtasks get Opus, medium get Sonnet, simple get Haiku. Dynamic: parent classifies the subtask first (cheap model call) and chooses the subagent model from a routing table. Cost-aware: always start with cheaper model, escalate if confidence < threshold. Most production systems use static heuristics for predictability.
 
-**What's the difference between subagents and the OpenAI Agents SDK handoff?**
+**Q: What's the difference between subagents and the OpenAI Agents SDK handoff?**
 Handoff is sequential — control transfers to the target agent, prior agent stops. Subagents are parallel — parent stays in control, dispatches N subagents concurrently, synthesizes. Handoff is for "transfer the user to specialist"; subagents are for "spawn workers to gather data."
 
-**How do you debug a parallel subagent system?**
+**Q: How do you debug a parallel subagent system?**
 Use distributed tracing (OpenTelemetry, LangSmith, OpenAI Tracing) to capture parent + all subagent traces under one trace_id. Log: subagent ID, task, tools used, iterations, final result, tokens used. View parent trace and drill into each subagent span. Without tracing, parallel subagents are nearly impossible to debug from logs alone.
 
-**Can subagents call each other?**
+**Q: Can subagents call each other?**
 Technically yes — a subagent could call `run_subagent()` itself. In practice, avoid: it creates recursion that's hard to bound and debug. Prefer "flat" dispatch: the parent identifies all subtasks (at any conceptual depth), dispatches them as a flat list, and synthesizes.
 
-**How do you cap total cost across a parallel subagent dispatch?**
+**Q: How do you cap total cost across a parallel subagent dispatch?**
 Pre-compute the expected cost: N subagents × estimated tokens per subagent × $/token. Enforce per-subagent token budget (return partial result when exceeded). Enforce total parent cost cap by tracking cumulative tokens across all subagents — abort dispatch if cap exceeded. Production systems typically set per-task cost limits ($0.50, $5, $50) configurable per user/feature.
 
-**Should the subagent's system prompt be cached?**
+**Q: Should the subagent's system prompt be cached?**
 Yes — if the same subagent definition is invoked many times in a short window (Anthropic's 5-min cache TTL), caching the system prompt saves 90% on subsequent calls. For map-reduce dispatches where 10 subagents share an identical system prompt, cache the first one's prompt and the rest get cache hits within microseconds.
 
-**What metrics should you track for a subagent system in production?**
+**Q: What metrics should you track for a subagent system in production?**
 Per-subagent: latency, tokens, iterations, success rate. Per-parent task: total subagent count, parallel max, total cost, end-to-end latency. Aggregate: success rate by subagent type, p99 latency, cost per task. Alert on: subagent failure rate >5%, p99 latency degradation, cost-per-task drift.
 
 ---

@@ -357,17 +357,17 @@ public class IdempotencyService {
 
 ## Interview Discussion Points
 
-**Why SERIALIZABLE isolation instead of READ COMMITTED for payment processing?**
+**Q: Why SERIALIZABLE isolation instead of READ COMMITTED for payment processing?**
 SERIALIZABLE prevents write skew — the scenario where two concurrent transactions each read a balance, both see sufficient funds, and both debit, resulting in a negative balance. READ COMMITTED allows write skew because both transactions can read the same committed value before either commits their debit. SERIALIZABLE detects conflicting patterns (both transactions read and write the same balance) and aborts one with a serialization failure error. The application retries the aborted transaction. The overhead of SERIALIZABLE (typically 10–20% throughput reduction) is justified for financial correctness.
 
-**Why is balance derived from ledger entries instead of stored as a column?**
+**Q: Why is balance derived from ledger entries instead of stored as a column?**
 A stored balance column creates a risk of ledger/balance divergence — if a bug or direct DB manipulation changes the balance column without corresponding ledger entries, the account has incorrect money. Deriving balance by summing all ledger entries means the balance is always mathematically consistent with the transaction history. Balance checkpoints (daily snapshots) optimize query performance for accounts with millions of entries. The double-entry constraint (sum of entries per transaction = 0) provides a further integrity check.
 
-**How does the idempotency key prevent double-charging on network retries?**
+**Q: How does the idempotency key prevent double-charging on network retries?**
 The client generates a UUID before initiating a payment. If the network fails after the server processes the payment but before the client receives the response, the client retries with the same UUID. The server checks the `idempotency_key` UNIQUE constraint on the transactions table. If a row already exists with that key, the server returns the stored result without executing the payment again. The idempotency check happens within the SERIALIZABLE transaction, so even concurrent duplicate requests are serialized correctly (one proceeds; the other finds the committed result).
 
-**How do you achieve RPO=0 without degrading write throughput significantly?**
+**Q: How do you achieve RPO=0 without degrading write throughput significantly?**
 Use synchronous replication to exactly one standby replica within the same datacenter: `synchronous_standby_names = 'FIRST 1 (replica1)'`. The primary waits for replica1 to flush the WAL before returning commit success. On LAN, this adds 1–2ms per transaction — acceptable for banking (< 100ms P99 target). For cross-datacenter standby (DR), use asynchronous replication — this does not prevent local-datacenter data loss but does prevent cross-region write latency of 50–200ms. Additionally, WAL archiving to S3 (WAL-G) provides a second durability layer.
 
-**How do you handle the case where a ledger grows to billions of entries?**
+**Q: How do you handle the case where a ledger grows to billions of entries?**
 Monthly range partitioning on `created_at` allows efficient partition pruning for date-range queries and fast partition detachment for archiving old data. After the regulatory retention period (5 years), old partitions are detached and moved to cold storage (S3 as Parquet via COPY TO, then the partition is dropped). Balance queries are optimized by daily checkpoint materialization — instead of summing 5 years of entries, sum the last checkpoint plus the current month's entries. The checkpoint table is small (one row per account per day) and can be fully cached in memory.

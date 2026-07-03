@@ -914,49 +914,49 @@ def fixed_client(host: str, port: int, n_requests: int) -> None:
 
 ## 12. Interview Questions with Answers
 
-**What happens if you call recv() once and assume you've received the full message?**
+**Q: What happens if you call recv() once and assume you've received the full message?**
 You'll get a partial read. TCP is a byte stream; the OS splits data across segments based on MSS (~1460 B on Ethernet) and network conditions. A single send() of 4096 B may arrive as three recv() calls returning 1460, 1460, and 1176 bytes. The fix is a length-prefixed framing protocol and a loop that calls recv() until all expected bytes arrive.
 
-**Why does TIME_WAIT exist, and why can it cause problems in production?**
+**Q: Why does TIME_WAIT exist, and why can it cause problems in production?**
 TIME_WAIT ensures delayed duplicates from the closed connection don't corrupt a new connection reusing the same 5-tuple. It lasts 2×MSL (typically 60 s on Linux). Problem: a service making many short-lived outbound connections exhausts the ~28,000 ephemeral port range. Fixes: connection pooling, `SO_REUSEADDR`, reducing TIME_WAIT duration via `net.ipv4.tcp_tw_reuse`, or using HTTP keep-alive.
 
-**Why is TCP's 3-way handshake 1.5 RTTs, not 1 RTT?**
+**Q: Why is TCP's 3-way handshake 1.5 RTTs, not 1 RTT?**
 The SYN takes 0.5 RTT to reach the server, the SYN-ACK takes 0.5 RTT to return (total 1 RTT) — but the server cannot deliver data until the third ACK arrives (confirming the client received the SYN-ACK). So the client can send data with the ACK, but the first server response arrives 1.5 RTTs after the SYN. TCP Fast Open allows data in the initial SYN, reducing this to 0.5 RTT on cached connections.
 
-**What is the difference between flow control and congestion control in TCP?**
+**Q: What is the difference between flow control and congestion control in TCP?**
 Flow control (receiver window, rwnd) prevents a fast sender from overrunning a slow receiver's buffer — it is end-to-end between sender and receiver. Congestion control (cwnd: slow start, AIMD, CUBIC) prevents the sender from overloading intermediate routers — it is a response to network conditions inferred from packet loss or delay. The effective send window is min(rwnd, cwnd).
 
-**Why would you choose UDP over TCP for a DNS query?**
+**Q: Why would you choose UDP over TCP for a DNS query?**
 A DNS query and response each fit in a single datagram (~50–100 bytes), well under the 1500-byte MTU. No connection is needed. If no response arrives within ~200 ms, the stub resolver retransmits. The overhead of a TCP handshake (1.5 RTT) would dominate the actual DNS query (which should resolve in <10 ms from a nearby resolver). UDP is used by default; TCP is used when responses exceed 512 bytes (DNSSEC, large zone transfers).
 
-**What does TLS 1.3 do differently than TLS 1.2 to achieve 1 RTT?**
+**Q: What does TLS 1.3 do differently than TLS 1.2 to achieve 1 RTT?**
 TLS 1.3 merges the key exchange into the ClientHello (sending the ECDHE key share immediately) and the server responds with its key share, certificate, and Finished in one flight. In TLS 1.2, the server sent the certificate in a separate flight, requiring the client to verify it before sending key material. TLS 1.3 also removed RSA key exchange (which lacks forward secrecy) and deprecated all weak cipher suites.
 
-**What is 0-RTT resumption in TLS 1.3, and what is the security risk?**
+**Q: What is 0-RTT resumption in TLS 1.3, and what is the security risk?**
 0-RTT allows the client to send application data with the first ClientHello, using keying material from a prior session ticket. This saves 1 RTT for repeat connections. The risk is replay attacks: a network attacker can capture and re-send the early data. 0-RTT is safe only for idempotent operations (GET, not POST with side effects). Servers must check for replay via a nonce database or restrict 0-RTT to safe methods.
 
-**What is CIDR notation and how do you calculate usable hosts in a /24 subnet?**
+**Q: What is CIDR notation and how do you calculate usable hosts in a /24 subnet?**
 CIDR (Classless Inter-Domain Routing) notation expresses an IP address and its subnet prefix length as `IP/bits`. A /24 has 24 bits for the network and 8 bits for hosts: 2^8 = 256 addresses. Subtract 2 for network address (.0) and broadcast (.255) = 254 usable hosts. A /16 gives 65,536 total - 2 = 65,534 usable hosts. A /32 is a single host.
 
-**How does NAT work, and what protocol does it break?**
+**Q: How does NAT work, and what protocol does it break?**
 NAT (Network Address Translation) rewrites the source IP (and optionally port) of outgoing packets from private addresses to a public IP, maintaining a translation table to route responses back. It breaks any protocol that embeds IP addresses in the payload (FTP active mode, SIP, IPsec AH) because the NAT device does not rewrite the payload. It also complicates peer-to-peer connections (Skype, WebRTC require STUN/TURN/ICE to punch through NAT).
 
-**What is the difference between a CNAME and an A record, and when does a CNAME cause problems?**
+**Q: What is the difference between a CNAME and an A record, and when does a CNAME cause problems?**
 An A record maps a hostname directly to an IPv4 address. A CNAME maps a hostname to another hostname (an alias), which must itself resolve to an A/AAAA record via a subsequent lookup. CNAME causes problems: (1) you cannot use a CNAME at the zone apex (`example.com`, not `www.example.com`) — RFC prohibits it because the apex must have NS and SOA records; (2) each CNAME hop adds a DNS lookup round-trip; (3) the ultimate A record TTL governs caching, not the CNAME TTL.
 
-**What is head-of-line blocking in HTTP/1.1 and how does HTTP/2 address it?**
+**Q: What is head-of-line blocking in HTTP/1.1 and how does HTTP/2 address it?**
 In HTTP/1.1, a connection processes one request-response pair at a time; if the first response is slow (large object, slow origin), all subsequent requests queue behind it. Browsers open 6–8 parallel connections to work around this, but each has handshake cost. HTTP/2 multiplexes requests over a single TCP connection via numbered streams; the server can interleave responses. However, a single lost TCP packet causes all HTTP/2 streams to stall (TCP-level HoL blocking). HTTP/3 over QUIC solves this with per-stream packet loss handling.
 
-**What is the listen() backlog, and what happens when it fills up?**
+**Q: What is the listen() backlog, and what happens when it fills up?**
 The backlog argument to `listen(N)` sets the maximum size of the kernel's queue of completed (but not yet `accept()`-ed) connections. When the queue is full, new incoming SYNs are dropped (the kernel does not send SYN-ACK). This causes the client to experience a connection timeout rather than a connection refused, which is confusing to diagnose. Fix: increase the backlog (`listen(1024)`) and ensure the application calls `accept()` quickly (non-blocking I/O or a dedicated accept thread).
 
-**What is the MSS (Maximum Segment Size) and how does it relate to MTU?**
+**Q: What is the MSS (Maximum Segment Size) and how does it relate to MTU?**
 MSS is the maximum amount of data in a single TCP segment, negotiated during the handshake. It is typically MTU - IP header (20 B) - TCP header (20 B) = 1500 - 40 = 1460 bytes on Ethernet. Sending more than the MSS causes IP fragmentation, which is expensive and fragile (firewalls drop fragments). TCP uses MSS to avoid fragmentation by design. PMTUD (Path MTU Discovery) finds the minimum MTU along a path for VPNs or tunnels with smaller MTUs.
 
-**How does slow start work, and why does it matter for large file transfers?**
+**Q: How does slow start work, and why does it matter for large file transfers?**
 Slow start initializes TCP's congestion window (cwnd) to 1 MSS (later defaults raised to 10 MSS by RFC 6928). Per RTT, cwnd doubles until it reaches ssthresh, then grows linearly (AIMD). On a 10 Gbps link with 100 ms RTT, it takes ~15 RTTs (1.5 s) for cwnd to reach the bandwidth-delay product (10 Gbps × 0.1 s / 8 = 125 MB). This is why small, long-lived connections (database connection pools) dramatically outperform many short-lived connections for bulk transfers.
 
-**What is QUIC, and why was it built on UDP instead of TCP?**
+**Q: What is QUIC, and why was it built on UDP instead of TCP?**
 QUIC is a transport protocol developed by Google (standardized as RFC 9000) that provides TCP-like reliability and ordering per stream, TLS 1.3 security, and 0-RTT connection establishment — all in a single UDP-based protocol. It was built on UDP because modifying TCP requires OS kernel changes (slow to deploy), and the TCP/TLS stack has inherent inefficiencies (two separate handshakes, TCP HoL blocking). UDP allows QUIC to be deployed as a user-space library, enabling rapid iteration. HTTP/3 runs over QUIC.
 
 ---

@@ -1107,47 +1107,47 @@ See also: [GPU Pool Economics](./cross_cutting/gpu_pool_economics.md) for spot v
 
 ## 11. Interview Discussion Points
 
-**Why is LoRA adapter serving — not model quality — the core scaling challenge for an image generation platform?**
+**Q: Why is LoRA adapter serving — not model quality — the core scaling challenge for an image generation platform?**
 
 Model quality is a solved problem: FLUX.1-dev and SDXL produce commercially viable outputs. The hard engineering problem is that users who train custom LoRA adapters generate 10x more images than users who don't, so adapter utilization is the primary revenue driver. Serving 100K unique user adapters on a shared fleet requires keeping the 12GB base model permanently in GPU HBM and hot-swapping only the 200MB LoRA delta weights. Naive per-adapter model copies would require 100K × 12GB = 1.2PB of GPU HBM — physically impossible. S-LoRA (Stanford, 2023) solves this: base model stays resident, adapters occupy LRU slots. The correct interview answer is: LoRA multiplexing is to image generation what KV-cache management is to LLM text generation — the fundamental resource scheduling problem that determines whether the business unit economics work.
 
-**What is CFG batching and why does it save 35% generation latency?**
+**Q: What is CFG batching and why does it save 35% generation latency?**
 
 Classifier-free guidance requires two forward passes per denoising step: one with the prompt embedding (conditional) and one with a null embedding (unconditional). Sequential execution doubles the step time. The batching trick concatenates both embeddings into a single batch of size 2 and runs one forward pass, then splits the output predictions. A DiT or UNet forward pass is memory-bandwidth bound (not FLOP bound) at typical batch sizes, so batch_size=2 runs in ~1.35x the time of batch_size=1 (not 2x), yielding ~35% wall-clock savings. The tradeoff is 2x peak VRAM usage for the intermediate activation tensors. At FLUX.1-dev 1024px: conditional VRAM ~14.8GB, CFG batch VRAM ~18.2GB — still fits H100 80GB with room for LoRA adapters.
 
-**How do you detect NSFW content in generated images when the original prompt passed the text classifier?**
+**Q: How do you detect NSFW content in generated images when the original prompt passed the text classifier?**
 
 Two-stage approach is required. Pre-generation text classifiers (DistilBERT fine-tuned on NSFW text) catch direct NSFW requests. However, adversarial prompts use indirect references ("draw a medieval scene with the bath" → nudity), and LoRA adapters trained on NSFW data can generate NSFW from innocuous prompts. Post-generation image classification using a MobileNetV3 fine-tuned NSFW classifier (~20ms on dedicated safety GPU) catches what text classifiers miss. Key calibration point: set the image classifier threshold at 0.90 (higher specificity, lower false-positive rate), not 0.70, because false positives (blocking legitimate art, figure studies) drive user churn. Run both classifiers; never rely on just one.
 
-**Why does DiT architecture scale better than UNet for large image generation models?**
+**Q: Why does DiT architecture scale better than UNet for large image generation models?**
 
 UNet uses convolutional skip connections that encode spatial structure inductively — the architecture has hard-coded assumptions about locality. Stacking more parameters in UNet yields diminishing quality returns above ~3B parameters because the inductive biases become constraints. DiT (Diffusion Transformer) replaces convolutions with self-attention, following the same scaling path as language model transformers: quality scales predictably with parameter count. FLUX.1-dev at 12B parameters achieves quality that would require a ~30B UNet to match (if such scaling were even practical). Additionally, DiT naturally handles variable-resolution inputs via sequence length variation, whereas UNet requires architectural modifications or training tricks for non-standard resolutions.
 
-**How do you select LoRA rank for a production platform with varied user needs?**
+**Q: How do you select LoRA rank for a production platform with varied user needs?**
 
 Rank-4 (50MB adapter): sufficient for texture or style transfer where the change is global. Trains in 20-25 minutes on a single A10G. Poor for face capture (insufficient expressiveness). Rank-16 (200MB): good balance — captures faces, specific styles, and object classes. Trains in 30-45 minutes. Fits 16 slots per H100 with manageable HBM overhead. This is the default for consumer platforms. Rank-64 (800MB): near full fine-tune expressiveness, excellent for complex scene compositions. Trains in 45-70 minutes. Only 6 slots per H100. NVMe warm cache capacity drops 4x vs rank-16. Reserve rank-64 for enterprise customers paying for it explicitly — the operational cost (memory, load time, NVMe capacity) is 4x higher per adapter.
 
-**How does Adobe Firefly's training data approach create competitive advantage beyond marketing?**
+**Q: How does Adobe Firefly's training data approach create competitive advantage beyond marketing?**
 
 The competitive advantage is enterprise B2B sales. Large media companies (Disney, Warner, Publicis) have legal teams that require indemnification against IP infringement claims before deploying AI tools. Adobe offers training data provenance attestation and commercial use indemnification as part of Creative Cloud Enterprise contracts. Competitors using LAION-trained models (SDXL, FLUX) cannot offer this indemnification because LAION contains uncurated copyrighted content. This is not a quality advantage — Firefly's output quality is behind FLUX in most benchmarks. It is a legal risk advantage that converts to enterprise revenue. Architectural decision: if your target market is enterprise B2B, training data provenance is an architectural requirement, not an afterthought.
 
-**How do you handle CSAM in a platform that serves user-provided LoRA adapters?**
+**Q: How do you handle CSAM in a platform that serves user-provided LoRA adapters?**
 
 CSAM detection is mandatory at three points, not one. First: PhotoDNA scan all training images at upload time before the LoRA training job starts. Second: during LoRA training, generate probe images at each 250-step checkpoint and PhotoDNA-scan the outputs — this catches adapters that learn CSAM generation from non-CSAM training images through adversarial prompt-adapter combinations. Third: post-generation PhotoDNA scan of every generated image before delivery, regardless of prompt or adapter. Omitting any of the three layers creates a bypass vector. Detection triggers mandatory NCMEC CyberTipline reporting within 1 hour (18 U.S.C. § 2258A, applicable to any "electronic service provider" — image generation platforms qualify). This is a legal obligation, not an optional feature.
 
-**How does resolution-aware GPU routing reduce fleet costs?**
+**Q: How does resolution-aware GPU routing reduce fleet costs?**
 
 A10G GPUs cost $0.60/hr spot vs H100 at $2.50/hr — a 4.2x cost difference. 512px and 1024px FLUX.1-dev generations fit in 24GB A10G VRAM (14.8GB peak with CFG batching, leaving 9GB margin). 2048px generation requires 28.6GB (exceeds A10G 24GB, requires H100). Routing 60% of traffic (512px-1024px) to A10G and 40% (2048px or high-throughput) to H100 reduces effective GPU cost per generation from $0.020 to $0.012 — a 40% reduction. The router must also account for LoRA adapter overhead (+400MB) and check whether the candidate GPU has the adapter hot-cached (adapter-affinity routing reduces cache-miss latency from 2.1s to 260ms for 80% of requests).
 
-**What is the async generation UX pattern and why is it mandatory above 4-second generation times?**
+**Q: What is the async generation UX pattern and why is it mandatory above 4-second generation times?**
 
 Synchronous HTTP requires the client to hold an open connection for the entire generation duration. At 3-15 seconds, this creates three failure modes: mobile app backgrounding closes the connection (iOS/Android kill background network activity after 30-90 seconds on cellular); corporate proxies and load balancers timeout idle connections at 60 seconds; HTTP keep-alive overhead becomes significant at scale. The async pattern: client submits job → receives `{"job_id": "gen_abc", "status": "queued"}` immediately → polls `GET /jobs/gen_abc` every 2 seconds (or receives webhook) → when status is "complete", retrieves presigned S3 URL (valid 7 days). Polling interval of 2 seconds is the practical sweet spot: aggressive enough that users perceive near-real-time feedback, light enough that 5M daily active users generate only 5M/5 = 1M polls/second (manageable). Webhook delivery (POST to user-registered URL) is preferred for API integrations; polling is for web/mobile UIs.
 
-**How do you prevent the NVMe thundering herd problem when many users simultaneously request adapters not in cache?**
+**Q: How do you prevent the NVMe thundering herd problem when many users simultaneously request adapters not in cache?**
 
 The thundering herd occurs when 60+ users simultaneously request different LoRA adapters not cached on NVMe: 60 × 200MB = 12GB of concurrent S3 downloads saturate the 3.5GB/s NVMe write bandwidth, causing all downloads to take 45s instead of 2.1s. Three mitigations work together: (1) Semaphore limiting concurrent S3→NVMe downloads to 4 per node (others wait in queue). (2) Adapter-affinity routing: check which nodes already have an adapter on NVMe before assigning the request to any node (router queries a Redis hash of `adapter_id → [node_ids with nvme_cache_hit]`). (3) Predictive pre-warming: hourly batch job analyzes the last 7 days of adapter usage patterns and pre-fetches the top-1,000 adapters (by hourly access count) onto all nodes during the 02:00-06:00 UTC low-traffic window. After these mitigations, the 45-second spike dropped to under 1 second in 97% of adapter load scenarios.
 
-**What storage architecture supports petabyte-scale image retention at reasonable cost?**
+**Q: What storage architecture supports petabyte-scale image retention at reasonable cost?**
 
 At 50M images/day × 5MB = 250TB/day, naive S3 Standard at $0.023/GB would cost $5.75M/month for a single day's images retained indefinitely. The practical architecture uses tiered retention: generated images are written to S3 Standard (hot, fast CDN delivery), automatically transitioned to S3 Intelligent-Tiering after 7 days (moves to IA when not accessed for 30 days, ~40% cost reduction), then to S3 Glacier Instant Retrieval after 90 days for paid tier (additional 60% reduction vs IA). Free tier images are deleted after 30 days. A pre-deletion notification email with a "download your images" link is sent 7 days before expiry. Additionally, WebP conversion at 85% quality at upload time reduces average file size from 5MB JPEG to 2.8MB WebP (44% reduction), applied to all tiers. Combined: storage cost per TB-month drops from $23 (S3 Standard) to $4.60 (tiered + WebP), an 80% reduction.
 

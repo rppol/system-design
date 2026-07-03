@@ -437,40 +437,40 @@ jdbcTemplate.query(
 
 ## 12. Interview Questions with Answers
 
-**How do you read a PostgreSQL EXPLAIN ANALYZE output?**
+**Q: How do you read a PostgreSQL EXPLAIN ANALYZE output?**
 Each line is a plan node (operation). Read from the innermost (deepest indentation) outward — inner nodes execute first. Key fields: cost=X..Y (estimated startup..total cost), rows=N (estimated), actual time=A..B ms (measured startup..total), actual rows=M. Large gap between rows=N (estimated) and actual rows=M indicates outdated statistics. The widest actual time lines are bottlenecks. Look for Seq Scan on large tables (should be Index Scan for high-selectivity queries), Sort with Disk methods (sort exceeded work_mem), and Hash Join with memory pressure.
 
-**What is the N+1 problem and how do you detect it in a Spring application?**
+**Q: What is the N+1 problem and how do you detect it in a Spring application?**
 N+1: a query fetches N entities (1 query), then for each entity fetches a related collection (N queries) = N+1 queries total. In JPA, this occurs with LAZY-loaded collections accessed outside the repository. Detection: enable `hibernate.generate_statistics=true`, use datasource-proxy to count queries per HTTP request, or use p6spy to log all SQL with stack traces. In tests, assert a maximum query count per operation.
 
-**How would you fix N+1 for a User with Orders in Spring Data JPA?**
+**Q: How would you fix N+1 for a User with Orders in Spring Data JPA?**
 Option 1: `@Query("SELECT u FROM User u LEFT JOIN FETCH u.orders WHERE u.id IN :ids")` — JOIN FETCH fetches users and orders in one query. Option 2: `@EntityGraph(attributePaths = "orders")` on the repository method. Option 3: For multiple collections (orders + tags), use separate queries with IN: fetch all users, collect IDs, `SELECT o FROM Order o WHERE o.userId IN :userIds`, map by userId in Java. Avoid JOIN FETCH for multiple collections simultaneously (Cartesian product).
 
-**What is the performance cliff with OFFSET pagination?**
+**Q: What is the performance cliff with OFFSET pagination?**
 OFFSET N requires the database to generate all rows 0 through N+LIMIT-1 and discard 0 through N-1. For OFFSET 1,000,000 LIMIT 20, the database generates 1,000,020 rows and discards 1,000,000. Performance is O(OFFSET) — doubling the page number doubles the query time. At deep pages (export, large dataset), this becomes unbearably slow. Keyset pagination avoids this: `WHERE id > last_id LIMIT 20` uses the index directly, O(1) regardless of depth.
 
-**How does keyset pagination work?**
+**Q: How does keyset pagination work?**
 Keyset pagination uses the values from the last row of the current page as the cursor for the next page. For a list sorted by `(created_at DESC, id DESC)`, the next page query is: `WHERE (created_at, id) < (last_created_at, last_id) ORDER BY created_at DESC, id DESC LIMIT 20`. The composite WHERE condition acts as a cursor. An index on (created_at DESC, id DESC) makes this O(1). The tradeoff: cannot jump to arbitrary pages — you can only page forward (or backward with reversed comparison).
 
-**What JDBC patterns should you use for bulk inserts?**
+**Q: What JDBC patterns should you use for bulk inserts?**
 Best performance: COPY (PostgreSQL) or LOAD DATA INFILE (MySQL) — bypasses row-by-row WAL overhead. For general use: JDBC batch execute (`PreparedStatement.addBatch(); executeBatch()`) groups statements for fewer round trips. With Hibernate: set `hibernate.jdbc.batch_size=100`, `hibernate.order_inserts=true`, and use `saveAll()`. Never: loop calling `save()` individually — this is N round trips for N rows.
 
-**How does a PreparedStatement improve performance?**
+**Q: How does a PreparedStatement improve performance?**
 PreparedStatement separates query planning from execution. First call: `prepareStatement(sql)` sends the SQL to the database for parsing and planning, returning a statement handle. Subsequent executions: send only the handle and parameters — the database uses the cached plan. Benefits: (1) eliminates repeated parse and plan overhead for the same query shape; (2) prevents SQL injection (parameters cannot change the query structure). With PostgreSQL: after the 5th execution of the same prepared statement, the server switches from parameter-specific plans to generic plans that are cached more aggressively.
 
-**What is a Cartesian product in JPA and when does it occur?**
+**Q: What is a Cartesian product in JPA and when does it occur?**
 When JOIN FETCHing multiple collections on the same entity (e.g., `User FETCH JOIN orders FETCH JOIN tags`), the SQL JOIN multiplies the result set: each user row is combined with each order and each tag. A user with 100 orders and 20 tags produces 100 * 20 = 2,000 rows, which Hibernate deduplicates in memory. The network traffic and memory used is 2,000 rows even though only 120 entities exist. Fix: use separate queries for each collection, connected via IN clause.
 
-**How do you find slow queries in production?**
+**Q: How do you find slow queries in production?**
 PostgreSQL: (1) Enable `pg_stat_statements` — aggregates all executed queries with total time, execution count, and average time. `SELECT query, total_exec_time/calls AS avg_ms, calls FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 20`. (2) `log_min_duration_statement = 1000` logs all queries taking >1s. (3) `auto_explain` automatically logs plans for slow queries. MySQL: slow query log with `long_query_time`. Application: micrometer timer on repository methods, distributed tracing span for DB calls.
 
-**What is the work_mem setting and when does it cause disk spills?**
+**Q: What is the work_mem setting and when does it cause disk spills?**
 `work_mem` (PostgreSQL) is the memory available per sort or hash operation per query execution. If a sort exceeds work_mem, PostgreSQL spills to disk (external merge sort). EXPLAIN ANALYZE shows "Sort Method: external merge Disk: XKIB". Signs of work_mem pressure: sorts and hash joins taking unexpectedly long, high temp file usage in pg_stat_database. Fix: increase work_mem for specific queries (`SET LOCAL work_mem = '256MB'`), or add an index to eliminate the sort, or redesign the query. Be careful: work_mem is per-operation per-query, and a complex query can have many operations.
 
-**What query hints are available in PostgreSQL?**
+**Q: What query hints are available in PostgreSQL?**
 PostgreSQL has limited native hints. `enable_seqscan = off` (session level) disables seq scans — forces index use. `enable_hashjoin = off` disables hash joins. These are global settings and dangerous in production. Better: use `pg_hint_plan` extension for per-query hints: `/*+ SeqScan(orders) */` or `/*+ IndexScan(orders orders_user_id_idx) */`. Also: `SET LOCAL enable_nestloop = off` inside a transaction. For most cases, fixing statistics (ANALYZE) or adjusting planner cost parameters is better than hints.
 
-**How do you count queries in a Spring test to prevent N+1 regression?**
+**Q: How do you count queries in a Spring test to prevent N+1 regression?**
 Use datasource-proxy or a custom JDBC connection wrapper. Configure a QueryCountHolder ThreadLocal that counts SQL executions. In tests:
 ```java
 QueryCountHolder.clear();
@@ -480,10 +480,10 @@ assertThat(QueryCountHolder.getGrandTotal()).isLessThanOrEqualTo(2);
 ```
 This prevents regression: if someone adds a lazy access that triggers N+1, the test fails. Run these in all repository/service integration tests.
 
-**What is the difference between INNER JOIN and LEFT JOIN performance-wise?**
+**Q: What is the difference between INNER JOIN and LEFT JOIN performance-wise?**
 INNER JOIN: only returns rows where the join condition matches in both tables. LEFT JOIN: returns all rows from the left table, with NULLs for unmatched right table rows. Performance: INNER JOIN generally performs better — it can eliminate non-matching rows earlier in the plan. LEFT JOIN must preserve all left rows, preventing some filter pushdowns. When you use LEFT JOIN but then filter on the right table's columns in WHERE (making it effectively an INNER JOIN), use INNER JOIN explicitly to allow the planner to optimize better.
 
-**How do you debug a query that is suddenly slow in production?**
+**Q: How do you debug a query that is suddenly slow in production?**
 Systematic approach: (1) Get the execution plan from production: `EXPLAIN (ANALYZE, BUFFERS) <query>`. (2) Compare estimated vs actual rows — large gap = stale statistics. Run `ANALYZE tablename`. (3) Check if an index is being used: look for Seq Scan where an Index Scan is expected. (4) Check buffer hit rate in EXPLAIN BUFFERS output: low hit rate = working set exceeds buffer pool. (5) Check for lock contention: `SELECT * FROM pg_locks JOIN pg_stat_activity ON pg_locks.pid = pg_stat_activity.pid WHERE granted = false`. (6) Compare with a known-good plan: `EXPLAIN (ANALYZE)` from before the slowdown and compare cardinality estimates.
 
 ---

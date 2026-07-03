@@ -314,31 +314,31 @@ Found 1 deadlock:
 
 ## 12. Interview Questions with Answers
 
-**How do you find the cause of high CPU usage in a Java application?**
+**Q: How do you find the cause of high CPU usage in a Java application?**
 Take a 30-60 second CPU profile with async-profiler (`-e cpu`). Generate a flamegraph. The widest frames near the top of stacks are the CPU hotspots. Look for business logic (your code) vs framework code vs GC. If GC is wide, investigate allocation rate. If serialization or parsing is wide, optimize the data format. If a specific method is wide, inspect it for inefficiencies (unnecessary object creation, redundant computation, unoptimized algorithms).
 
-**What is safepoint bias and why does it matter?**
+**Q: What is safepoint bias and why does it matter?**
 Traditional JVM profilers (VisualVM, JProfiler with some modes) take stack samples only at JVM safepoints — points where the JVM can pause all threads (method boundaries, loop back-edges, before allocations). Tight loops without safepoints appear to consume zero CPU in these profiles. async-profiler uses AsyncGetCallTrace which can sample at any point in execution, including inside tight loops. Safepoint bias matters when you have CPU-intensive tight loops — traditional profilers will incorrectly show them as not consuming CPU.
 
-**How do you diagnose a memory leak in a Java application?**
+**Q: How do you diagnose a memory leak in a Java application?**
 (1) Take a heap histogram: `jcmd <pid> GC.heap_info` or `jmap -histo:live <pid>`. Look for unexpected object counts growing over time. (2) Compare two heap histograms taken minutes apart — objects growing are suspects. (3) Take a full heap dump and analyze in Eclipse MAT: the Dominator Tree shows which objects hold the most memory; Leak Suspects report automates analysis. (4) Look for classic patterns: static collections growing, ThreadLocal not removed, listeners not unregistered, session objects accumulating.
 
-**How do you read a flamegraph?**
+**Q: How do you read a flamegraph?**
 The x-axis represents time (or sample count) — width means how much time was spent. The y-axis is call stack depth — bottom is the thread entry point, top is the currently executing method. Wide frames near the top are hot methods. To find the bottleneck: identify the widest frame in the visible stack area. If many narrow top frames converge to a wide bottom frame, the bottleneck is that common ancestor. Colors (in async-profiler) represent categories: yellow = Java code, green = C++ JVM code, red = kernel/native.
 
-**What are the JVM flags for GC logging in production?**
+**Q: What are the JVM flags for GC logging in production?**
 JDK 17+: `-Xlog:gc*:file=/tmp/gc.log:time,uptime,level,tags:filecount=10,filesize=20m`. This logs all GC events with timestamps, rotates after 20MB, keeping 10 files. Key events to watch: Pause duration (> MaxGCPauseMillis is a warning), Full GC events (severe latency impact), heap occupancy after GC (approaching heap limit means memory pressure). For G1: also log `-Xlog:gc+phases*` for detailed phase breakdown.
 
-**How do you profile memory allocation rate?**
+**Q: How do you profile memory allocation rate?**
 Use async-profiler with `-e alloc`: samples allocation sites, showing which code paths allocate the most. Alternatively, JFR with the ObjectAllocationInNewTLAB event records allocations. Key metrics: allocation rate (MB/s), top allocation sites, largest allocated types. A high allocation rate (>500 MB/s for typical workloads) causes frequent young GC pauses. Fix: reduce object creation in hot paths (use primitives, reuse objects, use object pools for expensive-to-create objects).
 
-**What is the difference between heap dump and heap histogram?**
+**Q: What is the difference between heap dump and heap histogram?**
 A heap histogram (jmap -histo or jcmd GC.heap_info) lists object counts and sizes by class — fast (seconds), low impact. Good for initial diagnosis. A full heap dump (jmap -dump or -XX:+HeapDumpOnOutOfMemoryError) captures the entire heap with object references — can take seconds to minutes for large heaps, requires significant disk space (heap size bytes), and pauses the JVM during dump (for jmap; JFR heap dumps are asynchronous). Use histogram first; full dump for deep investigation.
 
-**How do you diagnose thread contention?**
+**Q: How do you diagnose thread contention?**
 Take a thread dump with jstack. Count threads in BLOCKED state — high BLOCKED count indicates lock contention. Multiple threads BLOCKED on the same object address indicate a hot lock. Use async-profiler with `-e lock` to identify which locks cause the most contention and which methods hold them. Fix: reduce synchronized scope, replace synchronized with ReentrantLock (tryLock with timeout), use concurrent data structures (ConcurrentHashMap), or striped locks (Guava Striped).
 
-**What JVM flags do you set for a production Spring Boot service?**
+**Q: What JVM flags do you set for a production Spring Boot service?**
 ```bash
 java \
   -Xms512m -Xmx2g \                          # heap sizing
@@ -353,19 +353,19 @@ java \
   -jar app.jar
 ```
 
-**What is async-profiler and how does it avoid safepoint bias?**
+**Q: What is async-profiler and how does it avoid safepoint bias?**
 async-profiler is a low-overhead profiler for Java that uses AsyncGetCallTrace (a JVM internal API) and Linux perf_events to sample call stacks. AsyncGetCallTrace can be called at any signal (including from a signal handler triggered by a timer), not just at JVM safepoints. This eliminates safepoint bias. async-profiler also uses perf_events to sample native and kernel frames, giving a complete picture including time spent in system calls and native libraries — which traditional JVM profilers miss entirely.
 
-**How do you find the root cause of a garbage collection spike?**
+**Q: How do you find the root cause of a garbage collection spike?**
 (1) Check GC logs for the spike: what GC event type (Young, Mixed, Full)? What was the heap occupancy before and after? (2) Full GC: old generation full — memory pressure, possibly a leak. (3) Young GC spike: high allocation rate, possibly a hot code path creating many objects. Use async-profiler `-e alloc` to find the allocation site. (4) Check promotion rate — if young objects are surviving to old gen quickly, the survivor spaces are too small (increase -XX:SurvivorRatio) or objects live too long. (5) Check for humongous object allocations (objects > half a G1 region, default 1 MB/2 = 512 KB) — these bypass young gen and go directly to old gen.
 
-**What is the difference between wall-clock profiling and CPU profiling?**
+**Q: What is the difference between wall-clock profiling and CPU profiling?**
 CPU profiling (`-e cpu`) samples threads only when they are running on CPU (RUNNABLE state). It shows where CPU time is spent. Wall-clock profiling (`-e wall`) samples all threads regardless of state — including threads waiting for I/O, blocked on locks, or sleeping. For latency investigations where a request is slow but CPU usage is low (waiting for database, waiting for network, waiting for a lock), wall-clock profiling reveals where the wall time is spent. CPU profiling would show almost nothing for a primarily I/O-bound request.
 
-**How do you detect and fix high allocation pressure?**
+**Q: How do you detect and fix high allocation pressure?**
 Detection: async-profiler `-e alloc` shows top allocation sites. JFR's jdk.ObjectAllocationInNewTLAB shows allocations per code path. GC frequency > once every 5 seconds for a typical service indicates high allocation. Fix strategies: (1) Object pooling for frequently created/destroyed objects (e.g., StringBuilder, ByteBuffer, database result objects). (2) Replace boxed types with primitives in hot paths (Integer → int, HashMap<Long,Long> → use a primitive map library). (3) Reduce intermediate object creation in streams/lambdas (use traditional for-loops for allocation-sensitive code). (4) Escape analysis: the JVM may already eliminate allocations (stack allocation) for short-lived objects — check with JFR AllocationInOldGen event.
 
-**What production signals indicate a need for profiling?**
+**Q: What production signals indicate a need for profiling?**
 High CPU utilization without high throughput (CPU-intensive processing). Increasing heap usage over time (memory leak). GC throughput < 95% (too much time in GC). Latency p99 >> p50 (long-tail latency from GC pauses, lock contention, or occasional slow I/O). Thread pool rejection or queue depth growing (thread pool exhaustion or slow tasks). JVM OOM errors in logs. Service response time degrading after running for hours (heap pressure, leak, fragmentation).
 
 ---

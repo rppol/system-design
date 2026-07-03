@@ -639,32 +639,32 @@ Subdomain resolution requires the API gateway to parse the `Host` header and inj
 
 ## Interview Discussion Points
 
-**Why use `SET LOCAL` instead of `SET` for the RLS context variable?**
+**Q: Why use `SET LOCAL` instead of `SET` for the RLS context variable?**
 `SET LOCAL` is transaction-scoped and reverts automatically at transaction end. `SET` is session-scoped and persists on the connection even after it returns to the pool, which would cause the next request reusing that connection to execute under the previous tenant's RLS context — a critical data leak. `SET LOCAL` is the only safe choice in a pooled async environment.
 
-**What happens if a request handler raises an exception before `SET LOCAL` commits?**
+**Q: What happens if a request handler raises an exception before `SET LOCAL` commits?**
 The `async with session.begin()` block rolls back the transaction on any unhandled exception, which also reverts `SET LOCAL`. The connection is returned to the pool in a clean state. Even partial writes are rolled back, ensuring atomicity.
 
-**How do you prevent a tenant from enumerating another tenant's resource IDs?**
+**Q: How do you prevent a tenant from enumerating another tenant's resource IDs?**
 The 404 response for `DELETE /projects/{id}` is intentional. Returning 403 (Forbidden) would confirm that the resource exists but belongs to another tenant — leaking information. Returning 404 normalizes the response regardless of whether the ID belongs to a different tenant or simply does not exist. This is called "resource existence hiding."
 
-**How does this design scale when a single tenant generates 80% of the traffic?**
+**Q: How does this design scale when a single tenant generates 80% of the traffic?**
 RLS filtering happens at the query level; a noisy tenant increases PostgreSQL CPU and I/O but does not affect other tenants' connection availability because the pool is shared. To enforce true per-tenant QoS, add a token-bucket rate limiter at the API gateway keyed on `tenant_id` (extracted from the JWT). This limits burst throughput per tenant before the request reaches the database.
 
-**What is the risk of storing `tenant_id` only in the JWT and not re-validating it in every query?**
+**Q: What is the risk of storing `tenant_id` only in the JWT and not re-validating it in every query?**
 The risk is mitigated by RLS. The database enforces `tenant_id` isolation independently of application logic. However, the application still validates that the `user_id` in the JWT belongs to the claimed `tenant_id` (the `User` lookup in `get_current_user` includes `User.tenant_id == ctx.tenant_id`) — preventing a token-swap attack where a valid user forges a `tenant_id` claim.
 
-**How would you implement tenant-scoped rate limiting?**
+**Q: How would you implement tenant-scoped rate limiting?**
 Use Redis with a sliding window counter keyed on `f"ratelimit:{tenant_id}:{window}"`. Inject it as a FastAPI dependency that runs after `get_tenant()`. Limits can be per-plan (e.g., free tier: 1,000 req/min, pro: 10,000 req/min) stored in a `tenant_config` table and cached in Redis with a short TTL.
 
-**How do you run Alembic migrations without taking downtime?**
+**Q: How do you run Alembic migrations without taking downtime?**
 RLS policies are `CREATE POLICY` DDL, which in PostgreSQL acquires an `ACCESS SHARE` lock (not a full table lock) on the target table. New columns should use `ADD COLUMN ... DEFAULT NULL` (non-locking in PostgreSQL 11+). The migration runs against the single schema, applies to all tenants simultaneously, and does not require per-tenant steps.
 
-**How would you add a new tenant at runtime?**
+**Q: How would you add a new tenant at runtime?**
 Insert a row into `tenants`, create the first user row, assign the `owner` role, and issue a JWT. No schema or database creation is required. The RLS policy already covers the new `tenant_id` because it uses a runtime `current_setting()` check rather than a static list.
 
-**How would you implement tenant-level audit logging?**
+**Q: How would you implement tenant-level audit logging?**
 Add a PostgreSQL trigger on `projects` and `tasks` that inserts into an `audit_log` table with `(tenant_id, user_id, action, table_name, row_id, changed_at)`. The trigger fires inside the same transaction as the DML, so the audit record is atomically consistent with the data change. For high-volume tenants, partition the `audit_log` table by `tenant_id` hash.
 
-**How do you handle GDPR right-to-erasure for a tenant?**
+**Q: How do you handle GDPR right-to-erasure for a tenant?**
 Issue a `DELETE FROM users WHERE tenant_id = :tid` cascade (foreign key `ON DELETE CASCADE` on all tenant-owned tables), then delete the `tenants` row. Because all data is in a single schema, a single transaction covers the full deletion. Schema-per-tenant would require `DROP SCHEMA` which is irreversible without a backup; database-per-tenant requires decommissioning an entire instance. RLS + single schema makes GDPR erasure a standard parameterized `DELETE`.

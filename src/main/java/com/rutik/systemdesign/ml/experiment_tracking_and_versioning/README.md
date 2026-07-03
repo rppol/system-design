@@ -620,28 +620,28 @@ DVCLive is DVC's built-in metric logging library that writes metrics to files (m
 **Q: How do you compare two MLflow runs programmatically to select the best model?**
 Use the MLflow tracking client: `MlflowClient().search_runs(experiment_ids=["1"], filter_string="metrics.val_accuracy > 0.90", order_by=["metrics.val_accuracy DESC"], max_results=10)`. This returns Run objects with params, metrics, and artifact URIs. Best practice for model selection pipelines: (1) filter by minimum quality threshold (val_accuracy > 0.90), (2) sort by primary metric (val_accuracy), (3) apply secondary filter if needed (training_time < 4 hours), (4) fetch the best run's artifact URI and register it to the Model Registry. Automate this in a CI/CD step that runs after the sweep completes.
 
-**Why must hyperparameters be logged at run start rather than at run end?**
+**Q: Why must hyperparameters be logged at run start rather than at run end?**
 Logging at run start means a mid-training crash still leaves a complete parameter record you can reproduce from. If you log the config only on the last line of the training loop, a job that dies at epoch 5 leaves an orphan run with metrics but no idea which learning rate or batch size produced them — the record is useless. Capture params, dataset version, git SHA, and environment before the first forward pass; treat run-start logging as the commit that makes the run recoverable.
 
-**Why is SQLite a poor tracking backend for a team running concurrent experiments?**
+**Q: Why is SQLite a poor tracking backend for a team running concurrent experiments?**
 SQLite serializes writes behind a single file lock, so concurrent runs collide and block, and a distributed sweep will throw "database is locked" errors. It is fine for a single-user local prototype but does not survive multiple agents logging metrics simultaneously. Use PostgreSQL (or MySQL) as the MLflow backend store for any team or parallel-HPO setup, with an S3/GCS artifact store alongside it. The switch is a one-line `--backend-store-uri` change and removes the entire class of concurrency failures.
 
-**Why should model checkpoints never be written to a single shared path like models/best_model.pt?**
+**Q: Why should model checkpoints never be written to a single shared path like models/best_model.pt?**
 A shared flat path is overwritten by every run, so after a sweep only the last run's weights survive — not the best run's. This is the classic "weekend sweep of 50 runs and the good model is gone" incident. Always key artifact paths by run ID, e.g. `s3://bucket/models/{run_id}/best_model.pt`; MLflow's `log_artifact()` and W&B's `log_artifact()` do this isolation automatically, which is the main reason to log through the tracker rather than saving files by hand.
 
-**Why does inconsistent metric naming across runs make experiments impossible to compare?**
+**Q: Why does inconsistent metric naming across runs make experiments impossible to compare?**
 Comparison and search queries key on exact metric names, so `val_loss` in one run and `validation_loss` in another never line up on the same axis. Schema drift in metric names silently fragments a dashboard: half your runs plot on one chart and half vanish. Enforce a fixed metric vocabulary (a shared logging helper or constants module) so every run reports `val_loss`, `val_accuracy`, `train_loss` under identical keys — the same discipline applies to param names used in `search_runs()` filters.
 
-**How do early-stopping pruners like MedianPruner and Hyperband reduce hyperparameter-search cost?**
+**Q: How do early-stopping pruners like MedianPruner and Hyperband reduce hyperparameter-search cost?**
 They kill trials that are already worse than the median at a given step, freeing GPU budget for promising configs instead of running every trial to completion. In a 200-trial Optuna study where 60% of configs are clearly bad by epoch 5, running them for the full 50 epochs wastes most of the budget for zero information gain. `MedianPruner(n_startup_trials=5, n_warmup_steps=5)` or Hyperband typically prunes 40-60% of trials, roughly halving GPU hours for the same set of useful results — pruning requires reporting an intermediate value each step via `trial.report()`.
 
-**Why does random search outperform grid search in high-dimensional hyperparameter spaces?**
+**Q: Why does random search outperform grid search in high-dimensional hyperparameter spaces?**
 Random search spends its budget across the few hyperparameters that actually matter, instead of wasting it re-sampling unimportant dimensions on a rigid grid. Bergstra and Bengio showed that in a 10-dimensional space random search finds a config within 5% of optimal in about 60 trials, while grid search would need on the order of 10,000. Grid search is only viable for 1-2 hyperparameters; beyond that its cost is O(N^k) and it repeatedly evaluates the same value of an irrelevant dimension. For anything larger, use random search as a floor and Bayesian optimization for sample efficiency.
 
-**What is population-based training (PBT) and when is it preferable to Bayesian optimization?**
+**Q: What is population-based training (PBT) and when is it preferable to Bayesian optimization?**
 PBT trains a population of models in parallel, periodically copying the best performers' weights and perturbing their hyperparameters mid-run. Unlike Bayesian optimization, which picks a fixed config per trial and trains it to completion, PBT adapts hyperparameters online — so it can discover schedules (e.g. a decaying learning rate or entropy coefficient) rather than a single static value. It shines for RL and long training runs where the optimal hyperparameter changes over the course of training, at the cost of higher orchestration complexity (Ray Tune PBT).
 
-**How do nested runs keep a large hyperparameter sweep organized in MLflow?**
+**Q: How do nested runs keep a large hyperparameter sweep organized in MLflow?**
 A parent run represents the whole sweep and each trial is a nested child run, so the UI groups configs together instead of scattering 200 sibling runs across the experiment list. Start the parent with `mlflow.start_run(run_name="hpo_study")` and each trial with `mlflow.start_run(nested=True)`; the parent can then hold aggregate tags and the best hyperparameters, while children hold per-trial params and metrics. This mirrors how Optuna studies map onto MLflow and makes sweep-level comparison a single click.
 
 ---

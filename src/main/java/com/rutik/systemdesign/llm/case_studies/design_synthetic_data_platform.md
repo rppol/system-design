@@ -1026,34 +1026,34 @@ Cross-reference: [./cross_cutting/gpu_pool_economics.md](./cross_cutting/gpu_poo
 
 ## 11. Interview Discussion Points
 
-**Why can synthetic data match or exceed human-labeled data for instruction tuning?**
+**Q: Why can synthetic data match or exceed human-labeled data for instruction tuning?**
 Synthetic data from a frontier model covers the prompt distribution more uniformly than human labelers, who cluster around familiar topics and writing patterns. Human labelers are also inconsistent — inter-annotator agreement for instruction quality is typically 0.65-0.75 Fleiss' kappa. A well-calibrated LLM judge applied consistently can achieve higher consistency (σ ≈ 0.08 for a trained RM) while covering millions of examples per day that human labeling cannot reach. The caveat: for specialized domains (medical, legal, safety-critical), human expert review remains essential to catch subtle errors the LLM judge cannot detect.
 
-**How does diversity sampling prevent topic collapse, and what is the failure mode when it breaks?**
+**Q: How does diversity sampling prevent topic collapse, and what is the failure mode when it breaks?**
 Diversity sampling assigns generation probability inversely proportional to how many examples have already been generated for each topic, using a topic tree with 500 leaf nodes. The failure mode is stale weight state: if sampling weights are computed once at startup from historical totals, topics that began over-represented remain over-represented for the entire run. The fix is recalculating weights every 10,000 generations relative to the current run, not cumulative historical counts. Monitoring: track normalized entropy of the leaf distribution hourly; values below 0.6 indicate collapse.
 
-**Why does best-of-N beat contrastive generation for DPO preference pairs?**
+**Q: Why does best-of-N beat contrastive generation for DPO preference pairs?**
 Contrastive pairs (strong model chosen, weak model rejected) contain spurious style correlations: the strong model's responses are systematically longer, more structured, and more formal than the weak model's. The DPO objective cannot distinguish between "this response is better because of content quality" and "this response is better because it uses bullet points." Best-of-N pairs from the same model at high temperature produce responses that differ in content and reasoning quality but share stylistic characteristics, forcing the model to learn behavioral alignment rather than stylistic mimicry.
 
-**How do you detect reward hacking in a quality judge LLM?**
+**Q: How do you detect reward hacking in a quality judge LLM?**
 Plot the joint distribution of (judge_score, response_length_tokens) for a random sample of 10,000 examples. If Pearson correlation exceeds 0.4, the judge is length-biased. More subtly, plot (judge_score, uses_bullet_points) and (judge_score, response_starts_with_affirmation) — these are common RLHF artifacts in judge models. The fix is a length-normalized score, format-invariant scoring rubric, and periodic calibration against a golden set where response quality is decoupled from length by construction.
 
-**What makes PII scrubbing uniquely hard in a synthetic data context?**
+**Q: What makes PII scrubbing uniquely hard in a synthetic data context?**
 The seed documents for synthetic generation often come from real-world text (customer support logs, web scrapes, internal documents) that contain PII. Standard PII detectors (Presidio, spaCy NER) are trained on clean, well-formatted text. Real PII appears in non-standard formats: phone numbers with period separators, emails with display names, SSNs in formatted tables. Additionally, synthetic generation can amplify PII leakage: if a seed document contains a real name, the LLM may incorporate it into the generated example in a paraphrase that the PII detector treats as a fictional name. Defense in depth: Stage 1 regex rules for 15 common PII formats + Presidio for entity detection + monthly adversarial audit with synthetic PII injection to measure scrubber recall.
 
-**How do you version datasets to support training lineage and regression bisection?**
+**Q: How do you version datasets to support training lineage and regression bisection?**
 Every example carries a content-addressed hash (SHA-256 of prompt + response). A dataset version is an immutable manifest of all content hashes, itself hashed to produce the manifest hash. Training jobs reference the manifest hash, not a mutable dataset name. When a model regresses, engineers binary-search dataset versions: train on v2.0, v2.5, and v3.0 to narrow the regression window, then bisect within batches of v2.5 by content hash ranges. This typically localizes the defective batch within 4-5 training runs.
 
-**Why does a 0.5% error rate in training data cause measurable model regression?**
+**Q: Why does a 0.5% error rate in training data cause measurable model regression?**
 At 1M examples per training epoch, 0.5% = 5,000 defective examples. These examples are not distributed randomly — they often cluster in a specific topic or generation batch, creating systematic bias in a particular capability area. Models are highly sensitive to systematic biases in their training data: even a small number of examples that consistently reward the wrong behavior (e.g., verbosity, hedging, factual errors in a specific domain) are reinforced across many gradient steps. The effect compounds over multiple epochs.
 
-**How is Scale AI's $1B ARR defensible against open-source synthetic data alternatives?**
+**Q: How is Scale AI's $1B ARR defensible against open-source synthetic data alternatives?**
 Scale AI's defensible moat is not the generation software (replicable) but the human annotation network (30,000+ vetted domain expert labelers), enterprise data handling compliance (SOC 2 Type II, HIPAA, classified environments), and the calibration feedback loop: Scale's quality signals from billions of human reviews improve their automated quality judges, which reduces the cost of human review required per new task. Open-source datasets like Magpie and UltraChat require no human review budget but produce lower-quality data for specialized domains (medicine, law, STEM) where factual accuracy cannot be assessed by a general LLM judge.
 
-**What does Constitutional AI contribute compared to a trained reward model?**
+**Q: What does Constitutional AI contribute compared to a trained reward model?**
 Constitutional AI enables quality scoring without any human-labeled preference data: the LLM self-critiques responses against a declared set of principles and revises them. This is useful during cold-start when you have no labeled data to train a reward model. The limitation is inconsistency: as the judge LLM's base model updates, the scoring distribution shifts without warning. A trained reward model produces consistent scores (σ ≈ 0.08 vs σ ≈ 0.22 for LLM-as-judge) but requires 10,000+ human-labeled pairs to bootstrap. The practical strategy: start with Constitutional AI, collect human judgments on 5,000 examples per month, train a reward model at 10K examples, switch to RM scoring at 6-9 months.
 
-**How do you calculate the break-even between frontier LLM generation and self-hosted generation?**
+**Q: How do you calculate the break-even between frontier LLM generation and self-hosted generation?**
 Break-even point: self-hosted GPU cost per token = frontier API cost per token.
 
 At Llama-3-70B on 4× H100 (on-demand $32/hr for the pod):
@@ -1067,7 +1067,7 @@ Self-hosting breaks even only at scale: with reserved GPU pricing (40% discount)
 
 Self-hosting becomes cost-effective at >500M tokens/day per deployment, when the blended reserved GPU rate falls below the API rate, or in air-gapped environments where API access is not permitted.
 
-**How do you handle multilingual quality judging without introducing language bias?**
+**Q: How do you handle multilingual quality judging without introducing language bias?**
 A single English-calibrated judge gives systematically lower scores to correct non-English responses because it pattern-matches on English-language fluency signals. The fix is a routing layer: classify each generated example's language, route to a language-specific judge (or a multilingual judge with language-specific few-shot calibration examples). Validate calibration by running the judge on 100 human-labeled examples per language and measuring Pearson correlation with human scores. Cohere's Aya dataset found that language-specific calibration improved audit agreement from 61% to 87% across 20 target languages.
 
 Cross-references:

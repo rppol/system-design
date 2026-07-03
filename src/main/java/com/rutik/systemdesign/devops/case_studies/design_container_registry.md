@@ -783,38 +783,38 @@ When pull volume 10x's to 50M/day, the bottleneck is **not storage** (grows slow
 
 ## 11. Interview Discussion Points
 
-**Why is a container registry content-addressable, and what does that buy you?**
+**Q: Why is a container registry content-addressable, and what does that buy you?**
 Because blobs are named by the SHA-256 of their content, identical layers are physically stored once regardless of how many images reference them. This buys deduplication (a shared base image stored once across 1,000 images), integrity verification (recompute the hash on pull), and trivial caching (a digest is a perfect cache key that never goes stale). The manifest plane on top is just mutable pointers into this immutable store — the same model as Git objects and refs.
 
-**How do you keep manifest fetch p95 under 100 ms at 580 pulls/sec?**
+**Q: How do you keep manifest fetch p95 under 100 ms at 580 pulls/sec?**
 Serve manifests from a Redis cache fronting Postgres, since manifests are tiny (1-30 KB) and immutable by digest, so cache TTL can be long (10 min) with no staleness risk for digest lookups. Tags are mutable, so tag→digest resolution is cached separately with shorter TTL and invalidated on push. Postgres carries a read replica for the resolution queries; the actual manifest body is keyed by immutable digest and rarely misses cache.
 
-**Where does the cross-region egress cost actually come from, and how do you minimize it?**
+**Q: Where does the cross-region egress cost actually come from, and how do you minimize it?**
 From blob GETs that cross a region boundary at $0.02/GB; at naive scale this is 29 GB/s of origin egress. A regional pull-through cache at 98% hit ratio cuts origin egress 50x to ~0.58 GB/s because each blob crosses a region once and then serves locally forever. You replicate eagerly only for prod-critical images (failover readiness) and lazily (pull-through) for the long tail — eager-mirroring everything would balloon both storage (120 PB) and egress.
 
-**Why scan asynchronously instead of blocking the push?**
+**Q: Why scan asynchronously instead of blocking the push?**
 Because Trivy takes 20-40 s and pushes must complete in seconds; blocking would add 30 s to every CI push and couple push availability to scan-worker availability. The real enforcement point is the promotion gate and the admission controller, which refuse to move or run an image whose digest hasn't passed scan. A vulnerable image may exist briefly in dev, but it can never reach prod — defense is at the gate, not the push.
 
-**What is the difference between "signed" and "signed by someone I trust," and why does it matter at admission?**
+**Q: What is the difference between "signed" and "signed by someone I trust," and why does it matter at admission?**
 "Signed" only proves a valid signature exists; "signed by someone I trust" pins the OIDC issuer and the signer subject so only your CI workflow identity produces an admissible signature (see §4.3). Without pinning, any Fulcio-issued identity — including an attacker running a GitHub Action in any repo — can produce a "valid" keyless signature that passes a naive policy. The fix is mandatory issuer + subject pinning plus Rekor transparency-log inclusion.
 
-**How does garbage collection avoid deleting a layer that's still in use?**
+**Q: How does garbage collection avoid deleting a layer that's still in use?**
 With two-phase mark-and-sweep: first accumulate the full live set across all tags, all reachable manifests, and all referrers (signatures/SBOMs), then sweep only blobs absent from that complete set. The classic bug is marking per-tag in isolation and deleting a layer another image shares, or forgetting referrers and silently deleting a signature. A grace window (2 h) further protects blobs from an in-flight push racing the sweep, and a dry-run diff catches anomalies before any delete.
 
-**How do you prevent one tenant from starving the registry with pull traffic?**
+**Q: How do you prevent one tenant from starving the registry with pull traffic?**
 Per-principal token-bucket rate limiting in Redis: anonymous (100/6h), authenticated (5,000/6h), service accounts (metered, high). This is exactly Docker Hub's model and prevents a runaway CI loop or a single noisy tenant from consuming all origin bandwidth. The limits live at the auth layer so they apply before any blob bytes move, and CI is configured to authenticate (never pull anonymously) and to use a regional cache.
 
-**Why store blobs in S3 instead of a filesystem, and what's the cost?**
+**Q: Why store blobs in S3 instead of a filesystem, and what's the cost?**
 S3 gives 11-nines durability, effectively infinite capacity, and lets registry API pods stay stateless (blobs aren't on node disks). The cost is higher per-GET latency than local disk, which you erase with a Redis manifest cache and a regional blob pull-through cache. A filesystem driver is faster cold but requires replicated block storage and couples capacity to nodes — untenable at 4 PB hot working set.
 
-**How do you promote an image from dev to prod without re-uploading gigabytes?**
+**Q: How do you promote an image from dev to prod without re-uploading gigabytes?**
 Promotion is a manifest copy by digest (`crane copy dev/app@sha256:... prod/app@sha256:...`); since blobs are content-addressed and already present, only the small manifest moves and the layers are deduped. The copy is gated: the exact digest must have a passing Trivy scan and a valid cosign signature with pinned issuer/subject. Keying on the immutable digest (not the tag) prevents a re-pushed tag from sneaking an unscanned image past the gate.
 
-**What's the worst-case failure mode of this system and how do you bound it?**
+**Q: What's the worst-case failure mode of this system and how do you bound it?**
 A pull-path outage — if the origin and all regional caches fail, no node can pull and deploys/autoscaling stall fleet-wide. You bound it with the 99.95% pull-path SLO (≤ 21.6 min/month error budget), multi-region caches that serve independently of origin, S3's 11-nines durability for the blobs themselves, and pre-warming critical images onto nodes so a registry blip doesn't block already-scheduled pods. GC and signature bugs are bounded by two-phase reachability and issuer/subject pinning respectively.
 
-**How would you handle a 10x growth from 5M to 50M pulls/day?**
+**Q: How would you handle a 10x growth from 5M to 50M pulls/day?**
 The bottleneck shifts to origin egress and manifest QPS, not storage (which grows slowly with dedup). Add more regional pull-through caches and push the cache hit ratio from 0.98 toward 0.99, which roughly halves origin egress again; scale Redis manifest-cache capacity and Postgres read replicas for tag resolution; and shard the scan and replication worker pools by namespace. For extreme co-pull scenarios (thousands of nodes pulling one image at once), adopt a P2P distribution layer like Uber Kraken so hosts seed layers to each other instead of hammering origin.
 
-**How do referrers (signatures, SBOMs, attestations) fit into the OCI model, and why must GC know about them?**
+**Q: How do referrers (signatures, SBOMs, attestations) fit into the OCI model, and why must GC know about them?**
 Referrers are OCI artifacts attached to a subject manifest via the Referrers API, stored as their own manifests + blobs that point at the image digest. GC must treat them as live whenever their subject is live, or it will delete a cosign signature blob and silently un-sign a running, admitted image — which then fails the next admission check or breaks audit. Reachability marking must walk subject→referrers, not just tag→layers.

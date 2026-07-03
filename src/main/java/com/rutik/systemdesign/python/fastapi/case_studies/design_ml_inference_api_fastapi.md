@@ -565,29 +565,29 @@ TorchServe is appropriate for pure model-serving infrastructure. FastAPI is bett
 
 ## Interview Discussion Points
 
-**Why load the model in `lifespan` instead of at module level?**
+**Q: Why load the model in `lifespan` instead of at module level?**
 Module-level loading executes during `import`, which runs in all worker processes simultaneously at startup and also during test imports. `lifespan` runs exactly once per process after the event loop is ready, giving access to async APIs (e.g., loading from S3 with `aioboto3`) and allowing clean teardown on SIGTERM.
 
-**How does the micro-batcher guarantee the 200 ms p99 SLA?**
+**Q: How does the micro-batcher guarantee the 200 ms p99 SLA?**
 Worst-case queue time is the flush interval (10 ms). GPU inference on a batch of 8 BERT-base inputs takes approximately 20 ms on a T4. Total worst-case is 10 + 20 + network = ~50 ms, well under 200 ms. The batcher uses `asyncio.wait_for` with a hard timeout so no request waits longer than one flush interval regardless of queue depth.
 
-**What happens if the GPU runs out of memory during a batch inference call?**
+**Q: What happens if the GPU runs out of memory during a batch inference call?**
 `run_in_executor` propagates the `torch.cuda.OutOfMemoryError` back to the event loop. The drain loop catches it, marks all in-flight futures as failed with the exception, and the request handlers return HTTP 500. The batcher continues processing the next batch. A production system should add a circuit breaker that reduces batch size or falls back to CPU inference after repeated OOM events.
 
-**How do you prevent a cache poisoning attack via the semantic cache?**
+**Q: How do you prevent a cache poisoning attack via the semantic cache?**
 Only the model's own output is stored — user input is never stored as the value, only as the lookup key. Embeddings are deterministic and produced server-side. A user cannot inject an arbitrary cached answer because `set` is called only after a successful inference result. Input length is bounded by the Pydantic validator (`max_length=2048`).
 
-**Why use cosine similarity at 0.95 rather than exact-match hashing?**
+**Q: Why use cosine similarity at 0.95 rather than exact-match hashing?**
 Exact-match hashing misses "What is the sentiment of this review?" and "What's the sentiment for this review?" — semantically identical prompts that hash differently. At 0.95 cosine similarity with MiniLM-L6 embeddings, false positive rate is under 1% on standard NLP benchmarks. Exact-match is still valuable as a first-pass check (O(1)) before the embedding scan.
 
-**How does zero-downtime model update avoid serving inconsistent results mid-swap?**
+**Q: How does zero-downtime model update avoid serving inconsistent results mid-swap?**
 `app.state.active_slot` is a plain Python integer. Python's GIL guarantees that the integer assignment `active_slot = new_slot` is atomic at the bytecode level. Requests that have already read the old slot ID and are mid-inference continue to use the old model object (which is kept alive in `slots[old_slot]` until the drain window expires). No request sees a partially-loaded model.
 
-**How would you scale this beyond a single process?**
+**Q: How would you scale this beyond a single process?**
 Run multiple Uvicorn workers behind Gunicorn (`-w 4 --worker-class uvicorn.workers.UvicornWorker`). Each worker has its own copy of the model in GPU memory, so memory scales linearly with worker count. The semantic cache lives in Redis, which is shared across all workers, so cache hits are process-agnostic. The micro-batcher is per-process; cross-process batching requires an external queue (Redis Streams or Kafka) feeding a dedicated inference worker, which is the TorchServe or Triton Inference Server architecture.
 
-**What observability would you add to this service?**
+**Q: What observability would you add to this service?**
 At minimum: Prometheus counter for requests (labelled by cached/not-cached and label), histogram for end-to-end latency and per-stage latency (cache lookup, queue wait, inference), and a gauge for micro-batch queue depth. OpenTelemetry spans should wrap the cache lookup and the `run_in_executor` inference call so distributed traces show exactly where latency is spent. See `../../../llm/case_studies/cross_cutting/streaming_at_scale.md` for SSE-specific tracing patterns.
 
-**How would you handle the case where the sentence transformer embedder is slower than the model it is protecting?**
+**Q: How would you handle the case where the sentence transformer embedder is slower than the model it is protecting?**
 MiniLM-L6 produces 384-dim embeddings and runs at ~2 ms per input on CPU. BERT-base inference on GPU takes ~15 ms per input, so the embedder is 7x faster. If the embedder becomes a bottleneck (e.g., on a CPU-only host), cache the embeddings of frequently seen inputs in a local LRU dict keyed by exact input hash before falling through to Redis and the full embedding scan. This degrades to exact-match for repeated identical inputs without paying the embedding cost.

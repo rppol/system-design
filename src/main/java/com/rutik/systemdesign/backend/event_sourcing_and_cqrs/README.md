@@ -385,37 +385,37 @@ Do NOT use event sourcing for: simple CRUD applications without complex business
 
 ## 12. Interview Questions with Answers
 
-**What is event sourcing and how does it differ from traditional state persistence?**
+**Q: What is event sourcing and how does it differ from traditional state persistence?**
 In traditional state persistence, you store the current state of an entity and update it in-place: `UPDATE orders SET status = 'SHIPPED'`. In event sourcing, you store the sequence of events that led to the current state and never update records: you append `OrderShipped{orderId, trackingNumber, shippedAt}`. Current state is derived by replaying all events for an aggregate from the beginning. The difference is that traditional persistence answers "what is the current state?" while event sourcing answers "what happened and how did we get here?"
 
-**What is CQRS and why would you use it?**
+**Q: What is CQRS and why would you use it?**
 CQRS separates the write model (command side) from the read model (query side). The command model enforces business invariants and maintains consistency. The read model is denormalized and optimized for specific query patterns — no joins, no complex aggregations at query time. You use CQRS when: reads and writes have vastly different load patterns (10:1 or higher read-to-write ratio), reads require different shapes than the write model (list view vs detail view vs reporting), or different consistency requirements exist (reads can be eventually consistent, writes must be strongly consistent).
 
-**What is an aggregate in the context of event sourcing?**
+**Q: What is an aggregate in the context of event sourcing?**
 An aggregate is a cluster of domain objects treated as a single unit for data consistency. It is the boundary of transactional consistency — all changes within an aggregate are atomic. In event sourcing, each aggregate has its own ordered event stream. The aggregate root is the only entry point for modifying the aggregate — all commands go through it. The aggregate validates business invariants before emitting events. Examples: `Order` aggregate (contains OrderItems, ShippingAddress, PaymentDetails), `BankAccount` aggregate (contains transactions, balance).
 
-**What are snapshots in event sourcing and when should you use them?**
+**Q: What are snapshots in event sourcing and when should you use them?**
 A snapshot is a point-in-time serialization of an aggregate's state, stored alongside the event log. When loading an aggregate, instead of replaying all events from the beginning, you load the most recent snapshot and only replay events that occurred after the snapshot's version. Use snapshots when: aggregate has more than 50-100 events (replay time > 50ms), or for aggregates with high event velocity. The snapshot threshold is typically 50-100 events. Snapshots trade storage space (snapshot table) for faster aggregate loading. They do not change the event log — events remain the source of truth.
 
-**How do you handle schema evolution in event sourcing?**
+**Q: How do you handle schema evolution in event sourcing?**
 Events are immutable once written, so you cannot change their schema retroactively. Use event upcasters: a transformer that converts old event format to new format at read time. When loading events, the upcaster chain runs before the event reaches the aggregate or projection. An upcaster matches events by type and revision, transforms the payload (adds a new field with default value, renames a field, splits one event into two), and outputs the new format. Rules: adding optional fields is backward-compatible; removing or renaming fields requires an upcaster; changing semantics requires a new event type and a migration strategy.
 
-**What is the difference between choreography and orchestration in event-driven systems?**
+**Q: What is the difference between choreography and orchestration in event-driven systems?**
 Choreography: each service reacts to domain events published by other services and takes action. There is no central coordinator — services are loosely coupled through events. Example: `OrderCreated` event → InventoryService reserves stock → publishes `StockReserved` → PaymentService charges → publishes `PaymentCompleted`. Orchestration: a central saga orchestrator sends commands to services and waits for replies, managing the workflow state machine. Example: `OrderSagaOrchestrator` sends `ReserveInventoryCommand` to InventoryService, receives `StockReservedEvent`, then sends `ChargePaymentCommand`. Choreography is more loosely coupled but harder to trace; orchestration makes the flow explicit and visible but introduces a coupled coordinator.
 
-**How do you implement "read your own writes" consistency with CQRS?**
+**Q: How do you implement "read your own writes" consistency with CQRS?**
 By default, CQRS with async projections means a write followed immediately by a read may not see the written data. Solutions: (1) Return the new state directly from the command handler response — skip the read model for the immediate redirect. (2) Synchronous projection: update the read model in the same transaction as the command (strong consistency, same DB required). (3) Wait-for-projection: after command, poll the read model with a timeout until the new entity appears (Awaitility-style in the UI). (4) Client-side cache: the frontend holds the just-written data locally and uses it for the immediate display without a round-trip.
 
-**What is event replay and what are its use cases?**
+**Q: What is event replay and what are its use cases?**
 Event replay is re-processing historical events from the event store. Use cases: (1) Build a new projection from existing data — e.g., add a new read model for a reporting dashboard by replaying all events from the beginning. (2) Fix a corrupted projection — if a bug in an event handler caused incorrect read model state, fix the bug, delete the read model, replay all events. (3) Temporal queries — replay events up to a specific timestamp to reconstruct historical state. (4) Debugging — replay events to reproduce a specific state and investigate a bug. Event replay is one of event sourcing's most powerful capabilities — it makes the event log a complete historical record that can be re-interpreted.
 
-**What is the optimistic concurrency check in an event store?**
+**Q: What is the optimistic concurrency check in an event store?**
 When a command handler loads an aggregate, it knows the current version (the version of the last event). When saving new events, it includes the expected version. The event store checks: is the current version of the aggregate in storage still equal to the expected version? If another process appended an event between load and save, the version will not match, and the save fails with an optimistic concurrency exception. The command handler then retries: reload the aggregate (now with the new event), re-validate invariants, re-apply the command. This is identical to JPA's `@Version`-based optimistic locking but for event streams.
 
-**How does CQRS relate to microservices?**
+**Q: How does CQRS relate to microservices?**
 In a microservices architecture, each service naturally has its own write model (its aggregate) and can publish events that other services project into their own read models. Order service owns `OrderAggregate` and publishes `OrderCreated`, `OrderShipped` events. ShippingService subscribes to `OrderShipped` and maintains its own shipment read model. ReportingService subscribes to all order events and builds denormalized reporting tables. Each service owns its read model, denormalized for its specific queries. This avoids cross-service JOINs and lets each service's read model be independently scaled and optimized.
 
-**What is the Axon Framework and what problems does it solve?**
+**Q: What is the Axon Framework and what problems does it solve?**
 Axon Framework is a Java framework for implementing CQRS and event sourcing. It provides: `@Aggregate` annotation for aggregates with automatic event sourcing, `@CommandHandler` for command handling, `@EventSourcingHandler` for state reconstruction, `@EventHandler` for projections, `CommandGateway` for dispatching commands, `QueryGateway` for querying projections, and AxonServer as the event store and message routing infrastructure. It solves the boilerplate of: event serialization, aggregate loading (snapshot + replay), optimistic concurrency, event publishing, and projection catch-up. It integrates natively with Spring Boot.
 
 ---

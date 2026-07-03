@@ -660,41 +660,41 @@ For multi-region: each region runs its own collection + Kafka + processing + hot
 
 ## 11. Interview Discussion Points
 
-**How do you guarantee you never drop logs under backpressure?**
+**Q: How do you guarantee you never drop logs under backpressure?**
 You push durability to the edge and decouple stages with a buffer that has hours of runway. Agents write to a bounded *filesystem* buffer (not memory-only) with unlimited retries, so a downstream stall becomes delay, not loss; Kafka with RF=3, `min.insync.replicas=2`, and 8h retention absorbs a 4h peak surge twice over; consumers replay from Kafka after any storage outage. The guarantee holds only if every stage degrades into *delay* — a memory-only agent buffer or `unclean.leader.election=true` quietly breaks it.
 
-**Why Kafka in the middle instead of agents writing directly to Loki/OpenSearch?**
+**Q: Why Kafka in the middle instead of agents writing directly to Loki/OpenSearch?**
 Kafka decouples ingest availability from storage availability and enables fan-out. A direct write makes an OpenSearch GC pause or a Loki rollout into agent-side drops; Kafka turns it into consumer lag that drains later. It also lets multiple consumers — Loki, OpenSearch, S3 cold, SIEM, real-time alerting — tee off one durable stream without each producer knowing about them. The cost is one more tier-0 system to operate.
 
-**Loki vs Elasticsearch/OpenSearch — when would you pick each?**
+**Q: Loki vs Elasticsearch/OpenSearch — when would you pick each?**
 Loki for the bulk path because it indexes only labels, making its index ~1000x smaller and its storage ~10x cheaper at 50 TB/day; you query by label-filter + grep. OpenSearch for the ~3% of logs needing fast full-text search and complex aggregations (security/audit). The deciding factor is read pattern: if 99% of queries are "show me errors for service X in the last hour," Loki is dramatically cheaper; if you need ad-hoc full-text analytics over everything, you pay for the inverted index.
 
-**What is the high-cardinality label trap and how do you prevent it?**
+**Q: What is the high-cardinality label trap and how do you prevent it?**
 In Loki, each unique combination of label values is a separate stream; putting a high-cardinality field like `request_id` or `user_id` in a label creates millions of streams, exploding the index and OOMing ingesters. Prevent it with a CI lint that rejects high-cardinality labels, per-tenant stream-count limits, and by putting such fields in *structured metadata* or the log body instead. The same trap exists in metrics cardinality — see the cross-cutting doc.
 
-**Where and why do you redact PII?**
+**Q: Where and why do you redact PII?**
 In the processing tier, in-stream, before any store. Agent-side redaction wastes CPU on thousands of nodes and can't easily apply per-tenant rules; post-storage redaction leaves a compliance window where plaintext PII is queryable. In-stream centralizes the rules and runs once before fan-out. You gate it with a CI assertion that runs a PII detector over the *post-redaction* output and fails the build if leak rate is non-zero.
 
-**How do you handle multiline logs like Java stack traces?**
+**Q: How do you handle multiline logs like Java stack traces?**
 Reassemble at the agent so a full stack trace becomes a single Kafka message, using a start-pattern rule (e.g., lines beginning with a timestamp start a new record; continuation lines without one are appended). Doing it at the agent preserves ordering and avoids the much harder problem of reassembling interleaved lines across Kafka partitions downstream. Final structured parsing then happens in the processing tier.
 
-**How do you size Kafka partitions, and what's the tradeoff?**
+**Q: How do you size Kafka partitions, and what's the tradeoff?**
 Partitions = ceil(peak throughput / per-partition sustainable throughput); at 2.9 GB/s peak and ~15 MB/s per partition with RF=3, that's ~194, rounded to 256 for headroom and rebalance smoothness. More partitions give more consumer parallelism but increase metadata overhead, rebalance time, and open file handles; too few partitions cap your maximum consumer count and create hot partitions. The partition key (`sha(tenant+service)`) balances load while preserving per-service ordering.
 
-**How does the hot/cold tiering work and what does a cold query cost?**
+**Q: How does the hot/cold tiering work and what does a cold query cost?**
 Hot tier (Loki, 30 days) keeps recent logs queryable in seconds; everything also lands in S3 as day/tenant-partitioned parquet for a year. Old queries hit the cold tier via Athena, where partition pruning on `dt`+`tenant` scans gigabytes instead of petabytes, costing a few dollars and running in seconds-to-minutes. The tradeoff is that cold queries are non-interactive — acceptable because >99% of queries hit the last 30 days, so paying 12x more to keep a year hot would serve ~1% of traffic.
 
-**A tenant ships DEBUG logging to prod and 8x's their volume — what happens and how do you contain it?**
+**Q: A tenant ships DEBUG logging to prod and 8x's their volume — what happens and how do you contain it?**
 Per-tenant ingest quotas cap their hot-tier impact so they can't starve other tenants; a volume-spike alert fires; under quota pressure, level-based sampling reduces DEBUG to a fraction in the *hot* index while keeping 100% in the cheap cold tier. Without these controls you get the real war story: $48K of extra cost over three days and a near-quota-exhaustion event. The structural fix is per-tenant isolation at ingest plus alerting on volume deltas.
 
-**How do you keep one tenant's query from degrading everyone else's?**
+**Q: How do you keep one tenant's query from degrading everyone else's?**
 The query-frontend enforces per-tenant limits — `max_query_length` (e.g., 31 days), `max_query_parallelism`, `max_query_series`, and a query timeout — and caches results. An unbounded 30-day, no-selector query gets rejected or throttled instead of fanning into thousands of subqueries that saturate shared queriers. Combined with per-tenant ingest isolation, this bounds blast radius on both read and write paths; without it, one runaway dashboard cost us ~$9K in an afternoon.
 
-**What's your backpressure signal and how do you act on it?**
+**Q: What's your backpressure signal and how do you act on it?**
 Kafka consumer-group lag is the canonical signal: it rises when processors or sinks can't keep up. An HPA scales processors on lag; if a specific sink (e.g., OpenSearch) is the bottleneck, you reroute that sink to S3-only temporarily and backfill, and you raise Kafka retention to buy runway. The whole point of the architecture is that backpressure shows up as *lag* (recoverable) rather than as *agent drops* (unrecoverable).
 
-**How do you detect and recover from data loss if it does occur?**
+**Q: How do you detect and recover from data loss if it does occur?**
 Alert on any non-zero `flb_output_dropped_records_total` and any DLQ rate above 0.5% — these are the only places loss can originate. If drops occurred, identify the time window and node set, then rehydrate from the source log files if still present on disk (the agent's offset DB lets you re-read from the last committed offset), or replay from Kafka if the window is within retention. Prevention beats recovery: `unclean.leader.election=false`, filesystem agent buffers, and `Retry_Limit no_limits` mean the recovery path almost never fires.
 
-**How would you scale this pipeline 10x to 500 TB/day?**
+**Q: How would you scale this pipeline 10x to 500 TB/day?**
 Scale horizontally at every tier and shard by tenant/region: more Kafka partitions and brokers (partitions scale linearly with throughput), more processor replicas (stateless, just add nodes), and shard Loki/OpenSearch by tenant into separate cells to keep blast radius bounded. The real constraints at 10x are Kafka cross-AZ network cost, S3 request rates (use partitioned prefixes to avoid hot prefixes), and cardinality — which is why label discipline and per-tenant limits become even more critical. See the multi-cluster networking cross-cutting doc for the cross-region replication and federation cost model.

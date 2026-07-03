@@ -406,49 +406,49 @@ async def get_user(user_id: str) -> str:
 
 ## 12. Interview Questions with Answers
 
-**What are the four MCP primitives and how do they differ?**
+**Q: What are the four MCP primitives and how do they differ?**
 Resources (URI-addressable read-only data — files, records); Tools (callable functions with potential side effects — actions); Prompts (reusable prompt templates clients can invoke); Sampling (server requests client to call an LLM on its behalf). Resources are for "show me X"; Tools are for "do X".
 
-**What's the difference between FastMCP and the bare Python SDK?**
+**Q: What's the difference between FastMCP and the bare Python SDK?**
 FastMCP is a higher-level wrapper using decorators (`@mcp.tool()`, `@mcp.resource()`) — closer to FastAPI ergonomics. Bare SDK gives you direct access to request handlers (more code, more control). FastMCP is recommended for most server implementations.
 
-**How does capability negotiation work at initialize?**
+**Q: How does capability negotiation work at initialize?**
 Client sends `initialize` with protocolVersion and its capabilities (e.g., sampling support). Server responds with its capabilities (resources/tools/prompts available). Both parties know what the other supports. Notifications about list changes (e.g., `notifications/tools/list_changed`) are only sent if the recipient supports them.
 
-**Why use stdio vs HTTP transport?**
+**Q: Why use stdio vs HTTP transport?**
 Stdio: client launches server as subprocess; communicates via stdin/stdout. Simplest, most secure (no network), good for local tools. HTTP (Streamable HTTP, since 2025): server runs as HTTP service; multiple clients can connect. Required for remote/cloud servers. Choose based on deployment model.
 
-**What's the right way to describe a tool?**
+**Q: What's the right way to describe a tool?**
 Description should answer: what does this tool do? When should the LLM use it? What does it return? Include example use cases. The LLM reads the description to decide when to call — vague descriptions cause missed or wrong calls. Augment with type hints + Pydantic Field descriptions for parameters.
 
-**How do you handle errors in tools?**
+**Q: How do you handle errors in tools?**
 Return the error as the tool's result text (so the LLM sees and can react), not as a protocol-level exception. Include enough context for the LLM to either retry with different arguments or report failure to the user. Example: "Query failed: column 'usr_id' not found. Available columns: id, user_id, name."
 
-**What's the role of the MCP Inspector?**
+**Q: What's the role of the MCP Inspector?**
 Inspector is a browser-based testing UI: launches your server, lets you call tools, inspect resources, view raw JSON-RPC traffic. Essential for development — much faster than testing through a real LLM client.
 
-**How do you secure an MCP server?**
+**Q: How do you secure an MCP server?**
 For stdio servers: rely on subprocess privileges (server runs as user that launched it). For HTTP servers: authenticate clients (OAuth 2.0 per 2025 spec, API keys, mTLS). Validate all tool inputs. Never trust tool descriptions from untrusted servers (prompt injection risk) — the full threat model is in [MCP Security](mcp_security.md).
 
-**Can MCP servers have state across calls?**
+**Q: Can MCP servers have state across calls?**
 Yes — server is a long-running process; you can hold state in memory or external storage. Example: cache database connections, maintain session tokens. Be careful with state in HTTP servers if you have multiple instances (use Redis/external store).
 
-**How do you handle long-running operations?**
+**Q: How do you handle long-running operations?**
 Per MCP spec, tools should return within a reasonable timeout. For longer operations (>30s): (1) submit operation, return task_id immediately; (2) provide a separate tool to poll task status; (3) consider sending progress notifications (some clients support).
 
-**What's prompt sampling and when do servers use it?**
+**Q: What's prompt sampling and when do servers use it?**
 Sampling lets the server ask the client to make an LLM call on its behalf. Example: a Git MCP server might ask the client's LLM to summarize a diff (using the client's model + auth). Lets servers use AI capabilities without bundling their own API keys.
 
-**How do you version an MCP server?**
+**Q: How do you version an MCP server?**
 Semantic versioning. Breaking changes to tool schemas or behavior require major version bumps. Communicate version in server metadata. Clients should pin versions for stability. Use additive changes (new optional fields) where possible.
 
-**How does an MCP server expose static documentation?**
+**Q: How does an MCP server expose static documentation?**
 As Prompts (if templated) or Resources (if static). Example: docs as `doc://api/users` resources, each returning Markdown. Or as a single resource at `doc://overview` returning a table of contents. Clients can list/read these to give the LLM background knowledge.
 
-**Can MCP servers call other MCP servers?**
+**Q: Can MCP servers call other MCP servers?**
 The MCP protocol is client-server; servers don't call other servers natively. But a server's tool implementation could itself be an MCP client to another server — chaining is possible at the implementation level. This is uncommon; usually one client orchestrates multiple servers.
 
-**How do you handle file uploads/downloads through MCP?**
+**Q: How do you handle file uploads/downloads through MCP?**
 MCP supports binary content via base64-encoded resources or tool results. For large files, prefer URIs that the client can fetch directly (e.g., S3 pre-signed URLs returned by a tool). Avoid streaming gigabytes through JSON-RPC.
 
 ---

@@ -1028,47 +1028,47 @@ Gross margin:      ($30M - $975K) / $30M = 96.75%  (platform economics scale wel
 
 ## 11. Interview Discussion Points
 
-**Why does LLM-as-judge have self-preference bias, and how do you mitigate it?**
+**Q: Why does LLM-as-judge have self-preference bias, and how do you mitigate it?**
 
 LLM judges prefer outputs matching their own training distribution. GPT-4o rates GPT-4o outputs 12-18% higher than equivalent Claude outputs because the model treats its own stylistic patterns (formal tone, disclaimer phrasing) as quality markers — measurable with human raters (Spearman 0.42 between GPT-4o-judging-cross-provider vs 0.83 within-provider). Mitigation: use a judge from a different provider than the model under evaluation; or use a 3-judge ensemble with at least 2 provider families and take majority vote. The platform warns users when judge model and inference model share the same provider.
 
-**How do you detect when a golden dataset is stale?**
+**Q: How do you detect when a golden dataset is stale?**
 
 Compute embedding centroids for both the golden dataset and a recent sample of production traces (last 7 days), then measure cosine distance. Distance > 0.15 (empirically tuned) indicates meaningful drift — the dataset no longer represents production. Run the `DatasetDriftDetector` monthly and before any knowledge base update. Practical signal: if the model's answers on golden examples differ from "expected" at higher than the historical false-positive rate, the "expected" answers are likely outdated, not the model regressing.
 
-**What statistical test should you use for regression detection, and why Welch's t-test over Student's t-test?**
+**Q: What statistical test should you use for regression detection, and why Welch's t-test over Student's t-test?**
 
 Welch's t-test is correct because it does not assume equal variance between baseline and candidate distributions. A prompt change that improves quality often also reduces variance — Student's t-test pools variance across both groups, yielding a 30% higher false-negative rate under unequal variances. Always pair the test with a minimum effect size requirement: Cohen's d >= 0.05 in addition to p < 0.05, because at large sample sizes (>10,000 examples) trivially tiny differences become statistically significant. For binary pass/fail scores, use a proportions z-test with Wilson score confidence intervals.
 
-**Why is 2-5% online sampling sufficient to catch production regressions?**
+**Q: Why is 2-5% online sampling sufficient to catch production regressions?**
 
 At 10B traces/day with 2% sampling you get 200M eval data points per day. Power analysis shows the minimum to detect a 0.1-effect-size regression at 80% power (p<0.05) is ~1,600 examples — 200M gives 125,000x the minimum. The only scenario where 2% fails is detecting failure modes occurring in <0.01% of traffic; the solution there is stratified sampling (oversample low-confidence scores, flagged topics, user-reported issues) rather than a higher uniform rate.
 
-**How do you prevent Goodhart's Law in eval optimization?**
+**Q: How do you prevent Goodhart's Law in eval optimization?**
 
 Teams that optimize prompts against their judge rubric see judge scores rise while user satisfaction falls. The fix is a two-set strategy: a "dev eval set" (team knows and optimizes against it) and a "held-out validation set" (strictly separate, human-labeled, never exposed during iteration). The held-out set runs only at milestone checkpoints; if dev scores improve but held-out degrades, the team is gaming the eval. The platform enforces this by locking the held-out set so team members see only aggregate scores, never individual examples.
 
-**Why does judge model version pinning matter for historical comparability?**
+**Q: Why does judge model version pinning matter for historical comparability?**
 
 An eval score is only meaningful relative to scores computed with the same judge. OpenAI, Anthropic, and Google silently update models behind stable-seeming names — `gpt-4o-mini` on 2024-07-18 vs 2024-11-05 shifts scores 8-12% on the same data, breaking 8 months of eval history. The platform pins judge version at eval function registration time using `(function_name, judge_model_exact_version, prompt_hash)` as the version identity. Upgrading the judge is treated as a new eval function version requiring a re-baselining run before historical comparisons resume.
 
-**How do you handle eval of open-ended creative tasks with no single correct answer?**
+**Q: How do you handle eval of open-ended creative tasks with no single correct answer?**
 
 Abandon the expected-answer paradigm. Use dimension-specific LLM-as-judge rubrics: "is this response engaging? (0-10)", "is this response on-topic? (0-10)", "is this response safe? (0-10)" as independent scorers. Each dimension has its own rubric, judge, and baseline. A regression is detected when any single dimension drops significantly even if the aggregate stays flat. Route 10% of creative evals to human reviewers (vs standard 1%) because judge-human agreement is lower on subjective tasks: 0.72 Spearman vs 0.83 for factual tasks.
 
-**How do you design the human annotation queue for disagreement resolution?**
+**Q: How do you design the human annotation queue for disagreement resolution?**
 
 Two entry paths: (1) low-confidence evals (judge score between 0.4-0.6) and (2) disputed evals (two judges disagree by >0.3). Each task is assigned to two independent reviewers; agreement within 0.15 → majority score recorded; disagreement → senior reviewer arbitrates. SLA: assigned within 15 minutes, first review within 8 hours, arbitration within 48 hours. Inter-annotator agreement (Cohen's kappa) computed weekly per project — if kappa < 0.70, the rubric is ambiguous and must be revised. Annotators are blinded to the automated score to prevent anchoring bias.
 
-**How do you evaluate RAG systems specifically?**
+**Q: How do you evaluate RAG systems specifically?**
 
 Three distinct measurements: (1) Retrieval quality — NDCG@k, Recall@k, MRR on a labeled query-document relevance set. (2) Faithfulness — LLM-judge extracts claims from the answer and checks each against retrieved chunks; 0.0 if any claim is unsupported, 1.0 if all supported. (3) Answer relevance — LLM-judge on (question, answer) pair independent of context. All three must be measured independently: a system can be highly faithful but retrieve irrelevant context, or retrieve perfectly but hallucinate in generation. The most common RAG failure mode is high faithfulness + low retrieval recall — the model is honest about what it finds, but finds the wrong things.
 
-**How do you optimize LLM-as-judge cost at production scale?**
+**Q: How do you optimize LLM-as-judge cost at production scale?**
 
 Three-layer strategy: (1) Routing — heuristic evals (exact match, ROUGE, JSON validity) handle 90% of cases at $0.0001/eval; only route to judge when reasoning about quality is required. (2) Judge model selection — GPT-4o-mini at $0.0015/call achieves 80-83% human agreement vs GPT-4o at $0.01/call for 85-88%; the 5% quality difference does not justify 6.7x cost for most tasks. (3) Sampling — 2-5% online rate plus 100% offline golden-set eval per deploy catches both distribution drift and model regression without per-trace judge cost. Blended: $38K/day at 10B traces vs $100M/day for full GPT-4o coverage — 2,600x cost reduction with equivalent regression detection sensitivity.
 
-**How does the CI eval gate work with fast-moving pipelines shipping 20 times per day?**
+**Q: How does the CI eval gate work with fast-moving pipelines shipping 20 times per day?**
 
 Tiered gates: a "fast gate" (100 examples, heuristic only, 90 seconds) runs on every PR merge; a "full gate" (500 examples including LLM-judge, 8-12 minutes) runs every 4 hours or before production promotion. Alternatively, async gate: deploy to staging immediately, full gate runs in parallel, auto-rollback staging if gate fails within 30 minutes, production promotion gated on gate pass. This decouples deploy velocity from eval gate latency while maintaining quality guarantees.
 

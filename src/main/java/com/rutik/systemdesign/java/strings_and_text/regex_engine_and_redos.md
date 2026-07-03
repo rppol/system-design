@@ -535,55 +535,55 @@ linear-time engine (same `Pattern`/`Matcher` API surface).
 
 ## 12. Interview Questions with Answers
 
-**Why does Java's regex engine hang on some patterns when Go's `regexp` or `grep` never do?**
+**Q: Why does Java's regex engine hang on some patterns when Go's `regexp` or `grep` never do?**
 Java uses a backtracking NFA engine, whereas Go's RE2 and `grep -E` use a DFA that guarantees linear time. Backtracking explores every way a set of nested quantifiers can partition the input, which is exponential for patterns like `(a+)+$`. A DFA cannot express backreferences or lookaround but never backtracks, so it is immune to catastrophic blowup. The practical takeaway: with `java.util.regex`, runtime depends on the pattern *shape*, not just input length.
 
-**What is catastrophic backtracking, and which pattern shapes cause it?**
+**Q: What is catastrophic backtracking, and which pattern shapes cause it?**
 Catastrophic backtracking is exponential-time matching caused by ambiguity in how quantifiers can split the input. The three canonical shapes are nested quantifiers (`(a+)+`, `(a*)*`), a quantifier over overlapping alternation (`(a|a)*`, `(a|ab)*`), and adjacent flexible quantifiers (`\d+\d+`, `.*.*`). Each gives the engine many equivalent ways to match a prefix; when the overall match ultimately fails, it tries all 2ⁿ⁻¹ of them. Anchoring, possessive quantifiers, or de-nesting eliminate the ambiguity.
 
-**How do possessive quantifiers and atomic groups prevent ReDoS?**
+**Q: How do possessive quantifiers and atomic groups prevent ReDoS?**
 They disable local backtracking: a possessive quantifier (`a++`) or atomic group (`(?>a+)`) matches greedily and then refuses to give characters back. Because there is exactly one way to consume the run, a failing tail cannot force the engine to re-split it, collapsing the 2ⁿ search to O(n). The tradeoff is that possessive matching can *fail* where a greedy version would have succeeded, so you use it only where the sub-expression should never reconsider — which is most validation patterns.
 
-**Is `Matcher` thread-safe? Is `Pattern`?**
+**Q: Is `Matcher` thread-safe? Is `Pattern`?**
 `Pattern` is immutable and fully thread-safe, but `Matcher` is not — it holds mutable state (current position, region bounds, captured groups). Sharing one `Matcher` across threads produces corrupted results or exceptions. The correct pattern is a `static final Pattern` shared everywhere and a fresh `pattern.matcher(input)` per call, or a `ThreadLocal<Matcher>` in extremely hot paths.
 
-**What is the difference between `matches()`, `find()`, and `lookingAt()`?**
+**Q: What is the difference between `matches()`, `find()`, and `lookingAt()`?**
 `matches()` requires the entire input to match (anchored at both ends), `lookingAt()` requires a match at the start but not to the end, and `find()` searches for a match anywhere and advances on each call. Validators almost always want `matches()`; scanners want repeated `find()`. A frequent bug is using `find()` for validation, which accepts input like `"abc123xyz"` because `\d{3}` matches somewhere inside it.
 
-**What is the difference between greedy, lazy, and possessive quantifiers?**
+**Q: What is the difference between greedy, lazy, and possessive quantifiers?**
 Greedy (`a+`) matches as much as possible then backtracks; lazy (`a+?`) matches as little as possible then takes more; possessive (`a++`) matches as much as possible and never gives back. Greedy vs lazy changes *what* text is matched; possessive changes *whether backtracking can happen at all*. A common misconception is that lazy quantifiers fix performance — they still backtrack, just in the other direction; only possessive/atomic cut the search tree.
 
-**`java.util.regex` has no timeout — how do you bound a match's runtime?**
+**Q: `java.util.regex` has no timeout — how do you bound a match's runtime?**
 Wrap the input in a custom `CharSequence` whose `charAt` throws when the thread is interrupted or a deadline passes, then run the match on a worker thread that a watchdog interrupts. The engine calls `charAt` in its innermost loop, so the exception fires mid-match and unwinds the backtracking. Alternatively, cap input length before matching, or switch to RE2/J which cannot blow up in the first place.
 
-**Why is `String.matches("...")` a performance trap?**
+**Q: Why is `String.matches("...")` a performance trap?**
 `String.matches`, `String.split`, and `String.replaceAll` all call `Pattern.compile` internally on every invocation, so using them in a loop recompiles the regex every iteration. Compilation (parsing the pattern into a `Node` graph) is the expensive step; matching is comparatively cheap. Fix: hoist the pattern into a `static final Pattern` field and reuse `matcher()`.
 
-**What are capture groups, named groups, and backreferences?**
+**Q: What are capture groups, named groups, and backreferences?**
 Capture groups `(...)` record the text they matched, retrievable by index via `group(n)` (group 0 is the whole match); named groups `(?<name>...)` retrieve by name via `group("name")`. A backreference `\1` (or `\k<name>`) requires the same captured text to appear again — for example `\b(\w+)\s+\1\b` finds a doubled word. Backreferences are precisely the feature that makes a linear DFA engine impossible, forcing the backtracking design.
 
-**What is the difference between lookahead and lookbehind, and what do they cost?**
+**Q: What is the difference between lookahead and lookbehind, and what do they cost?**
 Lookahead `(?=...)` / `(?!...)` asserts what follows the current position; lookbehind `(?<=...)` / `(?<!...)` asserts what precedes it — neither consumes input. They are zero-width assertions but still execute their sub-pattern, so a lookahead containing an inner quantifier (`(?=.*a+)`) can itself be a ReDoS source. Java supports arbitrary-length lookbehind, but wide lookbehind re-scans preceding text and is expensive.
 
-**How do `\p{...}` classes and `UNICODE_CHARACTER_CLASS` change matching?**
+**Q: How do `\p{...}` classes and `UNICODE_CHARACTER_CLASS` change matching?**
 `\p{L}`, `\p{Sc}`, `\p{IsGreek}` and similar match Unicode categories, scripts, and blocks directly. By default `\d`, `\w`, `\s`, and `\b` are ASCII-only, so `\d` matches only `[0-9]`; enabling `Pattern.UNICODE_CHARACTER_CLASS` (or inline `(?U)`) makes them Unicode-aware so `\w` matches accented and non-Latin letters. Forgetting this flag silently rejects legitimate international input.
 
-**What do the `MULTILINE` and `DOTALL` flags do?**
+**Q: What do the `MULTILINE` and `DOTALL` flags do?**
 `MULTILINE` (`(?m)`) makes `^` and `$` match at every line boundary rather than only the string's ends; `DOTALL` (`(?s)`) makes `.` also match line terminators like `\n`. They are independent — you often want both when parsing multi-line logs. The default where `.` stops at `\n` is a frequent cause of a pattern that "works on one line but not the whole file."
 
-**Why can a Java regex throw `StackOverflowError` instead of merely running slowly?**
+**Q: Why can a Java regex throw `StackOverflowError` instead of merely running slowly?**
 Java's matcher implements each node's `match` recursively, so matching consumes JVM stack frames proportional to match depth. A pattern like `(a|b)*` against a multi-megabyte input can exhaust the thread stack and throw `StackOverflowError` — which is an `Error`, not an `Exception`, so `catch (Exception e)` blocks miss it. This is a distinct failure mode from the exponential-time hang and is triggered by long input rather than pattern nesting alone.
 
-**What is regex injection and how do you prevent it?**
+**Q: What is regex injection and how do you prevent it?**
 Regex injection happens when user input is concatenated into a pattern (`Pattern.compile("id=" + userInput)`), letting the user inject metacharacters — including ReDoS-triggering nested quantifiers. Prevent it by wrapping the user text in `Pattern.quote(userInput)`, which escapes all metacharacters, or by using the `LITERAL` compile flag. Never build a live pattern from untrusted input without quoting.
 
-**What is RE2/J and when should you choose it over `java.util.regex`?**
+**Q: What is RE2/J and when should you choose it over `java.util.regex`?**
 RE2/J (`com.google.re2j`) is a pure-Java port of Google's RE2 that runs in guaranteed linear time using an automaton that never backtracks, making it immune to ReDoS. Choose it whenever the pattern or the input is attacker-controlled — user-defined search filters, WAF rules, config-driven validators. The cost is that it drops backreferences and lookaround, which is an acceptable trade for DoS-sensitive endpoints; its API mirrors `Pattern`/`Matcher` for an easy swap.
 
-**What does `Matcher.region()` do and why use it?**
+**Q: What does `Matcher.region()` do and why use it?**
 `region(start, end)` restricts matching to a sub-range of the input without allocating a substring, so anchors and `find()` operate only within that window. It avoids the copy that `input.substring(start, end)` would create, which matters when scanning large buffers repeatedly. You can also tune anchoring behavior at region boundaries with `useAnchoringBounds` and `useTransparentBounds`.
 
-**What is the gotcha with `$` and `\` in `replaceAll`'s replacement string?**
+**Q: What is the gotcha with `$` and `\` in `replaceAll`'s replacement string?**
 In the replacement argument, `$` introduces a group reference (`$1`) and `\` escapes, so a literal `$` or `\` in the output must be written as `\\$` and `\\\\`. Passing user text directly as the replacement can throw `IllegalArgumentException` or inject unintended group references; wrap it in `Matcher.quoteReplacement(str)` to treat it literally. This is separate from `Pattern.quote`, which protects the *pattern* side.
 
 ---

@@ -212,82 +212,82 @@ Q&As are ordered by interview frequency: gotchas and traps first, then internal 
 
 ---
 
-**Decorator vs Proxy: they have exactly the same structure — what distinguishes them?**
+**Q: Decorator vs Proxy: they have exactly the same structure — what distinguishes them?**
 Proxy controls access to the real object transparently: the client doesn't know or care it's talking to a proxy; the proxy decides whether and how to forward the call (lazy init, security check, remote forwarding). Decorator adds behavior the client explicitly requests: the client constructs the decorator stack itself (`new BufferedReader(new FileReader(path))`). Intent is the difference: Proxy = access control; Decorator = behavior extension. In Spring, `@Transactional` adds a transaction Proxy the client is unaware of; wrapping an `OutputStream` in a `GZIPOutputStream` is a Decorator the caller chose.
 
 ---
 
-**Adapter vs Bridge: one retrofits, the other is designed upfront — why does it matter?**
+**Q: Adapter vs Bridge: one retrofits, the other is designed upfront — why does it matter?**
 If you design an Adapter, it means you already have two incompatible things and you're gluing them together. The existence of an Adapter is often a sign of an architectural seam between legacy and new code. Bridge requires upfront foresight: you recognize that an abstraction (e.g., "rendering") will have multiple implementations (e.g., OpenGL, DirectX) and you architect the hierarchy to avoid N×M subclasses. Adapter = reactive; Bridge = proactive. In practice, most developers reach for Adapter far more often than Bridge.
 
 ---
 
-**How does Spring AOP implement the Proxy pattern? What are the two mechanisms?**
+**Q: How does Spring AOP implement the Proxy pattern? What are the two mechanisms?**
 Spring creates a proxy around the target bean at startup. If the target implements an interface, Spring uses `java.lang.reflect.Proxy` (JDK dynamic proxy) — the proxy implements the same interface and delegates all calls. If the target does NOT implement an interface (or if `proxyTargetClass=true` is set), Spring uses CGLIB to subclass the target class and override methods. This is why `@Transactional` on a `final` method silently fails with CGLIB — final methods can't be overridden, so the proxy can't intercept them. Fix: declare all proxied methods on an interface, or remove `final`.
 
 ---
 
-**What is the difference between Facade and Adapter?**
+**Q: What is the difference between Facade and Adapter?**
 Adapter converts one existing interface to another (1:1, fixing an incompatibility). Facade creates a new, simplified interface over multiple subsystem components (N:1, reducing complexity). Adapter doesn't add or remove functionality. Facade hides parts of the subsystem and may combine multiple operations into one call. `Arrays.asList()` is an Adapter (converts array to List). `JdbcTemplate` is a Facade (hides Connection, PreparedStatement, ResultSet, exception handling behind simple `query()` and `update()` methods).
 
 ---
 
-**Composite: how do you handle leaf-specific operations like `add()` on a leaf node?**
+**Q: Composite: how do you handle leaf-specific operations like `add()` on a leaf node?**
 Two approaches: (a) Declare `add()`/`remove()` on the Component interface and throw `UnsupportedOperationException` from Leaf — maximizes transparency (client uses Component uniformly) at the cost of safety (compiler won't catch the call). (b) Declare `add()`/`remove()` only on Composite — maximizes safety (compiler prevents the call on Leaf) at the cost of transparency (client must downcast to Composite to add children). GoF calls these "transparency" vs "safety" designs. In practice: use option (b) (safety) when leaf/composite distinction is meaningful to clients, and option (a) only when the uniform interface is critical.
 
 ---
 
-**Flyweight: what is the intrinsic/extrinsic state distinction and why does it matter?**
+**Q: Flyweight: what is the intrinsic/extrinsic state distinction and why does it matter?**
 Intrinsic state is shared — it doesn't vary between instances and can be stored in the Flyweight (e.g., a character's glyph bitmap, a bullet sprite image). Extrinsic state is context-specific — it varies per use and must be passed by the client (e.g., the character's position on screen, the bullet's current velocity). The Flyweight only stores intrinsic state; extrinsic state is passed in on each operation. This distinction matters because: (a) shared state must be immutable (thread-safe by design); (b) if you accidentally put extrinsic state into the Flyweight, the shared object reflects one context's state and corrupts all others.
 
 ---
 
-**When does a Decorator stack become a maintenance problem?**
+**Q: When does a Decorator stack become a maintenance problem?**
 When: (a) stack depth is deep (5+ decorators = debugging a `NullPointerException` requires unwrapping every layer), (b) decorator ordering has undocumented semantic constraints (e.g., `GZIPOutputStream` must wrap before `BufferedOutputStream`, not after), (c) decorators are added conditionally at runtime with no visibility. Fix: document the canonical stack order, make ordering constraints part of a factory method or builder, and avoid deep stacks by merging related concerns into one decorator.
 
 ---
 
-**What is the "self-invocation problem" with Spring Proxy, and how do you fix it?**
+**Q: What is the "self-invocation problem" with Spring Proxy, and how do you fix it?**
 When a Spring bean calls one of its own `@Transactional` methods directly (`this.someMethod()`), it calls the real object, not the proxy — so the transaction advice never runs. This is because the proxy wraps the bean externally; internal calls bypass it. Fix options: (a) inject the bean into itself (`@Autowired MyService self` — works but looks odd), (b) fetch the proxy from `ApplicationContext` at call time, (c) extract the method to a separate bean, (d) use AspectJ weaving instead of proxy-based AOP (which applies advice at the bytecode level, not the proxy level).
 
 ---
 
-**How does Java's `Integer.valueOf()` implement the Flyweight pattern?**
+**Q: How does Java's `Integer.valueOf()` implement the Flyweight pattern?**
 `Integer.valueOf(n)` caches `Integer` instances for values -128 to 127 (configurable up to a JVM flag maximum). Calls with values in this range return the same cached instance; calls outside the range create a new instance each time. This is the Flyweight: the `Integer` objects in the cache are the shared flyweights (intrinsic state = the integer value). The extrinsic state is the calling context — the same `Integer(42)` instance is returned to every caller who asks for 42. Pitfall: `Integer a = 200; Integer b = 200; a == b` is `false` (outside cache range); `Integer a = 100; Integer b = 100; a == b` is `true`. Always use `.equals()`, not `==`, for Integer comparison.
 
 ---
 
-**How does the Bridge pattern prevent class-hierarchy explosion?**
+**Q: How does the Bridge pattern prevent class-hierarchy explosion?**
 Without Bridge: N abstractions x M implementations = N×M subclasses. Example: `Shape` with `Circle`, `Square`, `Triangle` (3) x `OpenGL`, `DirectX`, `Metal` (3) = 9 concrete classes. With Bridge: Shape has a reference to a `Renderer` (the implementation). `Circle`, `Square`, `Triangle` extend `Shape` (3 classes). `OpenGL`, `DirectX`, `Metal` implement `Renderer` (3 classes). Total: 6 classes, not 9. For 5 shapes x 5 renderers: 25 classes without Bridge; 10 with Bridge. The saving grows quadratically.
 
 ---
 
-**What is a remote proxy, and how does it relate to Java RMI?**
+**Q: What is a remote proxy, and how does it relate to Java RMI?**
 A remote proxy represents an object that lives in a different JVM or address space. The proxy exposes the same interface as the real object; method calls on the proxy are serialized, transmitted to the remote JVM, executed on the real object, and the result is serialized back. Java RMI (`java.rmi.Remote`) is the classic implementation: a stub (proxy) on the client side implements the remote interface; the skeleton on the server side unwraps calls. Modern equivalents: gRPC stubs, Feign clients, and Spring's `@FeignClient` are all remote proxies at the HTTP/protobuf level.
 
 ---
 
-**When is Facade the wrong pattern to reach for?**
+**Q: When is Facade the wrong pattern to reach for?**
 When the subsystem needs to remain fully accessible to some clients. Facade simplifies for the common case but doesn't prevent direct access — so you end up with two APIs (the facade and the raw subsystem). If different clients need different subsets of the subsystem, a Facade that tries to serve all of them becomes a God Class. Alternative: use distinct Facades for distinct client types (a `CustomerFacade` vs `AdminFacade`), or use Adapter per client type to present exactly the right interface.
 
 ---
 
-**Object adapter vs class adapter in Java — which do you use and why?**
+**Q: Object adapter vs class adapter in Java — which do you use and why?**
 Java doesn't support multiple inheritance of classes, so the GoF class adapter (which inherits from both the target interface and the adaptee class simultaneously) isn't possible. Java uses object adapter: the adapter holds a reference to an adaptee instance and delegates calls. Benefit of object adapter: you can adapt an object of any subclass of adaptee (not just one specific class). Benefit of class adapter (where available, e.g., C++): direct method access without delegation overhead. In Java, always use object adapter.
 
 ---
 
-**How does `JdbcTemplate` implement Facade, and what complexity does it hide?**
+**Q: How does `JdbcTemplate` implement Facade, and what complexity does it hide?**
 `JdbcTemplate.query(sql, mapper)` hides: acquiring a connection from the pool, creating a `PreparedStatement`, setting parameters, executing the query, iterating the `ResultSet`, mapping each row, closing the `ResultSet`, closing the statement, releasing the connection back to the pool, and translating `SQLException` to Spring's `DataAccessException` hierarchy. Without `JdbcTemplate`, each operation requires 10–15 lines of boilerplate with try-with-resources nesting. The facade reduces this to 1–3 lines. The subsystem (JDBC API) remains directly accessible for edge cases that need it.
 
 ---
 
-**Composite: can a Composite contain other Composites? Show the design.**
+**Q: Composite: can a Composite contain other Composites? Show the design.**
 Yes — that's the point. A `FileSystem` Composite: `FileSystemComponent` is the interface with `getName()`, `getSize()`, `print()`. `File` is a Leaf implementing it. `Directory` is a Composite holding `List<FileSystemComponent>` — it can contain both `File` and other `Directory` objects recursively. `getSize()` on a `Directory` sums `getSize()` across all children recursively. This models the part-whole hierarchy. In Spring: `CompositeCacheManager` holds a `List<CacheManager>`, each of which might itself be a `CompositeCacheManager`.
 
 ---
 
-**Which structural patterns are most commonly tested in senior-level interviews, and why?**
+**Q: Which structural patterns are most commonly tested in senior-level interviews, and why?**
 Proxy (Spring AOP mechanics and the self-invocation trap), Decorator vs Proxy (same structure, different intent — a classic gotcha), and Adapter vs Bridge (retrofit vs upfront design) appear most frequently because they require understanding both the pattern mechanics and real-world framework implementations. Flyweight appears in performance-focused interviews (Java memory model, caching). Composite appears when tree structures or recursive algorithms are discussed. Facade and Adapter are often used as warm-up questions before the harder ones.
 
 ---

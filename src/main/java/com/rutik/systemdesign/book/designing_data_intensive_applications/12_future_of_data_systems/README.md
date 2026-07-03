@@ -289,49 +289,49 @@ the erosion of privacy and consent — because just because a system *can* be bu
 
 ## Interview Questions
 
-**What does "unbundling the database" mean?**
+**Q: What does "unbundling the database" mean?**
 It means taking the features a database normally provides internally — durable storage, secondary indexes, materialized views, replication, caching — and providing them as *separate*, specialized systems wired together by dataflow (event logs / change streams), instead of locking them inside one monolithic database. Kleppmann calls it turning the database "inside out": the replication log, normally a hidden implementation detail, becomes the primary public interface, and each index, cache, or view becomes an explicit derived system that subscribes to that log and is kept in sync — a federation of best-of-breed tools behaving together like one coherent database.
 
-**Why does the book advocate deriving data from a single log instead of dual writes?**
+**Q: Why does the book advocate deriving data from a single log instead of dual writes?**
 Because keeping multiple stores (database, search index, cache, warehouse) consistent by having the application write to each one directly is fragile: the writes aren't atomic, so they can race (applied in different orders to different stores) or partially fail (one succeeds, another doesn't), causing permanent, hard-to-detect divergence. Deriving from a single authoritative log means all changes flow through one ordered stream, and every derived store applies the same changes in the same order, so they converge — and any derived store can be rebuilt from the log if it gets out of sync.
 
-**What is the end-to-end argument, and how does it apply to exactly-once processing?**
+**Q: What is the end-to-end argument, and how does it apply to exactly-once processing?**
 The end-to-end argument states that a correctness guarantee is only truly achieved if it's enforced at the application level, end to end, because lower layers don't understand the application's semantics. Applied to exactly-once: TCP can deduplicate *packets* and a database can retry internally, but neither knows what a duplicate *business operation* is — so a user double-clicking "pay" or a client retrying after a timeout will double-charge unless the application itself recognizes the duplicate via an idempotency key or unique request ID. Real exactly-once must be designed at the boundary where the operation's meaning lives.
 
-**Distinguish timeliness from integrity, and explain which one asynchronous dataflow may relax.**
+**Q: Distinguish timeliness from integrity, and explain which one asynchronous dataflow may relax.**
 Timeliness is whether a read reflects recent writes — being up to date; if violated, the staleness is temporary and self-corrects as derived views catch up. Integrity is whether the data is correct and uncorrupted — no lost or duplicated updates, no contradictions; if violated, the damage is permanent and far more serious. Asynchronous dataflow architectures routinely *relax timeliness* (derived views lag slightly behind the source) but must *never* relax integrity. The encouraging result is that exactly-once processing on a replayable log with idempotent operations preserves integrity even while timeliness is only eventual.
 
-**How can you enforce a uniqueness constraint in a log-based dataflow system without a distributed transaction?**
+**Q: How can you enforce a uniqueness constraint in a log-based dataflow system without a distributed transaction?**
 By routing all operations that touch the same constrained value to the *same* log partition and having a single consumer process that partition's events *in order*. This converts a distributed agreement problem into a local, sequential decision: the consumer sees requests for a given username one at a time in a defined order, grants the first, and rejects every later one — achieving the consensus-like guarantee of uniqueness without a global distributed transaction. It works because ordering within a partition plus single-threaded processing gives a total order over all decisions about that value.
 
-**Why does the book end on ethics, and what is its central argument there?**
+**Q: Why does the book end on ethics, and what is its central argument there?**
 Because data systems increasingly make or inform consequential decisions about people — credit, insurance, hiring, policing — so their design has real human impact beyond technical correctness. The central argument is that engineers are responsible for the consequences of what they build: predictive models can encode and amplify historical bias under a false veneer of objectivity; mass data collection is surveillance that users rarely meaningfully consent to; and "the algorithm decided" or "we just build the tools" is not an absolution. Kleppmann urges data minimization, transparency, consent, and the recognition that something being buildable doesn't make it ethical to build.
 
-**How do batch and stream processing relate in the book's vision of data integration?**
+**Q: How do batch and stream processing relate in the book's vision of data integration?**
 They're presented as two ends of one spectrum rather than separate worlds: stream processing keeps derived data fresh with low latency by handling events incrementally, while batch processing rebuilds derived datasets from the full history. Ideally the same derivation logic runs both ways. The crucial shared capability is *reprocessing* — replaying historical data — which lets you fix a bug, adopt a new schema, or build an entirely new derived view by reprocessing the log, all while keeping the old view running until you switch over. This is what makes the architecture evolvable (and simplifies the older lambda architecture as engines unify the two paths).
 
-**What is CQRS, and how does it fit the unbundling vision?**
+**Q: What is CQRS, and how does it fit the unbundling vision?**
 CQRS (Command Query Responsibility Segregation) separates the write model from the read model: writes (commands) are handled one way — appended to an event log — while reads (queries) are served by separate, possibly multiple, read-optimized views derived from that log. It fits unbundling perfectly because the unbundled architecture *is* this separation at scale: writes append to the log, and any number of derived stores (a relational view, a search index, a cache) materialize the read side, each optimized for its query pattern. It frees the read and write sides to use entirely different data models and storage technologies.
 
-**What does "trust, but verify" mean for data systems, and why is auditing important?**
+**Q: What does "trust, but verify" mean for data systems, and why is auditing important?**
 It means you should not blindly assume that storage and transmission are perfect — disks silently corrupt data, "durable" writes can be lost on some hardware, and software has bugs — so systems should continuously check their own integrity rather than trust the lower layers. Auditing (checksums, reconciling derived views against the source by reprocessing, end-to-end verification) ensures corruption is *detected* instead of silently propagating into every derived dataset. An immutable, replayable event log makes auditing natural: you can always recompute a derived view from the log and compare it against the live one to catch drift or corruption.
 
-**How can algorithmic decision-making encode and amplify bias?**
+**Q: How can algorithmic decision-making encode and amplify bias?**
 A model trained on historical data learns the patterns in that data, including the discriminatory ones — so if past lending, hiring, or policing decisions were biased, the model reproduces that bias at scale while appearing objective and data-driven. Worse, it can create self-reinforcing feedback loops: denying someone a loan worsens their circumstances, which the model then reads as "confirmation" it was right, entrenching the discrimination. The veneer of mathematical neutrality makes the bias harder to challenge than an obviously prejudiced human decision, which is why Kleppmann insists "the algorithm decided" doesn't remove human responsibility.
 
-**Why does the book treat the user's screen as part of the dataflow?**
+**Q: Why does the book treat the user's screen as part of the dataflow?**
 Because a user interface displays a view of server-side state, which makes it just another *derived* view in the same sense as a cache or a materialized view — and the spectrum from precomputed materialized views to on-demand queries extends all the way to the client. Technologies that *push* changes to the device (subscribing to a stream of updates rather than polling) extend the write-side dataflow end to end, so the screen becomes a live, continuously-updated materialization of the event log. This reframes "real-time UI" as the natural endpoint of the same derivation pipeline that keeps indexes and caches fresh.
 
-**What role does reprocessing play in evolving a system's schema or derived views?**
+**Q: What role does reprocessing play in evolving a system's schema or derived views?**
 Reprocessing — replaying the full event-log history through new derivation logic — lets you build a new derived dataset (a differently-structured index, a new materialized view, a migrated schema) from scratch while the existing view keeps serving traffic. Once the new view is fully built and validated, you switch reads over to it and retire the old one, achieving a schema migration with no downtime and no risky in-place mutation. This is only possible if the log is retained and replayable, which is why the book emphasizes durable, replayable logs as the foundation of an evolvable architecture.
 
-**What is data minimization, and why does the book recommend it?**
+**Q: What is data minimization, and why does the book recommend it?**
 Data minimization is the practice of collecting and retaining only the data actually needed for a clear purpose, rather than hoarding everything "in case it's useful later." The book recommends it because data has inertia — once collected it persists, gets combined with other datasets, and is repurposed far beyond the original intent, while every stored record is a liability that can be breached, misused, or turned into surveillance. Minimizing collection reduces the potential for harm, limits the blast radius of breaches, and respects that the data is about real people who didn't consent to open-ended use.
 
-**How is an unbundled architecture analogous to the internals of a single database?**
+**Q: How is an unbundled architecture analogous to the internals of a single database?**
 In a single database, a write goes to the transaction/replication log, and internal indexes and materialized views are kept in sync with that log automatically. The unbundled architecture does exactly this but at organizational scale and with separate products: the **event log** plays the role of the transaction log, and each external derived store (Elasticsearch as a "secondary index," Redis as a "cache," a warehouse as an "analytical view") is kept in sync by consuming the log via CDC/streams. So the whole heterogeneous system behaves like one big database whose components you assembled from the best tool for each job.
 
-**Why is the ability to relax timeliness while preserving integrity such a powerful result?**
+**Q: Why is the ability to relax timeliness while preserving integrity such a powerful result?**
 Because it means you can build correct systems on top of asynchronous, loosely-coupled dataflow — which is far more scalable, available, and partition-tolerant than synchronous distributed transactions — without giving up the guarantee that actually matters most. Strong, synchronous coordination (linearizability, distributed transactions) is expensive and fragile, but most applications can tolerate derived views being a little behind (relaxed timeliness) as long as no data is ever lost, duplicated, or corrupted (preserved integrity). Exactly-once processing with idempotence on a replayable log delivers exactly that combination, so you get scalability and correctness together.
 
 ---

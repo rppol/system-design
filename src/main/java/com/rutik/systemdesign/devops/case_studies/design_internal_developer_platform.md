@@ -872,41 +872,41 @@ The infra is a **rounding error (~$1.1k/mo) against the team cost (~$50k/mo)** �
 
 ## 11. Interview Discussion Points
 
-**Why is an IDP a control plane and not just a portal?**
+**Q: Why is an IDP a control plane and not just a portal?**
 Because the durable engineering value is the reconciliation loop, not the UI. A portal that only displays links is a wiki that rots; a control plane takes a declarative intent (a Claim, a `catalog-info.yaml`) and *continuously converges* real-world state to match it — self-healing drift, re-deriving the catalog from Git, re-provisioning lost resources. The UI is the cheap, replaceable layer; if you remove the reconciliation underneath, you have a directory, not a platform.
 
-**How do you onboard a new service in under 25 minutes when it used to take 6–9 days?**
+**Q: How do you onboard a new service in under 25 minutes when it used to take 6–9 days?**
 You collapse a multi-team handoff chain into one declarative transaction. The scaffolder template emits, in one run, the repo + CI pipeline + Helm chart + infra Claim + catalog registration — all the artifacts a human used to chase across teams. The old 6–9 days was *coordination latency* (tickets, Slack, waiting on the platform team), not work time; encoding the "right way" once into a template removes the humans from the critical path. The remaining ~25 min is just CI building and Crossplane provisioning.
 
-**Why Crossplane over wrapping Terraform behind the portal?**
+**Q: Why Crossplane over wrapping Terraform behind the portal?**
 Continuous reconciliation and a typed, narrow API. Terraform-in-CI applies only when triggered, so drift (someone changing a resource in the console) persists until the next apply, and concurrent applies across 200 teams turn state-file locking into a coordination bottleneck. Crossplane reconciles every minute, self-heals drift, and exposes infra as a validated K8s API (XRD/Claim) with RBAC, GitOps, and audit for free. Terraform still wins for foundational one-off infra (VPCs, accounts) where reconciliation churn isn't wanted — so use both.
 
-**What makes the software catalog more valuable than a spreadsheet of services?**
+**Q: What makes the software catalog more valuable than a spreadsheet of services?**
 The materialized relation graph. The catalog stores typed edges (`ownedBy`, `dependsOn`, `providesApi`, `consumesApi`) built at ingest time, so blast-radius questions ("who breaks if `ledger-api` fails?") are millisecond graph traversals, not manual archaeology. A spreadsheet has no edges and goes stale instantly; the catalog pulls truth from `catalog-info.yaml` next to the code, so it stays fresh and is the authorization substrate for RBAC.
 
-**How do you guarantee every service has a real owner?**
+**Q: How do you guarantee every service has a real owner?**
 Defense in depth at three layers: the scaffolder uses an `OwnerPicker` bound to actual `Group` entities (you literally cannot type a fake team), required so it can't be skipped; repo creation enforces branch protection and CODEOWNERS; and a CI ownership gate fails closed if `spec.owner` is missing or doesn't resolve to a registered group. Ownership is the auth boundary (RBAC keys off `spec.owner`), so garbage owners mean garbage authorization — which is why it's enforced redundantly. Plus a periodic catalog query for `spec.owner == null` catches any leakage.
 
-**Golden paths constrain choices — how do you avoid the platform becoming a blocker?**
+**Q: Golden paths constrain choices — how do you avoid the platform becoming a blocker?**
 Provide an explicit, slower escape hatch. The paved road covers ~80% of cases at maximum speed; for the genuine 20% (an Aurora cluster, an exotic framework), offer an off-road Claim path that still goes through the catalog and platform review — slower and explicitly owned, but supported. Without an escape hatch, frustrated power-user teams fork the platform (war story #5), fragmenting tooling and creating services the catalog can't see. The path of least resistance should be the golden path, but it must not be the *only* path.
 
-**Mono-catalog or federated — and what's the failure mode?**
+**Q: Mono-catalog or federated — and what's the failure mode?**
 Mono-catalog at this scale (4000 entities, ≤1.5 GB) because the value is cross-team relations and federation breaks the dependency graph. The failure mode is a shared refresh loop: one slow/broken entity provider can starve processing for everyone (war story #2 — a 4-hour stall). You mitigate with processing concurrency, per-source error isolation, and timeouts/circuit-breakers around custom providers, not by federating the catalog and losing the graph.
 
-**The catalog is "always stale" with pull ingestion — is that acceptable?**
+**Q: The catalog is "always stale" with pull ingestion — is that acceptable?**
 Yes, with one tweak. Pull (refresh loop) is self-healing and re-derives truth from Git, but has up-to-600s latency. For the one case where staleness hurts UX — a freshly scaffolded service not appearing — the scaffolder runs an immediate `catalog:register` so new entities show instantly. Everything else tolerates ≤10-min freshness, which is well within the requirement. Pure push would be lower-latency but loses the self-healing property: a missed webhook permanently desyncs Git and catalog.
 
-**How do you keep portal p95 under 500 ms as you add plugins?**
+**Q: How do you keep portal p95 under 500 ms as you add plugins?**
 Treat the frontend bundle and catalog queries as the two latency budgets. Plugins must be code-split and lazy-loaded (war story #4: eager-loading 34 plugins pushed TTI to 9s and dropped adoption 22%), enforced by a CI bundle-size budget. On the backend, catalog queries hit Postgres with proper indexes (a missing index after a migration is a classic spike), optionally a read replica, and CDN caching for entity pages. Page QPS is tiny (~30 RPS burst); the latency risk is bundle bloat and unindexed graph queries, not load.
 
-**What's the real capacity bottleneck for Crossplane at this scale?**
+**Q: What's the real capacity bottleneck for Crossplane at this scale?**
 Cloud-provider API rate limits, not Crossplane CPU. With ~1800 managed resources reconciling every 60s you generate ~1800 describe calls/min, which exceeds default AWS per-account throttles. You fix it by raising the reconcile interval for stable resources (5 min), sharding providers across multiple AWS accounts (which doubles as tenant isolation), and honoring throttle backoff. Crossplane's own worker concurrency (~50 reconciles/sec available vs 30 needed) has headroom; the external API is the wall.
 
-**How do you measure whether the IDP is actually working?**
+**Q: How do you measure whether the IDP is actually working?**
 DORA metrics on services served by the platform plus adoption signals. Track deploy frequency, lead time for change (< 1 day), change-failure rate (< 15%), and MTTR (< 1 hr) for services born from golden paths, gating template promotion on these (an eval gate). Pair that with adoption (weekly active portal users, % services onboarded self-service) and the onboarding-time SLI (< 25 min p90). A platform with great DORA numbers but falling adoption is failing — engineers routing around it (back to Slack) is the canary.
 
-**How do you justify the IDP's cost to leadership?**
+**Q: How do you justify the IDP's cost to leadership?**
 On recovered engineer-time, not infra savings. The infra is ~$1.1k/mo and the platform team ~$50k/mo; that's negligible against 2000 engineers. If the IDP saves each engineer just 30 min/week (faster onboarding, instant owner lookup, self-service infra), that's ~1000 engineer-hours/week ≈ ~$90k/week of recovered productivity — roughly a 7x return on the all-in cost. You frame it as cognitive-load amortization: encode the "right way" once, 2000 people consume it cheaply, and the platform team scales sub-linearly with the org.
 
-**How do you secure the plugin and provisioning supply chain?**
+**Q: How do you secure the plugin and provisioning supply chain?**
 Treat plugins and Compositions as code with full supply-chain controls — signed artifacts, SBOMs, pinned dependencies, and review gates — because a malicious or buggy plugin runs inside the backend (war story #2 showed a benign one stalling the whole catalog). Provisioning is constrained by XRD schemas (only paved-road tiers), Composition Functions that pin safe defaults (`publiclyAccessible: false`), and OPA policies on who can provision expensive infra. The detailed pipeline — provenance, signing, admission — is in [`cross_cutting/supply_chain_security_pipeline.md`](cross_cutting/supply_chain_security_pipeline.md), and the GitOps delivery half is in [`../gitops_argocd_flux/README.md`](../gitops_argocd_flux/README.md).

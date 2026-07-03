@@ -342,46 +342,46 @@ CREATE INDEX idx_readings_ts ON sensor_readings USING BRIN (recorded_at);
 
 ## 12. Interview Questions with Answers
 
-**Describe the structure of a B+tree index and how it enables efficient queries.**
+**Q: Describe the structure of a B+tree index and how it enables efficient queries.**
 A B+tree has internal nodes (routing only, store keys for navigation) and leaf nodes (store all key-value pairs with pointers to the heap row, linked in a doubly-linked list). To find a row, traverse from root to leaf in O(log N) steps. For range scans: find the first matching leaf, then traverse the linked list. For a 1-billion row table with branching factor 100, height is ~5 — all lookups require ~5 page reads regardless of table size. This makes B-tree indexes extremely efficient for both equality and range queries.
 
-**What is WAL (Write-Ahead Logging) and why is it important?**
+**Q: What is WAL (Write-Ahead Logging) and why is it important?**
 WAL is a durability mechanism: every database modification is first written to the WAL (a sequential append-only log) before being applied to data files. If the server crashes, on restart the database replays WAL from the last checkpoint to recover all committed transactions. WAL enables: crash recovery (replay lost changes), streaming replication (replicas receive and replay WAL), point-in-time recovery (replay WAL to any past point), and logical decoding (CDC tools like Debezium read WAL).
 
-**Explain MVCC and how it enables concurrent reads without blocking writes.**
+**Q: Explain MVCC and how it enables concurrent reads without blocking writes.**
 MVCC (Multi-Version Concurrency Control) stores multiple versions of each row — one for the current state and old versions for active transactions that read an earlier snapshot. When a row is updated, the old version (with xmax set to the updating transaction ID) coexists with the new version (with xmin set to the same). Readers choose which version to see based on their transaction snapshot. Since readers access old versions, they never block writers who create new versions. The tradeoff: dead row versions accumulate until VACUUM reclaims them.
 
-**What is the difference between an Index Scan and an Index Only Scan?**
+**Q: What is the difference between an Index Scan and an Index Only Scan?**
 An Index Scan traverses the B+tree to find row pointers, then fetches each matching row from the heap file (potentially random I/O). An Index Only Scan satisfies the query entirely from the index — no heap fetch. This requires: (1) all columns in the SELECT list are in the index (covering index); (2) the visibility map confirms the heap page is all-visible (so the planner does not need to check MVCC visibility from the heap). Index Only Scans are dramatically faster for large result sets that hit many heap pages.
 
-**What is a covering index and when should you create one?**
+**Q: What is a covering index and when should you create one?**
 A covering index includes all columns needed by a query — the key columns (in the B-tree order) plus any additional columns via INCLUDE. When an index-only scan is possible, the database reads only the index (sequential), not the heap (random I/O). Create covering indexes for high-frequency queries with a predictable column set. Trade-off: larger indexes with more write overhead. In PostgreSQL, use INCLUDE for non-key columns: `CREATE INDEX ON orders(user_id, status) INCLUDE (amount, created_at)`.
 
-**What is table bloat and how is it caused?**
+**Q: What is table bloat and how is it caused?**
 Table bloat is the accumulation of dead row versions (from UPDATEs and DELETEs) that have not been reclaimed by VACUUM. MVCC keeps dead versions until no active transaction can see them. Until VACUUM runs, dead rows remain in the heap and indexes, wasting space and slowing sequential scans. Bloat causes: slow sequential scans (scanning dead rows), slow index scans (more pages), wasted disk space. Prevention: ensure autovacuum is tuned aggressively for busy tables (smaller scale_factor thresholds).
 
-**What is the difference between a partial index and a covering index?**
+**Q: What is the difference between a partial index and a covering index?**
 A partial index indexes only a subset of rows (rows matching a WHERE condition). Example: `CREATE INDEX ON users(email) WHERE deleted_at IS NULL` — indexes only non-deleted users. Reduces index size and is only used by queries that include the partial index's condition. A covering index includes all columns needed by a query to enable index-only scans. These are orthogonal — you can have a partial covering index: `CREATE INDEX ON orders(user_id, created_at) INCLUDE (amount) WHERE status = 'active'`.
 
-**How does the query planner decide between Seq Scan and Index Scan?**
+**Q: How does the query planner decide between Seq Scan and Index Scan?**
 The planner estimates the cost of each plan based on: table size (pages), number of matching rows (from statistics/histograms), page read costs (random vs sequential), and whether pages are in the buffer pool. If a query matches >15-20% of rows (low selectivity), a sequential scan is often cheaper than random I/O from index scans. The planner uses statistics (from ANALYZE) to estimate row counts. Outdated statistics cause wrong plan choices. Random page cost (random_page_cost) is set at 4.0 for spinning disks and 1.1 for SSDs — this significantly affects when the planner prefers index over seq scan.
 
-**What is the visibility map and why does it matter for Index Only Scans?**
+**Q: What is the visibility map and why does it matter for Index Only Scans?**
 The visibility map is a per-page bitmap recording whether every row on a page is visible to all current transactions. VACUUM sets the visibility map after cleaning dead rows. For an Index Only Scan, if a page's visibility map bit is set, the planner knows any row version on that page is visible — no need to check the heap for MVCC visibility. If the bit is not set, the planner falls back to fetching the heap page to verify visibility, degrading to a regular Index Scan. Stale visibility maps (from infrequent VACUUM) prevent Index Only Scans.
 
-**Explain transaction ID wraparound in PostgreSQL.**
+**Q: Explain transaction ID wraparound in PostgreSQL.**
 PostgreSQL uses 32-bit transaction IDs (xids). The comparison function is modular arithmetic: a transaction is "newer" if its xid is within 2 billion of the current xid. Once a table's oldest unfrozen transaction (datfrozenxid) is more than 2 billion transactions behind the current xid, the database cannot distinguish old from new and enters emergency mode (refuses all writes). Prevention: autovacuum freezes old row versions by replacing their xmin with a special FrozenTransactionId. Monitor with `SELECT age(datfrozenxid) FROM pg_database` — alert at 1.5 billion.
 
-**What is a GIN index and when should you use it?**
+**Q: What is a GIN index and when should you use it?**
 GIN (Generalized Inverted Index) is designed for multi-valued data: arrays, JSONB, full-text tsvectors. An inverted index maps each element value to the rows containing it — like a book's index mapping words to page numbers. For a JSONB column, GIN can quickly find all rows containing `{"color": "red"}` by looking up "color=red" in the inverted index. Use GIN for JSONB containment queries, array element containment, and full-text search. GIN is expensive to update (entire document must be re-indexed on update) — use where reads dominate writes.
 
-**How does BRIN work and when is it appropriate?**
+**Q: How does BRIN work and when is it appropriate?**
 BRIN (Block Range Index) stores the minimum and maximum values for each contiguous range of heap pages (block range, default 128 pages). For a query `WHERE timestamp BETWEEN X AND Y`, BRIN checks which block ranges could contain matching rows and scans only those. Effective only when data is physically ordered by the indexed column (timestamps inserted in order, sequential IDs). BRIN is tiny (bytes per block range vs bytes per row for B-tree) — a 10 billion row time-series table has a BRIN index of ~100 KB vs ~10 GB for B-tree. Use BRIN for append-only time-series tables; use B-tree for random-access patterns.
 
-**What is the difference between VACUUM and VACUUM FULL?**
+**Q: What is the difference between VACUUM and VACUUM FULL?**
 VACUUM removes dead row versions, reclaims space for reuse within the same table file, and updates the visibility map. It does NOT return space to the OS. It takes a lightweight lock (non-blocking for reads/writes). VACUUM FULL rewrites the entire table into a new file (defragmenting it), returning space to the OS. It takes an exclusive lock (blocks all access). VACUUM FULL is rarely needed — use it only to recover disk space after deleting large portions of a table, and only during maintenance windows.
 
-**How do you find and fix unused indexes?**
+**Q: How do you find and fix unused indexes?**
 ```sql
 -- Find indexes with no scans since last stats reset
 SELECT schemaname, relname, indexrelname, idx_scan, idx_tup_read, idx_tup_fetch,
@@ -395,10 +395,10 @@ ORDER BY pg_relation_size(indexrelid) DESC;
 DROP INDEX CONCURRENTLY idx_unused;  -- CONCURRENTLY avoids table lock
 ```
 
-**What causes an execution plan to suddenly change from Index Scan to Seq Scan?**
+**Q: What causes an execution plan to suddenly change from Index Scan to Seq Scan?**
 Most common causes: (1) Table grew significantly and selectivity of the queried column dropped below the planner's threshold for index preference. (2) Statistics became stale after a bulk load — planner underestimates row count, chooses wrong join type or access method. (3) `random_page_cost` too high for SSD — planner overestimates cost of index scan. (4) `seq_page_cost` too low. (5) A new autovacuum ran that updated statistics differently. Fix: run ANALYZE, check pg_stats for the column, adjust random_page_cost for SSDs (1.1), and consider adding hints via pg_hint_plan if needed.
 
-**What is the difference between the heap file and an index in PostgreSQL?**
+**Q: What is the difference between the heap file and an index in PostgreSQL?**
 The heap file is the main data file — it stores all rows, in insertion order (no sorting). Pages are 8 KB. Rows within a page are referenced by ctid (page number + slot offset). An index is a separate B-tree (or other structure) that stores (indexed_key, ctid) pairs in sorted order. When a row is updated, both the heap and all indexes must be updated. The heap grows as rows are inserted/updated (old versions stay until VACUUM); indexes also accumulate dead entries. They must be VACUUMed together.
 
 ---

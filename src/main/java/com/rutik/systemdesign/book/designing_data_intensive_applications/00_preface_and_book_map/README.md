@@ -186,49 +186,49 @@ and integrating data across systems.
 
 ## Interview Questions
 
-**What does "data-intensive" mean, and why does the book claim most modern apps are data-intensive rather than compute-intensive?**
+**Q: What does "data-intensive" mean, and why does the book claim most modern apps are data-intensive rather than compute-intensive?**
 Data-intensive means the binding constraint is the *data* — its volume, its complexity, or how fast it changes — not CPU cycles. Kleppmann argues most apps hit data limits first: a typical web service spends its effort coordinating databases, caches, and indexes, not doing heavy math. The practical consequence is that the skills that matter are about storage, replication, and consistency, not micro-optimizing algorithms.
 
-**Name the three core concerns the book is organized around and give a one-line definition of each.**
+**Q: Name the three core concerns the book is organized around and give a one-line definition of each.**
 Reliability (works correctly despite faults), scalability (has strategies to cope as load grows), and maintainability (people can work on it productively over time). They're not independent — an unscalable system fails under load (a reliability problem), and an unmaintainable one accumulates bugs. The book returns to this triad in nearly every chapter.
 
-**What is the difference between a fault and a failure, and why does the distinction matter?**
+**Q: What is the difference between a fault and a failure, and why does the distinction matter?**
 A fault is one component deviating from its spec (a disk dies, a function throws); a failure is the system as a whole stopping service. The distinction matters because the goal of reliability engineering is to *tolerate faults so they don't escalate into failures* — you build fault-tolerance, not fault-prevention, because faults are inevitable. Netflix's Chaos Monkey embodies this: inject faults deliberately to prove they don't become failures.
 
-**What is the difference between a system of record and derived data?**
+**Q: What is the difference between a system of record and derived data?**
 A system of record holds the authoritative, canonical copy of data — the source of truth, written once. Derived data is computed *from* a system of record: caches, denormalized fields, search indexes, materialized views. The key property is that derived data is redundant and rebuildable — if it's lost or corrupted, you regenerate it from the source. This distinction is the conceptual backbone of Part III.
 
-**Why does the book teach principles instead of specific products?**
+**Q: Why does the book teach principles instead of specific products?**
 Because the tool landscape changes constantly and the categories blur (Redis is a cache and a broker; Kafka is a log and a store). If you only know products, you can't evaluate a new one. If you understand the underlying principles — what guarantees a quorum gives, what isolation level prevents which anomaly — you can read any system's docs and know what it actually promises. Principles age slowly; product names age fast.
 
-**Why is "no single tool does it all anymore" the book's motivating premise?**
+**Q: Why is "no single tool does it all anymore" the book's motivating premise?**
 Different access patterns need different engines: OLTP databases for point reads/writes, search indexes for full-text, caches for hot reads, stream processors for real-time, batch systems for analytics. One tool optimized for all of these would be optimized for none. So applications compose specialized tools — and that composition creates the central problem: keeping them consistent. The whole book follows from this premise.
 
-**If you compose several data stores, who is responsible for the consistency between them?**
+**Q: If you compose several data stores, who is responsible for the consistency between them?**
 Your application code is. No individual product can guarantee that the database, the cache, and the search index agree with each other, because none of them knows about the others. The application that writes to all of them owns the contract that they stay in sync — which is why Part III spends so much effort on dataflow and exactly-once semantics.
 
-**What does the book mean by "maintainability", and what three sub-properties make it up?**
+**Q: What does the book mean by "maintainability", and what three sub-properties make it up?**
 Maintainability is the ease with which different people can work on the system over its lifetime. It decomposes into operability (easy for operations to keep it running), simplicity (easy for new engineers to understand — minimizing accidental complexity), and evolvability (easy to change as requirements shift, also called extensibility or plasticity). Most of a system's cost is in maintenance, not initial build, so this concern is economically the largest.
 
-**Why does the preface say correctness becomes "your problem" rather than the database's?**
+**Q: Why does the preface say correctness becomes "your problem" rather than the database's?**
 Because once data lives in more than one store, no single store can promise the set agrees. A classic bug: you update the database but the cache still serves the old value, or the search index lags. The database did its job correctly; the *system* is still wrong. The application straddling multiple stores is the only place that can enforce cross-store correctness.
 
-**What kinds of building blocks does the preface enumerate, and how do they blur together?**
+**Q: What kinds of building blocks does the preface enumerate, and how do they blur together?**
 Databases (store and retrieve), caches (remember expensive results), search indexes (filter/search), stream processing (async messaging), and batch processing (periodic bulk crunching). They blur because real products span categories — Redis is a key-value store, a cache, and a message broker; Kafka is a message queue and a durable log that can act like a database. This blurring is precisely why category labels are less useful than understanding guarantees.
 
-**Who is the intended audience, and what is the book explicitly NOT?**
+**Q: Who is the intended audience, and what is the book explicitly NOT?**
 It targets engineers who build on top of data systems and want to understand the internals and tradeoffs. It is not a single-tool tutorial, not an ops runbook, and not introductory — it assumes prior experience with databases and application code. Knowing what it isn't keeps you from expecting step-by-step product instructions.
 
-**How does the three-part structure map onto a difficulty curve?**
+**Q: How does the three-part structure map onto a difficulty curve?**
 Part I (foundations) reasons about a single machine — conceptually rich but no distribution. Part II (distributed data) is the hard core, where networks and clocks betray you. Part III (derived data) is about composition and is conceptually unifying. Difficulty peaks in Part II (Chapters 7–9), so if you're studying for interviews, that's where to spend the most time.
 
-**Why does the author put "derived data" in its own part rather than treating it as an implementation detail?**
+**Q: Why does the author put "derived data" in its own part rather than treating it as an implementation detail?**
 Because the insight that caches, indexes, and materialized views are all *the same thing* — data derived from a source via a transformation — is genuinely unifying. Once you see batch and stream processing as two ways of maintaining derived data, the whole zoo of tools (Hadoop, Spark, Kafka Streams, Flink) collapses into one mental model. Part III earns its place by delivering that unification.
 
-**Give an example where ignoring the system-of-record vs derived-data distinction causes a production incident.**
+**Q: Give an example where ignoring the system-of-record vs derived-data distinction causes a production incident.**
 A team writes user profile edits directly to Elasticsearch (the search index) for speed and "later" syncs back to Postgres. The sync breaks; now the index has edits the database never saw, and there's no way to rebuild the index because it *is* the source for those fields. Treating a derived store as authoritative destroyed rebuildability — the cardinal sin the preface warns against.
 
-**Why is "compute-intensive vs data-intensive" a useful framing even though some systems are both?**
+**Q: Why is "compute-intensive vs data-intensive" a useful framing even though some systems are both?**
 It directs your optimization effort to the actual bottleneck. If you assume compute is the limit, you'll micro-optimize code while the real cost is a chatty database or replication lag. Naming the dominant constraint up front — usually data — keeps architectural attention on storage, movement, and consistency, which is where data-intensive systems live or die.
 
 ---

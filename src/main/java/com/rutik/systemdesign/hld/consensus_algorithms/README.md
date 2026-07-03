@@ -435,61 +435,61 @@ etcd implements this via the key's `mod_revision` (a monotonically increasing re
 
 ## 12. Interview Questions with Answers
 
-**What is Raft and how does leader election work?**
+**Q: What is Raft and how does leader election work?**
 Raft is a consensus algorithm designed for understandability. Leader election: when a Follower's election timeout fires (randomized 150–300ms), it becomes a Candidate, increments its term, votes for itself, and sends `RequestVote` to all peers. A Candidate wins if it receives votes from a quorum (majority) before its timeout expires. Randomized timeouts prevent ties. A node grants a vote only if (a) it has not voted in this term, and (b) the Candidate's log is at least as up-to-date as the voter's log (the log-completeness safety check). Practical guidance: set the election timeout to at least 10× the heartbeat interval to prevent spurious elections during a leader's GC pauses.
 
-**What is split-brain and how does Raft prevent it?**
+**Q: What is split-brain and how does Raft prevent it?**
 Split-brain is when two nodes both believe they are the leader and independently accept writes, producing divergent state that cannot be reconciled. Raft prevents it via term numbers: every message carries the sender's current term. If a leader receives a message with a higher term, it immediately reverts to Follower and can commit nothing more. During a partition, the minority side (old leader) cannot reach quorum, so its writes stay uncommitted and are rolled back when the partition heals; the majority side elects a new leader with a higher term. Only one leader can commit per term.
 
-**What is a quorum and why is majority (N/2+1) the threshold?**
+**Q: What is a quorum and why is majority (N/2+1) the threshold?**
 A quorum is the minimum number of nodes that must agree before an operation counts as committed. The majority threshold ensures any two quorums share at least one node. That overlap node carries the committed state, so any new leader formed from a quorum is guaranteed to know the last committed value. For N=3: quorum=2, tolerates 1 failure. For N=5: quorum=3, tolerates 2 failures. Running an even number of nodes (e.g. N=4) gives the same fault tolerance as N=3 but wastes a node and creates partition problems — a 2+2 split has no majority on either side.
 
-**What happens to a Raft cluster when the leader fails?**
+**Q: What happens to a Raft cluster when the leader fails?**
 Followers stop receiving heartbeats. After the election timeout (150–300ms typical), one Follower becomes a Candidate, requests votes, wins on a quorum, and becomes the new leader, which then begins sending heartbeats. Uncommitted entries from the old leader are either replicated and committed by the new leader (if it has them) or discarded (if its log is more up-to-date). Committed entries are never lost: the election-safety guarantee ensures a Candidate with a stale log cannot win.
 
-**How does Kafka's ISR relate to Raft/consensus?**
+**Q: How does Kafka's ISR relate to Raft/consensus?**
 Kafka's In-Sync Replica mechanism is a form of quorum replication, though not textbook Raft. With `acks=all`, the partition leader waits for all ISR members to write the message before acknowledging. ISR membership is dynamic — a Follower is removed if it lags more than `replica.lag.time.max.ms` (default 30s). With `min.insync.replicas=2` and `acks=all`, a write needs at least 2 replicas, equivalent to a 3-node quorum tolerating 1 failure. KRaft (Kafka 3.3+) replaces ZooKeeper with a built-in Raft implementation for controller election and metadata.
 
-**Why does etcd exist — can't Kubernetes just use a regular database?**
+**Q: Why does etcd exist — can't Kubernetes just use a regular database?**
 Kubernetes needs linearizable reads and writes for cluster state: after the API server writes a Pod spec, the next read must return the updated value. A typical SQL setup with read replicas offers only eventual consistency — a follower can return stale data. etcd's Raft guarantees linearizability via the leader (or a quorum-based ReadIndex). etcd also provides the Watch API, letting controllers receive change notifications — a capability standard SQL databases lack, and exactly what makes Kubernetes' declarative reconciliation loops work.
 
-**What is the FLP impossibility result?**
+**Q: What is the FLP impossibility result?**
 Fischer, Lynch, and Paterson (1985) proved that in a fully asynchronous system, no deterministic consensus algorithm can guarantee both safety and liveness with even one faulty process. The reason: you cannot distinguish a slow node from a crashed one, so any timeout may be a false positive. Practical systems circumvent FLP with timeouts and randomization — Raft's randomized election timeout breaks symmetry without violating safety. FLP applies to perfectly asynchronous systems; real systems assume partial synchrony, which makes Raft correct in practice.
 
-**Raft vs Paxos — what did Raft improve?**
+**Q: Raft vs Paxos — what did Raft improve?**
 Raft was explicitly designed for understandability (Ongaro, 2014). Paxos describes single-decree consensus; Multi-Paxos — the production form — is underspecified, leaving log structure, leader election, membership changes, and snapshots to the implementer. Raft makes all of these explicit: one leader per term, log entries applied in strict order, an explicit election protocol, and joint-consensus membership changes. Engineers implement Raft correctly far more often than Paxos from the spec alone. The tradeoff: Raft requires a strict leader, while EPaxos achieves higher throughput by allowing leaderless commits.
 
-**When would you choose PBFT over Raft?**
+**Q: When would you choose PBFT over Raft?**
 Choose PBFT when you need Byzantine fault tolerance — nodes that actively lie, equivocate, or behave arbitrarily (e.g., a compromised node in a multi-organization consortium). Raft only tolerates crash-stop faults. Use cases: permissioned blockchains (Hyperledger Fabric) and multi-party settlement systems where participants do not trust each other. The cost: PBFT needs 3f+1 nodes (vs 2f+1 for Raft) and O(n²) message complexity, impractical beyond ~20–30 nodes. For internal systems where you trust your own nodes, Raft is the right choice.
 
-**How does Raft handle log divergence after a network partition heals?**
+**Q: How does Raft handle log divergence after a network partition heals?**
 The old leader (now a Follower) receives `AppendEntries` from the new leader carrying a higher term. The new leader decrements `nextIndex[oldLeader]` until it finds the point where the logs agree (matching `prevLogIndex` and `prevLogTerm`), then overwrites everything after that point with its own entries. The old leader's uncommitted entries are discarded. Committed entries are safe because the election-safety property guarantees the new leader's log already contains all committed entries.
 
-**How do you size an etcd cluster for a large Kubernetes deployment?**
+**Q: How do you size an etcd cluster for a large Kubernetes deployment?**
 A 3-node etcd cluster (quorum=2, tolerates 1 failure) suffices for most clusters up to ~1000 nodes. For 5000+ nodes with high write throughput: (a) use 5 nodes (quorum=3, tolerates 2 failures); (b) use NVMe SSD — rotational disk causes >100ms fsync latency, triggering spurious elections; (c) dedicate etcd to its own nodes to avoid CPU contention with API servers; (d) set `--heartbeat-interval=100 --election-timeout=1000`; (e) enable compaction and periodic defragmentation to prevent storage bloat; (f) consider namespace-level sharding via Kine for very large clusters.
 
-**What is a leader lease and how does it improve read performance?**
+**Q: What is a leader lease and how does it improve read performance?**
 A leader lease is a time-bound guarantee that no other leader has been elected, letting the current leader serve reads locally without a quorum round-trip. Normally a Raft read requires a ReadIndex quorum check to confirm the leader is still the leader. With a lease, the leader records when it last renewed (lease length < election timeout, adjusted for clock skew); while the lease is valid, it serves reads locally. The risk is clock skew causing an old leader's lease to overlap a new leader's term, returning stale reads. CockroachDB and etcd use leases with carefully bounded clock skew (NTP, or TrueTime-style bounds).
 
-**What is Flexible Paxos and how does it relax the quorum requirement?**
+**Q: What is Flexible Paxos and how does it relax the quorum requirement?**
 Flexible Paxos (Heidi Howard, 2016) observes that the two phases of consensus can use different quorum sizes, as long as any Phase 1 quorum overlaps any Phase 2 quorum. This lets you trade leader-election cost for commit latency: use a large Phase 1 quorum (leader election, infrequent) and a small Phase 2 quorum (log replication, frequent). Example on 5 nodes — Phase 1 quorum=4, Phase 2 quorum=2 — gives low-latency writes at the cost of slower elections (needs 4/5 nodes). Useful for write-heavy workloads with stable leadership.
 
-**How does Kafka KRaft improve on ZooKeeper?**
+**Q: How does Kafka KRaft improve on ZooKeeper?**
 ZooKeeper was an external dependency for Kafka controller election and metadata. Problems: a separate operational burden, slower metadata propagation (ZooKeeper → controller → brokers), and a scalability ceiling for large clusters (10,000+ partitions). KRaft (stable in Kafka 3.3+, default in 4.0) runs a built-in Raft group among brokers for metadata; a controller quorum of 3–5 nodes holds all metadata. Benefits: single deployment (no ZooKeeper), faster propagation via direct Raft replication, and roughly 10× more partitions per cluster. Kafka 3.x supports both modes; 4.0 drops ZooKeeper.
 
-**What is the "term number" mechanism and why is it central to Raft's correctness?**
+**Q: What is the "term number" mechanism and why is it central to Raft's correctness?**
 Every Raft message carries the sender's `currentTerm`, a monotonically increasing integer incremented on each election attempt. Two rules govern it: a node receiving any message with a higher term immediately reverts to Follower and adopts that term; a node rejects any message with a lower term as stale. This makes stale leaders harmless — an old leader that rejoins after a partition sees a higher term and steps down before it can cause split-brain. The term number is the single mechanism that prevents multiple concurrent leaders across every partition and failure scenario.
 
-**What is a fencing token and why is a distributed lock unsafe without one?**
+**Q: What is a fencing token and why is a distributed lock unsafe without one?**
 A fencing token is a monotonically increasing number handed out with each lock grant. Without it, a lock is unsafe: a client can acquire the lock, stall in a GC pause beyond the lease TTL, have the lock expire and be granted to another client, then resume and write — two clients writing as if they hold the lock. The fix is for the lock service to issue an increasing token (etcd `mod_revision`, ZooKeeper version) on each grant, and for the *protected storage* to record the highest token it has seen and reject any write with a lower one. Crucially, the lock service alone cannot prevent corruption — the storage layer must enforce the token check.
 
-**Why can't a follower just serve reads locally in Raft, and what is ReadIndex?**
+**Q: Why can't a follower just serve reads locally in Raft, and what is ReadIndex?**
 A follower (or even a leader that was just deposed) may have stale state, so serving a read locally can violate linearizability — returning a value that was already overwritten. ReadIndex fixes this on the leader: it records the current `commitIndex` as the read index, confirms via a heartbeat round that it is still the leader (quorum acknowledgment), waits until its state machine has applied up to that index, then serves the read. This costs one round-trip (~1ms same-AZ). Leader leases avoid even that round-trip when clock skew is bounded, at the risk of stale reads if clocks drift.
 
-**Can a 4-node Raft cluster tolerate more failures than a 3-node one?**
+**Q: Can a 4-node Raft cluster tolerate more failures than a 3-node one?**
 No — and this is a common trap. A 4-node cluster has quorum=3, so it tolerates only 1 failure, exactly the same as a 3-node cluster (quorum=2), while costing an extra machine. Worse, a 2+2 network partition leaves neither side with a quorum, halting the whole cluster. Always use odd sizes: 3 tolerates 1, 5 tolerates 2, 7 tolerates 3. Adding nodes also raises commit latency (larger quorum), so do not over-provision voters — use learners/replicas for read scaling and DR instead.
 
-**How does consensus relate to the CAP theorem?**
+**Q: How does consensus relate to the CAP theorem?**
 Consensus algorithms are CP: they choose Consistency and Partition-tolerance over Availability. During a network partition, the minority side cannot reach a quorum and therefore refuses writes (and linearizable reads) rather than risk divergence — that refusal is the loss of availability. The majority side stays consistent and available. This is why etcd, ZooKeeper, and Consul become read-only or unavailable in the minority partition: they would rather stop than return a value that might disagree with the other side. See `../cap_theorem/` for the broader framing.
 
 ---

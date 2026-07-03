@@ -442,7 +442,7 @@ power of two" (powers of two have exactly one set bit), and (2) repeatedly
 applying it counts set bits in O(popcount(n)) iterations (Brian Kernighan's
 algorithm) instead of O(bit-width).
 
-**What does `n & (-n)` do, and how is it different from `n & (n-1)`?**
+**Q: What does `n & (-n)` do, and how is it different from `n & (n-1)`?**
 `n & (-n)` ISOLATES the lowest set bit (returns a value with only that one bit
 set), whereas `n & (n-1)` CLEARS it (returns `n` with that bit removed). `-n`
 in two's complement is `~n + 1`; this flips all bits and adds 1, which has the

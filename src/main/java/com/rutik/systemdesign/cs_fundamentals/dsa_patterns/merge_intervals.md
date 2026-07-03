@@ -314,35 +314,35 @@ def merge_intervals_fixed(intervals: list[list[int]]) -> list[list[int]]:
 
 ## 11. Interview Q&A
 
-**Why must intervals be sorted by START time (not end time) for the merge operation?**
+**Q: Why must intervals be sorted by START time (not end time) for the merge operation?**
 Once sorted by start, you only need to compare each interval against the **most recently merged** interval — if `current.end >= next.start`, they overlap (because `next.start >= current.start` is guaranteed by the sort, so the only question is whether `next` starts before `current` ends). Without this ordering, an interval processed later could overlap with one processed much earlier, requiring you to re-check all previously merged intervals — breaking the single-pass O(n) sweep.
 
-**What's the difference in sort key between "Merge Intervals" and "Non-overlapping Intervals" (LC 435)?**
+**Q: What's the difference in sort key between "Merge Intervals" and "Non-overlapping Intervals" (LC 435)?**
 "Merge Intervals" sorts by **start** time — you're combining overlapping ranges into larger ranges. "Non-overlapping Intervals" (a greedy problem) sorts by **end** time — you're *selecting* a maximum-size subset of mutually non-overlapping intervals, and greedily picking the interval that ends earliest leaves the most room for future selections (an exchange-argument proof). Same data shape, different sort key, different algorithm family.
 
-**How do you decide whether overlapping should use `<` or `<=` when comparing `current.end` and `next.start`?**
+**Q: How do you decide whether overlapping should use `<` or `<=` when comparing `current.end` and `next.start`?**
 This depends on whether intervals are treated as **closed** (`[1,3]` includes the point 3) or **half-open** (`[1,3)` excludes 3). If closed, `[1,3]` and `[3,5]` share the point 3 and are typically considered overlapping/mergeable → use `<=`. If half-open, they don't share any point → use `<`. Real-world calendar systems usually treat meeting times as half-open (`[start, end)`) so a meeting ending at 3:00 and one starting at 3:00 don't conflict — but always clarify the problem's convention rather than assuming.
 
-**For "Insert Interval," why is the three-phase approach O(n) while "append and re-sort" is O(n log n) — and when would the O(n log n) approach still be acceptable?**
+**Q: For "Insert Interval," why is the three-phase approach O(n) while "append and re-sort" is O(n log n) — and when would the O(n log n) approach still be acceptable?**
 The three-phase approach exploits the precondition that the input is *already sorted and non-overlapping* — a single linear scan suffices. "Append and re-sort" treats the input as arbitrary, paying O(n log n) for the sort. The O(n log n) approach is acceptable if (a) the interviewer doesn't emphasize the pre-sorted constraint, (b) `n` is small enough that the constant-factor difference doesn't matter, or (c) code simplicity is prioritized over asymptotic optimality — but you should *mention* the O(n) alternative to demonstrate you noticed the precondition.
 
-**How does the "minimum meeting rooms" two-pointer (separate sorted starts/ends) approach work, intuitively?**
+**Q: How does the "minimum meeting rooms" two-pointer (separate sorted starts/ends) approach work, intuitively?**
 Think of it as a timeline sweep: sort all start times and all end times independently. Walk through time using two pointers — whenever the next event is a "start" that occurs *before* the next "end", a new room is needed (increment `rooms`, track the max). Whenever the next event is an "end" (or a start that's not before the next end), a room frees up (decrement `rooms`, advance the end pointer). The maximum value `rooms` reaches during this sweep is the answer — it represents the peak concurrent meeting count.
 
-**What's the heap-based alternative for "minimum meeting rooms," and when might you prefer it?**
+**Q: What's the heap-based alternative for "minimum meeting rooms," and when might you prefer it?**
 Sort intervals by start time. Maintain a min-heap of "end times of currently occupied rooms." For each interval, if the heap's minimum end time is `<= current.start` (the earliest-freeing room is free by now), pop it (reuse that room) and push the new end time; otherwise, push the new end time without popping (allocate a new room). The heap's final size is the answer. This is more intuitive for some people (it directly models "rooms" as heap entries) and generalizes more easily if rooms have different *types* or *costs* (you could use a priority based on room cost, not just end time).
 
-**How would "Employee Free Time" combine merge-intervals with another technique?**
+**Q: How would "Employee Free Time" combine merge-intervals with another technique?**
 Flatten all employees' intervals into a single list, sort by start time, and run the standard merge to get the **union** of all busy times. Then, the "free time" is the **gaps between consecutive merged intervals** — for each pair of adjacent merged intervals `(a, b)`, if `a.end < b.start`, then `[a.end, b.start]` is a free-time slot common to everyone. This is "merge intervals" followed by a "find gaps" post-processing pass.
 
-**What's the "delta array" / "difference array" technique used in "Car Pooling," and how does it relate to prefix sums?**
+**Q: What's the "delta array" / "difference array" technique used in "Car Pooling," and how does it relate to prefix sums?**
 For each interval `[start, end, capacity_change]`, record `+capacity_change` at index `start` and `-capacity_change` at index `end` in a delta array. Then compute the prefix sum of this delta array — `prefix_sum[i]` gives the "net effect" (e.g., number of passengers) at point `i`. This converts "does any point exceed capacity across all intervals" into a single O(n + range) prefix-sum computation, avoiding O(n^2) pairwise overlap checks. It's a direct application of [prefix_sum.md](prefix_sum.md) to interval data.
 
-**Can "Merge Intervals" be done without sorting, e.g., using a Union-Find structure?**
+**Q: Can "Merge Intervals" be done without sorting, e.g., using a Union-Find structure?**
 In principle, you could model overlapping intervals as a graph (edge between intervals `i` and `j` if they overlap) and use [union_find.md](union_find.md) to find connected components, then merge each component. But determining *which* intervals overlap without sorting still requires O(n^2) pairwise checks (or a sweep-line, which itself requires sorting events) — so sorting is effectively unavoidable for an efficient solution. Union-Find doesn't eliminate the need to sort; it would only be useful if "overlap" relationships were given to you directly (e.g., as a graph), which is not the typical problem framing.
 
-**How do you handle intervals with the SAME start time during sorting — does tie-breaking matter?**
+**Q: How do you handle intervals with the SAME start time during sorting — does tie-breaking matter?**
 For pure "merge overlapping intervals," tie-breaking on `start` doesn't matter — if two intervals have the same start, whichever is processed first becomes `result[-1]`, and the other will have `start <= result[-1][1]` trivially (since `start == result[-1][0] <= result[-1][1]` assuming valid intervals where `start <= end`), so it merges correctly regardless of order. For "Non-overlapping Intervals" (sorted by *end* time) or other greedy variants, tie-breaking CAN matter and should be considered based on the specific problem's goal — e.g., "Minimum Arrows to Burst Balloons" sorts by end time and ties don't affect correctness, but always verify with a small example.
 
-**What's the time complexity if you need to repeatedly insert intervals one at a time (online), maintaining a merged, sorted state — like "My Calendar I"?**
+**Q: What's the time complexity if you need to repeatedly insert intervals one at a time (online), maintaining a merged, sorted state — like "My Calendar I"?**
 Each insertion requires finding the correct position (binary search on starts, O(log n)) and checking for overlap with neighbors (O(1)), but inserting into a Python `list` is O(n) due to shifting elements. For `n` insertions, this is O(n^2) total. To do better, a balanced BST or skip-list-backed sorted container (e.g., `sortedcontainers.SortedList` in Python) gives O(log n) insertion, for O(n log n) total — relevant if asked about "online" / "streaming" variants of interval problems.

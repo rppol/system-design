@@ -385,31 +385,31 @@ Do NOT run chaos experiments without: clear steady-state metrics and monitoring,
 
 ## 12. Interview Questions with Answers
 
-**What is chaos engineering and how does it differ from random testing?**
+**Q: What is chaos engineering and how does it differ from random testing?**
 Chaos engineering is a disciplined, hypothesis-driven practice of injecting known fault conditions into a system to verify that resilience mechanisms work as designed. It is not random destruction. Each experiment starts with a steady-state hypothesis (measurable baseline of normal behavior), injects a specific realistic fault, and observes whether the system maintains steady state. Random testing has no hypothesis and no learning objective. Chaos engineering is closer to a scientific experiment: you predict the outcome and learn whether your prediction was correct.
 
-**What is the steady-state hypothesis and why is it essential?**
+**Q: What is the steady-state hypothesis and why is it essential?**
 The steady-state hypothesis defines what "normal" looks like in measurable, objective terms — for example, "p99 checkout latency < 200ms and error rate < 0.1% over any 1-minute window." It is measured before and after the experiment, and continuously during. Without a steady-state definition, you cannot determine whether the experiment affected user experience. The hypothesis also defines the abort criteria: if steady state is violated during the experiment, the kill switch triggers. Teams that skip steady-state definition end up running experiments with unknown outcomes.
 
-**How do you minimize blast radius in chaos experiments?**
+**Q: How do you minimize blast radius in chaos experiments?**
 Start with the smallest possible scope: one replica of one service, in a staging environment, during off-peak hours. Expand gradually: canary instance (1 of 20 pods), one availability zone, eventually full production. Use traffic shadowing or feature flags to limit which users are affected. Set automated stop conditions: if Prometheus alert fires (error rate > 1%), the chaos agent automatically removes the fault. Define the maximum acceptable blast radius before starting and do not exceed it in a single experiment.
 
-**What is a Game Day and how do you run one?**
+**Q: What is a Game Day and how do you run one?**
 A Game Day is a scheduled chaos exercise where the on-call team, engineers, and SREs gather to simulate failure scenarios together. Before: define hypothesis, establish steady-state baseline, prepare runbook with rollback steps, brief all participants on the plan and their roles. During: chaos operator injects faults; monitor lead watches dashboards; others observe behavior. After: compare actual behavior to hypothesis, document timeline, identify action items. Game Days serve two purposes: discovering system weaknesses and training the team to respond to incidents under controlled conditions.
 
-**What types of faults should you inject first?**
+**Q: What types of faults should you inject first?**
 Start with the most realistic failure modes for your system. For a service that calls three external dependencies, start with: one dependency returning 500 errors, then one dependency with 500ms added latency, then one dependency completely unreachable. These are the most common production failure patterns. Network partitions and instance failures come next. CPU and memory pressure are useful for validating autoscaling and GC behavior. Avoid starting with catastrophic faults (entire region down) until you have confidence in smaller-scope resilience.
 
-**How does chaos engineering relate to resilience patterns like circuit breakers?**
+**Q: How does chaos engineering relate to resilience patterns like circuit breakers?**
 Circuit breakers, bulkheads, retries, and fallbacks are designed resilience mechanisms. Chaos engineering tests whether they actually work in practice. Engineers often configure circuit breakers but never see them open in production. A chaos experiment that makes a dependency respond with 100% errors for 2 minutes validates: does the circuit breaker open? At what failure rate? How long does it stay open? Does it transition to half-open correctly? Are fallback responses returned to users? Without chaos testing, circuit breakers can have misconfigured thresholds that never trigger, or fallback paths that have silent bugs.
 
-**What is the difference between chaos engineering and disaster recovery testing?**
+**Q: What is the difference between chaos engineering and disaster recovery testing?**
 Chaos engineering focuses on small, targeted fault injection to test resilience mechanisms and discover unknown weaknesses. It runs frequently (weekly or continuously) with limited blast radius. Disaster recovery testing validates recovery procedures for catastrophic failures (data center loss, complete service outage, database corruption). DR testing validates RTOs (Recovery Time Objective) and RPOs (Recovery Point Objective). DR tests run infrequently (quarterly or annually), involve the entire operations team, and often involve actual data restoration from backups. Chaos engineering is ongoing operational practice; DR testing is periodic validation of catastrophic recovery procedures.
 
-**How do you handle chaos experiments that go wrong?**
+**Q: How do you handle chaos experiments that go wrong?**
 Every experiment must have a documented rollback procedure executable in under 2 minutes. For network faults: `tc qdisc del dev eth0 root`. For killed processes: `kubectl scale deployment order-service --replicas=5`. For AWS FIS experiments: the stop condition automatically triggers rollback. For Spring Boot Chaos Monkey: `POST /actuator/chaosmonkey/disable`. The kill switch must be tested before the experiment (verify rollback works in staging). If the kill switch itself fails, the on-call team must know how to recover manually. All experiments must have an abort trigger based on steady-state violation metrics.
 
-**What makes a good chaos engineering culture?**
+**Q: What makes a good chaos engineering culture?**
 Blameless postmortems where findings from chaos experiments are shared openly. Treating chaos experiment failures as system weaknesses to fix, not human failures. Having engineering teams run their own chaos experiments rather than a separate "chaos team" — ownership of resilience belongs to service teams. Celebrating discovered weaknesses: finding a circuit breaker misconfiguration via chaos is much better than finding it during a real incident. Continuous chaos experiments integrated into deployment pipelines so that every significant deployment is validated under fault conditions.
 
 ---

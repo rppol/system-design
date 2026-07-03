@@ -461,7 +461,7 @@ exists — *regardless* of how many words are stored. The hashmap's O(1) only
 applies to the exact query it was built for; prefix queries are not what
 hashing optimizes for.
 
-**When is a trie actually worse than a hashmap (memory-wise)?**
+**Q: When is a trie actually worse than a hashmap (memory-wise)?**
 When words share **few or no prefixes** — e.g., a dictionary of random UUIDs.
 Each `TrieNode` carries the overhead of a `dict` (or array) of children plus
 a boolean flag, multiplied across every character of every word with no
@@ -547,7 +547,7 @@ for hashing the substring, giving `O(L^2)` per word. With a trie: walk the
 word character-by-character once (`O(L)`), stopping at the first `is_end`
 node — a single O(L) walk replaces O(L) separate hash lookups.
 
-**How would you delete a word from a trie?**
+**Q: How would you delete a word from a trie?**
 Walk to the node representing the word's last character and set
 `is_end = False`. If that node now has **no children** AND `is_end == False`,
 it's "dead weight" — recursively remove it from its parent's `children` dict,

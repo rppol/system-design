@@ -497,52 +497,52 @@ The auxiliary loss enforces load balance on training data distribution. At infer
 
 ## 12. Interview Questions with Answers
 
-**What is a Mixture of Experts layer and how does it differ from a standard FFN layer?**
+**Q: What is a Mixture of Experts layer and how does it differ from a standard FFN layer?**
 A MoE layer replaces a single dense FFN with N parallel expert FFNs and a router that selects k of them per token. The standard FFN runs all its weights on every token; the MoE layer runs only k/N of its expert weights per token. This decouples total model capacity (all N experts) from per-token compute cost (k experts). Mixtral 8x7B has 8 experts per layer with top-2 routing, giving 46.7B total parameters but only 12.9B active per token.
 
-**How does the routing mechanism work in a top-k MoE?**
+**Q: How does the routing mechanism work in a top-k MoE?**
 The router is a learned linear projection that maps each token's hidden state to N logits (one per expert). A softmax normalizes the logits to probabilities. The top-k highest-probability experts are selected; their weights are renormalized to sum to 1. The token is processed by each of the k selected experts independently, and their outputs are combined as a weighted sum. The router weights are trained jointly with the rest of the model via gradient descent.
 
-**What is expert collapse and how do you prevent it?**
+**Q: What is expert collapse and how do you prevent it?**
 Expert collapse is when the router learns to send all (or nearly all) tokens to the same 1-2 experts, starving the rest of gradient signal. It is a self-reinforcing failure: experts that receive more tokens improve faster, making the router prefer them more. Prevention requires an auxiliary load-balancing loss added to the training objective. The standard formulation penalizes high variance in per-expert token fraction, typically weighted at alpha=0.01. Monitoring the histogram of tokens per expert during training is essential; any expert consistently above 25-30% of traffic signals incipient collapse.
 
-**Why does a MoE model require much more memory than a dense model of equivalent inference cost?**
+**Q: Why does a MoE model require much more memory than a dense model of equivalent inference cost?**
 All expert weights must reside in GPU memory simultaneously, even though only k of N experts are active per token. A Mixtral 8x7B with 12.9B active parameters requires ~90GB of GPU memory at bfloat16, because all 46.7B parameters must be loaded. By contrast, a dense 12.9B model needs ~25GB. This is the fundamental MoE memory-compute tradeoff: you gain capacity and quality at identical inference FLOPs, but you pay a memory tax proportional to the total-to-active parameter ratio.
 
-**What is expert capacity factor and what happens when it is exceeded?**
+**Q: What is expert capacity factor and what happens when it is exceeded?**
 Capacity factor defines the maximum number of tokens an expert can process in a single forward pass, expressed as a multiplier over the ideal-uniform load. Capacity = capacity_factor * (total_tokens * k / N). Tokens routed to a full expert are dropped — they skip expert computation and their input hidden state is passed through unchanged (identity fallback). A capacity_factor of 1.25 means each expert can handle 25% more than the uniform ideal. Typical production values: 1.25 for training, 1.5-2.0 for inference to minimize quality degradation.
 
-**When is a dense model the right choice over a MoE model of equivalent quality?**
+**Q: When is a dense model the right choice over a MoE model of equivalent quality?**
 Choose dense when you are memory-constrained, latency-critical at low batch sizes, or lack multi-GPU serving expertise. A Mixtral 8x7B needs ~90GB in bfloat16 versus ~25GB for a dense 7B, so if you can barely fit a dense model, MoE is off the table. At batch size 1 (single-user, low QPS) the all-to-all routing overhead of expert parallelism is not amortized and dense is simply faster. Dense also wins for simple LoRA fine-tuning (no per-expert adapter explosion) and small models under ~3B where routing overhead outweighs the capacity benefit. MoE pays off specifically when you serve at high throughput with abundant GPU memory and want more knowledge capacity at the same active-parameter compute.
 
-**Compare top-1 (Switch) and top-2 (Mixtral) routing. What is the tradeoff?**
+**Q: Compare top-1 (Switch) and top-2 (Mixtral) routing. What is the tradeoff?**
 Top-1 routing (Switch Transformer) sends each token to exactly one expert, minimizing per-token compute and maximizing the effective sparsity, but it is the hardest to load-balance (any imbalance immediately drops tokens) and gives the model no way to blend expert outputs. Top-2 (Mixtral) selects two experts and combines them as a weighted sum, which provides redundancy, richer representations, and smoother gradients to more experts per step — at roughly 2x the expert FLOPs per token. Top-1 is favored when maximum efficiency matters and you can invest in balancing; top-2 is the production default because the quality and stability gains outweigh the modest extra compute. Fine-grained designs push further to top-8 (DeepSeek-V3) for even more routing flexibility.
 
-**Explain expert parallelism. How does it differ from tensor parallelism?**
+**Q: Explain expert parallelism. How does it differ from tensor parallelism?**
 Expert parallelism distributes different experts across different GPUs; each GPU holds a subset of experts and runs them on routed tokens. Tensor parallelism splits individual weight matrices across GPUs so each GPU holds a shard of every layer. Expert parallelism requires all-to-all communication to route tokens between GPUs; tensor parallelism requires all-reduce. Expert parallelism is more natural for MoE because the split boundary aligns with the expert boundary, but it requires high-bandwidth GPU interconnects for the all-to-all collectives to be efficient.
 
-**How does Mixtral 8x7B achieve 46.7B total parameters with only 12.9B active?**
+**Q: How does Mixtral 8x7B achieve 46.7B total parameters with only 12.9B active?**
 Mixtral's attention layers are shared and identical to a standard Mistral-7B architecture (~7.7B parameters). Every FFN layer is replaced by a MoE block with 8 expert FFNs each of dimension 14336 (versus a single FFN). 8 experts * 32 layers * (FFN weight matrices) accounts for ~32B additional parameters. With top-2 routing, only 2 of the 8 expert FFNs run per token, so active parameters are roughly 7.7B (attention) + 5.2B (2 experts worth of FFN per layer) = ~12.9B. The other 6 expert FFNs are loaded in memory but idle for any given token.
 
-**What is fine-grained MoE and why does DeepSeek-V3 use it?**
+**Q: What is fine-grained MoE and why does DeepSeek-V3 use it?**
 Fine-grained MoE uses many more, smaller experts with a correspondingly higher k. DeepSeek-V3 uses 256 expert FFNs with top-8 routing plus 1 shared expert that always runs. Compared to 8 experts top-2, this provides exponentially more possible expert combinations (256 choose 8 vs 8 choose 2), giving the model far greater flexibility in routing. The shared expert ensures every token has a stable "general knowledge" path regardless of routing. Fine-grained MoE also provides smoother gradient flow across experts since each expert is smaller and more tokens touch each expert per batch.
 
-**What is MoE upcycling and when would you use it?**
+**Q: What is MoE upcycling and when would you use it?**
 Upcycling is converting a trained dense model into a MoE model to reduce MoE training cost. The dense model's FFN weights are copied N times to initialize N expert FFNs (all starting from identical weights), and a randomly initialized gating network is added. Training then continues from this checkpoint. Because you start from a strong initialization rather than random, you need significantly fewer training tokens to reach MoE quality. Use upcycling when you have a good dense model checkpoint and want MoE capacity without the cost of training from scratch.
 
-**How do you serve MoE models efficiently in production?**
+**Q: How do you serve MoE models efficiently in production?**
 Key strategies: (1) Expert parallelism across GPUs with NVLink interconnect to minimize all-to-all latency. (2) Continuous batching to maximize expert utilization — larger batches amortize routing overhead. (3) Expert-aware scheduling: batch requests by predicted expert usage to reduce load imbalance. (4) INT4/INT8 quantization of expert weights to reduce memory, enabling more requests per GPU. (5) Expert offloading to CPU RAM for low-QPS serving (llama.cpp supports this). (6) Monitor dropped token rate and per-expert utilization; adjust capacity factor to production traffic distribution. For Mixtral 8x7B at 1000 req/s, a minimum of 4xA100 80GB is required with tensor+expert parallelism.
 
-**What are the challenges of fine-tuning a MoE model compared to a dense model?**
+**Q: What are the challenges of fine-tuning a MoE model compared to a dense model?**
 Three main challenges: (1) All expert weights must be loaded even if you only tune a subset, so memory requirements equal full model inference memory. (2) Applying LoRA to all expert FFNs multiplies adapter count by N, increasing adapter memory and training cost. A common compromise is applying LoRA only to attention layers or to a subset of experts. (3) The routing distribution shifts during fine-tuning — if the fine-tuning domain activates different experts than pretraining, those experts may be undertrained. Best practice: monitor expert utilization on fine-tuning data before training; if certain experts are consistently activated, ensure they are included in the trainable parameter set.
 
-**Compare MoE and dense models when serving a single request at low latency versus a batch of 512 at high throughput.**
+**Q: Compare MoE and dense models when serving a single request at low latency versus a batch of 512 at high throughput.**
 At batch size 1, MoE is at a disadvantage. Expert parallelism all-to-all overhead is not amortized, and only k/N experts compute per token. The routing, dispatch, and gather operations add latency without quality gain visible to a single user. Dense models are simpler and faster for single-request serving. At batch size 512, MoE excels. All-to-all communication is amortized over the batch, experts receive enough tokens for efficient GPU utilization, and the model delivers higher quality (more parameters) at the same compute budget. The crossover batch size where MoE becomes favorable depends on interconnect speed — typically batch >= 64-128 for NVLink, higher for InfiniBand.
 
-**What is router z-loss and why is it used alongside the load-balancing loss?**
+**Q: What is router z-loss and why is it used alongside the load-balancing loss?**
 Router z-loss (introduced in ST-MoE) penalizes large router logits by adding a term proportional to the squared log-sum-exp of the gating logits, `z_loss = (1/B) * sum(logsumexp(logits)^2)`, typically weighted at ~0.001. It addresses a failure mode distinct from load imbalance: during training the router logits can grow very large, which makes the softmax numerically unstable (overflow in bfloat16) and causes sharp, brittle routing that hurts convergence. Where the load-balancing auxiliary loss encourages uniform expert *utilization*, z-loss keeps the routing logit *magnitudes* bounded and well-conditioned. Large MoE training runs commonly use both together — load-balancing loss (alpha ~0.01) for balance and z-loss (~0.001) for numerical stability — and dropping z-loss is a common cause of mid-training loss spikes in bfloat16.
 
-**How does DeepSeek-V3's auxiliary-loss-free load balancing work, and why prefer it?**
+**Q: How does DeepSeek-V3's auxiliary-loss-free load balancing work, and why prefer it?**
 DeepSeek-V3 replaces the load-balancing auxiliary loss with a per-expert learnable bias added to the router logits *only for the top-k selection*, not for the combining weights. A controller nudges each expert's bias up when it is under-utilized and down when over-utilized, steering token assignment toward balance without injecting a gradient that fights the task loss. This matters because the classic auxiliary loss is a tax on quality: it pulls routing toward uniformity even when the task would benefit from mild specialization, so setting alpha too high measurably degrades task performance. The bias-based scheme achieves balance while letting the language-modeling gradient shape routing freely, which is one reason DeepSeek-V3 reached strong quality at 671B/37B-active scale. The tradeoff is added controller machinery and a hyperparameter for the bias update rate.
 
 ---

@@ -447,7 +447,7 @@ treating it as free.
 
 ## 12. Interview Questions with Answers
 
-**What is annotation processing and how does it differ from reflection?**
+**Q: What is annotation processing and how does it differ from reflection?**
 Annotation processing (JSR 269) is a compiler plugin mechanism: during compilation,
 `javac` hands registered `Processor`s the annotated program elements so they can read
 the source model and generate new source/class/resource files. It is compile-time
@@ -457,7 +457,7 @@ cost (it produces plain code), surfaces errors at compile time, and is GraalVM-n
 friendly; reflection is dynamic and flexible but pays a per-call cost, fails at
 runtime, and needs metadata hints under native image.
 
-**Explain how the rounds model works.**
+**Q: Explain how the rounds model works.**
 `javac` invokes processors in rounds. Round 1 sees the original source files; any
 files a processor writes via the `Filer` become inputs to a new round, where
 processors run again; this repeats until a round produces no new files. Then a final
@@ -466,7 +466,7 @@ a last chance to emit (e.g. aggregate files), after which everything is compiled
 rounds let generated code itself trigger further generation, but output must converge
 or the compiler errors.
 
-**Why can't you use `Class.forName` on a type you are currently compiling?**
+**Q: Why can't you use `Class.forName` on a type you are currently compiling?**
 Because during annotation processing the bytecode does not exist yet — there is no
 loaded `Class` object for a type that is still being compiled. Instead you work with
 the `javax.lang.model` mirror API: `TypeElement` for a type, `ExecutableElement` for a
@@ -474,7 +474,7 @@ method, `VariableElement` for a field, and `TypeMirror` for a type reference, na
 with the `Elements` and `Types` utility services. This source-level model is the whole
 reason processing is decoupled from runtime reflection.
 
-**How does Lombok differ from a normal annotation processor like MapStruct?**
+**Q: How does Lombok differ from a normal annotation processor like MapStruct?**
 MapStruct is spec-compliant: it reads `@Mapper` interfaces and *generates new files*
 (a plain implementation class) via the `Filer`. Lombok registers as a processor but
 does not generate separate files — it reaches into `javac`'s internal `JCTree` AST
@@ -483,7 +483,7 @@ getters, `equals`, builders in place. That AST mutation is outside the JSR 269 s
 which is why Lombok needs IDE plugins, can break on JDK upgrades, and offers
 `delombok` to materialize the synthetic code.
 
-**Why is compile-time code generation preferred over runtime reflection for things like DI and mapping?**
+**Q: Why is compile-time code generation preferred over runtime reflection for things like DI and mapping?**
 Because the information (the object graph, the field mappings) is known at compile
 time, so generating plain code gives you: no per-call reflection overhead (faster,
 especially at startup), compile-time error checking (a missing mapping fails the
@@ -492,7 +492,7 @@ compatibility since there is no reflection for the closed-world analysis to miss
 is exactly why Dagger beat reflective Guice on Android and why Micronaut/Quarkus/Spring
 AOT moved DI work to build time.
 
-**How do you register an annotation processor?**
+**Q: How do you register an annotation processor?**
 Provide a `META-INF/services/javax.annotation.processing.Processor` file listing the
 fully-qualified processor class names (the ServiceLoader mechanism), or annotate the
 processor with Google's `@AutoService(Processor.class)` to generate that file
@@ -501,7 +501,7 @@ path (`annotationProcessorPath` in Maven, `annotationProcessor` configuration in
 Gradle), which is separate from the compile/runtime classpath so the processor runs at
 build time only.
 
-**How should a processor report a usage error to the developer?**
+**Q: How should a processor report a usage error to the developer?**
 Through the `Messager`, by calling `processingEnv.getMessager().printMessage(
 Diagnostic.Kind.ERROR, "message", element)`, passing the offending `Element` so the
 error points at the right source location. A `Kind.ERROR` fails the compilation,
@@ -509,14 +509,14 @@ turning what would be a runtime bug into a clean compile error. Throwing an exce
 from `process` instead produces an opaque compiler crash, so user-facing problems
 should always go through `Messager`.
 
-**What is the Filer and what restriction does it enforce?**
+**Q: What is the Filer and what restriction does it enforce?**
 The `Filer` is the API a processor uses to create new source, class, or resource files
 — the sanctioned output channel. Its key restriction is that you cannot create the
 same file twice in a single compilation: doing so throws a `FilerException` ("attempt
 to recreate a file"). This enforces idempotent, deterministic generation, which is
 necessary for reproducible builds and for incremental compilation to work correctly.
 
-**What is JavaPoet and why use it?**
+**Q: What is JavaPoet and why use it?**
 JavaPoet is a Square library that provides a fluent, type-safe builder API for
 generating `.java` source — `TypeSpec`, `MethodSpec`, `FieldSpec`, with `ClassName`
 references and `$T`/`$L` placeholders. You use it instead of concatenating strings
@@ -524,7 +524,7 @@ because it handles imports, formatting, and type references correctly, producing
 generated code and avoiding the brittle, error-prone string-building that plagues
 hand-rolled generators.
 
-**What does MapStruct do at compile time and what is the safety benefit?**
+**Q: What does MapStruct do at compile time and what is the safety benefit?**
 MapStruct's processor reads a `@Mapper` interface and generates a concrete
 implementation that copies fields with plain getter/setter calls — no reflection. The
 safety benefit is that mapping mismatches are caught at compile time: if a target
@@ -533,7 +533,7 @@ error, so mapping bugs surface during the build rather than as nulls or wrong va
 production. The generated code is also as fast as hand-written mapping and fully
 native-compatible.
 
-**Why is annotation processing important for GraalVM native images?**
+**Q: Why is annotation processing important for GraalVM native images?**
 Because native image uses a closed-world assumption and cannot follow runtime
 reflection without explicit metadata. Code produced by annotation processors is plain,
 statically-analyzable Java with no reflection, so it is reachable and retained
@@ -541,7 +541,7 @@ automatically — no hints needed. Frameworks that do their DI/mapping/AOP via p
 (or AOT, as Spring Boot 3 does) are therefore native-friendly by construction, whereas
 reflection-heavy frameworks require extensive reachability metadata.
 
-**How can a processor break incremental compilation, and how do you avoid it?**
+**Q: How can a processor break incremental compilation, and how do you avoid it?**
 If a processor is non-deterministic, reads inputs the build system cannot track, or
 regenerates outputs unpredictably, the build tool must fall back to full recompilation
 and may produce inconsistent results. To avoid it, make the processor deterministic
@@ -550,7 +550,7 @@ incremental for the build tool (Gradle's `org.gradle.annotation.processing` meta
 classifies a processor as isolating or aggregating). Established processors do this;
 hand-rolled ones often do not.
 
-**What is the difference between `getSupportedAnnotationTypes`/`@SupportedAnnotationTypes` returning a specific set vs `"*"`?**
+**Q: What is the difference between `getSupportedAnnotationTypes`/`@SupportedAnnotationTypes` returning a specific set vs `"*"`?**
 Returning specific annotation type names tells `javac` to invoke your processor only
 when those annotations are present, which is efficient and clear. Returning `"*"` makes
 the processor claim *all* annotations, so it runs on every compilation regardless —
@@ -559,7 +559,7 @@ error-prone otherwise. Also note the boolean return of `process`: returning `tru
 *claims* the annotations so no other processor handles them, while `false` lets them
 pass on — usually you return `true` only for annotations you own.
 
-**Can annotation processing modify existing methods or classes within the spec?**
+**Q: Can annotation processing modify existing methods or classes within the spec?**
 No — within JSR 269 you can only *add* new files, not modify or delete existing
 source/bytecode. The spec is intentionally additive to keep compilation predictable.
 Lombok modifies existing classes only by going outside the spec into compiler
@@ -567,7 +567,7 @@ internals. If you need to alter existing bytecode, the right tools are bytecode
 manipulation libraries (ASM, ByteBuddy) at build or load time, not annotation
 processing.
 
-**When would you still choose runtime reflection over a processor?**
+**Q: When would you still choose runtime reflection over a processor?**
 When the behavior is genuinely dynamic and not known at compile time: loading plugin
 classes discovered at runtime, deserializing data whose shape is unknown until runtime,
 building generic frameworks that must work with arbitrary user types they have never
@@ -575,7 +575,7 @@ seen, or rapid prototyping where the build-time investment is not justified. Ref
 trades runtime cost and native-image friction for that runtime flexibility, which is
 exactly what codegen cannot provide.
 
-**What is Kotlin's equivalent of Java annotation processing?**
+**Q: What is Kotlin's equivalent of Java annotation processing?**
 KSP (Kotlin Symbol Processing) is the modern equivalent — a Kotlin-first API that
 gives processors a Kotlin-aware symbol model and is much faster than the legacy KAPT,
 which worked by generating Java stubs so that Java's `javac` annotation processors

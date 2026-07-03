@@ -682,32 +682,32 @@ Optimization: reduce to 10 passages per reader (not 20) saves 50% GPU cost
 
 ## 11. Interview Discussion Points
 
-**What is the difference between extractive and open-domain QA?**
+**Q: What is the difference between extractive and open-domain QA?**
 Extractive QA (e.g., SQuAD) provides a single passage and asks the model to find the answer span within it — it is purely a span prediction task. Open-domain QA (e.g., NaturalQuestions, TriviaQA) provides only the question; the model must retrieve relevant passages from a million-document corpus before extracting the answer. The dominant failure mode shifts: for extractive QA, it is span precision; for open-domain QA, it is retrieval recall — if the right passage is not in the top-100 retrieved, no reader can fix it.
 
-**Why is retrieval recall more important than reader precision in open-domain QA?**
+**Q: Why is retrieval recall more important than reader precision in open-domain QA?**
 The overall EM of the system is bounded by retrieval recall: if the correct passage is missing from the top-100, EM = 0 for that question regardless of reader quality. A strong reader (BERT-large, 87% F1) applied to a weak retriever (recall@100 = 70%) produces worse end-to-end EM than a weaker reader applied to a strong retriever. In practice, improving retrieval recall by 5% (e.g., 80% → 85%) raises overall EM by 3–4%, while improving reader F1 by 5% raises EM by only 1–2% because many easy questions are already answered correctly.
 
-**How does DPR differ from BM25 and when does each excel?**
+**Q: How does DPR differ from BM25 and when does each excel?**
 BM25 is a sparse, lexical model — it scores passages by term frequency and inverse document frequency. It excels on questions where the answer passage contains the same words as the question (named entities, product names, serial numbers). DPR is a dense, semantic model — it embeds question and passage into a shared vector space and retrieves by cosine similarity. It excels on paraphrase matches ("how does aspirin work?" matches a passage about "acetylsalicylic acid mechanism"). Hybrid RRF combines both: recall improves from ~78% (DPR alone) or ~74% (BM25 alone) to ~88% (hybrid).
 
-**What is the null-score threshold in SQuAD 2.0 models and how do you tune it?**
+**Q: What is the null-score threshold in SQuAD 2.0 models and how do you tune it?**
 SQuAD 2.0 includes ~50% unanswerable questions. Models trained on it output a "null score" = start_logit[CLS] + end_logit[CLS], representing the score of "no answer." A passage's answer score minus its null score is the "score differential." If the differential < threshold τ, the model returns no answer. Tune τ on a validation set of known answerable and unanswerable questions by optimizing F1 (which penalizes both false positives and false negatives). Typical τ = -2.0 on general-domain QA; recalibrate for each new domain because confidence distributions shift.
 
-**How does multi-hop QA work and what are its failure modes?**
+**Q: How does multi-hop QA work and what are its failure modes?**
 Multi-hop QA requires evidence from two documents: e.g., "Who founded the company that built GPT-4?" requires knowing (1) OpenAI built GPT-4 and (2) Sam Altman and Greg Brockman founded OpenAI. The pipeline retrieves for the original question, extracts a bridge entity from the top answer, then constructs a second query ("who founded OpenAI?"). Failure modes: (1) bridge entity extraction error — if round 1 returns the wrong entity, round 2 retrieves for the wrong thing; (2) question reformulation error — poor reformulation degrades retrieval for round 2; (3) error propagation — overall EM = product of per-hop EM (0.85 × 0.85 = 0.72).
 
-**How would you handle the long-tail of unanswerable questions without hurting answerability on known topics?**
+**Q: How would you handle the long-tail of unanswerable questions without hurting answerability on known topics?**
 Calibrate a domain-specific null score threshold (not the generic -2.0 from SQuAD 2.0 training). Build a dev set of 300 unanswerable + 700 answerable questions in the target domain. Plot precision-recall curve for answering vs. threshold τ; choose τ that maximizes F1 on the dev set. Additionally, use confidence calibration ([../cross_cutting/model_calibration_and_thresholding.md](cross_cutting/model_calibration_and_thresholding.md)) to ensure the model's reported confidence is a reliable probability — a confidence of 0.9 should correspond to 90% accuracy on held-out examples.
 
-**How do you evaluate a QA system in production without ground-truth labels?**
+**Q: How do you evaluate a QA system in production without ground-truth labels?**
 Use implicit signals: (1) click-through rate on the source document link (if users click through, the answer was likely relevant); (2) follow-up question rate (if users ask a follow-up immediately, the first answer was insufficient); (3) explicit thumbs-up/thumbs-down feedback. For systematic evaluation, maintain a rolling annotation pipeline: randomly sample 200 questions/day, have annotators judge answer correctness (binary), and compute rolling EM. This creates a continuous evaluation signal without requiring pre-labeled questions.
 
-**What is the trade-off between passage chunk size and QA quality?**
+**Q: What is the trade-off between passage chunk size and QA quality?**
 Shorter chunks (50–100 tokens) improve retrieval precision (less noise per passage) but risk splitting the answer from its context. Longer chunks (256–512 tokens) preserve context but dilute relevance signal and make the reader's job harder (more irrelevant tokens to sift through). Empirically, 100-token chunks with 20-token overlap maximize recall@100 on NaturalQuestions while keeping reader latency tractable. For technical documentation (longer structured content), 256-token chunks may perform better because answers often require reading a full procedure step.
 
-**How would you adapt this for a conversational QA system (multi-turn)?**
+**Q: How would you adapt this for a conversational QA system (multi-turn)?**
 Conversational QA (CoQA, QuAC) requires tracking conversation context. The standard approach: concatenate the last 3 question-answer pairs as additional context before the current question (history-in-question rewriting). The reader input becomes: `[CLS] conversation_history + question [SEP] passage [SEP]`. Key challenge: coreference ("it", "he", "the company" from previous turns). Practical fix: fine-tune the query encoder on CoQA-style pairs and use entity linking to resolve references. Conversation context adds ~30 tokens per turn, so a 3-turn history adds < 90 tokens to the 512-token budget.
 
-**When would you replace extractive QA with a generative LLM?**
+**Q: When would you replace extractive QA with a generative LLM?**
 Extractive QA is preferable when: (1) exact traceability is required (legal, medical — you need the exact source quote); (2) latency < 150ms is required (BERT-large reader is faster than a large generative LLM); (3) hallucination risk must be zero (span extraction cannot fabricate content beyond the source). Switch to generative (RAG with GPT-4 or Claude) when: (1) the answer requires synthesizing information from multiple passages; (2) the answer needs fluent natural language rather than a quoted span; (3) the corpus is small enough that retrieval is not the bottleneck. Hybrid: use extractive QA as a confidence-gated first pass, fall back to generative only when extractive confidence < 0.6.

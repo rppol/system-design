@@ -418,7 +418,7 @@ unreachable, instead of signaling "impossible."
 
 ## 11. Interview Q&A
 
-**Why does topological sort only make sense for DAGs?**
+**Q: Why does topological sort only make sense for DAGs?**
 A topological order requires that for every edge `u -> v`, `u` comes before
 `v`. If the graph has a cycle `a -> b -> c -> a`, then `a` must come before
 `b`, `b` before `c`, and `c` before `a` — a contradiction. No linear ordering
@@ -436,7 +436,7 @@ post-order is preferable when you're already doing a DFS for another reason
 without a separate pass. Both are O(V+E); pick whichever maps more naturally
 to how you're already modeling the problem.
 
-**How exactly does Kahn's algorithm detect a cycle?**
+**Q: How exactly does Kahn's algorithm detect a cycle?**
 Every node in a cycle has at least one incoming edge *from within the cycle*
 that can never be "removed" (because the node providing that edge can never
 reach in-degree 0 either — it's circular). So nodes inside a cycle (and
@@ -455,7 +455,7 @@ ancestor, meaning a cycle exists. An edge to a BLACK node is a **cross/forward
 edge** — perfectly fine, just means you reached an already-finished subtree
 via a different path (not a cycle).
 
-**Why must the DFS-based approach reverse the post-order list?**
+**Q: Why must the DFS-based approach reverse the post-order list?**
 A node is appended to the post-order list only after *all* nodes reachable
 from it have been appended. So the node that "unlocks" the most other nodes
 (i.e., has the most things depending on it, transitively) finishes last and
@@ -499,7 +499,7 @@ in total (not once per node) — because each edge `(u, v)` is only iterated
 when processing `u`. Summing the inner-loop work across all nodes gives
 `sum(out_degree(u) for u in nodes) == E`, not `V * E`.
 
-**A common bug: initializing `in_degree` incorrectly. What's the right way?**
+**Q: A common bug: initializing `in_degree` incorrectly. What's the right way?**
 `in_degree[v]` must count *every* edge `(u, v)` in the input — initialize it
 to all zeros, then for each edge `(u, v)`, do `in_degree[v] += 1`. A common
 mistake is initializing `in_degree` to `1` for all nodes (confusing it with

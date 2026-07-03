@@ -454,55 +454,55 @@ support before relying on it; enabling it has a small per-context-switch cost.
 
 ## 12. Interview Questions with Answers
 
-**What makes exposing remote JMX without authentication dangerous?**
+**Q: What makes exposing remote JMX without authentication dangerous?**
 Unauthenticated remote JMX is a remote-code-execution vector, not just an information leak. An attacker who reaches the port can register an MLet MBean, point it at a remote MBean, and load arbitrary code into the JVM. That is why `authenticate=false ssl=false` on a routable interface is one of the most-exploited Java misconfigurations. The fix is to bind localhost, require password auth plus TLS, or reach it only through an SSH tunnel.
 
-**Why does remote JMX often fail through a firewall even when the configured port is open?**
+**Q: Why does remote JMX often fail through a firewall even when the configured port is open?**
 The RMI connector uses two ports — the registry port you configure and a separate data-channel export port that defaults to a random ephemeral port. Firewalls and container network policies open only the known port, so the handshake succeeds but the actual JMX connection times out, producing the classic "JConsole connects then hangs." Set `com.sun.management.jmxremote.rmi.port` equal to the registry port and set `java.rmi.server.hostname` so both channels are known and reachable.
 
-**What is the difference between a Standard MBean and an MXBean?**
+**Q: What is the difference between a Standard MBean and an MXBean?**
 A Standard MBean exposes an arbitrary Java interface, while an MXBean converts everything to self-describing Open Types like CompositeData, so remote clients need no custom classes. A Standard MBean's attribute values may require your own classes on the client classpath to deserialize; an MXBean's `CompositeData`/`TabularData` cross the wire fully self-described. That is why every platform bean is an MXBean — JConsole renders `HeapMemoryUsage` without any JVM-internal class. Both are defined by a naming convention (`XMBean` vs `XMXBean`), but MXBean is the safer, preferred flavor.
 
-**How do you detect a deadlock programmatically in Java?**
+**Q: How do you detect a deadlock programmatically in Java?**
 Call `ManagementFactory.getThreadMXBean().findDeadlockedThreads()`, which returns the ids of threads in a deadlock cycle (or null if none). Pass those ids to `getThreadInfo(ids, true, true)` to get each thread's held locks and stack trace for logging or alerting. Unlike `findMonitorDeadlockedThreads()`, it detects cycles involving both `synchronized` monitors and `java.util.concurrent` `Lock`s, so running it on a scheduled health check turns silent hangs into pages.
 
-**What is the MBeanServer and how do you obtain the platform one?**
+**Q: What is the MBeanServer and how do you obtain the platform one?**
 The MBeanServer is the in-JVM registry — essentially a `Map<ObjectName, MBean>` — that management tools query by `ObjectName` rather than by object reference. Get the singleton platform server with `ManagementFactory.getPlatformMBeanServer()`; it already holds all platform MXBeans (Memory, Thread, GC, OS, Runtime). You register your own MBeans into it with `registerMBean(bean, objectName)`. This indirection is what lets a tool introspect an application it was never compiled against.
 
-**How do you access the built-in platform MXBeans, and what does each give you?**
+**Q: How do you access the built-in platform MXBeans, and what does each give you?**
 Use the `ManagementFactory` factory methods, each returning a live bean that reflects current JVM state on every call. `getMemoryMXBean()` gives heap/non-heap usage, `getThreadMXBean()` thread counts and deadlocks, `getGarbageCollectorMXBeans()` per-collector counts and times, `getOperatingSystemMXBean()` CPU and cores, and `getRuntimeMXBean()` uptime and launch flags. `RuntimeMXBean.getInputArguments()` in particular is invaluable for confirming which flags a running process actually started with.
 
-**How do you write and register a custom MXBean?**
+**Q: How do you write and register a custom MXBean?**
 Define an interface whose name ends in `MXBean`, implement it, then register the instance under a unique `ObjectName` in the platform MBeanServer. For example `server.registerMBean(new CacheStats(), new ObjectName("com.example:type=CacheStats,name=userCache"))`. Getters become read-only attributes, setters become writable attributes, and remaining public methods (like `clear()`) become invokable operations that tools such as JConsole can call.
 
-**What is an ObjectName and why does its format matter?**
+**Q: What is an ObjectName and why does its format matter?**
 An ObjectName is an MBean's address in the format `domain:key1=value1,key2=value2`, such as `java.lang:type=Memory` or `com.example:type=Cache,name=userCache`. Tools browse, filter, and query MBeans by this name, and it must be unique — duplicate names throw `InstanceAlreadyExistsException` and malformed ones throw `MalformedObjectNameException`. Including a distinguishing key like `name=` lets you register many instances of the same type without collision.
 
-**What is the difference between JConsole, VisualVM, jcmd, jstack, and jmap?**
+**Q: What is the difference between JConsole, VisualVM, jcmd, jstack, and jmap?**
 JConsole and VisualVM are GUI tools that connect over a JMX connector (VisualVM also samples CPU/memory), while `jcmd`, `jstack`, and `jmap` are command-line tools that use the local attach API and need no open JMX port. `jstack` prints thread dumps, `jmap` produces heap histograms and dumps, and `jcmd` is the modern umbrella that subsumes both (`Thread.print`, `GC.heap_dump`) and also drives JFR. For a JVM you can `ssh` into, the `jcmd` family is the safe, port-free way to inspect it.
 
-**Why do modern stacks bridge JMX to Prometheus instead of scraping JMX directly?**
+**Q: Why do modern stacks bridge JMX to Prometheus instead of scraping JMX directly?**
 JMX is a stateful pull-over-RMI protocol with per-client TCP connections, an ephemeral-port firewall problem, an RCE-prone connector, and no dimensional labels — a poor fit for scraping thousands of time series. `jmx_exporter` (or Micrometer) reads the MBeans and re-exposes them at an HTTP `/metrics` endpoint in Prometheus format, which is stateless, single-port, and label-rich. The pattern keeps JMX for interactive operations while giving fleet monitoring a clean HTTP scrape target.
 
-**How does JMX relate to JFR (Java Flight Recorder)?**
+**Q: How does JMX relate to JFR (Java Flight Recorder)?**
 JMX exposes current gauge values like heap-used-now, while JFR records a time-ordered stream of events such as allocations and GC pauses at about 1% overhead. JMX is controlled through the MBeanServer; JFR is driven via `jcmd JFR.start/dump` and the `FlightRecorderMXBean`, then analyzed in JDK Mission Control. Use JMX for live dashboards and alerting, and JFR for post-incident forensics; they are complementary and both reachable through the same management plane.
 
-**What are the MBean flavors and which should you use?**
+**Q: What are the MBean flavors and which should you use?**
 The flavors are Standard, Dynamic, Open, MXBean, and Model, and you should almost always write MXBeans. Standard is an interface plus impl with inferred attributes; Dynamic implements `DynamicMBean` and exposes `MBeanInfo` at runtime; Open restricts a Dynamic MBean to Open Types; MXBean is Standard-style but auto-converted to Open Types; Model is a metadata-configured legacy bean. MXBeans combine the simplicity of declaring an interface with the wire-safety of Open Types, which is exactly why every platform bean is one. Dynamic/Open MBeans are for cases where the management interface is only known at runtime.
 
-**How do you secure a remote JMX connection properly?**
+**Q: How do you secure a remote JMX connection properly?**
 Bind the connector to localhost, require authentication, and enable TLS — the three controls that close the RCE surface. Concretely: set `com.sun.management.jmxremote.host=127.0.0.1`, require a `jmxremote.password`/`jmxremote.access` file pair, and turn on `ssl=true` (ideally `ssl.need.client.auth=true`). The password file must be `chmod 600` or the JVM refuses to start, and roles in the access file are scoped `readonly` or `readwrite`. For access beyond the host, prefer an SSH tunnel (`ssh -L 9010:localhost:9010`) over opening the port to the network.
 
-**What does `getThreadCpuTime` measure, and what is its caveat?**
+**Q: What does `getThreadCpuTime` measure, and what is its caveat?**
 `ThreadMXBean.getThreadCpuTime(threadId)` returns the CPU time consumed by a specific thread in nanoseconds, letting you find a thread burning a core. The caveat is that it can be unsupported or disabled on some platforms, returning `-1`, so you must check `isThreadCpuTimeSupported()` and `isThreadCpuTimeEnabled()` first. Enabling per-thread CPU measurement also carries a small per-context-switch cost, so leave it off unless you need it.
 
-**Can you monitor and inspect a JVM without opening any remote JMX port?**
+**Q: Can you monitor and inspect a JVM without opening any remote JMX port?**
 Yes — local tools (`jcmd`, `jstack`, `jmap`, and same-host VisualVM) use the attach API over a local socket, so they read the MBeanServer with no `jmxremote` flags and no network listener. This is both the safest and the most common way to inspect a JVM in production: `jcmd <pid> Thread.print` for a thread dump, `jcmd <pid> GC.heap_info` for heap state, `jcmd <pid> JFR.start` to begin a recording. Opening a remote JMX port is only necessary for interactive GUI tools connecting from another host.
 
-**What is the RMI connector, and are there alternatives?**
+**Q: What is the RMI connector, and are there alternatives?**
 The RMI connector is JMX's default remote transport, addressed as `service:jmx:rmi:///jndi/rmi://host:port/jmxrmi`, and it is stateful and uses the two-port scheme that causes firewall issues. Alternatives include JMXMP (a simpler single-socket connector from the optional JMX Remote API, easier to firewall but requiring an extra jar) and, more commonly today, sidestepping remote JMX entirely by bridging MBeans to an HTTP `/metrics` endpoint via jmx_exporter. For interactive access many teams keep RMI but bind it to localhost and tunnel over SSH.
 
-**Why is high-frequency JMX polling a potential availability risk?**
+**Q: Why is high-frequency JMX polling a potential availability risk?**
 Attribute getters run real code, so polling expensive ones every second — a `getHitRatio()` that takes a lock, or `getThreadCpuTime` across every thread — adds measurable load and can even contend with application work. Because tools poll attributes repeatedly, getters must be cheap, side-effect-free, and free of locks on hot paths. Keep polling intervals coarse and push heavy aggregation out of the getter itself.
 
 ---

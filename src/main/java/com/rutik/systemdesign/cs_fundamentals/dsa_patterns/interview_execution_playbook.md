@@ -643,7 +643,7 @@ You don't need to narrate every keystroke — narrate at the level of "now I'm
 handling the case where the heap exceeds size k" (one sentence per logical
 step), not "now I'm typing h-e-a-p-q-dot-h-e-a-p-p-u-s-h."
 
-**What if the interviewer's hint contradicts my current approach?**
+**Q: What if the interviewer's hint contradicts my current approach?**
 Repeat the hint back in your own words to confirm you understood it, then
 re-evaluate: "So you're suggesting [restated hint] — that would mean
 [implication for my approach]. Let me reconsider..." If, after
@@ -651,14 +651,14 @@ reconsidering, you still believe your approach is correct, it's fine to say
 so with a brief justification — but check first, since most hints are
 intentional redirections toward something the interviewer needs to observe.
 
-**Is it OK to ask the interviewer to confirm my complexity analysis?**
+**Q: Is it OK to ask the interviewer to confirm my complexity analysis?**
 Yes, briefly — "So that's O(n log k) time, O(n) space — does that match
 what you'd expect?" is a good wrap-up question. Don't ask it as "is that
 right?" with no analysis attached; ask it AFTER giving your justified
 analysis, as a final confirmation/segue, not as a substitute for the
 analysis.
 
-**What if I run out of time before finishing the implementation?**
+**Q: What if I run out of time before finishing the implementation?**
 Say where you are and what's left: "I have the frequency-counting and heap
 logic done; the remaining step is extracting values from the heap into the
 result list — that's a one-line list comprehension: `[num for freq, num in
@@ -689,14 +689,14 @@ instead of `c`, costs zero extra time and immediately tells the interviewer
 (and you, six lines later) what each variable represents. It also reduces
 the chance of variable-name collisions and copy-paste bugs.
 
-**What's the right way to test my code at the end, given limited time?**
+**Q: What's the right way to test my code at the end, given limited time?**
 Hand-trace the 1-2 examples from the Understand phase, maintaining actual
 variable values as you go (as in §5's Review step) — this is faster than
 writing `assert` statements and demonstrates the same rigor. If significant
 time remains (see §7 "When You Finish Early"), THEN write 1-2 actual test
 cases as code, especially for edge cases (empty input, single element).
 
-**How do I recover gracefully from a bug found during Review?**
+**Q: How do I recover gracefully from a bug found during Review?**
 State it calmly and specifically: "I see the issue — on line [X], I'm using
 `<` but this should be `<=` to handle the case where [specific scenario from
 my edge-case example]. Let me fix that." Then re-trace ONLY the part of the

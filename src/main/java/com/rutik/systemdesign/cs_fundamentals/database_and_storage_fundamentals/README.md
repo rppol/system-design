@@ -963,52 +963,52 @@ After loading 50 million rows into a new table, the query planner may still beli
 
 ## 12. Interview Questions with Answers
 
-**What is a dirty read and which isolation level prevents it?**
+**Q: What is a dirty read and which isolation level prevents it?**
 A dirty read occurs when Transaction A reads data written by Transaction B that has not yet committed. If B then rolls back, A has read data that never existed. Read Committed isolation prevents dirty reads by allowing reads only of committed data. Read Uncommitted allows dirty reads and is almost never used in production.
 
-**What is the difference between a non-repeatable read and a phantom read?**
+**Q: What is the difference between a non-repeatable read and a phantom read?**
 A non-repeatable read affects a single existing row: T1 reads row R, T2 updates and commits R, T1 reads R again and sees a different value. A phantom read affects a range query result set: T1 runs a range query, T2 inserts a new row that falls in the range and commits, T1 runs the same range query and sees a new row that wasn't there before. Repeatable Read prevents non-repeatable reads but (in the SQL standard) not phantoms; Serializable prevents both.
 
-**What is a lost update and how do you prevent it?**
+**Q: What is a lost update and how do you prevent it?**
 A lost update occurs when two transactions read the same value, each modifies it in application code, and the second COMMIT overwrites the first's change. Prevention options: (1) atomic SQL expressions (`UPDATE t SET x = x + 1`), (2) `SELECT ... FOR UPDATE` to lock the row before reading, (3) optimistic concurrency control with a version/timestamp column checked in the UPDATE WHERE clause, (4) Serializable isolation with automatic conflict detection.
 
-**What is MVCC and why does PostgreSQL use it instead of read locks?**
+**Q: What is MVCC and why does PostgreSQL use it instead of read locks?**
 MVCC (Multi-Version Concurrency Control) keeps multiple versions of each row, one per committed transaction. Readers see a snapshot consistent with their transaction's start time; they never block writers and writers never block readers. This enables high concurrency on read-heavy workloads. PostgreSQL implements this via a hidden `xmin`/`xmax` column on every tuple. The cost is storage bloat (dead tuples) that must be reclaimed by VACUUM. See [../../database/database_fundamentals](../../database/database_fundamentals/) for full MVCC internals.
 
-**How tall is a B+Tree index on 10 million rows, and how many I/Os does a lookup take?**
+**Q: How tall is a B+Tree index on 10 million rows, and how many I/Os does a lookup take?**
 With fanout = 100 (PostgreSQL default 8 KB page), height = ceil(log_100(10,000,000)) = ceil(3.5) = 4. A single-row lookup traverses 4 levels = 4 page reads in the worst case. In practice the root and upper internal nodes are almost always in the buffer pool (hot pages), so effective I/Os are often 1–2. InnoDB with 16 KB pages has fanout ~200, so height is also 4 for 10 M rows.
 
-**What is the difference between ACID and BASE?**
+**Q: What is the difference between ACID and BASE?**
 ACID is a set of guarantees (Atomicity, Consistency, Isolation, Durability) for transactions, typically on single-node or synchronously replicated databases. BASE (Basically Available, Soft State, Eventually Consistent) is the alternative contract for distributed systems that prioritise availability and partition tolerance over strict consistency. ACID ensures every read sees the last committed write; BASE accepts that reads may return stale data for a bounded window. The choice is determined by the CAP theorem tradeoff at design time, not a runtime toggle.
 
-**What are the three normalisation forms, and what anomaly does each prevent?**
+**Q: What are the three normalisation forms, and what anomaly does each prevent?**
 1NF: atomic column values; prevents repeating groups and multi-valued cells. 2NF (requires composite PK): every non-key column depends on the full primary key; prevents partial dependencies (where a column depends on only part of a composite key). 3NF: no transitive dependencies (no non-key column determines another non-key column); prevents update anomalies where changing one derived fact requires updating multiple rows.
 
-**What is the Write-Ahead Log (WAL) and how does it provide durability?**
+**Q: What is the Write-Ahead Log (WAL) and how does it provide durability?**
 The WAL is a sequential append-only log on disk that records the intent of every database change before the change is applied to the data file. On commit, the WAL record is fsynced to disk; only then is the acknowledgement returned to the client. If the server crashes, recovery replays WAL records from the last checkpoint to reconstruct all committed changes and roll back uncommitted ones. Sequential WAL writes (~0.1–1 ms on SSD) are far faster than random heap file writes (~100–500 µs per page on NVMe), so WAL improves both durability and throughput.
 
-**What is two-phase commit (2PC) and what is its main weakness?**
+**Q: What is two-phase commit (2PC) and what is its main weakness?**
 2PC is a distributed transaction protocol. Phase 1 (Prepare): coordinator asks all participants if they can commit; each participant locks its resources and writes a prepare record to its WAL. Phase 2 (Commit): if all reply YES, coordinator writes a commit record and tells all to commit. The main weakness is that 2PC is a blocking protocol: if the coordinator crashes after sending Prepare but before sending Commit, participants hold locks indefinitely waiting for the coordinator to recover. This can cause prolonged blocking in distributed systems, which is why SAGA patterns and idempotent compensation are preferred for long-running distributed transactions.
 
-**Why does PostgreSQL default to Read Committed rather than Serializable?**
+**Q: Why does PostgreSQL default to Read Committed rather than Serializable?**
 Serializable isolation (via Serializable Snapshot Isolation in PostgreSQL) requires tracking read sets and detecting conflicts, which causes transactions to abort and retry under contention. For most OLTP workloads, Read Committed provides enough safety with significantly higher throughput because readers never block writers (MVCC), and write-write conflicts still abort one transaction. Serializable is recommended for financial ledgers, inventory allocation, or any use case where phantom reads would cause correctness violations.
 
-**What is the difference between a clustered index and a secondary index?**
+**Q: What is the difference between a clustered index and a secondary index?**
 A clustered index (InnoDB: the primary key index) stores the actual row data in the leaf nodes; the table IS the index. There can be only one clustered index per table. A secondary index stores (secondary key, primary key) in the leaf nodes; to fetch the full row, InnoDB performs a second lookup in the clustered index (bookmark lookup). PostgreSQL uses heap tables for all data and the primary key index is just another index; its "index-only scan" avoids the second lookup when all needed columns are in the index. See [../../database/indexing_deep_dive](../../database/indexing_deep_dive/).
 
-**How do you detect and resolve a deadlock in a relational database?**
+**Q: How do you detect and resolve a deadlock in a relational database?**
 A deadlock occurs when T1 holds lock A and waits for lock B, while T2 holds lock B and waits for lock A — a cycle. Databases run a background deadlock detector (PostgreSQL: cycle detection in the lock graph every `deadlock_timeout` ms, default 1 s). When a cycle is detected, the database aborts the transaction with the lowest cost (fewest locks held, least work done). The application must catch the deadlock error (PostgreSQL: SQLSTATE 40P01) and retry the transaction. Prevention strategies: always acquire locks in a consistent global order; keep transactions short; use SELECT FOR UPDATE SKIP LOCKED for queue patterns.
 
-**What is the buffer pool and why is its hit ratio the most important database performance metric?**
+**Q: What is the buffer pool and why is its hit ratio the most important database performance metric?**
 The buffer pool (PostgreSQL: shared_buffers; InnoDB: innodb_buffer_pool_size) is the in-memory cache of database pages. A cache hit serves a page from RAM (~100 ns); a cache miss fetches from SSD (~100 µs) — a 1000× difference. A 95% hit rate with 4-level B+Tree lookup results in ~0.2 µs expected I/O latency vs. ~400 µs all-miss. PostgreSQL recommends shared_buffers = 25–40% of RAM; InnoDB buffer pool = 70–80% of RAM. Monitor with `pg_stat_bgwriter` (PostgreSQL) or `SHOW ENGINE INNODB STATUS` (MySQL).
 
-**What happens to uncommitted data during a crash, and how does the database ensure correctness?**
+**Q: What happens to uncommitted data during a crash, and how does the database ensure correctness?**
 The WAL records both committed and uncommitted changes. On crash recovery, the database replays all WAL records from the last checkpoint (redo pass) to reconstruct the state up to the crash point. It then scans for transactions that had not committed at the time of crash and rolls them back using the undo log (or MVCC undo version chain). This two-pass approach (redo + undo) guarantees that committed transactions are fully applied and uncommitted transactions are fully removed.
 
-**What is a phantom read in the context of an inventory system, and how do you prevent it?**
+**Q: What is a phantom read in the context of an inventory system, and how do you prevent it?**
 In a ticket booking system, T1 queries `SELECT COUNT(*) FROM tickets WHERE status='available'` and gets 1. T2 runs the same query, also gets 1, and both decide to book. T1 inserts a booking and updates the ticket status. T2 also inserts a booking — the event is now double-booked. This is a phantom insert scenario. Prevention: (1) Serializable isolation detects the conflict and aborts T2; (2) `SELECT ... FOR UPDATE` on the ticket row makes T2 block until T1 commits; (3) a UNIQUE constraint or CHECK on available count turns the second insert into a constraint violation.
 
-**What is the cost of an fsync, and why does it matter for database commit latency?**
+**Q: What is the cost of an fsync, and why does it matter for database commit latency?**
 fsync forces the OS to write all dirty pages in the file's page cache to durable storage, bypassing the OS write cache. On NVMe SSD: ~0.5–1 ms. On SATA SSD: ~1–5 ms. On HDD: ~5–20 ms. PostgreSQL calls fsync on the WAL before returning COMMIT to the client. With `synchronous_commit = on` (default), commit latency is bounded by fsync latency. With `synchronous_commit = off`, commits are acknowledged before fsync, reducing latency to ~0.1 ms but risking loss of the last few hundred milliseconds of committed data on crash.
 
 ---

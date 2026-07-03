@@ -346,55 +346,55 @@ locks, fencing tokens, membership, and ordering for everyone else.
 
 ## Interview Questions
 
-**What is linearizability, in one precise sentence, and why is it called a recency guarantee?**
+**Q: What is linearizability, in one precise sentence, and why is it called a recency guarantee?**
 Linearizability means the system behaves as if there were a single copy of the data on which every operation is atomic and instantaneous, so once a write completes, every subsequent read returns that value or a later one. It's called a recency guarantee because it forbids stale reads: a read is guaranteed to see the most recent committed value in real-time order, with the data appearing to switch from old to new at one instant that all clients agree on.
 
-**How does linearizability differ from serializability?**
+**Q: How does linearizability differ from serializability?**
 Serializability is an isolation property about *transactions* (which may touch multiple objects): it guarantees the outcome is equivalent to *some* serial execution of those transactions, but says nothing about real-time recency. Linearizability is a recency property about individual *single-object* reads and writes: it guarantees each sees the latest value in real-time order, but doesn't bundle multiple operations into a transaction. A system can provide both (strict serializability), but they answer different questions — "did transactions appear to run one at a time?" versus "did this read see the freshest value?".
 
-**State the CAP theorem precisely and explain why it's often misused.**
+**Q: State the CAP theorem precisely and explain why it's often misused.**
 CAP states that when a network partition occurs, a system must choose between linearizable consistency and availability: a consistent (CP) system rejects requests on the minority side to avoid stale data, while an available (AP) system keeps serving but may return stale or conflicting data. It's misused because people read it as "pick two of three" all the time, but it only concerns linearizability versus *total* availability, and only *during* a partition — it says nothing about normal operation, other consistency models, or the latency cost, which is why PACELC extends it.
 
-**What does PACELC add to CAP?**
+**Q: What does PACELC add to CAP?**
 PACELC captures that the tradeoff isn't only about partitions: *if* there's a Partition, you trade Availability against Consistency (the CAP part), but *Else* (in normal operation) you still trade Latency against Consistency. The key insight is that linearizability is inherently slow even when nothing is broken, because every operation must coordinate with a majority of nodes over the network, so the round-trip latency is unavoidable. Many systems give up linearizability purely for speed, not just for partition-time availability.
 
-**Why are leaderless quorum reads/writes (w + r > n) not linearizable?**
+**Q: Why are leaderless quorum reads/writes (w + r > n) not linearizable?**
 Because the quorum overlap guarantees a read *intersects* a recent write's replicas, but it doesn't guarantee real-time recency: concurrent reads and writes can interleave so two reads happening at nearly the same time see different values (one new, one old), last-write-wins can discard the genuinely latest write due to clock skew, and variable network delays mean a read might reach replicas before a write has propagated to its quorum. So quorums give strong-ish freshness but violate the strict recency and single-order requirements of linearizability.
 
-**What is causality, and why is causal consistency often preferable to linearizability?**
+**Q: What is causality, and why is causal consistency often preferable to linearizability?**
 Causality is a *partial* order: it requires that causally related events keep their order (the question before the answer, a row created before it's updated) while leaving truly concurrent, unrelated events unordered. Causal consistency is preferable when you don't need full recency because it's the strongest model achievable *without* the coordination cost of linearizability and *without* becoming unavailable during a network partition — you can preserve cause→effect using cheap logical clocks while still serving requests on both sides of a partition.
 
-**What are Lamport timestamps, and what is their key limitation?**
+**Q: What are Lamport timestamps, and what is their key limitation?**
 A Lamport timestamp is a pair (counter, node-id): each node keeps a counter it increments per operation and bumps to at least any larger value it observes, with the node-id breaking ties, producing a total order consistent with causality. Their key limitation is that they only establish the order *after the fact*, once all operations are collected — they can't tell you *in the moment* whether an operation is, say, the first to claim a username, because a smaller-numbered operation might still be in flight and arrive later. For real-time decisions you need total order broadcast.
 
-**What is total order broadcast, and why is it so important?**
+**Q: What is total order broadcast, and why is it so important?**
 Total order broadcast (atomic broadcast) is a protocol that delivers messages to all nodes reliably (none lost) and in exactly the same order on every node. It's important because it directly implements a replicated state machine — if every replica applies the same operations in the same order, they all stay identical — which is the foundation of consensus-based replication and single-leader logs. Critically, it's *equivalent* to consensus and to a linearizable compare-and-set register, so solving any one solves the others.
 
-**Define the consensus problem and its four properties.**
+**Q: Define the consensus problem and its four properties.**
 Consensus is getting several nodes to agree on a single value. Its properties are: uniform agreement (no two nodes decide differently), integrity (no node decides more than once), validity (the decided value was actually proposed by some node, ruling out trivial constant answers), and termination (every node that doesn't crash eventually decides — the liveness property). Termination is what makes consensus hard and is why it requires a majority of nodes to be available to make progress.
 
-**What is the FLP result, and why doesn't it stop us from building consensus systems?**
+**Q: What is the FLP result, and why doesn't it stop us from building consensus systems?**
 The FLP result proves that consensus is impossible to guarantee in a *purely asynchronous* system (no timing assumptions, no clocks) if even a single node may fail, because you can't distinguish a crashed node from an infinitely slow one. It doesn't stop real systems because real networks are *partially synchronous* — usually timely — so algorithms can use timeouts (and sometimes randomness) to make progress in practice, sidestepping the impossibility while still guaranteeing safety even when the timing assumptions are temporarily violated.
 
-**How does two-phase commit work, and what is its fatal flaw?**
+**Q: How does two-phase commit work, and what is its fatal flaw?**
 In phase one (prepare), a coordinator asks all participants if they can commit; each writes the transaction durably and votes yes or no, where a "yes" is an irrevocable promise it can no longer abort on its own. In phase two, if all voted yes the coordinator logs and broadcasts "commit" (the point of no return); if any voted no it broadcasts "abort." The fatal flaw is that if the coordinator crashes after participants vote yes but before broadcasting the decision, those participants are stuck "in doubt" — they've promised to commit but don't know whether to — so they block, holding locks, until the coordinator recovers.
 
-**Why is two-phase commit called a blocking protocol, and how does fault-tolerant consensus avoid that?**
+**Q: Why is two-phase commit called a blocking protocol, and how does fault-tolerant consensus avoid that?**
 2PC blocks because it requires *all* participants to act and gives the coordinator sole authority over the decision: any single failure (especially the coordinator's) during the in-doubt window freezes participants indefinitely while they hold locks. Fault-tolerant consensus algorithms (Paxos, Raft, Zab) avoid this by deciding based on a *majority* rather than unanimity, and by being able to elect a new leader: a minority failure — including the current leader's — doesn't halt the group, because the surviving majority can continue and a new leader, identified by a higher epoch number, takes over safely.
 
-**What role do epoch/term/ballot numbers play in consensus algorithms?**
+**Q: What role do epoch/term/ballot numbers play in consensus algorithms?**
 They are monotonically increasing numbers identifying each leadership generation, functioning like fencing tokens. Within a single epoch there's at most one leader, and a value is decided only if a majority votes for it in that epoch; when a leader is suspected dead, a new election produces a *higher* epoch number. Because quorums from different epochs overlap, a new leader is guaranteed to learn of any value an older leader might have committed, and proposals tagged with stale (lower) epoch numbers are rejected — preventing a deposed leader from causing a conflicting decision (split brain).
 
-**What problems are equivalent to consensus?**
+**Q: What problems are equivalent to consensus?**
 Total order broadcast, a linearizable compare-and-set (or atomic increment) register, leader election, atomic commit, and uniqueness constraints all reduce to consensus — you can build each from the others. This equivalence is a central insight of the chapter: a wide range of seemingly different distributed-systems problems are the *same* underlying problem, which is why a single well-built consensus implementation (packaged as ZooKeeper or etcd) can serve so many use cases like locks, leader election, and membership.
 
-**What does ZooKeeper (or etcd) provide, and why use it instead of rolling your own?**
+**Q: What does ZooKeeper (or etcd) provide, and why use it instead of rolling your own?**
 ZooKeeper/etcd expose a small, fault-tolerant, *linearizable* key-value store built on a consensus protocol, offering linearizable atomic operations (compare-and-set for locks and leader election, with monotonically increasing version numbers usable as fencing tokens), total ordering of operations, failure detection via ephemeral nodes tied to client sessions (locks auto-release when a client dies), and watches for change notifications. You use it instead of rolling your own because consensus is extremely easy to get subtly wrong — hand-built leader election and locking routinely produce split-brain or lost decisions — so you delegate the hardest part to a small, battle-tested core.
 
-**Give an example of a cross-channel timing dependency that requires linearizability.**
+**Q: Give an example of a cross-channel timing dependency that requires linearizability.**
 A media service writes an uploaded full-size image to blob storage and then enqueues a "generate thumbnail" message referencing it. If the message-processing worker fetches the image before the write has propagated to the replica it reads from, it sees a missing or stale image and produces a wrong or failed thumbnail. The two communication channels — the message queue and the storage system — together create a recency requirement that only a linearizable read of the storage (or carrying the image data in the message, or waiting for replication) can satisfy.
 
-**Why must a consensus system have a majority alive, and what happens during a partition that loses the majority?**
+**Q: Why must a consensus system have a majority alive, and what happens during a partition that loses the majority?**
 A majority is required because overlapping quorums are how the protocol guarantees that any two decisions are consistent and that a new leader learns prior commitments — without a majority, two disjoint groups could each "decide" and diverge. During a partition that isolates the majority, the consensus group deliberately *halts* progress on the minority side (and even the majority side may pause briefly during re-election), preserving safety at the cost of liveness; it will not let a minority proceed, because doing so would risk split-brain. This is why such clusters are sized as odd numbers (3, 5) so a majority survives expected failures.
 
 ---

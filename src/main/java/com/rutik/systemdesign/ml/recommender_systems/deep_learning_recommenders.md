@@ -635,7 +635,7 @@ When using in-batch negatives, popular items appear as negatives for many users 
 **Q: How would you design a two-tower model to handle new items (item cold start)?**
 Design the item tower to operate purely on content features — no item ID embedding (or use it only as a residual when available). The item tower takes: category embedding, text embedding (from pre-trained language model), numerical features (price, rating). At serving time, new items can immediately receive a vector from the content-only item tower without needing interaction history. As interactions accumulate, a fine-tuning step or online update adds the item ID embedding as a correction term. This is the "content-based initialization → collaborative refinement" pattern used at platforms with high item turnover (news, e-commerce).
 
-**Why does a two-tower model cap accuracy compared to a single-tower cross-attention ranker?**
+**Q: Why does a two-tower model cap accuracy compared to a single-tower cross-attention ranker?**
 The two towers never interact until the final dot product, so the model cannot learn fine-grained user-item feature crosses that a cross-attention ranker captures. This "late interaction" is exactly the property that makes item vectors precomputable and ANN-searchable, but it forfeits expressiveness — the score is just a dot product of two independently computed vectors. That is why production stacks use two-tower for cheap high-recall retrieval (top-500) and then a heavier cross-feature ranker (Wide & Deep, DLRM) to re-score those candidates for the final ordering.
 
 ---

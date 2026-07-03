@@ -656,49 +656,49 @@ spring:
 
 ## 12. Interview Questions with Answers
 
-**What is Spring Cloud Config Server and what problem does it solve?**
+**Q: What is Spring Cloud Config Server and what problem does it solve?**
 Spring Cloud Config Server is a centralized configuration service that externalizes application configuration from the artifact. It solves configuration drift between environments: instead of each microservice maintaining its own `application.yml` baked into the Docker image, all services fetch their configuration from a single versioned source (typically a Git repository) at startup. Changes to configuration are auditable, reviewable via PRs, and can be applied at runtime without redeployment using `@RefreshScope`.
 
-**How does a Config Client fetch configuration in Spring Boot 3.x?**
+**Q: How does a Config Client fetch configuration in Spring Boot 3.x?**
 In Boot 3.x, the client declares `spring.config.import=configserver:http://config-server:8888` in `application.yml`. During the `ApplicationContext` startup, Spring's `ConfigDataLocationResolver` sees the `configserver:` import, connects to the Config Server, and fetches properties for the current `spring.application.name` and active profiles. These remote properties are merged into the `Environment` with higher priority than local `application.yml`. In Boot 2.x, this was done via a separate `bootstrap.yml` loaded in a bootstrap context before the main context.
 
-**What is the difference between bootstrap context and spring.config.import?**
+**Q: What is the difference between bootstrap context and spring.config.import?**
 Bootstrap context (Boot 2.x) is a parent `ApplicationContext` that loads before the main context, specifically to resolve configuration from external sources. It requires a separate `bootstrap.yml` and the `spring-cloud-starter-bootstrap` dependency. `spring.config.import` (Boot 3.x) achieves the same goal in a single phase without a separate context: Spring's `ConfigData` infrastructure processes import declarations during the main context startup. The new approach is simpler (one config file), but the behavior on failure differs — `optional:configserver:` continues without the remote config, while the required form (default) fails the startup.
 
-**How does @RefreshScope work and what beans should NOT use it?**
+**Q: How does @RefreshScope work and what beans should NOT use it?**
 `@RefreshScope` marks a bean as refresh-scoped. Spring wraps it in a proxy. When a refresh event is triggered (via `/actuator/refresh` or Spring Cloud Bus), the proxy destroys the underlying bean instance and re-creates it on the next method call, re-injecting all `@Value` fields and `@ConfigurationProperties` with current Environment values. Beans that should NOT use `@RefreshScope` include `DataSource` (re-creating destroys the connection pool and kills active transactions), `EntityManagerFactory`, `PlatformTransactionManager`, and any infrastructure beans whose lifecycle is tied to expensive resources. Apply `@RefreshScope` only to lightweight configuration holders and feature-flag beans.
 
-**How does Spring Cloud Bus work to broadcast configuration refresh?**
+**Q: How does Spring Cloud Bus work to broadcast configuration refresh?**
 Spring Cloud Bus connects all service instances to a shared message broker topic (Kafka or RabbitMQ). When `/actuator/busrefresh` is called on any instance, that instance publishes a `RefreshRemoteApplicationEvent` to the bus topic. Every instance subscribed to the topic receives the event, calls its local `ContextRefresher`, and re-creates all `@RefreshScope` beans. This avoids calling `/actuator/refresh` on every pod individually — a single HTTP call triggers a coordinated refresh across the entire cluster. The destination can be scoped: `/actuator/busrefresh/order-service:**` only refreshes `order-service` instances.
 
-**How do you encrypt sensitive properties in the Config Server?**
+**Q: How do you encrypt sensitive properties in the Config Server?**
 The Config Server supports symmetric (AES) and asymmetric (RSA) encryption. Configure `encrypt.key` for symmetric or a JKS keystore for asymmetric. Call `POST /encrypt` with the plaintext value; the server returns the ciphertext. Store it in the config repo as `'{cipher}<ciphertext>'`. When a Config Client requests properties, the server (or client, depending on configuration) decrypts `{cipher}` prefixed values before delivery. The private key never leaves the Config Server. For production, RSA asymmetric encryption is preferred: the public key can be distributed to Config Clients for client-side decryption.
 
-**What is the priority order of configuration sources in a Spring Cloud Config client?**
+**Q: What is the priority order of configuration sources in a Spring Cloud Config client?**
 From highest to lowest: (1) Config Server remote properties, (2) OS environment variables, (3) JVM system properties / command-line args, (4) `application-{profile}.yml` local to the JAR, (5) `application.yml` local to the JAR, (6) `@PropertySource` annotations, (7) default values. The Config Server properties intentionally override local files, which is the mechanism for enforcing environment-specific values centrally.
 
-**How does Vault integration work with Config Server for dynamic secrets?**
+**Q: How does Vault integration work with Config Server for dynamic secrets?**
 When the Vault backend is configured, Config Server connects to Vault using an authentication token (or AppRole, Kubernetes auth, etc.) and fetches secrets from the configured paths. For dynamic secrets (e.g., database credentials via Vault's database secret engine), Vault issues short-lived credentials with a lease TTL. Config Server holds a lease and renews it before expiry. When credentials are rotated (lease expires and a new lease is created), the Config Server can trigger a refresh event to push new credentials to clients. This creates a fully automated password rotation pipeline without any manual steps.
 
-**What happens if the Config Server is unavailable when a microservice starts?**
+**Q: What happens if the Config Server is unavailable when a microservice starts?**
 If `spring.cloud.config.fail-fast=true` (recommended), the service throws an exception during startup and does not proceed. Combined with retry configuration (`spring.cloud.config.retry.*`), the client retries with exponential backoff for a configurable number of attempts before failing. If `fail-fast=false` (or `optional:configserver:` import), the service starts with local defaults or no externalized config — which can lead to running in a misconfigured state silently. In production, `fail-fast=true` with retry is the correct setting because it is better to fail loudly than to run silently misconfigured.
 
-**How would you make the Config Server itself highly available?**
+**Q: How would you make the Config Server itself highly available?**
 Deploy multiple Config Server instances behind a load balancer. Each instance independently clones the Git repository to a local working copy (configure a unique `basedir` per instance or use a shared filesystem). Config Server is stateless with respect to client connections — any instance can serve any client. For Git backend, the main concern is Git clone/pull latency; configure `clone-on-start: true` and an appropriate timeout. Register Config Server with a service registry (Eureka) so clients can discover it via load-balanced URL (`http://config-server/`) rather than a hardcoded IP.
 
-**What is the `spring.cloud.config.label` property and how does it map to Git branches/tags?**
+**Q: What is the `spring.cloud.config.label` property and how does it map to Git branches/tags?**
 `spring.cloud.config.label` specifies the Git branch, tag, or commit hash that the Config Server uses when cloning the repository. By default it is the backend's default branch (usually `main`). In a multi-environment setup, point different profiles to different branches: `dev` → `develop`, `prod` → `main`, a hotfix to a release tag. Clients set `spring.cloud.config.label=main` or the value can be embedded in the server configuration as `spring.cloud.config.server.git.default-label=main`. Using labels for environment isolation avoids the need for separate Config Server instances per environment — one server, multiple branches.
 
-**What are the risks of using `@RefreshScope` on beans that hold expensive resources, and how do you avoid in-production outages?**
+**Q: What are the risks of using `@RefreshScope` on beans that hold expensive resources, and how do you avoid in-production outages?**
 When refresh is triggered, `@RefreshScope` destroys the underlying bean instance and marks it for re-creation on next access. For `DataSource`, this means: (1) all current HikariCP connections are destroyed mid-flight, causing `Connection is closed` for in-flight requests; (2) the new `DataSource` creates a fresh pool, causing a connection-acquisition burst to the database; (3) any thread holding an open `Connection` gets `Connection is closed` and throws. Avoid by never applying `@RefreshScope` to `DataSource`, `EntityManagerFactory`, `PlatformTransactionManager`, or Kafka consumers. For database credential rotation, use Vault dynamic secrets with credential renewal rather than Config Server refresh. Apply `@RefreshScope` only to thin configuration-holder beans (feature flags, rate-limit thresholds, external URL strings) where re-creation is instantaneous and safe.
 
-**How do you test configuration loading order and property overriding in Config Client integration tests?**
+**Q: How do you test configuration loading order and property overriding in Config Client integration tests?**
 Use `@SpringBootTest` with `spring.config.import=optional:configserver:` to make the server optional for tests, then provide test properties via `@TestPropertySource` or `application-test.yml`. To test against a real Config Server in CI: use `@SpringBootTest` with Testcontainers to spin up a Config Server container, or use Wiremock to mock the Config Server's HTTP endpoints and return controlled JSON responses. For unit testing `@ConfigurationProperties` classes independently of the server: use `ApplicationContextRunner.withPropertyValues("prefix.key=value")` to test binding without any HTTP call. Verify `@RefreshScope` behaviour with `ContextRefresher.refresh()` called programmatically in the test.
 
-**What is the native profile in Config Server and how does it differ from the Git backend?**
+**Q: What is the native profile in Config Server and how does it differ from the Git backend?**
 The native profile (`spring.profiles.active=native`) serves configuration from the local file system or classpath rather than a Git repository. Files are searched in `search-locations` (default: `classpath:/`, `classpath:/config/`, `file:./`, `file:./config/`). This is primarily for: (1) **Local development** — no need for a running Git server. (2) **Kubernetes ConfigMap integration** — mount a `ConfigMap` as a file at a known path, point Config Server's `search-locations` to that path, and the native profile serves those YAML files. Each file follows the naming convention `{application}-{profile}.yml`. The native backend does not support encryption, history, or audit trail — use Git for production.
 
-**How does Spring Cloud Config handle configuration for multiple applications sharing a common base?**
+**Q: How does Spring Cloud Config handle configuration for multiple applications sharing a common base?**
 The Config Server loads properties by combining three application names in order: the specific application's files, then `application-{profile}.{yml|properties}`, then `application.{yml|properties}`. Files named `application.*` (without a specific app name) are shared defaults loaded for all clients. A service named `order-service` requesting the `prod` profile gets: `application.yml` (shared base) → `application-prod.yml` (shared prod override) → `order-service.yml` (service-specific base) → `order-service-prod.yml` (service-specific prod override). Later files in the sequence override earlier ones. Use this layering to DRY configuration: common DB pool sizes in `application.yml`, environment-specific database URLs in `application-{env}.yml`, service-specific tuning in `{service}.yml`.
 
 ---

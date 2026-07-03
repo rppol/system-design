@@ -373,7 +373,7 @@ error.
 
 ## 11. Interview Q&A
 
-**Why a max-heap for the smaller half and a min-heap for the larger half — why not the other way around?**
+**Q: Why a max-heap for the smaller half and a min-heap for the larger half — why not the other way around?**
 The median sits at the *boundary* between the two halves. To read the
 boundary in O(1), you need the **largest** element of the smaller half
 (closest to the boundary from below) and the **smallest** element of the
@@ -382,7 +382,7 @@ the root in O(1); a min-heap exposes its smallest. Swapping them would put
 the *farthest-from-the-median* elements at the roots, useless for computing
 the median.
 
-**How does the size-balance invariant guarantee O(1) median lookup?**
+**Q: How does the size-balance invariant guarantee O(1) median lookup?**
 The invariant `len(left) == len(right)` or `len(left) == len(right) + 1`
 means there are only two cases: equal sizes (median = average of both roots)
 or `left` has exactly one more element (median = `left`'s root, the
@@ -390,7 +390,7 @@ or `left` has exactly one more element (median = `left`'s root, the
 two roots — no traversal needed. The `O(log n)` rebalancing on every insert
 is what *maintains* this invariant so the O(1) read remains valid.
 
-**In the BROKEN→FIX trace, why does rebalancing (which only depends on sizes) fail to fix a values-based invariant violation?**
+**Q: In the BROKEN→FIX trace, why does rebalancing (which only depends on sizes) fail to fix a values-based invariant violation?**
 Rebalancing moves elements between heaps based purely on **counts**
 (`len(left)` vs `len(right)`) to restore the size invariant — it has no
 mechanism to verify `max(left) <= min(right)`. If the *initial routing*
@@ -401,7 +401,7 @@ the routing comparison (`num <= -self.left[0]`) must be correct independent
 of rebalancing — rebalancing is a size-correction mechanism, not a
 value-correction mechanism.
 
-**Sliding Window Median — why can't you just call a `heap.remove(x)` when an element leaves the window?**
+**Q: Sliding Window Median — why can't you just call a `heap.remove(x)` when an element leaves the window?**
 Python's `heapq` (and most binary heap implementations) only support O(1)
 peek and O(log n) pop **of the root** — removing an *arbitrary* element
 requires an O(n) linear scan to find it, then O(log n) to re-heapify, making
@@ -410,7 +410,7 @@ each removal O(n) overall. **Lazy deletion** avoids this: mark the element as
 when it happens to surface at the root during a future operation — at which
 point popping the root is back to O(log n).
 
-**IPO/Maximize Capital — how is "two heaps" used differently here than in median-finding?**
+**Q: IPO/Maximize Capital — how is "two heaps" used differently here than in median-finding?**
 In median-finding, the two heaps represent a **size-balanced split of one
 sorted sequence** (smaller half / larger half), and elements move between
 them to *maintain* that balance. In IPO, the two heaps represent **two
@@ -420,7 +420,7 @@ max-heap). Items move *permanently* from the first to the second as your
 capital grows; there's no "balance" invariant, just a one-way migration
 driven by a threshold.
 
-**What's the time/space complexity of `add_num` and `find_median`, and why the asymmetry?**
+**Q: What's the time/space complexity of `add_num` and `find_median`, and why the asymmetry?**
 `add_num` is `O(log n)`: one `heappush` (`O(log n)`) plus at most one
 rebalance (`heappop` + `heappush`, also `O(log n)`). `find_median` is `O(1)`:
 it only reads `heap[0]` from each heap, which is a plain array index, not a
@@ -428,7 +428,7 @@ heap operation. The asymmetry is the entire point of the pattern — you pay
 `O(log n)` *once per insertion* so that *every* median query afterward is
 free, which is far better than re-sorting (`O(n log n)`) on every query.
 
-**Why is Median of Two Sorted Arrays not typically solved with two heaps in the optimal solution?**
+**Q: Why is Median of Two Sorted Arrays not typically solved with two heaps in the optimal solution?**
 Both input arrays are *already fully sorted and static* — there's no
 streaming. Pouring `m + n` elements into two heaps costs `O((m+n) log(m+n))`,
 which is **worse** than just merging the two arrays directly (`O(m+n)`), and
@@ -437,21 +437,21 @@ approach (see [modified_binary_search](modified_binary_search.md)). Two heaps
 shine when data *arrives incrementally*; for static, pre-sorted data, a
 one-shot algorithm tailored to that structure wins.
 
-**How would you extend this to track the running p-th percentile instead of the median?**
+**Q: How would you extend this to track the running p-th percentile instead of the median?**
 Change the target size ratio: instead of keeping `left` and `right` within
 one element of equal size, keep `len(left) ~= p% * n` and
 `len(right) ~= (100-p)% * n`. The rebalancing logic is structurally identical
 — move the boundary element between heaps whenever the ratio drifts outside
 tolerance. The median is the special case `p = 50`.
 
-**Does the algorithm still work correctly with duplicate values?**
+**Q: Does the algorithm still work correctly with duplicate values?**
 Yes — heaps handle duplicates natively (multiple entries with the same value
 are valid), and the comparison `num <= -self.left[0]` uses `<=`, so a
 duplicate of the current boundary value is deterministically routed to
 `left` without any special-casing. The invariant `max(left) <= min(right)`
 permits `max(left) == min(right)` when duplicates straddle the boundary.
 
-**Single-Threaded CPU and Process Tasks Using Servers — how do these "two heap" problems differ structurally from median-finding?**
+**Q: Single-Threaded CPU and Process Tasks Using Servers — how do these "two heap" problems differ structurally from median-finding?**
 These are **discrete-event simulations**, not balanced-partition problems.
 One heap orders items by *when they become available* (arrival time, or
 server free-time); the other orders *available* items by *selection
@@ -462,7 +462,7 @@ no size-balance invariant between the two heaps — they represent
 "not yet eligible" vs. "eligible and ranked," a fundamentally different
 relationship than "smaller half / larger half."
 
-**What's the space complexity, and can it be reduced?**
+**Q: What's the space complexity, and can it be reduced?**
 `O(n)` — every inserted element lives in exactly one of the two heaps,
 forever (for the streaming median problem, you must retain all history to
 support the running median). This cannot be reduced for *exact* medians of an
@@ -471,7 +471,7 @@ P-square) trade exactness for `O(1)` or `O(log n)` space when only an
 approximate percentile is acceptable — relevant for production metrics
 systems tracking p50/p99 latencies over millions of events.
 
-**`find_median` returns a `float` even when `len(left) > len(right)` (an integer value) — is that necessary?**
+**Q: `find_median` returns a `float` even when `len(left) > len(right)` (an integer value) — is that necessary?**
 LeetCode's `MedianFinder.findMedian()` is typed to return `double`
 (Python: `float`) because the **even-size case** averages two integers and
 may produce a `.5` result. For consistency (a single return type regardless

@@ -326,14 +326,14 @@ public class EngagementService {
 
 ## Interview Discussion Points
 
-**Why Cassandra instead of PostgreSQL for feed storage?**
+**Q: Why Cassandra instead of PostgreSQL for feed storage?**
 Feed writes are 3,500 posts/second × average 500 followers = 1.75M Cassandra writes/second (fan-out on write for non-celebrities). PostgreSQL cannot handle this write throughput on a single node. Cassandra's leaderless architecture distributes writes across the cluster. The feed access pattern is a perfect match for Cassandra's data model: partition by user_id (all of a user's feed on one node), cluster by created_at DESC (natural time-ordered retrieval). The 30-day TTL is handled by Cassandra natively — no need for explicit deletion jobs. TWCS compaction efficiently drops old data windows.
 
-**How does fan-out on write vs fan-out on read work and when do you switch?**
+**Q: How does fan-out on write vs fan-out on read work and when do you switch?**
 Fan-out on write: when a user posts, write the post ID to each follower's feed partition in Cassandra immediately. Fast reads (single Cassandra query), but write amplification = N writes per post (N = follower count). For a user with 500 followers: 500 writes, manageable. For a celebrity with 10M followers: 10M writes takes 3+ hours — unacceptable. Fan-out on read: don't pre-populate followers' feeds. At read time, query the author's posts table and merge with the user's regular feed. Scales writes (1 write per post) at the cost of read complexity (N queries to celebrities' post tables, in-memory merge). Switch at the point where fan-out on write latency or cost is prohibitive (~10K followers is a common threshold).
 
-**How do you handle a user who follows 1000 celebrities?**
+**Q: How do you handle a user who follows 1000 celebrities?**
 A user following 1000 celebrities would require 1000 Cassandra reads per feed load (one per celebrity's post table). Mitigation: (1) Cap celebrity follows at 500 for feed computation (UI allows following more, but feed only shows top 500 by engagement). (2) Batch the celebrity post fetches into parallel requests (10 batches of 50, each batched as a Cassandra `IN` query). (3) Cache the merged celebrity feed in Redis per user (60s TTL) — repeat feed loads within 60s are served from cache. (4) Pre-compute celebrity feed merges asynchronously for high-engagement users, storing the result in Redis before the user requests it.
 
-**How do you design for viral posts that exceed the 30-day feed TTL?**
+**Q: How do you design for viral posts that exceed the 30-day feed TTL?**
 The 30-day TTL means posts older than 30 days disappear from feeds. For viral posts: (1) Posts are still in PostgreSQL (source of truth, no TTL). (2) If a post goes viral after 30 days, it can be promoted to trending (Redis Sorted Set has no TTL — scores just decay). (3) Users can still access the post directly via URL or profile browse. (4) The feed design intentionally shows recent content — viral old posts appear through other discovery mechanisms (trending, recommendations, direct shares).

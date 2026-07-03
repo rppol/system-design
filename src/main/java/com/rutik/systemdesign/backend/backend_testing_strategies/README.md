@@ -361,40 +361,40 @@ Do NOT use `@SpringBootTest` for unit tests — it starts the full context and t
 
 ## 12. Interview Questions with Answers
 
-**What is the testing pyramid and why does it matter?**
+**Q: What is the testing pyramid and why does it matter?**
 The testing pyramid recommends a distribution: many unit tests (70%), fewer integration tests (20%), minimal E2E tests (10%). Unit tests are fast (milliseconds), isolated, and cheap to maintain. Integration tests are slower (seconds to minutes) but verify real interactions with databases, caches, and queues. E2E tests are slowest and most brittle but confirm complete user flows. The pyramid shape ensures the test suite runs in minutes, giving fast feedback. An inverted pyramid (many E2E, few unit) results in a fragile, slow suite that developers stop running.
 
-**What is the difference between a mock and a stub?**
+**Q: What is the difference between a mock and a stub?**
 A stub provides pre-programmed responses to method calls but does not verify how it was called — it exists only to let the code under test proceed. A mock is pre-programmed with expectations and verifies at the end that specific interactions happened. In Mockito: `when(repo.findById(1)).thenReturn(order)` is stubbing behavior. `verify(emailService).sendEmail("user@example.com")` is mock verification. The distinction matters: stubs set up state, mocks verify behavior. Use stubs when you need collaborators to return specific values; use mocks when the test's correctness depends on a specific interaction occurring.
 
-**What is consumer-driven contract testing and why is it superior to integration testing against a shared environment?**
+**Q: What is consumer-driven contract testing and why is it superior to integration testing against a shared environment?**
 Consumer-driven contract testing (Pact) lets each consumer team define the exact subset of the provider's API they depend on. Consumers write tests that generate a contract file describing expected request/response pairs. The provider runs tests against all consumer contracts in CI. If a provider change would break any consumer contract, the build fails before deployment. This is superior to shared-environment integration testing because: no coordination needed for test environment availability, contracts are versioned in the Pact Broker, provider changes that break consumers are caught immediately, and tests run in parallel against mock consumers.
 
-**What is mutation testing and what does mutation score tell you?**
+**Q: What is mutation testing and what does mutation score tell you?**
 Mutation testing automatically introduces bugs (mutations) into the source code — changing `>` to `>=`, negating booleans, removing method calls — and then runs the test suite. If the suite catches the bug (a test fails), the mutant is "killed." Mutation score = killed mutants / total mutants. A score below 70% means your tests are not sensitive enough to catch real bugs. A service can have 90% line coverage with 40% mutation score if tests only assert that methods return non-null. PIT is the standard Java mutation testing tool; it's slow (can take hours for large codebases) so run it on CI nightly, not on every commit.
 
-**When should you use @SpringBootTest vs @WebMvcTest vs @DataJpaTest?**
+**Q: When should you use @SpringBootTest vs @WebMvcTest vs @DataJpaTest?**
 `@SpringBootTest` loads the entire application context including all beans, auto-configurations, and database connections. Use it for full integration tests and E2E tests but expect 10-30 second startup. `@WebMvcTest` loads only Spring MVC components: controllers, `@ControllerAdvice`, filters, security configuration, and `WebMvcConfigurer`. Service and repository beans are not created — you must `@MockBean` them. Use for testing HTTP request handling, validation, and JSON serialization. `@DataJpaTest` loads only JPA-related beans: entity manager, repositories, and an embedded or Testcontainers DB. Use for testing repository queries, entity lifecycle, and database constraints without web overhead.
 
-**What is the coordinated omission problem in performance testing?**
+**Q: What is the coordinated omission problem in performance testing?**
 When measuring response time in a load test, if the system slows down and the test tool waits for each response before sending the next request, the tool naturally reduces its request rate. This masks the actual latency tail: slow responses cause a gap, then normal-speed responses follow, making the histogram look better than it is. Real users don't wait — they keep arriving regardless of system speed. Tools like wrk2, Gatling with constant arrival rate scenarios, and k6 with `constant-arrival-rate` executor avoid this by sending requests at a fixed rate regardless of pending responses. Always verify your load test tool uses a fixed arrival rate.
 
-**How do you test asynchronous behavior (e.g., Kafka consumer processing)?**
+**Q: How do you test asynchronous behavior (e.g., Kafka consumer processing)?**
 Use Awaitility for polling assertions: `await().atMost(10, SECONDS).pollInterval(500, MILLISECONDS).until(() -> orderRepository.count() == 1)`. For Kafka consumer tests, use the embedded Kafka from `spring-kafka-test` (`@EmbeddedKafka`) or a Testcontainers Kafka container for production-fidelity. Publish a test message to the topic, then assert with Awaitility that the consumer processed it. For unit tests of consumer logic, test the `@KafkaListener` method directly without Kafka infrastructure. For verifying outbox-to-Kafka flow, use Awaitility after publishing to assert the message appeared on the Kafka topic using a test consumer.
 
-**What are the key test anti-patterns to avoid?**
+**Q: What are the key test anti-patterns to avoid?**
 (1) Testing implementation: verifying internal method call sequences rather than observable output. (2) Over-mocking: mocking so much that the test only verifies Mockito configuration, not real behavior. (3) Non-deterministic tests: `Thread.sleep()`, `new Date()`, `Math.random()` in test assertions — use `Clock` injection and `Instant.now(fixedClock)`. (4) Test interdependence: tests relying on order of execution or shared state. (5) Meaningless assertions: `assertNotNull(result)` when the result could be any non-null value. (6) Ignoring or disabling tests: `@Disabled` test methods accumulate, giving a false sense of coverage.
 
-**How do you achieve test isolation with databases in integration tests?**
+**Q: How do you achieve test isolation with databases in integration tests?**
 Three approaches: (1) `@Transactional` on test methods — Spring rolls back the transaction after each test; works well for `@DataJpaTest` but does not test rollback-related behavior. (2) `@Sql` annotation to run cleanup SQL before each test: `@Sql(scripts = "/cleanup.sql", executionPhase = BEFORE_TEST_METHOD)`. (3) Testcontainers with database-per-test-class: each test class gets a fresh schema; slower but fully isolated. For Kafka: use unique topic names per test class (include `UUID.randomUUID()` in topic name) to prevent message contamination between tests.
 
-**What is property-based testing and when should you use it?**
+**Q: What is property-based testing and when should you use it?**
 Property-based testing generates hundreds of random inputs satisfying defined constraints and verifies that invariants hold for all of them. Instead of `assertEquals(15, priceOf(10, 1.5))`, you assert `for all positive price p and tax rate t in [0, 0.5]: totalPrice(p, t) >= p`. Libraries like jqwik (Java) automatically shrink failing examples to the minimal case. Use it for: numeric calculations (pricing, discounts), data format parsing and serialization (any valid input should round-trip correctly), sorting and data structure invariants (sorted list always has first element <= last), and business rule boundaries (order total is always >= 0).
 
-**How do you test Spring Security configuration?**
+**Q: How do you test Spring Security configuration?**
 Use `@WebMvcTest` with `@WithMockUser(roles = "ADMIN")` or `@WithMockUser(username = "user1")` annotations to simulate authenticated users. For JWT-based auth, create a `SecurityMockMvcRequestPostProcessors.jwt()` post-processor: `mockMvc.perform(get("/api/admin").with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN"))))`. Test: authenticated requests to protected endpoints return 200, unauthenticated requests return 401, correctly authenticated but unauthorized requests return 403. Also test CSRF token handling for POST endpoints.
 
-**What is the difference between @Mock and @MockBean?**
+**Q: What is the difference between @Mock and @MockBean?**
 `@Mock` (Mockito) creates a mock object outside the Spring context. It works in unit tests with `@ExtendWith(MockitoExtension.class)`. The mock is injected into the class under test via `@InjectMocks`. `@MockBean` (Spring Boot Test) creates a Mockito mock and registers it as a Spring bean in the application context, replacing any existing bean of that type. Use `@MockBean` in `@WebMvcTest` and `@SpringBootTest` to replace real beans (service, repository) with mocks without loading the entire application graph. `@MockBean` causes Spring to restart its context (unless the same mock configuration is cached), so use it sparingly.
 
 ---

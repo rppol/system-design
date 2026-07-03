@@ -431,28 +431,28 @@ Do NOT set CPU limits on JVM applications unless absolutely necessary — CFS (C
 
 ## 12. Interview Questions with Answers
 
-**What is a Docker multi-stage build and why do you use it?**
+**Q: What is a Docker multi-stage build and why do you use it?**
 A multi-stage build uses multiple `FROM` instructions in a Dockerfile, each creating an intermediate image. You build the application in a JDK image (full development tools), then copy only the compiled artifacts to a JRE-only runtime image. The final image does not contain the JDK, Maven, source code, or test dependencies — only the JRE and the compiled JAR. This reduces image size from ~800MB (JDK) to ~180MB (JRE-only), reduces attack surface (no compiler/package manager in production), and speeds up image pulls. Layer caching: copy `pom.xml` and download dependencies before copying source code; the dependency layer is cached and only re-built when `pom.xml` changes.
 
-**What is the difference between maxUnavailable and maxSurge in rolling updates?**
+**Q: What is the difference between maxUnavailable and maxSurge in rolling updates?**
 `maxUnavailable` sets the maximum number of pods that can be unavailable during the rolling update. Setting it to 0 means no pod goes down until a replacement is ready and passing readiness checks — guarantees zero downtime but requires capacity for surge pods. `maxSurge` sets the maximum number of extra pods beyond the desired replica count. Setting `maxUnavailable=0, maxSurge=1` means: start a new pod (6 total), wait for it to be ready, then terminate an old pod (back to 5) — one pod at a time, always at least 5 healthy. `maxUnavailable=1, maxSurge=0` means: terminate one old pod first (4 total), then start a replacement — faster but with temporarily reduced capacity.
 
-**What is the difference between CPU requests and CPU limits in Kubernetes?**
+**Q: What is the difference between CPU requests and CPU limits in Kubernetes?**
 CPU requests are used by the scheduler to find a node with sufficient available CPU — the pod is guaranteed this amount. CPU limits are enforced by CFS (Completely Fair Scheduler) cgroups at runtime: if a container exceeds its limit within a CFS period (100ms), it is throttled until the next period. For JVM applications, GC and JIT compilation cause brief CPU spikes. With a CPU limit set too low, these spikes trigger throttling, causing latency spikes visible as high p99 latency. Best practice for latency-sensitive JVM services: set CPU requests (for scheduling fairness) but omit CPU limits. Set memory limits always (prevent unbounded growth; OOM kill is predictable and recoverable via restart).
 
-**How should you size JVM heap in a Kubernetes container?**
+**Q: How should you size JVM heap in a Kubernetes container?**
 Always use `-XX:+UseContainerSupport` (default in Java 11+) to make the JVM container-aware — it reads cgroup memory limits instead of host total RAM. Set `-XX:MaxRAMPercentage=75.0` to allocate 75% of the container's memory limit to the heap. Reserve 25% for: JVM overhead (metaspace, code cache, JIT buffers), off-heap memory (direct buffers, Netty allocations), and OS/container overhead. Example: 1GB container limit → 768MB heap, 256MB for JVM overhead. Without these flags on Java < 11 or with UseContainerSupport disabled, the JVM sees the host's 64GB RAM and tries to use 16GB for heap, causing immediate OOM kill.
 
-**What is a Pod Disruption Budget (PDB) and why is it important?**
+**Q: What is a Pod Disruption Budget (PDB) and why is it important?**
 A PDB specifies the minimum number (or percentage) of pods of a replicated application that must be available at any time. During voluntary disruptions (node drains for maintenance, cluster upgrades, rolling updates), Kubernetes respects PDBs: it will not drain a node if doing so would violate the PDB. Without a PDB, a node drain can terminate all pods of a deployment simultaneously if they all happen to be on the same node — causing a complete outage. Set `minAvailable` to at least the majority of replicas: for 5 replicas, set `minAvailable=3`. This ensures at least 3 pods are always serving traffic during any rolling operation.
 
-**When would you choose blue-green over rolling update deployment?**
+**Q: When would you choose blue-green over rolling update deployment?**
 Blue-green is preferred when: you need instant rollback capability (switch selector back in < 1 second vs rolling forward with rolling update taking minutes), you have database schema changes that are tightly coupled to the application version (both must cut over at the same time), your service cannot tolerate having two versions running simultaneously (conflicting session formats, incompatible API versions with shared state), or you are running acceptance tests against the new version in production before switching traffic. The cost is maintaining 2x the compute resources during the deployment. For most stateless services with backward-compatible changes, rolling update is simpler and equally safe.
 
-**How does HPA work and what are common pitfalls?**
+**Q: How does HPA work and what are common pitfalls?**
 HPA (Horizontal Pod Autoscaler) queries the metrics API (CPU from metrics-server, custom metrics from Prometheus Adapter or KEDA) every 15 seconds, calculates the desired replica count, and adjusts. Formula: `desiredReplicas = ceil(currentReplicas * (currentMetric / targetMetric))`. Common pitfalls: (1) flapping — CPU oscillates around the target, causing constant scale up/down; fix with `stabilizationWindowSeconds=300` for scale-down. (2) Slow reaction — by default HPA reacts in 15s intervals; for bursty traffic, set `scaleUp.stabilizationWindowSeconds=0` and high `maxSurge`. (3) Scale-down thrashing during rolling updates — temporarily inflated pod count confuses HPA; HPA should not overlap with deployment rollouts. (4) Not working with Karpenter/cluster autoscaler — HPA must add replicas before cluster autoscaler can add nodes; configure adequate pending pod time.
 
-**What is the 12-factor app methodology and which factors are most important for containerized Java services?**
+**Q: What is the 12-factor app methodology and which factors are most important for containerized Java services?**
 The 12-factor app is a methodology for building cloud-native applications. The most critical factors for containerized Java services: Factor III (Config via environment variables — no config in image; inject via Kubernetes ConfigMap/Secret), Factor VI (Processes — stateless; store session in Redis, not in-memory), Factor IX (Disposability — fast startup for rapid scaling; graceful shutdown for zero-downtime deploys), Factor X (Dev/Prod parity — use Testcontainers to have dev/test match production infrastructure), Factor XI (Logs as streams — write to stdout/stderr; let the container platform capture and ship logs). These directly affect deployment reliability, scalability, and operability.
 
 ---

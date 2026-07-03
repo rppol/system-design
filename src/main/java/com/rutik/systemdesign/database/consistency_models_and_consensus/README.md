@@ -321,49 +321,49 @@ Eventual (LWW)     | Available    | Low      | High       | Low (with clock sync
 
 ## 12. Interview Questions with Answers
 
-**What is the difference between linearizability and serializability?**
+**Q: What is the difference between linearizability and serializability?**
 Linearizability is a consistency model for single-object operations: once a write completes, all subsequent reads (from any node) must return that value or a later one, and the ordering of all operations must be consistent with real-world time. Serializability is an isolation level for multi-object transactions: concurrent transactions must produce a result equivalent to some serial execution order, but that order need not match wall-clock time. Strict serializability combines both: transactions are serializable AND the serial order is consistent with real time. Spanner and CockroachDB provide strict serializability.
 
-**Explain how Raft achieves consensus and what happens when the leader fails.**
+**Q: Explain how Raft achieves consensus and what happens when the leader fails.**
 Raft maintains a replicated log. The leader receives all writes, appends them to its log, and sends AppendEntries RPCs to followers. An entry is committed once a quorum (N/2+1) acknowledges it. When the leader fails: followers stop receiving heartbeats, their election timeouts expire (randomized 150–300ms), and one becomes a candidate. The candidate increments its term and sends RequestVote RPCs. Other nodes grant votes only if the candidate's log is at least as up-to-date as theirs. The candidate with the most up-to-date log wins, ensuring no committed entries are lost. A new leader is elected within one election timeout period (150–300ms + network RTT).
 
-**What are CRDTs and when would you use them over a strongly consistent system?**
+**Q: What are CRDTs and when would you use them over a strongly consistent system?**
 CRDTs (Conflict-Free Replicated Data Types) are data structures whose merge operation is commutative, associative, and idempotent, ensuring that any two replicas can be merged without conflicts regardless of update order. Examples: G-Counter (grow-only counter), PN-Counter (inc/dec), OR-Set (observed-remove set), LWW-Register (last-write-wins). Use CRDTs when: multiple replicas must accept writes simultaneously without coordination (multi-region active-active), network partitions are common, and the data type has a natural merge (counters, sets). Avoid when: the application requires exact agreement (bank balances, inventory counts requiring exact accuracy at all times).
 
-**What is causal consistency and how is it implemented with vector clocks?**
+**Q: What is causal consistency and how is it implemented with vector clocks?**
 Causal consistency guarantees that causally related operations are seen in the same order by all nodes. If Alice posts a comment and Bob replies, every node must see Alice's comment before Bob's reply. Causally concurrent operations (no happens-before relationship) may be seen in different orders on different nodes. Vector clocks implement causality tracking: each node maintains a vector of logical timestamps (one per node). When sending a message, a node increments its own counter and attaches the vector. The receiver updates its vector (element-wise max) and processes the message only if all causally preceding messages have been received (the sender's vector ≤ receiver's current vector).
 
-**Explain the difference between read-your-writes and monotonic reads consistency.**
+**Q: Explain the difference between read-your-writes and monotonic reads consistency.**
 Read-your-writes guarantees that a client always sees the effects of its own prior writes. If you update your profile, you will see the updated profile on your next read, even if it was replicated asynchronously. Monotonic reads guarantee that a client's reads never go backward: if you see a write at time T, you will never subsequently see a state from before T. Read-your-writes and monotonic reads are orthogonal: a system can provide one without the other. Sticky sessions (always reading from the same replica) provide monotonic reads; routing post-write reads to the primary provides read-your-writes.
 
-**What is the CAP theorem and what does "you can only choose 2 of 3" mean in practice?**
+**Q: What is the CAP theorem and what does "you can only choose 2 of 3" mean in practice?**
 CAP theorem states that a distributed system can provide at most two of: Consistency (every read returns the most recent write), Availability (every request receives a response, not an error), and Partition tolerance (the system continues to operate despite network partitions). "Partition tolerance" is not optional in real networks — partitions happen. Therefore the real choice is between Consistency and Availability during a partition: CA systems (choose consistency) reject or block writes when a partition is detected (etcd, ZooKeeper, CockroachDB); AP systems (choose availability) accept writes on both sides of a partition and reconcile later (Cassandra, DynamoDB, CouchDB). In practice: pick your consistency model based on which failure mode is more tolerable for your business.
 
-**How does eventual consistency work in Cassandra and what are its failure modes?**
+**Q: How does eventual consistency work in Cassandra and what are its failure modes?**
 Cassandra uses a tunable consistency model. Each write goes to the Snitch-determined replica nodes; the coordinator waits for `CL` responses before returning success. With `CL=ONE`, success requires only 1 replica to acknowledge — if that replica crashes and the write was not replicated, it is lost until anti-entropy reconciles. With `CL=QUORUM` (RF/2+1), a majority must acknowledge, ensuring no data loss on single-node failure. Failure modes of eventual consistency: (1) Stale reads: with CL=ONE reads and CL=ONE writes, a read may return old data if the owning replica lagged. (2) LWW conflicts: concurrent writes resolved by timestamp; clock skew can cause "future" writes to overwrite "newer" ones. (3) Tombstone accumulation: delete markers persist and must be garbage-collected by compaction.
 
-**What is the PACELC theorem and how does it extend CAP?**
+**Q: What is the PACELC theorem and how does it extend CAP?**
 PACELC extends CAP by noting that the latency-consistency tradeoff exists even in the absence of partitions. CAP only addresses the partition scenario. PACELC says: during a Partition (P), choose between Availability (A) and Consistency (C); Else (E, no partition), choose between Latency (L) and Consistency (C). Example: Cassandra is PA/EL — during partitions it chooses availability; in normal operation it sacrifices consistency for low latency. CockroachDB is PC/EC — during partitions it chooses consistency (rejects writes without quorum); in normal operation it sacrifices latency (Raft coordination) for consistency.
 
-**Explain Paxos phases and how it differs from Raft.**
+**Q: Explain Paxos phases and how it differs from Raft.**
 Paxos has two phases per decision (Classic Paxos): Phase 1 (Prepare/Promise) — the proposer sends a Prepare(n) with a ballot number n to acceptors; acceptors promise not to accept ballots < n and return the highest accepted value they know. Phase 2 (Accept/Accepted) — if a quorum promises, the proposer sends Accept(n, value) with the highest-valued promised value; acceptors accept if no higher ballot was promised. Multi-Paxos adds a leader who runs Phase 1 once and uses Phase 2 for subsequent decisions, reducing to 1 RTT per decision (same as Raft). Raft is more prescriptive: one leader, strict log ordering (no gaps), and a well-defined leader election algorithm — Raft is easier to implement correctly.
 
-**What is the split-brain problem in consensus systems and how is it prevented?**
+**Q: What is the split-brain problem in consensus systems and how is it prevented?**
 Split-brain occurs when two nodes simultaneously believe they are the leader and accept writes, causing divergent state. In Raft, this cannot happen with a correct quorum: a leader can only be elected if a quorum votes for it. If the network partitions and both partitions try to elect a leader, only the partition with N/2+1 or more nodes can elect a leader; the minority partition's candidate cannot receive a quorum of votes. Writes to the minority partition's stale leader will fail because AppendEntries responses will not form a quorum. In practice: always run an odd number of nodes (3, 5, 7) to ensure a clear majority partition exists.
 
-**What are fencing tokens in the context of distributed consensus?**
+**Q: What are fencing tokens in the context of distributed consensus?**
 A fencing token is a monotonically increasing number issued by the consensus system (e.g., etcd) when granting a lock or lease. The token is included in every write request to the protected resource (database, file system). The resource layer tracks the highest token it has seen and rejects writes with a stale (lower) token. If a lock holder pauses (GC, OS preemption) and loses its lease, the new lock holder gets a higher token. When the old holder resumes and sends writes with its stale token, the resource rejects them. Fencing tokens make distributed locks safe against process pauses, which TTL-based locks alone cannot prevent.
 
-**What is quorum and how does it enable consistent distributed operations?**
+**Q: What is quorum and how does it enable consistent distributed operations?**
 A quorum is the minimum number of nodes that must agree on an operation for it to be considered valid: N/2 + 1 for N nodes. Quorum ensures that any two quorums share at least one node (pigeonhole principle), so any two operations that both achieve quorum will have a node in common that knows about both. This prevents two conflicting values from both being "committed." In Raft: commits require N/2+1 AppendEntries acknowledgments. In Cassandra: CL=QUORUM requires ⌊RF/2⌋+1 acknowledgments. For a 5-node Raft cluster: quorum=3; the system tolerates 2 simultaneous node failures (3 nodes can still form quorum).
 
-**How do vector clocks differ from Lamport timestamps?**
+**Q: How do vector clocks differ from Lamport timestamps?**
 Lamport timestamps are a single monotonically increasing counter per node. They provide partial ordering: if A → B (A causally precedes B), then timestamp(A) < timestamp(B). But if timestamp(A) < timestamp(B), it does NOT mean A → B (concurrent events can have any timestamp relation). Vector clocks solve this: each node maintains a vector of N counters (one per node). If vector(A) ≤ vector(B) (every element of A ≤ corresponding B element), then A → B. If neither dominates, A and B are concurrent. Vector clocks detect concurrency exactly; Lamport timestamps cannot.
 
-**What is the Zab protocol and how does it relate to Paxos?**
+**Q: What is the Zab protocol and how does it relate to Paxos?**
 Zab (ZooKeeper Atomic Broadcast) is the consensus protocol underlying ZooKeeper. It is similar to Multi-Paxos but optimized for primary-backup replication: a single leader (primary) handles all writes, broadcasts them to followers, and waits for a quorum to acknowledge before committing. Zab has two phases: leader election (similar to Paxos Phase 1) and active messaging (similar to Multi-Paxos Phase 2 with the leader established). Key difference from Raft: Zab's leader election protocol is more complex and allows leaders to have gaps in their logs (unlike Raft which requires a contiguous committed log). ZooKeeper's consistency guarantee is sequential consistency (not linearizable by default, though linearizable reads can be achieved with `sync()` before read).
 
-**How does DynamoDB implement tunable consistency?**
+**Q: How does DynamoDB implement tunable consistency?**
 DynamoDB replicates each item to 3 storage nodes across 3 Availability Zones. For writes: the coordinator sends the write to all 3 nodes; a quorum of 2 must acknowledge before returning success. For reads: ConsistentRead=false (eventual) reads from any 1 node — may see data 1–2 seconds stale. ConsistentRead=true reads from 2 of 3 nodes — guarantees the most recent committed write is returned. The cost: ConsistentRead=true consumes 2× read capacity units and has slightly higher latency. DynamoDB global tables (multi-region active-active) use last-write-wins conflict resolution — there is no linearizable cross-region guarantee.
 
 ---

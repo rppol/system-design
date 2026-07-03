@@ -602,58 +602,58 @@ Critically, these combination weights are **not** learned by SGD — the true ob
 
 ## 12. Interview Questions with Answers
 
-**What is negative transfer in multi-task learning and when does it happen?**
+**Q: What is negative transfer in multi-task learning and when does it happen?**
 Negative transfer is when jointly training tasks makes one or more tasks worse than a single-task model. It happens when tasks are weakly related, have conflicting gradient directions, or differ greatly in label scale or data volume so the shared trunk is pulled toward the dominant task. The fingerprint is a persistently negative cosine similarity between per-task gradients at the shared layer. Mitigate by separating capacity (MMoE/PLE), applying gradient surgery (PCGrad), or dropping the offending task.
 
-**Why does MMoE outperform a shared-bottom model?**
+**Q: Why does MMoE outperform a shared-bottom model?**
 MMoE gives each task its own softmax gate over a shared bank of experts, so conflicting tasks can route to different experts instead of fighting over one trunk. A shared-bottom model forces every task through identical trunk weights, which produces the seesaw effect when task gradients conflict. MMoE keeps the parameter efficiency of sharing while decoupling how each task reads the shared representation. It was introduced by Ma et al. (KDD 2018) and deployed in YouTube ranking.
 
-**How does PLE improve on MMoE, and why does it resist expert collapse?**
+**Q: How does PLE improve on MMoE, and why does it resist expert collapse?**
 PLE splits experts into task-specific groups and a shared group, so each task has private capacity that only its own gradient touches. MMoE shares all experts, so under strong conflict some experts degenerate to serve only the dominant task (expert collapse) and the other task's gate sees flat outputs. PLE's private experts cannot be hijacked, and stacking extraction levels lets sharing be progressively refined. Tencent's RecSys 2020 paper showed PLE improving both conflicting tasks where MMoE improved one at the other's cost.
 
-**What is the difference between hard and soft parameter sharing?**
+**Q: What is the difference between hard and soft parameter sharing?**
 Hard sharing forces tasks to use the same trunk weights (shared-bottom, MMoE, PLE); soft sharing keeps a separate model per task and couples them with a learned mixing operator or penalty (cross-stitch, sluice). Hard sharing is more parameter-efficient and regularizes harder, but suffers more negative transfer. Soft sharing tolerates conflicting tasks better because each keeps its own parameters, at higher parameter and compute cost.
 
-**Why can't you just sum the task losses, and how do you fix the scale problem?**
+**Q: Why can't you just sum the task losses, and how do you fix the scale problem?**
 Summing raw losses lets a large-magnitude loss (a regression loss of 50) dominate a small one (a BCE loss of 0.3), so the trunk effectively optimizes only the big task. Fix it by normalizing losses to comparable scales — standardize regression targets, or use uncertainty weighting, GradNorm, or DWA to learn or adapt per-task weights. Scale balancing addresses magnitude; it does not fix gradient-direction conflict, which needs gradient surgery.
 
-**How does uncertainty weighting balance task losses, and why is the log-sigma term essential?**
+**Q: How does uncertainty weighting balance task losses, and why is the log-sigma term essential?**
 Uncertainty weighting learns a per-task noise σ and weights each loss by 1/(2σ²), down-weighting noisy tasks automatically. The objective adds a `+log σ` term because without it the optimizer would drive σ to infinity, making every weight zero and the loss trivially small — the regularizer penalizes large σ and keeps each task's weight finite. Kendall & Gal (CVPR 2018) derived it from the Gaussian log-likelihood, and it removes the need to hand-tune loss weights.
 
-**What is gradient conflict and how does PCGrad resolve it?**
+**Q: What is gradient conflict and how does PCGrad resolve it?**
 Gradient conflict is when two task gradients have a negative dot product, meaning descending one increases the other. PCGrad detects the conflict and projects each task gradient onto the normal plane of the conflicting gradient, removing only the component that hurts the other task and keeping the rest. When gradients already agree it does nothing. Yu et al. (NeurIPS 2020) showed this reduces negative transfer; you must shuffle the projection order each step to avoid biasing toward one task.
 
-**What is a Pareto front and what does Pareto optimality mean for multi-objective learning?**
+**Q: What is a Pareto front and what does Pareto optimality mean for multi-objective learning?**
 A Pareto front is the set of solutions where you cannot improve one objective without worsening another, and Pareto optimality means a solution lies on that front. Any point strictly dominated (worse on some objective, no better on others) should never be shipped. Scalarization with a fixed weight vector selects a single point on the front; different weights select different points. MGDA searches for a Pareto-stationary point directly.
 
-**When would you use scalarization versus MGDA?**
+**Q: When would you use scalarization versus MGDA?**
 Use scalarization (a fixed weighted sum of losses) when you know the business tradeoff and want product teams to dial the weights directly — it is cheap and differentiable. Use MGDA when tasks conflict and the right tradeoff is unknown, because MGDA computes the min-norm convex combination of task gradients to find a common descent direction that decreases every loss. MGDA costs per-task gradients plus a min-norm QP each step, so it is heavier.
 
-**How do you combine multiple head predictions (pCTR, pWatch, pShare, pReport) into one ranking score?**
+**Q: How do you combine multiple head predictions (pCTR, pWatch, pShare, pReport) into one ranking score?**
 Combine them as a weighted product or weighted sum where positive events get positive weights and negative events (report, hide) get negative weights, e.g. `score = pWatch^1.0 · pShare^0.5 · pReport^-2.0`. The multiplicative form lets any single very-bad signal veto an item. Crucially the weights are tuned by online A/B tests or Bayesian optimization on long-term metrics, not learned by SGD, because retention is not differentiable per batch.
 
-**What are cross-stitch networks?**
+**Q: What are cross-stitch networks?**
 Cross-stitch networks are a soft-sharing method that keeps one network per task and inserts learnable units that linearly mix the per-task activations at each layer. The mixing matrix is learned end-to-end, so the model discovers how much to share at each depth — near-identity means independent tasks, dense means heavy sharing. Introduced by Misra et al. (CVPR 2016), they trade extra parameters for better tolerance of conflicting tasks.
 
-**How do GradNorm and DWA differ?**
+**Q: How do GradNorm and DWA differ?**
 GradNorm tunes task weights so the gradient magnitudes at the shared layer are balanced relative to each task's training rate, which requires an extra backward pass to differentiate through gradient norms. DWA is cheaper: it weights tasks by the ratio of their last two losses, giving more weight to slowly improving tasks, and needs no extra backward. GradNorm balances actual gradients; DWA only looks at loss trajectories, so it can miss direction conflicts.
 
-**When do auxiliary tasks help, and when do they hurt?**
+**Q: When do auxiliary tasks help, and when do they hurt?**
 Auxiliary tasks help when their labels are cheap, correlated with the main task's structure, and they regularize the shared trunk without dominating the gradient (e.g., YouTube's position-bias tower). They hurt when the auxiliary task is unrelated or high-magnitude, causing negative transfer that degrades the main task. Always weight the auxiliary loss down and monitor whether the main metric improves; drop the auxiliary task if gradient cosine turns negative.
 
-**How do you detect expert collapse in an MMoE model in production?**
+**Q: How do you detect expert collapse in an MMoE model in production?**
 Track the variance of each expert's output over a fixed diagnostic batch; a collapsed expert has near-constant output (variance below roughly 1e-3) and its gate weights become degenerate. Alert when any expert's variance drops below threshold, and run this check every training run, not weekly, since a labeling bug can collapse experts within days. The fix is an expert-diversity loss that penalizes low output variance plus restoring balanced labels.
 
-**What is the seesaw effect?**
+**Q: What is the seesaw effect?**
 The seesaw effect is when improving one task in a jointly trained model degrades another, so their metrics move up and down like a seesaw over training. It is caused by conflicting task gradients sharing the same parameters, and it is the specific symptom of negative transfer in recommenders. MMoE partially fixes it by per-task gating; PLE fixes it more thoroughly with task-specific experts, and PLE's paper is named for improving both tasks at once.
 
-**How does CAGrad differ from PCGrad?**
+**Q: How does CAGrad differ from PCGrad?**
 CAGrad finds an update close to the average gradient while guaranteeing the worst-case task loss still decreases, whereas PCGrad only projects away pairwise conflicting components with no convergence guarantee. CAGrad solves a small constrained optimization with a hyperparameter `c` controlling how close to the average gradient to stay, and it provably converges to a Pareto-stationary point. PCGrad is simpler and cheaper; CAGrad is stronger when strict multi-objective guarantees matter.
 
-**What is the data-efficiency benefit of multi-task learning?**
+**Q: What is the data-efficiency benefit of multi-task learning?**
 A task with sparse labels borrows statistical strength from a task with dense labels because they share a representation, so the sparse task effectively trains on more signal. For example, joint pCTR/pCVR training lets the dense click task regularize the sparse conversion task, improving pCVR calibration. This is why ads and recommender systems co-train dense and sparse objectives rather than training the sparse one alone.
 
-**How does MGDA decide when a model has reached the Pareto front?**
+**Q: How does MGDA decide when a model has reached the Pareto front?**
 MGDA computes the min-norm point in the convex hull of the task gradients; when that norm is zero, no convex combination of gradients gives a descent direction, so the model is Pareto-stationary and on the front. As long as the min-norm is nonzero, the corresponding weighted gradient decreases every task loss simultaneously. Sener & Koltun solve this with Frank-Wolfe for many tasks and a closed form for two.
 
 ---

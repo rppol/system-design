@@ -701,14 +701,14 @@ not after the bill arrives.
 
 ## 12. Interview Questions with Answers
 
-**How do input and output token costs differ, and what does this imply for prompt design?**
+**Q: How do input and output token costs differ, and what does this imply for prompt design?**
 Output tokens cost 3-5x more than input tokens across all major providers. GPT-4o charges $2.50/1M
 input vs $10.00/1M output. This means generation length is the dominant cost driver, not prompt
 length. Concise output instructions ("respond in under 150 words"), structured extraction instead
 of free-form prose, and explicit max_tokens limits all target the expensive side. Do not over-index
 on prompt compression at the expense of ignoring output verbosity.
 
-**Why do reasoning models blow up cost forecasts that were calibrated on non-reasoning models?**
+**Q: Why do reasoning models blow up cost forecasts that were calibrated on non-reasoning models?**
 Reasoning models bill their (often hidden) "thinking" tokens as output tokens — the most expensive
 class — and thinking length varies enormously with problem difficulty. A query that produces a
 200-token visible answer can consume thousands of reasoning tokens before it, so effective output
@@ -718,7 +718,7 @@ thinking-budget parameter is raised. Cap reasoning effort explicitly where the A
 monitor the output-token distribution separately for reasoning traffic, and route only genuinely
 hard queries to reasoning models.
 
-**Why does a long chat conversation cost quadratically, and what do you do about it?**
+**Q: Why does a long chat conversation cost quadratically, and what do you do about it?**
 Each turn resends the entire conversation history as input tokens, so an N-turn conversation pays
 for the history N times — cumulative input cost grows O(N²) in turns. A 50-turn session averaging
 300 tokens per turn pays for roughly 375K cumulative input tokens against only 15K generated: the
@@ -738,7 +738,7 @@ content (user query, retrieved documents) at the end. The cache key is the exact
 the prefix, so any variation in the static portion breaks the cache. In a RAG system, this means
 retrieved documents should come after the system prompt, not interleaved with it.
 
-**Walk through the break-even analysis for self-hosting a 70B model versus using a cloud API.**
+**Q: Walk through the break-even analysis for self-hosting a 70B model versus using a cloud API.**
 Start with total monthly cost of self-hosting: GPU reservation ($20K for 4x A100 on AWS 1yr),
 storage ($200), and engineering maintenance ($8,000 for 0.5 FTE) = ~$28,700/month. Then calculate
 API cost per token at your expected volume with your input/output mix. At a blended $7.80/1M tokens
@@ -747,7 +747,7 @@ At 50M tokens/day, API = $11,700/month — self-hosting is more expensive. The b
 here is approximately 110M tokens/day. Always include engineering FTE in the self-hosting total;
 this is the most commonly omitted factor.
 
-**What is the OpenAI Batch API and when should it be used?**
+**Q: What is the OpenAI Batch API and when should it be used?**
 The OpenAI Batch API accepts a JSONL file of up to 50,000 requests and processes them
 asynchronously with a 24-hour SLA at 50% off standard per-token pricing. It is appropriate for
 any offline or asynchronous workload: document classification, overnight report generation, dataset
@@ -755,7 +755,7 @@ annotation, bulk embeddings, and content moderation pipelines. It should not be 
 user-facing interactions. The implementation requires writing a JSONL file, uploading it, polling
 for batch completion, and downloading the results file.
 
-**How does tokenizer efficiency change costs across languages?**
+**Q: How does tokenizer efficiency change costs across languages?**
 Non-English text tokenizes into substantially more tokens per unit of meaning on English-heavy
 tokenizers — typically 1.5-3x more tokens for the same content in Hindi, Thai, or Arabic than in
 English, and historically far worse for low-resource scripts. Since billing is per token, the same
@@ -764,7 +764,7 @@ proportionally. Newer tokenizers with larger multilingual vocabularies (100K+ en
 do not eliminate the gap. If you operate multilingually, measure tokens-per-character per language
 on your actual traffic and build per-language cost models rather than one global average.
 
-**When does prompt caching lose money, given the cache-write premium?**
+**Q: When does prompt caching lose money, given the cache-write premium?**
 Anthropic bills cache writes at a 25% premium over standard input ($3.75 vs $3.00 per 1M tokens
 for Sonnet-class models), so a prefix that is written but never re-read within the TTL costs 25%
 more than not caching at all. Break-even arithmetic for N uses of the same prefix: uncached cost
@@ -774,7 +774,7 @@ prefixes (per-request dynamic content mistakenly marked cacheable) or very spars
 entries always expire before reuse. Watch the ratio of cache_creation to cache_read tokens — a
 ratio near or above 1 means you are paying premiums without collecting discounts.
 
-**How would you implement per-feature cost monitoring in a production LLM application?**
+**Q: How would you implement per-feature cost monitoring in a production LLM application?**
 Every LLM API call should log: feature_name (the product feature making the call), user_id,
 model, input_tokens, cached_tokens, output_tokens, latency_ms, and cost_usd (calculated from token
 counts and the current pricing table). These logs go to a structured log store (e.g., BigQuery,
@@ -783,7 +783,7 @@ cost per query, and cost per user. Set anomaly alerts for features whose cost de
 2x from their 7-day average. The key discipline is adding feature_name to every logging call —
 this is trivial per call but transformative for visibility.
 
-**How does model routing work and what are the risks?**
+**Q: How does model routing work and what are the risks?**
 Model routing classifies each incoming query by complexity and directs it to a cheaper model when
 the cheaper model can answer with acceptable quality. The classifier is typically a small model
 (GPT-4o-mini, a fine-tuned local model, or heuristic rules) that estimates complexity for a few
@@ -794,7 +794,7 @@ and monitoring of user satisfaction signals (thumbs down, escalation rate) by ro
 starting point is routing only a subset (e.g., the highest-confidence simple queries) and expanding
 gradually.
 
-**How do you enforce per-user or per-feature token budgets?**
+**Q: How do you enforce per-user or per-feature token budgets?**
 Use a distributed counter in Redis or a similar fast store. For each request, estimate the token
 count before calling the API (using tiktoken for input, applying a per-feature expected output
 multiplier). Perform an atomic increment-and-check against the daily or monthly budget key. If
@@ -803,7 +803,7 @@ call completes, reconcile with actual token usage by adjusting the counter. Budg
 per feature, per user tier (free vs paid), and per day. Alerts should fire at 80% consumption so
 the team has time to investigate before the hard limit is hit.
 
-**What is semantic caching and when does it provide the most value?**
+**Q: What is semantic caching and when does it provide the most value?**
 Semantic caching stores responses keyed on the embedding of the input query rather than the exact
 string, so semantically similar queries return cached responses without an API call. It provides
 the most value when: (1) the user base asks similar questions repeatedly (FAQ scenarios, product
@@ -813,7 +813,7 @@ similarity threshold (typically 0.90-0.97 cosine similarity) is the critical tun
 Too low causes incorrect cache hits; too high defeats the purpose. GPTCache and Portkey both
 implement semantic caching with configurable thresholds.
 
-**How do you estimate and forecast LLM costs for a new feature before launch?**
+**Q: How do you estimate and forecast LLM costs for a new feature before launch?**
 Run a load test or manually sample 100-500 representative queries from the expected distribution.
 Measure average input tokens and average output tokens per query. Multiply by expected query volume
 per day. Apply the pricing table for each model under consideration. Factor in caching hit rate
@@ -822,7 +822,7 @@ in output length and usage spikes. Track actual vs forecast weekly for the first
 the model. Cost forecasting should be a standard part of feature scoping, not a post-launch
 retrospective.
 
-**How does LiteLLM help with multi-provider cost optimization?**
+**Q: How does LiteLLM help with multi-provider cost optimization?**
 LiteLLM provides a unified OpenAI-compatible API that translates calls to 100+ providers
 (OpenAI, Anthropic, Google, Mistral, Cohere, self-hosted). It handles request translation,
 response normalization, retry logic, and fallback routing. For cost optimization, it enables:
@@ -843,10 +843,10 @@ immediately to requirement changes, and handles edge cases better, but has ongoi
 cost. The decision depends on query volume (fine-tuning pays off faster at higher volume) and
 task stability (stable, narrow tasks are better fine-tuning candidates).
 
-**What rate limiting strategies would you implement for a multi-tenant LLM platform?**
+**Q: What rate limiting strategies would you implement for a multi-tenant LLM platform?**
 A multi-tenant platform needs layered rate limiting across three dimensions: per-user RPM and TPM limits (prevent individual abuse), per-organization monthly token budgets (cost control), and global capacity limits (prevent infrastructure overload). Implementation uses token bucket algorithm with Redis + Lua scripts for atomic counting — the bucket fills at quota/period rate and drains by estimated token count per request. Sliding window rate limiting is preferred over fixed windows to prevent the boundary-burst problem where clients hit 2x the limit by straddling two fixed windows. Return HTTP 429 with Retry-After header and include X-RateLimit-Remaining in every response so clients can self-throttle. For overflow handling, queue lower-priority requests (free tier) rather than rejecting immediately, while high-priority requests (paid, SLA-bound) bypass the queue. Budget enforcement: warn at 80% of monthly allocation, soft-cap at 100% with a 10% grace period, hard-cap at 110%. The key production lesson is to enforce limits at the API gateway layer (not the application layer) to catch all traffic uniformly.
 
-**When does self-hosting LLMs become cost-effective versus using commercial APIs?**
+**Q: When does self-hosting LLMs become cost-effective versus using commercial APIs?**
 The break-even depends on daily token volume and whether all costs are honestly accounted for. For a 70B model on 4x A100 80GB reserved instances, the all-in monthly TCO is approximately $28,700 (GPU lease $15K + infrastructure overhead $4K + personnel share $6K + monitoring/tooling $3.7K). Against a commercial API at ~$7.80/1M blended token cost, this breaks even at approximately 120M tokens/day. Below 10M tokens/day, the API is almost always cheaper because self-hosting overhead (personnel, infrastructure, maintenance) exceeds any per-token savings. Between 10M and 50M tokens/day, a hybrid approach works: route high-volume, latency-tolerant tasks (batch processing, embeddings) to self-hosted infrastructure while keeping real-time, user-facing queries on the API. Above 50M tokens/day, self-hosting primary workloads becomes clearly cost-effective. The most commonly underestimated costs are personnel (0.5-1.0 FTE ML engineer for maintenance), GPU failure rates (2-5% annually, requiring spare capacity), and inference framework tuning (vLLM/TensorRT-LLM configuration is not set-and-forget). Revisit the analysis every 6 months because API prices are declining 30-50% per year.
 
 ---

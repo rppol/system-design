@@ -264,25 +264,25 @@ Complex queries    | Limited (Redis no JOIN)     | Full SQL
 
 ## 12. Interview Questions with Answers
 
-**When is an in-memory database preferable to a disk-backed one?**
+**Q: When is an in-memory database preferable to a disk-backed one?**
 Choose in-memory when sub-millisecond latency is required and the working dataset fits in RAM. Specific cases: session state where every request requires a lookup and the data is ephemeral; rate limiters where latency matters more than durability; leaderboards using sorted sets with microsecond rank lookups; distributed locks where lock acquisition must complete before a network timeout. Do not use in-memory as the primary store for financial records or any data where loss on restart is unacceptable unless you configure durable persistence (AOF fsync=always).
 
-**How does VoltDB guarantee ACID without disk writes on the critical path?**
+**Q: How does VoltDB guarantee ACID without disk writes on the critical path?**
 VoltDB uses partitioned execution with a single thread per partition, eliminating locking overhead. Each stored procedure executes as an atomic unit on its target partition(s). Durability comes from synchronous K-safety replication: before returning success to the client, VoltDB ensures the transaction is committed on K+1 nodes. A node failure does not lose committed data because at least one replica has the committed state. Command logging writes to disk asynchronously after the replication acknowledgment, so the disk I/O is off the critical path.
 
-**What happens when a Redis node runs out of memory with the noeviction policy?**
+**Q: What happens when a Redis node runs out of memory with the noeviction policy?**
 Redis returns an error for write commands (`OOM command not allowed when used memory > 'maxmemory'`). Read commands still succeed. The application receives errors that it must handle, typically by returning an error to the user or falling back to the database. In production this causes cascading failures if the application does not handle Redis write errors gracefully. The correct response: monitor Redis memory, alert at 80% capacity, and use an eviction policy (allkeys-lru or allkeys-lfu) for cache workloads.
 
-**What is the difference between Redis RDB and AOF persistence and when would you use each?**
+**Q: What is the difference between Redis RDB and AOF persistence and when would you use each?**
 RDB creates point-in-time snapshots by forking the process and writing a compact binary dump to disk. It has low I/O overhead during operation but the potential to lose minutes of data (between snapshots). AOF logs every write command; on restart Redis replays the AOF to reconstruct state. `fsync=always` gives durability similar to a traditional database but halves throughput; `fsync=everysec` risks 1 second of data loss. Use RDB for caches where some data loss is acceptable and fast restarts are needed. Use AOF `fsync=everysec` for session stores. Use both (hybrid mode) for primary data stores requiring fast restart and minimal data loss.
 
-**How does Redis Sorted Set support a leaderboard with 10 million users?**
+**Q: How does Redis Sorted Set support a leaderboard with 10 million users?**
 A Redis Sorted Set stores members with a floating-point score, backed by a skip list for O(log N) rank operations. `ZADD leaderboard score user_id` adds or updates a user's score. `ZRANK leaderboard user_id` returns the user's rank (0-indexed) in O(log N). `ZREVRANGE leaderboard 0 9` retrieves the top 10 in O(log N + 10). Memory usage: ~200 bytes per entry (skip list overhead), so 10M users ≈ 2GB RAM. This is a well-known Redis use case that handles 10M entries with sub-millisecond operations.
 
-**What is the Redis fork pause and how do you mitigate it?**
+**Q: What is the Redis fork pause and how do you mitigate it?**
 When Redis creates an RDB snapshot or begins AOF rewrite, it calls `fork()` to create a child process. The fork itself is instantaneous (copy-on-write pages), but copying the page table takes ~1ms per GB of used memory. A 20GB Redis instance pauses ~20ms during fork. Mitigation: use jemalloc allocator (Redis default, reduces page table fragmentation), disable transparent huge pages (`echo never > /sys/kernel/mm/transparent_hugepage/enabled`), schedule snapshots on a replica not the primary, and monitor `latest_fork_usec` in Redis INFO.
 
-**How do you implement a distributed rate limiter with Redis?**
+**Q: How do you implement a distributed rate limiter with Redis?**
 Use an atomic Lua script or a single Redis command to ensure the check-and-increment is atomic:
 ```lua
 -- Lua script: rate limit to N requests per window_seconds
@@ -300,13 +300,13 @@ return 1  -- allowed
 ```
 This script executes atomically (Redis single-threaded commands). The key is scoped per user/IP/API-key per time window. For sliding window, use a Sorted Set (score = timestamp, trim expired entries with `ZREMRANGEBYSCORE`).
 
-**What is Apache Ignite's near cache and when is it useful?**
+**Q: What is Apache Ignite's near cache and when is it useful?**
 A near cache is a local in-process cache on each application node that stores frequently accessed entries from the distributed Ignite cluster. When a node requests a cached entry, Ignite first checks the near cache (L1), then the distributed cluster (L2). Near cache reduces network round trips for hot data to zero. It is useful when a small subset of data is accessed by nearly every application node (e.g., product catalog, configuration). The risk: near cache invalidation lag — when the primary copy updates, near caches become stale for up to the configured invalidation window. Not suitable for data requiring strict consistency.
 
-**How does Aerospike achieve high throughput with datasets larger than RAM?**
+**Q: How does Aerospike achieve high throughput with datasets larger than RAM?**
 Aerospike uses a hybrid memory model: all indexes are kept in DRAM (for sub-millisecond index lookup), while values are stored on NVMe SSDs with direct device access (bypassing the OS page cache and filesystem). A read requires one DRAM index lookup followed by one direct NVMe read. Since NVMe latency is ~0.1ms (vs ~5ms for HDD or ~0.5ms for Redis network round trip), Aerospike achieves ~0.5ms reads for datasets many times larger than available RAM. This makes it suitable for ML feature stores and ad-tech where dataset size exceeds RAM but sub-millisecond latency is still required.
 
-**What is the difference between Redis MULTI/EXEC transactions and Lua scripts?**
+**Q: What is the difference between Redis MULTI/EXEC transactions and Lua scripts?**
 `MULTI/EXEC` queues commands and executes them atomically (no other client commands interleave), but it does NOT support conditional logic — you cannot inspect a value and branch within a MULTI/EXEC block. If a queued command fails, other commands still execute (no rollback). Lua scripts (`EVAL`) execute as a single atomic operation with full Lua programming capability: conditionals, loops, variable reads. Scripts can read a value and branch on it atomically. Use MULTI/EXEC for simple batched writes; use Lua for conditional operations (check-then-set, rate limiting, inventory decrement with floor check).
 
 ---

@@ -328,28 +328,28 @@ Use soak tests specifically for detecting: memory leaks (heap growing 1MB/hour �
 
 ## 12. Interview Questions with Answers
 
-**What is the difference between load testing and stress testing?**
+**Q: What is the difference between load testing and stress testing?**
 Load testing validates system behavior at expected production load — you simulate the peak RPS you expect on a busy day and verify that latency and error rate meet SLOs. Stress testing pushes beyond capacity to find the breaking point and understand failure mode. Does the service fail fast (circuit breaker opens, returns 503 quickly), fail slowly (timeout after 30 seconds), or fail silently (returns incorrect data)? Stress tests inform capacity planning: if the service breaks at 3000 RPS and you expect 1000 RPS, you have a 3x headroom — healthy. If it breaks at 1200 RPS, you need more capacity.
 
-**What is the coordinated omission problem?**
+**Q: What is the coordinated omission problem?**
 When a load test uses a virtual-user (VU) model, each VU sends one request and waits for the response before sending the next. If the server slows down and takes 1 second per request, a 100-VU test only sends 100 RPS instead of the intended 1000 RPS. The slow period is under-sampled because fewer requests arrive. The latency histogram looks better than real production behavior where arrivals continue regardless of server speed. The fix is to use a constant arrival rate model (k6's `constant-arrival-rate` executor, Gatling's `constantUsersPerSec`) which maintains the target RPS even when the server is slow.
 
-**How do you identify a database bottleneck during a load test?**
+**Q: How do you identify a database bottleneck during a load test?**
 Monitor connection pool metrics (active connections, pending connections) — if pending connections exceed 0 for sustained periods, the pool is exhausted. Check `pg_stat_activity` for long-running queries. Enable `pg_stat_statements` and query it for highest mean execution time. Check `pg_locks` for lock contention. Correlate GC pauses (JVM) vs DB query time (application timer) to determine if latency spikes are JVM-side or DB-side. A definitive signal: if adding more application instances does not improve throughput (RPS stays flat), the bottleneck is shared infrastructure (DB, Redis, external API).
 
-**What metrics should you track during a performance test?**
+**Q: What metrics should you track during a performance test?**
 Application layer: request rate (RPS), latency percentiles (p50, p95, p99, p999), error rate by type (4xx vs 5xx), active concurrent connections. JVM layer: heap usage, GC pause duration and frequency, GC allocation rate (MB/s), thread states (blocked threads indicate lock contention). Database: active connections, query execution time, lock wait events, index hit rate (should be > 99%), I/O wait. Operating system: CPU utilization (> 80% = CPU bound), memory (swap = bad), network bandwidth, disk I/O latency. The combination tells you where the bottleneck is.
 
-**How do you implement performance regression detection in CI?**
+**Q: How do you implement performance regression detection in CI?**
 Establish a baseline: run a 10-minute load test at fixed RPS (e.g., 500 RPS) on the main branch and record p50/p95/p99. On each PR, run the same test and compare. Fail the build if p99 regresses more than 10% vs baseline, or error rate increases by more than 0.1%. Store results in a time-series database (InfluxDB) with build metadata (commit SHA, branch, date). Gatling's CI plugin outputs a baseline comparison report. k6 threshold assertions fail the exit code so CI pipelines can detect failures natively. Run performance tests in a separate, dedicated environment with production-equivalent resources.
 
-**What is a soak test and what does it detect?**
+**Q: What is a soak test and what does it detect?**
 A soak test runs a sustained load (typically 60-80% of peak capacity) for an extended period (8-24 hours). It detects slow degradation that only becomes visible over time: memory leaks (heap grows by 10MB/hour, eventually causes OOM after 10 hours), connection leaks (connection pool gradually fills as connections are not returned to pool), thread leaks (thread count grows monotonically), database file handle leaks, and performance cliffs where query plans degrade as table statistics change. Load tests miss these because they are too short. A service that passes a 30-minute load test may fail after 12 hours in production.
 
-**How do you interpret a flamegraph from a performance profile?**
+**Q: How do you interpret a flamegraph from a performance profile?**
 A flamegraph shows the call stack of CPU samples. The x-axis is time (proportional width = % of CPU time spent in that method and its callees). The y-axis is stack depth. Wide frames at the top of the stack are hot code paths — the wider, the more CPU time spent. Find the widest frames that are application code (not JVM internals). If `JsonSerializer.serialize()` is 30% wide, JSON serialization is a bottleneck — consider a faster library (Jackson streaming API vs ObjectMapper). If `DatabaseConnectionPool.acquire()` is 20% wide, connection pool contention is the issue. If GC-related frames are wide, memory allocation is the problem.
 
-**What is your process for capacity planning from load test results?**
+**Q: What is your process for capacity planning from load test results?**
 Run the breakpoint test to find the maximum sustainable RPS (where error rate first exceeds 1%). Calculate required headroom: if you expect 10K RPS peak and one instance handles 3K RPS at 60% CPU, you need ceil(10000/3000) = 4 instances, plus 20% spare = 5 instances. Account for: gradual traffic ramp (HPA needs 2-3 minutes to add instances), traffic skew (some instances may receive 2x average), headroom for unexpected spikes (provision for 150% of expected peak). Validate by running the load test against the capacity-planned cluster. Re-run quarterly or when traffic doubles.
 
 ---

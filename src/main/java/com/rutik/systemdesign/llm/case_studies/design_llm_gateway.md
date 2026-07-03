@@ -839,7 +839,7 @@ The gateway is a defense layer, not the only defense. Its role: (1) Input scanne
 
 ### Multi-Provider Routing Architecture
 
-**Provider capability matrix:**
+**Q: Provider capability matrix:**
 
 | Provider | Strength | Context | Cost/1M tokens | p99 TTFT |
 |---|---|---|---|---|
@@ -848,7 +848,7 @@ The gateway is a defense layer, not the only defense. Its role: (1) Input scanne
 | GPT-4o | Complex reasoning, multi-step | 128k | $5 (in) / $15 (out) | 800ms |
 | Claude Sonnet 3.5 | Coding, analysis, long-form | 200k | $3 (in) / $15 (out) | 600ms |
 
-**Routing decision logic (heuristic, first-match-wins):**
+**Q: Routing decision logic (heuristic, first-match-wins):**
 
 ```python
 def classify_and_route(messages: list[dict], tenant_config: dict) -> RoutingDecision:
@@ -1095,7 +1095,7 @@ Abstraction at three levels: (1) normalize all provider APIs to a single interna
 **Q: How does the gateway handle provider API changes (e.g., OpenAI deprecating a model endpoint)?**
 Pin to specific model versions in routing config (`gpt-4o-2024-11-20`, not `gpt-4o`). Subscribe to provider deprecation announcements. Send a 10-token health ping to each model version every 15 minutes — version disappearing from responses gives 2-4 weeks of early warning before the official deadline. Validate the substitution against the internal golden dataset before updating the routing table.
 
-**Key architectural principles:**
+**Q: Key architectural principles:**
 - Separate Redis for cache (allkeys-lru eviction) and rate-limit counters (noeviction) — prevents rate-limit bypass during memory pressure
 - Proportional load reducer replaces binary circuit breaker — handles partial degradation that binary OPEN/CLOSED misses
 - Output safety scan runs on every cache read — prevents poisoned responses from propagating

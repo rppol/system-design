@@ -570,61 +570,61 @@ torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.25)
 
 ## 12. Interview Questions with Answers
 
-**What is a language model in one sentence?**
+**Q: What is a language model in one sentence?**
 A language model assigns a probability to a sequence of tokens, or equivalently predicts the next token given the preceding ones. It factors the joint probability with the chain rule, `P(w_1..w_T) = Π P(w_t | w_1..w_{t-1})`, and every LM family differs only in how it approximates that conditional — n-grams truncate the history, RNNs compress it into a hidden state, transformers attend over all of it. The training objective of GPT-style models is exactly this next-token prediction, scaled up.
 
-**Why does an unsmoothed n-gram model assign zero probability, and why is that catastrophic?**
+**Q: Why does an unsmoothed n-gram model assign zero probability, and why is that catastrophic?**
 Maximum-likelihood estimation sets `P(w | context) = count(context, w) / count(context)`, which is exactly zero for any n-gram never seen in training. Because a sentence's probability is the *product* of its per-token conditionals, a single unseen n-gram makes the whole sentence probability zero, `log P = -infinity`, and perplexity `2^(-log P / N)` becomes infinite. The model declares an ordinary sentence impossible. The fix is smoothing: reserve a little probability mass for unseen events so nothing is ever exactly zero.
 
-**What is the Markov assumption in an n-gram model?**
+**Q: What is the Markov assumption in an n-gram model?**
 The Markov assumption says the next token depends only on the previous `n-1` tokens, not the entire history — so a trigram model approximates `P(w_t | w_1..w_{t-1})` as `P(w_t | w_{t-2}, w_{t-1})`. It is what makes the chain rule tractable, since there are far fewer `n-1`-token contexts than full-length prefixes. The assumption is linguistically false (language has long-range dependencies like subject-verb agreement across clauses), which is precisely the limitation that RNN and transformer LMs were built to overcome.
 
-**What does perplexity measure and how does it relate to cross-entropy?**
+**Q: What does perplexity measure and how does it relate to cross-entropy?**
 Perplexity is the exponentiated average per-token cross-entropy, `PPL = 2^H` in bits or `exp(H)` in nats, so minimizing cross-entropy loss and minimizing perplexity are the same objective. Intuitively it is the model's effective branching factor: a perplexity of 100 means the model is, on average, as uncertain as if choosing uniformly among 100 next tokens. Lower is better; for neural LMs trained with cross-entropy loss, `perplexity = exp(loss)` directly.
 
-**What is Kneser-Ney smoothing's key idea?**
+**Q: What is Kneser-Ney smoothing's key idea?**
 Kneser-Ney combines absolute discounting with a *continuation probability* that estimates a word by how many distinct contexts it follows, not by its raw frequency. The classic example is "Francisco": it is frequent but almost always follows "San", so its continuation probability is low and it is not over-predicted after unseen contexts. This fixes the backoff distribution — the lower-order term reflects *versatility* rather than *count* — which is why Kneser-Ney (and its modified variant with count-dependent discounts) is the best-performing classical smoothing method.
 
-**What is the difference between backoff and interpolation?**
+**Q: What is the difference between backoff and interpolation?**
 Backoff uses only the highest-order n-gram that has a nonzero count, dropping to a lower order (scaled by a backoff weight) only when the higher order is unseen. Interpolation always computes a weighted blend of all orders, `λ_3 P_3 + λ_2 P_2 + λ_1 P_1` with the lambdas summing to one, regardless of whether the high-order gram was seen. Interpolation is smoother and is the production standard (interpolated Kneser-Ney); Katz backoff is sharper but discontinuous at the point where it switches orders.
 
-**Why does increasing n past 3 to 5 give diminishing returns?**
+**Q: Why does increasing n past 3 to 5 give diminishing returns?**
 Higher-order contexts are exponentially more numerous, so almost all of them are unseen or seen only once — you run out of data before you run out of context length. A 50k vocabulary has 1.25 × 10¹⁴ possible trigrams; even a billion-token corpus observes a vanishing fraction, so a 6-gram model spends most of its time backing off to lower orders anyway. Empirically perplexity drops sharply from unigram to trigram and then flattens, which is why production n-gram systems settled on 4-grams and 5-grams.
 
-**Why is add-one (Laplace) smoothing a poor choice for language models?**
+**Q: Why is add-one (Laplace) smoothing a poor choice for language models?**
 Add-one steals far too much probability mass from seen events because the vocabulary is huge, so seen and unseen n-grams end up with nearly equal probability. The denominator `count(context) + |V|` is dominated by `|V|` (say 50,000), so a context seen 10 times has its real counts swamped by 50,000 phantom counts, wrecking perplexity. Add-k with a small tuned k (e.g. 0.01) is less damaging, but even that is far behind Kneser-Ney; Laplace survives only as a teaching example.
 
-**How do neural language models solve the sparsity problem that plagues n-grams?**
+**Q: How do neural language models solve the sparsity problem that plagues n-grams?**
 Neural LMs map each token to a dense embedding vector, so statistically similar words get similar vectors and evidence generalizes across contexts even when the exact n-gram never occurred. Where an n-gram model treats "the cat sat" and "the dog sat" as unrelated events, a neural model sees "cat" and "dog" as nearby vectors and shares strength between them. This distributed representation, introduced by Bengio's 2003 feedforward NLM, is the structural cure for sparsity — no smoothing hack required.
 
-**What is weight tying and why does it help?**
+**Q: What is weight tying and why does it help?**
 Weight tying shares the input embedding matrix with the output softmax projection, since both are `|V| × d` matrices mapping between token identities and the same semantic space. It cuts parameters by `|V| × d` (about 25M for a 50k vocab and d=512) and typically *lowers* perplexity by 1–3 points because the two matrices are learning the same word geometry, so tying acts as a regularizer. The one constraint is that the embedding dimension must equal the pre-softmax hidden dimension, or you need a projection layer in between.
 
-**How do you handle out-of-vocabulary words in an n-gram LM?**
+**Q: How do you handle out-of-vocabulary words in an n-gram LM?**
 Fix a closed vocabulary at training time — typically words with count at or above a threshold like 3 — and map every other token to a special `<UNK>` symbol, then train and test both through the same mapping. `<UNK>` gets its own probability mass, so unseen surface forms no longer produce undefined or zero probabilities. Critically, two models' perplexities are only comparable if they used the same vocabulary and the same OOV treatment, since a larger `<UNK>` bucket makes perplexity artificially lower.
 
-**Why can't you compare perplexity across models with different tokenizers?**
+**Q: Why can't you compare perplexity across models with different tokenizers?**
 Perplexity is computed per token, so a model that uses more, shorter tokens (subwords) will show a lower per-token perplexity than a word-level model on the identical text, even if it is no better. To compare across tokenizations you normalize by characters instead — bits-per-character, `(total -log2 P) / num_characters` — which is tokenizer-independent. This is a frequent interview trap and is covered in depth in [NLP Evaluation and Metrics](nlp_evaluation_and_metrics.md).
 
-**What is the intuition behind Good-Turing smoothing?**
+**Q: What is the intuition behind Good-Turing smoothing?**
 Good-Turing reallocates probability mass using the frequency of frequencies, estimating the total probability of all unseen events as `N_1 / N` — the fraction of the corpus made up of once-seen n-grams. The idea is that the count of singletons (how many n-grams were seen exactly once) is a good estimate of how much mass to reserve for things you have not yet seen. It is the theoretical ancestor of absolute discounting and Kneser-Ney, which are simpler and perform better in practice.
 
-**What is the difference between absolute discounting and Kneser-Ney?**
+**Q: What is the difference between absolute discounting and Kneser-Ney?**
 Absolute discounting subtracts a fixed constant `d` (around 0.75) from every nonzero n-gram count and redistributes the freed mass to the lower-order model. Kneser-Ney does the same discounting but replaces the lower-order term with the continuation probability — counting distinct preceding contexts rather than raw frequency. That single change to the backoff distribution is what makes Kneser-Ney consistently beat plain absolute discounting.
 
-**What is the difference between intrinsic and extrinsic evaluation of a language model?**
+**Q: What is the difference between intrinsic and extrinsic evaluation of a language model?**
 Intrinsic evaluation measures the model in isolation — perplexity on held-out text — while extrinsic evaluation measures its effect on a downstream task like word-error-rate in speech recognition or BLEU in translation. Perplexity is cheap and correlates with quality for models over the same vocabulary, but lower perplexity does not always mean better downstream performance, so the extrinsic metric is the one that ultimately matters. For fine-tuned models the correlation can even break entirely (see the perplexity discussion in [NLP Evaluation and Metrics](nlp_evaluation_and_metrics.md)).
 
-**Why do vanilla RNN language models struggle with long-range dependencies, and what fixed it?**
+**Q: Why do vanilla RNN language models struggle with long-range dependencies, and what fixed it?**
 Vanilla RNNs suffer from vanishing gradients: backpropagation through time multiplies many Jacobians, and gradients shrink exponentially, so the model cannot learn dependencies more than a few dozen tokens apart. LSTMs and GRUs added gating and a nearly-linear cell-state path that lets gradients flow, extending the effective range to a couple hundred tokens. Transformers removed recurrence entirely, using self-attention to connect any two positions in one step — which is why they, not RNNs, power modern LMs (see [LLM Foundations](../../llm/foundations_and_architecture/README.md)).
 
-**What was the key contribution of Bengio's 2003 neural probabilistic language model?**
+**Q: What was the key contribution of Bengio's 2003 neural probabilistic language model?**
 It introduced learned distributed word representations (embeddings) inside a feedforward language model, the first model to learn word embeddings as a byproduct of language modeling. It concatenated the embeddings of the previous `n-1` words and predicted the next word through a hidden layer and softmax; by letting similar words share a region of vector space, it generalized across contexts that count-based n-grams treated as unrelated, beating smoothed trigrams. Those embeddings are the direct ancestor of word2vec and every subsequent neural LM.
 
-**How does temperature affect sampling from a language model?**
+**Q: How does temperature affect sampling from a language model?**
 Temperature `T` rescales the logits before the softmax as `softmax(logits / T)`, trading coherence against creativity without retraining the model. `T < 1` sharpens the distribution toward the most probable tokens (more deterministic, less diverse), `T > 1` flattens it (more random, more diverse), and `T` approaching 0 becomes greedy argmax. Decoding strategies including temperature, greedy, beam, top-k, and nucleus sampling are covered in [Attention and Seq2Seq](attention_and_seq2seq.md) and at LLM scale in the LLM section.
 
-**How would you estimate the memory footprint of a 5-gram model over a billion tokens?**
+**Q: How would you estimate the memory footprint of a 5-gram model over a billion tokens?**
 The footprint is dominated by the number of distinct n-gram *types*, not tokens — a billion-token corpus might yield hundreds of millions of distinct 5-grams, each needing a key plus a probability and backoff weight. Naive hash storage runs to tens of gigabytes, which is why toolkits like KenLM use a compressed, quantized trie that shares prefixes and stores probabilities in a few bits, bringing a large model down to a few GB with nanosecond lookups. Pruning (dropping singletons or low-count n-grams) trades a little accuracy for a large memory saving, which is essential for on-device deployment.
 
 ---

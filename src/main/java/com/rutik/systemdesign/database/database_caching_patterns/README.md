@@ -395,34 +395,34 @@ Write-around     | N/A             | DB only       | DB only       | Low
 
 ## 12. Interview Questions with Answers
 
-**What is a cache stampede and how do you prevent it?**
+**Q: What is a cache stampede and how do you prevent it?**
 A cache stampede (thundering herd) occurs when a popular cache entry expires and many concurrent requests simultaneously miss the cache, all query the database at once. With 10K requests/second hitting the database instead of 100 (normal non-cached load), the database saturates. Prevention strategies: (1) Mutex lock: only one request queries the database when a key is missing; others wait and retry. (2) Background refresh: detect entries nearing expiration and refresh before they expire, serving stale data to current requests. (3) TTL jitter: add random variance to TTL so bulk-loaded entries don't all expire at the same time. (4) Local L1 cache: a short-TTL in-process cache means cache misses are rare even when Redis is unavailable.
 
-**When would you use write-behind caching and what are the durability risks?**
+**Q: When would you use write-behind caching and what are the durability risks?**
 Write-behind (write-back) caches writes in Redis and asynchronously persists them to the database. Use it when write throughput far exceeds database capacity and the data can tolerate loss — view counts, like counts, non-financial analytics counters. The durability risk: if Redis crashes before the async persist completes, all unsynced writes are lost. For a 30-second flush interval, up to 30 seconds of data is at risk. Never use write-behind for financial transactions, inventory counts that affect checkout, or any data where loss causes business or compliance issues.
 
-**How do you invalidate cache entries in a microservices architecture where multiple services write to the same data?**
+**Q: How do you invalidate cache entries in a microservices architecture where multiple services write to the same data?**
 Options: (1) Event-driven invalidation: the service that owns the data publishes a change event to a message bus (Kafka); all services with cached copies subscribe and invalidate. (2) CDC-based invalidation: Debezium tails the database WAL, detects row changes, publishes invalidation events to Kafka; a cache invalidation service consumes events and deletes keys. (3) TTL-only: accept bounded staleness (e.g., 60-second TTL) and rely on TTL expiration. (4) Version-based keys: the DB version column is part of the cache key; old versions expire naturally. Event-driven is most accurate but requires reliable message delivery and idempotent consumers. TTL-only is simplest and handles most cases.
 
-**Explain the difference between cache-aside and read-through caching.**
+**Q: Explain the difference between cache-aside and read-through caching.**
 Cache-aside: the application manages the cache explicitly. On a read miss, the application queries the database, then populates the cache. On a write, the application updates the database and optionally invalidates/updates the cache. The cache is populated on demand. Read-through: the cache layer transparently queries the database on a miss, returning the result and caching it. The application interacts only with the cache interface. Difference: cache-aside gives the application full control (useful for complex caching logic or non-standard data types); read-through is simpler for the application (implemented by frameworks like Spring Cache, Caffeine LoadingCache) but requires the cache layer to know how to query the database.
 
-**What is the hot key problem in Redis and how do you solve it?**
+**Q: What is the hot key problem in Redis and how do you solve it?**
 A hot key is a single Redis key receiving more traffic than a single Redis node can handle (typically > 100K ops/second). Since Redis keys are pinned to specific nodes in a cluster, one node becomes a CPU bottleneck regardless of cluster size. Solutions: (1) Local in-process cache (Caffeine with 100–500ms TTL): application checks in-process cache before Redis; reduces Redis access rate by 99% for hot keys. (2) Key sharding: replicate the hot key across N Redis keys (e.g., trending:1 through trending:10), read from a randomly chosen shard, write to all. (3) Read from Redis replicas: use `ReadFrom.REPLICA_PREFERRED` to distribute reads across primary and replicas. (4) Use Redis Cluster's read-from-replica mode.
 
-**How does the write-through pattern ensure cache consistency?**
+**Q: How does the write-through pattern ensure cache consistency?**
 Write-through updates both the database and the cache synchronously during each write, ensuring the cache always reflects the current database state for any key that was previously cached. If the write to the database succeeds but the cache update fails, the cache entry should be explicitly deleted (fallback) to prevent stale data. The benefit: any key in the cache is guaranteed to be current as of the last write. The cost: every write pays the latency of updating both the database and cache; writes are slower than pure cache-aside (which only writes to the database). Most appropriate when cache misses are expensive and reads far outnumber writes.
 
-**How do you handle cache warming after a Redis restart?**
+**Q: How do you handle cache warming after a Redis restart?**
 Strategies: (1) Lazy warming: let the cache fill naturally from cache misses. Use a circuit breaker on the database to shed load while the cache warms. (2) Pre-warming script: before cutting traffic over, run a script that reads frequently accessed keys from the database and populates the cache. Identify hot keys from historical access logs. (3) Redis persistence: configure RDB or AOF so Redis restores its state from disk on restart — no warming needed for data that was cached before shutdown. (4) Blue-green cache: maintain a second Redis instance, gradually shift traffic while the new instance warms from the primary's replication stream. (5) Staggered deployment: deploy to a subset of servers, let them warm the cache, then expand.
 
-**What metrics indicate caching is working and when it is degrading?**
+**Q: What metrics indicate caching is working and when it is degrading?**
 Primary metric: cache hit rate = hits / (hits + misses). Target: ≥ 95% for frequently accessed data. Alert if it drops below 90%. Secondary metrics: (1) Cache eviction rate — high evictions (from Redis INFO: evicted_keys) indicate cache is undersized. (2) Average cache miss latency — a spike indicates the database is slow on cache misses. (3) Key TTL distribution — if most keys have very short TTL, they expire before being accessed, contributing to low hit rate. (4) Memory usage vs maxmemory — if approaching 90%, add capacity or reduce TTL. (5) Per-key access frequency (Redis --hotkeys flag) — identify hot keys for dedicated treatment.
 
-**What is the stale-while-revalidate CDN pattern?**
+**Q: What is the stale-while-revalidate CDN pattern?**
 `stale-while-revalidate` is an HTTP Cache-Control directive that tells CDN edge nodes: serve the stale (expired) cached version immediately to the current request while simultaneously revalidating (fetching a fresh copy) in the background. This eliminates the latency spike that occurs when an entry expires and the CDN must wait for the origin server to respond before serving the request. The syntax: `Cache-Control: max-age=3600, stale-while-revalidate=60` means: fresh for 1 hour; after expiry, serve stale for up to 60 more seconds while revalidating. The user always gets a fast response; the stale-serving window is bounded to 60 seconds.
 
-**How does Spring Cache abstraction simplify caching?**
+**Q: How does Spring Cache abstraction simplify caching?**
 Spring Cache (`@Cacheable`, `@CachePut`, `@CacheEvict`) provides declarative caching as an AOP-based abstraction. Annotate methods; Spring intercepts calls, checks the cache, and either returns cached results or calls the method and caches the result. The backing store (Redis, Caffeine, EhCache) is swappable via `CacheManager` configuration.
 
 ```java
@@ -443,7 +443,7 @@ public Product createProduct(CreateProductRequest req) {
 ```
 Limitation: Spring Cache does not handle distributed stampede prevention, TTL per-entry, or cache-aside logic for complex multi-key operations.
 
-**What is the N+1 caching problem and how do you fix it?**
+**Q: What is the N+1 caching problem and how do you fix it?**
 The N+1 caching problem occurs when an application fetches N entity IDs and then makes N individual cache lookups (one per ID). With 100 entities, this is 100 separate Redis round trips (N×RTT). Fix: use `MGET` (Redis multi-get) to fetch all N keys in a single round trip. The cache miss handling: for missing keys, query the database in a single `WHERE id IN (...)` query (not N individual queries). Then populate all N missing keys with a pipeline of SET commands.
 
 ```java
@@ -480,10 +480,10 @@ public List<User> getUsers(List<Long> userIds) {
 }
 ```
 
-**How do you prevent cache-related security issues (cache poisoning)?**
+**Q: How do you prevent cache-related security issues (cache poisoning)?**
 Cache poisoning: a malicious user causes an incorrect response to be cached and served to other users. Prevention: (1) Never cache responses that vary per-user or include authorization — use `Cache-Control: private` or `Vary: Authorization`. (2) Validate all cache keys: if the cache key contains user input, sanitize it to prevent key collision between users. (3) Use separate cache namespaces per tenant in multi-tenant systems: key prefix = `tenant:{tenant_id}:user:{user_id}`. (4) For CDN: validate `X-Forwarded-Host` and `X-Forwarded-For` headers before using them in cache keys — these can be spoofed to poison other users' caches.
 
-**How does two-level caching (L1 + L2) work?**
+**Q: How does two-level caching (L1 + L2) work?**
 L1 (local in-process cache, e.g., Caffeine) is checked first. L2 (shared distributed cache, e.g., Redis) is checked on L1 miss. Database is queried only on L2 miss.
 
 ```

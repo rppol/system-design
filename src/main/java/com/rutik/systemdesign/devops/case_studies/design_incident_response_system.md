@@ -633,41 +633,41 @@ PagerDuty dominates cost. The build-vs-buy break-even (D1): an in-house telco-gr
 
 ## 11. Interview Discussion Points
 
-**Why must the paging path be more available than the systems it monitors?**
+**Q: Why must the paging path be more available than the systems it monitors?**
 Because a pager that shares fate with production goes silent during the exact outage it must report. If your alerting stack runs in the same cluster/region/account as production and that cluster dies, no page is sent (war story P1: 47-min undetected outage). The delivery plane therefore runs in a separate cloud account and region with independent DNS, database, and on-call, targeting 99.99% vs production's 99.9% — and is backstopped by a dead-man's-switch heartbeat so a fully-dead alerting stack still triggers an external page.
 
-**How do you reduce 10,000 raw alerts/day to ~50 actionable pages without dropping real incidents?**
+**Q: How do you reduce 10,000 raw alerts/day to ~50 actionable pages without dropping real incidents?**
 Three stacked reductions: grouping (`group_by: [alertname, cluster, service]` with a 30s `group_wait` collapses correlated alerts ~200:1), inhibition (a `NodeDown` rule suppresses the 40 dependent pod-down alerts → 1 page instead of 41), and routing by severity (warnings go to Slack/tickets, only symptom-based criticals page). The key is symptom-based alerting (page on what users feel) plus multi-burn-rate SLO alerts so you page on real budget burn, not on transient blips. Dependent alerts are still recorded in the incident timeline — they're suppressed from paging, not deleted.
 
-**Explain multi-window multi-burn-rate alerting and why it beats a static threshold.**
+**Q: Explain multi-window multi-burn-rate alerting and why it beats a static threshold.**
 A static `error rate > 1% for 5m` forces a bad tradeoff: tight enough to catch problems means it flaps on 90-second blips; loose enough to avoid flaps means slow leaks bleed your budget for days. Multi-burn-rate fires when the error-budget burn rate exceeds a multiple of normal — a fast 14.4x burn (2% of a 30-day budget in 1 hour) pages immediately, while a 1x slow burn tickets. The "multi-window" part requires BOTH a long window (1h, prevents flapping) and a short window (5m, confirms it's still happening) to fire, killing false alarms. Full math: `cross_cutting/slo_error_budget_math.md`.
 
-**How does escalation guarantee zero missed escalations across process restarts?**
+**Q: How does escalation guarantee zero missed escalations across process restarts?**
 Timers are persisted durably (Temporal workflows or SQS delayed messages), never held only in process memory — a dispatcher restart re-loads pending timers. Each escalation step re-checks ack state atomically before firing (a late ack must cancel a racing escalation) and re-resolves the current on-call freshly (handoffs between page time and escalation must route to the new person — war story P4). If schedule resolution fails, the engine degrades to a static fallback target rather than going silent, because over-paging is strictly better than a missed escalation.
 
-**What's the difference between symptom-based and cause-based alerting, and which pages?**
+**Q: What's the difference between symptom-based and cause-based alerting, and which pages?**
 Symptoms are what users experience (latency, error rate, availability/SLO violations); causes are internal states (CPU 90%, disk filling, pod restarts). You page on symptoms and ticket on causes. Cause-based paging produces ~10x more pages, most non-actionable (high CPU users never notice), which drives alert fatigue and missed real pages. The risk — a novel cause with no symptom yet — is covered by slow-burn warning tickets that surface degradation before it becomes user-visible.
 
-**How do you handle a notification-provider (Twilio) outage?**
+**Q: How do you handle a notification-provider (Twilio) outage?**
 A multi-provider ring per channel with automatic failover in < 10s: health probes ping each provider every 15s, and 3 consecutive failures trip a circuit breaker routing 100% to the failover provider (e.g., Bandwidth). Each send carries an idempotency key (`hash(incidentID, target, channel, attempt)`) so retries across providers never double-page. War story P5 ($90k in SLA credits from an 18-min delay) is exactly the single-provider failure this prevents. The dispatcher's own failures emit a meta-alert on a *separate* paging path.
 
-**Why ChatOps-first instead of ticket-first incident coordination?**
+**Q: Why ChatOps-first instead of ticket-first incident coordination?**
 Incidents need real-time, low-friction coordination and chat is where engineers already work; a bot can auto-create a war-room channel, run one-click runbook commands, and capture the timeline automatically — ticketing systems are too high-latency for SEV1. The ticket still exists behind the scenes as the durable record. The pitfall is losing decisions in scrollback and conflating chat retention (often 90 days) with audit retention (18 months, war story P6) — solved by persisting the full timeline to an independent object-locked store.
 
-**Should incidents auto-remediate? Where's the line?**
+**Q: Should incidents auto-remediate? Where's the line?**
 Default to human-in-the-loop with one-click suggested runbook actions from chat, not full autonomy, because misfiring automation can amplify an incident (an auto-rollback that reverts the actual fix). Graduate only the safest, highest-frequency, well-understood runbooks to fully automatic over time, each behind a circuit breaker. The slight MTTR cost versus full automation is worth the safety; keep a human accountable until a runbook has proven itself across many incidents.
 
-**How do you keep page latency under 60 seconds?**
+**Q: How do you keep page latency under 60 seconds?**
 Decompose the budget: `group_wait` 30s (the dominant, intentional cost — batches correlated alerts), routing/on-call resolution ~2s, dispatch queue ~1s, and provider delivery 5–15s → ~48s p99. SEV1 fast-burn routes drop `group_wait` to 5s to trade noise for speed. The whole path is traced with OpenTelemetry (`ingest → schedule.resolve → dispatch → provider.send`) with an SLI of p99 < 45s, and it has its own error budget and burn-rate alert.
 
-**How do you measure whether your alerting is actually good?**
+**Q: How do you measure whether your alerting is actually good?**
 Treat alerts as code with a CI eval gate: page precision (pages that led to action / total pages, target ≥ 70%; auto-demote rules below 50%), mandatory runbook annotations (CI fails the PR without one), a 30-day backtest rejecting rules that would fire > 20×/day or flap > 5×/day, and a self-resolve rate (alerts resolving in < 2 min without human action are noise). Operationally, track MTTD/MTTA/MTTR and per-shift page volume, capping on-call at ≤ 2 incidents per 12-hour shift (Google's bar) and triggering a reliability investment when exceeded.
 
-**How do you size the notification subsystem for a major-incident broadcast?**
+**Q: How do you size the notification subsystem for a major-incident broadcast?**
 Use `peak_sends_per_sec = (team_size × channels_per_target) / delivery_window`. A 30-person broadcast over 3 channels in 60s is only 1.5 sends/sec, but you design for ~100 sends/sec to cover fleet-wide AZ events broadcasting to many teams. With 8s average SMS latency and 50 in-flight per worker, `ceil(100 × 8 / 50) = 16` dispatcher workers across 3 AZs. Alertmanager HA gossip is trivial bandwidth (~530 KB/s at storm peak); the real constraint is memory for active alerts (~16 MB for 8,000 alerts) and notification-log replication latency.
 
-**How do you prevent a single bad deploy from paging the entire org in a loop?**
+**Q: How do you prevent a single bad deploy from paging the entire org in a loop?**
 Cap maximum escalation levels with a circuit breaker that broadcasts once then stops re-paging; ensure ack callbacks atomically cancel all timers (the GetIncident re-check in §4.3 prevents a late-ack/escalation race — war story Runbook 3); set a sane `repeat_interval` (4h, not 1m) so a still-firing non-resolving alert doesn't re-page constantly; and use inhibition so the deploy's root-cause alert suppresses dependents. A storm runbook also lets on-call apply a broad label-matched silence to stop the bleeding while the inhibition rule is fixed.
 
-**How do you handle on-call for the paging system itself?**
+**Q: How do you handle on-call for the paging system itself?**
 The delivery plane has its own independent on-call rotation, its own 99.99% SLO with burn-rate alerting, and is meta-monitored by an external dead-man's-switch (a Watchdog alert fires every 30s to an external heartbeat service; if heartbeats stop, that external service pages). You cannot monitor the pager with the pager — the meta-monitoring must be a fully separate vendor/path. This rotation is staffed by the platform team that owns the IR system, kept deliberately small and high-skill.

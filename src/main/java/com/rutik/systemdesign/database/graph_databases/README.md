@@ -317,10 +317,10 @@ Neo4j without indexes on node properties is equivalent to a full graph scan for 
 
 ## 12. Interview Questions with Answers
 
-**How does index-free adjacency in Neo4j differ from a foreign key join in PostgreSQL?**
+**Q: How does index-free adjacency in Neo4j differ from a foreign key join in PostgreSQL?**
 In PostgreSQL, finding connected data requires a foreign key join — an index lookup (B+tree traversal) to find matching rows. For a query with 4 hops: 4 index traversals, each O(log n) where n is the number of rows. Total: O(4 × log n) minimum, but often O(n^k) for k-hop queries on large datasets. In Neo4j, each node record stores a direct pointer to its first relationship record. Each relationship record stores pointers to the source and destination nodes plus the next relationship of each node (doubly-linked list of relationships). Traversal: follow pointer from node → relationship → next node — all pointer dereferences at fixed offsets in fixed-size record files. Time per hop: O(1). For 4 hops: O(degree1 × degree2 × degree3 × degree4) — proportional to the number of actual connections, not the total graph size.
 
-**Design a fraud detection graph schema for detecting ring transactions.**
+**Q: Design a fraud detection graph schema for detecting ring transactions.**
 Schema:
 - Nodes: `(:Account {id, balance, created_at, risk_score})`, `(:Person {id, name, ssn})`, `(:Device {fingerprint, ip})`
 - Relationships: `(:Account)-[:SENT_TO {amount, timestamp, tx_id}]→(:Account)`, `(:Person)-[:OWNS]→(:Account)`, `(:Person)-[:USES]→(:Device)`
@@ -341,28 +341,28 @@ MATCH (p1)-[:OWNS]->(a1:Account), (p2)-[:OWNS]->(a2:Account)
 RETURN p1.id, p2.id, d.fingerprint AS shared_device, a1.id, a2.id
 ```
 
-**When would you choose a graph database over PostgreSQL with recursive CTEs?**
+**Q: When would you choose a graph database over PostgreSQL with recursive CTEs?**
 Choose graph database when: (1) Variable-depth traversal with no fixed maximum depth ("who can reach X within any number of hops"). (2) Complex pattern matching across multiple relationship types (fraud rings, supply chain). (3) Relationship properties matter and are frequently queried (when did they connect, how strong is the connection). (4) Graph algorithms (PageRank, community detection, shortest path) are core to the application. Choose PostgreSQL recursive CTEs when: (1) Maximum depth is bounded and small (< 5 levels). (2) The rest of the data is relational and the overhead of running a separate database outweighs the graph traversal benefit. (3) Simple parent-child hierarchy (org chart, file system) — ltree extension may suffice. (4) Team is more comfortable with SQL than Cypher/Gremlin.
 
-**What is the Cypher MERGE statement and when do you use it?**
+**Q: What is the Cypher MERGE statement and when do you use it?**
 MERGE is a combination of MATCH and CREATE: it matches the pattern if it exists and creates it if not. Essential for idempotent graph updates — prevents duplicate node or relationship creation. `MERGE (u:User {email: "alice@example.com"}) ON CREATE SET u.created_at = datetime() ON MATCH SET u.last_login = datetime()` — creates the user if the email doesn't exist, updates last_login if it does. Common mistake: `MERGE` on a large pattern without indexes — it performs a full scan to find the pattern before deciding to create it. Always ensure all properties used in MERGE conditions are indexed. Use `MERGE` for nodes when you have a natural unique identifier; use CREATE for relationships when you want to allow multiple relationships of the same type between two nodes.
 
-**How does Neo4j GDS (Graph Data Science) library enable graph analytics?**
+**Q: How does Neo4j GDS (Graph Data Science) library enable graph analytics?**
 GDS provides in-memory graph projections and algorithm implementations: (1) Project the graph: `CALL gds.graph.project('my-graph', 'User', 'FOLLOWS')` — loads nodes and relationships into an optimized in-memory format. (2) Run algorithms: PageRank (node importance), Louvain community detection (cluster discovery), Dijkstra shortest path (weighted path), betweenness centrality (bridge nodes). (3) Write results back: stream results to application or write as node properties. GDS uses parallel execution (multi-threaded traversals) for large graphs. Use cases: recommendation systems (community detection → recommend within community), content ranking (PageRank for important documents), fraud detection (betweenness centrality to find money mule nodes in transaction networks).
 
-**What is the supernode problem and how do you mitigate it?**
+**Q: What is the supernode problem and how do you mitigate it?**
 A supernode is a node with extremely high degree (many relationships) — examples: a celebrity user with 50M followers, a highly-connected product in a recommendation graph, an IP address seen in millions of transactions. Problem: any traversal that reaches a supernode must consider all N edges, even if only a few lead to the answer. For a 3-hop traversal that hits a supernode with 50M relationships at hop 2: 50M edges must be examined. Mitigation strategies: (1) Filter before reaching the supernode (use additional predicates to narrow the traversal earlier). (2) Cap the degree of traversal: use relationship properties to select only recent or high-weight connections. (3) Cache: precompute traversals from/to supernodes as static properties. (4) Avoid using supernodes as traversal waypoints — start traversals from the query-specific node, not from the supernode. (5) Consider not modeling extremely high-degree relationships in the graph at all — use alternative structures.
 
-**What graph databases work at billion-node scale?**
+**Q: What graph databases work at billion-node scale?**
 Neo4j: handles billions of nodes on a single server with high RAM (2-4TB RAM servers handle 10B+ nodes). Not horizontally scalable in the traditional sense — Fabric provides federation across multiple Neo4j instances. TigerGraph: natively distributed, handles 100B+ nodes and 1T+ edges across a cluster. Uses parallel graph computation (GSQL parallel traversals). Used by financial institutions for global fraud detection. JanusGraph: distributed graph using Cassandra or HBase as backend storage — horizontally scalable but with higher latency per hop than native graphs. Amazon Neptune: managed, scales to billions of nodes, but latency is higher than on-premise native graphs due to network round trips. At extreme scale (>100B nodes): consider specialized graph processing frameworks like Apache Spark GraphX or Pregel for batch analytics.
 
-**How does Neo4j handle transactions and ACID compliance?**
+**Q: How does Neo4j handle transactions and ACID compliance?**
 Neo4j provides full ACID compliance at the graph level. Write transactions: all changes to nodes and relationships within a transaction are atomic (either all committed or all rolled back). WAL (write-ahead log): changes written to WAL before data files, ensuring crash recovery. MVCC: readers do not block writers; each transaction gets a consistent snapshot. Constraint enforcement: unique constraints (on node properties), existence constraints. Transaction timeouts: configurable to prevent long-running transactions from holding locks. Cluster: in a causal cluster, write transactions are applied to the leader (primary), replicated via Raft consensus to followers. Read transactions can be served by followers (potentially slightly stale). `USING PERIODIC COMMIT` (or `CALL { ... } IN TRANSACTIONS OF N ROWS`): batch large write operations to avoid memory exhaustion on large imports.
 
-**What are the index types in Neo4j and how do you choose?**
+**Q: What are the index types in Neo4j and how do you choose?**
 Neo4j index types: (1) Range index (B+tree based): supports equality, range, prefix, and ordering. Use for: numeric properties (age, price), dates, string prefixes. Default index type. (2) Text index (Lucene-based): full-text search on string properties. Use for: free-text search within graph queries (`MATCH (u:User) WHERE u.bio CONTAINS "database expert"`). (3) Point index: for spatial properties (latitude, longitude). Use for geospatial queries (within distance, bounding box). (4) Composite index: multiple properties in one index for compound queries. (5) Full-text index: Lucene-based search across multiple node labels and properties. Create: `CREATE INDEX idx_user_email FOR (u:User) ON (u.email)`. Always create indexes on properties used in MERGE conditions, MATCH patterns, and WHERE clauses on high-cardinality properties.
 
-**How do you model a hierarchical permission system in a graph database?**
+**Q: How do you model a hierarchical permission system in a graph database?**
 RBAC (Role-Based Access Control) graph schema:
 ```
 (:User)-[:MEMBER_OF]→(:Group)-[:SUBGROUP_OF*]→(:Group) // Nested groups
@@ -371,7 +371,7 @@ RBAC (Role-Based Access Control) graph schema:
 ```
 Advantages over relational RBAC: inherited permissions through group hierarchies work naturally via variable-depth traversal. Complex permission queries like "what can Alice do?" or "who can delete document 42?" are single Cypher queries — no multi-level SQL JOINs. ABAC (Attribute-Based): add property predicates to the `GRANTS` relationship or permission node (`IF request.time > 9AM AND request.department = "Finance"`). Policy evaluation becomes a graph traversal with property filtering.
 
-**What is the difference between a labeled property graph and an RDF triple store?**
+**Q: What is the difference between a labeled property graph and an RDF triple store?**
 Labeled property graph (LPG — used by Neo4j, Amazon Neptune property graph): nodes and relationships are first-class objects with labels (type tags) and properties (key-value pairs attached directly). Relationships have a direction, type, and properties. Query: Cypher or Gremlin. RDF triple store (used by Amazon Neptune RDF, AllegroGraph): data modeled as subject-predicate-object triples. Attributes are additional triples: `(alice, age, 30)` instead of a property. No native relationship properties — must reify relationships as nodes. Query: SPARQL. RDF follows W3C standards for semantic web and linked data. LPG: more intuitive for application development, better performance for typical graph queries. RDF: better for knowledge graph integration, linked data, ontology reasoning. Many enterprise knowledge graphs use RDF (Google Knowledge Graph, DBpedia).
 
 ---

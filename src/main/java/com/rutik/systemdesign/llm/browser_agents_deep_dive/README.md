@@ -346,49 +346,49 @@ await secure_input_tool.fill("#password", credential_ref="user_pwd")
 
 ## 12. Interview Questions with Answers
 
-**Why is accessibility tree extraction better than HTML for browser agents?**
+**Q: Why is accessibility tree extraction better than HTML for browser agents?**
 Accessibility tree is built for assistive technology — it surfaces semantic info (labels, roles, states) and filters out presentational noise. Smaller (10-100× fewer tokens than raw HTML), structured for interpretation, more stable across CSS refactors. LLMs reason over it more accurately than over raw HTML.
 
-**What's the difference between Browser Use, Stagehand, and Playwright MCP?**
+**Q: What's the difference between Browser Use, Stagehand, and Playwright MCP?**
 Browser Use: Python library, Playwright-based, DOM+vision hybrid, default to Claude. Stagehand: TypeScript SDK from Browserbase team, three high-level primitives (act/extract/observe), tightly integrated with Browserbase cloud. Playwright MCP: Anthropic's official MCP server — protocol-based, works with any MCP client.
 
-**Why are semantic selectors more reliable than CSS/XPath?**
+**Q: Why are semantic selectors more reliable than CSS/XPath?**
 CSS selectors (`#btn-1234`) and XPath (`//button[@data-test='5']`) reference implementation details that change between deploys. Semantic selectors (`get_by_role("button", name="Submit")`) reference the user-visible semantics — text, role, ARIA labels — which are far more stable.
 
-**How do browser agents handle authentication?**
+**Q: How do browser agents handle authentication?**
 Two patterns: (1) Session persistence — manually log in once, save cookies+localStorage to JSON via Playwright's `context.storage_state()`, reuse in agent runs. (2) Credential injection — agent navigates to login page, dedicated "fill credential" tool (not LLM-visible) retrieves password from secret manager.
 
-**How do you handle captchas?**
+**Q: How do you handle captchas?**
 Three options: (1) Avoid by using residential proxies / stealth browsers (Browserbase has this) to reduce captcha triggering. (2) Solve via 2captcha or CapSolver API — agent detects captcha, sends image, gets solution back. (3) Escalate to human — pause agent, request user to solve in real browser, resume.
 
-**What's WebArena and how do agents perform on it?**
+**Q: What's WebArena and how do agents perform on it?**
 WebArena (CMU 2024) is a benchmark of real web tasks across 6 sites (Shopping, GitLab, Reddit, OpenStreetMap, etc). Tests are realistic multi-step tasks. Leading agents: Browser Use + Claude Sonnet 4 ~58%, Stagehand ~50%, vision-only approaches ~30%. Benchmark drives architectural progress.
 
-**When should you use vision vs DOM extraction?**
+**Q: When should you use vision vs DOM extraction?**
 Use DOM when site is standard (HTML/React/Vue with semantic markup). Use vision as fallback when: Canvas-based UI (Figma, Google Sheets), PDF viewers, custom-rendered widgets, or when DOM extraction returns ambiguous results. Hybrid agents try DOM first, fall back to screenshot only when needed.
 
-**How do browser agents handle pagination and infinite scroll?**
+**Q: How do browser agents handle pagination and infinite scroll?**
 Detect end-of-page via DOM signal (specific selector) or absence of "next" button. For infinite scroll: scroll down, wait for new content, repeat until task complete OR new content stops appearing OR max-scroll cap reached. Cost grows linearly with scroll depth.
 
-**What's Browserbase and why is it popular?**
+**Q: What's Browserbase and why is it popular?**
 Browserbase provides cloud-hosted browsers (Chromium with stealth-mode patches) as a service. Benefits: don't run browsers in your infra (memory-heavy), session persistence built in, captcha solving integrated, live debugging UI (watch agent work in real-time). Pay-per-session model.
 
-**How do you debug a failing browser agent?**
+**Q: How do you debug a failing browser agent?**
 Capture: (1) screenshot at each step, (2) DOM snapshot, (3) action taken, (4) LLM reasoning. Browser Use and Stagehand have built-in debuggers; Browserbase has session replay UI. Common failures: stale element, missed wait condition, semantic locator that should have worked but didn't.
 
-**What about anti-bot defenses (Cloudflare, etc)?**
+**Q: What about anti-bot defenses (Cloudflare, etc)?**
 Modern bot detection (Cloudflare, DataDome, PerimeterX) profiles browser fingerprints — User-Agent, screen resolution, WebGL renderer, JavaScript timing patterns, mouse movement. Vanilla Playwright is fingerprintable. Counter: stealth plugins (puppeteer-stealth, Playwright-stealth), residential proxies, human-like mouse paths. Cat-and-mouse game.
 
-**How do you cap cost on browser agents?**
+**Q: How do you cap cost on browser agents?**
 Per-task budget (terminate if cost exceeds $X), per-domain rate limits (don't hammer one site), max-pages-per-task limit (cap navigation depth), DOM truncation (cap accessibility tree to 50KB), screenshot size limits (low-res screenshots are cheaper).
 
-**How are browser agents different from Computer Use?**
+**Q: How are browser agents different from Computer Use?**
 Computer Use is generic — screenshot + click/type/key, works on any GUI. Browser agents specialize on web pages — leverage DOM/accessibility tree for cleaner extraction, use semantic selectors, handle browser-specific lifecycle (page loads, navigation). Browser agents are typically 2-3× more accurate on web tasks at lower cost.
 
-**What's the role of MCP in the browser agent ecosystem?**
+**Q: What's the role of MCP in the browser agent ecosystem?**
 Playwright MCP (and community variants like Browser MCP) expose browser operations as standardized tools. Any MCP client (Claude Code, custom agents, etc) can use them without proprietary SDK integration. Standardizing on MCP enables interoperability.
 
-**Can browser agents run unattended at scale?**
+**Q: Can browser agents run unattended at scale?**
 Yes but with constraints. For 100s of concurrent browser sessions, use Browserbase or similar (don't try to run 100 headless Chrome on one host — memory dies). Implement rate limiting per target site (politeness), captcha handling, session refresh on auth expiry, retry/failure handling.
 
 ---

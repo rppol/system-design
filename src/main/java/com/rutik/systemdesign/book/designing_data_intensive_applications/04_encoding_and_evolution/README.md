@@ -275,52 +275,52 @@ buffering, redelivery, fan-out). Every mode needs version-skew tolerance.
 
 ## Interview Questions
 
-**What are forward and backward compatibility, and why do you need both at once?**
+**Q: What are forward and backward compatibility, and why do you need both at once?**
 Backward compatibility means new code can read data written by old code; forward compatibility means old code can read data written by new code. You need both simultaneously because deployments are rolling — for a window of time, old and new versions of your application run side by side, reading and writing the same database and queues. New code must understand the historical data, and old code must tolerate (and not corrupt) data written by the newer code it hasn't been updated to fully understand.
 
-**How do Protocol Buffers and Thrift achieve schema evolution, and what are the rules?**
+**Q: How do Protocol Buffers and Thrift achieve schema evolution, and what are the rules?**
 They encode fields by numeric tag rather than by name, so the schema maps tags to field names and types out of band. To add a field you assign it a brand-new tag; old readers ignore unknown tags (forward compatible), and the field must be optional or have a default so new readers can handle old data lacking it (backward compatible). The rules: never reuse a tag number, never make a new field required, and only remove optional fields — never reusing their tags.
 
-**How does Avro differ from Protobuf/Thrift, and what is its key advantage?**
+**Q: How does Avro differ from Protobuf/Thrift, and what is its key advantage?**
 Avro's encoded bytes contain no field tags or type annotations at all — just concatenated values — so the reader must know the schema used to write the data. It separates the writer's schema (used to encode) from the reader's schema (what the consumer expects) and reconciles them by matching fields by *name*, filling defaults for missing fields and ignoring extra ones. Its key advantage is friendliness to dynamically generated schemas, like auto-deriving a schema from a database table, because there are no manually assigned tag numbers to coordinate.
 
-**Why does Avro distinguish the writer's schema from the reader's schema?**
+**Q: Why does Avro distinguish the writer's schema from the reader's schema?**
 Because the data may have been written by a different (often older or newer) version of the code than the one reading it, and Avro's tagless encoding gives no way to interpret the bytes without the exact writing schema. By carrying or referencing the writer's schema and resolving it against the reader's expected schema by field name, Avro lets the two versions differ yet still communicate — defaults cover fields the reader added, and fields the writer included but the reader dropped are skipped.
 
-**What is the "silent field drop" bug when data flows through a database?**
+**Q: What is the "silent field drop" bug when data flows through a database?**
 It happens when an older version of the application reads a record that a newer version augmented with a field the old code doesn't know about, then writes the record back — and in doing so discards the unrecognized field, silently losing data during normal operation. The fix is for the encoding/decoding layer to preserve unknown fields through a decode-modify-re-encode cycle so that fields a given code version doesn't understand survive a round trip untouched.
 
-**Why does the book say "data outlives code," and what does that imply for migrations?**
+**Q: Why does the book say "data outlives code," and what does that imply for migrations?**
 Because you can deploy new code across a fleet in minutes, but the data already sitting in the database may be years old and was written by many past schema versions — so the database effectively contains every version of your schema you've ever used. This implies you should avoid big-bang migrations that rewrite every row (slow, lock-heavy, risky) and instead let the schema evolve so old rows keep their shape, handling multiple versions at read time and migrating lazily.
 
-**Why are language-specific serialization formats (pickle, Java Serializable) discouraged?**
+**Q: Why are language-specific serialization formats (pickle, Java Serializable) discouraged?**
 They lock data to a single language so other systems can't read it; they're a security risk because decoding can instantiate arbitrary classes, enabling remote code execution on untrusted input; and they typically neglect versioning and efficiency, encoding bulky representations with poor evolution support. They're acceptable only for the most transient, same-process, same-version use — never for data persisted or sent across a network or time.
 
-**What problems do JSON, XML, and CSV have despite their popularity?**
+**Q: What problems do JSON, XML, and CSV have despite their popularity?**
 They're verbose and have ambiguous data types: XML and CSV can't reliably distinguish a number from a string, and JSON can't distinguish integers from floats and loses precision on integers above 2^53. They have no native binary support, forcing Base64 (a ~33% size increase), and their schema support is optional or weak (CSV has none). They persist because they're human-readable and universally supported, making them a solid lingua franca for interfaces between organizations.
 
-**Why is RPC's "make a remote call look like a local call" considered a leaky abstraction?**
+**Q: Why is RPC's "make a remote call look like a local call" considered a leaky abstraction?**
 Because a network call has failure modes a local call never does: it can be lost or delayed unpredictably, and it can time out *after* the server already executed it, leaving the caller unsure whether it happened. Latency varies enormously, all arguments must be serialized, and large objects become problematic across languages. A local function call either returns a value or throws; pretending the network behaves the same way hides exactly the cases that cause production bugs.
 
-**Given RPC timeouts, why is idempotence important?**
+**Q: Given RPC timeouts, why is idempotence important?**
 Because when an RPC times out, the caller doesn't know whether the operation executed or not, so the safe response is to retry — but retrying a non-idempotent operation (charge a credit card, transfer money) applies it twice. Designing operations to be idempotent (safe to apply repeatedly, e.g. via a unique request ID the server deduplicates) lets the client retry freely after a timeout without risking double execution, which is essential for reliable service-to-service communication.
 
-**What advantages does asynchronous message-passing offer over direct RPC?**
+**Q: What advantages does asynchronous message-passing offer over direct RPC?**
 A message broker buffers messages when the recipient is unavailable or overloaded (improving reliability and smoothing load spikes), can redeliver to a consumer that crashed (preventing loss), decouples sender from receiver so the sender needn't know the recipient's address or wait for a response, and lets one message fan out to multiple consumers. The cost is that it's one-way and asynchronous, so request/response patterns need extra work, and payloads still require forward/backward compatibility since brokers don't enforce schemas.
 
-**What benefits do schemas provide beyond compact encoding?**
+**Q: What benefits do schemas provide beyond compact encoding?**
 A schema is valuable, always-current documentation of the data's structure; a schema registry lets you check forward/backward compatibility of a proposed change *before* deploying it, catching breaking changes early; and in statically typed languages, code generation from the schema gives compile-time type checking. In effect, schemas deliver the guarantees of schema-on-write while still permitting disciplined evolution, which is why they're preferred for internal data over schemaless JSON.
 
-**How does data flow "through a database" create a compatibility requirement that services don't?**
+**Q: How does data flow "through a database" create a compatibility requirement that services don't?**
 When data flows through a database, the writer and reader are separated in *time*, not just space — a record written today may be read months later by code that has since changed, and during rolling upgrades a reader process may actually be older than the writer. So a single database simultaneously holds records in many schema versions, requiring both forward and backward compatibility within one datastore, plus care to preserve unknown fields. Services exchange data live, so the version skew is bounded to currently running instances.
 
-**What is the actor model, and how does it relate to message compatibility?**
+**Q: What is the actor model, and how does it relate to message compatibility?**
 The actor model structures concurrency as independent actors that hold local state and communicate only by sending each other asynchronous messages, avoiding shared-memory locking. A distributed actor framework (Akka, Erlang/OTP, Orleans) transparently routes those messages across nodes, so it doubles as a programming and a distribution model. Because actors exchange encoded messages and the system undergoes rolling upgrades, those messages need the same forward/backward compatibility as any other dataflow.
 
-**When would you choose a textual format like JSON over a binary schema format like Avro or Protobuf?**
+**Q: When would you choose a textual format like JSON over a binary schema format like Avro or Protobuf?**
 Choose JSON when the interface crosses organizational boundaries or targets a broad, uncontrolled set of consumers (public web APIs), where human readability, universal tooling, and no need to distribute schemas outweigh size and type-safety concerns. Choose a binary schema format for internal, high-volume, performance-sensitive dataflows where you control both ends, can manage schemas centrally, and want compactness, evolution rules, and type checking — the typical microservice-to-microservice or data-pipeline case.
 
-**Why must you never reuse a field tag number in Protobuf/Thrift, and what's the analogous Avro concern?**
+**Q: Why must you never reuse a field tag number in Protobuf/Thrift, and what's the analogous Avro concern?**
 Reusing a retired tag number means old data encoded with that tag for the *old* field will be misinterpreted by new code as the *new* field of that tag, silently corrupting reads. The analogous Avro concern is that since resolution is by field *name*, renaming a field breaks matching unless you use aliases — so you add an alias mapping the new name to the old so the reader can still reconcile data written under the previous name. Both are about preserving the identity link between historical bytes and current code.
 
 ---

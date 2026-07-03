@@ -280,49 +280,49 @@ Maturity               | Decades               | ~10 years            | ~12 year
 
 ## 12. Interview Questions with Answers
 
-**How does Google Spanner achieve external consistency without two-phase commit?**
+**Q: How does Google Spanner achieve external consistency without two-phase commit?**
 Spanner uses TrueTime commit-wait instead of 2PC coordination. After choosing a commit timestamp T using `TT.now().latest`, the leader waits until `TT.now().earliest > T` (the commit-wait period, ~1–7ms). This wait ensures no future transaction can receive a timestamp ≤ T, guaranteeing that any transaction starting after this commit will observe it. The key insight is that the wait is bounded by clock uncertainty (epsilon), not by network round trips to remote sites, so external consistency is maintained without cross-datacenter coordination messages.
 
-**What is the TrueTime API and why is it necessary for Spanner?**
+**Q: What is the TrueTime API and why is it necessary for Spanner?**
 TrueTime is Google's globally synchronized clock API that returns a time interval `[earliest, latest]` with bounded uncertainty (epsilon ≈ 1–7ms, maintained by GPS receivers and atomic clocks in each datacenter). It is necessary because distributed databases need globally ordered timestamps without a centralized timestamp oracle (which would be a single point of failure and latency bottleneck). TrueTime lets each Spanner leader independently choose a commit timestamp that is guaranteed to be strictly greater than any timestamp assigned before it, enabling external consistency without coordination.
 
-**What is the hotspot problem with auto-increment keys in CockroachDB and how do you fix it?**
+**Q: What is the hotspot problem with auto-increment keys in CockroachDB and how do you fix it?**
 Auto-increment keys are monotonically increasing, so all new rows are written to the range with the highest key values. That range's Raft leader handles 100% of inserts regardless of cluster size — the other nodes sit idle for writes. Fix by using random UUIDs (`gen_random_uuid()`), ULIDs (sortable but random suffix), or CockroachDB's hash-sharded indexes which split a sequential key space across N buckets automatically.
 
-**Explain how CockroachDB's distributed SQL execution works.**
+**Q: Explain how CockroachDB's distributed SQL execution works.**
 The SQL gateway node decomposes a query into a physical plan targeting specific key ranges. For a join between two tables, the planner estimates whether to shuffle one table to the other (similar to a distributed hash join) or to co-locate the computation where both tables share a Raft leader. Predicates are pushed down so each TiKV/RocksDB node filters data locally before sending results to the coordinator. The gateway assembles partial results into the final output.
 
-**When would you choose CockroachDB over PostgreSQL with read replicas?**
+**Q: When would you choose CockroachDB over PostgreSQL with read replicas?**
 Choose CockroachDB when you need write scalability beyond a single node (typically above 50K TPS sustained or 10TB+ active data), when you need multi-region active-active writes with strong consistency, or when you want automatic re-sharding without downtime. PostgreSQL with read replicas is preferable for single-region deployments (5x lower latency, full extension ecosystem, lower cost, simpler operations) and for read-heavy workloads where replicas absorb load.
 
-**How does TiDB achieve HTAP — serving both OLTP and analytical queries on the same data?**
+**Q: How does TiDB achieve HTAP — serving both OLTP and analytical queries on the same data?**
 TiDB stores data in TiKV (row-oriented, RocksDB-backed, Raft-replicated) for OLTP, and asynchronously replicates it to TiFlash (columnar store) via Raft learner replication. The TiFlash replica receives the same Raft log entries as regular TiKV replicas but stores them in columnar format. TiDB's cost-based optimizer detects query type and routes to TiKV (index scans, small point reads) or TiFlash (full scans, aggregations). The replication lag is typically under 100ms, so analytics run on near-real-time data without ETL.
 
-**What is the CAP position of Spanner and CockroachDB, and what does that mean in practice?**
+**Q: What is the CAP position of Spanner and CockroachDB, and what does that mean in practice?**
 Both are CP systems: they choose consistency over availability during a network partition. In practice, this means: if a region is partitioned, writes to that region's data halt rather than proceeding with potentially conflicting writes that would create divergence. For Spanner, a zone outage causes that zone's data to become unavailable for writes (the Paxos majority is gone). For CockroachDB, a range's Raft group needs a quorum (2 of 3 replicas); if 2 replicas are unreachable, that range's writes block. Applications using these systems need retry logic and circuit breakers for partition scenarios.
 
-**How does Spanner handle schema changes across a globally distributed table?**
+**Q: How does Spanner handle schema changes across a globally distributed table?**
 Spanner supports online schema changes that apply gradually across all replicas. When you add a column, Spanner marks it as a new schema version and begins backfilling the column's default value across all splits. Old and new schema versions coexist during the migration. Reads and writes continue against the old schema, with the database transparently translating between versions. The migration completes when all splits finish backfilling. This can take hours for billion-row tables and cannot be significantly accelerated.
 
-**What is Raft and how does it differ from Paxos in distributed SQL systems?**
+**Q: What is Raft and how does it differ from Paxos in distributed SQL systems?**
 Raft is a consensus algorithm designed to be more understandable than Paxos while providing the same safety guarantees. Raft separates leader election, log replication, and safety into distinct modules. A Raft group has one leader that receives all writes and replicates to followers; a quorum (majority) must acknowledge each log entry before it is committed. Paxos allows more flexible quorum structures but is harder to implement correctly. CockroachDB and TiDB use Raft; Spanner uses Paxos. Both achieve the same correctness guarantees: a committed entry is never lost as long as a quorum of replicas survives.
 
-**What are write intents in CockroachDB and how do they affect read performance?**
+**Q: What are write intents in CockroachDB and how do they affect read performance?**
 Write intents are uncommitted values written directly to the MVCC keyspace by in-progress transactions. They are records of "I plan to set this key to this value but haven't committed yet." When a reader encounters an intent, it must resolve the intent's status: if the transaction has committed, the intent is cleaned up and the value is returned; if aborted, the intent is removed and the previous MVCC version is returned; if still pending, the reader must wait or push the transaction to a higher timestamp (priority-based). High contention scenarios with many simultaneous writers create intent storms that slow reads. Mitigate by keeping transactions short.
 
-**Explain YugabyteDB's dual API approach.**
+**Q: Explain YugabyteDB's dual API approach.**
 YugabyteDB exposes two SQL APIs over the same DocDB storage engine: YSQL (PostgreSQL-compatible, port 5433) and YCQL (Cassandra Query Language-compatible, port 9042). DocDB uses RocksDB as the storage layer, with Raft for replication. YSQL targets OLTP use cases requiring joins and transactions; YCQL targets time-series and wide-column access patterns. This lets teams consolidate PostgreSQL and Cassandra workloads on one system. The tradeoff is that neither API is 100% feature-complete with its reference implementation.
 
-**How does Aurora's shared log differ from true distributed SQL?**
+**Q: How does Aurora's shared log differ from true distributed SQL?**
 Aurora uses a single-writer, shared-log architecture. All writes go through one primary instance (no write scale-out). The primary writes to a distributed log store (6 copies across 3 AZs), and up to 15 read replicas can replay this log for reads. Failover is fast (<30s) because replicas share the log — there is no full replica sync needed. This is not true distributed SQL because writes do not scale horizontally. Aurora Limitless (announced 2023) adds sharding on top of Aurora to support distributed writes, moving toward distributed SQL.
 
-**What retry strategy should applications use with distributed SQL systems?**
+**Q: What retry strategy should applications use with distributed SQL systems?**
 Applications must implement exponential backoff with jitter for transaction retries. CockroachDB returns error code `40001` (serialization failure) when a transaction is aborted due to conflict or clock skew; the application must retry the entire transaction from the beginning. Spanner clients (via the client library) handle retries transparently for many cases. TiDB similarly returns retryable errors. Pattern: catch retryable error → wait `min(base * 2^attempt + random_jitter, max_wait)` → retry full transaction. Never retry individual statements; always retry the full transaction unit.
 
-**How does CockroachDB's REGIONAL BY ROW feature work?**
+**Q: How does CockroachDB's REGIONAL BY ROW feature work?**
 `REGIONAL BY ROW` is a table locality mode where each row has a `crdb_region` column that determines which region owns (has the Raft leader for) that row. Writes to a row are committed by the Raft group local to that row's region, reducing cross-region latency to a single regional RTT. Reads from the same region are fast (local); reads that cross regions incur cross-region latency. Combined with a `home_region` concept per user, applications can pin each user's data to their nearest datacenter for single-digit millisecond read/write latency globally.
 
-**What is PlanetScale's vitess-based approach and how does it differ from Spanner?**
+**Q: What is PlanetScale's vitess-based approach and how does it differ from Spanner?**
 PlanetScale uses Vitess, which is a sharding middleware for MySQL. Each shard is a strongly consistent MySQL instance (with Raft via Orchestrator or external HA). Cross-shard transactions are NOT ACID in the traditional sense — PlanetScale discourages cross-shard foreign keys and joins, pushing developers to design schemas that avoid cross-shard operations. Spanner, by contrast, supports cross-shard ACID transactions natively with external consistency. PlanetScale's tradeoff: better MySQL compatibility and lower cost; Spanner's: true distributed ACID at the cost of flexibility.
 
 ---

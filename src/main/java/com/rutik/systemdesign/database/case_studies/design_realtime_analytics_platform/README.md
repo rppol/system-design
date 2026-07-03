@@ -379,13 +379,13 @@ public class AnomalyDetector extends ProcessWindowFunction<EventCount, Alert, St
 
 ## Interview Discussion Points
 
-**How does ClickHouse achieve sub-second query performance on billions of events?**
+**Q: How does ClickHouse achieve sub-second query performance on billions of events?**
 ClickHouse uses a columnar storage format where each column is stored separately on disk. For a query aggregating `event_count` by `event_name` over 30 days, ClickHouse reads only the `event_name`, `timestamp`, and `org_id` columns — skipping all other columns entirely. This reduces I/O by 90%+ compared to row storage. Additionally: (1) Sparse primary index (one entry per 8192 rows) allows instant range skipping. (2) Data is sorted by the ORDER BY key, so range queries on `timestamp` are sequential reads (no random I/O). (3) Vectorized execution processes 1024 rows per SIMD instruction. (4) Pre-aggregated materialized views reduce the dataset from 1B events/day to 1M hourly aggregations.
 
-**Why use Kafka as an intermediate layer instead of writing directly to ClickHouse?**
+**Q: Why use Kafka as an intermediate layer instead of writing directly to ClickHouse?**
 Direct ClickHouse writes from 100K events/second across thousands of SDK clients would create: (1) Connection overhead (ClickHouse connection per SDK is expensive). (2) Write amplification (small inserts trigger merges frequently — ClickHouse prefers large batches). (3) No replay capability — if ClickHouse is down or the schema needs changing, events are lost. Kafka provides: (1) A write buffer that absorbs burst traffic up to 7-day retention. (2) Consumer groups for multiple downstream systems (ClickHouse + Redis + S3). (3) Replay capability for re-processing events when the ClickHouse schema changes. (4) Decoupling: SDK clients return 202 Accepted immediately; Kafka absorbs the writes asynchronously.
 
-**How do you handle schema evolution as new event properties are added?**
+**Q: How do you handle schema evolution as new event properties are added?**
 ClickHouse's `Map(String, String)` column for properties allows flexible key-value pairs without schema changes. New properties appear as new keys in the map — no ALTER TABLE needed. For properties that need to be filterable as first-class dimensions (high-cardinality attributes added later), add materialized columns:
 
 ```sql
@@ -396,5 +396,5 @@ MATERIALIZED JSONExtractString(properties, 'country');
 
 The materialized column is computed from the existing properties map for new rows and can be backfilled. For the Avro schema registry: backward-compatible additions (new optional fields with defaults) allow old consumers to continue processing new events.
 
-**How do you prevent one tenant's heavy queries from impacting others?**
+**Q: How do you prevent one tenant's heavy queries from impacting others?**
 ClickHouse resource quotas: `CREATE QUOTA tenant_{org_id} FOR INTERVAL 1 HOUR MAX QUERIES 1000, MAX READ ROWS 10000000000`. Each tenant's queries are assigned to their quota profile. When a tenant exceeds their quota, ClickHouse returns an error to their API requests rather than degrading service for others. Additionally: (1) Query complexity limits: reject queries scanning > 10B rows per tenant per day. (2) Materialized views ensure most dashboard queries hit pre-aggregated data, not raw events. (3) Query caching (Redis): repeated identical queries serve from cache without hitting ClickHouse again.

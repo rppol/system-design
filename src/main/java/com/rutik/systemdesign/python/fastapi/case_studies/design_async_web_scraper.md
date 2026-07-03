@@ -685,32 +685,32 @@ For 10,000 pages/hour = 2.8 pages/second, a single machine with 50 async workers
 
 ## Interview Discussion Points
 
-**What makes asyncio more efficient than threading for this use case?**
+**Q: What makes asyncio more efficient than threading for this use case?**
 asyncio uses a single thread and cooperative multitasking: when a coroutine awaits a network response, the event loop runs another coroutine. This avoids thread context-switch overhead (~1-5 µs) and the GIL contention that limits Python threads. 50 async workers consume ~10 MB total vs ~400 MB for 50 OS threads. The tradeoff: one blocking call anywhere stalls all workers, so CPU-bound operations must go through `run_in_executor`.
 
-**How do you prevent overwhelming a single domain with concurrent requests?**
+**Q: How do you prevent overwhelming a single domain with concurrent requests?**
 Two mechanisms in combination: a per-domain `asyncio.Semaphore(5)` caps concurrent open connections to that domain to 5, and a politeness delay of `sleep(1/rate)` ensures at least 200 ms between consecutive requests even when 5 connections are available simultaneously. The semaphore prevents connection storms; the sleep provides steady cadence.
 
-**How does the URL frontier handle backpressure when pages are discovered faster than they are processed?**
+**Q: How does the URL frontier handle backpressure when pages are discovered faster than they are processed?**
 The `asyncio.Queue(maxsize=200_000)` provides bounded capacity. When the queue is full, `queue.put()` blocks the producer coroutine, creating natural backpressure. Workers calling `queue.task_done()` signal completion, allowing blocked puts to resume. If 200,000 URLs is insufficient for a deep crawl, the frontier can be backed by Redis lists (`LPUSH`/`BRPOP`) which provide persistent, unbounded storage at the cost of Redis round-trips per URL.
 
-**What happens when a database write fails mid-crawl?**
+**Q: What happens when a database write fails mid-crawl?**
 The current implementation catches all exceptions in the worker loop, increments the error counter, and continues. A more robust approach wraps the `write_product` call in a retry with exponential backoff for `asyncpg.TooManyConnectionsError` or transient network errors. For idempotency, the schema uses `ON CONFLICT (url) DO UPDATE`, so replaying a URL after a partial write is safe.
 
-**How would you scale this system to 10x throughput (100,000 pages/hour)?**
+**Q: How would you scale this system to 10x throughput (100,000 pages/hour)?**
 100,000 pages/hour = 28 pages/second. Options: (1) increase `num_workers` from 50 to 200 — asyncio handles this with minimal overhead; (2) shard by domain across multiple scraper processes using Kafka topic partitioning; (3) add a second Redis for dedup to reduce round-trip latency. The PostgreSQL write path becomes the bottleneck at ~28 inserts/second — use `asyncpg` batch inserts or a write buffer that flushes every 100 records or 1 second.
 
-**How do you handle sites that require JavaScript rendering?**
+**Q: How do you handle sites that require JavaScript rendering?**
 aiohttp fetches raw HTML and cannot execute JavaScript. For JS-heavy sites, use Playwright's async API (`playwright.async_api`) with a pool of browser contexts. Each browser context costs ~50 MB RAM vs ~1 MB for an HTTP connection, so limit JS-rendered workers to a smaller pool (5-10) and route by domain. Alternatively, look for the site's internal API that the JavaScript calls and scrape that directly.
 
-**How does the robots.txt cache avoid stale data?**
+**Q: How does the robots.txt cache avoid stale data?**
 The `RobotsCache` stores a `(parser, timestamp)` tuple per domain and re-fetches when the cached entry is older than 1 hour (`_ttl = 3600`). If the `robots.txt` fetch fails (site unreachable), the parser is set to `allow_all = True` as a safe fallback, matching the robots.txt spec's guidance that crawlers should not retry indefinitely on failure. A 1-hour TTL balances freshness against the overhead of fetching robots.txt on every page request.
 
-**Why use `ON CONFLICT DO UPDATE` instead of checking existence before insert?**
+**Q: Why use `ON CONFLICT DO UPDATE` instead of checking existence before insert?**
 A check-then-insert sequence has a TOCTOU race: two workers could both check, both find the URL absent, and both attempt to insert, causing a constraint violation. `ON CONFLICT DO UPDATE` (an UPSERT) is atomic at the database level — the second writer's insert becomes an update. It also handles the case where a re-crawl run wants to refresh prices without needing explicit logic to distinguish new vs existing rows.
 
-**How would you add politeness delays that respect the `Crawl-Delay` directive in robots.txt?**
+**Q: How would you add politeness delays that respect the `Crawl-Delay` directive in robots.txt?**
 `RobotFileParser` exposes `crawler_delay(user_agent)` which returns the `Crawl-Delay` value in seconds if set. The `DomainRateLimiter` can be extended to read this value when initialising a domain's semaphore: if `robots.crawler_delay("AsyncScraper/1.0")` returns 2, set `_min_interval = 2.0` for that domain rather than the default `1/max_rps`. This integrates robots.txt compliance directly into the rate-limiting layer.
 
-**How do you monitor crawl health in production?**
+**Q: How do you monitor crawl health in production?**
 The `JobState` dataclass tracks `fetched` and `errors` counts exposed via `GET /jobs/{job_id}`. For production monitoring: (1) expose a Prometheus `/metrics` endpoint with `scraped_total`, `errors_total`, `queue_depth`, and `active_workers` gauges using `prometheus-fastapi-instrumentator`; (2) set an alert if `errors/fetched > 0.1` (10% error rate) over a 5-minute window; (3) track p95 fetch latency with a histogram to detect slow domains early.

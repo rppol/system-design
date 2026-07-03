@@ -459,7 +459,7 @@ smallest end time.
 
 ## 11. Interview Q&A
 
-**How do I prove a greedy algorithm is correct, on the spot, in an interview?**
+**Q: How do I prove a greedy algorithm is correct, on the spot, in an interview?**
 Use the exchange-argument sketch: assume an optimal solution `O` that differs
 from your greedy solution `G` in its first choice. Show that swapping `O`'s
 first choice for `G`'s choice produces a solution that is at least as good.
@@ -467,14 +467,14 @@ By induction over the remaining sub-problem, `G` is optimal. You don't need a
 rigorous formal proof — interviewers are looking for "I considered whether
 swapping in my choice could ever make things worse, and it can't, because...".
 
-**How do I decide between greedy and DP when a problem could be either?**
+**Q: How do I decide between greedy and DP when a problem could be either?**
 Ask: "If I make the locally best choice now, could it ever prevent me from
 reaching the *true* global optimum later?" If you can construct even one
 counter-example where it does, you need DP (which considers all choices via
 overlapping subproblems). The canonical split: fractional knapsack (greedy by
 value/weight ratio works) vs. 0/1 knapsack (same greedy fails — DP required).
 
-**Why does Non-overlapping Intervals sort by END time and not START time?**
+**Q: Why does Non-overlapping Intervals sort by END time and not START time?**
 Because the goal is to keep as many intervals as possible, and the interval
 that *finishes earliest* leaves the maximum remaining timeline for future
 intervals — regardless of when it starts. Sorting by start time can lock in a
@@ -500,7 +500,7 @@ the start (any later start has even less cumulative slack at that point) — so
 you can safely advance the candidate start past it without losing the true
 answer. This single pass replaces an O(n^2) "try every start" brute force.
 
-**Why does the Candy problem need TWO passes instead of one?**
+**Q: Why does the Candy problem need TWO passes instead of one?**
 Each child's required candy count depends on comparisons with BOTH
 neighbors simultaneously, but a single left-to-right (or right-to-left) pass
 can only enforce one direction's constraint at a time. The left-to-right pass
@@ -526,7 +526,7 @@ that's actually correct. The §8 BROKEN->FIX (`sort by start` vs `sort by end`)
 is exactly this kind of subtle failure — both sort keys "look reasonable,"
 but only one survives the adversarial trace.
 
-**Is greedy ever used for "minimum cost" problems with weighted graphs?**
+**Q: Is greedy ever used for "minimum cost" problems with weighted graphs?**
 Yes — Kruskal's and Prim's algorithms for Minimum Spanning Tree are greedy
 (always add the cheapest edge that doesn't create a cycle / doesn't already
 connect a visited node), and Dijkstra's shortest-path algorithm is greedy
@@ -534,7 +534,7 @@ connect a visited node), and Dijkstra's shortest-path algorithm is greedy
 [Shortest Path](shortest_path.md) and [Union-Find](union_find.md) (Kruskal
 uses DSU for cycle detection).
 
-**What's the difference between greedy and "local search" / hill climbing?**
+**Q: What's the difference between greedy and "local search" / hill climbing?**
 Greedy makes each choice ONCE, in a fixed order, and never revisits it — the
 algorithm has a clear termination point and a provable bound (when correct).
 Local search/hill climbing iteratively improves a *complete* candidate
@@ -543,7 +543,7 @@ get stuck in local optima, and generally has no optimality guarantee. Greedy
 is a single deterministic pass; local search is an iterative refinement loop
 (more common in optimization/heuristics than in coding interviews).
 
-**Huffman coding is described as "greedy" — what's the greedy choice?**
+**Q: Huffman coding is described as "greedy" — what's the greedy choice?**
 At each step, take the two least-frequent remaining nodes/symbols and merge
 them into a new node whose frequency is their sum, inserting it back into a
 min-heap. The exchange argument: the two least-frequent symbols can always be

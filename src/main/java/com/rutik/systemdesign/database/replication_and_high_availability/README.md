@@ -276,52 +276,52 @@ Cloud HA (RDS Multi-AZ) | 0        | 60-120s     | None (+3ms AZ)    | Low (mana
 
 ## 12. Interview Questions with Answers
 
-**What is split-brain and how does Patroni prevent it?**
+**Q: What is split-brain and how does Patroni prevent it?**
 Split-brain occurs when two nodes both believe they are the primary and accept writes simultaneously, creating divergent data that cannot be automatically reconciled. Patroni prevents this using a Distributed Configuration Store (etcd, Consul, or ZooKeeper) as an external arbiter. Only the node holding the DCS leader lease may act as primary. When a primary fails to renew its lease (due to crash or network partition), the lease expires and a new election occurs. Before promoting a new primary, Patroni optionally fences the old primary (via STONITH or cloud API) to ensure it cannot accept writes even if it recovers connectivity.
 
-**Why can replication slots be dangerous in production?**
+**Q: Why can replication slots be dangerous in production?**
 Replication slots prevent the primary from discarding WAL that a replica has not yet consumed. If a replica disconnects (maintenance, failure, misconfiguration) and its slot is not dropped, the primary retains all WAL generated since the replica's last applied position. In a write-heavy environment, this can fill the primary's disk in hours. PostgreSQL does not automatically drop slots or limit WAL accumulation — it will crash with "no space left on device" rather than drop a slot. Always monitor `pg_replication_slots.restart_lsn` lag and alert when slot lag exceeds 10GB.
 
-**How do you achieve read-your-writes consistency with read replicas?**
+**Q: How do you achieve read-your-writes consistency with read replicas?**
 Options in increasing complexity: (1) Route all reads to the primary — simple but defeats the purpose of replicas. (2) Track the last write's LSN per session and only read from a replica that has caught up to that LSN — requires replica lag monitoring and routing logic. (3) Use sticky sessions: after a write, route all reads from that session to the primary for a brief window (e.g., 500ms). PostgreSQL `pg_stat_replication.replay_lag` provides the per-replica lag. Application frameworks like Spring Data can route reads using a custom `AbstractRoutingDataSource` with lag awareness.
 
-**Explain semi-synchronous replication tradeoffs.**
+**Q: Explain semi-synchronous replication tradeoffs.**
 Semi-synchronous replication (MySQL `rpl_semi_sync_source_enabled`) waits for at least one replica to acknowledge receipt of WAL before returning success to the client — but only acknowledgment of receipt (written to replica's relay log), not full apply. This provides a guarantee that committed data exists on at least two servers, reducing data loss window to near-zero, while adding only one network RTT of latency (~0.5–2ms on LAN). If no replica acknowledges within `rpl_semi_sync_source_timeout` (default 10s), MySQL falls back to asynchronous mode to avoid blocking indefinitely. The fallback means semi-sync is not a hard RPO=0 guarantee.
 
-**What is the difference between streaming replication and logical replication in PostgreSQL?**
+**Q: What is the difference between streaming replication and logical replication in PostgreSQL?**
 Streaming replication sends raw WAL bytes (physical replication) — the replica maintains an identical bit-for-bit copy of the primary. It is simpler, lower overhead, and used for HA standby servers. Logical replication decodes WAL into row-level change events (INSERT/UPDATE/DELETE) and replicates specific tables or databases. It allows replication to a different PostgreSQL major version, to a replica with different schema (e.g., additional indexes), or to non-PostgreSQL systems (via Debezium). The tradeoff: logical replication is slightly higher overhead and does not replicate DDL automatically.
 
-**How do you perform a zero-downtime major version upgrade of PostgreSQL?**
+**Q: How do you perform a zero-downtime major version upgrade of PostgreSQL?**
 Use logical replication across versions: (1) Set up PostgreSQL 17 instance alongside PG 15 primary. (2) Use `pg_logical` or `pglogical` extension to create logical replication from PG 15 → PG 17. Wait for PG 17 to fully catch up (lag < 1 second). (3) Put application into read-only mode briefly (or use traffic shaping to drain writes). (4) Wait for PG 17 replication lag to reach 0. (5) Update application DSN to PG 17 primary. (6) Remove PG 15 instance. Alternatively, use `pg_upgrade --link` (hard links, fast but requires downtime for switchover) or AWS Aurora's blue/green deployments.
 
-**What is cascading replication and when is it useful?**
+**Q: What is cascading replication and when is it useful?**
 Cascading replication is a replica-of-a-replica topology: Primary → Replica A → Replica B. Replica B receives WAL from Replica A rather than the primary. This reduces WAL sender connections on the primary (each WAL sender uses ~5MB RAM and CPU), useful when you have many replicas (> 10). Replica B has higher replication lag (primary lag + A-to-B lag). Use cascading for analytics or reporting replicas that can tolerate higher lag, while keeping lag-sensitive read replicas directly connected to the primary.
 
-**How does MySQL Group Replication differ from traditional MySQL replication?**
+**Q: How does MySQL Group Replication differ from traditional MySQL replication?**
 Group Replication (MySQL 5.7.17+) uses a Paxos-based group communication protocol where all group members agree on the order of transactions before they commit. Every write is certified against concurrent writes before committing, detecting conflicts automatically. It supports both single-primary mode (one writer, automated failover) and multi-primary mode (all nodes accept writes, conflict detection). Unlike traditional async replication where the primary decides and replicas follow, Group Replication requires a quorum (N/2+1) to commit any transaction, making it CP rather than AP. Trade-off: higher write latency (~1ms additional for group certification) in exchange for stronger consistency.
 
-**What monitoring metrics are essential for replication health?**
+**Q: What monitoring metrics are essential for replication health?**
 Critical metrics: (1) `replication_lag` (seconds or bytes behind primary) — alert at > 60 seconds. (2) `pg_replication_slots` slot lag in bytes — alert at > 10GB. (3) `pg_stat_replication.write_lag / flush_lag / replay_lag` — distinguish network lag from apply lag. (4) `seconds_behind_master` in MySQL `SHOW REPLICA STATUS` — alert at > 30 seconds. (5) Replica count: alert if fewer replicas than expected are connected. (6) Primary WAL generation rate (bytes/sec) vs replica apply rate — if primary generates faster than replica applies, lag will grow. (7) Error log entries: replication errors often appear here before they cause visible lag.
 
-**How do you handle a lagging replica that is falling further behind?**
+**Q: How do you handle a lagging replica that is falling further behind?**
 Diagnose first: is lag from network saturation, slow disk on replica, long-running transactions on primary causing large WAL, or DDL locks on replica? Tools: `pg_stat_replication`, `pg_stat_activity` on both primary and replica. Fixes: (1) Reduce primary write volume (batch more, write less). (2) If primary has long transactions, set `max_standby_streaming_delay = -1` on replica to allow it to cancel conflicting queries. (3) Add replica compute/storage resources. (4) If the lag is unrecoverable, rebuild the replica from a fresh base backup with `pg_basebackup`.
 
-**What is STONITH and why is it necessary for HA?**
+**Q: What is STONITH and why is it necessary for HA?**
 STONITH (Shoot The Other Node In The Head) is a fencing mechanism that forcibly powers off or isolates a failed node before promoting its replacement. Without STONITH, a scenario arises: primary crashes and appears dead to the HA manager; new primary is promoted; old primary recovers connectivity and believes it is still primary. Both accept writes — split-brain. STONITH prevents this by cutting power to the old primary via IPMI/iLO, cloud API (AWS: terminate instance, stop EBS volume), or network-level isolation before promoting the new primary. Patroni supports STONITH via callback scripts.
 
-**Explain the differences between RPO and RTO in the context of database replication.**
+**Q: Explain the differences between RPO and RTO in the context of database replication.**
 RPO (Recovery Point Objective) is the maximum acceptable data loss measured in time: how many minutes or seconds of committed transactions can the business afford to lose? With async replication, RPO = replication lag at the time of failure (typically seconds to minutes). With synchronous replication, RPO = 0. RTO (Recovery Time Objective) is the maximum acceptable downtime: how long can the service be unavailable? With Patroni HA, RTO = 15–30 seconds (automatic failover). With manual failover, RTO = 5–30 minutes (human response time). Cloud managed HA (RDS Multi-AZ) typically achieves RTO < 2 minutes. Both metrics must be defined by business requirements before designing the replication topology.
 
-**What is the role of the pg_hba.conf in replication setup?**
+**Q: What is the role of the pg_hba.conf in replication setup?**
 `pg_hba.conf` controls client authentication on PostgreSQL. For replication connections, a specific entry is needed: `host replication replicator 10.0.0.0/24 scram-sha-256`. This allows the `replicator` role (created with `CREATE ROLE replicator WITH REPLICATION LOGIN`) from the replica's subnet to connect for WAL streaming. Without this entry, replicas cannot authenticate. In Patroni setups, the `pg_hba.conf` is managed by Patroni itself using the `bootstrap.dcs.postgresql.pg_hba` configuration, ensuring consistent auth across failover.
 
-**How does multi-region replication work and what are its limitations?**
+**Q: How does multi-region replication work and what are its limitations?**
 In multi-region active-passive replication, the primary is in region A and replicas are in region B and C. Writes go to region A; replicas consume WAL over the WAN link (typically 50–200ms latency). RTO involves failing over to region B, which may have 1–10 seconds of lag, implying potential data loss at that lag. Active-active (multi-primary) replication across regions is more complex: every write must be replicated to all regions, conflicts from concurrent writes to the same row must be resolved (LWW, custom merge, or reject), and the application must handle conflict resolution. Systems like CockroachDB and Spanner handle this natively; for PostgreSQL, BDR (Bi-Directional Replication, by EDB) provides multi-master with conflict detection.
 
-**How does logical replication enable CDC (Change Data Capture)?**
+**Q: How does logical replication enable CDC (Change Data Capture)?**
 Logical replication decodes WAL into row-level change events. Debezium connects to PostgreSQL as a logical replication client using the `pgoutput` output plugin. It receives INSERT/UPDATE/DELETE events per row with old and new values, and publishes them to Kafka topics. Consumers (Elasticsearch indexers, data warehouse loaders, cache invalidation services) process these events asynchronously. The key advantage: Debezium reads the WAL directly without impacting primary performance (WAL is generated anyway) and provides exactly-ordered, exactly-captured changes. The risk: the Debezium logical replication slot retains WAL if the Kafka consumer falls behind.
 
-**How do you monitor and alert on replication lag in production?**
+**Q: How do you monitor and alert on replication lag in production?**
 For PostgreSQL: query `pg_stat_replication.replay_lag` from the primary every 30 seconds and expose it as a Prometheus gauge. Alert at lag > 30 seconds (warning) and > 5 minutes (critical). Also monitor slot lag via `pg_replication_slots.confirmed_flush_lsn` vs `pg_current_wal_lsn()`. For MySQL: use Prometheus `mysqld_exporter` which exports `mysql_slave_status_seconds_behind_master`. For automated alerting, set PagerDuty or Slack alerts on these metrics with severity thresholds matching your RPO requirements. Test alerting quarterly by deliberately pausing a replica.
 
 ---

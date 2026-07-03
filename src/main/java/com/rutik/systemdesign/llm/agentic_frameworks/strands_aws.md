@@ -305,55 +305,55 @@ async def fetch_url(url: str) -> str:
 
 ## 12. Interview Questions with Answers
 
-**What is the core abstraction of Strands Agents?**
+**Q: What is the core abstraction of Strands Agents?**
 The `Agent(model, tools)` class is the core. `model` is a `BedrockModel` or `LiteLLMModel`; `tools` is a list of `@tool`-decorated Python functions. Calling `agent("input")` runs the loop until the model returns a final response.
 
-**How does Strands differ from the Anthropic native API or OpenAI Agents SDK?**
+**Q: How does Strands differ from the Anthropic native API or OpenAI Agents SDK?**
 Strands is AWS-centric — Bedrock as primary backend, IAM-based auth, OTEL traces flowing into CloudWatch/X-Ray. OpenAI Agents SDK is OpenAI-centric with similar abstractions. Native Anthropic API is provider-direct, lower-level. Pick based on your cloud and primary provider.
 
-**How is multi-agent composition done in Strands?**
+**Q: How is multi-agent composition done in Strands?**
 Wrap a specialist agent as a tool with `agent_as_tool(specialist, name="...", description="...")`. The orchestrator agent gets this as a callable tool. When the orchestrator calls it, the specialist agent runs end-to-end and returns its result. Simpler than separate orchestration frameworks but limited to sequential delegation.
 
-**What models does BedrockModel support?**
+**Q: What models does BedrockModel support?**
 All Bedrock-available models: Anthropic Claude (Opus, Sonnet, Haiku), AWS Nova (Lite, Pro, Premier, Micro), Meta Llama 3.x/4, Mistral, Cohere Command, AI21. Function calling capability varies by model — Claude and Nova have strong tool use; some Llama variants are weaker.
 
-**Why does BedrockModel sometimes fail with a ValidationException even though the model is enabled in the console?**
+**Q: Why does BedrockModel sometimes fail with a ValidationException even though the model is enabled in the console?**
 Because many newer Bedrock models can only be invoked through a cross-region inference profile, whose ID carries a geography prefix (`us.anthropic.claude-sonnet-4-...`, `eu.`, `apac.`) rather than the bare `anthropic.claude-...` model ID. Invoking the bare ID returns "Invocation of model ID ... with on-demand throughput isn't supported" — confusing, since model access shows as granted. Note the compliance angle: a cross-region profile may route requests to any region within that geography, which matters for data-residency reviews. Always pass the full inference-profile ID (with prefix) to `BedrockModel`, matching the geography your compliance posture requires.
 
-**How does Strands handle observability?**
+**Q: How does Strands handle observability?**
 Built-in OpenTelemetry instrumentation. Out-of-the-box exporters for CloudWatch, X-Ray, Honeycomb, Datadog, Jaeger. Each agent run produces a trace with spans for: LLM calls, tool executions, multi-agent delegations.
 
-**What's the cost difference between Bedrock and direct Anthropic API?**
+**Q: What's the cost difference between Bedrock and direct Anthropic API?**
 Bedrock typically prices 5-15% above direct provider pricing for the same model (Anthropic Claude on Bedrock vs claude.ai/api). You pay for AWS's integration value (IAM, VPC, CloudWatch). For high-volume workloads, the markup adds up — evaluate vs direct Anthropic if cost is paramount.
 
-**Can Strands agents run in Lambda?**
+**Q: Can Strands agents run in Lambda?**
 Yes. Common deployment: Lambda + API Gateway for synchronous endpoints, Step Functions for orchestration of longer agent runs. Tips: lazy-import boto3, use Lambda SnapStart, increase memory to 2GB+ for faster CPU.
 
-**How do you secure tool execution in Strands?**
+**Q: How do you secure tool execution in Strands?**
 Two main approaches: (1) tool-level: validate inputs, use parameterized queries, restrict file paths via os.path.commonpath. (2) Bedrock Guardrails: configure content filtering at the model layer. For sandboxed code execution, integrate E2B or AWS-managed code interpreter.
 
-**What is the relationship between Strands and Bedrock Agents (the AWS managed service)?**
+**Q: What is the relationship between Strands and Bedrock Agents (the AWS managed service)?**
 Bedrock Agents is AWS's fully-managed agent service — define agents in console/CLI, AWS hosts and runs them. Strands is the open-source SDK for self-hosted agents using Bedrock as the LLM backend. Use Bedrock Agents for no-code/low-code; use Strands for code-first agents.
 
-**How do you implement input/output guardrails in Strands?**
+**Q: How do you implement input/output guardrails in Strands?**
 Configure Bedrock Guardrails (AWS managed) for content filtering — denied topics, PII redaction, prompt attack detection. Pass `guardrail_id` to `BedrockModel`. For custom Python-level guardrails, wrap the agent call in your own validation function.
 
-**Can Strands work with MCP tool servers?**
+**Q: Can Strands work with MCP tool servers?**
 Yes via `MCPClient` from `strands.tools.mcp`. Connect to MCP server, get tools, pass as agent tools alongside native `@tool` functions. See [MCP](../mcp_model_context_protocol/README.md) for the protocol itself.
 
-**How does the Strands agent loop decide when to stop?**
+**Q: How does the Strands agent loop decide when to stop?**
 The loop terminates when the model returns a final text response with no tool-use blocks (stop reason `end_turn`) instead of requesting another tool call. Each iteration sends the conversation plus accumulated tool results back to Bedrock, so a poorly designed tool that returns unhelpful output can drive many extra iterations before the model gives up. Guard with an iteration cap and a per-run cost budget, and log tool-call counts per run — a runaway loop should show up in your metrics before it shows up on the Bedrock bill.
 
-**What's the streaming event model?**
+**Q: What's the streaming event model?**
 `agent.stream(query)` yields events: `tool_call`, `tool_result`, `text_delta`, `done`. Useful for UI integration. Bedrock streaming latency is similar to direct Anthropic streaming.
 
-**How do you handle Bedrock throttling?**
+**Q: How do you handle Bedrock throttling?**
 BedrockModel auto-retries on `ThrottlingException` with exponential backoff. For high throughput, use Bedrock Provisioned Throughput (reserved capacity). Or use multiple Bedrock regions with a router.
 
-**How do you keep long conversations from overflowing the context window in Strands?**
+**Q: How do you keep long conversations from overflowing the context window in Strands?**
 Use a conversation manager — Strands ships a sliding-window conversation manager that truncates the oldest turns once history exceeds a configured size, preserving the system prompt and recent turns. Without it, a long-running agent accumulates every tool result in history; a single large tool output (like the 50 KB document cap in `get_document` above) then gets re-sent as input tokens on every subsequent turn, inflating both latency and cost since Bedrock bills the full input each call. Truncate or summarize bulky tool results at the tool boundary, and cap history length before the model caps it for you.
 
-**Is Strands actively developed?**
+**Q: Is Strands actively developed?**
 Yes — AWS commitment, regular releases. As of 2025, considered stable for production but expect API additions. Pin version in production.
 
 ---

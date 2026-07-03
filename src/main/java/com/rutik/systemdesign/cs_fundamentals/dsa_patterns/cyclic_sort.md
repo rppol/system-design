@@ -276,35 +276,35 @@ def cyclic_sort_fixed(nums: list[int]) -> None:
 
 ## 11. Interview Q&A
 
-**Why does cyclic sort achieve O(n) time despite having a `while` loop nested inside another `while` loop (via the swap-and-retry)?**
+**Q: Why does cyclic sort achieve O(n) time despite having a `while` loop nested inside another `while` loop (via the swap-and-retry)?**
 Each swap places at least one element into its final, correct position — and once an element is in its correct position, it is **never moved again** (the `else: i += 1` branch only fires when `nums[i]` is already correct, or a duplicate is detected and we give up on that slot). Since there are only `n` elements and each can be "placed correctly" at most once, the total number of swaps across the *entire* algorithm is bounded by `n`. The outer `i` pointer also advances at most `n` times. Total work: O(n) swaps + O(n) pointer advances = O(n).
 
-**Why is the value range constraint (`[1,n]` or `[0,n-1]`) so critical to this pattern?**
+**Q: Why is the value range constraint (`[1,n]` or `[0,n-1]`) so critical to this pattern?**
 Because the core operation is "place value `v` at index `f(v)`" (where `f(v) = v-1` or `f(v) = v`), and this requires `f(v)` to be a **valid index** into the array — i.e., `0 <= f(v) < n`. If values could be arbitrary (e.g., `v = 10^9`), `f(v)` would be out of bounds. The constraint that values come from a range of size `n` (matching the array's length) is what makes "use the array itself as a hash table / counting array" possible.
 
-**How do you adapt cyclic sort for "First Missing Positive" where values can be negative or huge?**
+**Q: How do you adapt cyclic sort for "First Missing Positive" where values can be negative or huge?**
 Pre-process: any value `v` such that `v <= 0` or `v > n` can never be "the answer" (the answer is always in `[1, n+1]`), so during the placement phase, simply skip swapping for such values — leave them in place (they'll never match `nums[i] == i+1` for valid `i`, but that's fine, it just means that index will be flagged as "missing" in the second pass, which is correct). The condition becomes: `if 1 <= nums[i] <= n and nums[i] != nums[nums[i]-1]: swap`.
 
-**For "Find All Duplicates," what's the alternative "negation marking" trick, and how does it differ from full cyclic sort?**
+**Q: For "Find All Duplicates," what's the alternative "negation marking" trick, and how does it differ from full cyclic sort?**
 Negation marking: for each `nums[i]`, compute `index = abs(nums[i]) - 1`; if `nums[index] > 0`, negate it (`nums[index] *= -1`) to mark "value `index+1` has been seen"; if `nums[index]` is already negative, then `index+1` is a duplicate. This is O(n) time, O(1) space, and **doesn't require swapping** — it's a single pass using the sign bit as a visited-marker, which is simpler to implement correctly than full cyclic-sort placement, but only works when you don't need the array's values restored to a "sorted by home index" state (negation marking leaves values negated, which may need a cleanup pass if the original signs matter elsewhere).
 
-**Why does "Find the Duplicate Number" have both a cyclic-sort solution and a fast/slow-pointer solution — which should you use?**
+**Q: Why does "Find the Duplicate Number" have both a cyclic-sort solution and a fast/slow-pointer solution — which should you use?**
 Both achieve O(n) time, O(1) space. Cyclic sort **mutates** the array (swaps elements into place) — fine if mutation is allowed (often is, for "Find the Duplicate" specifically, since the problem just asks for a number, not the restored array). Fast/slow pointers (Floyd's) treat `nums[i]` as a pointer to index `nums[i]`, finding the cycle entry **without mutating** the array. If the problem says "the array must remain unmodified" or "read-only input," use fast/slow pointers; otherwise, either works, and cyclic sort is often more intuitive to derive on the spot.
 
-**What happens if you run cyclic sort on an array that does NOT satisfy the `[1,n]`/`[0,n-1]` precondition (e.g., contains a value of `0` when the expected range is `[1,n]`)?**
+**Q: What happens if you run cyclic sort on an array that does NOT satisfy the `[1,n]`/`[0,n-1]` precondition (e.g., contains a value of `0` when the expected range is `[1,n]`)?**
 `correct_index = nums[i] - 1 = -1`, which in Python is a *valid* index (it refers to the last element!) due to negative indexing — this would silently swap with the wrong element instead of crashing, producing incorrect results without an obvious error. This is why production code should explicitly bound-check (`if 1 <= nums[i] <= n`) before computing `correct_index`, especially in Python where negative indices don't raise `IndexError`.
 
-**Is cyclic sort a "real" sorting algorithm — could you use it to sort an arbitrary array?**
+**Q: Is cyclic sort a "real" sorting algorithm — could you use it to sort an arbitrary array?**
 Not directly — it's a placement trick that only works when the array's values form (approximately) a permutation of its indices. However, it IS closely related to **counting sort** / **pigeonhole sort**: if you generalize "place value `v` at index `v - min_value`" and allow a separate output array (rather than in-place swapping), you get counting sort, which works for any bounded integer range `[min_value, max_value]`, not just `[1,n]`.
 
-**How would you verify your cyclic sort implementation terminates for all valid inputs (no infinite loops)?**
+**Q: How would you verify your cyclic sort implementation terminates for all valid inputs (no infinite loops)?**
 Two invariants must hold: (1) every swap must strictly increase the number of elements in their "correct" position (i.e., you never swap two elements that are both already correct, and you never swap two equal values into each other's positions), and (2) the `else` branch (incrementing `i` without swapping) must fire whenever `nums[i]` is already correct OR a duplicate is detected. The `nums[i] != nums[correct_index]` check (not `nums[i] != i+1`) is what guarantees invariant 1 — it ensures a swap is only performed when it will *actually change* the array state.
 
-**Can cyclic sort be parallelized or vectorized?**
+**Q: Can cyclic sort be parallelized or vectorized?**
 Not easily — the swaps have sequential dependencies (the value swapped INTO position `i` must then itself be checked/placed, creating a chain). This is a case where the O(1)-space, O(n)-time guarantee comes at the cost of being inherently sequential, unlike, say, a counting-sort approach (count array can be built with parallel reduction, though the final placement is still sequential in the worst case).
 
-**What's the relationship between cyclic sort and the "permutation cycles" concept from group theory / cycle decomposition?**
+**Q: What's the relationship between cyclic sort and the "permutation cycles" concept from group theory / cycle decomposition?**
 The name "cyclic sort" comes from this connection: if the array IS a valid permutation of `[1,n]` (no duplicates/missing), the swap-based placement algorithm is literally tracing out the **cycle decomposition** of that permutation — each "cycle" of the permutation gets resolved by a sequence of swaps that rotates all its elements into place. The number of swaps needed equals `n - (number of cycles)`, including fixed points (cycles of length 1, which need 0 swaps) — this is why the total swap count is bounded by `n`.
 
-**If the problem constraints say `1 <= nums[i] <= n` but DON'T guarantee all values are distinct or that all of 1..n are covered — does cyclic sort still apply?**
+**Q: If the problem constraints say `1 <= nums[i] <= n` but DON'T guarantee all values are distinct or that all of 1..n are covered — does cyclic sort still apply?**
 Yes — this is exactly the "Find All Numbers Disappeared" / "Find All Duplicates" setup. The placement loop still works (each value `v` still has a valid home index `v-1`), but after placement, some indices may have the "wrong" value (because their correct value was a duplicate placed elsewhere, or a missing value's home was taken by a duplicate). The **second pass** (`for i: if nums[i] != i+1`) is what surfaces these mismatches — it's this second pass, not the placement itself, that handles the "not a perfect permutation" case.

@@ -751,52 +751,52 @@ A golden eval dataset created in Month 1 reflects the query distribution at laun
 
 ## 12. Interview Questions with Answers
 
-**What is the most common mistake teams make when adding LLMOps tooling, and how do you avoid it?**
+**Q: What is the most common mistake teams make when adding LLMOps tooling, and how do you avoid it?**
 The most common mistake is adding observability and eval tooling reactively — after a production incident reveals that a prompt change caused a quality regression, or after a surprise API bill. By that point, there is no baseline to measure against and no experiment history to debug from. The fix is to create a golden evaluation dataset before writing any production code, enable experiment tracking from the first training run, and instrument cost tracking before the first deployment. Retrofitting observability is expensive and incomplete.
 
-**What does W&B do that MLflow does not, and vice versa?**
+**Q: What does W&B do that MLflow does not, and vice versa?**
 W&B's primary advantage is its Sweeps system — automated hyperparameter search using Bayesian optimization, which is significantly more efficient than grid search and is built into the platform. W&B also has a richer collaboration layer (shared reports, team dashboards). MLflow's primary advantage is that it is fully open-source, self-hostable without a commercial agreement, and is the native format in the Databricks ecosystem. MLflow's Model Registry with staging/production lifecycle is more mature than W&B's artifact registry. For a pure research lab doing many hyperparameter sweeps, W&B; for an enterprise team on Databricks or requiring full self-hosting, MLflow.
 
-**What problems does LangSmith solve that Datadog or New Relic cannot?**
+**Q: What problems does LangSmith solve that Datadog or New Relic cannot?**
 Standard APM tools see HTTP requests and database queries — they can tell you that a POST to `/api/chat` took 3.2 seconds and returned 200. They cannot tell you that within that request, an agent made 2 tool calls and 1 LLM call, that the LLM call consumed 2,847 tokens at a cost of $0.0023, that the system prompt was 847 tokens, that the tool call `lookup_order_status` returned a stale result, or that the LLM's chain-of-thought led it to recommend an action it was not authorized to take. LangSmith captures the nested span structure of LLM application calls — each span has LLM-specific attributes (model, prompt, completion, token counts) that standard APM tools have no schema for.
 
-**How do you track prompt versions and prevent unreviewed prompt changes from reaching production?**
+**Q: How do you track prompt versions and prevent unreviewed prompt changes from reaching production?**
 Prompts are stored in Git alongside code, referenced by semantic version in a configuration file. A CI pipeline step detects changes to prompt files, runs the new version against the golden evaluation dataset, and compares scores against the baseline (the current production prompt). If the primary quality metric drops by more than 2%, the pipeline fails and blocks the PR. Deployment of the new prompt version uses the same infrastructure as code deployment — no out-of-band updates to prompt files in production. This pattern is called eval-gated deployment and is the LLM equivalent of unit tests gating a code deployment.
 
-**How do you calculate and alert on LLM API costs in production?**
+**Q: How do you calculate and alert on LLM API costs in production?**
 Every LLM API response includes token counts (prompt tokens, completion tokens). Multiply by the per-token price for the model to get per-call cost. Tag each call with metadata: `customer_id`, `feature_name`, `user_id`. Aggregate in LangFuse or Braintrust. Alert rules: (1) per-request cost exceeds 5x the median (indicates runaway loop or unexpectedly large context), (2) daily spend exceeds 80% of budget by noon, (3) per-customer daily spend exceeds their contracted amount. Alerts at 80% of budget give time to investigate before the limit is hit.
 
-**What metrics should you track for a RAG pipeline in production?**
+**Q: What metrics should you track for a RAG pipeline in production?**
 Faithfulness (is the answer grounded in retrieved context — catches hallucination), answer relevancy (does the answer address the question), context precision (are retrieved chunks relevant), context recall (was the needed information retrieved at all), retrieval latency (P50/P95/P99), generation latency, and end-to-end latency. Cost per call (embedding model + LLM). Failure rate (empty retrievals, LLM refusals, timeout errors). Track all of these; alert on faithfulness drops greater than 5% week-over-week, as this is the strongest signal of a quality regression.
 
-**How do you compare two prompt versions at scale without manual review of thousands of outputs?**
+**Q: How do you compare two prompt versions at scale without manual review of thousands of outputs?**
 Use LLM-as-judge evaluation: run both prompt versions on the golden dataset (200–500 examples), score each output using a judge LLM (GPT-4o prompted as an evaluator) on the specific quality criteria that matter, and compute aggregate scores. For production A/B testing, use Braintrust's traffic splitting — route 5% of production traffic to the new prompt, collect traces, run automated scoring on the sample, and compare score distributions. Statistical significance at 5% traffic in 24 hours requires roughly 500–1,000 samples for most quality metrics. Promote the new version if it wins with p < 0.05 on the primary metric and does not regress on any secondary metric.
 
-**What is a W&B Sweep and how does Bayesian optimization differ from grid search?**
+**Q: What is a W&B Sweep and how does Bayesian optimization differ from grid search?**
 A W&B Sweep is a managed hyperparameter search that launches multiple training runs, collects their results, and uses those results to guide the selection of the next hyperparameter combination to try. Grid search evaluates every combination in a fixed grid — for 4 learning rates, 4 LoRA ranks, and 4 batch sizes, that is 64 runs regardless of whether early results indicate some regions are promising. Bayesian optimization fits a surrogate model (typically a Gaussian process) over the observed (hyperparameter, metric) pairs and selects the next point that maximizes expected improvement. In practice, Bayesian optimization finds results within 5% of the global optimum in 15–25 trials, while grid search may need all 64.
 
-**How do you detect prompt injection attacks using observability tooling?**
+**Q: How do you detect prompt injection attacks using observability tooling?**
 Configure LangSmith or LangFuse to run automated scoring on every production trace: check if the model's output diverges from the expected response pattern (unusually long outputs, outputs containing instructions rather than answers, tool calls to unexpected external services). Flag traces where the user input contains patterns like "ignore previous instructions", "you are now", or base64-encoded blobs. Set alerts on tool calls to URLs not in an allowlist. Maintain a small golden dataset of known injection attempts and run them against the production system weekly — if any now succeed, a prompt change has weakened the system prompt's defenses.
 
-**When does a startup need LLMOps tooling versus when is simple logging enough?**
+**Q: When does a startup need LLMOps tooling versus when is simple logging enough?**
 Simple logging (structured JSON logs to stdout, shipped to Datadog) is sufficient when: fewer than 1,000 calls per day, one engineer owns the full stack, no paying customers depending on quality SLAs, and no fine-tuning (only prompt engineering). LLMOps tooling becomes necessary when: multiple engineers can change prompts independently, quality regressions would affect paying customers, API costs are meaningful (more than $500/month), or fine-tuning is in progress. The minimum viable LLMOps stack for an early-stage startup: LangFuse (free self-hosted) for cost tracking and error tracing, plus a 50-example golden dataset evaluated manually each sprint.
 
-**What is the difference between online evaluation and offline evaluation?**
+**Q: What is the difference between online evaluation and offline evaluation?**
 Offline evaluation runs a fixed model/prompt version against a curated golden dataset where the correct answers are known. It is fast, cheap, and reproducible — the same dataset produces the same scores. It is the right gate for CI/CD. Online evaluation samples real production traffic, applies automated scoring (LLM judge or rule-based), and aggregates scores over a time window. It catches distribution shifts (new query types not in the golden dataset) and prompt interaction effects (prompts that perform well in eval but fail on real user phrasing). Both are necessary: offline eval gates deployments, online eval detects regressions after deployment.
 
-**How do you integrate LangSmith with an existing OpenTelemetry setup?**
+**Q: How do you integrate LangSmith with an existing OpenTelemetry setup?**
 LangSmith supports exporting traces in OpenTelemetry format via its OTLP exporter. Configure the LangSmith client with `LANGCHAIN_TRACING_V2=true` and use the `langsmith.wrappers.wrap_openai` wrapper to capture OpenAI calls. To bridge to an existing OTel collector, use `from langsmith.run_helpers import get_current_run_tree` to access span context and attach it to OTel spans manually. Alternatively, use Arize Phoenix, which natively speaks OTLP and integrates with any OTel-compatible collector. The challenge is that LangSmith's trace model (parent runs with child runs) maps to OTel spans (parent span with child spans), but token/cost attributes are LangSmith-specific and require custom OTel attributes.
 
-**What is the "no baseline" problem in LLM evaluation, and how do you avoid it?**
+**Q: What is the "no baseline" problem in LLM evaluation, and how do you avoid it?**
 The no-baseline problem: a team builds a prompt for their use case, deploys it, then wants to improve it. They create a v2 prompt that "feels better." But without a golden dataset created from the v1 behavior, there is no objective comparison. They cannot say whether v2 is actually better or just different. They deploy v2, users complain, they try to roll back — but v1 was not systematically evaluated either, so they do not know if going back to v1 will help. Avoid this by creating the golden dataset before writing the first production prompt. Use 50–200 examples representative of expected production traffic. Label them with acceptable outputs before deploying anything. This baseline is the reference point for every future prompt change.
 
-**How do you handle PII in LLM traces, and what configurations prevent data leakage?**
+**Q: How do you handle PII in LLM traces, and what configurations prevent data leakage?**
 Default LangSmith and LangFuse configurations log the full prompt and completion — which includes user queries containing PII (names, account numbers, medical information). Configuration steps before production: (1) enable sampling (log 5–10% of requests, not all), (2) implement a PII scrubbing wrapper that replaces named entities and account numbers with placeholder tokens before logging, (3) set retention policies (90 days maximum for most use cases), (4) for regulated industries (healthcare, finance), use self-hosted LangFuse where traces never leave your infrastructure, (5) review vendor data processing agreements for GDPR and HIPAA compliance. Do all of this before the first production request, not after a compliance audit.
 
-**What is the eval-gated deployment pattern? Walk through a concrete CI/CD pipeline.**
+**Q: What is the eval-gated deployment pattern? Walk through a concrete CI/CD pipeline.**
 Eval-gated deployment means no prompt, model, or retrieval configuration change reaches production without passing quality benchmarks. Concrete pipeline: (1) Developer opens a PR with a change to `prompts/customer_support_v1.3.0.yaml`. (2) CI detects the prompt file change and triggers the eval pipeline. (3) The eval pipeline runs the new prompt against the golden dataset (`evals/customer_support_golden_v2.jsonl`, 200 examples) using DeepEval or the LangSmith eval SDK. (4) Scores are computed on faithfulness, answer relevancy, and a domain-specific accuracy metric. (5) Scores are compared to the baseline (current production prompt). (6) If any metric drops more than 2%, the CI job fails, the PR is blocked, and a comment is posted showing the score differential. (7) If scores pass, the PR can be merged and the prompt version is deployed with the code change. The entire pipeline runs in under 10 minutes for 200 examples.
 
-**How do you attribute LLM API costs to specific features or enterprise customers?**
+**Q: How do you attribute LLM API costs to specific features or enterprise customers?**
 Tag every LLM API call with metadata at call time: `customer_id` from the authenticated request, `feature_name` from the application context. In LangFuse, pass these as trace metadata. In Braintrust, pass them as span tags. Both platforms support grouping and aggregating cost by any tag dimension. For enterprise customer billing, run a daily aggregation query: `SELECT customer_id, SUM(cost_usd) FROM traces WHERE date = yesterday GROUP BY customer_id`. Feed this into your billing system. For internal feature cost attribution, the same query with `feature_name` identifies which product features are consuming the most API budget — informing optimization priority.
 
 ---

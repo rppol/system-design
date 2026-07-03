@@ -1013,50 +1013,50 @@ Scaling headroom:
 
 ## 11. Interview Discussion Points
 
-**How does a deep research agent differ architecturally from a RAG-based chatbot?**
+**Q: How does a deep research agent differ architecturally from a RAG-based chatbot?**
 
 RAG retrieves in one shot: query → vector search → top-K chunks → generate. Deep research is an iterative agent loop: plan → retrieve → evaluate → detect gaps → re-retrieve → synthesize, taking 5-30 minutes. The primary bottleneck shifts from LLM inference latency to URL fetch throughput and orchestration durability. RAG fits in a single request-response cycle; deep research requires a durable task execution model with checkpoints, progress streaming, and retry semantics. The cost profile also differs: RAG is dominated by LLM tokens; deep research splits cost roughly 60% LLM, 30% crawling infrastructure, 10% storage and orchestration.
 
-**Why is parallelizing URL fetching the single most important performance decision?**
+**Q: Why is parallelizing URL fetching the single most important performance decision?**
 
 Sequential fetching at 200 URLs x 2s = 400 seconds consumes the entire 20-minute task budget before synthesis begins. Parallel async fetching with asyncio.Semaphore(100) reduces the same 200 URLs to 10-15 seconds — a 26x speedup that is the difference between a usable product and a broken one. The concurrency limit exists to prevent local file descriptor exhaustion (Linux default: 1024 open FDs per process) and to avoid triggering target sites' per-IP rate limits. At 100 concurrent connections, the system stays under both limits while achieving near-maximum throughput on modern cloud instances.
 
-**How do you verify that citations in the report are faithful to the cited sources?**
+**Q: How do you verify that citations in the report are faithful to the cited sources?**
 
 A two-step process: first, the synthesizer generates each paragraph with source excerpts injected directly into context and explicit instructions to only state what sources confirm. Second, an NLI (natural language inference) model evaluates each factual claim against its cited source excerpt, producing an entailment confidence score. Claims scoring below 0.75 trigger regeneration with more explicit constraints. The NLI judge is GPT-4o-mini at $0.15/M tokens — verifying 50 claims per task costs $0.006, negligible against the $0.10-5 task cost. This achieves 95%+ citation accuracy in production evaluation, compared to 85% without post-hoc verification.
 
-**How does gap detection decide when to stop iterating without looping forever?**
+**Q: How does gap detection decide when to stop iterating without looping forever?**
 
 Three independent stopping conditions: (1) hard iteration ceiling (max 3 deepening iterations), (2) token budget ceiling (task terminates synthesis if 500K tokens consumed), and (3) threshold relaxation (completeness threshold drops from 0.70 on iteration 1 to 0.60 on iteration 2 to 0.50 on iteration 3, guaranteeing convergence even when sources are sparse on a sub-topic). All three conditions must be checked before triggering another retrieval cycle. A real production incident: without condition 3, an agent iterated 8 times on a topic where the web genuinely did not have sufficient coverage, consuming $45 before wall-clock timeout.
 
-**How do you handle paywalled content gracefully?**
+**Q: How do you handle paywalled content gracefully?**
 
 Three tiers: static pages use httpx and extract full text; JavaScript-rendered pages use Playwright headless (which also handles soft paywalls that render an abstract or preview before the paywall); hard-paywalled pages (Nature, WSJ, FT) get the abstract and first paragraph via Playwright before the paywall triggers — typically 300-500 words of extractable content. For academic papers, the Semantic Scholar API provides structured abstracts, methodology, and results for 200M+ papers with zero paywall issues. The system tracks which sources were partial extracts vs full content and surfaces this in the source quality score (partial extract receives 0.6x multiplier on domain authority).
 
-**How do you prevent the crawler from getting the entire platform IP-banned by popular sites?**
+**Q: How do you prevent the crawler from getting the entire platform IP-banned by popular sites?**
 
 Per-domain rate limiting enforced in Redis across all concurrent tasks, not just within a single task. A sorted set keyed by `rate_limit:{domain}` with a sliding 60-second window caps requests at 5 per minute per domain platform-wide. This means 10,000 concurrent tasks can collectively send at most 5 requests per minute to Reuters — not 10,000 x 5. High-value domains (Nature, arXiv, Semantic Scholar) use their official APIs with API key authentication rather than crawling. Anti-bot-detected domains fall back to Jina Reader API, which uses Jina's IP infrastructure and handles Cloudflare fingerprinting. The system monitors per-domain 403/429 error rates and automatically adds domains to the Jina fallback list when the error rate exceeds 30%.
 
-**How do you enforce a $20 cost ceiling mid-execution without failing the task?**
+**Q: How do you enforce a $20 cost ceiling mid-execution without failing the task?**
 
 A token budget counter is passed through the entire task graph. Every LLM call decrements the counter by the tokens used. The gap detector checks `token_budget_remaining` before triggering another iteration. If the counter drops below a 20K-token minimum (enough for one final synthesis pass), the gap detector returns no follow-up questions and the task proceeds directly to final report formatting. The hard safety valve is a token ceiling enforced at the LLM client wrapper: any call that would exceed the total budget throws `TokenBudgetExhausted`, which the orchestrator catches and converts to a graceful finalization rather than an error. This means users always receive a partial but coherent report, not an error message.
 
-**When should you use a single large LLM for all steps vs specialized models for each step?**
+**Q: When should you use a single large LLM for all steps vs specialized models for each step?**
 
 Specialized models win on cost for extractive, repetitive steps. Summarizing 50 web pages is repetitive and extractive — GPT-4o-mini is adequate and costs 16x less than GPT-4o per token ($0.15 vs $2.50 per million input tokens). Planning (deciding what to research) and synthesis (integrating contradictory sources into coherent prose) are reasoning-intensive — GPT-4o or o3 quality is necessary. NLI verification is binary classification — a cross-encoder or small judge model works. In practice: planning 5% of tokens at $2.50/M + summarization 55% of tokens at $0.15/M + synthesis 20% at $2.50/M + verification 20% at $0.15/M = blended rate of $0.72/M vs $2.50/M single-model. Blended model routing reduces per-task LLM cost by 71%.
 
-**How do you handle contradictory sources? Two sources say opposite things about the same claim.**
+**Q: How do you handle contradictory sources? Two sources say opposite things about the same claim.**
 
 The synthesizer prompt explicitly instructs the model to identify and surface contradictions rather than silently picking one source. When the NLI model detects two sources with high relevance scores that have low mutual entailment (they contradict), the synthesis prompt injects both sources and uses a specific instruction: "Source A says X; Source B says Y. Present both claims with their citations and note that the evidence is conflicting." This is a feature, not a bug — acknowledging scientific uncertainty is more faithful than artificially resolving it. The report includes a "Conflicting Evidence" subsection for topics where major sources disagree. Domain authority signals inform which claim to present first (higher-authority source leads) but both are cited.
 
-**Why is Gemini's "show the research plan first" UX pattern architecturally superior to just starting research immediately?**
+**Q: Why is Gemini's "show the research plan first" UX pattern architecturally superior to just starting research immediately?**
 
 Three concrete benefits: (1) User intent alignment — users can remove sub-questions the agent planned that are irrelevant to their actual intent, preventing wasted fetch and synthesis cycles. A 12-sub-question plan that the user trims to 7 reduces task cost by ~42%. (2) Scope agreement — enterprise users need to approve what information the agent will research before it starts fetching documents, especially for sensitive competitive analysis. (3) Time estimation — showing the plan with estimated duration and cost allows users to choose the right breadth/depth setting before committing. The architectural implication: the planner step and the execution step must be separate phases with a human approval gate between them, requiring the task orchestrator to support a WAITING_FOR_APPROVAL state with a TTL (plan expires if user does not approve within 10 minutes).
 
-**How do you evaluate deep research quality without ground-truth reference answers?**
+**Q: How do you evaluate deep research quality without ground-truth reference answers?**
 
 Two complementary approaches: (1) LLM-as-judge with a rubric — evaluate the report on faithfulness (claims grounded in cited sources), coherence (logical structure, no contradictions between sections), and completeness (covers the expected sub-topics for that research domain). These dimensions do not require a reference answer. (2) Partial ground-truth via known facts — seed the research question with a topic where specific facts are known (e.g., "What is the half-life of ibuprofen?" has a known answer: 2 hours). Check that the report includes this fact. Use 5-10 such anchor facts per research domain. For academic topics, Elicit's approach is strongest: compare the set of papers cited against a human-curated "must-cite" list for that topic (recall at K metric). Production systems combine all three approaches in their weekly eval pipeline.
 
-**How does task durability work for a 20-minute agent that must survive infra failures?**
+**Q: How does task durability work for a 20-minute agent that must survive infra failures?**
 
 Each phase of the task graph writes a checkpoint to Postgres before starting the next phase: plan generated, batch N of URLs fetched, synthesis of section K complete, iteration M of gap detection complete. If the task worker dies (pod OOM, spot preemption, network partition), the task orchestrator detects the missed heartbeat (10-second TTL in Redis) and reassigns the task to a new worker. The new worker reads the checkpoint from Postgres and resumes from the last completed phase — it does not re-fetch URLs that were already fetched and cached. The session source cache (Redis, 24-hour TTL) is the re-entry point: if the crawler checkpoint is complete but synthesis crashed, the new worker reads sources from Redis and starts synthesis without re-crawling. See [Agent Durability Patterns](./cross_cutting/agent_durability_patterns.md) for the checkpoint schema and exactly-once phase execution guarantees.

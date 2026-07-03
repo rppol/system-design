@@ -444,7 +444,7 @@ answer (for `amount=0`), making it a uniquely bad sentinel here.
 
 ## 11. Interview Q&A
 
-**Top-down (memoization) vs. bottom-up (tabulation) — how do you choose?**
+**Q: Top-down (memoization) vs. bottom-up (tabulation) — how do you choose?**
 Top-down (recursion + `@lru_cache` or a dict) is often easier to *write*
 directly from the recurrence — it mirrors the brute-force solution with one
 line added. Bottom-up (iterative table-filling) avoids recursion-depth limits

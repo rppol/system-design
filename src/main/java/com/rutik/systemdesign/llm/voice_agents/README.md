@@ -387,49 +387,49 @@ if silence_duration > 800:
 
 ## 12. Interview Questions with Answers
 
-**What is the latency budget for premium voice UX?**
+**Q: What is the latency budget for premium voice UX?**
 First audio byte should arrive within 300ms after the user finishes speaking for "human-like" conversational latency. Up to 800ms is acceptable. Above 1000ms feels broken — users notice the lag. This budget dictates architecture choice: end-to-end audio models hit 200-800ms; pipelines typically 800-1500ms.
 
-**What's the difference between pipeline and end-to-end audio models?**
+**Q: What's the difference between pipeline and end-to-end audio models?**
 Pipeline: STT (speech→text) → LLM (text→response text) → TTS (text→speech). Three independent models, each with its own latency. End-to-end: single model takes audio directly, emits audio directly. GPT-4o Realtime, Gemini Live. Lower latency, native prosody/emotion handling, but less per-stage control.
 
-**How does barge-in work?**
+**Q: How does barge-in work?**
 User starts speaking while agent is talking. Voice Activity Detection (VAD) detects user speech in real time; system immediately: (1) stops TTS playback (drain buffer), (2) cancels any in-flight LLM generation, (3) starts STT on user's new utterance, (4) informs LLM context that user interrupted. Without barge-in, agents feel uncomprehending.
 
-**What is server VAD vs client VAD?**
+**Q: What is server VAD vs client VAD?**
 Server VAD: audio sent to server; server detects speech boundaries and runs LLM. Lower client compute, but audio always streamed (more bandwidth, privacy concerns). Client VAD: client device detects speech, only sends audio when speech detected. Lower bandwidth, better privacy, but client must run VAD model.
 
-**What's Silero VAD and why is it used?**
+**Q: What's Silero VAD and why is it used?**
 Silero VAD is a small (~2MB) ONNX neural VAD trained on 6000+ hours of speech in 100+ languages. Runs in real time on CPU. Better than energy-based VAD (which fails on noisy environments). Standard choice for client-side VAD in voice agents.
 
-**How do you handle turn detection?**
+**Q: How do you handle turn detection?**
 Combine signals: (1) silence threshold (800-1000ms typical), (2) prosodic features (rising/falling pitch indicating completion), (3) semantic completeness (LLM judges if utterance is a complete thought). Pure silence is fast but inaccurate; combined approach is most reliable.
 
-**What's the cost of voice agents?**
+**Q: What's the cost of voice agents?**
 GPT-4o Realtime: $0.06/min audio input + $0.24/min audio output = ~$0.30/min total. Pipeline approach: $0.01/min STT + $0.02-$0.10/min LLM + $0.02-$0.05/min TTS = $0.05-$0.17/min. End-to-end is 2-3× more expensive but UX significantly better.
 
-**How do you handle multi-turn conversations with state?**
+**Q: How do you handle multi-turn conversations with state?**
 Maintain conversation history; send it on each turn for context. For end-to-end (Realtime API): the session persists state automatically; reconnect with session_id. For pipeline: maintain history yourself and inject into each LLM call.
 
-**What's the role of telephony integration?**
+**Q: What's the role of telephony integration?**
 For phone-based voice agents (IVR replacement, sales callbots), integrate with PSTN via Twilio Media Streams, Vonage Voice API, or LiveKit Cloud. These handle: call signaling (SIP), audio streaming (typically 8kHz mu-law), recording for compliance, DTMF detection for touch-tone input, transfer to human.
 
-**How do you handle interruption when the LLM is mid-generation?**
+**Q: How do you handle interruption when the LLM is mid-generation?**
 Server-side: support cancellation in your streaming generation API. When user barge-in detected, send abort signal to the LLM call. Most modern APIs (OpenAI streaming, Anthropic streaming) support mid-stream cancellation. Client-side: also drain TTS playback buffer to stop audio immediately.
 
-**What's the right strategy for tool calls in voice agents?**
+**Q: What's the right strategy for tool calls in voice agents?**
 Tool calls should be fast (<1s) since user is on a synchronous voice channel. For longer tool calls (>2s): (1) play "filler" audio like "Let me check that..." or "One moment...", (2) optionally play hold music for >5s waits, (3) inform user of progress for very long calls. End-to-end models can stream "ums" and acknowledgments natively.
 
-**How do you debug voice agent issues in production?**
+**Q: How do you debug voice agent issues in production?**
 Record audio with timestamps + transcripts + LLM text + tool calls all keyed to event timeline. Use observability tools (Vapi has built-in, or roll your own with timeline visualizations). Most common issues: VAD too aggressive (cuts off users), TTS lag spikes (network), LLM hallucinations on misheard input (use confidence-aware prompting).
 
-**How do you handle multilingual voice agents?**
+**Q: How do you handle multilingual voice agents?**
 Pipeline: use multilingual STT (Whisper, Deepgram Nova-2 supports 30+ languages) + multilingual LLM + voice cloning per language for TTS. End-to-end: GPT-4o Realtime auto-detects language; quality varies. For deployment: prompt the LLM with target language at session start; configure TTS voice per language.
 
-**What are the privacy concerns specific to voice agents?**
+**Q: What are the privacy concerns specific to voice agents?**
 Audio recording = biometric data in many jurisdictions (GDPR Article 9, CCPA). Get explicit consent. Encrypt audio in transit and at rest. Don't retain longer than needed. For PCI-regulated environments (taking credit cards), use DTMF-only for card numbers (audio not recorded) or transfer to human at payment step. See [Guardrails & Content Safety](../guardrails_and_content_safety/README.md) for PII detection/redaction and compliance filtering of transcripts.
 
-**How do voice agents handle background noise?**
+**Q: How do voice agents handle background noise?**
 VAD models are trained for varied noise; modern VAD handles typical environments. For very noisy environments (call centers, vehicles), use noise suppression (Krisp, NVIDIA Maxine) before VAD. STT models are noise-robust but accuracy degrades; report low confidence to the agent prompt so it can ask "Sorry, could you repeat that?"
 
 ---

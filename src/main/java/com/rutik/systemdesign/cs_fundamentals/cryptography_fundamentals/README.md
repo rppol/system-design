@@ -911,52 +911,52 @@ def correct_mac(message: bytes) -> bytes:
 
 ## 12. Interview Questions with Answers
 
-**Why should you never use SHA-256 directly to store passwords?**
+**Q: Why should you never use SHA-256 directly to store passwords?**
 SHA-256 is designed to be fast — modern GPUs compute over 1 billion SHA-256 hashes per second. An attacker who steals your password database can attempt billions of guesses per second. Password hashing requires intentional slowness (bcrypt at cost 12 takes ~200 ms, limiting an attacker to ~1,000 guesses/second on a GPU) plus a unique salt per user (defeating rainbow table precomputation). Use bcrypt, scrypt, or Argon2 — never plain hash functions — for passwords.
 
-**What is a timing attack and why does it affect MAC verification?**
+**Q: What is a timing attack and why does it affect MAC verification?**
 A timing attack exploits the fact that Python's `==` operator short-circuits — it returns False as soon as it finds the first mismatched byte. An attacker who can make millions of API calls can statistically measure response times to determine how many bytes of their guessed token match the real token, byte by byte. `hmac.compare_digest` is specifically designed to compare all bytes in constant time regardless of where (or whether) a mismatch occurs, eliminating this information leak.
 
-**Why is HMAC preferred over H(key || message) for MACs?**
+**Q: Why is HMAC preferred over H(key || message) for MACs?**
 SHA-2 functions are susceptible to length extension attacks: given H(m), an attacker can compute H(m || padding || extra) without knowing m. If the MAC is H(key || message), the attacker can compute a valid MAC for (message || padding || extra) without knowing the key. HMAC's nested construction — H(K XOR opad || H(K XOR ipad || message)) — prevents length extension because the outer hash wraps the inner hash output rather than the message. SHA-3 (Keccak sponge) is inherently immune to length extension, making H(key || message) with SHA-3 technically safe, but HMAC with SHA-2 is the universally deployed standard.
 
-**What is the difference between encryption and hashing?**
+**Q: What is the difference between encryption and hashing?**
 Hashing is one-way and deterministic: given H(m), you cannot recover m (only verify against it). Encryption is two-way: given ciphertext and key, you can recover the original plaintext. Hashing is used for integrity verification and password storage; encryption is used for confidentiality (protecting data you need to read later). A common mistake is "encrypting" passwords — if you can decrypt them, so can an attacker who compromises your key.
 
-**What is a nonce and why must AES-GCM nonces be unique?**
+**Q: What is a nonce and why must AES-GCM nonces be unique?**
 A nonce (number used once) is the initialization vector for AES-GCM. AES-GCM generates a keystream: a sequence of pseudorandom bytes derived from key + nonce, then XORs this keystream with the plaintext. If two different plaintexts are encrypted with the same key and same nonce, both ciphertexts are XORed with the same keystream. XORing the two ciphertexts cancels the keystream (C1 XOR C2 = P1 XOR P2), giving the attacker direct XOR of the plaintexts — sufficient to reconstruct both. Additionally, the authentication tag mechanism is completely broken. Always generate a random 12-byte nonce per message with `os.urandom(12)`.
 
-**What is the Diffie-Hellman key exchange and what problem does it solve?**
+**Q: What is the Diffie-Hellman key exchange and what problem does it solve?**
 DH solves the key distribution problem: how to establish a shared symmetric secret between two parties communicating over an untrusted channel, without ever transmitting that secret. Both parties exchange public values (g^a mod p and g^b mod p), each apply their private value to the other's public value, and arrive at the same shared secret g^ab mod p. An eavesdropper who sees both public values cannot compute g^ab without solving the discrete logarithm problem. ECDH does the same over elliptic curves with smaller keys (256-bit vs 2048-bit) and faster computation (~0.1 ms vs ~10 ms).
 
-**What is the difference between HMAC and digital signatures?**
+**Q: What is the difference between HMAC and digital signatures?**
 HMAC uses a shared secret key — both parties can generate and verify the MAC, so you cannot prove to a third party which party generated it (no non-repudiation). Digital signatures use a public/private key pair — only the private key holder can generate the signature, but anyone with the public key can verify it. If Alice signs a message with her private key, she cannot later deny signing it (non-repudiation). HMAC is faster and simpler; digital signatures are needed when you need to prove authorship to parties who don't share your secret.
 
-**What is a salt, and how does it prevent rainbow table attacks?**
+**Q: What is a salt, and how does it prevent rainbow table attacks?**
 A salt is a random value (typically 16–32 bytes) generated uniquely per user and prepended (or combined) with the password before hashing. Without salting, an attacker can precompute a rainbow table: a large precomputed database mapping hashes back to passwords (billions of entries, gigabytes in size). Any user whose password is in the table is cracked instantly. With salting, the attacker must compute H(unique_salt + password) separately for each user — precomputation becomes impossible because each salt makes the hash space unique. Modern algorithms (bcrypt, Argon2) embed the salt automatically in the output string.
 
-**What does AES-GCM's authentication tag protect against?**
+**Q: What does AES-GCM's authentication tag protect against?**
 The 16-byte authentication tag is an AEAD (Authenticated Encryption with Associated Data) component — it is essentially an HMAC over the ciphertext and any additional associated data (e.g., headers, metadata). If the ciphertext is tampered with in transit (bit flipping, truncation, reordering), the tag verification fails and decryption raises an exception before any plaintext is returned. Without authentication (e.g., AES-CBC without a separate MAC), bit-flipping attacks on CBC allow an attacker to make predictable modifications to the decrypted plaintext. Always use an AEAD mode; never use AES-ECB or AES-CBC without a MAC.
 
-**Why is RSA used to exchange keys but not to encrypt bulk data?**
+**Q: Why is RSA used to exchange keys but not to encrypt bulk data?**
 RSA encryption / decryption is computationally expensive — roughly 10 ms per operation for RSA-2048 decryption, compared to ~1 GB/s for AES-256-GCM. RSA also has a maximum message size (limited to key size minus padding overhead — about 190 bytes for RSA-2048 with OAEP). The standard pattern is hybrid encryption: use RSA to encrypt a randomly generated 32-byte AES key, then use AES-GCM to encrypt the actual data. This gives the key distribution advantages of asymmetric crypto with the speed of symmetric crypto.
 
-**What is forward secrecy and how does ECDH provide it?**
+**Q: What is forward secrecy and how does ECDH provide it?**
 Forward secrecy (perfect forward secrecy) means that compromise of a long-term private key does not compromise past session recordings. TLS 1.3 achieves this by using ephemeral ECDH: each TLS session generates a new temporary key pair, derives a session key, then discards the private key. Even if an attacker records all traffic and later steals the server's certificate private key, they cannot decrypt past sessions because each session used a unique ephemeral ECDH private key that no longer exists. TLS 1.2 with RSA key exchange (sending the AES key encrypted with the server's long-term RSA key) does not have forward secrecy.
 
-**What is the birthday paradox and how does it apply to hash collision resistance?**
+**Q: What is the birthday paradox and how does it apply to hash collision resistance?**
 The birthday paradox states that in a room of 23 people, there is >50% probability two share a birthday. Analogously, for a hash function with n-bit output, you need approximately 2^(n/2) random inputs to find a collision with 50% probability — not 2^n as intuition suggests. SHA-256 has 256-bit output, so collision resistance requires finding 2^128 hashes — computationally infeasible. MD5 (128-bit output) requires only 2^64 hashes to find a collision — feasible with modern hardware, and actual collision-generating tools exist.
 
-**What is the difference between entropy and randomness in cryptography?**
+**Q: What is the difference between entropy and randomness in cryptography?**
 Cryptographic security requires high-entropy randomness — unpredictability backed by physical randomness sources. Python's `random` module is a pseudo-random number generator (Mersenne Twister) — its state can be predicted from 624 outputs, making it completely inappropriate for security. `secrets.token_bytes(n)` uses the OS CSPRNG (on Linux: `getrandom()` or `/dev/urandom`; on macOS: `arc4random`) which gathers entropy from hardware events (interrupt timing, disk activity, thermal noise). Always use `secrets` for generating keys, salts, tokens, and any security-critical random values.
 
-**Explain how bcrypt's cost factor provides tunable slowness.**
+**Q: Explain how bcrypt's cost factor provides tunable slowness.**
 bcrypt is the Blowfish cipher initialization function (expensive_key_setup) applied to a password. The cost factor (typically 10–12) determines the number of iterations: the function performs 2^cost rounds of the expensive key setup. At cost 10: ~100 ms on a modern server; cost 12: ~300–400 ms. As hardware gets faster, you increase the cost factor to maintain the desired verification time. GPUs are relatively ineffective against bcrypt because bcrypt requires large amounts of sequential memory access that GPUs cannot parallelize efficiently, unlike SHA-256.
 
-**What is a key derivation function (KDF) and when would you use PBKDF2 vs HKDF?**
+**Q: What is a key derivation function (KDF) and when would you use PBKDF2 vs HKDF?**
 A KDF derives one or more cryptographic keys from a source of keying material. PBKDF2 is a password-based KDF: it adds computational hardness (via iteration count) to derive a key from a low-entropy, human-chosen password — its purpose is to make brute-force expensive. HKDF (HMAC-based KDF) is for high-entropy inputs: it derives multiple cryptographically independent keys from an already-secret, high-entropy input like an ECDH shared secret. HKDF adds no computational overhead (it is fast), relying instead on the input's existing entropy. Use PBKDF2 (or bcrypt/Argon2) for passwords; use HKDF for deriving session keys from a key exchange output.
 
-**What is authenticated encryption with associated data (AEAD) and what goes in the "associated data"?**
+**Q: What is authenticated encryption with associated data (AEAD) and what goes in the "associated data"?**
 AEAD encrypts plaintext (for confidentiality) and also authenticates associated data that is not encrypted (for integrity). Associated data is typically metadata that must be sent in plaintext but must not be tampered with — for example, a packet header, a recipient identifier, or a version number. An attacker cannot modify the associated data without breaking the authentication tag, even though the associated data is not encrypted. In AES-GCM, passing associated data as the `aad` parameter ensures that both the ciphertext and the metadata are covered by the authentication tag.
 
 ---

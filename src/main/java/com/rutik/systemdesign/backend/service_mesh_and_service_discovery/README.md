@@ -399,25 +399,25 @@ For liveness probes: NEVER check external dependencies (database, cache, downstr
 
 ## 12. Interview Questions with Answers
 
-**What is a service mesh and what problems does it solve?**
+**Q: What is a service mesh and what problems does it solve?**
 A service mesh is a dedicated infrastructure layer for service-to-service communication. It solves: (1) mTLS between services without code changes (zero-trust security), (2) centralized retry/timeout/circuit breaker policy applied uniformly, (3) automatic distributed tracing and metrics for all service calls, (4) traffic control (canary releases, A/B testing, traffic mirroring) at the infrastructure level. Without a mesh, each service implements these concerns differently or not at all. The mesh uses a sidecar proxy (Envoy) injected into each pod; iptables rules redirect all pod traffic through the sidecar, making it transparent to applications.
 
-**What is the difference between liveness and readiness probes?**
+**Q: What is the difference between liveness and readiness probes?**
 Liveness determines if the process is alive — failure triggers a container restart. Check only that the JVM is running and not deadlocked: `GET /actuator/health/liveness` returning 200 is sufficient. Readiness determines if the service is ready to accept traffic — failure removes the pod from the Service's endpoints (no new requests). Check all dependencies: DB connectivity, cache availability, any required warmup. The critical distinction: if a database goes down, all pods should fail readiness (removed from LB, no new traffic) but pass liveness (not restarted). If liveness was tied to DB health, all pods would restart simultaneously, potentially causing a cascading failure.
 
-**What is the difference between client-side and server-side service discovery?**
+**Q: What is the difference between client-side and server-side service discovery?**
 In client-side discovery, the service queries a registry (Eureka, Consul) for available instances and performs load balancing itself using a client-side library (Spring Cloud LoadBalancer). The client knows about all instances and can implement sophisticated routing (zone-aware, latency-based). The downside is logic in every service and a tightly coupled registry. In server-side discovery, the client makes a request to a load balancer or DNS name; the load balancer queries the registry. The client is simpler but there is an extra network hop. Kubernetes Services are a form of server-side discovery using iptables/IPVS at the node level, which adds minimal latency.
 
-**How does Istio implement circuit breaking without code changes?**
+**Q: How does Istio implement circuit breaking without code changes?**
 Istio's `DestinationRule` `outlierDetection` configuration implements circuit breaking at the Envoy sidecar level. You configure: `consecutiveGatewayErrors` (how many 5xx responses before ejecting an instance), `interval` (how often to evaluate), `baseEjectionTime` (how long to eject for), and `maxEjectionPercent` (max percentage of instances to eject simultaneously). When Envoy detects that a specific upstream instance is returning errors, it stops routing traffic to that instance for the ejection period, then gradually re-admits it. This works for any service regardless of language or framework.
 
-**What is mTLS in a service mesh and why is it important?**
+**Q: What is mTLS in a service mesh and why is it important?**
 Mutual TLS (mTLS) means both the client and server authenticate each other using TLS certificates, unlike regular HTTPS where only the server is authenticated. In a service mesh, Istio's Citadel issues certificates to each service (based on its Kubernetes ServiceAccount). When service A calls service B, both sides present and validate certificates. This provides: authentication (only services with valid certificates can communicate), encryption (traffic is encrypted in transit — protects against eavesdropping within the cluster), and authorization (Istio's AuthorizationPolicy can restrict which service identities can call which endpoints). This implements zero-trust networking inside the cluster.
 
-**How does xDS protocol work in Istio?**
+**Q: How does xDS protocol work in Istio?**
 xDS (x Discovery Service) is the API between Istio's control plane (Istiod) and Envoy sidecar proxies. It consists of several sub-APIs: LDS (Listener Discovery Service) configures what ports Envoy listens on; RDS (Route Discovery Service) configures routing rules (VirtualService); CDS (Cluster Discovery Service) defines upstream service clusters (DestinationRule); EDS (Endpoint Discovery Service) provides healthy endpoint lists for each cluster. Istiod watches Kubernetes Service and Pod resources, merges Istio CRD configurations (VirtualService, DestinationRule), and pushes the derived xDS configuration to all relevant Envoy proxies. This is how a change to a VirtualService takes effect across all pods within seconds without restart.
 
-**What is the startup probe in Kubernetes and when should you use it?**
+**Q: What is the startup probe in Kubernetes and when should you use it?**
 The startup probe prevents liveness and readiness probes from interfering with slow-starting applications. Before the startup probe succeeds, liveness and readiness probes are not evaluated. Configure `failureThreshold * periodSeconds` to cover the maximum possible startup time (Spring Boot cold start: 10-30 seconds). Once the startup probe succeeds, it is no longer checked — liveness and readiness take over. Without a startup probe, you would set `initialDelaySeconds=60` on liveness, meaning if the JVM hangs after startup, Kubernetes waits 60 seconds before restarting. With a startup probe, liveness reacts immediately after startup completes.
 
 ---

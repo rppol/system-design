@@ -468,64 +468,64 @@ public class AppConfig { }
 
 ## 12. Interview Questions with Answers
 
-**What is the difference between Spring AOP and AspectJ?**
+**Q: What is the difference between Spring AOP and AspectJ?**
 Spring AOP is proxy-based runtime weaving limited to method execution on Spring-managed beans. AspectJ is a full AOP framework supporting compile-time, post-compile, and load-time weaving, applicable to any Java object, including constructors, field access, and static initializers. Spring AOP is simpler (zero setup) but limited to Spring beans and public methods. AspectJ requires the AspectJ compiler or load-time weaving agent but can intercept anything. Most Spring applications use Spring AOP; AspectJ is reserved for cases requiring field interception or non-Spring object advice.
 
-**What are the five types of advice in Spring AOP?**
+**Q: What are the five types of advice in Spring AOP?**
 `@Before` runs before the method (cannot prevent execution unless throwing an exception). `@AfterReturning` runs after normal return (can access return value). `@AfterThrowing` runs after an exception (can access the exception). `@After` runs always, like a finally block. `@Around` wraps the entire method, calling `pjp.proceed()` to invoke the target — most powerful and most error-prone. For most cases `@Around` is preferred because it handles both normal and exceptional flows in one place.
 
-**How do you write a pointcut expression for all public methods in a service package?**
+**Q: How do you write a pointcut expression for all public methods in a service package?**
 `execution(public * com.example.service..*(..))` — matches: public methods (any return type, any method name) in any class within the `com.example.service` package and sub-packages, with any parameters. Alternatively, `within(com.example.service..*)` matches all method executions within those classes regardless of visibility (though Spring AOP only intercepts methods that can be overridden). `@annotation(com.example.Timed)` matches methods annotated with `@Timed` regardless of package.
 
-**What is a JoinPoint and what information can you access from it?**
+**Q: What is a JoinPoint and what information can you access from it?**
 `JoinPoint` is passed to non-`@Around` advice and provides: `getTarget()` (the target bean, not the proxy), `getThis()` (the proxy), `getArgs()` (method arguments as `Object[]`), `getSignature()` (method signature including name, declaring type, parameter types), `getKind()` (always "method-execution" in Spring AOP). For `@Around` advice, `ProceedingJoinPoint` extends `JoinPoint` with `proceed()` (invoke target with original args) and `proceed(Object[])` (invoke with modified args).
 
-**How does @Transactional use Spring AOP?**
+**Q: How does @Transactional use Spring AOP?**
 `@Transactional` is implemented by `TransactionInterceptor`, which is registered as an AOP `@Around` advice via `AnnotationTransactionAttributeSource`. When the container detects a `@Transactional` bean, `AnnotationAwareAspectJAutoProxyCreator` wraps it in a proxy. On each method call, `TransactionInterceptor.invoke()` checks the method's transaction attributes, starts/joins/suspends a transaction, calls `proceed()`, then commits or rolls back. This is why `@Transactional` on private methods is silently ignored — the proxy cannot intercept them.
 
-**How do you control the order in which multiple aspects apply to the same method?**
+**Q: How do you control the order in which multiple aspects apply to the same method?**
 Use `@Order(n)` on the aspect class — lower numbers have higher priority and run as the outermost wrapper in `@Around` advice (their `before` logic runs first; their `after` logic runs last). If no `@Order` is specified, order is undefined and may differ across JVM runs. For Spring's built-in aspects: Security (highest priority) → Transaction (middle) → Application aspects (varies). Use `Ordered.HIGHEST_PRECEDENCE` and `Ordered.LOWEST_PRECEDENCE` for clear semantics.
 
-**What is the difference between @Before and the "before" part of @Around?**
+**Q: What is the difference between @Before and the "before" part of @Around?**
 `@Before` runs before the method and cannot prevent execution (only throwing an exception aborts). The "before" part of `@Around` (code before `pjp.proceed()`) can prevent execution by not calling `proceed()`, by calling `proceed()` with modified arguments, or by returning a short-circuit value. `@Around` has full control: it can modify arguments, modify the return value, catch exceptions and return a fallback, or retry the call. Use `@Before` for simple pre-invocation logic; use `@Around` when you need control over execution.
 
-**Can a pointcut match beans in other Spring contexts (parent/child)?**
+**Q: Can a pointcut match beans in other Spring contexts (parent/child)?**
 Spring AOP only operates within a single `ApplicationContext`. A `BeanPostProcessor` in the child context (servlet context) creates proxies for beans in the child context. Beans in the parent context (root context) are proxied by post-processors in the parent context. An aspect declared in the child context does NOT apply to parent context beans. This is why aspects for service beans should be defined in the root context, while aspects for MVC components are in the servlet context.
 
-**What happens if @Around advice does not call proceed()?**
+**Q: What happens if @Around advice does not call proceed()?**
 The target method is never invoked. The advice return value (or null if no return statement) is returned to the caller. No exception from the method propagates. This silently breaks the application — all methods matching the pointcut return null and execute no business logic. This is a dangerous bug with no compile-time or startup warning. Always call `pjp.proceed()` in `@Around` advice unless intentionally short-circuiting (e.g., cache hit, circuit breaker open, circuit is returning cached response).
 
-**How does Spring AOP handle exceptions thrown by @Around advice?**
+**Q: How does Spring AOP handle exceptions thrown by @Around advice?**
 If `@Around` advice calls `pjp.proceed()` and the target throws an exception, and the advice does not catch it (or re-throws), the exception propagates normally to the caller. Other advice types (`@AfterThrowing`, `@After`) are also triggered. If the `@Around` advice catches the exception and does not re-throw, the caller sees a normal return (or the advice's return value). `@AfterThrowing` advice only runs if the exception propagates past all `@Around` advice. To ensure proper `@Transactional` rollback, never swallow exceptions in `@Around` advice.
 
-**What is the `@within` pointcut designator and how does it differ from `within`?**
+**Q: What is the `@within` pointcut designator and how does it differ from `within`?**
 `within(com.example.service..*)` matches all method executions in classes within the specified package. `@within(com.example.annotation.Monitored)` matches all method executions in classes that are annotated with `@Monitored`. The difference: `within` matches by package/class name; `@within` matches by annotation on the class. Similarly, `@annotation` matches by annotation on the method. Use `@within` when you want to apply advice to all methods of annotated classes (e.g., all methods in `@RestController` classes).
 
-**How do you get access to the annotation instance's attributes inside advice?**
+**Q: How do you get access to the annotation instance's attributes inside advice?**
 Bind the annotation type as a parameter to the advice method and reference it in the pointcut. For `@Around("@annotation(myAnnotation)")` where `myAnnotation` is the parameter name (must match!), Spring binds the actual annotation instance to that parameter. Then `myAnnotation.attribute()` accesses the value. This is how `@Retryable(maxAttempts=3)` works — the retry aspect reads `maxAttempts` directly from the annotation instance passed to `@Around`.
 
-**What is the performance cost of Spring AOP?**
+**Q: What is the performance cost of Spring AOP?**
 Spring AOP adds two costs: proxy creation (one-time at startup, typically negligible) and per-call proxy dispatch overhead. For CGLIB proxies, `MethodProxy.invokeSuper()` is faster than reflection. For JDK proxies, `Method.invoke()` uses reflection. Measured overhead is typically 1-10 microseconds per call depending on JIT optimization. For hot paths (millions of calls/second), this can matter. Pointcut evaluation is also a cost — complex `execution()` expressions evaluated on every method call can add up. Mitigation: use `@Pointcut` method-level caching (Spring does this), or use AspectJ compile-time weaving (near-zero overhead).
 
-**How would you implement method-level audit logging using AOP?**
+**Q: How would you implement method-level audit logging using AOP?**
 Define a custom `@Auditable` annotation with attributes for action and resource. Write an `@Aspect` with `@Around("@annotation(auditable)")`. In the advice: extract the annotation's action/resource attributes, capture the authenticated user from `SecurityContextHolder`, record the attempt, call `pjp.proceed()`, record success (including return value summary), catch exceptions to record failure. Annotate service methods with `@Auditable(action="CREATE_ORDER", resource="orders")`. This produces a complete audit trail for any method with zero change to business logic.
 
-**When should you prefer AspectJ weaving over Spring AOP?**
+**Q: When should you prefer AspectJ weaving over Spring AOP?**
 Use AspectJ when: (1) you need to advise non-Spring objects (domain objects, value objects); (2) you need to intercept field access or constructor execution; (3) private method interception is required; (4) per-call performance overhead of proxy dispatch is unacceptable (tight loops). AspectJ compile-time weaving requires the AspectJ compiler (`ajc`) in the build. Load-time weaving uses a JVM agent (`-javaagent:aspectjweaver.jar`). For `@Configurable` (DI into non-Spring domain objects), AspectJ load-time weaving with `@EnableSpringConfigured` is the standard approach.
 
-**What is the @EnableAspectJAutoProxy annotation and what does it do?**
+**Q: What is the @EnableAspectJAutoProxy annotation and what does it do?**
 `@EnableAspectJAutoProxy` registers `AnnotationAwareAspectJAutoProxyCreator` as a `BeanPostProcessor`. This post-processor inspects every bean during initialization and, if any declared `@Aspect` matches the bean via a pointcut, creates a proxy (CGLIB or JDK) for that bean. Without this annotation, `@Aspect` classes are created as regular beans but their advice is never applied. Spring Boot's `AopAutoConfiguration` auto-configures this when `spring-aop` is on the classpath and `spring.aop.auto=true` (the default), so explicit `@EnableAspectJAutoProxy` is rarely needed in Boot applications.
 
-**Why does self-invocation bypass AOP advice, and how do you fix it?**
+**Q: Why does self-invocation bypass AOP advice, and how do you fix it?**
 Because the advice lives on the *proxy*, not on the target object. When method `a()` calls `this.b()` inside the same bean, `this` is the raw target instance, not the proxy, so the call never passes through the interceptor chain and `b()`'s advice (e.g. `@Transactional`, `@Cacheable`, a custom aspect) silently does not run. The cleanest fix is to move `b()` into a separate bean so the call crosses a proxy boundary; alternatives are injecting a self-reference (`@Autowired` of your own type, or `ObjectProvider`), or `AopContext.currentProxy()` with `exposeProxy=true`. This is the single most common AOP bug in production and applies to every proxy-based annotation, not just AOP aspects.
 
-**What does the @Order / Ordered annotation control when multiple aspects match the same join point, and how do advice types nest?**
+**Q: What does the @Order / Ordered annotation control when multiple aspects match the same join point, and how do advice types nest?**
 `@Order` controls the *outer-to-inner* nesting of aspects: a lower order value wraps further outside, so its `@Around`/`@Before` runs first and its `@After`/`@AfterReturning` runs last (like nested try-finally blocks). Within a single aspect, the advice precedence is `@Around` (before `proceed`) → `@Before` → target method → `@AfterReturning`/`@AfterThrowing` → `@After`. Without explicit ordering, the order of aspects is undefined, which causes subtle bugs — e.g. a transaction aspect and a caching aspect whose relative order changes whether the cache sees committed data. Always order interacting aspects explicitly.
 
-**Can an aspect advise another aspect, and what happens with proxying of final classes or methods?**
+**Q: Can an aspect advise another aspect, and what happens with proxying of final classes or methods?**
 An aspect bean is itself a Spring bean and can in principle be matched by another aspect's pointcut, but you normally exclude aspects from pointcuts to avoid recursion and surprises. The proxying limitation is more important in practice: CGLIB subclasses the target, so it cannot proxy a `final` class or override a `final`/`private`/`static` method — advice on those simply does not apply (and a `final` class with no interface fails proxy creation). JDK dynamic proxies only proxy interface methods, so a `public` method not declared on an interface is not advised. Knowing these limits explains many "my aspect didn't fire" mysteries.
 
-**What is the difference between a join point and a pointcut, and what can be a join point in Spring AOP?**
+**Q: What is the difference between a join point and a pointcut, and what can be a join point in Spring AOP?**
 A join point is a *specific point* during program execution where advice could be applied; a pointcut is a *predicate/expression* that selects a set of join points. In full AspectJ, join points include method calls, method executions, constructor calls, field reads/writes, and exception handlers. Spring AOP, being proxy-based, supports only *method-execution* join points on Spring-managed beans — no field access, no constructor interception, no advising of calls made from within the target. This restriction is why interview answers must distinguish "AspectJ can do X" from "Spring AOP can do X": when you need field or constructor join points you must drop to AspectJ weaving.
 
 ---

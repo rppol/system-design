@@ -335,55 +335,55 @@ Team disabled InnoDB double-write buffer (`innodb_doublewrite=OFF`) for 10% writ
 
 ## 12. Interview Questions with Answers
 
-**Why does InnoDB use a clustered index and what is the impact on secondary indexes?**
+**Q: Why does InnoDB use a clustered index and what is the impact on secondary indexes?**
 InnoDB's primary key IS the B+tree — rows are physically stored in primary key order within leaf nodes. This makes primary key lookups require only one B+tree traversal. Secondary indexes store the primary key value as the row locator, not the physical row address. A secondary index lookup requires two B+tree traversals: first through the secondary index to get the PK, then through the clustered index (primary) to get the full row. This "double lookup" costs an extra I/O per secondary index scan if the data is not in the buffer pool.
 
-**Walk me through a write operation in RocksDB from application to durable storage.**
+**Q: Walk me through a write operation in RocksDB from application to durable storage.**
 (1) Write is appended to the WAL file synchronously (ensures durability). (2) Write is inserted into the MemTable (an in-memory skip list, ordered by key). (3) Write is acknowledged to the application. (4) When MemTable reaches ~64MB, it becomes immutable and a new MemTable opens. (5) Background thread flushes the immutable MemTable to an SSTable on disk (L0 file). (6) Background compaction merges L0 SSTables into L1, L1 into L2, etc. Each merge step produces larger, sorted, de-duplicated SSTables.
 
-**How does WAL enable point-in-time recovery?**
+**Q: How does WAL enable point-in-time recovery?**
 The WAL is an append-only sequence of all changes ever made to the database. By archiving WAL segments continuously (pg_archivecommand, WAL-G), you accumulate a complete change log. To recover to time T: start from the last base backup before T, replay archived WAL segments one by one until reaching T. Each WAL record is idempotent (replay-safe) because it's a physical delta (page number, offset, old value, new value). PostgreSQL WAL segments are 16MB each by default.
 
-**What is write amplification in LSM-trees and how do you minimize it?**
+**Q: What is write amplification in LSM-trees and how do you minimize it?**
 Write amplification (WA) = bytes written to disk / bytes written by application. In Leveled Compaction (LCS), data moves through multiple levels: L0→L1→L2→L3. Each level-crossing rewrites the data. WA = sum over levels of (level_ratio), typically 10-30x. Minimization strategies: (1) Increase SSTable sizes (fewer compaction events). (2) Use Size-Tiered Compaction (STCS) which has lower WA (~10x) at cost of space amplification. (3) Tune `level0_file_num_compaction_trigger` to reduce premature compaction. (4) Use WA-optimized algorithms like RocksDB's Dynamic Leveled Compaction.
 
-**Explain the difference between B+tree and LSM-tree for a workload with 10,000 writes/second and 100 reads/second.**
+**Q: Explain the difference between B+tree and LSM-tree for a workload with 10,000 writes/second and 100 reads/second.**
 With 10K writes/sec, B+tree suffers because each write potentially causes random I/O (page lookup + possible split + WAL write). This generates high IOPS demand. LSM-tree converts random writes to sequential writes (WAL + MemTable), dramatically reducing IOPS at the cost of read amplification. For this write-heavy, read-light workload, LSM-tree is superior — it can sustain higher write throughput on the same hardware. Use RocksDB, Cassandra, or similar LSM-based systems. For 100 reads/sec with bloom filters, read latency is acceptable even with 2-3 SSTable checks per read.
 
-**How does the buffer pool handle dirty pages and when does it flush them to disk?**
+**Q: How does the buffer pool handle dirty pages and when does it flush them to disk?**
 Dirty pages (modified but not yet written to disk) are flushed by: (1) Checkpoint process — periodically flushes all dirty pages to disk and advances the checkpoint LSN in WAL (default checkpoint_timeout=5min in PostgreSQL). (2) Background writers — bgwriter in PostgreSQL continuously flushes least-recently-used dirty pages to avoid checkpoint I/O spikes. (3) LRU eviction — when a clean page is needed but buffer pool is full, evict the LRU page; if it's dirty, flush it first. (4) explicit CHECKPOINT command.
 
-**What is a page cache and how does it differ from the buffer pool?**
+**Q: What is a page cache and how does it differ from the buffer pool?**
 The OS page cache caches file system blocks. The database buffer pool caches database pages. When a database has its own buffer pool (PostgreSQL, InnoDB), data can be cached twice: once in the buffer pool and once in the OS page cache — "double buffering." PostgreSQL uses O_RDONLY + madvise(MADV_DONTNEED) for sequential scans to avoid OS page cache pollution. `effective_cache_size` in PostgreSQL tells the query planner how much OS cache is available without actually allocating it.
 
-**Explain Copy-on-Write trees and their advantage for MVCC.**
+**Q: Explain Copy-on-Write trees and their advantage for MVCC.**
 In CoW trees (LMDB, TiKV), every write creates a new version of the modified path from root to the changed leaf — the old path remains unchanged. Readers take a pointer to the root at their snapshot time and traverse it locklessly, never seeing any in-progress write. This enables true lock-free reads: no latches, no shared memory contention, no MVCC garbage to collect. The downside: LMDB allows only one writer at a time (writer takes a file-level lock), and write amplification is proportional to tree height (typically 3-4 pages copied per write vs LSM's sequential write).
 
-**What is tombstone accumulation in LSM-trees and how does it affect performance?**
+**Q: What is tombstone accumulation in LSM-trees and how does it affect performance?**
 A delete in an LSM-tree writes a tombstone marker (a special delete record). The original row may still exist in older SSTables. During reads, the system must check all SSTables, find the tombstone, and skip the row — increasing read amplification. Tombstones are only removed during compaction when all SSTables containing the original row have been merged. In Cassandra with heavy deletes and slow compaction, tombstone count can reach millions, degrading read latency from <5ms to >500ms. Fix: tune `tombstone_compaction_interval`, use TTL-based expiry instead of explicit deletes, use TWCS with time-based data.
 
-**How does RocksDB's bloom filter reduce read amplification?**
+**Q: How does RocksDB's bloom filter reduce read amplification?**
 Each SSTable has a per-file Bloom filter (typically 10 bits/key, ~1% false positive rate). For a read: (1) Check MemTable — exact. (2) For each SSTable (newest to oldest), check bloom filter first. Filter says NO → SSTable definitely does not have the key (skip — no I/O). Filter says YES → search the SSTable (1% chance of false positive — one extra I/O). Net effect: instead of reading N SSTable files, only ~1-2 SSTable files are read per key lookup. Memory cost: ~10 bits/key × number of keys.
 
-**Compare the recovery times for B+tree vs LSM-tree engines after a crash.**
+**Q: Compare the recovery times for B+tree vs LSM-tree engines after a crash.**
 B+tree recovery (PostgreSQL/InnoDB): Replay WAL from last checkpoint. Checkpoint interval = 5min default. WAL at 100MB/sec for 5min = 30GB WAL to replay in worst case. Recovery takes seconds to minutes depending on WAL size and replay speed. LSM-tree recovery (RocksDB): Replay WAL for only the MemTable contents (since last flush). MemTable flush happens every ~64MB. WAL to replay is much smaller. Recovery typically takes < 1 second for small MemTables. However, opening an LSM database requires reading all SSTable metadata files, which can take several seconds for large databases.
 
-**What is the doublewrite buffer in InnoDB and is it still needed on modern SSDs?**
+**Q: What is the doublewrite buffer in InnoDB and is it still needed on modern SSDs?**
 The doublewrite buffer is a sequential area in the InnoDB tablespace where pages are written before being written to their actual locations. This prevents torn pages: if a crash occurs during the 16KB page write, InnoDB recovers the page from the doublewrite buffer. On modern SSDs with power-loss protection (PLP) capacitors (enterprise SSDs, NVMe with 'power loss data protection'), torn writes are guaranteed not to occur because the capacitor provides enough power to complete the in-flight write. With PLP SSDs, `innodb_doublewrite=OFF` is safe and eliminates ~10% write overhead. Consumer SSDs without PLP still need the doublewrite buffer.
 
-**How does columnar storage achieve 10-100x compression compared to row storage?**
+**Q: How does columnar storage achieve 10-100x compression compared to row storage?**
 Columnar stores adjacent values of the same column together. Same-type data compresses dramatically: (1) Delta encoding for sorted numeric columns (timestamps, sequential IDs) — store deltas instead of full values. Example: [1000, 1001, 1002] → delta=[1000, 1, 1], fits in fewer bits. (2) RLE (Run-Length Encoding) for low-cardinality columns (e.g., country codes) — store [US×1000, UK×500]. (3) Dictionary encoding for string columns — map values to 2-byte integers. (4) Bit-packing for small integers. ClickHouse uses LZ4 on top of these encoding, achieving 10-100x compression on typical analytical data.
 
-**What is the role of the WAL sender and WAL receiver in PostgreSQL streaming replication?**
+**Q: What is the role of the WAL sender and WAL receiver in PostgreSQL streaming replication?**
 The WAL sender is a backend process on the primary that continuously reads the WAL and streams WAL records to connected replicas. The WAL receiver is a process on the replica that receives WAL records, writes them to the replica's WAL, and applies them to update the replica's data files. This is physical replication: the replica applies the exact same byte changes as the primary. Recovery point: if the primary crashes, promote the replica (it has replayed all received WAL). Monitoring: `pg_stat_replication` on primary shows WAL sender lag per replica.
 
-**Explain the InnoDB redo log (circular) and why it has a size limit.**
+**Q: Explain the InnoDB redo log (circular) and why it has a size limit.**
 The InnoDB redo log (ib_logfile0, ib_logfile1 — or auto-sized in MySQL 8) is a circular buffer. New redo records are appended at the write position. The oldest records that are no longer needed (because their dirty pages have been flushed to disk) are overwritten. If dirty pages are not flushed fast enough, the write position catches up to the oldest needed record — this triggers a "sharp checkpoint" (emergency flush of all dirty pages), causing severe I/O spikes. Default redo log size in MySQL 5.7: 48MB (way too small). Recommendation: 1-4GB or use MySQL 8's auto-sizing. Set `innodb_log_file_size` accordingly.
 
-**How do MVCC dead tuples cause table bloat in PostgreSQL?**
+**Q: How do MVCC dead tuples cause table bloat in PostgreSQL?**
 In PostgreSQL's MVCC, UPDATE = delete old version + insert new version. The old version (dead tuple) is marked with xmax = committing transaction's ID but remains physically in the heap until VACUUM reclaims it. Dead tuples consume disk space and increase heap scan cost. On a table with 100M rows and 10% update rate per day: after 30 days without VACUUM, 30M dead tuples accumulate. A sequential scan reads them all. VACUUM removes dead tuples by marking their space as reusable (doesn't return space to OS — that requires VACUUM FULL, which takes an exclusive lock). Auto-vacuum triggers when dead tuple count exceeds `autovacuum_vacuum_scale_factor` (default 0.2 = 20% of table) × table row count.
 
-**What is the LSM tree's space amplification and how does leveled compaction reduce it?**
+**Q: What is the LSM tree's space amplification and how does leveled compaction reduce it?**
 Space amplification = actual disk space / minimum space needed for data. Size-Tiered Compaction (STCS) has SA up to 2x because multiple overlapping SSTables can contain different versions of the same key. Leveled Compaction (LCS) limits SA to ~1.1x because within each level (L1+), there is no key overlap — at most two versions of a key exist simultaneously (one in Lk, one being written to Lk+1 during compaction). The tradeoff: LCS has higher write amplification (10-30x) because keys are rewritten across levels more frequently.
 
 ---

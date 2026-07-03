@@ -682,25 +682,25 @@ LSTM hidden states can accumulate large magnitudes across long sequences, causin
 **Q: What are Fourier features and why are they used for seasonality encoding?**
 Fourier features represent periodic patterns as sums of sine and cosine functions at specific frequencies. For a weekly period of 7 days, Fourier features are sin(2*pi*t/7), cos(2*pi*t/7), sin(4*pi*t/7), cos(4*pi*t/7), etc. Using K pairs captures the first K harmonics of the pattern. Advantages over one-hot day-of-week encoding: (1) smooth — Sunday and Monday are adjacent in Fourier space; (2) compact — K=3 pairs (6 features) vs 7 one-hot features; (3) handles any period (not just integer periods). Prophet uses Fourier features internally for both weekly and yearly seasonality.
 
-**Why does shuffling or random train/test splitting produce misleadingly optimistic results on a time series?**
+**Q: Why does shuffling or random train/test splitting produce misleadingly optimistic results on a time series?**
 Random splitting leaks future information into training because future observations land in the training set and are used to predict the past. Temporal autocorrelation means a shuffled test point is nearly identical to a neighboring training point, so the model appears to generalize when it is really memorizing. This is why development MAPE of 8% can jump to 31% live. Always split chronologically and validate with walk-forward folds, never with KFold or a random split.
 
-**Why is MAPE a poor metric for series that contain zeros, and what should you use instead?**
+**Q: Why is MAPE a poor metric for series that contain zeros, and what should you use instead?**
 MAPE divides absolute error by the actual value, so it becomes undefined or infinite whenever an actual is zero. Intermittent-demand series (many zero-sales weeks) therefore produce NaN or infinity under MAPE, and MAPE is also asymmetric — it penalizes over-forecasts more lightly than under-forecasts. Use SMAPE (bounded 0-200%), MAE, or MASE/RMSSE, which scale error by a naive seasonal baseline and stay well-defined even when actuals hit zero.
 
-**Why must you scale features before training an LSTM but not before fitting ARIMA?**
+**Q: Why must you scale features before training an LSTM but not before fitting ARIMA?**
 LSTMs need scaled inputs because large-magnitude values saturate activations and make gradients vanish or explode during backpropagation through time. Raw sales in the range 0-100,000 push hidden-state gradients toward zero, and the network fails to learn. Fit a MinMaxScaler or StandardScaler on the training window only, apply it to validation and test, and inverse-transform predictions. ARIMA operates on the raw series directly because its coefficients are estimated by linear least-squares, which is scale-invariant.
 
-**How do you avoid target leakage when engineering rolling-window features?**
+**Q: How do you avoid target leakage when engineering rolling-window features?**
 Shift the target by one step before computing any rolling statistic so each feature is built only from strictly past values. A `rolling_mean(7)` computed without a `shift(1)` includes the current timestep's own value, letting the model peek at the label it is trying to predict. The same applies to lag features: never compute t+7 lags from the full series before the train/test split, or test samples inherit their own future.
 
-**What is the difference between ARIMA and exponential smoothing (ETS)?**
+**Q: What is the difference between ARIMA and exponential smoothing (ETS)?**
 ARIMA models the autocorrelation of the differenced series, while ETS models level, trend, and seasonality as exponentially weighted moving averages. ARIMA is more flexible for series with complex autocorrelation structure but requires stationarity and careful (p,d,q) selection; ETS (Holt-Winters) is simpler, needs no stationarity assumption, and often wins on short seasonal business series. In practice they are complementary — the M-competitions show ETS and ARIMA trading wins by series type, which is why ensembling both is common.
 
-**How does DeepAR produce probabilistic forecasts instead of single point estimates?**
+**Q: How does DeepAR produce probabilistic forecasts instead of single point estimates?**
 DeepAR outputs the parameters of a likelihood (Gaussian or negative binomial) at each step rather than a single value, then samples forward to build prediction intervals. It trains a single global LSTM across thousands of related series by maximizing the log-likelihood of the observed values under the predicted distribution. At inference it draws many sample paths through the autoregressive decoder and reads off quantiles (P10/P50/P90), which is what makes it suitable for inventory decisions at a target service level.
 
-**What is the difference between an expanding-window and a sliding-window backtest?**
+**Q: What is the difference between an expanding-window and a sliding-window backtest?**
 An expanding window keeps all history and grows the training set each fold, while a sliding window holds a fixed-length recent window and drops the oldest data. Expanding windows maximize data and suit stable processes; sliding windows adapt faster to drift and structural breaks because stale pre-break data is discarded. Choose sliding for regimes that change (post-COVID retail, evolving markets) and expanding when the data-generating process is stationary and every extra observation helps.
 
 ---

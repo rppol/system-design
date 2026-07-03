@@ -498,40 +498,40 @@ server.tomcat.max-http-form-post-size=10MB
 
 ## 12. Interview Questions with Answers
 
-**What is the difference between @RequestParam and @PathVariable?**
+**Q: What is the difference between @RequestParam and @PathVariable?**
 `@PathVariable` extracts a value from the URI path template segment: `GET /users/{id}` with `@PathVariable Long id` extracts the path segment. `@RequestParam` extracts from query string or form data: `GET /users?page=0` with `@RequestParam int page`. `@PathVariable` is required by default (missing segment = no route match = 404). `@RequestParam` can have `required=false` or `defaultValue`. Path variables are used for resource identification; query params for filtering, sorting, or pagination.
 
-**What happens when @Valid validation fails on a @RequestBody?**
+**Q: What happens when @Valid validation fails on a @RequestBody?**
 Spring throws `MethodArgumentNotValidException` before the controller method executes. The exception contains `BindingResult` with all field and object errors. Without a `@ExceptionHandler` for it, Spring's `DefaultHandlerExceptionResolver` returns a generic 400 response. In a `@ControllerAdvice`, catch `MethodArgumentNotValidException`, iterate `ex.getBindingResult().getFieldErrors()`, and return a structured JSON error response with field names and messages. For `@RequestParam` and `@PathVariable` validation, catch `ConstraintViolationException` (from `MethodValidationPostProcessor`).
 
-**What is ResponseBodyAdvice and when would you use it?**
+**Q: What is ResponseBodyAdvice and when would you use it?**
 `ResponseBodyAdvice<T>` intercepts controller return values before they are written to the response, allowing modification. `supports()` filters which controller methods or converter types it applies to. `beforeBodyWrite()` can wrap, replace, or inspect the body. Common uses: wrapping all responses in a standard `ApiResponse<T>` envelope, adding security headers to response bodies, or filtering sensitive fields. Register by annotating with `@ControllerAdvice`. Avoid using it to hide controller design problems — prefer returning `ApiResponse<T>` directly for clarity.
 
-**How does @RequestBody deserialization work?**
+**Q: How does @RequestBody deserialization work?**
 `RequestResponseBodyMethodProcessor` finds the `HttpMessageConverter` supporting the request's `Content-Type` and the parameter type. For `application/json`, `MappingJackson2HttpMessageConverter.read()` uses Jackson's `ObjectMapper` to deserialize. Jackson creates the object via the default constructor (or `@JsonCreator`), then sets fields via setters or direct field access. If the body is invalid JSON, `HttpMessageNotReadableException` is thrown (400). If the body is valid JSON but fails schema mapping, Jackson may silently ignore unknown fields (default) or throw `UnrecognizedPropertyException` (if `FAIL_ON_UNKNOWN_PROPERTIES` is enabled).
 
-**What is the difference between @Valid and @Validated?**
+**Q: What is the difference between @Valid and @Validated?**
 `@Valid` is a JSR-303 standard annotation that triggers full Bean Validation on the annotated parameter — all constraints on the object's fields are checked. `@Validated` is Spring's extension that adds support for validation groups — only constraints belonging to the specified group(s) are checked. This enables different validation rules for create vs update scenarios. `@Validated` is also required (instead of `@Valid`) to enable method-level validation via `MethodValidationPostProcessor`.
 
-**How do you return a 404 response in Spring MVC?**
+**Q: How do you return a 404 response in Spring MVC?**
 Multiple ways: (1) Throw `ResponseStatusException(HttpStatus.NOT_FOUND, "message")` from anywhere; (2) throw a custom exception annotated with `@ResponseStatus(HttpStatus.NOT_FOUND)`; (3) return `ResponseEntity.notFound().build()`; (4) throw `UserNotFoundException` and handle it in `@ControllerAdvice` with `@ExceptionHandler(UserNotFoundException.class)` returning `@ResponseStatus(HttpStatus.NOT_FOUND)`. Prefer option 4 for clean controller code and centralized error handling. Option 1 is a quick throwaway in simple cases.
 
-**What is ProblemDetail and why was it introduced?**
+**Q: What is ProblemDetail and why was it introduced?**
 `ProblemDetail` (Spring 6 / Spring Boot 3) implements RFC 7807 "Problem Details for HTTP APIs" — a standardized JSON format for error responses: `type` (URI identifying the error type), `title` (human-readable summary), `status` (HTTP status code), `detail` (specific problem description), `instance` (URI of the specific occurrence). Before this, every team invented their own error response format, making API clients harder to write. Use `ProblemDetail.forStatus(HttpStatus.NOT_FOUND)` in `@ExceptionHandler` methods. Spring MVC 6 also auto-returns `ProblemDetail` for many built-in exceptions (404, 400, 405) when `spring.mvc.problemdetails.enabled=true`.
 
-**How does HandlerMethodArgumentResolver allow extending Spring MVC?**
+**Q: How does HandlerMethodArgumentResolver allow extending Spring MVC?**
 `HandlerMethodArgumentResolver` with `supportsParameter()` returning true for a custom annotation/type and `resolveArgument()` extracting the value from the `NativeWebRequest`. Register via `WebMvcConfigurer.addArgumentResolvers()`. Spring MVC calls `supportsParameter()` for each registered resolver in order; the first match wins. Built-in resolvers handle `@RequestBody`, `@PathVariable`, `Principal`, `HttpSession`, `Pageable` (Spring Data). Custom resolvers cover authenticated user injection, tenant context, or any cross-cutting parameter pattern.
 
-**What is the difference between @ExceptionHandler in a controller vs @ControllerAdvice?**
+**Q: What is the difference between @ExceptionHandler in a controller vs @ControllerAdvice?**
 `@ExceptionHandler` declared in a `@Controller` class only handles exceptions from that specific controller. `@ControllerAdvice` (or `@RestControllerAdvice`) applies its `@ExceptionHandler` methods globally to all controllers matching its scope (all by default, or limited by `basePackages`, `annotations`, `assignableTypes`). Global exception handling should always be in `@ControllerAdvice` for consistent error responses across the API. Controller-local handlers are only useful when one controller has genuinely unique exception handling requirements.
 
-**How do you handle multipart file uploads in Spring MVC?**
+**Q: How do you handle multipart file uploads in Spring MVC?**
 Annotate the method with `@PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)`. Declare `@RequestParam("file") MultipartFile file` as a parameter. Spring's `StandardServletMultipartResolver` parses the multipart request; `RequestPartMethodArgumentResolver` resolves `MultipartFile`. Access `file.getOriginalFilename()`, `file.getContentType()`, `file.getSize()`, `file.getInputStream()`. For multiple files, use `List<MultipartFile>`. Configure `spring.servlet.multipart.max-file-size` and `spring.servlet.multipart.max-request-size` to prevent OOM from oversized uploads.
 
-**What is the difference between @RequestMapping(method=GET) and @GetMapping?**
+**Q: What is the difference between @RequestMapping(method=GET) and @GetMapping?**
 `@GetMapping` is a composed annotation: `@RequestMapping(method = RequestMethod.GET)`. It is shorter, more readable, and statically typed (IDE warns if you use `@GetMapping` with `method = RequestMethod.POST`). All `@GetMapping`, `@PostMapping`, `@PutMapping`, `@PatchMapping`, `@DeleteMapping` are composed annotations added in Spring 4.3. Use them instead of `@RequestMapping` with `method=` for all new code. Reserve `@RequestMapping` for class-level base path declarations where the method is not yet known.
 
-**What is `ProblemDetail` (RFC 7807) and how do you return it from a Spring MVC controller in Boot 3.x?**
+**Q: What is `ProblemDetail` (RFC 7807) and how do you return it from a Spring MVC controller in Boot 3.x?**
 `ProblemDetail` (Spring 6.0 / Boot 3.0) is a standardised error response body conforming to RFC 7807 Problem Details for HTTP APIs. It includes: `type` (URI identifier of the problem type), `title` (human-readable summary), `status` (HTTP status code), `detail` (specific problem description for this occurrence), `instance` (URI of the specific request). Enable it with `spring.mvc.problemdetails.enabled=true`. All built-in Spring exceptions (`MethodArgumentNotValidException`, `HttpMessageNotReadableException`, etc.) are automatically mapped to `ProblemDetail` responses. Throw `ResponseStatusException` with a problem detail or implement `ErrorResponseException` for custom problems:
 
 ```java
@@ -542,13 +542,13 @@ throw new ResponseStatusException(HttpStatus.NOT_FOUND,
 // class OrderNotFoundException extends ErrorResponseException { ... }
 ```
 
-**How does `@ResponseBody` work with message converters, and what determines which converter is used?**
+**Q: How does `@ResponseBody` work with message converters, and what determines which converter is used?**
 `@ResponseBody` (included in `@RestController`) instructs Spring MVC to write the return value directly to the HTTP response body via a `HttpMessageConverter`, bypassing view resolution. The converter is selected by content negotiation: (1) Check the `Accept` header from the client; (2) Match against the `produces` attribute of `@RequestMapping`; (3) Find the first registered `HttpMessageConverter` that supports the return type AND the accepted media type. Built-in converters (in order): `ByteArrayHttpMessageConverter` → `StringHttpMessageConverter` → `MappingJackson2HttpMessageConverter` (for JSON, if Jackson is on classpath) → others. If no converter matches, Spring returns `406 Not Acceptable`. Custom converters: implement `HttpMessageConverter<T>` and register via `WebMvcConfigurer.configureMessageConverters()`.
 
-**What is `@RequestBody` deserialization and what exception is thrown for malformed JSON?**
+**Q: What is `@RequestBody` deserialization and what exception is thrown for malformed JSON?**
 `@RequestBody` reads the HTTP request body and deserialises it using a `HttpMessageConverter`. For JSON bodies, `MappingJackson2HttpMessageConverter` uses Jackson's `ObjectMapper`. If the JSON is syntactically invalid (not well-formed JSON), Jackson throws `JsonParseException`, wrapped by Spring as `HttpMessageNotReadableException` — resulting in a `400 Bad Request`. If the JSON is valid but the type does not match the annotated parameter (e.g., a string where an integer is expected), Jackson throws `InvalidDefinitionException` or `MismatchedInputException`, also wrapped as `HttpMessageNotReadableException`. Handle it in `@ExceptionHandler(HttpMessageNotReadableException.class)` to return a structured error response with details about the malformed input.
 
-**How does Spring MVC's `@CrossOrigin` annotation compare to a global CORS configuration?**
+**Q: How does Spring MVC's `@CrossOrigin` annotation compare to a global CORS configuration?**
 `@CrossOrigin` on a controller or handler method enables CORS for that specific endpoint, configuring allowed origins, methods, and headers per-mapping. Global CORS configuration in `WebMvcConfigurer.addCorsMappings()` applies across all matching URL patterns without modifying any controller. Use global CORS for consistent policy across all endpoints — avoids scatter and ensures the policy is in one place. `@CrossOrigin` is useful for exceptions: a public endpoint in an otherwise restricted API. Important: `@CrossOrigin` and `WebMvcConfigurer` CORS config are additive — both can apply to the same endpoint. Spring Security's CORS integration must also be enabled (`http.cors(Customizer.withDefaults())`) — Spring MVC CORS config is ignored if Spring Security intercepts the preflight `OPTIONS` request before it reaches Spring MVC.
 
 ---

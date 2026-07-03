@@ -419,52 +419,52 @@ def detect_training_serving_skew(
 
 ## 12. Interview Questions with Answers
 
-**What is point-in-time correctness and why does it matter?**
+**Q: What is point-in-time correctness and why does it matter?**
 PIT correctness means that when building a training dataset, each training example uses only feature values that were available at the time of the label event — no information from the future. It matters because violating PIT correctness (using features computed with future data) makes the model appear more accurate in offline evaluation than it actually is. The model learns to predict using signals it will never have in production, so offline AUC of 0.95 can collapse to 0.62 in production. PIT correctness is the primary engineering guarantee that makes offline metrics trustworthy.
 
-**Describe the training-serving skew problem and its root causes.**
+**Q: Describe the training-serving skew problem and its root causes.**
 Training-serving skew is when the feature distribution at training time differs from the feature distribution at serving time. Root causes: (1) feature logic implemented differently in batch (training) vs online (serving) code; (2) using current feature values for training instead of past values (PIT violation); (3) features that are available during training but missing or stale at serving time; (4) preprocessing applied during training but forgotten during serving. It manifests as a model that looks great offline but degrades immediately in production with no code changes.
 
-**How does a dual-store feature store architecture work?**
+**Q: How does a dual-store feature store architecture work?**
 An offline store (typically Parquet/Delta Lake on S3 or BigQuery) stores full feature value histories with timestamps, enabling arbitrary PIT joins for training. An online store (Redis, DynamoDB, or Bigtable) stores only the most recent value per entity, enabling sub-millisecond lookups during serving. Both stores are fed by the same feature computation pipelines (batch Spark for the offline store; stream Flink for the online store) from shared feature definitions. The consistency guarantee is that the online store's current value should match the most recent timestamp in the offline store for the same entity.
 
-**What is the risk of implementing feature logic separately in the offline and online pipelines?**
+**Q: What is the risk of implementing feature logic separately in the offline and online pipelines?**
 Logic drift. Two codebases implementing the same semantic definition ("30-day purchase count") will diverge over time as each is maintained independently. The offline Spark job may fix a bug (e.g., excluding cancelled orders) while the online Python script is not updated. Now the model is trained on a feature that excludes cancelled orders but served on a feature that includes them. The model may have learned to correlate cancelled-order-free behavior with churn, which is wrong for the online distribution. This is why Chronon/Feathr-style single-definition-dual-materialization architectures exist.
 
-**How do you detect training-serving skew in production?**
+**Q: How do you detect training-serving skew in production?**
 Log feature values at serving time and compare their distribution against the training distribution periodically (e.g., hourly). Use Population Stability Index (PSI > 0.2 = significant shift) or KS test for continuous features. For categorical features, compare chi-squared statistics. Set alerts that trigger model investigation when PSI exceeds threshold. Also log model score distributions at serving time and compare against training score distribution — a shift in the score distribution is a leading indicator of skew even before you can identify which feature caused it.
 
-**A model degrades 2 weeks after deployment with no code changes. How do you root-cause it?**
+**Q: A model degrades 2 weeks after deployment with no code changes. How do you root-cause it?**
 Step 1: check if it is data drift or model drift. Plot input feature distributions (today vs training) for each feature using PSI. Step 2: if feature distributions have shifted, identify which features drifted most and trace back to the upstream data source. Step 3: check for PIT violations in recent training runs (did the training pipeline recently change how it performs historical joins?). Step 4: check online store freshness SLOs — did a pipeline break cause stale features? Step 5: check for concept drift — has the relationship between features and target changed (e.g., customer behavior shift post-campaign)?
 
-**What is feature freshness SLO and how do you enforce it?**
+**Q: What is feature freshness SLO and how do you enforce it?**
 A freshness SLO is a maximum allowed staleness for a feature value in the online store, e.g., "the 60-second transaction count feature must be updated within 5 minutes of the event." Enforcement: (1) write `feature_written_at` timestamp alongside the feature value in Redis; (2) a monitoring daemon polls a sample of entities every minute and computes `max(now - feature_written_at)` per feature; (3) alert if the staleness exceeds the SLO threshold; (4) the serving layer can also check freshness on read and return a null/default rather than a stale value if staleness exceeds a hard limit.
 
-**How does Feast enforce PIT correctness?**
+**Q: How does Feast enforce PIT correctness?**
 Feast's `get_historical_features` API requires an `entity_df` that includes an `event_timestamp` column per entity. Internally, Feast performs an as-of join: for each (entity_id, event_timestamp) pair, it finds the most recent feature row in the offline store with `feature_timestamp <= event_timestamp`. It is not possible to call `get_historical_features` without providing the observation timestamp, so PIT correctness is enforced at the API boundary rather than relying on caller discipline.
 
-**What is the difference between feature time and write time and why does it matter?**
+**Q: What is the difference between feature time and write time and why does it matter?**
 Feature time (event time) is when the underlying event that generated the feature value occurred. Write time is when the feature pipeline computed and wrote the value to the store. They differ by ingestion lag. For PIT correctness, you must use feature time for the join condition — not write time. If you use write time, a feature written at 03:00 from data spanning 01:00-02:00 will appear "available" for events that happened at 02:30, even though the feature computation hadn't happened yet. This introduces subtle future leakage proportional to ingestion lag.
 
-**When would you not build a feature store?**
+**Q: When would you not build a feature store?**
 When you have a single model, a small team, and simple features that can be computed at request time (e.g., from a database query in <5ms). The overhead of maintaining two stores, two pipelines, and PIT join logic is only justified when: (a) multiple models share features; (b) feature computation is expensive (Spark-scale aggregations); (c) training-serving skew is a known production problem. For a startup with one model and one data engineer, a feature store adds complexity faster than it removes it.
 
-**Describe the cold-start problem in online feature serving and how to handle it.**
+**Q: Describe the cold-start problem in online feature serving and how to handle it.**
 New entities (new users, new items) have no feature history in the online store. A lookup returns null. The model must handle null inputs — either via imputation at inference time (replace null with the training population mean or median) or via a fallback model (a simpler model trained on the subset of features available for new entities). The imputation strategy must be consistent between training (how nulls in training data were handled) and serving (how online nulls are handled). Inconsistency is another form of training-serving skew.
 
-**How would you handle a feature that is available for training but not for serving?**
+**Q: How would you handle a feature that is available for training but not for serving?**
 Remove it from the feature set before training. A feature that cannot be reliably provided at serving time should not be in the model regardless of its offline importance. If it cannot be removed (the model degrades unacceptably without it), build an approximation: identify a proxy feature that is available at serving time and correlates with the unavailable feature. Train the model with the proxy instead, validate that offline performance is acceptable, and document the approximation in the model card.
 
-**What is the "as-of" semantics in a PIT join and how does it differ from a regular left join?**
+**Q: What is the "as-of" semantics in a PIT join and how does it differ from a regular left join?**
 A regular left join matches all rows where join keys are equal — it does not consider timestamps. An as-of join matches each event to the most recent feature row where `feature_timestamp <= event_timestamp`. SQL does not natively support as-of joins; implementations use window functions (`ROW_NUMBER() OVER (PARTITION BY entity ORDER BY feature_timestamp DESC)` filtered to rows before the event) or specialized APIs (Feast, Tecton). The difference: a regular join on entity_id alone pulls in the latest feature value regardless of when it was computed; an as-of join pulls in the value that was current at the moment of the event.
 
-**How do you version features in a feature store?**
+**Q: How do you version features in a feature store?**
 Feature versioning has two components: schema versioning (the feature's data type, computation logic, or semantics changed) and value versioning (the feature is recomputed with corrected history). Schema changes should create a new feature name (e.g., `30d_purchase_cnt_v2`) to prevent models trained on the old definition from silently receiving the new one. For value corrections (backfill), overwrite historical values in the offline store with corrected values and retrain the model. Track which model version was trained with which feature version in the model registry so rollback decisions are informed.
 
-**A feature pipeline runs at 02:00 daily. Training data has events from 01:55. Is there a PIT issue?**
+**Q: A feature pipeline runs at 02:00 daily. Training data has events from 01:55. Is there a PIT issue?**
 Yes, potentially. The feature value written by the 02:00 pipeline reflects data from the full day up to pipeline execution time. If a label event occurred at 01:55 and the feature computation includes data from 02:00-23:59, then the 02:00 feature value includes future data relative to the 01:55 event. The safe practice: write features with the timestamp of the *last event included in the computation*, not the pipeline execution time. For a daily rollup computed at 02:00 covering the previous calendar day, the feature timestamp should be midnight (end of previous day), and any events labeled between midnight and 02:00 should use the day-before feature values (which were computed at the prior day's 02:00 run).
 
-**What monitoring do you put on a feature store in production?**
+**Q: What monitoring do you put on a feature store in production?**
 Four layers: (1) pipeline health — is the batch/stream pipeline completing on schedule? Alert on missed execution windows. (2) freshness — is the online store being updated within the SLO? Monitor `max(now - written_at)` per feature. (3) distribution drift — is the feature value distribution stable compared to the training distribution? Daily PSI report per feature. (4) cardinality — are new categorical values appearing that weren't in training? Alert when an unseen category ratio exceeds 1%. Each layer catches a different class of silent degradation.
 
 ---

@@ -464,7 +464,7 @@ DPO, reward hacking, and preference learning in depth.
 
 ## 12. Interview Questions with Answers
 
-**What is Constitutional AI and how does it differ from RLHF?**
+**Q: What is Constitutional AI and how does it differ from RLHF?**
 Constitutional AI uses a written set of principles (a constitution) to guide AI-generated
 feedback rather than relying on human rater preferences. In RLHF, humans label which
 response is better. In CAI/RLAIF, an AI evaluator is prompted with a principle and asks
@@ -472,28 +472,28 @@ which response is more compliant -- generating labels at scale without human rat
 clear-cut cases. Both train a reward model; the difference is who (or what) generates the
 preference labels. Claude uses both: CAI for safety/ethics, RLHF for nuanced helpfulness.
 
-**What are the limitations of Constitutional AI that still require human feedback?**
+**Q: What are the limitations of Constitutional AI that still require human feedback?**
 Principles cannot fully specify nuanced human preferences -- tone, verbosity, cultural
 context, whether a response is genuinely helpful to this specific user. AI-generated
 critiques also inherit the base model's biases. Human feedback is still needed for:
 subtle preference alignment, calibrating the AI critic with spot-checks, and designing
 the constitution itself (which requires human judgment about values).
 
-**How do you handle conflicts between constitutional principles? What is the priority order?**
+**Q: How do you handle conflicts between constitutional principles? What is the priority order?**
 Anthropic's documented priority: (1) broad safety -- supporting human oversight of AI,
 (2) general ethics -- avoid clearly unethical actions, (3) adherence to Anthropic's
 principles and policies, (4) helpfulness to the operator and user. When principles conflict,
 lower-priority principles yield. A response can be unhelpful if that is what safety requires.
 The constitution must include explicit worked examples of common conflicts.
 
-**What is RLAIF and how does it scale beyond RLHF?**
+**Q: What is RLAIF and how does it scale beyond RLHF?**
 RLAIF (Reinforcement Learning from AI Feedback) generates preference labels using an AI
 evaluator guided by written principles instead of human raters. A 70B model training run
 might require 1 million preference labels. Human labeling: $50,000-$100,000 over 3 months.
 RLAIF: ~$1,000 over a few days. The AI evaluator runs as a batch inference job on GPU
 clusters. Scale is limited only by compute, not human throughput.
 
-**How does the critique-revision loop work in SL-CAI? Walk through a concrete example.**
+**Q: How does the critique-revision loop work in SL-CAI? Walk through a concrete example.**
 (1) Red-team prompt elicits harmful response. (2) Model is shown the response and a sampled
 principle: "identify specific ways this is harmful given: [principle]." Model produces
 chain-of-thought critique. (3) Model is shown critique and asked to revise the response to
@@ -501,7 +501,7 @@ address the identified harms. (4) Optionally repeat. (5) Final (prompt, revised 
 pair becomes a supervised fine-tuning example. The model learns from this dataset to produce
 safe responses from the start rather than needing runtime correction.
 
-**Why is chain-of-thought critique important? What happens if you skip it?**
+**Q: Why is chain-of-thought critique important? What happens if you skip it?**
 Chain-of-thought forces the model to articulate why something is harmful before revising.
 This produces better revisions (more targeted, less over-broad) and better training signal
 (the reasoning process itself teaches harm recognition). Skipping to direct revision without
@@ -509,21 +509,21 @@ critique tends to produce generic safety refusals rather than thoughtful respons
 model learns "refuse this category" rather than "understand this harm and address it
 appropriately."
 
-**Can a model trained with CAI override its constitution at inference time?**
+**Q: Can a model trained with CAI override its constitution at inference time?**
 The constitution is baked into the model's weights through training -- it is not a runtime
 filter or system prompt that can be bypassed. However, no training procedure perfectly
 encodes values: adversarial inputs, long jailbreak prompts, or distributional shifts can
 still surface misaligned behavior. This is why inference-time guardrails (NeMo Guardrails,
 Llama Guard) complement CAI rather than replace it.
 
-**How does CAI address the "annotator values" problem in RLHF?**
+**Q: How does CAI address the "annotator values" problem in RLHF?**
 In RLHF, annotator demographics -- background, culture, employment context -- shape what
 gets labeled as "better." These values are opaque and hard to audit. CAI makes values
 explicit: the constitution is the value specification, and anyone can read it, debate it,
 and propose changes. This does not eliminate the problem (constitution authors have their
 own values), but it makes the value choices inspectable and accountable.
 
-**How does Constitutional AI relate to Claude's HHH framework?**
+**Q: How does Constitutional AI relate to Claude's HHH framework?**
 HHH (Helpful, Harmless, Honest) is the high-level framing; the constitution is the
 implementation. Each dimension maps to principles: harmlessness principles cover violence,
 manipulation, illegal assistance; honesty principles cover factual accuracy, no deception,
@@ -531,7 +531,7 @@ calibrated uncertainty; helpfulness principles ensure the model does not refuse 
 requests out of excessive caution. The priority ordering (safety > ethics > helpfulness)
 reflects that HHH dimensions are not equal when they conflict.
 
-**What is the difference between SL-CAI and RL-CAI?**
+**Q: What is the difference between SL-CAI and RL-CAI?**
 SL-CAI (Supervised Learning CAI) uses critique-revision pairs as supervised fine-tuning
 examples -- the model learns from demonstrations of how to respond safely. RL-CAI uses AI
 preference labels to train a reward model, then runs PPO to optimize the policy against
@@ -539,7 +539,7 @@ that reward model -- the model learns from reward signal rather than demonstrati
 runs first and produces a better starting model for RL-CAI; RL-CAI then refines alignment
 further. Both phases together produce a more aligned model than either alone.
 
-**What is "value lock-in" as a risk of CAI, and how do you mitigate it?**
+**Q: What is "value lock-in" as a risk of CAI, and how do you mitigate it?**
 If the same organization writes the constitution, trains the model, and deploys it at
 scale, their values become embedded globally without external accountability. A biased
 constitution -- even unintentionally -- could shape billions of interactions. Mitigations:
@@ -548,7 +548,7 @@ design, version and update the constitution regularly, maintain alternative mode
 different value profiles, and support user control over which principles apply in their
 context.
 
-**What metrics would you use to measure whether a CAI-trained model follows its constitution?**
+**Q: What metrics would you use to measure whether a CAI-trained model follows its constitution?**
 (1) Harm rate: percentage of responses to red-team prompts that violate stated principles
 (measured by held-out AI evaluator). (2) Refusal rate: percentage of benign requests
 refused -- a proxy for over-restriction. (3) Helpfulness score: human evaluation of
@@ -557,14 +557,14 @@ principle, what percentage of relevant test cases comply? (5) Consistency: given
 prompt twice, does the model respond consistently? These metrics should be tracked per
 model version and per principle.
 
-**How does Llama Guard relate to Constitutional AI?**
+**Q: How does Llama Guard relate to Constitutional AI?**
 Llama Guard is a CAI-adjacent artifact: a classifier trained to detect harmful content
 using explicit constitutional harm categories (violence, hate speech, sexual content,
 etc.). Unlike CAI training (which modifies the base model's weights), Llama Guard is
 deployed as a separate input/output filter. It operationalizes the constitution as a
 standalone safety component rather than encoding it in the generative model itself.
 
-**What is the difference between Constitutional AI and OpenAI's Model Spec?**
+**Q: What is the difference between Constitutional AI and OpenAI's Model Spec?**
 Both are explicit value specifications. The key differences: (1) CAI uses the constitution
 directly in training (as RLAIF prompts); OpenAI's Model Spec is primarily used to guide
 human annotator training. (2) CAI replaces some human labeling with AI labeling guided
@@ -572,7 +572,7 @@ by the spec; OpenAI's approach uses the spec to make human labeling more consist
 (3) Anthropic's constitution is partially public; OpenAI published a more detailed Model
 Spec document in 2024.
 
-**If building a domain-specific AI assistant, how would you write a constitution for it?**
+**Q: If building a domain-specific AI assistant, how would you write a constitution for it?**
 Start with harm taxonomy specific to the domain (for medical: avoid misdiagnosis,
 unauthorized prescriptions, inducing panic; for legal: avoid practicing law, misleading
 about rights). Add cross-cutting principles (honesty, calibrated uncertainty, user
@@ -581,7 +581,7 @@ helpfulness). Include worked examples of common conflicts. Review with domain ex
 (physicians, lawyers) before training. Version the constitution and update it as failures
 are discovered post-deployment.
 
-**How do you prevent the AI critic from inheriting and amplifying base model biases?**
+**Q: How do you prevent the AI critic from inheriting and amplifying base model biases?**
 (1) Sample diverse principles per training example to avoid single-dimension bias.
 (2) Human spot-check a random sample (~1,000) of AI critiques monthly; look for systematic
 patterns (e.g., critique more aggressive for certain demographic groups).

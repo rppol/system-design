@@ -512,16 +512,16 @@ class FraudScoringService:
 
 ## Interview Discussion Points
 
-**How do you handle the class imbalance of 0.1% fraud rate?**
+**Q: How do you handle the class imbalance of 0.1% fraud rate?**
 Three-layer approach: (1) scale_pos_weight=999 in XGBoost tells the model each fraud example counts as 999 legitimate ones during gradient computation. (2) SMOTE generates synthetic fraud examples by interpolating in feature space between existing fraud cases — avoids overfitting to exact training fraud examples. (3) Threshold tuning: the naive 0.5 threshold is wrong for imbalanced data; use F-beta with beta=0.5 on a time-held-out validation set (not random split — fraud patterns are temporal). Target threshold is typically 0.85 for auto-block.
 
-**How do you prevent model degradation as fraud patterns evolve (concept drift)?**
+**Q: How do you prevent model degradation as fraud patterns evolve (concept drift)?**
 Fraudsters adapt within days of a new model deploy. Mitigations: (1) Monitor PSI (Population Stability Index) on feature distributions — PSI > 0.2 triggers alert. (2) Monitor fraud rate on auto-approved transactions using delayed labels (chargebacks arrive 30-90 days later). (3) Hourly model retraining on a rolling 30-day window so fresh fraud patterns quickly dominate. (4) Maintain an "emergency rules" layer that analysts can update within minutes without model retraining.
 
-**Why use F-beta with beta=0.5 for threshold selection rather than maximizing AUC?**
+**Q: Why use F-beta with beta=0.5 for threshold selection rather than maximizing AUC?**
 AUC measures overall ranking quality but does not account for the asymmetric cost of errors. Blocking a legitimate transaction (false positive) costs an estimated $50 in customer service, potential churn, and reputation. Missing fraud costs an average $200 in loss. But the false positive rate multiplier is 1000x the false negative rate (because 99.9% of transactions are legitimate). F-beta with beta=0.5 gives precision double the weight of recall, directly encoding this business asymmetry. AUC would be 0.98+ while the system produces unacceptable false positive rates.
 
-**How do you ensure the fraud score is produced in <50ms given streaming feature computation?**
+**Q: How do you ensure the fraud score is produced in <50ms given streaming feature computation?**
 The critical insight is that streaming features must be precomputed, not computed on the critical path. Flink aggregates spend velocity continuously and writes results to Redis. At scoring time, the API does a Redis GET (sub-1ms), not a Flink computation. The 50ms budget is: rule engine 1ms + Redis feature fetch 5ms + model inference 15ms + network 10ms = 31ms, leaving 19ms buffer for tail latency. SHAP explanations (50-100ms) are computed asynchronously after the decision is returned.
 
 ---
@@ -862,17 +862,17 @@ Ramp: 20% → 50% → 100% at 3-day intervals after significance confirmed
 
 ## Additional Interview Questions
 
-**How do you handle feedback delays in fraud labels, where chargebacks arrive 30-90 days after a transaction?**
+**Q: How do you handle feedback delays in fraud labels, where chargebacks arrive 30-90 days after a transaction?**
 The feedback delay creates a censoring problem: transactions from the last 30-90 days have incomplete labels — many fraudulent transactions have not yet been charged back. Training naively on recent data with incomplete labels underestimates fraud probability and biases the model toward legitimate predictions. Mitigations: (1) Use a training window that excludes the most recent 90 days (train on months 1-9, evaluate on month 10 with complete labels). (2) For hourly retraining on fresh data, use analyst-confirmed labels (faster: analyst reviews within 4 hours) rather than chargeback labels. (3) Implement a "pending label" state: transactions from the last 90 days are held in a label buffer; as chargebacks arrive, the buffer is updated and periodically used to fine-tune the model.
 
-**How do you maintain explainability while improving model accuracy with ensemble methods?**
+**Q: How do you maintain explainability while improving model accuracy with ensemble methods?**
 Single XGBoost provides SHAP values that are exact (not approximate) because TreeExplainer computes the exact Shapley decomposition for tree models. Stacking multiple XGBoost models or adding neural components breaks this: SHAP becomes approximate (KernelSHAP, LIME) and much slower (100-1000x). The approach that preserves explainability while improving accuracy: (1) Feature engineering — add interaction features (amount_vs_velocity_ratio, country_mismatch × new_device) to a single XGBoost model rather than ensembling two models. (2) Monotonicity constraints: constrain features like spend_velocity_1h to be monotonically increasing in fraud score, which also prevents SHAP from showing counterintuitive values. (3) If a second model is required (e.g., a graph neural network for device association), use it only as a feature input (graph_fraud_score) to the XGBoost model, not as an ensemble. The XGBoost then explains the combined signal.
 
-**What is the review queue economics, and how do you size it?**
+**Q: What is the review queue economics, and how do you size it?**
 The review queue contains transactions with fraud score in [0.40, 0.85] where human judgment is required. Sizing: at 10K TPS, roughly 8% of traffic (after rule engine pass-through) reaches the ML model. Of that, approximately 5% falls in the review zone = 0.008 × 10K = 80 transactions/second = 6.9M per day. Each analyst reviews 200 transactions per hour → 6.9M / 200 = 34,500 analyst-hours/day. At $40/hour fully-loaded cost, this is $1.38M/day — clearly unsustainable. The review queue must be ruthlessly prioritized: only transactions with expected loss > $500 AND fraud_score > 0.60 enter the queue (reduces queue by 85%). Automated disposition handles the rest with slightly lower precision. The threshold zone [0.40, 0.60] is auto-approved with enhanced monitoring; [0.60, 0.85] is auto-reviewed with transaction hold.
 
-**How does the system handle coordinated bot attacks targeting the scoring service itself?**
+**Q: How does the system handle coordinated bot attacks targeting the scoring service itself?**
 A coordinated attack might send millions of test transactions at low amounts to probe the model's decision boundary and infer the fraud threshold. Defenses: (1) Score obfuscation: never return the exact fraud probability to the client — return only the decision (approved/declined/pending). (2) Rate limiting at the API gateway: max 100 transactions per card per hour enforced in the rule engine, regardless of fraud score. (3) Behavioral fingerprinting: transaction inter-arrival times that are too regular (bots send at fixed intervals) trigger a rule-engine flag, routing to human review. (4) Model obfuscation: periodically introduce noise into auto-approve/block decisions for borderline scores (score 0.38-0.42 gets 20% stochastic override). This makes the boundary fuzzy from the attacker's perspective. (5) Canary features: hidden features that legitimate merchants would never trigger but test-probing bots might, similar to honeypots.
 
-**How do you reconcile the 99.9% precision requirement with the 80% recall requirement?**
+**Q: How do you reconcile the 99.9% precision requirement with the 80% recall requirement?**
 At 0.1% fraud rate with 99.9% precision and 80% recall: for every 1,000 transactions, 1 is fraud and 999 are legitimate. Catching 80% of fraud means catching 0.8 fraud cases. With 99.9% precision, we can have at most 0.001 × (0.8 / 0.999) ≈ 0.0008 false positives per transaction reviewed, or about 1 false positive per 1,000 auto-blocked decisions. In practice, this precision-recall operating point is achieved via the three-zone architecture: the auto-block zone (score > 0.85) must have 99.9% precision on its own, while the review zone (0.40-0.85) has lower precision (85-95%) but higher recall. The combined system recall is: auto-block recall + review recall. This separation allows optimizing each zone independently.

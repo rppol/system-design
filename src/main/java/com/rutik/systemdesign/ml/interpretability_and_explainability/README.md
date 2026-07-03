@@ -629,58 +629,58 @@ TreeSHAP on a classifier defaults to explaining the *margin* (log-odds), and log
 
 ## 12. Interview Questions with Answers
 
-**Why prefer SHAP over a tree model's built-in feature_importances_?**
+**Q: Why prefer SHAP over a tree model's built-in feature_importances_?**
 SHAP gives consistent, additive attributions that sum to the prediction, while impurity-based feature_importances_ is biased toward high-cardinality features and is a training-set quantity that can reward overfitting. Built-in importance counts impurity reduction at split time, so continuous and many-valued features get more chances to look important; TreeSHAP instead computes exact Shapley values with the consistency guarantee that a feature the model relies on more never gets a smaller attribution. In practice, cross-check global mean-absolute-SHAP against permutation importance on held-out data before trusting any ranking.
 
-**Why is LIME unstable, and what do you do about it?**
+**Q: Why is LIME unstable, and what do you do about it?**
 LIME is unstable because its explanation depends on the random perturbation sample, the kernel width, and the number of samples — none of which have a principled default. Rerun LIME with different seeds and the top feature can flip, since it fits a fresh local linear model each time on independently perturbed (often off-manifold) points. Mitigate by aggregating many runs and reporting mean ± std, raising num_samples, or switching to KernelSHAP, which has a convergence guarantee toward the Shapley values.
 
-**What is the correlated-feature trap in permutation importance?**
+**Q: What is the correlated-feature trap in permutation importance?**
 When two features are correlated, shuffling one alone barely hurts the model because the other still carries the signal, so both look unimportant and hide a real driver. Permutation importance measures the metric drop when a single column is shuffled, and collinear partners substitute for each other under that shuffle. Fix by clustering features on Spearman correlation and permuting whole clusters, or use conditional permutation — never conclude a feature is unused from low permutation importance without checking its correlations.
 
-**When would you use TreeSHAP versus KernelSHAP?**
+**Q: When would you use TreeSHAP versus KernelSHAP?**
 Use TreeSHAP for any tree-based model because it is exact and polynomial-time, and KernelSHAP only for non-tree black boxes where you have no internals to exploit. TreeSHAP runs in O(T·L·D^2) — milliseconds for a batch — while KernelSHAP costs many model evaluations per instance and only approximates the Shapley values with 1/sqrt(m) variance. Running KernelSHAP on an XGBoost model is a classic mistake: it is slower, noisier, and strictly worse than the exact TreeSHAP answer.
 
-**Does a large SHAP value mean the feature causes the outcome?**
+**Q: Does a large SHAP value mean the feature causes the outcome?**
 No — a large SHAP value means the model relies on that feature, not that the feature causes the target. SHAP explains the model's function, so if the model learned a proxy (ZIP code standing in for income), SHAP faithfully reports the model's reliance on the proxy, which is a correlation the model exploited, not a causal effect. For causal questions use causal inference methods; presenting SHAP as "change X to change the outcome" is a common and dangerous overreach.
 
-**What are the axioms that make Shapley values the unique attribution?**
+**Q: What are the axioms that make Shapley values the unique attribution?**
 Shapley values are the unique attribution satisfying efficiency, symmetry, dummy, and additivity. Efficiency (completeness) means the per-feature values sum to prediction minus baseline; symmetry gives equal credit to features with identical marginal contributions; dummy assigns zero to a feature that never changes the output; additivity makes attributions of an ensemble equal the sum over its members. These four together pin down one and only one attribution function, which is why SHAP is called the "fair" allocation.
 
-**Why does the Integrated Gradients baseline matter, and how do you pick one?**
+**Q: Why does the Integrated Gradients baseline matter, and how do you pick one?**
 The baseline defines the reference the attribution is measured against, so IG explains the input relative to it and a poor baseline distorts every attribution. An all-zeros image baseline assigns zero attribution to any pixel that is itself zero, which can hide dark but important regions; better choices are a blurred input, a mean image, or averaging over several baselines (Expected Gradients). Always verify the completeness axiom via captum's convergence_delta and increase n_steps if it is not near zero.
 
-**What is the completeness axiom and how do you check it holds?**
+**Q: What is the completeness axiom and how do you check it holds?**
 Completeness means the attributions sum exactly to f(input) minus f(baseline), so nothing about the prediction is left unexplained. Integrated Gradients and SHAP both guarantee it in theory, but IG approximates the path integral with a finite Riemann sum, so too few steps under-integrate. Captum returns a convergence_delta; if its magnitude is not tiny (say > 1e-2), raise n_steps from 50 toward 200–300 until the sum reconciles.
 
-**How does Grad-CAM work, and why the last convolutional layer?**
+**Q: How does Grad-CAM work, and why the last convolutional layer?**
 Grad-CAM weights each last-conv feature map by the average gradient of the target class score, sums them, and applies ReLU to produce a class-discriminative heatmap. The last conv layer is chosen because it holds the richest high-level semantics while still preserving a spatial grid — deeper fully-connected layers lose spatial layout, and earlier conv layers carry only low-level edges. The result is coarse (7×7 for ResNet-50), so it is upsampled and often paired with a pixel-level method for sharp boundaries.
 
-**How is Grad-CAM different from a raw-gradient saliency map?**
+**Q: How is Grad-CAM different from a raw-gradient saliency map?**
 Grad-CAM is class-discriminative and localizes the object, whereas a raw-gradient saliency map is noisy and often highlights edges regardless of the class. Grad-CAM operates on last-layer feature maps weighted by gradients, so it answers "where is the evidence for *this class*," while pixel-space gradients suffer from saturation and gradient shattering. Guided Grad-CAM combines Grad-CAM's localization with guided-backprop's sharpness to get both class specificity and pixel detail.
 
-**Explain the difference between global and local explanations with an example.**
+**Q: Explain the difference between global and local explanations with an example.**
 Local explanations justify a single prediction, while global explanations describe the model's overall behavior. As examples, a local reason is "this loan was denied because debt ratio and delinquencies dominated," while a global summary is "across all applicants, payment history is the top driver." A single SHAP force plot is local; the mean absolute SHAP across the dataset (beeswarm summary) is global. You cannot justify one applicant's adverse-action notice with a global ranking — regulators require the local, instance-specific reasons.
 
-**What is the extrapolation caveat with partial dependence plots?**
+**Q: What is the extrapolation caveat with partial dependence plots?**
 A PDP can evaluate the model on impossible feature combinations because it marginalizes over the marginal distribution of the other features, ignoring their correlation. Fixing age to 20 while the data has years_employed = 40 asks the model about a person who cannot exist, and the resulting curve is unreliable in those regions. Use accumulated local effects (ALE), which conditions on the local distribution, or restrict the PDP to the observed support, and always inspect ICE curves for hidden interactions.
 
-**How do PDP and ICE relate, and when does ICE reveal something PDP hides?**
+**Q: How do PDP and ICE relate, and when does ICE reveal something PDP hides?**
 ICE draws one line per instance and PDP is the average of those lines, so ICE exposes heterogeneity that averaging erases. When a feature increases the prediction for one subgroup and decreases it for another, the two effects cancel and the PDP looks flat even though the feature matters strongly. A fanned-out ICE bundle under a flat PDP is the signature of an interaction — that is when you reach for ICE or a two-way PDP.
 
-**What is a counterfactual explanation and when is it the right tool?**
+**Q: What is a counterfactual explanation and when is it the right tool?**
 A counterfactual is the smallest change to the input that flips the model's decision, and it is the right tool when the audience must *act* on the explanation. For a loan denial, "increase income by \$8k or reduce revolving balance by \$3k" is directly actionable and maps cleanly onto an adverse-action notice, unlike a list of SHAP values. Tools like DiCE search for diverse, feasible, minimal counterfactuals subject to constraints such as immutable features (you cannot change age).
 
-**How do Anchors differ from LIME?**
+**Q: How do Anchors differ from LIME?**
 Anchors produce a high-precision IF-THEN rule that holds for the instance and its neighborhood, whereas LIME fits a local linear approximation with no coverage guarantee. An anchor like "IF debt_ratio > 0.45 AND delinquencies >= 2 THEN deny (precision 0.97)" states exactly when the explanation applies, making it more robust than LIME's weights, which can change sign just outside the sampled region. Anchors trade off coverage for precision and are more stable, at the cost of a more expensive rule search.
 
-**How do you choose an interpretability method for a given model?**
+**Q: How do you choose an interpretability method for a given model?**
 Pick the attribution engine by model type first: TreeSHAP for trees, Grad-CAM and Integrated Gradients for CNNs and other differentiable nets, and KernelSHAP or LIME only for true black boxes. Exploiting internals gives exact or faithful results cheaply, whereas model-agnostic sampling is slow and approximate. Then layer an audience-appropriate presentation — counterfactuals or a single top reason for end users and regulators, and SHAP summary plus PDP/ICE for engineers debugging the model.
 
-**What does it mean to explain SHAP values in log-odds versus probability space?**
+**Q: What does it mean to explain SHAP values in log-odds versus probability space?**
 TreeSHAP defaults to explaining the margin (log-odds), where attributions are additive, whereas probability-space attributions are not additive and cannot be summed to the predicted probability. If you report probability-space SHAP and claim the values sum to 0.73, you will contradict yourself because the logistic link is nonlinear. Choose the space explicitly — log-odds for additive correctness, or model_output="probability" with the interventional perturbation cost — and label it in the report.
 
-**Can you make a model both accurate and intrinsically interpretable?**
+**Q: Can you make a model both accurate and intrinsically interpretable?**
 Yes — on tabular data, Explainable Boosting Machines and monotone GBDTs often match black-box accuracy while staying auditable, so the accuracy-interpretability tradeoff is frequently a myth. An EBM is a generalized additive model with one learned shape function per feature, readable directly, and monotone constraints encode domain rules (income only helps creditworthiness). The real cost is engineering effort, not accuracy, and for regulated domains a glass-box model avoids the risk of unfaithful post-hoc explanations entirely.
 
 ---

@@ -308,55 +308,55 @@ class OrderResult(BaseModel):
 
 ## 12. Interview Questions with Answers
 
-**What is `Agent[Deps, Result]` and why is it generic?**
+**Q: What is `Agent[Deps, Result]` and why is it generic?**
 It's a typed generic where Deps is your dependency type (injected at runtime) and Result is the expected output schema. The generic parameters enable static type checking — `agent.run(..., deps=...)` requires deps matches Deps, and `result.data` is typed as Result. Catches mismatches at dev time via mypy/pyright.
 
-**How does dependency injection work in PydanticAI?**
+**Q: How does dependency injection work in PydanticAI?**
 You define a dataclass or BaseModel for your dependencies. Pass them to `agent.run(query, deps=MyDeps(...))`. Tools annotated with `RunContext[MyDeps]` as their first parameter receive `ctx.deps` containing the injected object. Replaces global state with explicit, testable dependencies.
 
-**How does a tool signal that the model should retry with different arguments, without crashing the run?**
+**Q: How does a tool signal that the model should retry with different arguments, without crashing the run?**
 Raise `ModelRetry("explanation")` from inside the tool. PydanticAI catches it, sends the message back to the model as the tool response, and re-invokes the model so it can correct its arguments (counted against the retry limit). This is the idiomatic path for recoverable cases like "order not found — check the order_id format": returning a bare error dict the model may ignore is weaker, and raising a plain exception aborts the entire run. Reserve normal exceptions for genuine infrastructure failures; use `ModelRetry` for anything the model can fix by calling differently.
 
-**What's the difference between `@agent.tool` and `@agent.tool_plain`?**
+**Q: What's the difference between `@agent.tool` and `@agent.tool_plain`?**
 `@agent.tool` requires `RunContext[Deps]` as first parameter — for tools that need deps access. `@agent.tool_plain` is for tools without deps (purely functional). Schema generated identically; only the function signature differs.
 
-**How is structured output enforced?**
+**Q: How is structured output enforced?**
 At Agent creation, `result_type=MyPydanticModel`. On providers with tool calling, the schema is registered as a special final-result tool the model must call to finish the run; on providers without it, the JSON schema is injected as prompt instructions. After the LLM call, output is validated by Pydantic. If invalid, the framework auto-retries (up to 3 times) feeding the validation error back to the model.
 
-**Can you use PydanticAI with non-OpenAI providers?**
+**Q: Can you use PydanticAI with non-OpenAI providers?**
 Yes — supports OpenAI, Anthropic, Google, Groq, Mistral, Cohere via model classes (`OpenAIModel`, `AnthropicModel`, etc). Swap one line to switch providers. Native features like prompt caching are provider-specific.
 
-**How do you test PydanticAI agents?**
+**Q: How do you test PydanticAI agents?**
 Override the model with `TestModel` (canned responses) or `FunctionModel` (custom logic). Pattern: `with agent.override(model=test_model): result = await agent.run(...)`. Mock dependencies are passed via `deps=MockDeps(...)`. Use pytest-anyio for async test execution.
 
-**What is `result.new_messages()` and when do you use it?**
+**Q: What is `result.new_messages()` and when do you use it?**
 After `result = await agent.run(...)`, `result.new_messages()` returns the conversation messages from that run. Pass into the next call's `message_history` parameter to continue a multi-turn conversation. PydanticAI is stateless — you manage history explicitly.
 
-**How does streaming work for structured outputs?**
+**Q: How does streaming work for structured outputs?**
 `async with agent.run_stream(...) as result:` then `async for partial in result.stream_structured(debounce_by=0.1):` — yields partially-validated Pydantic objects as the model streams tokens. Useful for UI rendering of structured data progressively.
 
-**What's the role of Logfire?**
+**Q: What's the role of Logfire?**
 Logfire is Pydantic's observability platform. PydanticAI emits OpenTelemetry-compatible traces; Logfire visualizes them: full agent execution tree, model calls, tool calls, validation errors, latency. Optional but recommended for production debugging.
 
-**How does PydanticAI compare to Instructor?**
+**Q: How does PydanticAI compare to Instructor?**
 [Instructor](structured_outputs_and_instructor.md) focuses on extracting structured outputs from a single LLM call (good for data extraction). PydanticAI is a full agent framework — multi-turn loops, tools, dependency injection, eval harness. Use Instructor when you need typed extraction; PydanticAI when you need typed agents.
 
-**What's the cost of running PydanticAI agents?**
+**Q: What's the cost of running PydanticAI agents?**
 Zero overhead at API level (calls underlying provider directly). Adds: Pydantic validation (~ms-scale), retry on schema mismatch (extra LLM call when triggered). Net cost matches direct API for typical workloads; can be slightly higher when retries occur due to bad output.
 
-**Can PydanticAI agents have subagents?**
+**Q: Can PydanticAI agents have subagents?**
 Yes — define a separate Agent[OtherDeps, OtherResult] and wrap it as a tool that the parent agent can call. The subagent runs its own loop and returns a typed result that gets injected back as a tool result.
 
-**How are tool descriptions generated?**
+**Q: How are tool descriptions generated?**
 Auto-generated from the function's docstring + Python type hints. The docstring becomes the tool description (visible to LLM); parameter types + descriptions form the JSON schema. Add Pydantic `Field(description=...)` for richer parameter documentation.
 
-**How do dynamic system prompts work?**
+**Q: How do dynamic system prompts work?**
 Decorate a function with `@agent.system_prompt`; it runs at the start of each `agent.run()` and receives `RunContext[Deps]`, so the prompt can include per-request data (user name, current date, entitlements) pulled from deps. Static system prompts (the `system_prompt=` constructor argument) are fixed at agent creation; dynamic ones are evaluated per run and appended after them. Keep the large stable portion static (prompt-cache friendly) and only the genuinely per-request lines dynamic.
 
-**How do you stop an agent from looping forever or blowing the token budget?**
+**Q: How do you stop an agent from looping forever or blowing the token budget?**
 Pass usage limits to the run: `agent.run(..., usage_limits=UsageLimits(request_limit=5, total_tokens_limit=20_000))`. The framework tracks per-run usage across the internal loop and raises a usage-limit exception when a cap is hit; `result.usage()` reports request and token counts after a run for cost logging. Set a `request_limit` on every production agent — a mis-specified tool that keeps triggering `ModelRetry` is otherwise an unbounded cost loop.
 
-**What's the max retry count for structured output validation?**
+**Q: What's the max retry count for structured output validation?**
 Default 3. Configurable via `Agent(retries=N)`. On each retry, the validation error is fed back to the model with instruction to fix. After max retries, raises `UnexpectedModelBehavior` exception.
 
 ---

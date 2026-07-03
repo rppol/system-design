@@ -920,52 +920,52 @@ class MyAgent(RoutedAgent):
 
 ## 12. Interview Questions with Answers
 
-**What is the Orchestrator's role in Magentic-One and how does it differ from a GroupChat manager?**
+**Q: What is the Orchestrator's role in Magentic-One and how does it differ from a GroupChat manager?**
 The Orchestrator maintains two explicit ledgers (task ledger for global facts and plan, progress ledger for per-step state) and uses them to select the next agent, detect stalls, and trigger replanning. A GroupChat manager in AutoGen v0.2 simply selects the next speaker based on a prompt over the conversation history — it has no structured plan representation and no stall detection. The ledger approach gives the Orchestrator a persistent, inspectable audit trail independent of the LLM's context window.
 
-**What are the two ledgers in Magentic-One and what does each store?**
+**Q: What are the two ledgers in Magentic-One and what does each store?**
 The task ledger stores durable information: the original request, a list of verified facts, the current plan (list of steps), and the current step index. The progress ledger stores ephemeral per-step state: whether the task is done, whether the orchestrator needs user input, the instruction sent to the last agent, the assigned agent name, and the last observation (truncated output). The task ledger accumulates throughout the run; the progress ledger is overwritten each step.
 
-**How does Magentic-One detect and recover from a stall?**
+**Q: How does Magentic-One detect and recover from a stall?**
 The Orchestrator counts consecutive steps in which no new facts were added to the task ledger. When this count exceeds a threshold (default 3 steps), it issues a replanning LLM call that rewrites `task_ledger.plan` given the facts accumulated so far. This avoids the infinite-loop failure mode where an agent keeps returning unhelpful output and the Orchestrator keeps re-sending the same instruction.
 
-**What GAIA benchmark scores did Magentic-One achieve and what do they mean?**
+**Q: What GAIA benchmark scores did Magentic-One achieve and what do they mean?**
 Magentic-One achieved 75.0% on Level 1 (1-2 step tasks), 52.0% on Level 2 (3-4 steps), and 38.85% on Level 3 (5+ steps requiring multi-modal reasoning). Level 3 was state-of-the-art at the time of the November 2024 paper. The scores demonstrate that hierarchical orchestration with specialized tool agents substantially outperforms single-LLM approaches on complex, real-world tasks.
 
-**What is the fundamental architectural difference between AutoGen v0.2 and v0.4?**
+**Q: What is the fundamental architectural difference between AutoGen v0.2 and v0.4?**
 AutoGen v0.2 uses synchronous, blocking `initiate_chat` calls and routes messages via a GroupChat string-matching speaker selection loop. AutoGen v0.4 replaces this with an async-first actor model: each agent is a `RoutedAgent` that declares typed `@message_handler` methods, and a `SingleThreadedAgentRuntime` (or distributed runtime) routes typed Pydantic message objects to the correct handler. v0.4 eliminates the global mutable GroupChat state and enables concurrent execution of independent agents.
 
-**What is a RoutedAgent and how does message routing work in AutoGen v0.4?**
+**Q: What is a RoutedAgent and how does message routing work in AutoGen v0.4?**
 A `RoutedAgent` is a base class whose subclasses declare message handlers with the `@message_handler` decorator. Each handler's first parameter type annotation (a dataclass or Pydantic model) is registered with the runtime as the message type that handler accepts. When a message is sent to the agent's `AgentId`, the runtime inspects the message type and calls the matching handler. If no handler matches, the message is dropped silently — hence the pitfall of using plain `str` as a message type.
 
-**What is the difference between RoundRobinGroupChat and SelectorGroupChat in AutoGen v0.4?**
+**Q: What is the difference between RoundRobinGroupChat and SelectorGroupChat in AutoGen v0.4?**
 `RoundRobinGroupChat` activates agents in a fixed cyclic order — deterministic, predictable, zero extra LLM calls per turn. `SelectorGroupChat` uses a Selector LLM (one additional LLM call per turn, ~1-2 s, ~500 tokens) to read the conversation history and pick the most appropriate next speaker. Use RoundRobin when the step sequence is known; use Selector when the task requires dynamic routing based on what has been discussed.
 
-**How does AutoGen v0.4 handle termination conditions?**
+**Q: How does AutoGen v0.4 handle termination conditions?**
 Termination conditions are composable objects passed to the team constructor. `MaxMessageTermination(n)` stops after n total messages. `TextMentionTermination("DONE")` stops when any agent's message contains the string "DONE". `StopMessageTermination()` stops when an agent returns a `StopMessage`. Conditions combine with `|` (OR) and `&` (AND) operators, e.g., `MaxMessageTermination(10) | TextMentionTermination("DONE")`.
 
-**Why is the observation truncated before being passed back to the Orchestrator?**
+**Q: Why is the observation truncated before being passed back to the Orchestrator?**
 LLM context windows have hard limits (GPT-4o: 128K tokens). A WebSurfer observation can include full HTML (50-200 KB), and a Coder observation can include verbose stdout. Passing raw observations to the Orchestrator would overflow the context window, cause API errors (or $20+ API calls for large contexts), and dilute the prompt with irrelevant content. Truncating to the last 2,000-3,000 characters preserves the most recent (most relevant) output while keeping costs predictable.
 
-**What security risks does Magentic-One's ComputerTerminal agent introduce and how are they mitigated?**
+**Q: What security risks does Magentic-One's ComputerTerminal agent introduce and how are they mitigated?**
 ComputerTerminal executes arbitrary shell commands on the host system. A malicious task or a hallucinating LLM could issue `rm -rf /`, exfiltrate credentials, or install malware. Mitigations: run ComputerTerminal inside a Docker container with no host mounts, no network egress (except a whitelist), and a non-root user (see [Sandboxed Code Execution](../agents_and_tool_use/sandboxed_code_execution.md)). Add a command allowlist/denylist layer before execution. Log every command with its exit code for audit. In production, the Microsoft Magentic-One reference implementation defaults to a Docker sandbox.
 
-**How does AutoGen v0.4 improve testability compared to v0.2?**
+**Q: How does AutoGen v0.4 improve testability compared to v0.2?**
 In v0.2, testing required mocking the global GroupChat state and monkey-patching `initiate_chat`. In v0.4, the runtime is injected as a dependency. Tests can create an in-memory `SingleThreadedAgentRuntime`, register mock agents that return predefined typed messages, and assert the exact typed messages exchanged — without any real LLM calls. This makes unit tests for agent logic fast (<100 ms) and deterministic.
 
-**What is the Swarm pattern in AutoGen and how does it relate to Magentic-One?**
+**Q: What is the Swarm pattern in AutoGen and how does it relate to Magentic-One?**
 Swarm is an AutoGen v0.4 extension where each agent, instead of waiting for an Orchestrator to assign the next step, explicitly hands off control by returning a `HandoffMessage` naming the next agent. This eliminates the Orchestrator as a single point of failure and reduces latency by one LLM call per step. Unlike Magentic-One, Swarm has no global task ledger — each agent is responsible for deciding its own successor, which makes complex replanning harder but reduces coordination overhead.
 
-**What token cost does the Orchestrator add per step in Magentic-One?**
+**Q: What token cost does the Orchestrator add per step in Magentic-One?**
 Each Orchestrator decision requires one GPT-4o call consuming roughly 500-1,500 input tokens (ledger prompt + last observation) and 100-200 output tokens (JSON decision). At GPT-4o pricing (~$2.50/M input, $10/M output as of mid-2024), this is approximately $0.002-$0.005 per step. A 20-step task costs $0.04-$0.10 in Orchestrator calls alone, plus the cost of the specialist agent calls (WebSurfer screenshot analysis: ~2,000 tokens per page).
 
-**How does SelectorGroupChat handle the case where no agent is clearly the right next speaker?**
+**Q: How does SelectorGroupChat handle the case where no agent is clearly the right next speaker?**
 The Selector LLM receives a prompt listing all participant names and their descriptions, plus the conversation history, and must return exactly one agent name. If the LLM returns an invalid name, AutoGen v0.4 raises a `ValueError` and the run fails — there is no fallback. Best practice: add a `selector_prompt` that explicitly lists valid agent names and instructs the LLM to return only one of them verbatim. Include a default agent name in the prompt as a fallback instruction.
 
-**What is the stall threshold in Magentic-One and how should it be tuned?**
+**Q: What is the stall threshold in Magentic-One and how should it be tuned?**
 The default stall threshold is 3 consecutive steps with no new facts added to the task ledger. For tasks with long-running agents (browser page loads, large file reads), the threshold should be increased to 5-7 to avoid premature replanning. For short-latency tasks (code execution), 2-3 is appropriate. Setting the threshold too low causes unnecessary replanning (wasted tokens); too high causes the system to spin on a dead-end strategy for many steps before recovering.
 
-**Can Magentic-One agents run in parallel, and if not, what is the architectural reason?**
+**Q: Can Magentic-One agents run in parallel, and if not, what is the architectural reason?**
 No. The Orchestrator activates exactly one agent per step and waits for its observation before deciding the next step. This is intentional: the Orchestrator's decision depends on the latest observation (it reads `progress_ledger.last_observation`), so parallel agent execution would produce race conditions on the progress ledger. Parallelism can be introduced by having the Orchestrator issue a "batch instruction" to a fan-out coordinator, but this is not part of the base Magentic-One architecture.
 
 ---

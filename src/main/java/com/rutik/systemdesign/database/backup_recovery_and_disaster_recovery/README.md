@@ -369,40 +369,40 @@ Multi-region active | 0           | 0            | 2× DB      | Very High
 
 ## 12. Interview Questions with Answers
 
-**What is the difference between RPO and RTO and how do you test them?**
+**Q: What is the difference between RPO and RTO and how do you test them?**
 RPO (Recovery Point Objective) is the maximum acceptable data loss measured in time: if RPO=1 hour, you can lose at most 1 hour of data. RTO (Recovery Time Objective) is the maximum acceptable service downtime from failure to full restoration. Testing RPO: stop WAL archiving or replication at a known time, wait, then simulate failure and check the timestamp of the most recent recoverable state. Testing RTO: execute the full recovery procedure (including failure detection, notification, and restoration) and measure elapsed time from failure event to service-restored state. Both tests must use production-sized data and production hardware to be meaningful. Run quarterly; document results; compare against SLA commitments.
 
-**Why is a streaming replica not a substitute for backups?**
+**Q: Why is a streaming replica not a substitute for backups?**
 A streaming replica is a live copy of the primary database. Any data-destroying operation — `DROP TABLE`, `TRUNCATE`, a bug that `DELETE`s all rows — replicates to the replica within milliseconds. By the time the operator discovers the mistake, all replicas have the same corrupted or empty state. A backup, by contrast, captures the state at a specific point in time and does not change when the live database changes. PITR (point-in-time recovery) enables restoring to any moment before the destructive operation. Keep backups with retention long enough to detect and recover from logical errors (human mistakes typically discovered within days).
 
-**How does WAL archiving enable point-in-time recovery?**
+**Q: How does WAL archiving enable point-in-time recovery?**
 WAL (Write-Ahead Log) records every change made to the database in sequential order. WAL archiving copies each 16MB WAL segment to object storage (S3, GCS) as it is filled. A base backup captures the full database files at a specific LSN (log sequence number). To recover to any point in time: (1) restore the base backup that precedes the target time, (2) configure PostgreSQL to fetch WAL segments from archive, (3) set `recovery_target_time` to the desired moment, (4) start PostgreSQL — it replays WAL records up to the target time, then promotes. This can recover to within seconds of any historical moment.
 
-**What is the difference between logical and physical backups?**
+**Q: What is the difference between logical and physical backups?**
 Logical backups (`pg_dump`, `mysqldump`) export the database as SQL statements or structured data. They are portable (can restore to different hardware, OS, or PostgreSQL minor version), support selective restore (individual tables), and can restore to a different database name. They are slow to create and restore for large databases (> 100GB). Physical backups (`pg_basebackup`, XtraBackup, volume snapshots) copy the raw database files. They are faster to create (streaming copy) and restore, support PITR when combined with WAL archiving, but must be restored to an identical or compatible database version and storage layout. Use logical backups for migrations and selective restores; physical backups for production PITR recovery.
 
-**How do you verify that a backup is valid?**
+**Q: How do you verify that a backup is valid?**
 Automated restore testing: (1) Daily: verify that WAL segments are being successfully uploaded by checking the archive command exit code and monitoring S3 object counts vs expected WAL segment rate. (2) Weekly: restore the most recent base backup to an isolated test instance, replay WAL to the latest available segment, run `ANALYZE` to rebuild statistics, execute a suite of data integrity queries (row counts, checksum queries on critical tables), compare results against known-good values from the primary. Alert on any mismatch or restore failure. (3) Quarterly: execute a full DR runbook drill — simulate region failure, restore to a different region from S3, run smoke tests, measure RTO against SLA.
 
-**How does pg_dump handle transactions and consistency?**
+**Q: How does pg_dump handle transactions and consistency?**
 `pg_dump` takes a consistent snapshot of the database by starting a transaction with `REPEATABLE READ` isolation before reading any data. This transaction snapshot ensures that all tables are read as of the same moment, even if the dump takes an hour to complete. Active writes during the dump are not captured in the snapshot — they are committed after the dump's snapshot time, and will not appear in the restored database. This is intentional: `pg_dump` produces a consistent point-in-time snapshot without interrupting write traffic. For a 100GB database, the dump takes 20–60 minutes; the snapshot point is the moment the `pg_dump` command started.
 
-**What is pgBackRest's advantage over WAL-G?**
+**Q: What is pgBackRest's advantage over WAL-G?**
 Both WAL-G and pgBackRest provide PITR-capable PostgreSQL backup to object storage. Key differences: (1) pgBackRest supports delta restores — it can restore only the blocks that changed since a previous backup, much faster for large databases. (2) pgBackRest has built-in parallel restore with configurable worker count. (3) pgBackRest supports standby backup — taking the backup from a replica to avoid primary I/O impact. (4) WAL-G is simpler to configure (environment variables) and has broader cloud storage support out of the box. For most use cases, either is appropriate. pgBackRest's delta restore is a significant advantage for databases > 1TB where full restore time would otherwise exceed the RTO.
 
-**How do you handle backup retention and storage costs?**
+**Q: How do you handle backup retention and storage costs?**
 Tiered retention strategy: (1) Keep full backups for 7 days in standard S3 (high access, moderate cost). (2) After 7 days, transition to S3 Infrequent Access or Glacier Instant Retrieval (lower cost, slightly higher retrieval latency). (3) After 30 days, transition to Glacier Deep Archive (lowest cost, 12-hour retrieval — for compliance only). WAL segments: retain at least as long as the oldest full backup you want to use for PITR. If you keep full backups for 7 days, keep WAL for 8 days. pgBackRest `repo1-retention-full=4` keeps 4 full backups and automatically removes older backups and associated WAL. Regularly audit backup storage costs against your RTO/RPO requirements.
 
-**What is a DR runbook and what should it contain?**
+**Q: What is a DR runbook and what should it contain?**
 A disaster recovery runbook is a step-by-step procedure document for restoring service after a catastrophic failure. It must be: (1) Written in advance, before the emergency. (2) Tested and updated regularly. (3) Accessible offline (not just in the production system that failed). Content: failure detection signals and thresholds; escalation procedure (who to call, in what order); step-by-step recovery commands (exact commands, not descriptions); DNS/load balancer update procedure; verification queries to confirm data integrity; rollback procedure if recovery fails; communication templates for status page and stakeholders. Time the drill to validate RTO assumptions. A runbook not executed in practice is unreliable.
 
-**How does Percona XtraBackup differ from mysqldump for MySQL backup?**
+**Q: How does Percona XtraBackup differ from mysqldump for MySQL backup?**
 `mysqldump` is a logical backup: it reads data from MySQL and writes SQL INSERT statements. It locks tables (with some options) or uses transactions for InnoDB consistency. It is slow for large databases (> 100GB can take hours) and creates large output files. Percona XtraBackup is a physical hot backup: it copies InnoDB data files directly from disk while MySQL is running, without taking table locks. It applies the InnoDB redo log during a `--prepare` phase to make the backup consistent. Results: XtraBackup is 5–10× faster for backup and restore of large databases, does not interrupt production writes, and supports incremental backups. Use XtraBackup for production MySQL backups; mysqldump for small databases and selective table restores.
 
-**What is the recovery model for AWS RDS and Aurora?**
+**Q: What is the recovery model for AWS RDS and Aurora?**
 AWS RDS automatically takes daily snapshots and continuously archives transaction logs to S3. RDS supports PITR to any second within the backup retention window (1–35 days). To restore: select the instance, choose "Restore to point in time," specify the target time — RDS creates a new instance and replays transaction logs to the specified moment. RTO for RDS PITR: 10–45 minutes depending on database size. Aurora has continuous backup to Aurora's shared storage layer; snapshots are taken by copying storage layer pointers (instantaneous, no performance impact). Aurora PITR restores to a new cluster. Both RDS and Aurora support cross-region snapshot copies for DR to a different region.
 
-**How do you perform a cross-version PostgreSQL upgrade with minimal downtime?**
+**Q: How do you perform a cross-version PostgreSQL upgrade with minimal downtime?**
 Use logical replication for zero-downtime major version upgrades: (1) Set up a new PostgreSQL 17 server. (2) Create a logical publication on the PG 15 primary for all tables. (3) Create a logical subscription on the PG 17 server. (4) Wait for PG 17 to fully catch up (replication lag < 1 second). (5) Put the application in read-only mode briefly (or use traffic shaping to drain writes). (6) Wait for PG 17 lag to reach 0. (7) Update application database connection string to PG 17. (8) Remove the subscription and publication. Limitation: logical replication does not replicate sequences automatically — sync sequences from PG 15 to PG 17 before cutover. Alternative: `pg_upgrade --link` (faster, but requires downtime for the pg_upgrade process itself).
 
 ---

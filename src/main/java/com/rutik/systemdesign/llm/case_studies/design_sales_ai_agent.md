@@ -1240,46 +1240,46 @@ changes per prospect into a single API call per sync window.
 
 ## 11. Interview Discussion Points
 
-**Why does sequence state durability matter more than LLM response quality for a sales agent?**
+**Q: Why does sequence state durability matter more than LLM response quality for a sales agent?**
 
 A sales sequence runs for 3-6 weeks. A single dropped state transition — failing to record that touchpoint 4 was sent — can result in the prospect receiving touchpoint 4 twice, which reads as "this AI has no memory." Worse, a lost HARD_NO state means a prospect who said "stop emailing me" receives more emails, which is a CAN-SPAM violation and a reputational disaster. LLM response quality affects reply rates marginally (the difference between a good and great email is 1-2 percentage points in reply rate). Lost state transitions affect legal compliance and brand reputation permanently. A sales AI agent that writes mediocre emails but never loses state is far more valuable than one that writes excellent emails and occasionally sends two touchpoints in one day.
 
-**How is TCPA compliance enforced at the architecture level, not just at the policy level?**
+**Q: How is TCPA compliance enforced at the architecture level, not just at the policy level?**
 
 TCPA compliance is enforced by a block-by-default architecture in the `DNCScrubber`. Three design decisions make this architectural: first, any exception or Redis timeout in the DNC check returns `False` (block), never `True` (allow) — the error handling itself enforces compliance. Second, for SMS and phone channels, the check requires a positive TCPA consent key to be present in Redis — the absence of an opt-out record is not sufficient. Third, opt-outs are written to Redis synchronously before the function returns, ensuring that a concurrent send that starts 50ms later will read the opt-out. Policy documents say "do not contact opted-out prospects"; architecture means the software cannot contact them even if a bug exists in the calling code.
 
-**Why must the opt-out be written to Redis before Postgres, rather than both simultaneously?**
+**Q: Why must the opt-out be written to Redis before Postgres, rather than both simultaneously?**
 
 The ordering matters because of replication lag. If the opt-out is written only to Postgres, a second concurrent send worker reading from a Postgres replica will not see the opt-out for 50-200ms (typical async replication lag). During that window, a second email or SMS can be dispatched. Redis is a single primary node; any value written to it is immediately visible to all readers (within the same data center). By writing to Redis first — synchronously before returning from `record_opt_out` — and then writing to Postgres for durability, the replication lag window is eliminated. Even if the Postgres write fails, the Redis write ensures no further contacts occur. The Postgres write can be retried asynchronously.
 
-**How is email deliverability maintained at scale when sending 1.2 million emails per day?**
+**Q: How is email deliverability maintained at scale when sending 1.2 million emails per day?**
 
 Four mechanisms work together. Domain warmup: new sending domains start at 20 emails per day and ramp over 30 days to 5,000 per day, establishing reputation with Gmail, Outlook, and Yahoo mail servers. Per-domain volume limits: even warmed domains are capped at 5,000-10,000 emails per day, so 500 customer accounts each have their own sending domain rather than sharing one platform domain. Bounce rate monitoring: a 15-minute automated health check detects when bounce rate exceeds 5% and triggers automatic rotation to a backup domain before Gmail deprioritizes the domain. Authentication: SPF, DKIM, and DMARC records are required before any sending domain is activated — not optional. The platform provides a DNS verification step during customer onboarding.
 
-**What happens if a prospect who was classified as HARD_NO on touchpoint 1 sends a new inbound inquiry 3 months later?**
+**Q: What happens if a prospect who was classified as HARD_NO on touchpoint 1 sends a new inbound inquiry 3 months later?**
 
 The HARD_NO classification and the opt-out record in Redis are permanent and have no TTL — they do not expire. However, an inbound inquiry is a new context: the prospect is proactively reaching out. The correct handling is to route the inbound inquiry to a human rep immediately, bypassing the AI agent entirely. The AI agent should never send outbound to this prospect again — the opt-out remains in effect. The human rep handles the inbound lead manually and can create a new CRM opportunity. The key distinction: the opt-out applies to outbound AI-initiated contact, not to the prospect's own inbound queries. This is why the handoff to human rep is triggered for inbound signals from HARD_NO prospects.
 
-**What is the difference between a CAN-SPAM opt-out legal requirement and production best practice?**
+**Q: What is the difference between a CAN-SPAM opt-out legal requirement and production best practice?**
 
 CAN-SPAM requires honoring opt-out requests within 10 business days. This is the legal minimum. Production best practice is immediate — opt-outs are honored within 100ms of receipt, which is when `record_opt_out` writes to Redis. The gap between the legal requirement and best practice is significant: an organization that takes 9 business days to honor opt-outs is technically compliant but will face consumer complaints, poor deliverability reputation, and potential regulatory scrutiny. At scale (1.2M emails per day), even a 1-day opt-out processing delay can result in dozens of additional unwanted contacts. The architecture makes immediate opt-out the default behavior, not a compliance checkbox.
 
-**How are email subject lines A/B tested at the sequence platform level without contaminating the sequence state?**
+**Q: How are email subject lines A/B tested at the sequence platform level without contaminating the sequence state?**
 
 Each email send records the subject variant ID alongside the message ID and prospect ID in a separate analytics table. The send itself is independent of the A/B test outcome — the sequence advances to the next state regardless of which variant was sent. The A/B test evaluation happens in a separate analytics pipeline that joins the send records with delivery events (open webhooks from SendGrid). A winner is declared after a minimum of 500 sends per variant with a statistically significant difference (p < 0.05 using a two-proportion z-test). The winning variant is promoted by updating a feature flag in Redis that the email personalizer reads when selecting the subject template. The sequence state machine has no awareness of A/B testing — it only records that a touchpoint was sent, not which variant.
 
-**Why does multi-domain sending improve deliverability compared to a single platform-wide sending domain?**
+**Q: Why does multi-domain sending improve deliverability compared to a single platform-wide sending domain?**
 
 Mailbox providers (Gmail, Outlook) rate deliverability signals per domain. If a single platform domain sends 500,000 emails per day across all customers, a single customer with a low-quality prospect list (high bounce rate) degrades the reputation of that domain for all other customers. With per-customer sending domains, one customer's deliverability problems are isolated to their own domain. The customer's domain reputation reflects their own list quality and content quality, not the quality of 499 other customers. Additionally, per-customer domains allow customers to use their own company domain (e.g., `outreach.acmecorp.com`) in the From address, which increases open rates by 20-30% versus a generic platform domain.
 
-**How is the handoff from AI to human rep triggered, and what state is transferred?**
+**Q: How is the handoff from AI to human rep triggered, and what state is transferred?**
 
 Handoff is triggered by three signals: POSITIVE_INTEREST reply classification, a MEETING_BOOKED event, or the opportunity value exceeding the configured threshold (default $50K). When triggered, `SequenceStateMachine.advance(prospect_id, SequenceEvent.HUMAN_TAKEOVER)` transitions the sequence to `PAUSED` status, preventing any further automated touchpoints. Simultaneously, a Slack notification is sent to the assigned rep with a full context packet: prospect name, company, role, all prior touchpoints and their send dates, the prospect's reply verbatim, the reply classification and confidence, and a link to the Salesforce opportunity. The CRM is updated with a task assigned to the rep. The sequence remains in `PAUSED` status until the rep either marks it as won, lost, or explicitly restarts the AI sequence (which transitions back to `ACTIVE`).
 
-**How do you evaluate sequence effectiveness when the B2B sales cycle is 6+ months?**
+**Q: How do you evaluate sequence effectiveness when the B2B sales cycle is 6+ months?**
 
 Three evaluation horizons with different metrics. Short term (weekly): open rate and reply rate per sequence template and touchpoint number — these are leading indicators available within days of sending. Open rate target: 35-40%; reply rate target: 5-8%. Medium term (monthly): meeting booked rate — the fraction of entered prospects that result in a calendar meeting. This lags sends by 3-6 weeks and is the primary business metric. Long term (quarterly): pipeline influence — the fraction of closed-won deals that had an AI SDR touchpoint in the first 90 days of the deal lifecycle. This requires CRM attribution and lags by 6+ months. The eval pipeline tracks all three but only the short-term metrics can trigger automated alerts. Medium and long-term metrics are reviewed in monthly business reviews. Reference [LLM Eval Harness in Production](./cross_cutting/llm_eval_harness_in_production.md) for multi-horizon eval pipeline design.
 
-**What architectural change would you make if the customer base grew from 500 to 5,000 enterprise customers?**
+**Q: What architectural change would you make if the customer base grew from 500 to 5,000 enterprise customers?**
 
 Two bottlenecks become critical at 10x scale. First, the Postgres instance handling 50M active sequences (10x current 5M) at 500 bytes of writes per state transition x 1.2M transitions per day x 10 = 600MB writes per day; Postgres handles this comfortably, but the connection pool becomes the bottleneck at 5,000 customers each with connection pool workers. Solution: introduce PgBouncer connection pooling in transaction mode, reducing Postgres connections from 5,000 to 50-100. Second, the Redis cluster holding 200GB of active sequence state (10x current 20GB) needs horizontal sharding. Redis Cluster with hash slots across 10 shard nodes handles this transparently. The bigger architectural question: at 50M active sequences, migrate the sequence state machine to Temporal, which provides built-in history, versioning, and recovery that the Redis+Postgres combination emulates manually. Temporal's operational overhead (Cassandra backend, Temporal server cluster) becomes justified when the state management engineering cost exceeds the Temporal operational cost.

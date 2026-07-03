@@ -614,52 +614,52 @@ Evaluating a thought in isolation (without the path so far) produces scores that
 
 ## 12. Interview Questions with Answers
 
-**What problem does Tree of Thoughts solve that chain-of-thought does not?**
+**Q: What problem does Tree of Thoughts solve that chain-of-thought does not?**
 Chain-of-thought generates a single linear reasoning path greedily — once a reasoning step is produced, the model cannot revisit it. ToT solves the inability to explore alternatives and backtrack by maintaining a tree of candidate thoughts and using search to navigate it.
 
-**How does the original ToT paper demonstrate the benefit quantitatively?**
+**Q: How does the original ToT paper demonstrate the benefit quantitatively?**
 On the 24-game benchmark (combine 4 numbers to reach 24 using arithmetic), GPT-4 with chain-of-thought solved 4% of problems, while GPT-4 with ToT + BFS solved 74%. The key difference was the ability to backtrack when intermediate arithmetic was evaluated as infeasible.
 
-**What is the role of the value function in ToT and what are the two main implementation strategies?**
+**Q: What is the role of the value function in ToT and what are the two main implementation strategies?**
 The value function scores candidate thoughts to guide the search. The two strategies are: (1) scoring — the LLM outputs a numeric score (e.g., 1–10) allowing soft ranking across candidates; (2) voting — the LLM is sampled multiple times and the majority verdict (sure/maybe/impossible) is used. Scoring suits continuous search strategies (beam, MCTS); voting suits binary pruning (DFS).
 
-**Explain BFS vs DFS in the context of ToT and when you would choose each.**
+**Q: Explain BFS vs DFS in the context of ToT and when you would choose each.**
 BFS expands all nodes at depth k before proceeding to depth k+1, guaranteeing the shallowest solution but costing branching_factor^depth LLM calls. DFS commits to one branch and backtracks on failure, costing at most depth * branching_factor calls in the best case. Choose BFS for shallow trees where global optimality matters; choose DFS for deep trees where early commitment is acceptable and cost is constrained.
 
-**What is beam search and why is it the most practical ToT strategy?**
+**Q: What is beam search and why is it the most practical ToT strategy?**
 Beam search is BFS with a fixed beam width B: at each level, generate k children per node, score all B*k candidates, keep only the top B. Cost is O(B * k * depth), which is linear in depth rather than exponential. With B=3, k=3, depth=3, this yields ~54 LLM calls — tractable in production. Pure BFS with branching 4, depth 3 costs 84 calls even before pruning.
 
-**How does MCTS differ from beam search for agent planning?**
+**Q: How does MCTS differ from beam search for agent planning?**
 MCTS uses UCB1 to balance exploration and exploitation across iterations — nodes with high value but low visit count are preferentially expanded. Beam search is purely greedy at each level and does not revisit discarded branches. MCTS amortizes evaluation across many rollouts and is more sample-efficient for deep trees, but is harder to implement and reason about. Beam search is simpler and faster for shallow trees.
 
-**What is UCB1 and how does it drive MCTS node selection?**
+**Q: What is UCB1 and how does it drive MCTS node selection?**
 UCB1 = V(node) + C * sqrt(ln(N_parent) / N_node), where V is the node's average value, N_node is its visit count, N_parent is the parent's visit count, and C is an exploration constant (commonly sqrt(2)). Nodes with high V are exploited; nodes with low N_node are explored. This formula ensures every node is eventually visited.
 
-**How do process reward models (PRMs) relate to ToT?**
+**Q: How do process reward models (PRMs) relate to ToT?**
 PRMs are small models trained to score intermediate reasoning steps rather than only final answers. They replace the LLM evaluator in ToT with a dedicated, fast, cheap model — reducing evaluation cost from one full LLM call to one forward pass through a small classifier. OpenAI's o1 training used PRMs to provide step-level reward signals during RLHF, which is conceptually the offline training analogue of online ToT evaluation.
 
-**What is the cost of naive BFS ToT with branching factor 4 and depth 3, and how does beam search reduce it?**
+**Q: What is the cost of naive BFS ToT with branching factor 4 and depth 3, and how does beam search reduce it?**
 Naive BFS: 4 + 16 + 64 = 84 nodes, each requiring a generate call and an evaluate call = 168 LLM calls minimum. With beam_width=3: 3*4=12 candidates at depth 1, keep 3; 3*4=12 at depth 2, keep 3; 3*4=12 at depth 3 = 36 candidates total, ~72 LLM calls. Pruning drops this further to ~54 calls in practice — a 3x reduction.
 
-**When is ToT not worth the extra LLM calls?**
+**Q: When is ToT not worth the extra LLM calls?**
 ToT is not worth it when: (1) the task has a single obvious correct next step (RAG Q&A, summarization); (2) latency requirements preclude multiple sequential LLM calls (< 2 s response expected); (3) no meaningful value function exists to differentiate candidates; (4) per-query economics are too tight (high-volume consumer applications at low margins).
 
-**How does ToT relate to the "test-time compute scaling" narrative for models like o1?**
+**Q: How does ToT relate to the "test-time compute scaling" narrative for models like o1?**
 Test-time compute scaling refers to spending more inference compute to improve answer quality. ToT is one mechanism: by generating and evaluating multiple reasoning branches at inference time, the model effectively runs longer before producing an output. o1-class models implement this internally via a search over chain-of-thought trajectories scored by a PRM, controlled by a "thinking token budget" that gates tree depth.
 
-**What makes a good "thought" granularity in agent ToT?**
+**Q: What makes a good "thought" granularity in agent ToT?**
 A thought should represent a complete, coherent agent action — one that advances the plan meaningfully and is independently evaluable. Too fine-grained (individual sentences) and the tree is too wide; the decoder's built-in beam search already handles sub-word diversity. Too coarse-grained (multi-step sub-plans) and the evaluator cannot distinguish good from bad candidates accurately. In practice, one thought = one tool call or one implementation step.
 
-**How do you prevent the evaluator from confirming whatever the generator produced (sycophancy)?**
+**Q: How do you prevent the evaluator from confirming whatever the generator produced (sycophancy)?**
 Use separate, explicitly adversarial system prompts for the evaluator ("identify flaws and risks in this proposed action"). Ask the evaluator to reason about failure modes before assigning a score. Use a different model (or different temperature) for evaluation than generation. In high-stakes applications, use a trained discriminator or domain verifier (test execution, type checker) instead of an LLM evaluator altogether.
 
-**How would you implement ToT for a code debugging agent?**
+**Q: How would you implement ToT for a code debugging agent?**
 Generator: given a failing test + current code, propose 3 candidate patches. Evaluator: run the unit test suite against each patch; value = fraction of tests passing (0.0–1.0). This replaces LLM scoring with a deterministic, cheap verifier — far more reliable. Use DFS: apply the highest-scoring patch, run tests, backtrack if no improvement. Depth limit = 5 attempts. This is essentially how SWE-bench top performers operate.
 
-**What is the relationship between ToT and classical AI search algorithms?**
+**Q: What is the relationship between ToT and classical AI search algorithms?**
 ToT is a direct application of classical heuristic search (A*, BFS, DFS, beam search, MCTS) to the space of LLM-generated reasoning steps. The only LLM-specific adaptation is: (1) the branching factor is generated by sampling rather than enumerated from a fixed action space; (2) the heuristic function is an LLM or trained model rather than a hand-coded function. The underlying search theory (completeness, optimality, complexity) is identical.
 
-**How do you decide between beam search and MCTS for a new agent task?**
+**Q: How do you decide between beam search and MCTS for a new agent task?**
 Use beam search when: depth is shallow (< 5), latency matters (serial expansion is faster), the task is relatively straightforward, and engineering simplicity is a priority. Use MCTS when: depth is large (5+), exploration/exploitation balance is critical (the optimal first step is not obvious), the rollout is cheap and informative, or you are dealing with game-like tasks where future rewards are highly uncertain. In practice, start with beam search and escalate to MCTS only if quality is insufficient.
 
 ---

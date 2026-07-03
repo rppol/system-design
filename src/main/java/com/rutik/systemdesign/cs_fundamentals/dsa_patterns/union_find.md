@@ -430,7 +430,7 @@ stack, sets `parent[node] = root` for every node visited. So if `3 -> 2 -> 0`
 nodes visited during the call get repointed directly to the root) — not just
 the node you originally called `find` on.
 
-**Union by rank vs. union by size — does the choice matter?**
+**Q: Union by rank vs. union by size — does the choice matter?**
 Both achieve the same asymptotic bound (O(α(n)) with path compression). Rank
 tracks an *upper bound on tree height*; size tracks the *number of elements*
 in the tree. Size is sometimes more directly useful (e.g., "what's the size
@@ -438,7 +438,7 @@ of the largest connected component?" falls out for free). In practice, either
 is fine — pick whichever the problem's follow-up questions make more
 convenient.
 
-**Why initialize `parent[i] = i` for every `i`?**
+**Q: Why initialize `parent[i] = i` for every `i`?**
 Each element starts in its **own** singleton set, and the representative
 (root) of a singleton set `{i}` is `i` itself. `parent[i] == i` is exactly
 the base case / termination condition for `find` — "if I am my own parent, I
@@ -465,7 +465,7 @@ because `a -> b` and `b -> a` together form a cycle, but `a -> b` and `a -> c`
 (with `b` and `c` unrelated) do not — Union-Find would incorrectly treat both
 scenarios the same way (both unions of `{a,b,c}`).
 
-**How does Union-Find fit into Kruskal's MST algorithm?**
+**Q: How does Union-Find fit into Kruskal's MST algorithm?**
 Sort all edges by weight ascending. For each edge `(u, v, w)` in that order,
 call `union(u, v)`. If it returns `True` (they were in different
 components), this edge doesn't create a cycle — accept it into the MST and

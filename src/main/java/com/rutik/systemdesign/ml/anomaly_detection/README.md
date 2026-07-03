@@ -621,58 +621,58 @@ scores = clf.decision_function(X)          # higher = more anomalous
 
 ## 12. Interview Questions with Answers
 
-**Why is accuracy a useless metric for anomaly detection?**
+**Q: Why is accuracy a useless metric for anomaly detection?**
 Because anomalies are rare — at a 0.1% base rate, a model that labels everything "normal" scores 99.9% accuracy while catching zero anomalies. Accuracy is dominated by the majority class and cannot distinguish a useful detector from a degenerate constant. Use PR-AUC (average precision), precision@k, and recall at a fixed false-positive/alert budget instead, and always inspect the full precision-recall curve rather than a single threshold's number.
 
-**Should you use ROC-AUC or PR-AUC for imbalanced anomaly detection?**
+**Q: Should you use ROC-AUC or PR-AUC for imbalanced anomaly detection?**
 Use PR-AUC — ROC-AUC is misleadingly optimistic under extreme imbalance because the enormous true-negative count keeps the false-positive *rate* tiny even when false-positive *counts* dwarf true positives. A model can show ROC-AUC 0.99 while precision at its operating point is 5%. PR-AUC (precision vs recall) has no true-negative term, so it reflects the imbalance honestly; report it alongside precision@k at the real alert budget.
 
-**Why should you never threshold a raw anomaly score directly?**
+**Q: Why should you never threshold a raw anomaly score directly?**
 Because raw scores (Isolation Forest's decision_function, autoencoder MSE) are uncalibrated — their scale is arbitrary and shifts with every retrain, feature change, and dimensionality change. A hard-coded constant silently over- or under-fires after any drift. Threshold a percentile/quantile of the score on a clean reference distribution instead (e.g. the 99.9th percentile of normal traffic), which stays stable and ties directly to your tolerated false-positive rate.
 
-**What is the difference between point, contextual, and collective anomalies?**
+**Q: What is the difference between point, contextual, and collective anomalies?**
 A point anomaly is a single value far from the rest. A contextual anomaly is normal in general but abnormal for its context (time, location), and a collective anomaly is a subsequence that is abnormal as a group even though each individual point looks normal. 40°C is a contextual anomaly in winter, not summer; a slow memory leak is collective (each reading is fine, the trend is not). The type dictates the method — point methods (z-score, Isolation Forest) never catch a slow leak.
 
-**When does LOF beat Isolation Forest or One-Class SVM?**
+**Q: When does LOF beat Isolation Forest or One-Class SVM?**
 When the data has clusters of varying density, because LOF is a local density-ratio rather than a global distance or boundary. LOF flags a point that is sparse *relative to its immediate neighbors* even if it sits near a dense cluster and looks globally central — exactly the case a z-score, One-Class SVM boundary, or (to a lesser extent) Isolation Forest miss. The cost is O(n²) scaling and sensitivity to `k` (default 20), so it is a subsample or low-scale tool.
 
-**What does the contamination parameter do and why is it dangerous?**
+**Q: What does the contamination parameter do and why is it dangerous?**
 Contamination sets the expected fraction of anomalies, which directly fixes the score threshold, so getting it wrong mislabels a fixed slice of every batch. Overstating it floods you with false positives (too many points forced past the threshold); understating it hides real anomalies. Set it to your measured base rate, keep the detector's *ranking* as the real output, and tune the final threshold against PR-AUC or an alert budget rather than trusting the contamination default.
 
-**What is the difference between semi-supervised and unsupervised anomaly detection?**
+**Q: What is the difference between semi-supervised and unsupervised anomaly detection?**
 Semi-supervised (novelty detection) trains on only-normal data and flags anything surprising. Unsupervised (outlier detection) trains on unlabeled data that already contains the anomalies and assumes they are the sparse minority. One-Class SVM and autoencoders are the classic semi-supervised methods; Isolation Forest, LOF, and DBSCAN run unsupervised. Semi-supervised needs a clean normal set — if it is contaminated, the model learns to accept anomalies as normal.
 
-**How does Isolation Forest score anomalies, and why is it fast?**
+**Q: How does Isolation Forest score anomalies, and why is it fast?**
 It scores a point by how few random splits are needed to isolate it — anomalies fall out in short paths, giving a score near 1, while normal points need many splits (score near 0.5). It normalizes average path length by the expected unsuccessful-BST-search length c(n) ≈ 2·ln(n). It is fast because each tree uses a subsample of just 256 points (max depth 8) and 100 trees, so training is O(n·t·log ψ) and it scales to millions of rows without distance computation or feature scaling.
 
-**How do you set the threshold on autoencoder reconstruction error?**
+**Q: How do you set the threshold on autoencoder reconstruction error?**
 Pick a percentile of the reconstruction-error distribution on a held-out clean validation set — for example the 99th percentile — never a hand-picked absolute MSE. The absolute error scale is arbitrary and drifts across retrains, so a percentile ties the threshold to a tolerated flag rate. For high-dimensional inputs prefer per-feature max error over mean error, otherwise a single corrupted feature is diluted across all dimensions and never crosses the threshold.
 
-**Why not just use a z-score threshold of 3 for everything?**
+**Q: Why not just use a z-score threshold of 3 for everything?**
 Because z-score assumes unimodal, roughly Gaussian, stationary data, and its μ and σ are themselves corrupted by the very outliers you are hunting. It breaks on skewed, multimodal, or seasonal signals — a bimodal metric flags its own second mode, a seasonal metric flags every peak. Use robust statistics (median and MAD: |x − median| / (1.4826·MAD) > 3.5) so the estimate resists outliers, and decompose seasonality before thresholding.
 
-**What is Mahalanobis distance and when is it better than Euclidean for outliers?**
+**Q: What is Mahalanobis distance and when is it better than Euclidean for outliers?**
 It is a covariance-scaled distance, D²(x) = (x−μ)ᵀΣ⁻¹(x−μ), that accounts for correlated features, so it flags points off the data's correlation ellipse that Euclidean distance would call normal. Under a Gaussian assumption D² is χ²-distributed with d degrees of freedom, giving a principled threshold at the χ²(0.999, d) quantile. Estimate Σ robustly (MinCovDet), because a classical covariance estimate is itself broken by the outliers.
 
-**What is Extreme Value Theory / Peaks-Over-Threshold used for in anomaly detection?**
+**Q: What is Extreme Value Theory / Peaks-Over-Threshold used for in anomaly detection?**
 It models only the tail of a distribution with a Generalized Pareto Distribution to set a principled extreme threshold without assuming the whole distribution's shape. The Pickands-Balkema-de Haan theorem guarantees exceedances over a high threshold converge to a GPD, so you fit the GPD to exceedances and pick a threshold for a target tail probability (e.g. 1e-4). This is how you threshold unbounded signals like latency or loss tails; the streaming SPOT/DSPOT variant adapts it online to drift.
 
-**How does One-Class SVM's nu parameter behave and how do you set it?**
+**Q: How does One-Class SVM's nu parameter behave and how do you set it?**
 nu is simultaneously an upper bound on the fraction of training points allowed outside the boundary and a lower bound on the fraction of support vectors. Set it to the expected training contamination (nu=0.01 for ~1% expected outliers/false-positive rate). Lower nu means a tighter boundary and more false negatives; higher nu means a looser boundary and more false positives. One-Class SVM is O(n²)–O(n³) and very sensitive to the RBF gamma, so prefer SGDOneClassSVM or Isolation Forest beyond ~50K rows.
 
-**What is precision@k and why do practitioners prefer it?**
+**Q: What is precision@k and why do practitioners prefer it?**
 It is the fraction of the top-k highest-scored items that are truly anomalous, which matches the operational reality that analysts can only review a fixed alert budget per day. If a team can investigate 200 alerts, precision@200 is the metric that actually predicts their hit rate, independent of where you place a binary threshold. It is more actionable than a single F1 because it answers "of what we will actually look at, how much is real?".
 
-**How do you evaluate and maintain a streaming anomaly detector under concept drift?**
+**Q: How do you evaluate and maintain a streaming anomaly detector under concept drift?**
 Use adaptive thresholds (rolling quantiles or EWMA) and windowed PR metrics, because a fixed threshold trained on old data drifts into either an alert storm or silence as the input distribution moves. Monitor the flag-rate and the score distribution itself with PSI/KS tests; a sudden shift is either a real incident or a stale threshold. Retrain on a rolling normal window and use online methods (Half-Space Trees, Random Cut Forest, SPOT) that update incrementally.
 
-**When should you use supervised classification instead of unsupervised anomaly detection?**
+**Q: When should you use supervised classification instead of unsupervised anomaly detection?**
 Use supervised when you have trustworthy labels for both classes and the anomalies recur, because a gradient-boosted classifier that directly optimizes the target usually beats any unsupervised detector. Unsupervised methods shine only when anomalies are genuinely novel and unlabeled. The strong production pattern is a hybrid: a supervised model for known fraud plus an unsupervised layer (Isolation Forest/autoencoder) to catch new patterns the labels have never seen.
 
-**What is a GMM used for in anomaly detection?**
+**Q: What is a GMM used for in anomaly detection?**
 It fits a mixture of K Gaussians to normal data and scores each point by its negative log-likelihood under the mixture; low-likelihood points are anomalies. It is the right choice when normal behavior is multimodal — several distinct normal regimes — because a single-Gaussian or z-score model would flag the minor modes as anomalies. Choose K by BIC and use a robust or regularized covariance so a near-singular component does not assign spuriously high density.
 
-**How do you handle categorical or mixed-type data in anomaly detection?**
+**Q: How do you handle categorical or mixed-type data in anomaly detection?**
 Isolation Forest and tree-based detectors handle mixed types well after simple encoding, since they split on values rather than distances. For distance/density methods (LOF, kNN) use Gower distance, which mixes numeric and categorical dissimilarity, and for high-cardinality categoricals add a rareness/frequency score (rare category values are themselves a signal). Avoid naive one-hot with Euclidean distance, which makes every pair of distinct categories equidistant and washes out the numeric features.
 
 ---

@@ -478,7 +478,7 @@ meaning "shortest path" is undefined — you could loop forever decreasing
 cost). If you know weights are non-negative (the overwhelming majority of
 real-world "distance"/"time"/"cost" problems), always prefer Dijkstra.
 
-**Why is 0-1 BFS O(V+E) instead of O((V+E) log V) like Dijkstra?**
+**Q: Why is 0-1 BFS O(V+E) instead of O((V+E) log V) like Dijkstra?**
 A `deque` supports O(1) push/pop from both ends, vs. O(log V) for a heap.
 0-1 BFS maintains the same "process nodes in non-decreasing distance order"
 invariant as Dijkstra, but because weights are only 0 or 1, a 0-weight edge
@@ -535,7 +535,7 @@ For products of probabilities in `[0,1]`, `prob[u] * w <= prob[u]` (since
 `w <= 1`). Both satisfy "extending can't make it look better than the prefix
 already was" — which is the real requirement, not "addition" specifically.
 
-**Is BFS a "special case" of Dijkstra? In what sense?**
+**Q: Is BFS a "special case" of Dijkstra? In what sense?**
 Yes — BFS is Dijkstra where all edge weights equal 1 (or 0, for 0-1 BFS). A
 plain `deque`-based queue, where every node is appended to one end, IS
 implicitly maintaining "process in non-decreasing distance order" — because

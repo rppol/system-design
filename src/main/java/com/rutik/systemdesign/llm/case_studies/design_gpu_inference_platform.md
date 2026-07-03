@@ -920,35 +920,35 @@ Resolution:
 
 ## 7. Interview Discussion Points
 
-**Why use token throughput (MBU) instead of RPS as the autoscaling metric?**
+**Q: Why use token throughput (MBU) instead of RPS as the autoscaling metric?**
 
 RPS treats a 10-token request and a 4,000-token request identically, but they consume completely different amounts of GPU resources. A 4,000-token request uses 400x more KV-cache pages than a 10-token request and may require 80x longer decode time. An autoscaler watching RPS would under-react to a traffic shift toward long-context requests and over-react to a shift toward short completions. MBU (KV-cache occupancy) directly measures what the GPU is actually doing — it is the HBM utilization proxy. A pod at 85% MBU is genuinely saturated regardless of whether it is serving 10 RPS of long requests or 200 RPS of short ones. As a practical rule: if your autoscaler metric does not correlate with GPU OOM probability, it is the wrong metric.
 
-**How does S-LoRA multiplex 1,000 adapters on 4 GPUs without reloading the base model?**
+**Q: How does S-LoRA multiplex 1,000 adapters on 4 GPUs without reloading the base model?**
 
 The base model (70 GB for Llama-70B FP8) is loaded once per GPU and never evicted. LoRA adapters are small (rank-64 FP16 ≈ 1.5 GB) and occupy reserved HBM "adapter slots" — 4 slots per GPU means 4 adapters active per GPU simultaneously. When a request arrives for adapter A that is not in any slot, the LRU adapter is swapped out (HBM slot reference released; weights remain on NVMe) and adapter A is copied from NVMe in ~200 ms. In-flight requests using the evicted adapter have already completed their current decode step before the swap begins. The mathematical breakthrough: 4 slots × 4 GPUs serve 1,000 adapters needing only 60 hot adapters × 1.5 GB = 90 GB NVMe, not 1,000 × 70 GB = 70 TB HBM.
 
-**What happens to an in-flight streaming request when the pod it is on is preempted?**
+**Q: What happens to an in-flight streaming request when the pod it is on is preempted?**
 
 Spot preemption gives a 2-minute warning on AWS EC2 (instance interruption notice via IMDS). The streaming gateway receives the pod's drain signal, stops routing new requests to it, and records each active stream's last-token offset in Redis (key: `stream:{request_id}:last_token_offset`, TTL 60 s). When the pod terminates, the gateway emits `data: {"error": "stream_interrupted", "retry_after": 5}` and closes the connection. The client SDK retries automatically with `resume_from_token: N`; the new pod re-generates from that offset using the original prompt as KV-cache seed. This doubles the cost of the affected request but maintains the user-facing SLA. Dedicated-tier tenants (on-demand GPUs) are never preempted; the 3-8% preemption rate applies only to the serverless tier.
 
-**How do you enforce tenant isolation in a shared vLLM engine?**
+**Q: How do you enforce tenant isolation in a shared vLLM engine?**
 
 Three layers: (1) Pre-inference quota check — Redis token bucket per tenant; quota-exceeded requests get HTTP 429 before touching the GPU. (2) KV-cache page tagging — PagedAttention allocates pages per sequence; pages are never shared across tenant sequences (prefix caching within a tenant is safe because the prefix is identical). (3) Process-level memory isolation — vLLM is a single process; cross-tenant reads require a vLLM bug. For HIPAA/FedRAMP tenants this risk is unacceptable: they run Strategy A (dedicated GPU pods), accepting 29x cost. For the remaining 95% of tenants, process-level isolation is contractually sufficient.
 
-**Why is the cold start problem harder for 70B models than 7B models?**
+**Q: Why is the cold start problem harder for 70B models than 7B models?**
 
 Three compounding factors: (1) Weight size: 70 GB vs 7 GB — 10x more bytes to transfer. (2) Tensor parallelism: 70B requires TP=4 (4 GPUs gang-scheduled); Karpenter must find 4 co-located GPUs simultaneously, which may require waiting for capacity. A 7B model starts on any single GPU with no coordination. (3) NVMe staging footprint: 70 GB of staged weights leaves less NVMe headroom for other model caches on the same node, cascading cold-start rates for less-popular 70B variants. Practical fix: always maintain 2 warm 70B pods (never scale to zero for 70B) — the $180/day idle cost is cheap cold-start insurance.
 
-**How do you handle the thundering herd when 50 customers all request the same rarely-used model simultaneously?**
+**Q: How do you handle the thundering herd when 50 customers all request the same rarely-used model simultaneously?**
 
 Without mitigation: 50 × 8 = 400 simultaneous S3 shard downloads compete for 6 GB/s NVMe write bandwidth — 50 × 70 GB = 3.5 TB of writes would saturate the drive for 583 seconds. The fix is a **thundering herd coalescer**: the first request acquires a Redis lock (`model_load_lock:{model_id}`); all subsequent requests enqueue on a Redis pub/sub channel (`model_loaded:{model_id}`). When the first pod finishes loading, it publishes the event and all queued requests dispatch immediately — only one cold start per model per node. Queued requests experience extra latency (up to 300 s for 70B) surfaced as `{"status": "warming", "estimated_seconds": 45}` on the first poll.
 
-**What is the break-even point where a customer should switch from your platform to self-hosted GPUs?**
+**Q: What is the break-even point where a customer should switch from your platform to self-hosted GPUs?**
 
 Rule of thumb math: an H100 on-demand at $7/hr = $5,040/month produces 3.36B tokens/month (70B model, 65% utilization). Our platform charges $0.80/M tokens = $2,688/month from that GPU's output — below raw hardware cost. We survive through shared tenancy (17 tenants per pod) and spot pricing. A single customer needs ~$20K/month in platform spend (self-hosted H100 + prorated ops salary) before self-hosting saves money — approximately 25B tokens/month. Below that threshold we win on cost; above it we must win on zero-ops value or they churn. This is why inference platforms introduce dedicated-tier pricing at enterprise scale: match self-hosted cost while retaining the simplicity proposition.
 
-**How does LoRA adapter hot-swap work without interrupting other in-flight requests?**
+**Q: How does LoRA adapter hot-swap work without interrupting other in-flight requests?**
 
 vLLM's scheduler operates at the granularity of one decode step (one forward pass per batch, typically 20 ms). Within a decode step, all sequences in the batch are processed together. The adapter swap protocol is: (1) The `LoRAAdapterManager` sets a flag `swap_pending=True` on the current HBM slot. (2) The vLLM scheduler completes the current decode step for all sequences using the about-to-be-evicted adapter. (3) After the step completes, the scheduler drains all sequences that need the evicted adapter into a temporary "paused" queue. (4) The HBM slot is freed and the new adapter is loaded from NVMe (200 ms). (5) Paused sequences resume on the next decode step. From the perspective of an in-flight streaming request, it sees a 200-220 ms pause in token streaming — within our 500 ms inter-token jitter budget. The client SDK does not detect this as an error. The critical invariant: the adapter swap never occurs mid-decode-step — it only occurs at decode step boundaries where the scheduler has full control over sequence dispatch.
 

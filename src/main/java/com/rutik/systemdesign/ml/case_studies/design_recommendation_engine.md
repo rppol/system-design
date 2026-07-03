@@ -520,16 +520,16 @@ def mmr_rerank(
 
 ## Interview Discussion Points
 
-**How do you handle the cold start problem for new users?**
+**Q: How do you handle the cold start problem for new users?**
 New users have no watch history, so collaborative filtering is useless. Strategy: (1) Onboarding flow asking genre preferences (3-5 clicks), which seeds a genre-based embedding via the item tower. (2) During first session, use popularity-within-genre as proxy ranker. (3) After 5 interactions, enough signal exists for two-tower retrieval. New items get item-tower embedding from metadata alone; ALS score is set to the item's global average until enough interactions accumulate (warm-up threshold: 50 interactions).
 
-**How do you prevent popularity bias where the model keeps recommending already-popular items?**
+**Q: How do you prevent popularity bias where the model keeps recommending already-popular items?**
 Three mitigations: (1) Popularity bias correction in two-tower training — subtract log(item_frequency) from logits so rare items are not penalized. (2) Exploration budget: 10-15% of recommendations are sampled from less-popular content matching user's genre preferences. (3) Freshness boost in re-ranking: items under 7 days old receive a +0.05 score boost, encouraging new content discovery.
 
-**How do you evaluate recommendation quality offline vs online?**
+**Q: How do you evaluate recommendation quality offline vs online?**
 Offline: NDCG@10 on held-out sessions, Recall@100 from retrieval, coverage (fraction of catalog recommended at least once). Online A/B test: watch time per session (primary), CTR, session length, 30-day retention. Offline NDCG correlates moderately with online watch time (Pearson ~0.6) but is not a perfect proxy — always A/B test before full rollout.
 
-**What happens if the FAISS index becomes stale as new videos are added?**
+**Q: What happens if the FAISS index becomes stale as new videos are added?**
 New videos added to the catalog need to be indexed immediately or they will never be retrieved. Strategy: (1) Near-real-time index updates — new items are added to a small in-memory HNSW shard. At query time, search both FAISS IVF (existing items) and HNSW shard (new items), merge top-K from both. (2) Full index rebuild nightly to consolidate. This ensures new videos get retrieval exposure within minutes of upload.
 
 ---
@@ -912,17 +912,17 @@ Statistical thresholds:
 
 ## Additional Interview Questions
 
-**How do you handle the cold start problem for new videos with no interaction data?**
+**Q: How do you handle the cold start problem for new videos with no interaction data?**
 New videos have no interaction history so ALS embeddings are undefined and two-tower item embeddings rely only on metadata. Strategy: (1) Item tower is trained with metadata features (genre, duration, description embeddings from a text encoder, creator popularity) so new items have a meaningful embedding from day 1. (2) Force retrieval: new items (<7 days old) are stored in a freshness HNSW shard; every user request retrieves top-50 from this shard in addition to the main FAISS index. (3) Post-ranking: 15% of recommendations are allocated to a "discovery slot" filled from the freshness shard, bypassing relevance ranking for new content. After 50 interactions, the item graduates from forced exposure to organic retrieval competition.
 
-**What is the difference between offline NDCG and online watch time, and why do they sometimes diverge?**
+**Q: What is the difference between offline NDCG and online watch time, and why do they sometimes diverge?**
 Offline NDCG is computed on historical click data, which suffers from selection bias: it only measures items that were shown (position bias) and already liked (historical popularity bias). Online watch time measures actual user satisfaction in a real session. Divergence occurs when: (1) the new model ranks items that were rarely shown historically (low NDCG from sparse data) but users love them (high watch time); (2) the new model promotes content that is clickable but not watchable (high CTR, low watch time — click-bait dynamics); (3) the held-out test set has different temporal distribution than the current period. Rule: if offline NDCG improves but online watch time does not, investigate for click-bait bias or temporal distribution mismatch before concluding the model is better.
 
-**How do you prevent the recommendation system from creating filter bubbles?**
+**Q: How do you prevent the recommendation system from creating filter bubbles?**
 Four mechanisms: (1) Genre diversity cap in MMR post-ranking: no more than 3 items from the same genre in the top-10, regardless of user preference strength. (2) Exploration budget: 15% of every user's recommendations come from genres they have watched fewer than 5 times, sampled from popular content in those genres. (3) Creator diversity: limit recommendations from any single creator to 2 items in the top-10. (4) Long-term engagement signals: if 30-day retention is used as a secondary metric in model selection (alongside short-term engagement), models that maximize short-term clicks at the cost of user satisfaction are penalized. A/B tests that show improved 7-day CTR but declining 30-day retention are rejected.
 
-**How would you design the system to handle a catalog of 1 billion items instead of 10 million?**
+**Q: How would you design the system to handle a catalog of 1 billion items instead of 10 million?**
 At 1 billion items, FAISS IVF with PQ becomes infeasible in a single machine (even PQ-compressed: 1B × 32 bytes = 32GB per replica). Three approaches: (1) Hierarchical two-level retrieval — coarse retrieval reduces to 1M candidates using a lightweight semantic hash or product category filter, then FAISS IVF over 1M items (32MB PQ). (2) Sharded FAISS: partition the 1B item catalog into 100 shards of 10M items each, route queries to the 2-3 most relevant shards based on a coarse item-space classifier, merge top-K from those shards. (3) ScaNN (Google) or HNSW with product quantization in distributed mode — ScaNN is reported to scale to 100M+ items with <5ms latency. The two-tower training pipeline remains the same; only the index infrastructure changes.
 
-**How do you measure and optimize for long-term user retention rather than short-term engagement?**
+**Q: How do you measure and optimize for long-term user retention rather than short-term engagement?**
 Short-term engagement metrics (CTR, watch time per session) are easy to optimize but can be maximized by recommendation systems that exploit user psychological biases (autoplay, thumbnail sensationalism). Long-term retention is measured as 30-day and 90-day retention rates per user cohort. To optimize for it: (1) Include 30-day retention as a secondary metric in all A/B tests — reject models that improve 7-day metrics at cost of 30-day retention. (2) Add long-term satisfaction proxies to training labels: app re-opens within 3 days, manual search (user was not passively suggested), explicit ratings. (3) Penalize models with high variance in recommendations — high predictability leads to boredom over months. Monitor recommendation entropy (diversity of genres/creators over a 30-day window per user) as a leading indicator for long-term retention.

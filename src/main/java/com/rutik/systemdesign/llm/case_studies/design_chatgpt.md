@@ -432,10 +432,10 @@ SLA: 99.9% = 8.7 hours downtime/year
 
 **Key insight — context window as a resource:** The KV cache for a 128K context uses 2GB+ of GPU memory per request. This is why [PagedAttention](../vllm_deep_dive/README.md) is critical — naive allocation would mean each A100 can only serve ~10-20 concurrent long-context requests.
 
-**Trade-off question: Why not cache all responses?**
+**Q: Trade-off question: Why not cache all responses?**
 Conversations are personalized and contextual — the same question "what should I do next?" has completely different answers depending on conversation history. Only context-independent queries (factual lookups) are cacheable. [Semantic caching](../llm_caching/README.md) applies only to a subset.
 
-**Follow-up: How would you handle a 10× traffic spike?**
+**Q: Follow-up: How would you handle a 10× traffic spike?**
 Short term: queue requests, lower context limits, route more to GPT-3.5. Long term: predictive auto-scaling (expand GPU cluster 30 minutes before expected peak based on historical patterns).
 
 **Cost vs. quality trade-off:** The fundamental tension is that better models cost more to run. ChatGPT monetizes this gap: free tier subsidizes costs, paid tier generates revenue. The system must correctly route requests to appropriately-tiered models without degrading user experience.

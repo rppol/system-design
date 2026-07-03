@@ -392,13 +392,13 @@ def build_debiased_training_data(
 
 ## Interview Discussion Points
 
-**How do you deal with position bias when training on click data?**
+**Q: How do you deal with position bias when training on click data?**
 Click data is the most abundant training signal but heavily biased: position 1 receives 5-10x more clicks than position 5 regardless of product quality. Training a ranker directly on click counts teaches it to replicate the existing ranking, not improve it. IPW correction weights each click by 1/P(examined|position), estimated via the EM algorithm on historical click-through rates. An alternative is interleaving experiments where the candidate model and production model are interleaved in results, then observed — this is less biased than A/B tests for ranking evaluation.
 
-**How do you balance relevance, conversion, and business objectives in ranking?**
+**Q: How do you balance relevance, conversion, and business objectives in ranking?**
 Three-layer approach: (1) LambdaMART optimizes a combined relevance label (click=0.5, long dwell=1, cart=2, purchase=3) capturing both relevance and conversion signals in one model. (2) Post-ranking business rules apply constraints: out-of-stock items are demoted, promoted listings receive a bounded boost (cap at +3 positions to avoid quality degradation), brand diversity enforced via cap-3-per-brand. (3) Separate margin-weighted ranking model for "sponsored" slots. This separation keeps the organic ranker clean while allowing business control.
 
-**How do you evaluate the ranking system? When do you trust offline metrics vs online experiments?**
+**Q: How do you evaluate the ranking system? When do you trust offline metrics vs online experiments?**
 Offline NDCG@10 on a held-out click dataset measures ranking quality but is biased by the same position bias present in training data. Use a randomization experiment (5% of traffic with fully randomized results) to collect an unbiased offline evaluation set. Online A/B tests measure CTR, conversion rate, and revenue per search. The correlation between offline NDCG and online CTR is typically 0.7-0.8 — sufficient to use offline metrics for fast iteration and A/B tests for final validation before full rollout. Never skip A/B testing: a model with +2% offline NDCG has failed to improve online CTR in practice.
 
 ---
@@ -881,17 +881,17 @@ Experiment lifecycle:
 
 ## Additional Interview Questions
 
-**How does a cross-encoder reranker differ from a bi-encoder, and when do you use each?**
+**Q: How does a cross-encoder reranker differ from a bi-encoder, and when do you use each?**
 A bi-encoder independently encodes the query and document into separate embedding vectors, then computes similarity via dot product. This enables precomputing document embeddings offline, making retrieval over millions of documents feasible in milliseconds. A cross-encoder takes the concatenation of query and document tokens as a single input and produces a relevance score via full attention between both, capturing complex query-document interactions. Cross-encoders score 3-5% higher NDCG but are 100x slower because they cannot precompute embeddings. The standard pattern is bi-encoder for retrieval (top-1000 candidates) and cross-encoder for reranking (top-50 candidates) where latency budget permits.
 
-**How would you handle a query with no relevant results in the catalog?**
+**Q: How would you handle a query with no relevant results in the catalog?**
 Three signals indicate zero-result situations: (1) retrieval candidate count below 20, (2) all LTR scores below 0.01, (3) cross-encoder max score below 0.10. Recovery strategies in order: (1) Query relaxation — drop the most specific tokens (size, color) and re-retrieve; (2) Spell-corrected alternative query; (3) Semantic fallback — use dense retrieval only without BM25 exact-match constraints; (4) Category-level fallback — if query intent is classified as "shoes," return top-10 most popular shoes even with low relevance. Zero-result rate should be monitored per category; spikes indicate catalog gaps, not ranking failures.
 
-**How do you ensure the LTR model remains interpretable for product managers and business stakeholders?**
+**Q: How do you ensure the LTR model remains interpretable for product managers and business stakeholders?**
 Three mechanisms: (1) SHAP feature importance computed weekly on a 10K-sample hold-out set and published in an internal dashboard, showing the top-20 features and their average impact on rank score. (2) PDP (Partial Dependence Plots) for the 5 most important continuous features (e.g., product_ctr_7d vs rank score), showing the model's learned relationship. (3) Monotonicity constraints in XGBoost: constrain features like `product_avg_rating` and `product_review_count` to be monotonically increasing — the ranker cannot learn that a product with a 4.9 rating should rank below one with a 4.5 rating. This prevents the model from learning spurious negative correlations that would alarm stakeholders.
 
-**How do you handle long-tail queries that have very few clicks in training data?**
+**Q: How do you handle long-tail queries that have very few clicks in training data?**
 Long-tail queries (appearing <10 times in 30 days) are 60% of unique queries but 5% of total traffic. Strategies: (1) Dense retrieval is the primary mechanism for long-tail — it generalizes via semantic similarity even without query-specific training examples. (2) In LTR training, long-tail queries have high-variance labels (few clicks = noisy signal); minimum 10 click events required for a query to contribute to LTR training. (3) Query clustering: group semantically similar long-tail queries together for LTR training, treating the cluster as a single "meta-query." (4) The two-stage fallback ensures long-tail queries receive BM25 results as a safety net even if dense retrieval quality is low.
 
-**What is interleaving and why is it preferred over A/B testing for ranking evaluation?**
+**Q: What is interleaving and why is it preferred over A/B testing for ranking evaluation?**
 Interleaving presents a single merged list to the user where items from two competing ranking models are interleaved according to team-draft algorithm: model A picks its top unselected item, then model B, alternating until the list is full. User clicks on interleaved results indicate which model produced more clicked items. Interleaving detects ranking differences with 10-100x fewer user impressions than traditional A/B testing because each user serves as their own control — the same user sees items from both models in the same session. Sensitivity: interleaving can detect a 1% NDCG difference with 10K sessions vs A/B tests requiring 1M sessions for the same statistical power. Drawback: interleaving measures pairwise preference, not absolute business metrics; use A/B for final revenue and conversion validation.

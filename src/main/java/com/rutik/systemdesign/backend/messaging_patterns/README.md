@@ -451,28 +451,28 @@ public Order createOrder(CreateOrderRequest request) {
 
 ## 12. Interview Questions with Answers
 
-**What is the dual-write problem and how does the outbox pattern solve it?**
+**Q: What is the dual-write problem and how does the outbox pattern solve it?**
 The dual-write problem occurs when a service must write to two systems atomically — for example, update a database and publish a Kafka message. These two writes cannot be wrapped in a single ACID transaction spanning different systems. If the DB write succeeds but Kafka publish fails, the event is lost (downstream services miss the update). If Kafka publish succeeds but DB write fails (or rolls back), a phantom event is published for a transaction that never happened. The outbox pattern solves this by writing the event to an `outbox_events` table in the same DB transaction as the business data. A separate relay (polling or CDC) then reads the outbox and publishes to Kafka. The relay can retry until success — events are published at least once after the DB transaction commits.
 
-**What is exactly-once delivery and how do you achieve it with Kafka?**
+**Q: What is exactly-once delivery and how do you achieve it with Kafka?**
 Exactly-once delivery means each message is processed precisely once, producing the same result as if processed once — no duplicates, no losses. Achieving this requires coordination at producer, broker, and consumer levels. Producer: `enable.idempotence=true` (sequence numbers prevent duplicates from retries), transactional API for atomic multi-partition writes. Broker: `acks=all`, `min.insync.replicas=2`. Consumer: `isolation.level=read_committed` (skip uncommitted transactional messages). Application level: transactional inbox with deduplication table. Full end-to-end exactly-once within Kafka Streams is achievable with `processing.guarantee=exactly_once_v2`. Across service boundaries (Kafka + external DB), exactly-once requires the transactional outbox + inbox pattern.
 
-**What is a dead letter queue and how should you handle messages in it?**
+**Q: What is a dead letter queue and how should you handle messages in it?**
 A DLQ (dead letter topic/queue) receives messages that have exhausted all retry attempts. Messages end up in the DLQ because they are unprocessable: bad payload format, invalid data, downstream service unavailable for too long, or application bugs. DLQ consumers should: (1) log and alert on every DLQ message — DLQ depth > 0 is always an alert condition, (2) analyze root cause — is it a bad message, an application bug, or an infrastructure issue, (3) after fixing the root cause, replay DLQ messages back to the original topic in controlled batches. Never delete DLQ messages until you understand why they failed. Keep DLQ messages for at least 7 days.
 
-**What is the transactional inbox pattern and when is it necessary?**
+**Q: What is the transactional inbox pattern and when is it necessary?**
 The transactional inbox stores a record of processed message IDs in the same database as the application state, with the deduplication INSERT and business logic update in the same transaction. If the consumer crashes after processing but before committing the Kafka offset, Kafka will redeliver the message. Without an inbox, the business logic runs twice (double charge, double inventory decrement). With the inbox, the second processing attempt finds the message_id already in the inbox table and skips processing. It is necessary for non-idempotent operations: financial transactions, inventory decrements, counters, and any operation where "process twice" has different results than "process once."
 
-**What is Avro BACKWARD compatibility and why should you default to it?**
+**Q: What is Avro BACKWARD compatibility and why should you default to it?**
 BACKWARD compatibility means a newer schema version can read data written with an older schema version. When you add an optional field with a default value, new consumers can read old messages (the field defaults to null/0) and new messages (the field has a value). Deploy consumers first with the new schema (they can read old messages with defaults), then deploy producers that start writing the new field. This is the standard deployment order: consumers before producers. FORWARD compatibility means the opposite (old schema reads new data) — needed when you must deploy producers first. FULL is both directions and is the safest but most restrictive.
 
-**What is the difference between Kafka and RabbitMQ for event-driven architectures?**
+**Q: What is the difference between Kafka and RabbitMQ for event-driven architectures?**
 Kafka is log-based: messages are retained for a configured duration (default 7 days) and consumers maintain their own offset. Any consumer can replay from any offset. Kafka preserves order within a partition. Throughput is very high (1M+ msg/s per cluster). Kafka is ideal for event streaming, audit logs, and scenarios requiring replay. RabbitMQ is queue-based: messages are removed from the queue once acknowledged. Complex routing is available (topic exchanges, header exchanges). Throughput is lower (~50K msg/s) but latency is lower (push-based vs poll-based). RabbitMQ is better for task queues, RPC patterns, and complex routing requirements. Use Kafka when you need replay and high throughput; use RabbitMQ when you need complex routing and low latency task distribution.
 
-**How do you handle message ordering with Kafka when multiple consumers process in parallel?**
+**Q: How do you handle message ordering with Kafka when multiple consumers process in parallel?**
 Kafka guarantees ordering within a partition, not across partitions. To maintain order for a specific entity (e.g., all events for order-123), always use the entity ID as the partition key: `kafkaTemplate.send(topic, orderId.toString(), payload)`. All events for the same order will go to the same partition, processed in order by the same consumer thread. For consumers, within a partition, messages are processed sequentially. Across partitions, messages are processed in parallel. Never change the partition count of an existing topic — it changes the hash mapping and breaks ordering guarantees for existing consumers until they process through the re-partitioned data.
 
-**What happens when the Debezium CDC connector loses its replication slot?**
+**Q: What happens when the Debezium CDC connector loses its replication slot?**
 PostgreSQL creates a replication slot for Debezium to read WAL changes. If Debezium is down for too long, PostgreSQL cannot clean up WAL files because Debezium's slot is holding them. This causes disk space to fill up. If disk fills, PostgreSQL stops accepting writes — a production outage. Mitigations: (1) set `max_slot_wal_keep_size` in PostgreSQL to limit WAL retention per slot; (2) monitor replication slot lag — alert when lag exceeds 1GB; (3) if Debezium is down for more than a few hours, manually drop the slot and let Debezium reinitialize (this causes the outbox relay approach to be safer as a fallback). Always monitor `pg_replication_slots` in production.
 
 ---

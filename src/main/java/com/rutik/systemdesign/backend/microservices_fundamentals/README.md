@@ -376,49 +376,49 @@ A bug is reported: "the payment page is slow sometimes." You have 15 services. W
 
 ## 12. Interview Questions with Answers
 
-**What is the difference between a microservice and a monolith, and when would you choose one over the other?**
+**Q: What is the difference between a microservice and a monolith, and when would you choose one over the other?**
 A monolith is a single deployable unit where all business logic runs in one process sharing a database. A microservice architecture decomposes the system into independently deployable services, each owning its data. Choose a monolith for early-stage products, small teams (under 10 engineers), or when domain boundaries are not yet clear. Choose microservices when you have multiple teams needing independent deployments, well-understood domain boundaries, and varying scaling requirements. The modular monolith is a pragmatic middle ground.
 
-**What is the database-per-service pattern and why is it critical?**
+**Q: What is the database-per-service pattern and why is it critical?**
 Each service owns its own database and no other service accesses it directly. This is critical because it enforces loose coupling at the data layer. Without it, a schema change in one team's database breaks another team's queries, creating de facto deployment coupling. It is the hardest microservices rule to follow because it forces you to handle data aggregation at the API level, deal with eventual consistency, and implement patterns like sagas for cross-service transactions.
 
-**What is a distributed monolith and how do you avoid it?**
+**Q: What is a distributed monolith and how do you avoid it?**
 A distributed monolith is a system deployed as separate services but tightly coupled via synchronous call chains, shared databases, or shared code libraries. It has the worst properties of both architectures: the complexity of distributed systems with the coupling of a monolith. Avoid it by enforcing database-per-service, preferring asynchronous communication for non-blocking workflows, keeping shared libraries to pure utilities (no domain logic), and measuring actual deployment independence (can a team deploy without coordinating with another team?).
 
-**Explain the strangler fig pattern.**
+**Q: Explain the strangler fig pattern.**
 The strangler fig pattern migrates a monolith incrementally by routing new or extracted features behind an API gateway to new microservices, while the monolith handles remaining features. Over time, features are extracted one by one until the monolith is fully replaced. This avoids the risk of a big-bang rewrite. The key is to start with the strangler fig from day one — retroactively adding a gateway to a tightly coupled monolith is itself a large project.
 
-**How do you handle data consistency across services when you cannot use a single ACID transaction?**
+**Q: How do you handle data consistency across services when you cannot use a single ACID transaction?**
 Use the Saga pattern. In a choreography-based saga, each service publishes an event on success; downstream services listen and react, publishing their own events or compensation events on failure. In an orchestration-based saga, a central coordinator sends commands to services and handles compensation. The outbox pattern ensures events are reliably published: write the event to a local outbox table in the same transaction as the domain change, then relay the outbox to the message broker asynchronously. This guarantees at-least-once delivery without distributed transactions.
 
-**What is a bounded context in DDD and how does it map to a microservice?**
+**Q: What is a bounded context in DDD and how does it map to a microservice?**
 A bounded context is a boundary within which a domain model is consistent and unambiguous. The word "order" in the order context means one thing (items, shipping address, status); in the inventory context it may mean something else. Each bounded context should map to one microservice (or a small cluster of services). The mapping ensures teams have clear ownership and domain models do not bleed across service boundaries.
 
-**What is the difference between REST and gRPC for inter-service communication?**
+**Q: What is the difference between REST and gRPC for inter-service communication?**
 REST uses HTTP/1.1 or HTTP/2 with JSON. gRPC uses HTTP/2 with Protocol Buffers (binary serialization). gRPC is faster (binary encoding, header compression, multiplexing) and supports streaming. REST is easier to debug and more universally supported. Use gRPC for internal, high-throughput service-to-service calls where you control both sides. Use REST for public APIs or when client libraries in all languages are required. gRPC requires a schema (proto file), which enforces API contracts and enables code generation.
 
-**How do you decompose a monolith using business capabilities?**
+**Q: How do you decompose a monolith using business capabilities?**
 Identify what the business does, not how the code is organized. A typical e-commerce system has capabilities: product catalog, order management, payment processing, inventory, shipping, customer management, notifications, search. Each capability becomes a service candidate. Validate by asking: does this capability have a clear owner? Does it have well-defined inputs and outputs? Can it be deployed independently? Would different teams reasonably own it? If yes to all, it is a valid service boundary.
 
-**What is the two-pizza team rule and why does it matter for microservices?**
+**Q: What is the two-pizza team rule and why does it matter for microservices?**
 Amazon's rule: if a team cannot be fed by two pizzas (6-8 people), it is too large. In microservices, this means one team owns one service end-to-end: development, deployment, on-call. Too many people on one service creates coordination overhead. Too few and you cannot sustain the operational burden. The rule enforces that each service is small enough for a small team to own completely, driving autonomous deployment and clear accountability.
 
-**How do you handle a scenario where Service A needs data owned by Service B?**
+**Q: How do you handle a scenario where Service A needs data owned by Service B?**
 Option 1: Service A calls Service B's API at request time (synchronous). Simple but creates a runtime dependency — if B is down, A is degraded. Option 2: Service A subscribes to events from Service B and maintains a read-model (local cache of B's data). A is independent at request time but data is eventually consistent. Option 3: API composition at the gateway level aggregates data from A and B for the client. The right choice depends on consistency requirements: if A needs real-time data from B for a critical operation, use synchronous; if A needs reference data for display, use async with local read-model.
 
-**What are the main challenges when testing microservices?**
+**Q: What are the main challenges when testing microservices?**
 Unit testing individual services is straightforward. Integration testing is harder: you need contract tests (Pact) to verify service A's API calls match service B's contract without standing up both services. End-to-end testing requires a full environment with all services running. Consumer-driven contract testing (Pact) addresses the integration test problem: the consumer defines the contract, the provider verifies it, without both needing to be deployed simultaneously. Testcontainers enables integration tests with real databases and message brokers.
 
-**What is the purpose of an API gateway in a microservices architecture?**
+**Q: What is the purpose of an API gateway in a microservices architecture?**
 The API gateway is the single entry point for all clients. It handles cross-cutting concerns: routing (path to service mapping), authentication and authorization (JWT validation before requests reach services), rate limiting, SSL termination, request/response transformation, and observability. It prevents each individual service from re-implementing auth, rate limiting, and logging. A gateway also enables the BFF pattern (Backend For Frontend) where separate gateway instances serve mobile, web, and partner clients with tailored request/response shapes.
 
-**How do synchronous call chains cause latency problems in microservices?**
+**Q: How do synchronous call chains cause latency problems in microservices?**
 If Service A calls B, B calls C, C calls D, all synchronously, the total latency is the sum of all hops: 20ms + 15ms + 30ms + 25ms = 90ms plus overhead. A ten-hop chain with 20ms average per hop adds 200ms to every request — before any business logic. Solutions: fan-out parallel calls where possible (A calls B and C simultaneously if they are independent), use async messaging to decouple non-critical downstream processing, aggregate at the gateway level, or co-locate services that are always called together (which may indicate they belong in the same bounded context).
 
-**What is the outbox pattern and why is it needed?**
+**Q: What is the outbox pattern and why is it needed?**
 Without the outbox pattern, a service might save data to the database and then publish an event to Kafka. If the application crashes between the two operations, the data is saved but the event is never published — downstream services never learn of the change. The outbox pattern solves this by writing the event to an "outbox" table in the same local database transaction as the domain change. A separate relay process reads the outbox and publishes to Kafka. The relay guarantees at-least-once delivery. Consumers must be idempotent.
 
-**How do you observe and debug a microservices system in production?**
+**Q: How do you observe and debug a microservices system in production?**
 Three pillars: logs, metrics, traces. Logs: structured JSON logs with correlation ID (X-Correlation-ID) and service name in every line, aggregated to a central store (ELK, Loki). Metrics: each service exposes /actuator/prometheus; Prometheus scrapes and Grafana dashboards show latency, error rate, and throughput per service. Traces: Micrometer Tracing or OpenTelemetry generates a trace ID for each request, propagated to all downstream services via headers. Jaeger or Zipkin visualizes the full call tree with timing. Without all three, debugging a multi-service latency issue is nearly impossible.
 
 ---

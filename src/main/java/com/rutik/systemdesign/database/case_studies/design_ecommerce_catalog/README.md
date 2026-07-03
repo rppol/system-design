@@ -356,14 +356,14 @@ ORDER BY week;
 
 ## Interview Discussion Points
 
-**How do you prevent inventory oversell at 100K concurrent purchases?**
+**Q: How do you prevent inventory oversell at 100K concurrent purchases?**
 Two tiers: (1) Redis atomic DECR via Lua script for most products — the Lua script checks available quantity and decrements atomically. Sub-millisecond, handles 1M ops/second. Brief oversell possible if Redis restarts before PostgreSQL sync (configurable: AOF fsync=everysec = 1s max data loss). (2) PostgreSQL SELECT FOR UPDATE for high-demand, limited-inventory products (flash sale items, pre-orders). This serializes concurrent purchases at the DB level with absolute accuracy. The tradeoff: slower (5–10ms vs 0.5ms) and limited throughput (1K TPS per product vs unlimited in Redis). Mark these products with `strict_inventory=true` and route them to the PostgreSQL path.
 
-**How do you keep Elasticsearch consistent with PostgreSQL for 50M products?**
+**Q: How do you keep Elasticsearch consistent with PostgreSQL for 50M products?**
 Debezium CDC tails the PostgreSQL WAL and publishes change events to Kafka within 100ms. A Kafka consumer reads these events, fetches the complete product document from PostgreSQL (to denormalize all related fields: title, brand, pricing, inventory, attributes), and upserts into Elasticsearch. Typical end-to-end lag: 1–5 seconds. At 50K merchants × 100 updates/day = 5M updates/day = ~58 updates/second. Elasticsearch handles this comfortably (can index thousands/second). For zero-downtime mapping changes (e.g., adding a new facet field), use the index alias pattern: create new index v2, reindex 50M documents in background (hours), swap alias atomically.
 
-**How do you handle a merchant updating 1000 products simultaneously?**
+**Q: How do you handle a merchant updating 1000 products simultaneously?**
 Batch update: the merchant uploads a CSV. The API processes it as a bulk update job: (1) Validate all 1000 rows before writing any. (2) Upsert products in batches of 100 within individual transactions. (3) Each batch writes an outbox event. (4) Debezium picks up the changes. (5) Kafka consumer processes up to 100 events/second. All 1000 products appear in search within 10–15 seconds (1000/100 events × 1s CDC lag). The search index update is asynchronous — the merchant sees their products "updating" with a status indicator in the UI. This is acceptable because search results for the merchant's products are typically not shown to other users until the merchant explicitly publishes.
 
-**Why is JSONB used for product attributes instead of a normalized schema?**
+**Q: Why is JSONB used for product attributes instead of a normalized schema?**
 Product categories have wildly different attribute sets: laptops have RAM/CPU/screen size; shirts have color/size/material; furniture has dimensions/weight capacity. A normalized attribute schema (EAV: entity-attribute-value) requires a 3-table join for every attribute query and cannot be efficiently indexed for multi-attribute filtering. JSONB stores structured data with the flexibility of semi-structured schema and can be indexed with GIN (`CREATE INDEX ON product_attributes USING gin(attributes)`) for containment queries (`attributes @> '{"color": "red"}'`). For range queries on attributes (price < 500 within attributes), add a functional index on the specific attribute: `CREATE INDEX ON product_attributes ((attributes->>'weight_kg')::FLOAT)`.

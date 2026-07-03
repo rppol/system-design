@@ -428,40 +428,40 @@ Benefits:
 
 ## 12. Interview Questions with Answers
 
-**What is GraphQL and what problem does it solve?**
+**Q: What is GraphQL and what problem does it solve?**
 GraphQL is an API query language and runtime that lets clients specify exactly what data they need. It solves over-fetching (REST returns fixed response shapes with more data than needed) and under-fetching (needing multiple REST calls for a single view). Clients describe the shape of the data they want; the server returns exactly that structure. This makes GraphQL particularly useful for mobile clients and complex data models.
 
-**What is the N+1 problem in GraphQL and how do you solve it?**
+**Q: What is the N+1 problem in GraphQL and how do you solve it?**
 When resolving a list of objects with a related field (e.g., 10 users and their departments), each field resolver executes independently — causing 1 query for users and 10 queries for departments = 11 total. DataLoader solves this by batching all pending loads within a single request execution: after resolving all 10 users, DataLoader collects all 10 department IDs and fetches them in one SELECT IN query. DataLoader also caches within the request so duplicate IDs are fetched once.
 
-**How does GraphQL handle errors differently from REST?**
+**Q: How does GraphQL handle errors differently from REST?**
 GraphQL always returns HTTP 200, with a `data` field for results and an `errors` array for errors. Errors include a message, locations in the query, and a path to the failing field. Partial responses are possible: some fields may resolve successfully while others fail. This differs fundamentally from REST where HTTP status codes communicate success/failure. For monitoring, you must parse the errors array, not rely on HTTP status codes.
 
-**What are GraphQL subscriptions and how are they implemented?**
+**Q: What are GraphQL subscriptions and how are they implemented?**
 Subscriptions are real-time operations where the server pushes updates to clients. They are typically implemented over WebSocket (using graphql-ws or subscriptions-transport-ws protocols). The client subscribes with a subscription operation; the server publishes events when underlying data changes (via a pub/sub system like Redis). In production, you need a stateful connection manager — WebSocket connections cannot be horizontally scaled without shared state (Redis pub/sub or similar).
 
-**What is the difference between schema stitching and Apollo Federation?**
+**Q: What is the difference between schema stitching and Apollo Federation?**
 Schema stitching merges multiple GraphQL schemas at the gateway level using shared types and remote execution. It is older, requires more manual configuration, and can create tight coupling. Apollo Federation is a specification for a distributed graph where each service owns part of the schema and can extend types defined in other services using @key and @external directives. The Apollo Router (or Gateway) composes them automatically. Federation is the modern approach for microservices.
 
-**How do you prevent abuse of GraphQL with malicious queries?**
+**Q: How do you prevent abuse of GraphQL with malicious queries?**
 Depth limiting (MaxQueryDepthInstrumentation — reject queries deeper than N levels), complexity limiting (MaxQueryComplexityInstrumentation — reject queries with score > threshold, where each field has a weight), query whitelisting / persisted queries (only allow registered query hashes in production), rate limiting (by IP or user), and disabling introspection in production. Never run GraphQL without at least depth and complexity limits.
 
-**What are persisted queries and why are they used?**
+**Q: What are persisted queries and why are they used?**
 Persisted queries associate a hash (SHA-256 of the query string) with the full query on the server. Clients send only the hash at runtime. Benefits: (1) reduced request size; (2) GET requests with hash + variables are cacheable by CDN (unlike POST with full query body); (3) security — reject any query not in the registry, preventing query injection; (4) performance — queries can be pre-validated and pre-analyzed. Used in production by most large GraphQL deployments.
 
-**How do you implement pagination in GraphQL?**
+**Q: How do you implement pagination in GraphQL?**
 Relay-style connections are the standard: a Connection type with edges (cursor + node) and pageInfo (hasNextPage, endCursor). Query: `users(first: 20, after: "cursor")`. This enables cursor-based pagination, consistent even with concurrent writes. Simple pagination: `users(limit: 20, offset: 0)` is simpler but has offset performance problems at scale. Use Relay connections for user-facing paginated lists; offset for admin interfaces.
 
-**What is GraphQL introspection and should you disable it?**
+**Q: What is GraphQL introspection and should you disable it?**
 Introspection allows clients to query the schema itself: what types exist, what fields they have, what arguments each field takes. It powers GraphiQL, Apollo Sandbox, and code generators. In production, disable it for public APIs to prevent schema reconnaissance: `GraphQL.newGraphQL().introspection(false)`. For internal APIs with authenticated access, it's acceptable to leave enabled. Always ensure query depth limits are set before enabling introspection to prevent introspection-based DoS.
 
-**How does GraphQL handle schema evolution compared to REST?**
+**Q: How does GraphQL handle schema evolution compared to REST?**
 GraphQL schemas evolve additively: add new fields, types, and operations freely — existing clients are unaffected (they only request what they know about). Deprecate old fields with @deprecated. Never remove a field without checking usage metrics first. Breaking changes (removing fields, changing types, renaming arguments) require versioning. Unlike REST, GraphQL has no built-in versioning mechanism — additive evolution is the primary strategy. Apollo Studio tracks field usage to safely identify when deprecated fields can be removed.
 
-**What is the difference between queries and mutations in GraphQL execution?**
+**Q: What is the difference between queries and mutations in GraphQL execution?**
 Queries can execute root-level resolvers in parallel (the spec allows this for optimization). Mutations execute sequentially — the spec requires that each root-level mutation completes before the next starts. This ensures mutations like `createOrder` followed by `sendConfirmation` execute in order. Nested resolvers within a single mutation execute normally (DataLoader still batches). For multiple independent mutations, clients should send separate requests.
 
-**How do you design a GraphQL schema for a social network feed?**
+**Q: How do you design a GraphQL schema for a social network feed?**
 Define a FeedItem interface with implementing types (Post, Story, Share, AdUnit). The feed query: `feed(userId: ID!, first: Int!, after: String): FeedConnection!` uses cursor-based pagination. FeedItems include only the fields needed for the feed list view; full post content is in a separate Post type fetched on demand. Use DataLoader for author resolution, reaction counts (batched to a counting service), and media metadata. Subscriptions for real-time new items.
 
 ---

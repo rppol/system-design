@@ -272,67 +272,67 @@ Q&As ordered by interview frequency: gotchas and traps first, internals second, 
 
 ---
 
-**Why must the field in DCL Singleton be volatile — what breaks without it?**
+**Q: Why must the field in DCL Singleton be volatile — what breaks without it?**
 
 Without `volatile`, the JVM may reorder the instructions: `instance = new Singleton()` can be seen by another thread as (1) allocate memory, (2) assign reference to `instance`, (3) invoke constructor — steps 2 and 3 can be reordered. A second thread checks `instance != null` after step 2 but before step 3, sees a non-null reference, and uses a partially-constructed object. `volatile` inserts a memory barrier that prevents this reordering. This is the pre-Java 5 DCL bug; `volatile` fixes it in Java 5+ via the JMM.
 
 ---
 
-**Enum Singleton vs Holder idiom vs DCL + volatile — which is "correct" and when do you use each?**
+**Q: Enum Singleton vs Holder idiom vs DCL + volatile — which is "correct" and when do you use each?**
 
 Enum (Effective Java Item 3) is the definitive answer: thread-safe by JVM guarantee, handles serialization and reflection attacks automatically, and is the simplest. Holder idiom (`private static class Holder`) is the preferred choice when enum is not possible (e.g., the class has to extend another class, or the singleton must implement a more complex initialization). DCL + volatile is correct but verbose — it exists for cases where the singleton must be lazily initialized AND the class cannot use enum or Holder for some reason. In practice: enum if possible; Holder if you need a class-based singleton.
 
 ---
 
-**Producer-Consumer with `wait()`/`notify()`: what is the spurious wakeup bug?**
+**Q: Producer-Consumer with `wait()`/`notify()`: what is the spurious wakeup bug?**
 
 `notify()` wakes exactly one thread, but a thread woken by `notify()` should re-check the condition — not assume the condition is true — because the condition may have changed between the `notify()` call and the awakened thread actually running. More critically, `notify()` with multiple consumers can wake the wrong thread (a producer waking a producer instead of a consumer, deadlocking the system). Fix: always use `notifyAll()` and re-check the condition in a `while` loop, not an `if` statement. `BlockingQueue` handles all of this internally — prefer it over raw `wait()`/`notifyAll()`.
 
 ---
 
-**ThreadPoolExecutor: when does it create new threads vs queue tasks vs reject?**
+**Q: ThreadPoolExecutor: when does it create new threads vs queue tasks vs reject?**
 
 With `corePoolSize=5`, `maxPoolSize=10`, `queueCapacity=20`: (1) if active threads < corePoolSize, create a new core thread even if the queue has space; (2) if active threads >= corePoolSize, add to queue; (3) if queue is full AND active threads < maxPoolSize, create a new non-core thread; (4) if queue is full AND active threads >= maxPoolSize, apply rejection policy. Counter-intuitive: the pool doesn't grow beyond corePoolSize until the queue is FULL. If corePoolSize=5 and maxPoolSize=50 with an unbounded queue, max threads stay at 5 forever.
 
 ---
 
-**What is write starvation in Read-Write Lock and how does the fairness parameter fix it?**
+**Q: What is write starvation in Read-Write Lock and how does the fairness parameter fix it?**
 
 In an unfair `ReentrantReadWriteLock`, new read lock requests can be granted even when a writer is waiting — because readers don't block other readers. If reads are continuous, writers wait indefinitely (starvation). Fix: `new ReentrantReadWriteLock(true)` (fair mode) uses a FIFO ordering: once a writer is waiting, new readers must queue behind it. Cost: throughput drops because reads that could be concurrent are now serialized behind the waiting writer. `StampedLock` provides optimistic reads as an alternative: read without acquiring the lock, then validate; if invalid, upgrade to a full read lock.
 
 ---
 
-**Thread pool rejection policies — when does each apply?**
+**Q: Thread pool rejection policies — when does each apply?**
 
 `AbortPolicy` (default): throws `RejectedExecutionException`. Use when the caller must know the task was rejected. `CallerRunsPolicy`: the submitting thread executes the task directly, providing natural backpressure (the caller slows down). Use when you'd rather slow the producer than lose tasks. `DiscardPolicy`: silently drops the task. Use only when tasks are truly expendable (e.g., monitoring samples). `DiscardOldestPolicy`: drops the oldest queued task and retries. Use when newest tasks are more valuable than oldest (e.g., real-time position updates).
 
 ---
 
-**Virtual threads (Java 21): do these concurrency patterns still apply?**
+**Q: Virtual threads (Java 21): do these concurrency patterns still apply?**
 
 Singleton and Read-Write Lock: still fully relevant — virtual threads have the same memory visibility concerns and can still race on shared state. Producer-Consumer backpressure: still needed for CPU-bound consumers (virtual threads don't help with CPU saturation). Thread Pool: partially replaced — for I/O-bound tasks, a virtual thread per task is now viable. `Executors.newVirtualThreadPerTaskExecutor()` replaces a fixed thread pool for I/O tasks. But for CPU-bound work with known parallelism needs, a fixed platform-thread pool (sized to CPU cores) is still preferred.
 
 ---
 
-**How does `BlockingQueue` implement both the Producer-Consumer and the backpressure patterns?**
+**Q: How does `BlockingQueue` implement both the Producer-Consumer and the backpressure patterns?**
 
 `BlockingQueue.put()` blocks the producer when the queue is at capacity. `BlockingQueue.take()` blocks the consumer when the queue is empty. The bounded capacity (`new ArrayBlockingQueue<>(1000)`) acts as a buffer: it absorbs speed bursts. When the buffer is full, `put()` blocks — the producer slows to consumer speed automatically (backpressure). `offer(item, timeout)` gives producers a timeout to avoid indefinite blocking. `LinkedBlockingQueue` with no capacity limit is an unbounded queue — it provides buffering but no backpressure and can grow until OOM under sustained producer excess.
 
 ---
 
-**ForkJoinPool vs ThreadPoolExecutor — when do you use each?**
+**Q: ForkJoinPool vs ThreadPoolExecutor — when do you use each?**
 
 `ThreadPoolExecutor`: general-purpose; best for independent tasks of uniform size (HTTP requests, DB queries, event processing). `ForkJoinPool`: designed for divide-and-conquer tasks that recursively fork subtasks and join results. Uses work-stealing: idle threads steal tasks from busy threads' queues, keeping all CPUs busy even when subtask sizes vary. `ForkJoinPool.commonPool()` backs `CompletableFuture.supplyAsync()` and parallel streams. Use `ForkJoinPool` for recursive computation (merge sort, tree traversal, parallel streams); use `ThreadPoolExecutor` for independent task execution.
 
 ---
 
-**How do you detect thread safety issues in code review?**
+**Q: How do you detect thread safety issues in code review?**
 
 Look for: (1) mutable shared fields accessed from multiple threads without synchronization or `volatile`; (2) check-then-act patterns that aren't atomic (`if (map.containsKey(k)) map.put(k, v)` — use `putIfAbsent`); (3) iterating over a shared collection while another thread modifies it; (4) `SimpleDateFormat` or `Calendar` shared as a static field (not thread-safe); (5) lazy initialization without `volatile` or synchronization. Tools: SpotBugs `@GuardedBy` annotations, ErrorProne checks, and `jcstress` for JMM correctness verification.
 
 ---
 
-**What is the `synchronized` pinning problem with virtual threads and how do you avoid it?**
+**Q: What is the `synchronized` pinning problem with virtual threads and how do you avoid it?**
 
 When a virtual thread enters a `synchronized` block, it is pinned to its carrier platform thread for the duration of the block. If the virtual thread then blocks on I/O inside the `synchronized` block, the carrier platform thread is also blocked — eliminating the scalability benefit of virtual threads. On Java 21, this means a `synchronized`-heavy codebase does not benefit from `newVirtualThreadPerTaskExecutor()`. Fix: replace `synchronized` with `ReentrantLock`. `ReentrantLock.lock()`/`unlock()` allows the virtual thread to unmount from the carrier while waiting, freeing the carrier to run other virtual threads.
 

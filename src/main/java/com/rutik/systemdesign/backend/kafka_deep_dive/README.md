@@ -545,58 +545,58 @@ A streaming pipeline had consistent 0-lag during normal operations. During a Bla
 
 ## 12. Interview Questions with Answers
 
-**What is the role of a partition in Kafka and how does it enable parallelism?**
+**Q: What is the role of a partition in Kafka and how does it enable parallelism?**
 A partition is the fundamental unit of parallelism and ordering in Kafka. Each topic is split into N partitions, each an independent ordered log stored on a single broker (the partition leader). Within a consumer group, each partition is consumed by exactly one consumer at a time. Therefore, a topic with 12 partitions can be consumed by at most 12 consumers in parallel within one group. Ordering is guaranteed within a partition but not across partitions. Choose a partition key (e.g., orderId) that maps the records you need ordered together to the same partition.
 
-**What is the ISR (In-Sync Replicas) and how does it relate to acks=all?**
+**Q: What is the ISR (In-Sync Replicas) and how does it relate to acks=all?**
 The ISR is the set of replicas that are fully caught up with the partition leader within `replica.lag.time.max.ms` (default 30 seconds). With `acks=all`, the producer waits for all replicas in the ISR to confirm the write. If `min.insync.replicas=2` and the ISR has 3 replicas, all 3 must confirm. If one broker is slow and falls out of the ISR, the producer only waits for the remaining ISR members (as long as ISR size >= min.insync.replicas). If the ISR shrinks below `min.insync.replicas`, the producer receives a `NotEnoughReplicasException`.
 
-**What is the difference between at-most-once, at-least-once, and exactly-once delivery semantics in Kafka?**
+**Q: What is the difference between at-most-once, at-least-once, and exactly-once delivery semantics in Kafka?**
 At-most-once commits the offset before processing — if processing fails, the message is lost but never duplicated. At-least-once commits after processing — if the consumer crashes after processing but before committing, the message is reprocessed on restart, potentially causing duplicates. Exactly-once is achieved by combining three features: `enable.idempotence=true` on the producer (eliminates duplicates caused by producer retries), `transactional.id` + `producer.beginTransaction()` / `commitTransaction()` for atomic multi-partition writes, and `isolation.level=read_committed` on consumers so they only see committed data. Without all three, you cannot guarantee exactly-once.
 
-**What does enable.idempotence=true do in the producer?**
+**Q: What does enable.idempotence=true do in the producer?**
 The idempotent producer assigns a producer ID (PID) and a monotonically increasing sequence number to each message. The broker tracks the last sequence number per (PID, partition). If the producer retries a message (e.g., due to a network timeout), the broker detects the duplicate sequence number and discards the duplicate, returning success to the producer. This eliminates duplicates caused by producer retries within a single producer session. Note: the PID is reassigned on producer restart, so idempotence is per-session only. For cross-session deduplication, use transactional producers or consumer-side idempotency.
 
-**What is log compaction and when would you use it instead of the default delete policy?**
+**Q: What is log compaction and when would you use it instead of the default delete policy?**
 Log compaction retains the latest value for each record key indefinitely, deleting older records with the same key. A null value (tombstone) causes the key to be deleted entirely after the compaction runs. Use it for topics that represent current state rather than event history — for example, a `product.prices` topic where only the latest price matters, or a Kafka Streams changelog topic backing a state store. Use the delete policy when events are time-bounded and older events are irrelevant after a retention period.
 
-**What is the difference between KStream and KTable in Kafka Streams?**
+**Q: What is the difference between KStream and KTable in Kafka Streams?**
 A KStream represents an unbounded stream of events where each record is an independent fact. Multiple records with the same key coexist and are all processed. A KTable represents a changelog stream where each record is an update to a keyed value — only the latest value per key matters, similar to a database table. Internally, a KTable is backed by a state store (RocksDB by default). Use KStream for event processing (every occurrence matters). Use KTable for current-state lookups (latest value per key). A KStream can be aggregated into a KTable.
 
-**What is a GlobalKTable and when should you use it instead of a KTable?**
+**Q: What is a GlobalKTable and when should you use it instead of a KTable?**
 A GlobalKTable is replicated to every Kafka Streams instance in the application, regardless of which partitions that instance is assigned. This means any instance can join any record against a GlobalKTable without co-partitioning requirements. Use it for small-to-medium reference data (country codes, product catalog with <100k entries) that every instance needs. Never use GlobalKTable for large tables — the full dataset is stored locally on every instance. For large tables with co-partitioned keys, use a regular KTable join.
 
-**Explain the producer batching mechanism and how to tune it.**
+**Q: Explain the producer batching mechanism and how to tune it.**
 The producer accumulates records in an in-memory batch per partition (up to `batch.size` bytes, default 16384 = 16 KB). When the batch is full or `linger.ms` elapses (default 0), the batch is sent. With `linger.ms=0`, each record is sent as soon as possible (low latency, poor batching). With `linger.ms=5`, the producer waits 5ms for additional records to fill the batch (higher latency, better throughput and compression ratio). For throughput-optimized pipelines: set `batch.size=65536` (64 KB), `linger.ms=5–20`, and enable compression. For latency-sensitive pipelines: keep `linger.ms` at 0–1.
 
-**What is cooperative-sticky rebalancing and why is it better than eager rebalancing?**
+**Q: What is cooperative-sticky rebalancing and why is it better than eager rebalancing?**
 In eager rebalancing, all consumers in a group revoke all partitions simultaneously, then the coordinator reassigns all partitions. This causes a full stop-the-world pause — no consumer processes any message during the rebalance, which can take 10–30+ seconds in large groups. In cooperative-sticky rebalancing (`CooperativeStickyAssignor`), only the partitions that need to move are revoked, and only the affected consumers pause briefly. Unaffected consumers continue processing uninterrupted. The rebalance runs in multiple rounds. This dramatically reduces the impact of rebalancing caused by rolling deployments or scaling events.
 
-**What is the Schema Registry and what compatibility modes does it support?**
+**Q: What is the Schema Registry and what compatibility modes does it support?**
 The Schema Registry is a centralized service that stores and enforces schemas for Kafka messages. Producers register a schema and receive a numeric schema ID; the ID and serialized bytes are published to Kafka. Consumers fetch the schema by ID and deserialize. Compatibility modes: BACKWARD — new schema can read data written with old schema (safe: add optional fields with defaults); FORWARD — old schema can read data written with new schema (safe: only add fields that old consumers will ignore); FULL — both backward and forward; BACKWARD_TRANSITIVE / FORWARD_TRANSITIVE / FULL_TRANSITIVE — check against all historical versions, not just the latest. Use FULL_TRANSITIVE for the strongest guarantee.
 
-**How does Kafka handle message ordering guarantees?**
+**Q: How does Kafka handle message ordering guarantees?**
 Kafka guarantees order within a single partition. Records with the same partition key always land in the same partition (hash(key) % numPartitions) and are consumed in order by the assigned consumer. There is no ordering guarantee across partitions. To maintain order for an entity (e.g., all events for order-123), always use the entity ID as the partition key. With `enable.idempotence=true`, setting `max.in.flight.requests.per.connection=5` (up from 1) is safe because the idempotent producer reorders retried batches correctly using sequence numbers.
 
-**What is the purpose of the transaction.id configuration in the producer?**
+**Q: What is the purpose of the transaction.id configuration in the producer?**
 The `transaction.id` is a static, application-assigned identifier that enables the broker to fence zombie producers. If a producer instance crashes and a new instance starts with the same `transaction.id`, the broker increments the producer epoch and rejects writes from the old instance (the zombie). This prevents two producer instances from writing to the same transactional stream simultaneously, which would break the exactly-once guarantee. The `transaction.id` must be unique per partition subset the producer writes to and stable across restarts.
 
-**How would you implement a consumer that processes messages exactly once, end-to-end?**
+**Q: How would you implement a consumer that processes messages exactly once, end-to-end?**
 You need: producer-side EOS (`enable.idempotence=true`, `transactional.id`, `acks=all`) to guarantee the event is written exactly once to Kafka. Consumer-side `isolation.level=read_committed` so the consumer only reads committed transactional records. If the consumer writes results to Kafka (Kafka-to-Kafka), use consumer-producer transactions: `consumer.poll()`, process, `producer.beginTransaction()`, produce result, send offsets with `producer.sendOffsetsToTransaction(offsets, groupMetadata)`, `producer.commitTransaction()`. This atomically commits both the result and the offset. If the consumer writes to an external database, use idempotent upserts keyed on the Kafka record's offset+partition as the idempotency key.
 
-**What metrics should you monitor in a production Kafka deployment?**
+**Q: What metrics should you monitor in a production Kafka deployment?**
 Producer metrics: `record-error-rate` (should be 0), `record-send-rate`, `request-latency-avg`. Consumer metrics: consumer group lag per partition (most critical — alert at 10k+ records), `fetch-rate`, `commit-rate`. Broker metrics: `UnderReplicatedPartitions` (should be 0 — indicates ISR degradation), `ActiveControllerCount` (should be 1), `OfflinePartitionsCount` (should be 0), disk utilization, network throughput, `RequestHandlerAvgIdlePercent` (below 30% indicates broker is overloaded). Topic metrics: message rate per partition, bytes in/out per broker.
 
-**What is the difference between consumer group rebalancing and partition reassignment?**
+**Q: What is the difference between consumer group rebalancing and partition reassignment?**
 Consumer group rebalancing is a runtime event triggered when a consumer joins or leaves a group, or when partition count changes. It redistributes partition assignments among the live consumers in the group without moving data. Partition reassignment (via `kafka-reassign-partitions.sh` or Admin API) is an administrative operation that moves partition replicas between brokers — it physically copies partition data to new brokers. Partition reassignment is used for broker decommissioning, rack-aware rebalancing, or restoring replication factor after broker failure.
 
-**How does KRaft mode change Kafka's architecture compared to ZooKeeper-based Kafka?**
+**Q: How does KRaft mode change Kafka's architecture compared to ZooKeeper-based Kafka?**
 In ZooKeeper-based Kafka, ZooKeeper manages controller election, stores topic metadata, broker registrations, and consumer group offsets (in older versions). The active controller is a single broker elected via ZooKeeper. In KRaft mode, a subset of brokers designated as controllers form a Raft quorum. The active controller is elected via Raft consensus. All cluster metadata is stored in an internal `__cluster_metadata` topic replicated via the Raft log. Eliminating ZooKeeper removes an external operational dependency, reduces the number of processes to manage, improves controller failover speed from seconds to sub-seconds, and removes the ~200k partition scalability limit that ZooKeeper imposed.
 
-**What is the significance of the linger.ms and batch.size settings together?**
+**Q: What is the significance of the linger.ms and batch.size settings together?**
 These two settings jointly control when the producer sends a batch. `batch.size` sets the maximum size of a batch in bytes — the batch is sent immediately when full. `linger.ms` sets the maximum time the producer waits for the batch to fill before sending regardless of size. They work together: with `batch.size=64KB` and `linger.ms=5`, the producer sends when either 64KB is accumulated OR 5ms elapses, whichever comes first. At high throughput, batches fill quickly (batch.size dominates — near-zero extra latency). At low throughput, linger.ms governs (adds up to 5ms latency but groups more records together for compression efficiency). Setting both `linger.ms=0` and a large `batch.size` is counterproductive — batches will rarely fill.
 
-**How do you monitor and alert on consumer lag in production?**
+**Q: How do you monitor and alert on consumer lag in production?**
 Consumer lag = Log End Offset - Consumer Committed Offset per partition. Monitor it via JMX (`kafka.consumer:type=consumer-fetch-manager-metrics,client-id=*,attribute=records-lag-max`), Burrow (LinkedIn's consumer lag monitor), or by querying the Kafka Admin API. Export to Prometheus via the Kafka JMX Exporter. Set Grafana alerts: warn at 10,000 records lag, critical at 100,000. For Kubernetes deployments, use KEDA (Kubernetes Event-Driven Autoscaling) with the Kafka scaler to automatically scale consumer pod count based on lag. Treat lag as a latency SLA — if your SLA is 30-second processing freshness, 300,000 records at 10,000 records/sec processing speed means 30 seconds of lag before SLA breach.
 
 ---

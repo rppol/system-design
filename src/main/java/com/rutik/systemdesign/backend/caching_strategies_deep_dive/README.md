@@ -442,46 +442,46 @@ Cache invalidation service:
 
 ## 12. Interview Questions with Answers
 
-**What is cache-aside and how does it differ from read-through?**
+**Q: What is cache-aside and how does it differ from read-through?**
 Cache-aside (lazy loading): the application checks the cache, handles miss by fetching from DB and populating the cache. The application controls all cache interactions. Read-through: the cache itself handles misses by calling the underlying data store — the application only interacts with the cache. Cache-aside gives finer control (only populate what you need); read-through simplifies application code but requires a cache that can call the data store.
 
-**What is a cache stampede (thundering herd) and how do you prevent it?**
+**Q: What is a cache stampede (thundering herd) and how do you prevent it?**
 A cache stampede occurs when a popular cached item expires simultaneously and many concurrent requests all miss the cache, all query the database in parallel, overwhelming it. Prevention: (1) Mutex lock — only one request fetches; others wait and read the result. (2) Probabilistic early expiry (XFetch) — randomly refresh before expiry so the stampede is avoided proactively. (3) Stale-while-revalidate — serve stale content while refreshing in the background.
 
-**What Redis data structures would you use for a social media feed?**
+**Q: What Redis data structures would you use for a social media feed?**
 Sorted Set (ZSet) per user: each feed item's ID is the member, timestamp is the score. ZADD for adding new items, ZREVRANGE for reading the most recent N items, ZREMRANGEBYSCORE for removing old items. For large feeds: limit the ZSet to the last 1,000 items. TRIM with ZREMRANGEBYRANK after insert. User ID as part of the key: `feed:{userId}`.
 
-**Explain the difference between LRU and LFU eviction.**
+**Q: Explain the difference between LRU and LFU eviction.**
 LRU (Least Recently Used) evicts the item that was accessed least recently — it assumes recently accessed items will be accessed again. LFU (Least Frequently Used) evicts the item accessed least often — it handles cases where an item was accessed frequently historically but is now rarely needed. LFU is better for skewed access patterns where a small set of hot items dominate. LRU is better for temporal locality (recent items tend to be accessed again soon).
 
-**How do you invalidate a cache when data changes?**
+**Q: How do you invalidate a cache when data changes?**
 (1) TTL-based: set a short TTL; stale data is eventually evicted. Simple but allows staleness window. (2) Event-driven: the write path explicitly deletes/updates the cache key. Strong consistency but requires all write paths to be aware of the cache. (3) CDC (Change Data Capture): a background process (Debezium) reads DB change logs and invalidates cache keys asynchronously. Decouples invalidation from write path. (4) Write-through: cache and DB always updated together — strongest consistency.
 
-**What is a hot key in Redis and how do you solve it?**
+**Q: What is a hot key in Redis and how do you solve it?**
 A hot key is a single Redis key receiving disproportionately high traffic (millions of ops/second). Redis is single-threaded — one key can only be processed as fast as one core allows (~100k simple ops/s). Mitigations: (1) Local read-through cache: each app instance caches the hot key in-process for 1 second, greatly reducing Redis load. (2) Key replication: write to `hotkey:1`, `hotkey:2`, ..., `hotkey:N`; reads randomly pick one replica. (3) Redis Cluster: shard the hotkey across multiple slots. For write-heavy hot keys (counters), use local aggregation and periodic sync.
 
-**What is the difference between Redis standalone, Sentinel, and Cluster?**
+**Q: What is the difference between Redis standalone, Sentinel, and Cluster?**
 Standalone: single instance, simple, not HA. Sentinel: monitoring/failover system — N Sentinel processes watch a primary+replicas; if primary dies, Sentinel elects a replica as new primary. Applications use the Sentinel endpoint for transparent failover. No horizontal scaling. Cluster: shards data across multiple primary nodes (16384 hash slots). Horizontal scale for both read and write. Requires client-side cluster awareness. Use Sentinel for HA with simple data; Cluster for horizontal scaling.
 
-**When would you use a local in-process cache vs Redis?**
+**Q: When would you use a local in-process cache vs Redis?**
 Local cache (Caffeine): latency ~100 nanoseconds vs Redis ~1ms. Use for immutable or rarely-changing data (country codes, feature flags, configuration). The cache is per-instance — no sharing across instances. Cache consistency requires invalidation broadcast (Redis Pub/Sub) when data changes. Redis: use for data that must be consistent across instances (session data, rate limit counters, shared state). The network hop (~1ms) is acceptable for most use cases.
 
-**What is write-behind (write-back) caching and when is it appropriate?**
+**Q: What is write-behind (write-back) caching and when is it appropriate?**
 Write-behind: the application writes to the cache, and the cache writes to the database asynchronously (batched, with delay). The application gets near-instant write acknowledgment. Appropriate for: write-heavy workloads where some data loss is acceptable (analytics events, session data), or writes that can be batched efficiently (many small writes merged into one bulk insert). Not appropriate for: financial transactions, orders, any data where loss is unacceptable.
 
-**How does the XFetch algorithm prevent cache stampedes?**
+**Q: How does the XFetch algorithm prevent cache stampedes?**
 XFetch (probabilistic early expiry) triggers cache refresh before the item expires. The probability of early refresh increases as the item approaches expiry: P(refresh) = -β * δ * ln(U) where β = tuning factor (default 1), δ = time to recompute the value, U = uniform random [0,1). As remaining TTL decreases, ln(U) must be smaller (U closer to 1) to trigger refresh — meaning early refresh becomes more likely. Only one request triggers early refresh (the one that "wins the lottery"). All others still get the cached value. No lock needed, no stampede.
 
-**What cache invalidation strategy does Stripe use for their API?**
+**Q: What cache invalidation strategy does Stripe use for their API?**
 Stripe uses event-driven invalidation: when an object (charge, customer, subscription) is updated, the write handler explicitly evicts the cache key. They also use short TTLs (60–300 seconds) as a safety net. For read paths, they use cache-aside. For their rate limiting implementation, they use Redis Lua scripts for atomic sliding window counters. They do not use write-through because payment objects have complex consistency requirements.
 
-**How would you design caching for product inventory counts?**
+**Q: How would you design caching for product inventory counts?**
 Inventory counts must be accurate (cannot oversell). Options: (1) Cache with write-through: all inventory decrements update both DB and cache atomically (using a DB transaction + cache update). (2) Don't cache inventory counts — read from DB with SELECT FOR UPDATE during checkout. (3) Cache with short TTL (5 seconds) for display purposes; always verify from DB before deducting. (4) Redis atomic DECR for inventory with a background sync to DB — Redis as the source of truth for inventory. Option 4 is used by high-scale systems (Redis DECR is atomic, preventing oversell at cache level).
 
-**What is the Vary header in HTTP caching and how does it relate to backend caches?**
+**Q: What is the Vary header in HTTP caching and how does it relate to backend caches?**
 The HTTP Vary header tells CDNs/proxies to cache separate responses based on specific request headers. `Vary: Accept-Encoding` means: cache one version for gzip clients and one for uncompressed. This applies to CDN/proxy caches. Backend application caches (Redis) do not use HTTP Vary — but the same concept applies: a product response for user A (with their discount) should not be returned for user B. Include the user-specific factors in the cache key: `product:{id}:user:{userId}` for personalized responses, or `product:{id}` for public responses.
 
-**How do you design a cache for user authentication tokens?**
+**Q: How do you design a cache for user authentication tokens?**
 Cache: `session:{token_hash}` → `{userId, permissions, expires_at}`. TTL = token expiry time. On each request: check cache first (Redis GET); if hit, verify expires_at and use userId. If miss: validate token cryptographically (JWT signature) or look up in DB (opaque token). Revocation: when token is revoked, delete from cache immediately. For JWT: maintain a revocation list in Redis (bloom filter for efficiency: check if token hash is in revocation set before signature verification). Cache hit rate should be >99% — nearly every authenticated request reuses a recently checked token.
 
 ---

@@ -389,31 +389,31 @@ ThreadPoolExecutor cpuPool = new ThreadPoolExecutor(
 
 ## 12. Interview Questions with Answers
 
-**How do you size a thread pool for an IO-bound service?**
+**Q: How do you size a thread pool for an IO-bound service?**
 Use the formula: N = N_cpu * (1 + W/C) where W is average wait time and C is average CPU time per request. For a typical service with 50ms database wait and 5ms processing on an 8-core server: N = 8 * (1 + 10) = 88 threads. This keeps all CPU cores busy while threads are waiting for I/O. For virtual threads (Java 21), you do not need to size a pool — one virtual thread per request is the model, and the JVM manages carrier thread allocation.
 
-**What is the difference between thenApply and thenCompose?**
+**Q: What is the difference between thenApply and thenCompose?**
 thenApply transforms a CompletableFuture's result with a synchronous function: CF<A> → CF<B>. thenCompose chains an asynchronous function that itself returns a CompletableFuture: CF<A> → CF<B> (where the function returns CF<B>). If you use thenApply with an async function, you get CF<CF<B>> — a nested future that requires .join() to unwrap. thenCompose flattens this: always use thenCompose for functions that return CompletableFuture.
 
-**What is virtual thread pinning and how do you detect it?**
+**Q: What is virtual thread pinning and how do you detect it?**
 Virtual thread pinning occurs when a virtual thread is inside a synchronized block (or synchronized method). The JVM cannot unmount a virtual thread from its carrier (platform) thread while the carrier holds the object monitor. The carrier thread blocks until the synchronized block exits. With many pinned virtual threads, carrier threads are all blocked, reducing throughput to platform-thread levels. Detection: `-Djdk.tracePinnedThreads=full` logs pinning events; JFR `jdk.VirtualThreadPinned` event records them. Fix: replace synchronized with ReentrantLock.
 
-**What is the bulkhead pattern and how does it prevent cascade failures?**
+**Q: What is the bulkhead pattern and how does it prevent cascade failures?**
 The bulkhead pattern isolates thread pools per dependency. Each downstream service (database A, external API B) gets a fixed thread pool. When dependency B becomes slow and exhausts its thread pool, only calls to B are affected — calls to A, database C, and other services continue using their own pools. Without bulkhead, all dependencies share a pool: one slow dependency consumes all threads and blocks everything. Resilience4j ThreadPoolBulkhead implements this pattern.
 
-**Explain backpressure in reactive streams.**
+**Q: Explain backpressure in reactive streams.**
 Backpressure is a signal from consumer to producer: "I can only process N items at this rate." Without backpressure, a fast producer overwhelms a slow consumer, causing unbounded memory growth. Project Reactor implements backpressure through the Reactive Streams specification: the Subscriber requests N items at a time; the Publisher sends at most N. When the Subscriber's buffer is full, it stops requesting, and the Publisher must hold or drop items. Strategies: BUFFER (store excess), DROP (discard new items), LATEST (keep newest, drop older), ERROR (signal overflow).
 
-**What happens when ForkJoinPool.commonPool is saturated?**
+**Q: What happens when ForkJoinPool.commonPool is saturated?**
 The ForkJoinPool.commonPool() has a fixed parallelism equal to N_cpu - 1. When all threads are busy with blocking I/O, new tasks submitted to commonPool wait in the queue. CPU-bound parallel operations (parallel streams, ForkJoinTask) also wait. This can cause complete starvation: if IO-bound CompletableFuture tasks fill commonPool, parallel stream computations starve until those futures complete. Always use dedicated, separate thread pools for IO-bound and CPU-bound work.
 
-**How does structured concurrency differ from CompletableFuture.allOf?**
+**Q: How does structured concurrency differ from CompletableFuture.allOf?**
 CompletableFuture.allOf() starts all futures and waits for all to complete. If one fails, the returned CF completes exceptionally but the other futures continue running until completion (or cancellation must be manual). Structured concurrency (Java 21 StructuredTaskScope) defines a scope: all forked tasks are owned by the scope. When the scope closes, all tasks must complete. ShutdownOnFailure scope cancels all tasks when any one fails. ShutdownOnSuccess cancels when any one succeeds. Lifetimes are lexically scoped — no orphaned tasks, no resource leaks from forgotten futures.
 
-**What is work stealing in ForkJoinPool?**
+**Q: What is work stealing in ForkJoinPool?**
 In a ForkJoinPool, each thread has a deque (double-ended queue) of tasks. Work stealing allows an idle thread to "steal" tasks from the tail of another thread's deque while the owner works on tasks from its own head. This reduces idle time and improves throughput when tasks have unequal sizes. ForkJoinPool is designed for recursive, divide-and-conquer tasks. It is less appropriate for IO-bound work (where threads spend most time waiting, and stealing provides no benefit).
 
-**How do you implement a timeout for a CompletableFuture?**
+**Q: How do you implement a timeout for a CompletableFuture?**
 Java 9+ provides `orTimeout(long, TimeUnit)`: if the future does not complete within the specified time, it completes with a TimeoutException. Or `completeOnTimeout(defaultValue, long, TimeUnit)`: complete with a default value instead of exception. Internally, these use the JVM's delay mechanism (ScheduledExecutorService).
 ```java
 CompletableFuture<User> user = CompletableFuture
@@ -422,7 +422,7 @@ CompletableFuture<User> user = CompletableFuture
     .exceptionally(ex -> defaultUser(id));
 ```
 
-**How do you limit concurrency in a CompletableFuture pipeline processing a list?**
+**Q: How do you limit concurrency in a CompletableFuture pipeline processing a list?**
 For processing a stream of items with limited concurrency, use a Semaphore:
 ```java
 Semaphore semaphore = new Semaphore(10); // max 10 concurrent
@@ -440,19 +440,19 @@ CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 ```
 Or use Project Reactor's `Flux.flatMap(fn, maxConcurrency)` for reactive pipelines.
 
-**What metrics should you monitor for a thread pool?**
+**Q: What metrics should you monitor for a thread pool?**
 Active threads (currently executing tasks), queue size (tasks waiting), completed tasks (throughput), rejected tasks (pool overloaded), thread pool utilization = active / pool_size. Alerts: queue > 0 consistently (pool is bottleneck), utilization consistently > 80% (approaching exhaustion), rejection rate > 0 (tasks being dropped). Use Micrometer's ThreadPoolTaskExecutorMetrics or register via `executor.recordStats()` for a ThreadPoolExecutor.
 
-**When would you use virtual threads instead of reactive programming?**
+**Q: When would you use virtual threads instead of reactive programming?**
 Use virtual threads when: you want to write simple, blocking, sequential code without reactive complexity; your service is IO-bound (database calls, HTTP calls); you are using Spring Boot 3.2+ which has first-class virtual thread support. Use reactive programming when: you need fine-grained backpressure control; you are composing complex async pipelines with error handling across many stages; you are migrating existing reactive code. Virtual threads and reactive can coexist — Spring WebFlux on virtual threads is not contradictory, but the reactive model provides additional composability.
 
-**How do you detect thread pool exhaustion in production?**
+**Q: How do you detect thread pool exhaustion in production?**
 Signs: increasing request latency (tasks queuing), increasing error rate (if queue is bounded and rejects), thread dump showing all threads WAITING in queue.take() with many queued tasks. Monitor: hikaricp_connections_pending (DB pool), executor_queue_size (task queue depth), executor_active_count approaching executor_pool_size. Alert on: queue depth growing, utilization consistently above 80%, rejection count > 0. Preventive: circuit breakers that stop sending work when downstream is slow.
 
-**What is the difference between CallerRunsPolicy and AbortPolicy?**
+**Q: What is the difference between CallerRunsPolicy and AbortPolicy?**
 CallerRunsPolicy: when the thread pool is exhausted (queue full, max threads busy), the task is executed by the calling thread instead of the pool thread. This provides backpressure — the caller is blocked executing the task, slowing the rate of task submission. AbortPolicy (default): throws RejectedExecutionException immediately when the pool is exhausted. Use AbortPolicy for fail-fast behavior (return 503 to client). Use CallerRunsPolicy for producer-consumer pipelines where the caller should slow down naturally.
 
-**What is the Reactive Streams specification and how does it enable backpressure?**
+**Q: What is the Reactive Streams specification and how does it enable backpressure?**
 Reactive Streams (java.util.concurrent.Flow in Java 9+) defines four interfaces: Publisher (produces items), Subscriber (consumes items), Subscription (link between them), Processor (both). The protocol: Subscriber.onSubscribe() receives a Subscription. Subscriber calls subscription.request(N) to signal it can receive N items. Publisher calls Subscriber.onNext() at most N times. After consuming N items, Subscriber calls request(N) again. Publisher never sends more than requested — this is backpressure. The Publisher must buffer, drop, or signal error for items exceeding the requested amount.
 
 ---

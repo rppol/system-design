@@ -728,61 +728,61 @@ grpc:
 
 ## 12. Interview Questions with Answers
 
-**Why does a gRPC client call hang forever, and how do you prevent it?**
+**Q: Why does a gRPC client call hang forever, and how do you prevent it?**
 Because a blocking stub with no deadline waits indefinitely for a response that a slow or dead-but-listening peer never sends. gRPC does not impose a default timeout, so the call blocks its thread until the peer replies; under load this exhausts the caller's thread pool with zero errors — just silence. Always call `stub.withDeadlineAfter(200, TimeUnit.MILLISECONDS)`, and set a channel-level `deadline` backstop so a forgotten per-call deadline still fails fast with `DEADLINE_EXCEEDED`.
 
-**What is the difference between a gRPC deadline and a per-hop timeout?**
+**Q: What is the difference between a gRPC deadline and a per-hop timeout?**
 A deadline is an absolute wall-clock instant that propagates through the entire call tree, whereas a timeout is a per-call relative duration. When a client sets `withDeadlineAfter(300ms)`, that instant travels through the gRPC `Context` to user → pricing → inventory; each hop sees the *remaining* budget via `Context.current().getDeadline()`. This prevents the "reset timeout at each hop" bug where a 300ms budget silently becomes 900ms across three services. Set the deadline once at the edge of a request and let it flow.
 
-**How does `@GrpcService` differ from `@RestController`, and what machinery does it lose?**
+**Q: How does `@GrpcService` differ from `@RestController`, and what machinery does it lose?**
 `@GrpcService` binds a bean to the HTTP/2 gRPC server instead of the servlet dispatcher, so none of Spring MVC's servlet-scoped machinery applies. There is no `HttpServletRequest`, no `HandlerInterceptor`, no servlet `SecurityContextHolder` auto-population. Cross-cutting concerns move to gRPC `ServerInterceptor`s, and identity/trace context move to gRPC `Metadata` and `Context` rather than servlet request attributes. You rebuild security, tracing, and logging on those two gRPC primitives.
 
-**How do you propagate the security identity into a gRPC service method?**
+**Q: How do you propagate the security identity into a gRPC service method?**
 Read the token from `Metadata` in a `ServerInterceptor`, build an `Authentication`, and bind it into the gRPC `Context` with `Contexts.interceptCall`. Because gRPC calls are not servlet-scoped, the servlet `SecurityContextHolder` is not populated automatically; the interceptor either stores identity in the gRPC `Context` (read directly downstream) or, with net.devh's security bridge, copies it into `SecurityContextHolder` so `@Secured`/`@PreAuthorize` work as in MVC. Do this in one global interceptor, not per method.
 
-**Why does an unhandled server exception reach the client as UNKNOWN, and how do you fix it?**
+**Q: Why does an unhandled server exception reach the client as UNKNOWN, and how do you fix it?**
 Because gRPC strips stack traces for security and maps any unmapped exception to `Status.UNKNOWN` with no description, so the caller cannot distinguish a bug from "not found" from bad input. Fix it with a central `@GrpcAdvice` class whose `@GrpcExceptionHandler` methods map each domain exception to a canonical `Status` (`EntityNotFoundException` → `NOT_FOUND`, `IllegalArgumentException` → `INVALID_ARGUMENT`), and always include a catch-all so nothing silently degrades to `INTERNAL`.
 
-**What happens if a server-side handler calls onNext but forgets onCompleted?**
+**Q: What happens if a server-side handler calls onNext but forgets onCompleted?**
 The response stream never closes, so the client blocks until its own deadline fires and then reports `DEADLINE_EXCEEDED` — a misleading error that hides a pure server bug. Every `StreamObserver` must be terminated exactly once with `onCompleted()` (success) or `onError()` (failure). This is the server-side twin of the missing-deadline client hang; both manifest as a "timeout" that points at the wrong cause.
 
-**How does interceptor ordering affect tracing and metrics correctness?**
+**Q: How does interceptor ordering affect tracing and metrics correctness?**
 Lower `@Order` runs first and outermost, so the observation/tracing interceptor must be order 0 to wrap and time every inner interceptor plus the handler. If metrics or auth run outside the span, their cost is invisible in the trace and even unauthenticated calls get timed. The correct chain is observation (0) → auth (100) → authorization (150) → logging (200) → metrics (300, innermost), so the span measures the full inbound cost.
 
-**How is trace context propagated across a gRPC call?**
+**Q: How is trace context propagated across a gRPC call?**
 The client interceptor serializes the current trace into the W3C `traceparent` metadata key on the outgoing call. The `ObservationGrpcServerInterceptor` then deserializes that key and continues the span on the server, so one trace ID spans the entire call graph. Because it travels in gRPC `Metadata` (the header analog), this is identical in spirit to HTTP header propagation, just over gRPC. Register both interceptors from `micrometer-core`'s `binder.grpc` package.
 
-**Why do gRPC calls fail with RESOURCE_EXHAUSTED on large payloads?**
+**Q: Why do gRPC calls fail with RESOURCE_EXHAUSTED on large payloads?**
 Because grpc-java caps inbound messages at 4 MiB by default on both the server and the client, so a 6 MB response throws `RESOURCE_EXHAUSTED: gRPC message exceeds maximum size 4194304`. The right fix is to paginate or switch to server streaming so no single message is huge; only if unavoidable, raise `max-inbound-message-size` on both ends — a large limit invites memory pressure and makes a single call able to OOM the process.
 
-**What is the difference between the official Spring gRPC and net.devh's starter?**
+**Q: What is the difference between the official Spring gRPC and net.devh's starter?**
 The official Spring gRPC (1.0) is portfolio-backed and configured under the `spring.grpc` properties, while net.devh's starter is the mature community project under the `grpc` prefix. net.devh adds a richer built-in security module (`GrpcSecurity`, `@Secured`, `@GrpcGlobalServerInterceptor`), while both auto-configure the Netty server, register `@GrpcService` beans, and support global interceptors. Choose the official one for greenfield on the latest Boot; keep net.devh for existing systems that lean on its security bridge.
 
-**How does cancellation propagate, and how should a streaming handler react?**
+**Q: How does cancellation propagate, and how should a streaming handler react?**
 When a client cancels or its deadline expires, the server's gRPC `Context` becomes cancelled and a `ServerCallStreamObserver.setOnCancelHandler` callback fires. A long-running or streaming handler should check `Context.current().isCancelled()` before expensive steps and register an on-cancel handler to release resources (close cursors, cancel downstream calls). Ignoring cancellation wastes CPU producing results no one will read and can leak connections on long streams.
 
-**How do you inject a gRPC stub as a Spring bean?**
+**Q: How do you inject a gRPC stub as a Spring bean?**
 With net.devh, annotate a stub field with `@GrpcClient("channel-name")` and Spring injects a stub bound to the named channel from `grpc.client.<name>.*`. With the official starter, build the stub in a `@Bean` from a `GrpcChannelFactory.createChannel("name")`. Prefer a blocking stub for unary request/response, an async stub for streaming, and always apply `withDeadlineAfter` on each call rather than trusting a global default.
 
-**What are the four gRPC streaming modes and their Spring method shapes?**
+**Q: What are the four gRPC streaming modes and their Spring method shapes?**
 Unary and server-streaming both take a `(Request, StreamObserver<Response>)` signature, differing only in how many times the handler calls `onNext`. Client-streaming and bidirectional-streaming both return a `StreamObserver<Request>` that receives the incoming messages. Client-streaming emits one final response after the client half-closes; bidirectional keeps both directions open concurrently. In Spring you override the generated `...ImplBase` method matching the mode declared in the `.proto`.
 
-**How do you secure gRPC endpoints with method-level authorization?**
+**Q: How do you secure gRPC endpoints with method-level authorization?**
 Authenticate in a `ServerInterceptor` that populates identity, then guard methods with `@Secured` or `@PreAuthorize`. net.devh's security bridge enforces those annotations by copying the gRPC-context identity into `SecurityContextHolder` before the handler runs. The interceptor answers "who are you?" (`UNAUTHENTICATED` on failure) and the annotation answers "may you?" (`PERMISSION_DENIED` on failure). Keeping the two separate mirrors Spring Security's authentication-vs-authorization split.
 
-**How do you call a Spring gRPC service from a browser?**
+**Q: How do you call a Spring gRPC service from a browser?**
 Put a gRPC-Web proxy (Envoy's gRPC-Web filter, or grpcwebproxy) in front, because browsers cannot control HTTP/2 framing and cannot speak native gRPC. The proxy translates the browser's `application/grpc-web+proto` over HTTP/1.1 into native gRPC to the Spring `@GrpcService`. Alternatively expose a REST façade via transcoding (a gateway maps JSON/HTTP to the gRPC method using `google.api.http` annotations) when you want plain REST for external clients.
 
-**Why is Metadata used for auth tokens instead of the Protobuf message?**
+**Q: Why is Metadata used for auth tokens instead of the Protobuf message?**
 Because Metadata is the transport-level header channel — cross-cutting context like tokens, trace IDs, and tenant IDs belong there so interceptors can read them without parsing the domain message. Putting an auth token in the request message couples every method's schema to security concerns and forces the handler (not an interceptor) to enforce auth. Keys use `Metadata.Key.of(name, ASCII_STRING_MARSHALLER)`; binary values use a `-bin` suffix key.
 
-**What does a channel-level default deadline give you over a per-call deadline?**
+**Q: What does a channel-level default deadline give you over a per-call deadline?**
 A channel `deadline` is a backstop that bounds any call whose code path forgets `withDeadlineAfter`, so a single missed per-call deadline cannot hang. The per-call deadline is still preferred because it budgets the whole downstream tree for that specific request, while the channel default is a blunt catch-all. Configure both: a strict per-call deadline for correctness and a generous channel deadline as a safety net.
 
-**How do you keep gRPC serialization out of your service's critical CPU path under load?**
+**Q: How do you keep gRPC serialization out of your service's critical CPU path under load?**
 Rely on Protobuf's compact binary encoding, which is far smaller than JSON and parses faster, so serialization rarely dominates. Then avoid oversized messages by paginating or streaming instead of returning multi-MB blobs. Reuse generated builders rather than reflection, keep field numbers stable to avoid re-encoding surprises, and let the Netty transport multiplex many calls over one HTTP/2 connection so you are not paying per-call connection setup. The wire-level detail lives in [gRPC & Protobuf (pure Java)](../../java/grpc_protobuf/README.md).
 
-**When would you choose gRPC over REST or GraphQL for a new API?**
+**Q: When would you choose gRPC over REST or GraphQL for a new API?**
 Choose gRPC for internal service-to-service traffic where a strict typed contract, small binary payloads, low latency, and first-class streaming matter more than human readability. Choose REST for public or browser-facing APIs that need the broadest client reach and `curl`-level debuggability, and GraphQL when clients need to shape aggregated responses across many resources. gRPC's browser gap (needs gRPC-Web) and binary opacity are the usual reasons it stays internal.
 
 ---

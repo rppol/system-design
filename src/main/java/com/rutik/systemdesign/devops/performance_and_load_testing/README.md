@@ -354,43 +354,43 @@ The broken version once reported a p99 of 180ms while production users saw 6-sec
 
 ## 12. Interview Questions with Answers
 
-**What's the difference between load, stress, spike, and soak tests?**
+**Q: What's the difference between load, stress, spike, and soak tests?**
 Each answers a different question. A **load test** drives expected/peak traffic and verifies SLOs (latency, error rate) hold — "are we good for normal peak?" A **stress test** pushes *past* peak until something breaks, to find the breaking point and observe *how* it fails (graceful degradation vs cascading collapse). A **spike test** applies a sudden sharp jump (e.g., 100→5000 RPS in seconds) to verify autoscaling reacts in time and the system survives the transient. A **soak (endurance) test** holds moderate load for hours or days to surface slow problems — memory leaks, connection-pool exhaustion, disk fill — that short tests never reveal. Running "a load test" without picking the type is a common mistake; the load profile must match the question.
 
-**Why measure percentiles instead of average latency?**
+**Q: Why measure percentiles instead of average latency?**
 Because users experience the tail, not the mean. An average of 60ms can hide a p99 of 3 seconds — meaning 1% of requests (often millions/day, and disproportionately your power users with the most data) get a terrible experience. Averages are also easily skewed: a handful of fast cache hits drag the mean down while real failures hide in the tail. SLOs are written against percentiles (p95/p99/p99.9) precisely because they describe the worst experience a defined fraction of users tolerate. You report and gate on percentiles; the average is nearly useless for reliability decisions.
 
-**Explain coordinated omission and how you avoid it.**
+**Q: Explain coordinated omission and how you avoid it.**
 Coordinated omission is a measurement bug in closed-model (VU-based) load tests: each virtual user sends a request, waits for the response, then sends the next. When the system stalls, the VUs *also* stall — so the tool simply never issues the backlog of requests that would have piled up, and therefore never measures the long latencies those requests would have suffered. The reported p99 looks fine while real users (who keep arriving regardless) are timing out. You avoid it by using an **open model** — a constant arrival rate executor (`constant-arrival-rate`/`ramping-arrival-rate` in k6) that sends a fixed RPS independent of response time, so requests queue up and the true tail latency is captured. It's the single most important correctness concept in load testing.
 
-**The team says "our service maxes out at 2000 RPS" but you suspect the test is wrong. How do you check?**
+**Q: The team says "our service maxes out at 2000 RPS" but you suspect the test is wrong. How do you check?**
 First suspect the **load generator**, not the service. A single runner box hits its own limits — CPU saturation, ephemeral port exhaustion (~28k ports by default), open file descriptors, or NIC bandwidth — and plateaus, making it *look* like the service can't go faster. I'd monitor the generator's own CPU, FDs, socket count, and network during the test; if any is maxed, the generator is the bottleneck. The fix is distributed load generation (k6-operator or Locust master/worker across multiple pods/machines), each well under its own limits, with load split across them. Only once the generators have clear headroom can you trust that 2000 RPS is the *service's* ceiling.
 
-**Open model vs closed model — when would you actually want closed?**
+**Q: Open model vs closed model — when would you actually want closed?**
 The open model (constant arrival rate) is the default for latency truth because it mimics real users who keep arriving regardless of how slow you are. But the closed model (fixed virtual users) is correct when you're modeling a system with genuinely *fixed concurrency* — e.g., a fixed pool of backend worker threads, a batch job with a set number of parallel workers, or a client with a hard connection-pool cap. In those cases the real world *does* throttle itself to N in-flight, and a closed model with N VUs accurately represents it. The mistake is using closed-model to measure user-facing API latency under saturation, where it produces coordinated omission.
 
-**How do you derive autoscaling targets from a load test?**
+**Q: How do you derive autoscaling targets from a load test?**
 Run a **capacity test**: pin replicas to 1 (disable the HPA), step the arrival rate up, and record p99 and error rate at each step. Find the "knee" — the load just before p99 breaks the SLO; that's your max sustainable RPS per replica. Then set the HPA target so a replica runs at ~60–70% of that ceiling, leaving headroom for the scale-up lag (an HPA takes ~15s to sync plus pod start time). For peak capacity, divide peak RPS by the per-replica sustainable rate and add headroom: 11,000 RPS ÷ 550/replica ≈ 20 replicas, provision ~25. This turns autoscaling from a guess into a measured number, and feeds directly into cost models.
 
-**How do you wire a performance test into CI as a gate?**
+**Q: How do you wire a performance test into CI as a gate?**
 Define **thresholds** in the test (k6: `http_req_duration: ['p(95)<300']`, `http_req_failed: ['rate<0.001']`) so the tool exits non-zero when an SLO is breached, which fails the pipeline step. The flow: PR opens → deploy to an ephemeral/preview environment → run the load test against it → thresholds pass/fail the build → optionally compare against a stored baseline and fail on regression beyond a percentage (e.g., p95 worse by >10%). The key principle is that a test that doesn't gate is just a dashboard — to prevent regressions it must be able to *block the merge*. You keep the gate test short (a few minutes, focused) and run longer soak/stress tests on a schedule rather than per-PR.
 
-**Why is a warm-up period important, and what do you do with it?**
+**Q: Why is a warm-up period important, and what do you do with it?**
 The first minute or so of a test is unrepresentative: JIT compilers haven't optimized hot paths, caches are cold, connection pools are empty and filling, and the autoscaler is still ramping replicas. Measuring from t=0 inflates latency and pollutes your percentiles with transient cold-start behavior that doesn't reflect steady state. So you include an explicit warm-up stage (ramp to load, hold briefly) and then **discard it from analysis**, measuring only the steady-state "hold at peak" window. This is also why a 30-second test is nearly worthless — it's almost all warm-up.
 
-**What does a soak test catch that a load test doesn't?**
+**Q: What does a soak test catch that a load test doesn't?**
 Slow, cumulative problems that only manifest over time: memory leaks (heap creeping up until OOM after 6 hours), connection-pool or file-descriptor leaks (the pool slowly exhausts and requests start failing), disk fill (logs/temp files accumulating), cache unbounded growth, and database connection churn. A 15-minute load test passes cleanly because the leak hasn't accumulated yet; the 24-hour soak reveals the heap graph climbing steadily toward a cliff. Soak tests are how you catch the "it works fine in load tests but falls over after 2 days in prod" class of bug, which is otherwise found by customers.
 
-**How would you load-test safely against production?**
+**Q: How would you load-test safely against production?**
 With great care, because you can hurt real users. Techniques: **dark traffic / shadowing** (mirror real requests to a parallel test stack that doesn't affect users), **squeeze testing** (slowly raise real or synthetic traffic to a single instance/canary to find its limit while able to abort instantly), strict **blast-radius limits** (rate caps, circuit breakers, a kill switch), running during low-traffic windows, isolating test data so you don't corrupt real records, and tagging synthetic traffic so it's excluded from business metrics. Netflix's squeeze testing is the canonical pattern. The default should still be a production-*like* staging environment; prod testing is for behaviors you genuinely can't reproduce elsewhere.
 
-**k6 vs Locust — how do you choose?**
+**Q: k6 vs Locust — how do you choose?**
 k6 has a Go engine with JavaScript test scripts: very low resource footprint (high RPS per runner), first-class thresholds-as-CI-gates, Prometheus output, and a k6-operator for distributed K8s runs — it's the modern default for CI-integrated performance gates. Locust is pure Python with a gevent engine: tests are Python so you can express complex logic and reuse app code, it has built-in master/worker distribution and a live web UI, and it suits Python shops. Choose k6 for lightweight, scriptable, CI-gated tests and when footprint matters; choose Locust when your team is Python-centric, your test logic is complex, or you want the interactive UI to explore behavior live. Both support distributed generation; k6 generally needs fewer machines for the same load.
 
-**A load test passes in CI but the service still falls over in production at the same RPS. What could explain the gap?**
+**Q: A load test passes in CI but the service still falls over in production at the same RPS. What could explain the gap?**
 Several common causes: (1) the **test environment wasn't production-like** — fewer replicas, smaller instances, or mocked dependencies that hid the real bottleneck (often the database); (2) **coordinated omission** in a closed-model test reported a falsely good p99; (3) the test hit a **cache that's cold or absent in prod** (or vice versa), or used non-representative data/keys so it didn't exercise the slow paths; (4) **stateful effects** the short test didn't trigger — connection-pool exhaustion or a leak that only appears under sustained real traffic (a soak issue); (5) **traffic shape** — real traffic is bursty and multi-endpoint while the test was a smooth single-endpoint stream. The fix is making the test environment, data, traffic shape, and load model faithfully represent production, and adding soak coverage for time-dependent failures.
 
-**Why does test-data realism matter so much, and what goes wrong with naive synthetic data?**
+**Q: Why does test-data realism matter so much, and what goes wrong with naive synthetic data?**
 Because the system's performance is data-dependent in ways that synthetic data hides. Hitting the same record or key repeatedly makes every request a cache hit, so the test reports latency that production (with a cold, diverse working set) never achieves. A uniform key distribution misses **hot keys** — the celebrity user or popular product that creates a partition/lock/shard hotspot in production. Sequential or unrealistic IDs can produce index access patterns that don't match real queries. Tiny test datasets fit in memory while production tables spill to disk. The fixes: replay anonymized production traffic where possible, or generate data with realistic cardinality and skew (Zipfian, not uniform), size the dataset to production scale, and exercise the full breadth of endpoints in production-like proportions. A load test against unrealistic data is precise but inaccurate — it measures something, just not the thing you'll ship.
 
 ---

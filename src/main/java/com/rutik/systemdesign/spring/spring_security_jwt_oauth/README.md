@@ -647,58 +647,58 @@ return Jwts.builder()
 
 ## 12. Interview Questions with Answers
 
-**What is the structure of a JWT and what does each part contain?**
+**Q: What is the structure of a JWT and what does each part contain?**
 A JWT consists of three base64url-encoded parts separated by dots: header, payload, and signature. The header declares the token type ("JWT") and signing algorithm (e.g., "RS256"). The payload carries claims: registered claims (sub — subject, iss — issuer, aud — audience, exp — expiry, iat — issued-at), public claims, and private claims. The signature is computed over the encoded header and payload using the specified algorithm and key. Only the signature provides integrity; the header and payload are visible to anyone.
 
-**What is the difference between HS256 and RS256, and when would you choose each?**
+**Q: What is the difference between HS256 and RS256, and when would you choose each?**
 HS256 uses a single shared secret for both signing and verification. RS256 uses an RSA private key to sign and the corresponding public key to verify. In a microservices architecture, RS256 is strongly preferred: only the Authorization Server holds the private key, while every Resource Server only needs the public key (fetched from the JWKS endpoint). With HS256, every service that needs to validate tokens must possess the secret, meaning a compromise of any service compromises the signing secret for all services.
 
-**Explain the OAuth2 Authorization Code + PKCE flow and why PKCE is required for public clients.**
+**Q: Explain the OAuth2 Authorization Code + PKCE flow and why PKCE is required for public clients.**
 The flow has six steps that bind the token exchange to the client instance which started the request, without needing a client secret. (1) client generates a random code_verifier and computes code_challenge = BASE64URL(SHA256(code_verifier)); (2) client redirects user to the authorization endpoint with code_challenge; (3) user authenticates and server returns an authorization code; (4) client sends the code plus the original code_verifier to the token endpoint; (5) server recomputes SHA256(code_verifier) and compares it to the stored code_challenge; (6) if they match, server issues tokens. PKCE prevents authorization code interception attacks: an attacker who intercepts the code cannot exchange it for tokens because they do not know the code_verifier, which was never transmitted over the network.
 
-**How does Spring Security's OAuth2 Resource Server validate JWTs?**
+**Q: How does Spring Security's OAuth2 Resource Server validate JWTs?**
 When configured with `http.oauth2ResourceServer(oauth2 -> oauth2.jwt(...))`, Spring auto-configures a `BearerTokenAuthenticationFilter`. For each request with a Bearer token, it calls the configured `JwtDecoder` (typically `NimbusJwtDecoder`). Nimbus fetches the JWKS from the configured URI, caches the public keys (default 5-minute TTL), and verifies the token signature and standard claims (exp, nbf). The decoded JWT is then passed to a `JwtAuthenticationConverter` which maps claims to `GrantedAuthority` objects and populates the `SecurityContext`.
 
-**Why can't you simply delete a JWT to revoke it?**
+**Q: Why can't you simply delete a JWT to revoke it?**
 A JWT is self-contained and stateless. The Resource Server validates it locally without contacting any central store. There is no mechanism in the JWT specification for a server to "forget" a token. Once issued, a valid (unexpired) JWT will be accepted by any Resource Server that trusts the issuer. Revocation requires out-of-band infrastructure: a token blacklist (Redis set containing revoked JTI claims, checked on every request) or sufficiently short expiry windows (5–15 minutes) combined with refresh token invalidation.
 
-**What is refresh token rotation and why does it improve security?**
+**Q: What is refresh token rotation and why does it improve security?**
 Refresh token rotation means each use of a refresh token invalidates that token and issues a new one. If an attacker steals a refresh token and attempts to use it after the legitimate client has already used it, the server detects the reuse (the token has already been rotated) and can revoke the entire token family — invalidating all active sessions for that user. Without rotation, a stolen refresh token is valid until its expiry date (often days or weeks).
 
-**How would you implement JWT revocation without a blacklist lookup on every request?**
+**Q: How would you implement JWT revocation without a blacklist lookup on every request?**
 Several strategies: (1) Maintain short access token expiry (5–15 min) so the window of risk for stolen tokens is small; rely on refresh token rotation and a compact blacklist only for refresh tokens. (2) Store the user's token version (a counter) in the JWT claim and in the database; on token use, check if the JWT version matches the current version in the database — increment the version to invalidate all tokens. (3) Use opaque tokens for endpoints that require immediate revocation (e.g., privileged operations) and JWTs for low-risk endpoints.
 
-**Explain the alg:none vulnerability and how Spring Security protects against it.**
+**Q: Explain the alg:none vulnerability and how Spring Security protects against it.**
 The JWT specification originally allowed `"alg": "none"` to indicate an unsigned token. Vulnerable implementations trusted the algorithm declared in the header and would accept a token with no signature if alg was "none". An attacker could strip the signature from any valid token, set alg to "none", and the server would accept it. Spring Security's `NimbusJwtDecoder` uses a strict allow-list of algorithms (configured via `jwsAlgorithm()`); it does not support the "none" algorithm and will reject any token claiming it.
 
-**What is multi-tenant JWT validation and how would you implement it in Spring?**
+**Q: What is multi-tenant JWT validation and how would you implement it in Spring?**
 In a multi-tenant SaaS, each tenant typically has its own issuer or JWKS endpoint. An `AuthenticationManagerResolver<HttpServletRequest>` resolves the correct `JwtDecoder` based on a tenant identifier extracted from the request (subdomain, custom header, or unverified claim in the token). The decoder is cached per tenant to avoid re-fetching JWKS on every request. The security config wires this resolver via `.oauth2ResourceServer(oauth2 -> oauth2.authenticationManagerResolver(resolver))`.
 
-**What is the difference between OAuth2 and OIDC?**
+**Q: What is the difference between OAuth2 and OIDC?**
 OAuth2 is an authorization framework that defines how a resource owner can delegate access to a third party via access tokens. It does not specify anything about identity. OIDC (OpenID Connect) is an identity layer built on top of OAuth2: it adds an ID token (always a JWT) containing identity claims about the authenticated user (sub, name, email, etc.) and defines a UserInfo endpoint. OAuth2 answers "what can this client do?"; OIDC answers "who is this user?".
 
-**How does JwtAuthenticationConverter work and how would you customize it?**
+**Q: How does JwtAuthenticationConverter work and how would you customize it?**
 `JwtAuthenticationConverter` is a `Converter<Jwt, AbstractAuthenticationToken>` called by the security framework after successful JWT validation. Its default behavior extracts the "scope" claim from the JWT and creates `GrantedAuthority` objects with a "SCOPE_" prefix. To customize, you configure a `JwtGrantedAuthoritiesConverter` with a different claims name (e.g., "roles") and a different prefix (e.g., "ROLE_"), or you implement `JwtAuthenticationConverter` directly to handle complex claim structures such as nested role objects or multiple claim sources.
 
-**What is the security implication of storing a JWT in an httpOnly cookie versus localStorage?**
+**Q: What is the security implication of storing a JWT in an httpOnly cookie versus localStorage?**
 localStorage is accessible to JavaScript running on the page. Any successful XSS attack can extract the token, enabling token theft and session hijacking. An httpOnly cookie cannot be read by JavaScript; it is only sent by the browser to the server automatically on requests. The tradeoff is CSRF vulnerability: a malicious site can trick the browser into making a request that includes the httpOnly cookie. Mitigations include `SameSite=Strict` cookies (browser will not send cookie on cross-site navigated requests), CSRF double-submit tokens, or the Synchronizer Token Pattern. For most modern apps with properly configured CORS and SameSite cookies, httpOnly is the safer choice.
 
-**How would you configure Spring Security to trust tokens from multiple issuers?**
+**Q: How would you configure Spring Security to trust tokens from multiple issuers?**
 Use `AuthenticationManagerResolver<HttpServletRequest>`. Each issuer gets its own `JwtDecoder` (typically a `NimbusJwtDecoder` configured with that issuer's JWKS URI or issuer-uri for auto-discovery). The resolver extracts the `iss` claim from the unverified JWT header/payload (NOT trusting it — just routing), looks up the corresponding decoder, and the decoder performs full signature and claims validation. This pattern is also used for federated identity (allow tokens from Google AND Auth0 AND internal issuer).
 
-**What claims must you always validate in a JWT, and what are the security consequences of skipping each?**
+**Q: What claims must you always validate in a JWT, and what are the security consequences of skipping each?**
 `exp` (expiry): skipping allows use of indefinitely old tokens after they should have been invalidated. `iss` (issuer): skipping allows tokens from a different authorization server to be accepted (e.g., a test environment token in production). `aud` (audience): skipping allows a token issued for service A to be replayed against service B. `nbf` (not before, optional): skipping allows tokens to be used before their intended validity window. In production, always validate exp, iss, and aud at minimum.
 
-**How does NimbusJwtDecoder handle JWKS key rotation without downtime?**
+**Q: How does NimbusJwtDecoder handle JWKS key rotation without downtime?**
 NimbusJwtDecoder fetches the JWKS from the configured URI and caches the keys. When a JWT arrives with a `kid` (key ID) claim not found in the cache, Nimbus automatically re-fetches the JWKS to pick up new keys. Authorization Servers that rotate keys publish the new key alongside the old key for a grace period (typically 24–48 hours), so tokens signed with the old key continue to validate while clients refresh their JWKS cache. This is why JWKS endpoints should never remove old keys the moment a new key is published.
 
-**What is the difference between an access token and a refresh token, and why does rotating the refresh token matter more?**
+**Q: What is the difference between an access token and a refresh token, and why does rotating the refresh token matter more?**
 An access token authorizes API calls directly and is deliberately short-lived (5–15 minutes), while a refresh token only exchanges for a new access token and is long-lived (hours to days). Because the access token rides on every request, its blast radius is bounded purely by its short expiry; the refresh token is used far less often but grants renewable access, so a leaked refresh token is much more valuable to an attacker. This asymmetry is exactly why refresh token rotation — invalidating the old refresh token on every use and issuing a new one — is the primary defense: a single reuse of an already-rotated refresh token is a reliable compromise signal, whereas a stolen access token simply expires on its own within minutes.
 
-**What is the architectural difference between an OAuth2 Authorization Server and a Resource Server?**
+**Q: What is the architectural difference between an OAuth2 Authorization Server and a Resource Server?**
 The Authorization Server authenticates the user and issues tokens, while the Resource Server only validates tokens and serves protected data. Spring Security lets a single Boot application play both roles for small deployments, but production systems usually separate them: Keycloak, Auth0, or Spring Authorization Server plays the Authorization Server, and every microservice adds `spring-boot-starter-oauth2-resource-server` to become a Resource Server that trusts that issuer's public keys. A Resource Server has no login forms, consent screens, or credential storage — it only knows how to fetch the JWKS and check claims — which is precisely what makes horizontal scaling of the API tier trivial: any number of Resource Server instances validate the same tokens without ever calling the Authorization Server on the request hot path.
 
-**What are the exact steps Spring Security's OAuth2 Resource Server performs to validate an incoming JWT, and in what order?**
+**Q: What are the exact steps Spring Security's OAuth2 Resource Server performs to validate an incoming JWT, and in what order?**
 Signature verification runs first against the cached JWKS public key, then timestamp checks (`exp`, `nbf`), then issuer (`iss`), then any custom validators such as audience (`aud`). Signature verification comes first because there is no point evaluating claims on a token that could have been tampered with — a failed signature check short-circuits immediately. `JwtTimestampValidator` handles expiry, `JwtIssuerValidator` confirms the token came from the trusted Authorization Server, and any additional checks are composed on top via `DelegatingOAuth2TokenValidator`. The gotcha: replacing the default validator to add a custom check (instead of composing it with `JwtValidators.createDefaultWithIssuer(...)`) silently drops the exp/iss checks — exactly the mistake in Pitfall 2 of this module's case study.
 
 ---
