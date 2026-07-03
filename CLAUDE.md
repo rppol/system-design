@@ -18,7 +18,7 @@ A comprehensive system design study repository. All content is Markdown — no r
 | **DevOps** | DevOps / Cloud / Platform guide — 41 modules, 13 case studies | [devops/CLAUDE.md](src/main/java/com/rutik/systemdesign/devops/CLAUDE.md) |
 | **CS Fundamentals** | Language-agnostic CS spine — 20 modules, 6 case studies + DSA pattern playbooks sub-section (25-pattern recognition engine, interview execution playbook, Blind 75/NeetCode 150 study plans — complete) | [cs_fundamentals/CLAUDE.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/CLAUDE.md) |
 | **Book** | Chapter-by-chapter book summaries (book-faithful chapter template, not the 14-section module template) — Designing Data-Intensive Applications (Kleppmann): 12 chapters + preface | [book/CLAUDE.md](src/main/java/com/rutik/systemdesign/book/CLAUDE.md) |
-| **Game** | Browser-based daily learning game (an app, NOT 14-section content — template-exempt). 5-min MCQ blitz auto-built from all sections' Q&As via `extract.py`; stdlib `server.py`; Claude scheduled-task coach. | [game/CLAUDE.md](src/main/java/com/rutik/systemdesign/game/CLAUDE.md) |
+| **Game** | Pages-deployed daily learning game (a static SPA, NOT 14-section content — template-exempt). 5-min MCQ blitz auto-built from all sections' Q&As via `extract.py`; SM-2 spaced-repetition review, daily sealed Gauntlet, and an in-app coach; `localStorage` is the single source of truth (no server). | [game/CLAUDE.md](src/main/java/com/rutik/systemdesign/game/CLAUDE.md) |
 
 ---
 

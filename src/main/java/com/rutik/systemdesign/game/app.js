@@ -268,12 +268,16 @@ const announce = (msg) => { const n = el("#live"); if (n) n.textContent = msg; }
 const REDUCED = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 // Cross-fade between screens via the View Transitions API where available.
-function vt(fn) {
+function vt(fn, cls) {
   if (document.startViewTransition && !REDUCED()) {
+    // [E2] optional scope class on <html> so ::view-transition keyframes can be
+    // directional (e.g. a forward question swap slides left, not just cross-fades).
+    if (cls) document.documentElement.classList.add(cls);
     const t = document.startViewTransition(fn);
     /* [C] rapid successive navigations skip a transition; the ready/finished
        promises then reject with a benign AbortError — swallow it. */
     t.ready?.catch(() => {}); t.finished?.catch(() => {});
+    if (cls) { const done = () => document.documentElement.classList.remove(cls); t.finished?.then(done, done); }
   } else fn();
 }
 
@@ -1012,17 +1016,25 @@ function renderHome() {
        </button>`
     : "";
   const secs = state.index.sections, p = state.progress;
+  // [E2] mastery-delta shine: compare each section's accuracy to the snapshot
+  // written on the previous Home render; a changed tile runs the shine once.
+  let lastMastery = {};
+  try { lastMastery = JSON.parse(localStorage.getItem("sd_last_mastery")) || {}; } catch { /* first visit */ }
+  const curMastery = {};
   const tiles = Object.keys(secs).sort().map((s) => {
     const st = (p.sections && p.sections[s]) || { seen: 0, correct: 0 };
     const acc = st.seen ? Math.round((st.correct / st.seen) * 100) : null;
+    if (acc !== null) curMastery[s] = acc;
+    const deltaClass = (acc !== null && lastMastery[s] != null && lastMastery[s] !== acc) ? " mastery-delta" : "";
     const bar = acc === null ? "" : `<span class="tbar"><i style="width:${acc}%"></i></span>`;
     const passChip = (p.awards && (p.awards["interview_" + s] || p.awards["panel_" + s])) ? `<span class="c-chip pass sm">Passed</span>` : "";  // [C] interviewer plaque
-    return `<button class="tile ${s === section ? "suggested" : ""}" data-section="${s}">
+    return `<button class="tile ${s === section ? "suggested" : ""}${deltaClass}" data-section="${s}">
         <span class="tname">${esc(label(s))}${passChip}</span>
         <span class="tmeta">${secs[s]} Qs &middot; ${acc === null ? "new" : acc + "% mastery"}</span>
         ${bar}
       </button>`;
   }).join("");
+  try { localStorage.setItem("sd_last_mastery", JSON.stringify(curMastery)); } catch { /* quota */ }
   const dateLine = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
   /* [D] coach: the suggested card becomes either the reboarding card (calm,
      non-red — "the reviews kept your place") or the normal coach-voice card
@@ -2192,7 +2204,10 @@ function skipQuestion() {
 
 function nextQuestion() {
   state.cursor++;
-  if (state.cursor < state.queue.length) renderQuestion();
+  // [E2] beauty: the next question slides in from the right (directional vt);
+  // vt() falls back to an instant swap when view transitions are unsupported or
+  // reduced-motion is on.
+  if (state.cursor < state.queue.length) vt(() => renderQuestion(), "vt-qnext");
   else if (state.prime) finishPrime();               // [A2] prime: quiet save, then open the reader
   else finish();
 }
@@ -2404,7 +2419,7 @@ async function finish(opts = {}) {
   // review/weak/drill/refresh/gauntlet/interview replays aren't "a fresh mix".
   const isContentSection = !!(state.index.sections && Object.prototype.hasOwnProperty.call(state.index.sections, state.section));
   app.innerHTML = `
-    <div class="result">
+    <div class="result staged">
       <div class="score-wrap">
         <svg class="score-ring" viewBox="0 0 128 128" aria-hidden="true">
           <defs><linearGradient id="scoreGrad" x1="0" y1="0" x2="1" y2="1">
@@ -2686,10 +2701,369 @@ function heatmapHTML(history) {
   const empty = !(history || []).length
     ? `<p class="hm-empty">No activity yet &mdash; your first blitz lights up this grid.</p>` : "";
   return `<h2 class="section-h">Activity</h2>
-    <div class="heatmap">${cells}</div>
+    <div class="heatmap-scroll"><div class="heatmap">${cells}</div></div>
     <div class="hmlegend">Less
       <span class="hmcell hm-l0"></span><span class="hmcell hm-l1"></span><span class="hmcell hm-l2"></span><span class="hmcell hm-l3"></span><span class="hmcell hm-l4"></span>
       More</div>${empty}`;
+}
+
+/* ============================================================================
+   [E2] PHASE E2 — Insights · Command palette · Mobile · Beauty
+   All additive; every block below derives from the already-persisted sd_progress
+   (reviews / history / sections). No new persisted fields except sd_last_mastery
+   (a Home-render snapshot used only to detect an accuracy delta for a shine).
+   ========================================================================== */
+
+/* ---------- [E2] Insights: analytics on the Progress screen ---------- */
+
+// 14-day review-due forecast. Overdue (due <= today) rolls into today's bar so
+// the "clear it now" backlog is visible rather than hidden in the past.
+function forecastData() {
+  const today = todayISO();
+  const base = new Date(today + "T00:00:00");
+  const days = [];
+  for (let i = 0; i < 14; i++) { const d = new Date(base); d.setDate(d.getDate() + i); days.push({ iso: d.toLocaleDateString("en-CA"), n: 0 }); }
+  const last = days[13].iso, idxOf = {};
+  days.forEach((d, i) => (idxOf[d.iso] = i));
+  for (const rv of Object.values(state.progress.reviews || {})) {
+    if (!rv.due) continue;
+    if (rv.due <= today) days[0].n++;
+    else if (rv.due <= last) days[idxOf[rv.due]].n++;
+  }
+  return days;
+}
+function forecastHTML() {
+  const days = forecastData();
+  const total = days.reduce((s, d) => s + d.n, 0);
+  const max = Math.max(1, ...days.map((d) => d.n));
+  const today = todayISO();
+  const bars = days.map((d) => {
+    const h = d.n ? Math.max(8, Math.round((d.n / max) * 100)) : 0;
+    const dd = new Date(d.iso + "T00:00:00");
+    const wd = dd.toLocaleDateString("en-US", { weekday: "narrow" });
+    return `<div class="fc-col${d.iso === today ? " today" : ""}" title="${d.iso}: ${d.n} due">
+        <span class="fc-n">${d.n || ""}</span>
+        <div class="fc-track"><div class="fc-bar" style="height:${h}%"></div></div>
+        <span class="fc-d">${esc(wd)}</span></div>`;
+  }).join("");
+  return `<div class="ins-card">
+      <h3 class="ins-h">Memory forecast</h3>
+      <div class="forecast">${bars}</div>
+      <p class="ins-cap">${total} due over the next two weeks.</p></div>`;
+}
+
+// Per-module accuracy proxy from spaced-repetition state: reps are graded passes,
+// lapses are failed recalls, so reps/(reps+lapses) reads as a rolling accuracy.
+function moduleAccStats(progress) {
+  const acc = {};
+  for (const rv of Object.values((progress && progress.reviews) || {})) {
+    const mod = rv.module;
+    if (!mod) continue;
+    const s = acc[mod] || (acc[mod] = { count: 0, reps: 0, lapses: 0, easeSum: 0, section: rv.section || mod.split("/")[0] });
+    s.count++; s.reps += rv.reps || 0; s.lapses += rv.lapses || 0; s.easeSum += rv.ease || 2.5;
+  }
+  return Object.entries(acc).map(([mod, s]) => {
+    const denom = s.reps + s.lapses;
+    // denom 0 (only brand-new records) -> fall back to a normalized ease (1.3..2.5).
+    const a = denom ? s.reps / denom : Math.max(0, Math.min(1, (s.easeSum / s.count - 1.3) / 1.2));
+    return { module: mod, section: s.section, count: s.count, lapses: s.lapses, acc: Math.max(0, Math.min(1, a)) };
+  });
+}
+function modRow(m) {
+  const pct = Math.round(m.acc * 100);
+  return `<div class="mod-row">
+      <span class="mr-name">${esc(modDisplay(m.module))}</span>
+      <span class="mr-bar"><i style="width:${pct}%"></i></span>
+      <span class="mr-seen">${m.count}</span>
+      <button class="ghost sm ins-drill" data-sec="${esc(m.section)}" data-mod="${esc(m.module)}">Drill</button>
+    </div>`;
+}
+function strongestShakiestHTML() {
+  const all = moduleAccStats(state.progress).filter((m) => m.count >= 1);
+  if (all.length < 2) return "";
+  const strong = [...all].sort((a, b) => b.acc - a.acc || b.count - a.count).slice(0, 5);
+  const shaky = [...all].sort((a, b) => a.acc - b.acc || b.lapses - a.lapses).slice(0, 5);
+  return `<div class="ins-card">
+      <h3 class="ins-h">Strongest modules</h3>
+      <div class="mod-list">${strong.map(modRow).join("")}</div></div>
+    <div class="ins-card">
+      <h3 class="ins-h">Shakiest modules</h3>
+      <div class="mod-list">${shaky.map(modRow).join("")}</div></div>`;
+}
+
+// Leeches: questions missed 3+ times. Question text is looked up lazily (banks
+// are multi-MB) — fillLeeches() runs only when the <details> is first expanded.
+function leechIds() {
+  return Object.entries(state.progress.reviews || {})
+    .filter(([, r]) => (r.lapses || 0) >= 3)
+    .sort((a, b) => (b[1].lapses || 0) - (a[1].lapses || 0))
+    .slice(0, 7).map(([id]) => id);
+}
+function leechesHTML() {
+  const ids = leechIds();
+  if (!ids.length) return "";
+  return `<div class="ins-card">
+      <h3 class="ins-h">Your hardest questions</h3>
+      <details class="leeches" id="leechDetails">
+        <summary>${ids.length} question${ids.length === 1 ? "" : "s"} missed 3+ times &mdash; expand to see them</summary>
+        <div class="leech-list" id="leechList"><div class="leech-note">Loading&hellip;</div></div>
+        <button class="ghost" id="leechDrill">Drill these &rarr;</button>
+      </details></div>`;
+}
+async function fillLeeches() {
+  const ids = leechIds();
+  const secs = new Set(ids.map((id) => (state.progress.reviews[id] || {}).section).filter(Boolean));
+  const byId = new Map();
+  for (const s of secs) { const b = await loadBank(s); if (b) for (const q of b) byId.set(q.id, q); }
+  const list = el("#leechList");
+  if (!list) return;
+  const rows = ids.map((id) => {
+    const rv = state.progress.reviews[id] || {}, q = byId.get(id);
+    if (!q) return "";
+    return `<button class="leech-row" data-path="${esc(q.module + "/" + (q.sourceFile || "README.md"))}" data-name="${esc(q.moduleName)}">
+        <span class="leech-q">${qInline(q.questionMd || q.question)}</span>
+        <span class="leech-meta">${rv.lapses}&times; missed &middot; ${esc(q.moduleName)}</span></button>`;
+  }).join("");
+  list.innerHTML = rows || `<div class="leech-note">Those questions are no longer in the bank.</div>`;
+  list.querySelectorAll(".leech-row").forEach((b) => b.addEventListener("click", () => openReaderPath(b.dataset.path, b.dataset.name)));
+}
+
+// Per-section confidence calibration. Only sections with >= 10 confidence-tagged
+// answers qualify; a section where "sure" underperforms "unsure" is overconfident.
+function calibrationHTML() {
+  const rows = [];
+  for (const [s, st] of Object.entries(state.progress.sections || {})) {
+    const tagged = (st.sureSeen || 0) + (st.unsureSeen || 0);
+    if (tagged < 10) continue;
+    const sureAcc = st.sureSeen ? Math.round((st.sureCorrect || 0) / st.sureSeen * 100) : null;
+    const unsureAcc = st.unsureSeen ? Math.round((st.unsureCorrect || 0) / st.unsureSeen * 100) : null;
+    const over = sureAcc != null && unsureAcc != null && sureAcc < unsureAcc;
+    rows.push(`<div class="cal-row">
+        <span class="cal-sec">${esc(label(s))}${over ? ` <span class="warn-chip">overconfident</span>` : ""}</span>
+        <span class="cal-val">When sure: <b>${sureAcc == null ? "&mdash;" : sureAcc + "%"}</b> &middot; When unsure: <b>${unsureAcc == null ? "&mdash;" : unsureAcc + "%"}</b></span>
+      </div>`);
+  }
+  if (!rows.length) return "";
+  return `<div class="ins-card"><h3 class="ins-h">Calibration</h3>${rows.join("")}</div>`;
+}
+
+// 30-day trend: XP per day (bars) + a 7-day rolling accuracy line, both from history.
+function trendHTML() {
+  const base = new Date(todayISO() + "T00:00:00");
+  const days = [];
+  for (let i = 29; i >= 0; i--) { const d = new Date(base); d.setDate(d.getDate() - i); days.push({ iso: d.toLocaleDateString("en-CA"), xp: 0, answered: 0, correct: 0 }); }
+  const idxOf = {};
+  days.forEach((d, i) => (idxOf[d.iso] = i));
+  for (const h of state.progress.history || []) {
+    const i = idxOf[h.date];
+    if (i == null) continue;
+    days[i].xp += h.xp || 0; days[i].answered += h.answered || 0; days[i].correct += h.correct || 0;
+  }
+  const roll = days.map((_, i) => {
+    let a = 0, c = 0;
+    for (let j = Math.max(0, i - 6); j <= i; j++) { a += days[j].answered; c += days[j].correct; }
+    return a ? c / a : null;
+  });
+  const W = 320, H = 92, pad = 3, plot = H - 16, bw = (W - pad * 2) / 30;
+  const maxXp = Math.max(1, ...days.map((d) => d.xp));
+  const bars = days.map((d, i) => {
+    const bh = d.xp ? Math.max(1.5, (d.xp / maxXp) * plot) : 0;
+    const x = pad + i * bw;
+    return bh ? `<rect x="${(x + 0.8).toFixed(1)}" y="${(plot - bh + 2).toFixed(1)}" width="${(bw - 1.6).toFixed(1)}" height="${bh.toFixed(1)}" class="tr-bar" rx="1"/>` : "";
+  }).join("");
+  const pts = [];
+  roll.forEach((r, i) => { if (r == null) return; const x = pad + i * bw + bw / 2; const y = (plot + 2) - r * plot; pts.push(`${x.toFixed(1)},${y.toFixed(1)}`); });
+  const line = pts.length > 1 ? `<polyline class="tr-line" points="${pts.join(" ")}" fill="none" vector-effect="non-scaling-stroke"/>` : "";
+  const totalXp = days.reduce((s, d) => s + d.xp, 0);
+  return `<div class="ins-card">
+      <h3 class="ins-h">30-day trend</h3>
+      <svg class="trend" viewBox="0 0 ${W} ${H}" role="img" aria-label="Daily XP bars with a 7-day rolling accuracy line">${bars}${line}</svg>
+      <p class="ins-cap"><b>${totalXp}</b> XP over 30 days &middot; line is 7-day rolling accuracy.</p></div>`;
+}
+
+// Session log: the last 10 recorded runs, newest first.
+function sessionLogHTML() {
+  const h = (state.progress.history || []).slice(-10).reverse();
+  if (!h.length) return "";
+  const rows = h.map((e) => {
+    const secs = e.durationSec || 0, mm = Math.floor(secs / 60), ss = secs % 60;
+    const dur = secs > 0 ? `${mm}:${String(ss).padStart(2, "0")}` : "&mdash;";
+    return `<div class="log-row">
+        <span class="log-date">${fmtDate(e.date)}</span>
+        <span class="log-sec">${esc(label(e.section))}</span>
+        <span class="log-score">${e.correct}/${e.answered}</span>
+        <span class="log-xp">+${e.xp} XP</span>
+        <span class="log-dur">${dur}</span></div>`;
+  }).join("");
+  return `<div class="ins-card"><h3 class="ins-h">Session log</h3><div class="log-list">${rows}</div></div>`;
+}
+
+// The whole Insights region, ordered what's-due -> what's-weak -> how-am-I-doing.
+function insightsHTML() {
+  if (!(state.progress.history || []).length && !Object.keys(state.progress.reviews || {}).length) return "";
+  return `<div class="ins-region">
+      <h2 class="section-h">Insights</h2>
+      ${forecastHTML()}
+      <div class="ins-two">${strongestShakiestHTML()}</div>
+      ${leechesHTML()}
+      ${trendHTML()}
+      ${calibrationHTML()}
+      ${sessionLogHTML()}
+    </div>`;
+}
+function wireInsights() {
+  document.querySelectorAll(".ins-drill").forEach((b) =>
+    b.addEventListener("click", () => startBlitz(b.dataset.sec, [b.dataset.mod])));
+  const ld = el("#leechDetails");
+  if (ld) ld.addEventListener("toggle", () => { if (ld.open && !ld.dataset.filled) { ld.dataset.filled = "1"; fillLeeches(); } });
+  const drill = el("#leechDrill");
+  if (drill) drill.addEventListener("click", (e) => { e.preventDefault(); const ids = leechIds(); if (ids.length) startRefresh(ids); });
+  const hs = el(".heatmap-scroll");
+  if (hs) hs.scrollLeft = hs.scrollWidth;             // [E2] mobile: land on today (right edge)
+}
+
+/* ---------- [E2] Cmd+K command palette ---------- */
+// Subsequence fuzzy match. Returns -1 for a non-match; higher = tighter. Rewards
+// consecutive runs (tightness), word-boundary starts, and an early first hit.
+function fuzzyScore(query, text) {
+  const q = query.toLowerCase(), t = text.toLowerCase();
+  if (!q) return 0;
+  let qi = 0, score = 0, run = 0, first = -1;
+  for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+    if (t[ti] === q[qi]) {
+      if (first < 0) first = ti;
+      run++; score += 1 + run;                                   // consecutive matches compound
+      if (ti === 0 || /[\s/·—-]/.test(t[ti - 1])) score += 3;    // prefix / word-boundary bonus
+      qi++;
+    } else run = 0;
+  }
+  if (qi < q.length) return -1;                                  // not a subsequence -> drop
+  return score + Math.max(0, 12 - first);                        // earlier first hit -> better
+}
+
+// Static command set (sections + every module's Read/Quiz). Built once — ~340
+// modules -> ~680 entries — and cached; verbs are rebuilt per open (state-aware).
+let _palStatic = null;
+function palStaticCommands() {
+  if (_palStatic) return _palStatic;
+  const out = [];
+  for (const s of Object.keys(state.index.sections || {}).sort())
+    out.push({ label: `Start ${label(s)} blitz`, hint: "blitz", run: () => startBlitz(s) });
+  for (const [mod, list] of Object.entries(state.index.files || {})) {
+    const name = mod.split("/").pop().replace(/_/g, " "), sec = mod.split("/")[0];
+    const file = (list && list[0]) || "README.md";
+    out.push({ label: `Read ${name}`, hint: label(sec), run: () => { reader.back = []; openReaderPath(`${mod}/${file}`, name); } });
+    out.push({ label: `Quiz ${name}`, hint: label(sec), run: () => startBlitz(sec, [mod]) });
+  }
+  _palStatic = out;
+  return out;
+}
+function palVerbs() {
+  const out = [];
+  if (readDeckSnapshot()) out.push({ label: "Resume blitz", hint: "verb", run: () => resumeDeck() });
+  const due = dueReviews().length;
+  out.push({ label: `Start review${due ? ` (${due} due)` : ""}`, hint: "verb", run: () => startReview() });
+  out.push({ label: "Weak spots", hint: "verb", run: () => startWeakSpots() });
+  out.push({ label: "Today's gauntlet", hint: "verb", run: () => go("#/gauntlet") });
+  out.push({ label: "Codex", hint: "verb", run: () => go("#/codex") });
+  out.push({ label: "Insights", hint: "verb", run: () => go("#/progress") });
+  out.push({ label: "Debrief", hint: "verb", run: () => go("#/debrief") });
+  const flash = deckMode() === "flash";
+  out.push({ label: flash ? "Quiz mode (from flashcards)" : "Flashcards mode (from quiz)", hint: "verb",
+    run: () => { localStorage.setItem("sd_mode", flash ? "quiz" : "flash"); syncModeBtn(); if (!state.inQuiz) renderHome(); } });
+  for (const t of ["midnight", "orchid", "ember", "daylight"]) out.push({ label: `Theme: ${t}`, hint: "theme", run: () => applyTheme(t) });
+  out.push({ label: "Export progress", hint: "verb", run: () => exportProgress() });
+  return out;
+}
+// A cached section bank lets us offer full-text question search without a fetch.
+function palSearchSection(query) {
+  const cached = Object.keys(bankCache).filter((k) => bankCache[k] && bankCache[k].length);
+  if (!cached.length) return null;
+  const ql = query.toLowerCase();
+  const named = cached.find((s) => label(s).toLowerCase().split(/\s+/).some((w) => w.length > 2 && ql.includes(w)) || ql.includes(s));
+  return named || cached[cached.length - 1];
+}
+
+let _palette = null, _palKey = null;
+function closePalette() {
+  if (!_palette) return;
+  _palette.remove();
+  _palette = null;
+  if (_palKey) { document.removeEventListener("keydown", _palKey, true); _palKey = null; }
+}
+function openPalette() {
+  if (_palette) return;
+  const o = document.createElement("div");
+  o.className = "palette-overlay"; o.id = "paletteOverlay";
+  o.innerHTML = `<div class="palette" role="dialog" aria-label="Command palette" aria-modal="true">
+      <input type="text" class="pal-input" id="palInput" placeholder="Jump to a section, module, or command…" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Command palette search" aria-controls="palList" />
+      <ul class="pal-list" id="palList" role="listbox"></ul></div>`;
+  document.body.appendChild(o);
+  _palette = o;
+  const input = el("#palInput"), list = el("#palList");
+  let results = [], sel = 0, search = null;                      // search = {section} sub-mode
+
+  function topResults(query) {
+    const cmds = query ? [] : palVerbs().slice();                // empty query -> verbs first (calm default)
+    if (query) {
+      const all = [...palVerbs(), ...palStaticCommands()], scored = [];
+      for (const c of all) { const sc = fuzzyScore(query, c.label); if (sc >= 0) scored.push({ c, sc }); }
+      scored.sort((a, b) => b.sc - a.sc);
+      for (const x of scored.slice(0, 40)) cmds.push(x.c);
+    }
+    // Final "search questions" affordance when a section bank is already loaded.
+    const sec = query.length >= 2 ? palSearchSection(query) : null;
+    if (sec) cmds.push({ label: `Search questions for “${query}” in ${label(sec)}…`, hint: "search",
+      run: () => enterSearch(sec, query) });
+    return cmds;
+  }
+  function questionResults(query) {
+    const bank = bankCache[search.section] || [];
+    const toks = query.toLowerCase().split(/\s+/).filter(Boolean);
+    const hits = bank.filter((q) => { const t = (q.question || "").toLowerCase(); return toks.every((tk) => t.includes(tk)); }).slice(0, 8);
+    return hits.map((q) => ({ label: q.question, hint: q.moduleName, run: () => openReaderPath(`${q.module}/${q.sourceFile || "README.md"}`, q.moduleName) }));
+  }
+  function enterSearch(section, query) {
+    search = { section };
+    input.value = query;
+    render();
+  }
+  function render() {
+    results = search ? questionResults(input.value.trim()) : topResults(input.value.trim());
+    if (sel >= results.length) sel = Math.max(0, results.length - 1);
+    list.innerHTML = results.length
+      ? results.map((r, i) => `<li class="pal-item${i === sel ? " sel" : ""}" role="option" aria-selected="${i === sel}" data-i="${i}">
+          <span class="pal-label">${esc(r.label)}</span>${r.hint ? `<span class="pal-hint">${esc(r.hint)}</span>` : ""}</li>`).join("")
+      : `<li class="pal-empty">${search ? "No questions match." : "No matches."}</li>`;
+    list.querySelectorAll(".pal-item").forEach((li) => {
+      li.addEventListener("mousemove", () => { sel = +li.dataset.i; markSel(); });
+      li.addEventListener("click", () => activate(+li.dataset.i));
+    });
+  }
+  function markSel() {
+    list.querySelectorAll(".pal-item").forEach((li, i) => { const on = i === sel; li.classList.toggle("sel", on); li.setAttribute("aria-selected", on); });
+    list.querySelector(".pal-item.sel")?.scrollIntoView({ block: "nearest" });
+  }
+  function activate(i) {
+    const r = results[i];
+    if (!r) return;
+    if (r.hint === "search") { r.run(); return; }               // stay open: switch into search sub-mode
+    closePalette();
+    guardedNav(r.run);                                          // leaving a live blitz raises the pause sheet
+  }
+  input.addEventListener("input", () => { if (search) search = null; sel = 0; render(); });
+  _palKey = (e) => {
+    if (!_palette) return;
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); if (search) { search = null; sel = 0; render(); } else closePalette(); return; }
+    if (e.key === "ArrowDown") { e.preventDefault(); e.stopPropagation(); if (results.length) { sel = (sel + 1) % results.length; markSel(); } return; }
+    if (e.key === "ArrowUp") { e.preventDefault(); e.stopPropagation(); if (results.length) { sel = (sel - 1 + results.length) % results.length; markSel(); } return; }
+    if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); activate(sel); return; }
+    // any other key: let it reach the input (typing)
+  };
+  document.addEventListener("keydown", _palKey, true);
+  o.addEventListener("pointerdown", (e) => { if (e.target === o) closePalette(); });
+  render();
+  input.focus();
 }
 
 function renderProgress() {
@@ -2721,6 +3095,7 @@ function renderProgress() {
     ${ledgerStripHTML()}
     <h2 class="section-h">Mastery by section</h2>
     ${tiles}
+    ${insightsHTML()}
     <div class="backup-row">
       <div class="backup-copy">Your progress lives only in this browser. Keep a backup.</div>
       <div class="backup-actions">
@@ -2734,6 +3109,7 @@ function renderProgress() {
   el("#exportBtn").addEventListener("click", exportProgress);
   el("#importBtn").addEventListener("click", () => el("#importFile").click());
   el("#importFile").addEventListener("change", (e) => { if (e.target.files[0]) importProgress(e.target.files[0]); });
+  wireInsights();                                   // [E2] Insights: drill buttons, lazy leeches, heatmap scroll-to-today
   wireReveals();
 }
 
@@ -2928,7 +3304,11 @@ async function openStudySection(section) {
     const W = wrap.clientWidth;
     if (!W || !stepEls.length) return;
     const vis = visIdx;
-    const hasEdges = chords.length > 0;
+    // [E2] mobile: prerequisite chords are a hover-only affordance — dead weight on
+    // touch. On coarse pointers the chord SVG is hidden (CSS) and the layout drops
+    // the wide gutters that only existed to route those lines, reclaiming the width.
+    const coarse = window.matchMedia("(pointer: coarse)").matches;
+    const hasEdges = chords.length > 0 && !coarse;
     const cols = W < 520 ? 1 : Math.min(4, Math.max(2, Math.floor(W / 330)));
     const sideM = cols === 1 ? (hasEdges ? 42 : 4) : 8;
     const colGap = cols === 1 ? 0 : (hasEdges ? 48 : 28);
@@ -5025,7 +5405,21 @@ function redirect(route) {
   onHashChange();
 }
 
+// [E2] mobile bottom tab bar: reflect the current route as the active tab.
+function updateTabbar() {
+  const bar = el("#tabbar");
+  if (!bar) return;
+  const h = location.hash || "#/home";
+  const active = h.startsWith("#/study") ? "study" : h === "#/progress" ? "progress" : h.startsWith("#/quiz") || h.startsWith("#/reader") ? null : "home";
+  bar.querySelectorAll(".tab").forEach((t) => {
+    const on = t.dataset.tab === active;
+    t.classList.toggle("active", on);
+    t.setAttribute("aria-current", on ? "page" : "false");
+  });
+}
+
 function onHashChange() {
+  updateTabbar();                                    // [E2] keep the mobile tab bar in sync with the route
   if (_navLock) { _navLock = false; return; }       // swallow our own hash restore
   const route = location.hash || "#/home";
   const isReaderRoute = route.startsWith("#/reader/");
@@ -5091,6 +5485,9 @@ document.addEventListener("keydown", (e) => {
   const toggleEB = () => { const det = el(".explain-back"); if (det) { det.open = !det.open; if (det.open) det.querySelector(".eb-input")?.focus(); } };
   if (e.key === "Escape" && el("#helpOverlay")) { el("#helpOverlay").remove(); return; }
   if (e.key === "Escape" && el("#pauseSheet")) { el("#pauseSheet").remove(); return; }
+  // [E2] command palette: Cmd/Ctrl+K toggles anywhere; "/" opens when not typing.
+  if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) { e.preventDefault(); _palette ? closePalette() : openPalette(); return; }
+  if (e.key === "/" && !typing && !_palette) { e.preventDefault(); openPalette(); return; }
   if (e.key === "?" && !typing) { e.preventDefault(); toggleHelp(); return; }
   if (document.body.classList.contains("reader-open")) {
     if (e.key === "Escape") {                       // exit fullscreen first, then close
@@ -5788,6 +6185,12 @@ async function boot() {
   el("#navProgress").addEventListener("click", () => guardedNav(() => go("#/progress")));
   const studyB = el("#navStudy");
   if (studyB) studyB.addEventListener("click", () => guardedNav(() => go("#/study")));
+  // [E2] mobile bottom tab bar (shown only < 640px). Routes through guardedNav so
+  // leaving a live blitz raises the pause sheet, same as the topbar nav.
+  document.querySelectorAll("#tabbar .tab").forEach((t) => t.addEventListener("click", () => {
+    const dest = t.dataset.tab === "study" ? "#/study" : t.dataset.tab === "progress" ? "#/progress" : "#/home";
+    guardedNav(() => go(dest));
+  }));
   const helpB = el("#helpBtn");
   if (helpB) helpB.addEventListener("click", toggleHelp);
   restoreReaderWidth();
@@ -5816,6 +6219,8 @@ async function boot() {
     Object.assign(window.__qa = window.__qa || {}, { state, moduleStats, orderInterleaved, distractorSource, flipOptsFor, loadGraph, loadBank, bankById, bankCache });
     // [E1] additive QA surface for friction-kill features.
     Object.assign(window.__qa, { deckLen, loadRecent, errorScreen, showToast, coachMarkSeen: (id) => localStorage.getItem("sd_cm_" + id) === "1" });
+    // [E2] additive QA surface: insights derivations + command palette + tab bar.
+    Object.assign(window.__qa, { openPalette, closePalette, forecastData, leechIds, moduleAccStats, fuzzyScore, updateTabbar });
   }
   discardStaleDeck();                              // drop a previous-day resume snapshot
   registerServiceWorker();

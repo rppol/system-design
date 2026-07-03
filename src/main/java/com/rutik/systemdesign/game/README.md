@@ -3,166 +3,242 @@
 A browser-based daily learning game built **from this repo's own content**. It turns
 the ~5,600 interview Q&As scattered across all 12 sections (every module README **and
 its deep-dive sub-files**; case studies excluded) into a one-click, 5-minute
-multiple-choice blitz with streaks, XP, and per-section mastery — paired with a Claude
-Code scheduled task that nudges you, curates the day's topic, rescues your streak, and
-reports weekly.
+multiple-choice blitz with streaks, XP, spaced repetition, per-section mastery, and an
+in-app coach that curates the day's topic and reports weekly.
 
 > **Why this exists:** consistency, not content, is the bottleneck. This section is a
 > *discipline engine* targeting the four reasons daily learning fails: no nudge,
 > boredom, friction, and invisible progress.
 
-> **Pages-only as of 2026-07-03.** The game runs entirely as a static site on GitHub
-> Pages — there is no `server.py`, no `/api`, and no local scheduling stack anymore.
-> **`localStorage` (`sd_progress`) is the single source of truth** for streak, XP,
-> mastery, and the spaced-repetition schedule. Export a backup from the Progress
-> screen to move progress between browsers. (Some sections below still describe the
-> retired local stack; full doc rewrite is a later phase.)
-
-### Modes & controls
-
-- **Suggested topic** — one big button starts the coach's pick for today (all sub-topics).
-- **Pick a section, then sub-topics** — choose any section (LLM, LLD, HLD, …), then
-  multi-select exactly which modules to drill (e.g. LLM → only `advanced_rag`,
-  `rag_fundamentals`, `fine_tuning`). Select-all / clear; live question count.
-- **Review (spaced repetition)** — a home-screen card surfaces questions due for review
-  (driven by an SM-2 schedule over your past answers) and builds a cross-section deck.
-- **Drill your weak spots** — a home-screen card (shown when a section is below 70%) builds
-  a deck from your lowest-accuracy sections, prioritising questions you've lapsed on.
-- **Quiz / Cards toggle** — a top-bar switch turns any deck into flashcard self-grade mode
-  (reveal → "Got it / Missed it"), feeding the same spaced-repetition schedule.
-- **Skip for now** — defer a question; it returns at the end in **teach mode** (the
-  full concept is shown first, then you lock it in by answering). Skipped-then-learned
-  questions count as "learned," not as a scored-correct, so accuracy stays honest.
-- **Boss round** — `advanced`-difficulty questions come last and are worth 2x XP.
-- **Engagement** — answer-combo XP multiplier, a daily-XP goal ring, streak freezes, an
-  activity heatmap, mastery tiers + level, sound effects (toggle in the top bar), and
-  confetti on a flawless blitz.
-- **Keyboard** — `1`–`4` to answer, `Enter` for next, `S` to skip; in Cards mode `Space`
-  reveals and `1`/`2` grade Missed/Got. In the reader: `F` toggles fullscreen, `Esc`
-  exits fullscreen (then closes). In the diagram lightbox: `+`/`−`/`0` zoom, arrows pan.
-  `?` opens a shortcuts overlay anywhere. **Mouse back/forward buttons** navigate the
-  reader (back-stack → prev/next topic → close) and return to the previous screen.
-- **Post-round review** — the results screen lists every miss (and teach-mode learn)
-  with the correct answer and a dive-deeper link, under an animated score ring.
-- **Find fast** — type-to-filter inputs on the sub-topic picker and Study topic lists;
-  on a Learning Path the filter collapses the grid to just the matches (with an
-  "N of M topics" count; Enter opens the first match's reader). Study also shows a
-  "Continue reading" card for the last-opened page.
-- **Reader comfort** — reading-progress bar, `A−`/`A+` font-size controls (persisted),
-  back-to-top button, and full-name hover tooltips on truncated sidebar/TOC entries.
-- **Themes** — a top-bar picker with four glass themes (Midnight blue/violet,
-  Orchid purple/pink, Ember red/orange, Daylight light), each driving every color
-  token plus the animated aurora-mesh backdrop.
-  Persisted to `localStorage`; `?theme=<id>` in the URL previews one without saving.
-  All surfaces are translucent glass (`backdrop-filter`) over the mesh + blueprint grid.
-- **Study mode** — a top-bar `Study` button opens a pure-reading browser: pick a section,
-  then follow its **Learning Path** — a width-adaptive serpentine skill-tree of the
-  section's modules in learning order (up to 4 columns on a landscape laptop, snaking
-  row by row), drawn as glass node chips over a gradient spine. Nodes show step number
-  and question count, a ✓ once a module has review history, a pulsing "you are here"
-  ring on the last page you read, and expandable fans of deep-dive sub-files; clicking
-  any node opens the full reader with Previous/Next walking the path.
-- **Dive deeper** — every revealed answer opens its source module in the in-app reader
-  (rendered Markdown beside the quiz), no tab switch needed.
-- **The reader** — a One Dark reading surface: code blocks get IntelliJ-style syntax
-  highlighting; ASCII §5 diagrams get alignment-safe colouring (muted scaffolding, blue
-  `[labels]`, cyan flow arrows); headings/questions/answers are colour-coded. It is
-  **drag-resizable**, has a **fullscreen** mode, an **always-accessible collapsible index**
-  (sidebar built from the headings), and **working cross-links** (relative `.md` links
-  open in-reader with a Back button). **Diagrams are interactive**: Mermaid *and* ASCII
-  diagrams open in a lightbox with drag-to-pan, zoom-toward-cursor (wheel, buttons,
-  double-click, keyboard), and fit-to-viewport; Mermaid nodes glow on hover; every code
-  fence gets a hover copy button. **Diagrams are widescreen-aware**: each directional
-  Mermaid diagram is rendered in both orientations and the reader keeps the one that
-  reads better on a landscape screen (source files untouched), and every diagram has a
-  corner drag-grip for freeform resizing (double-click resets, no upper size cap).
-  **Chart-family Mermaid types are column-aware** (`mmChartType`/`mmChartDirective` in
-  `app.js`): xychart and quadrantChart re-render at the column width via an injected
-  init directive (text keeps true size; long xychart titles are font-fitted; colliding
-  x tick labels rotate -28°; colliding quadrant point labels flip above their point);
-  pie re-renders with text boosted by the measured shrink factor (legend rows re-spaced
-  to the boosted font); timeline keeps a 0.75x text floor and h-scrolls like a film
-  strip (gold title + visible axis line patched post-render). All chart types are
-  themed One Dark via `themeVariables` (pie1-12, quadrant fills, cScale0-11, xyChart
-  palette) — no per-diagram workarounds in source files. **Hard limit (see CLAUDE.md): the reader surface is
-  pitch-black `#000000` with `#e6e6e6` prose in every theme** — only the app chrome
-  re-themes; code, ASCII diagrams, and Mermaid stay One Dark.
-
 > **Template note:** `game/` is an application, not study content, so it is **exempt
 > from the repo's 14-section module template** (same way `book/` declares its own
-> chapter template). The files below are code, not a README-per-module.
+> chapter template). The files here are code, not a README-per-module.
 
 ---
 
-## Quick start
+## Architecture — Pages-only, `localStorage` is the single source of truth
 
-The game is a static site — serve the **repo root** (so the reader can fetch content
-at `../<section>/...`) with any static file server:
+There is **no server, no `/api`, no database, and no local scheduling stack.** The game
+is a static single-page app deployed to GitHub Pages.
+
+```
+Browser (index.html + app.js + style.css + sw.js)
+   GET  /                          static SPA shell (also precached by the service worker)
+   GET  questions/index.json       tiny manifest: { total, sections{sec:count}, files{mod:[md]} }
+   GET  questions/<section>.json   ~0.4–2 MB bank, fetched lazily only for the sections you touch
+   GET  graph/<section>.json       prerequisite edges for the Learning Path (optional)
+   GET  ../<section>/<module>/…md  raw repo Markdown, rendered in the in-app reader
+   localStorage  sd_progress       ← streak · XP · mastery · SM-2 review schedule · history
+```
+
+- **`localStorage` `sd_progress` is the one place all progress lives.** Every write goes
+  through `saveSessionLocal()` / `loadProgress()`; nothing else persists progress.
+- **No mirror seam, no round-trip.** Because there is no server, there is nothing to sync
+  and no `POST` — a finished session is written straight to `localStorage`.
+- **Backup = export/import.** The Progress screen has **Export backup** (downloads
+  `sd_progress` as JSON) and **Import backup** — that is the only way to move progress
+  between browsers or devices.
+- **PWA / offline.** `sw.js` precaches the app shell and lazily caches banks
+  (stale-while-revalidate) + content pages (network-first), so a revisit works offline.
+  The cache name embeds a per-deploy build stamp (`pages.yml` rewrites `__BUILD__`), so
+  every deploy busts the shell cache; content edits arrive on the next load without a
+  version bump.
+- **All app colours flow from tokens** in `:root` / `[data-theme=…]` in `style.css`;
+  four glass themes (Midnight, Orchid, Ember, Daylight) set `data-theme` on `<html>`.
+  `?theme=<id>` previews one without persisting.
+
+### Run it locally
+
+Serve the **repo root** (so the reader can fetch content at `../<section>/…`):
 
 ```bash
-cd /path/to/systemdesign          # the repo root, NOT the game dir
+cd /path/to/systemdesign          # the repo ROOT, not the game dir
 python3 -m http.server 8901
 # open http://localhost:8901/src/main/java/com/rutik/systemdesign/game/index.html
 ```
 
-No `pip install`, no `npm`, no build step. In production it deploys to GitHub Pages
-(`.github/workflows/pages.yml` runs `extract.py` + `build_graph.py` and publishes the
-whole repo root). Progress lives in the browser's `localStorage` only.
-
-Rebuild the question bank after editing any module's Q&A:
-
-```bash
-cd src/main/java/com/rutik/systemdesign/game
-python3 extract.py           # re-reads all READMEs -> questions/<section>.json
-```
+No `pip install`, no `npm`, no build step. In production
+`.github/workflows/pages.yml` runs `extract.py` + `build_graph.py` and publishes the
+whole repo root to Pages.
 
 ---
 
-## How it works
+## Feature inventory
 
-```
-Browser (index.html + app.js + style.css)
-   |  GET /                    static SPA
-   |  GET /questions/index.json   tiny manifest (section -> count)
-   |  GET /questions/<sec>.json    ~400-800KB, loaded only for today's topic
-   |  GET /api/today          coach's daily pick + message ({} if not set)
-   |  GET /api/progress        streak / XP / per-section accuracy
-   |  POST /api/progress       record a finished session, recompute streak
-   v
-server.py   (stdlib http.server; persists state/, serves files)
-        ^
-        |  reads progress.json, writes today.json, opens browser, notifies
-Claude scheduled task  ->  driven by claude_coach_prompt.md
-```
+### The daily loop
 
-**Separation of concerns:** `server.py` is deliberately dumb (files + JSON
-persistence). All intelligence — which topic to study, the nudge wording — lives in
-the Claude coach (`claude_coach_prompt.md`), which writes `state/today.json`. The game
-has its own fallback picker, so it still works when the coach hasn't run (weekends,
-missed days).
+- **Blitz** — one big button starts the coach's pick for today; or pick a section, then
+  multi-select exactly which sub-topics to drill (select-all/clear, live count, a
+  5/10/20 session-length control). Questions interleave so no two consecutive share a
+  module; a graph decides which topics sit adjacent for contrast.
+- **Gauntlet** — a daily **sealed** run: a deterministic 10-question recipe (oldest due →
+  suggested section → weakest section → one advanced "final question"), one scored
+  attempt per day, then unscored practice. Sealed days show a gold dot on the heatmap.
+- **Review (spaced repetition)** — a home card surfaces questions **due** today and builds
+  a cross-section deck, recall-first (options hidden until you commit). It reads as a
+  plan: rounds-to-clear estimate, up to 3 per-section chips, a "+N due tomorrow" whisper.
+- **Weak spots** — a card (shown when a section drops below 70%) builds a deck from your
+  lowest-accuracy sections, lapsed questions first.
+- **Drills** — a **confusion drill** (the two modules you most mix up, alternated) and a
+  **fading refresh** (questions whose estimated retention is slipping this week).
 
-### Question extraction
+### The learning engine
+
+- **SM-2-lite spaced repetition** — every first-attempt answer schedules a per-question
+  review (`ease`/`interval`/`reps`/`lapses`/`due`) in `sd_progress.reviews`. A
+  much-slower-than-typical correct answer schedules like a low-confidence one.
+- **Two-step confidence** — lock a pick, then rate **Sure / Not sure**; the tallies drive
+  the Insights calibration strip and a "hard for you" difficulty label.
+- **Miss loop (Redemption)** — a wrong answer re-queues the same question a few cards
+  later for a flat-bonus second shot; the first miss still counts.
+- **Skip → Teach 2.0** — skip a question and it returns in teach mode: the concept is
+  shown first with **cloze** (tap-to-reveal) key terms, then you lock it in. Learned-from-
+  a-skip counts as "learned", not scored-correct, so accuracy stays honest.
+- **Interleaving + confusion tracking** — a wrong cross-module pick is recorded as a
+  confusion pair (from honest distractor provenance) and feeds the confusion drill.
+- **Prime (pretest)** — before reading an unquizzed module, a 3-question pretest primes
+  recall (no XP, no combo, records reviews quietly), then opens the reader.
+- **Explain-back** — on a wrong reveal, type the concept back; matched key terms glow,
+  missed ones are highlighted, small XP for a real attempt.
+- **Flip rounds** — ~30% of review items (deterministic per day+qid) flip: the answer is
+  the prompt and the options are candidate questions.
+
+### Progression
+
+- **XP + career ladder** — correct = 10 XP × combo × boss × recall multipliers; a top-bar
+  `Lv` ring derives level and title from total XP.
+- **Mastery tiers** — sections earn Bronze/Silver/Gold from combined volume + accuracy.
+- **The Codex** — a collection view of every module, unlocked as you practise.
+- **The Skyline** — a home-screen city that grows with your sections.
+- **The Ledger** — earned award chips (and Interview/Panel passes) on the Progress screen.
+- **Time capsules** — a flawless full blitz buries a capsule; the question returns ~60
+  days later and celebrates if it "kept".
+- **Boss round, combos, double-down, comeback engine, daily-XP goal ring, streak freezes**
+  (auto-cover one missed day, re-earned every 7-day milestone, cap 3), sound effects,
+  confetti — all celebration flows through the single **moments engine** (`queueMoments`);
+  `bonusXp` is the only XP side-channel.
+
+### The coach (in-app, no scheduler)
+
+- **Daily pick + voice** — `coachPick()` chooses today's topic (new territory / weak spot /
+  least practised / rotation) and `coachMessage()` speaks it in a terse, dry voice; both
+  computed once per boot and shown on the home card.
+- **Reboarding** — a >2-day gap replaces the suggested card with a calm "the reviews kept
+  your place" card.
+- **Friday Debrief** — `#/debrief`: the week's deltas, a held-memory highlight, and three
+  generated quests for next week (live quest chips on Home).
+- **Streak nudge** — a same-day "you haven't played" toast, re-checked whenever the tab
+  regains visibility (there is no OS scheduler on Pages).
+
+### The reader (One Dark)
+
+- **Dive deeper** — every revealed answer opens its exact source module beside the quiz.
+- **One Dark surface** — code gets IntelliJ-style highlighting; ASCII §5 diagrams get
+  alignment-safe colouring; **Mermaid** fences render via a lazy CDN import (flowchart,
+  sequence, state, xychart, pie, quadrant, timeline, sankey), column-aware and themed.
+- **Evaluate me** — every module page ends with a "Quiz this topic" launcher.
+- **Comfort + deep links** — drag-resize, fullscreen, collapsible index + module tree,
+  reading-progress bar, `A−`/`A+` font, back-to-top, working cross-links, an interactive
+  pan/zoom **diagram lightbox**, and `#/reader/<path>` deep links.
+- **Hard limit (see `CLAUDE.md`):** the reader surface is pitch-black `#000000` with
+  `#e6e6e6` prose in **every** theme — only the app chrome re-themes.
+
+### Insights (Progress screen)
+
+Analytics derived entirely from `sd_progress`, ordered what's-due → what's-weak →
+how-am-I-doing:
+
+- **Memory forecast** — a 14-day bar chart of review-due counts (overdue rolls into
+  today, which is highlighted).
+- **Strongest / shakiest modules** — two 5-row lists (accuracy proxy from reps/lapses),
+  each row a one-tap **Drill** into that module.
+- **Your hardest questions (leeches)** — questions missed 3+ times; the list lazily fetches
+  banks only when expanded, links each to its source, and has a "Drill these" button.
+- **Calibration** — per-section "When sure: X% · When unsure: Y%", with an *overconfident*
+  warn chip when Sure underperforms Not-sure.
+- **30-day trend** — XP bars + a 7-day rolling-accuracy line (inline SVG).
+- **Session log** — the last 10 runs (date · section · score · XP · duration).
+
+### Command palette (Cmd/Ctrl+K, or `/`)
+
+A centred glass modal with fuzzy (subsequence) search over: every section blitz, every
+module's Read/Quiz command (~340 modules), and verbs (resume, start review + due count,
+weak spots, gauntlet, codex, insights, debrief, quiz/flashcards toggle, theme switch,
+export). Arrow keys + Enter, Esc closes. When a section's bank is already cached, a final
+row runs full-text question search (top 8, each opens its reader source).
+
+### Mobile
+
+Under 640px: a fixed glass **bottom tab bar** (Home / Study / Progress, 44px targets; the
+topbar keeps brand + stats), **sticky quiz actions**, a horizontally-scrollable heatmap
+(scrolled to today), and 44px reader controls. On coarse pointers the Learning Path's
+hover-only prerequisite chords are hidden and the side gutters reclaimed.
+
+### Accessibility & motion
+
+`prefers-reduced-motion` gates every animation (view transitions gate in JS); the beauty
+pass (reveal glow sweep, directional question slide, results stagger, mastery-delta shine,
+screen slide-fade) is all reduced-motion-safe. `:focus-visible`, an aria-live region,
+focus management, no emojis, tabular numerals throughout.
+
+---
+
+## `localStorage` keys
+
+`sd_progress` is the single source of truth; everything else is UI state or a cache.
+**All persisted fields are additive** — never rename or repurpose an existing field.
+
+| Key | Schema / purpose |
+|-----|------------------|
+| `sd_progress` | The one truth. `{ streak, longestStreak, lastPlayed, totalXP, sections:{sec:{seen,correct,lastPlayed,sureSeen,sureCorrect,unsureSeen,unsureCorrect}}, history:[{date,answered,correct,xp,section,durationSec,comeback?}] (cap 365), reviews:{qid:{ease,interval,reps,lapses,section,module,due,ms,flagged?,capsule?}}, freezes, freezeUsedOn:[], awards:{id:date}, deepReads, confusions:{"a\|b":n} }` |
+| `sd_active_deck` | Same-day resume snapshot of an interrupted blitz (dropped on a new day). |
+| `sd_gauntlet` | Today's sealed run: `{ date, qids:[], sealed, score, attempt:[] }` (ignored if `date` ≠ today). |
+| `sd_coach` | Coach memory: recent picks/observations so it doesn't repeat itself. |
+| `sd_recent_<section>` | Ring buffer of recently-served qids for no-repeat sampling. |
+| `sd_last_mastery` | `{sec: acc%}` snapshot from the last Home render — drives the mastery-delta shine. |
+| `sd_last_read` | `{ path, title }` for Study's "Continue reading" card. |
+| `sd_theme` | `midnight` \| `orchid` \| `ember` \| `daylight`. |
+| `sd_mode` | `quiz` \| `flash` (flashcard self-grade). |
+| `sd_deck_len` | Session length `5` \| `10` \| `20`. |
+| `sd_mute` | Sound on/off. |
+| `sd_prime_opt` | Count of "just read" opt-outs; 3 stops the prime offer. |
+| `sd_cm_<id>` | First-run coach marks seen (`first_question`/`first_combo`/`first_results`/`first_cards`). |
+| `sd_reader_fs` / `sd_reader_full` / `sd_reader_toc` / `sd_reader_modules` / `sd_reader_w` / `sd_modules_w` / `sd_toc_w` | Reader font size, fullscreen, TOC/module-tree open state, pane/sidebar widths. |
+| `sd_last_export` | Date of the last backup export (for the backup nudge). |
+
+---
+
+## Question extraction & the authoring contract
 
 `extract.py` walks every `.md` file in each section — **module READMEs and their
 deep-dive sub-files** (e.g. `llm/advanced_rag/graph_rag.md`), grouped under the parent
-directory's module, so deep dives count toward their topic. `case_studies/` and
-`CLAUDE.md` are excluded. It scopes to each file's `## 12. Interview Questions` section
-and treats every fully-bold line as a question and the paragraph beneath as the answer
-(handling all four `Q`-label variants found in the repo). Each MCQ uses the answer's
-**first sentence** as the correct option (CLAUDE.md guarantees the first sentence is
-the direct answer). Distractors are chosen to be **topically related**, not random: an
-IDF-weighted token-overlap model ranks other answers (same module first, widening to the
-section) by how many distinctive words they share with the question + answer, preferring
-the most-related while skipping any candidate too close to the correct answer (Jaccard
-> 0.7). This yields ~2.5x more topic overlap than random distractors, so you can't pick
-the answer by keyword-matching alone. Output is split per section for lazy loading.
+module — and builds `questions/<section>.json` + `index.json`. `case_studies/` and
+`CLAUDE.md` are excluded. It scopes to each file's `## 12. Interview Questions` section,
+treats every fully-bold line as a question and the paragraph beneath as the answer, uses
+the answer's **first sentence** as the correct option, and picks **topically related**
+distractors (IDF-weighted token overlap, same module first, widening to the section).
+Each question record carries `id`, `section`, `module`, `moduleName`, `sourceFile`,
+`difficulty`, `question`/`questionMd`, `answerFull`/`answerFullMd`, `correct`/`correctMd`,
+`distractors`/`distractorsMd`, `distractorIds`, and `concepts`.
 
-Question ids are **content-stable** (`module#md5(module|question)[:12]`), so
-re-running `extract.py` after content edits does *not* orphan spaced-repetition
-state (ids only change when a question's own text changes; the review deck also
-self-heals by dropping ids that left the bank). Extraction is fully deterministic
-(sorted walk, seeded RNG, total sort keys) — re-runs on any machine produce
-byte-identical output, and exact duplicate questions within a module are deduped.
+Question ids are **content-stable** (`module#md5(module|question)[:12]`), so re-running
+`extract.py` after content edits does *not* orphan spaced-repetition state (the review
+deck also self-heals by dropping ids that left the bank). Extraction is fully
+deterministic (sorted walk, seeded RNG) — re-runs produce byte-identical output.
+
+Authoring rules (unchanged, enforced by the game contract in the root `CLAUDE.md`):
+
+```bash
+cd src/main/java/com/rutik/systemdesign/game
+python3 extract.py     # re-run after editing ANY module's Q&A, then reload the reader
+```
+
+- Q&As live under `## 12. Interview Questions with Answers`; each question line starts
+  with `**`; the answer's **first sentence must be a self-contained 15–220 char answer**
+  (shorter/longer → silently dropped). The **15-Q&A floor** guarantees enough distractors.
+- Every new module directory must be added to `STUDY_ORDER["<section>"]` in `app.js` at
+  its learning-path position (sub-files need no entry — they group under their parent).
+- Mermaid fences are valid only in study section files, never in `game/` or `CLAUDE.md`.
 
 ---
 
@@ -170,157 +246,50 @@ byte-identical output, and exact duplicate questions within a module are deduped
 
 | File | Role |
 |------|------|
-| `extract.py` | Builds `questions/<section>.json` + `index.json` from all module READMEs |
-| `questions/` | Generated bank (committed so the game runs with no build) |
-| `index.html`, `app.js`, `style.css` | The single-page game (vanilla JS) |
-| `server.py` | Stdlib server: static files + `/api/today` + `/api/progress` |
-| `state/` | Runtime only (gitignored): `progress.json`, `today.json`, `coach.log` |
-| `pick_today.py` | Deterministic (no-LLM) topic picker; writes `today.json` |
-| `claude_coach_prompt.md` | Instructions the scheduled task runs (`main` / `checkin` / `weekly`) |
-| `scheduling/` | `launchd` plists + `coach.sh` for the durable daily trigger — see [`scheduling/README.md`](scheduling/README.md) |
+| `index.html`, `app.js`, `style.css` | The single-page game (vanilla JS/CSS, no build). |
+| `sw.js` | Service worker: precache the shell, lazily cache banks + content (PWA/offline). |
+| `manifest.webmanifest` | PWA manifest. |
+| `extract.py` | Builds `questions/<section>.json` + `index.json` from all module READMEs + sub-files. |
+| `build_graph.py` | Builds `graph/<section>.json` (prerequisite edges) for the Learning Path. |
+| `questions/`, `graph/` | Generated data (committed so the game runs with no build). |
 
 ---
 
-## The daily Claude coach
+## QA harness pattern
 
-Three local cron triggers, all driven by `claude_coach_prompt.md`:
+Features are smoke-tested with headless Chrome over the Chrome DevTools Protocol (raw Node
+`WebSocket`, no Puppeteer). The pattern (see `/tmp/qa_phase*.mjs`):
 
-| Trigger | Schedule | Job |
-|--------|----------|-----|
-| Main session | `0 11 * * 1-5` | Pick today's topic, write `today.json`, open the game, send a streak-aware nudge |
-| Check-in | `30 16 * * 1-5` | If you haven't played, send a streak-rescue reminder |
-| Weekly report | `0 17 * * 5` | Summarize streak, accuracy by section, and next week's focus |
-
-These must run **locally** (they read local files, open your browser, and notify).
-See `claude_coach_prompt.md` for the exact per-mode behavior.
-
-**Important — make it durable:** In-session Claude jobs (`CronCreate`) only fire
-while Claude Code is open and idle and expire after 7 days, so they can't reliably
-nudge you at 11am. For a real daily habit, install the macOS `launchd` agents in
-[`scheduling/`](scheduling/README.md) — they run independently of Claude, and the
-driver (`coach.sh` + `pick_today.py`) picks the topic and notifies with plain Python
-(no tokens, no dependency on Claude running).
+- Serve the repo root (`python3 -m http.server <port>`), launch
+  `--headless=new --remote-debugging-port=<cdp>` against
+  `…/game/index.html?qa=1`, and **wipe the Chrome profile each run** (`--user-data-dir` →
+  `rm -rf`) so a stale service worker can't serve an old `app.js`.
+- `?qa=1` exposes a `window.__qa` debug handle (`state`, `correctIdx()`, `loadBank`,
+  `moduleStats`, `openPalette`, `forecastData`, `leechIds`, … — additive per phase) so a
+  driver can read internals and call helpers without guessing from the shuffled DOM.
+- **Answering is two-step:** click an option → confidence **Sure/Not sure** → reveal
+  (prime/redemption/test grade instantly and skip the confidence bar).
+- Deterministic seams: `?qa_date=YYYY-MM-DD` and `?qa_time=HH:MM` override "today"/"now"
+  everywhere date/time math flows through `todayISO()` / `nowHM()`.
+- Seed a scenario by writing a `sd_progress` object to `localStorage`, then navigate and
+  assert on the rendered DOM + `__qa.state`.
 
 ---
 
-## Already built (beyond the MVP)
+## Deliberately out of scope
 
-The MVP was the multiple-choice blitz. Since then the following shipped:
-
-- **Section + sub-topic picker** — choose a section, then multi-select exactly which
-  modules to drill (part of the old "pick-your-mode" idea).
-- **Skip → teach-back** — skipped questions return at the end with the concept shown first.
-- **Spaced repetition + review deck** — per-question SM-2 scheduling in `progress.json`;
-  a "due for review" card on the home screen builds a cross-section review deck.
-- **Boss round** — `advanced`-difficulty questions are ordered last and worth 2x XP.
-- **Engagement layer** — answer-combo XP multiplier, daily-XP goal ring, sound effects
-  (mutable), XP count-up, and confetti on a flawless blitz.
-- **Keyboard controls** — `1`–`4` to answer, `Enter` for next, `S` to skip.
-- **Dive deeper** — each answer opens its source module in an in-app split-view reader
-  (see below), with a fallback to the server's `/content/` route.
-- **Streak freeze / grace** — banked freeze tokens auto-cover a single missed day so a
-  lone slip doesn't reset a long streak; one is re-earned at each 7-day milestone (cap 3).
-  Shown as a `❄` chip on the home hero and a badge on the progress screen.
-- **Activity heatmap** — a GitHub-style contribution grid on the progress screen, built
-  from the existing `history` array, so daily consistency is visible at a glance.
-- **Drill your weak spots** — a one-tap deck that pulls from your lowest-accuracy sections
-  (prioritising questions you've lapsed on); surfaces on the home screen when a section
-  drops below 70%.
-- **In-app reader (One Dark)** — "Dive deeper" slides the quiz aside and renders the full
-  source module beside it (Markdown → HTML via a hand-written, dependency-free renderer).
-  It ships:
-  - **Code syntax highlighting** — a compact hand-rolled tokenizer (java, python, sql,
-    yaml, bash, json, js, dockerfile, properties) styled with the One Dark palette.
-  - **Alignment-safe diagram colouring** — ASCII §5 diagrams are colour-coded by wrapping
-    characters only (never altering them, so columns stay aligned): muted box/connectors,
-    cyan flow arrows, blue `[labels]`, orange numbers.
-  - **Semantic Markdown colours** — module title, section headings, questions (yellow) and
-    answers each get a distinct One Dark colour.
-  - **Resizable** (drag the left edge; width persists), **fullscreen** (`F`), and an
-    **always-accessible collapsible index** (sidebar TOC from the headings; auto-shown in
-    fullscreen, toggled by the `☰` button otherwise).
-  - **Working cross-links** — relative `.md` links resolve and open in the reader with a
-    Back button; in-page anchors and the TOC scroll within the pane; external links open
-    in a new tab.
-- **Study mode** — a top-bar `Study` button: a pure-reading browser (section → topic →
-  reader) with Previous/Next-topic navigation. No quiz, no clock.
-- **Learning Path graph** — the Study topic list is a width-adaptive serpentine
-  (boustrophedon) skill-tree that escapes the app's 780px column: chips-per-row adapts
-  to the viewport (1 column on mobile, 2 at ~900px, up to 4 on a landscape laptop), and
-  the path snakes row 1 left→right, row 2 right→left, so a 52-topic section fits in a
-  couple of screenfuls. Glass node chips (step number, Q count, practiced ✓ from review
-  history, "you are here" ring from the last-read page) sit over a gradient SVG spine of
-  adjacent-slot connectors, with expandable leaf fans for modules that have deep-dive
-  sub-files (the row grows; rows below shift). Typing in the filter hides non-matches
-  and re-flows the grid so matches gather compactly at the top with an "N of M topics"
-  count; Enter opens the first match, clearing restores the full path. Order comes
-  straight from `STUDY_ORDER` via `modulesOf()`; sub-files from `index.json`'s files
-  map — nothing fabricated. Weighted prerequisite edges overlay the path from
-  `graph/<section>.json` (built by `build_graph.py` from real repo cross-links +
-  lexical Q&A overlap): chords are routed orthogonally through the chip-free row
-  gutters and column gaps (greedy interval-coloring assigns parallel lanes, so runs
-  never overlap or cross chip text), stroke width 1–5px by weight. Local hops (within
-  one gutter) draw by default; multi-row staircases and lexical-only pairs (faint
-  dashed) appear when a chip is hovered or keyboard-focused, which spotlights all its
-  edges and dims everything unconnected. Layout and routing recompute on debounced
-  resize. Sections with no cross-link data fall back to the plain path.
-- **Flashcard self-grade mode** — a top-bar `Quiz / Cards` toggle switches any deck to
-  active recall: see the question, reveal the answer, self-rate "Got it / Missed it". It
-  feeds the *same* spaced-repetition schedule as the blitz; XP is flat (no combo/boss) so
-  self-grading can't inflate score versus the verifiable multiple-choice path.
-- **Mastery tiers + level** — sections earn Bronze/Silver/Gold from combined volume and
-  accuracy (shown on the progress screen); a global `Lv` chip in the top bar derives from
-  total XP.
-- **Mastery-decay nudge** — the home screen flags your most-invested section when it
-  hasn't been practiced in a week ("X is getting rusty — N days"), one tap to refresh it.
-
-- **Visual overhaul (2026-07-02)** — token-driven design system in `style.css`: 4 glass
-  themes over an animated aurora-mesh + blueprint-grid backdrop, SF-style display type
-  with a monospace "data voice", unified button/motion system, single-hue chart ramps,
-  SVG icons replacing emoji, `prefers-reduced-motion` + `:focus-visible` + aria-live
-  announcements + focus management, and the interactive diagram lightbox (pan/zoom for
-  Mermaid + ASCII). Engine hardening from a full audit shipped alongside: stable
-  question ids + review-state migration, offline-session replay queue, key-repeat and
-  double-click guards, DST-safe heatmap, Mermaid CDN retry, server write-lock, and
-  bank revalidation caching (`no-cache` + 304s instead of `no-store` re-downloads).
-- **Round 2 (same day)** — graphics/usability layer: pointer-spotlight on glass cards,
-  scroll-driven reveals (`.rise`), aurora-mesh pointer parallax, gradient shimmer,
-  staggered option dealing, floating `+XP` particles, combo shockwaves, boss-banner
-  pulse, animated results score ring, View-Transitions cross-fades, date eyebrow, tile
-  mini mastery bars, difficulty chips, `n/N` counter, post-round miss review,
-  type-to-filter, `?` shortcuts overlay, mouse back/forward navigation, reader
-  progress bar + font controls + back-to-top + sidebar tooltips. Reader hard limits
-  locked in `CLAUDE.md`: pitch-black `#000` surface, `#e6e6e6` prose, every theme.
-- **Phase E1 (friction kills + QoL)** — first-run coach marks (4, shown once ever;
-  veterans pre-seeded so they never see onboarding chrome); friendly `errorScreen()`
-  (headline + Try again/Home + a collapsed maintainer `<details>`) at every load
-  dead-end, including the reader's in-panel retry; loading skeletons on quiz/topics/
-  study entry points; no-repeat sampling (`sd_recent_<section>` ring buffer) for plain
-  section blitzes, exempt for review/weak/drill/refresh/gauntlet/interview; bank
-  prefetch on tile hover/focus + idle-time prefetch of the suggested section; the
-  review backlog plan (rounds-to-clear + per-section chips + a "due tomorrow"
-  whisper) plus a one-time toast when orphaned reviews self-heal; flag-for-review
-  (a star on every reveal, sorts first in the review deck) and copy-question icons;
-  a 5/10/20 session-length control (`sd_deck_len`); a streak detail popover (current/
-  longest/freezes/last-3-freeze-dates); and the Ghost — a previous-best-run
-  comparison line on a section's results screen, derived from history alone.
-
-## Planned / to be implemented
-
-- _(nothing queued)_ — the deep-dive "learn, then test" flow is now covered by **Study
-  mode** plus the in-app reader and teach-mode.
-
-### Deliberately out of scope
-
-- **Hearts / lives** — punishing wrong answers discourages the exploration a *learning*
-  tool should reward.
-- **Shareable weekly card** — there is no social surface to share into (accounts/multi-user
-  are out of scope), so it has no pull for a solo local tool.
-- **Per-distractor "why this is wrong" text** — distractors are auto-generated by IDF
-  overlap in `extract.py`; there is no authored explanation to show, so it would risk
-  fabricated content.
+- **Per-distractor "why this is wrong" text** — **done, honestly.** A wrong pick whose
+  distractor resolves to another question shows real *provenance* ("You picked the answer
+  to: <that question> — from <that module>") plus a "Read that instead" link. No
+  fabricated explanations: it only ever cites the actual source Q&A the distractor came
+  from.
+- **Hearts / lives** — still rejected. Punishing wrong answers discourages the exploration
+  a *learning* tool should reward.
+- **Shareable weekly card / social** — still rejected. There is no social surface and no
+  accounts/multi-user, so it has no pull for a solo local tool.
 
 ### Out of scope
 
-Accounts/multi-user, cloud hosting, a database, frontend frameworks/build tooling, and
-a mobile app. The whole point is a zero-friction local tool.
+Accounts/multi-user, a server or database, cloud hosting, frontend frameworks/build
+tooling, and a native mobile app. The whole point is a zero-friction static tool whose
+only state is `localStorage`.

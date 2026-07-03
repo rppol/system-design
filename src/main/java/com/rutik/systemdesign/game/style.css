@@ -66,6 +66,7 @@
   --reader-w: min(58%, 760px);   /* reader pane width; updated live by the drag grip */
   --modules-w: 160px;            /* left sidebar width; drag-resizable */
   --toc-w: 190px;                /* right TOC sidebar width; drag-resizable */
+  --tabbar-h: 58px;              /* [E2] mobile bottom tab bar height (< 640px only) */
 }
 
 [data-theme="orchid"] {
@@ -1147,17 +1148,30 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 @keyframes fall { to { transform: translateY(105vh) rotate(var(--rot, 360deg)); opacity: 0.2; } }
 
 @media (max-width: 640px) {
-  main { padding: 22px 16px 40px; }
+  main { padding: 22px 16px calc(40px + var(--tabbar-h)); }   /* [E2] clear the bottom tab bar */
   .topbar { padding: 10px 14px; }
   .brand { font-size: 17px; }
   .hero h1 { font-size: 26px; }
   .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
   .badges { gap: 8px; }
   .badge { min-width: 84px; padding: 10px 14px; }
+  /* [E2] the topbar keeps brand + stats; text nav lives in the bottom tab bar. */
+  #navStudy, #navProgress { display: none; }
+  #tabbar { display: flex; }
+  /* [E2] sticky quiz actions: the answer/next controls ride just above the tab bar. */
+  .qactions {
+    position: sticky; bottom: var(--tabbar-h); z-index: 3;
+    margin-left: -16px; margin-right: -16px; padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    background: var(--topbar-bg);
+    -webkit-backdrop-filter: blur(18px) saturate(1.6); backdrop-filter: blur(18px) saturate(1.6);
+    border-top: 1px solid var(--glass-brd);
+  }
 }
 
 @media (pointer: coarse) {
-  .ghost, .skip, .next, .grade, .opt, .reader-nav { min-height: 44px; }
+  .ghost, .skip, .next, .grade, .opt, .reader-nav, .eval-btn, .tab { min-height: 44px; }
+  .reader-icon { min-width: 44px; }
+  .lp-chords { display: none; }   /* [E2] prerequisite chords are a hover affordance — off on touch */
 }
 
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
@@ -1978,3 +1992,182 @@ body.interview-mode #app::before {
 }
 .eval-btn:hover { filter: brightness(1.12); }
 .eval-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+/* ==========================================================================
+   [E2] PHASE E2 — Insights · Command palette · Mobile tab bar · Beauty
+   Token-only colors (every value flows from :root / [data-theme]); all motion is
+   REDUCED-gated by the global prefers-reduced-motion rule (view transitions gate
+   in JS via vt()'s !REDUCED() check).
+   ========================================================================== */
+
+/* ---------- Insights (Progress screen) ---------------------------------- */
+.ins-region { margin-top: 8px; }
+.ins-card {
+  background: var(--glass); border: 1px solid var(--glass-brd); border-radius: var(--radius);
+  padding: 16px 18px; margin: 12px 0; box-shadow: var(--glass-hilite);
+}
+.ins-two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
+.ins-two .ins-card { margin: 0; }
+.ins-h { margin: 0 0 12px; font-size: 13px; font-weight: 800; letter-spacing: 0.01em; color: var(--text); }
+.ins-cap { margin: 12px 0 0; color: var(--muted); font-size: 12.5px; }
+.ins-cap b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* memory forecast: 14 day-bars, today accented */
+.forecast { display: flex; align-items: flex-end; gap: 4px; height: 96px; }
+.fc-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; height: 100%; justify-content: flex-end; }
+.fc-n { font-family: var(--mono); font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; min-height: 12px; line-height: 12px; }
+.fc-track { width: 100%; flex: 1; display: flex; align-items: flex-end; }
+.fc-bar { width: 100%; border-radius: 3px 3px 0 0; background: linear-gradient(180deg, var(--accent), var(--accent-2)); }
+.fc-d { font-size: 10px; color: var(--faint); }
+.fc-col.today .fc-bar { background: linear-gradient(180deg, var(--warn), color-mix(in srgb, var(--warn) 55%, var(--accent))); }
+.fc-col.today .fc-d { color: var(--warn); font-weight: 800; }
+
+/* strongest / shakiest module lists */
+.mod-list { display: flex; flex-direction: column; gap: 8px; }
+.mod-row { display: grid; grid-template-columns: 1fr 78px auto auto; align-items: center; gap: 10px; }
+.mr-name { font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: capitalize; }
+.mr-bar { height: 6px; border-radius: 3px; background: var(--glass-2); overflow: hidden; }
+.mr-bar > i { display: block; height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+.mr-seen { font-family: var(--mono); font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; min-width: 18px; }
+.ghost.sm { padding: 5px 11px; font-size: 12px; }
+
+/* leeches: your hardest questions (lazy-fetched on expand) */
+.leeches > summary { cursor: pointer; color: var(--muted); font-size: 13px; padding: 4px 0; list-style: none; }
+.leeches > summary::-webkit-details-marker { display: none; }
+.leeches[open] > summary { color: var(--text); margin-bottom: 8px; }
+.leech-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.leech-row { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; width: 100%;
+  padding: 8px 10px; border-radius: var(--radius-sm); background: var(--glass); border: 1px solid var(--glass-brd); }
+.leech-row:hover { border-color: var(--glass-brd-hi); }
+.leech-q { color: var(--text); font-size: 13px; }
+.leech-meta { color: var(--faint); font-family: var(--mono); font-size: 10.5px; }
+.leech-note { color: var(--muted); font-size: 13px; padding: 4px 0; }
+
+/* calibration strip */
+.cal-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 0; border-top: 1px solid var(--glass-brd); }
+.cal-row:first-of-type { border-top: none; }
+.cal-sec { font-size: 13px; color: var(--text); }
+.cal-val { font-family: var(--mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.cal-val b { color: var(--text); }
+.warn-chip { display: inline-block; font-family: var(--mono); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); padding: 1px 6px; border-radius: 6px; }
+
+/* 30-day trend svg */
+.trend { width: 100%; height: auto; display: block; }
+.tr-bar { fill: color-mix(in srgb, var(--accent) 55%, transparent); }
+.tr-line { stroke: var(--accent-2); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+
+/* session log */
+.log-list { display: flex; flex-direction: column; }
+.log-row { display: grid; grid-template-columns: 1fr 1.2fr auto auto auto; align-items: center; gap: 10px;
+  padding: 7px 0; border-top: 1px solid var(--glass-brd); font-size: 12.5px; }
+.log-row:first-child { border-top: none; }
+.log-date { color: var(--muted); }
+.log-sec { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-score, .log-xp, .log-dur { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; color: var(--muted); }
+.log-score { color: var(--text); }
+
+/* heatmap horizontal scroll on narrow screens (JS scrolls it to today) */
+.heatmap-scroll { overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; }
+
+@media (max-width: 640px) {
+  .ins-two { grid-template-columns: 1fr; }
+  .log-row { grid-template-columns: auto 1fr auto; row-gap: 2px; }
+  .log-xp, .log-dur { grid-column: span 1; }
+}
+
+/* ---------- Cmd+K command palette --------------------------------------- */
+.palette-overlay {
+  position: fixed; inset: 0; z-index: 92;
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 11vh 16px 16px;
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  animation: fade 0.16s var(--ease-out);
+}
+.palette {
+  width: min(560px, 100%);
+  background: var(--glass-2); border: 1px solid var(--glass-brd-hi); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow); overflow: hidden;
+  -webkit-backdrop-filter: blur(28px) saturate(1.6); backdrop-filter: blur(28px) saturate(1.6);
+}
+.pal-input {
+  width: 100%; border: none; background: transparent; color: var(--text); font: inherit; font-size: 17px;
+  padding: 16px 18px; border-bottom: 1px solid var(--glass-brd); outline: none;
+}
+.pal-input::placeholder { color: var(--faint); }
+.pal-list { list-style: none; margin: 0; padding: 6px; max-height: 52vh; overflow-y: auto; }
+.pal-item {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding: 9px 12px; border-radius: var(--radius-sm); cursor: pointer;
+}
+.pal-item.sel { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.pal-label { color: var(--text); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pal-hint { color: var(--faint); font-family: var(--mono); font-size: 11px; flex: none; }
+.pal-item.sel .pal-hint { color: var(--muted); }
+.pal-empty { padding: 14px 12px; color: var(--muted); font-size: 14px; }
+
+/* ---------- Mobile bottom tab bar (< 640px only) ------------------------ */
+.tabbar {
+  display: none;   /* the < 640px media query flips this to flex */
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+  height: var(--tabbar-h); align-items: stretch;
+  background: var(--topbar-bg);
+  -webkit-backdrop-filter: blur(22px) saturate(1.7); backdrop-filter: blur(22px) saturate(1.7);
+  border-top: 1px solid var(--glass-brd);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.tab {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  color: var(--faint); font-size: 11px; font-weight: 600; border-radius: 0;
+}
+.tab .tabicon { width: 22px; height: 22px; }
+.tab.active { color: var(--accent); }
+.tab:active { background: var(--glass); }
+
+/* ---------- Beauty pass (all REDUCED-gated) ----------------------------- */
+/* reveal choreography: correct option gets a soft glow sweep (::before is free;
+   ::after already carries the pointer spotlight) */
+.opt.correct::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
+  background: linear-gradient(100deg, transparent 30%, color-mix(in srgb, var(--good) 42%, transparent) 50%, transparent 70%);
+  transform: translateX(-100%); animation: opt-sweep 0.7s 0.05s var(--ease-out) forwards;
+}
+@keyframes opt-sweep { to { transform: translateX(100%); } }
+/* reveal panel slides open (240ms); its buttons fade in 80ms behind the panel.
+   Scoped away from the teach concept card and the flashcard flip, which own
+   their own reveal animation. */
+.reveal.show:not(.card-flip):not(.concept) { animation: reveal-open 0.24s var(--ease-out); transform-origin: top; }
+@keyframes reveal-open { from { opacity: 0; transform: translateY(8px) scaleY(0.985); } }
+.reveal.show:not(.card-flip):not(.concept) .deeper,
+.reveal.show:not(.card-flip):not(.concept) .reveal-actions { animation: fade 0.28s 0.08s var(--ease-out) backwards; }
+
+/* results timeline: stagger ring -> meta -> badges -> miss groups */
+.result.staged > * { animation: res-rise 0.5s var(--ease-out) backwards; }
+.result.staged > *:nth-child(1) { animation-delay: 0.02s; }
+.result.staged > *:nth-child(2) { animation-delay: 0.10s; }
+.result.staged > *:nth-child(3) { animation-delay: 0.18s; }
+.result.staged > *:nth-child(4) { animation-delay: 0.26s; }
+.result.staged > *:nth-child(5) { animation-delay: 0.34s; }
+.result.staged > *:nth-child(n+6) { animation-delay: 0.40s; }
+@keyframes res-rise { from { opacity: 0; transform: translateY(12px); } }
+
+/* mastery-delta shine: a home tile whose accuracy changed sweeps once (reuses
+   the existing bar-shine keyframe) */
+.tile.mastery-delta .tbar { position: relative; }
+.tile.mastery-delta .tbar::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(100deg, transparent 20%, color-mix(in srgb, var(--accent) 45%, transparent) 50%, transparent 80%);
+  transform: translateX(-100%); animation: bar-shine 1.1s 0.4s var(--ease-out) forwards;
+}
+
+/* screen slide-fade: a 12px slide + cross-fade for every vt() navigation */
+::view-transition-old(root) { animation: vt-fade-out 0.2s var(--ease-out) both; }
+::view-transition-new(root) { animation: vt-fade-in 0.24s var(--ease-out) both; }
+@keyframes vt-fade-out { to { opacity: 0; transform: translateY(-12px); } }
+@keyframes vt-fade-in { from { opacity: 0; transform: translateY(12px); } }
+/* directional: the next question slides in from the right (overrides the default) */
+:root.vt-qnext::view-transition-old(root) { animation: q-out-left 0.22s var(--ease-out) both; }
+:root.vt-qnext::view-transition-new(root) { animation: q-in-right 0.24s var(--ease-out) both; }
+@keyframes q-out-left { to { opacity: 0; transform: translateX(-16px); } }
+@keyframes q-in-right { from { opacity: 0; transform: translateX(16px); } }
