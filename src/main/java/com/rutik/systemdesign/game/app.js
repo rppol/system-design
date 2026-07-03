@@ -3873,8 +3873,13 @@ function restoreReaderWidth() {
   const mw = localStorage.getItem("sd_modules_w");  if (mw) css.setProperty("--modules-w", mw);
   const tw = localStorage.getItem("sd_toc_w");      if (tw) css.setProperty("--toc-w", tw);
   reader.full    = localStorage.getItem("sd_reader_full")    === "1";
-  reader.toc     = localStorage.getItem("sd_reader_toc")     === "1";
-  reader.modules = localStorage.getItem("sd_reader_modules") === "1";
+  // First visit on this origin (no saved prefs): default the Contents index on
+  // for wide viewports and the module tree on for very wide ones — a blank
+  // gutter reads as broken. A saved "0"/"1" pref always wins.
+  const tocPref = localStorage.getItem("sd_reader_toc");
+  reader.toc     = tocPref == null ? window.innerWidth >= 1100 : tocPref === "1";
+  const modPref = localStorage.getItem("sd_reader_modules");
+  reader.modules = modPref == null ? window.innerWidth >= 1400 : modPref === "1";
   applyReaderFont();
 }
 
@@ -4002,6 +4007,24 @@ function wireReaderBody(body) {
 
 // Open any repo content file by path. Pushing onto the back-stack is the caller's
 // job (cross-links push; Back/Prev/Next do not), keeping history clean.
+// Build a Study-equivalent nav context for a path from the boot-time index
+// (state.index.files: "section/module" -> [md files]) — zero bank fetches.
+function navFromIndex(path) {
+  const files = (state.index && state.index.files) || {};
+  const section = path.split("/")[0];
+  const mods = Object.keys(files).filter((k) => k.startsWith(section + "/"));
+  if (!mods.length) return null;
+  const order = STUDY_ORDER[section] || [];
+  mods.sort((a, b) => {
+    const ai = order.indexOf(a), bi = order.indexOf(b);
+    return (ai === -1 ? 9999 : ai) - (bi === -1 ? 9999 : bi);
+  });
+  const list = mods.map((m) => ({ path: `${m}/README.md`, title: m.split("/").pop().replace(/_/g, " ") }));
+  const dir = path.replace(/\/[^/]+$/, "");
+  const idx = list.findIndex((m) => m.path.replace("/README.md", "") === dir || m.path === path);
+  return { list, idx: idx === -1 ? 0 : idx };
+}
+
 async function openReaderPath(path, title, navCtx, frag) {
   // Route history: first open pushes a #/reader entry (so browser Back closes the
   // reader onto the underlying screen); navigating within the reader replaces it.
@@ -4012,7 +4035,10 @@ async function openReaderPath(path, title, navCtx, frag) {
     else { state.underHash = location.hash || "#/home"; history.pushState(null, "", h); }
   }
   reader.path = path;
-  reader.nav = navCtx || null;
+  // Deep links and dive-deeper opens arrive without Study's nav context;
+  // synthesize one from the boot-time index so the module tree and Prev/Next
+  // are always available, not only when entered through Study.
+  reader.nav = navCtx || navFromIndex(path);
   reader.titleText = title || titleFromPath(path);
   let panel = el("#reader");
   if (!panel) { panel = document.createElement("aside"); panel.id = "reader"; document.body.appendChild(panel); }
