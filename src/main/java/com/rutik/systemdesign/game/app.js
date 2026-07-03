@@ -333,6 +333,169 @@ async function apiGet(path, fallback, cache = "no-store") {
   catch { return fallback; }
 }
 
+/* ---------- [A2] shared learning helpers ---------- */
+// Deterministic hashing for flip-round selection. Base has no cyrb53/mulberry32,
+// so ship self-contained equivalents (same algorithms).
+function a2Hash(str) {
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0, ch; i < str.length; i++) {
+    ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
+}
+function a2Rand(seed) {                                // mulberry32
+  return function () {
+    seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Knowledge-graph cache — mirrors bankCache; a missing file tolerantly -> null.
+const graphCache = {};
+async function loadGraph(section) {
+  if (!(section in graphCache)) graphCache[section] = await apiGet(`graph/${section}.json`, null, "default");
+  return graphCache[section];
+}
+
+// Tokenizer ported from extract.py (lowercase, split on non-alphanumerics, drop
+// <3-char tokens and a small stopword set) — used by explain-back + concepts.
+const A2_STOP = new Set(("a an and the of to in for on with is are be by as at it its this that these those or " +
+  "not no if then else when while do does done can could should would may might will you your they them their " +
+  "we our he she his her from into over under than so such each per via use used using uses what why how which " +
+  "who whom where whose between within across about after before during because both either neither only also " +
+  "more most less least very much many few some any all one two three first second data system systems model " +
+  "models value values case cases example examples type types").split(/\s+/));
+function a2Tokenize(text) {
+  return (String(text).toLowerCase().match(/[a-z0-9]+/g) || []).filter((t) => t.length > 2 && !A2_STOP.has(t));
+}
+
+// The bank has no `concepts` field yet, so derive the top-6 distinctive tokens
+// (direct-answer tokens first, then question tokens) for explain-back scoring.
+function conceptsOf(q) {
+  if (Array.isArray(q.concepts) && q.concepts.length) return q.concepts.slice(0, 6);
+  const seen = new Set(), out = [];
+  for (const t of [...a2Tokenize(q.correct), ...a2Tokenize(q.question)]) {
+    if (seen.has(t)) continue;
+    seen.add(t); out.push(t);
+    if (out.length >= 6) break;
+  }
+  return out;
+}
+
+// Same-section provenance: the bank has no distractorIds, but extract.py draws
+// distractors from other questions' `correct` (their answerShort), so an option
+// text maps back to the question it is the direct answer of. Cache per section.
+const _provIndex = {};
+function provIndexFor(section) {
+  if (_provIndex[section]) return _provIndex[section];
+  const bank = bankCache[section];
+  if (!bank) return null;                              // section not loaded yet
+  const m = new Map();
+  for (const q of bank) if (!m.has(q.correct)) m.set(q.correct, q);
+  _provIndex[section] = m;
+  return m;
+}
+// Resolve an option/distractor string to its source question (same section).
+function distractorSource(q, text) {
+  const m = provIndexFor(q.section);
+  if (!m) return null;
+  const src = m.get(text);
+  return src && src.id !== q.id ? src : null;
+}
+// id -> question map for a loaded section bank (task references bankById()).
+function bankById(section) {
+  const bank = bankCache[section];
+  if (!bank) return null;
+  return new Map(bank.map((q) => [q.id, q]));
+}
+
+// Greedy reorder so no two consecutive items share a module, preferring the next
+// item whose module is graph-connected to the previous one (A-B-A'-C texture).
+function orderInterleaved(items, pairs) {
+  if (items.length < 3) return items.slice();
+  const modOf = (it) => it.module || (it.q && it.q.module);   // accepts raw questions or deck items
+  const adj = new Map();
+  for (const p of pairs || []) {
+    if (!adj.has(p.a)) adj.set(p.a, new Set());
+    if (!adj.has(p.b)) adj.set(p.b, new Set());
+    adj.get(p.a).add(p.b); adj.get(p.b).add(p.a);
+  }
+  const connected = (m1, m2) => m1 && m2 && m1 !== m2 && adj.has(m1) && adj.get(m1).has(m2);
+  const pool = items.slice(), out = [];
+  const count = new Map();                              // remaining count per module
+  pool.forEach((it) => count.set(modOf(it), (count.get(modOf(it)) || 0) + 1));
+  let prevMod = null;
+  while (pool.length) {
+    // Optimal ordering to minimize same-module adjacencies: among modules that
+    // differ from the previous one, always take the one with the MOST remaining
+    // (leftover-heavy module clusters otherwise). Graph-connectedness only breaks
+    // ties, so the A-B-A'-C texture still shows when counts are equal.
+    let best = 0, bestScore = -1;
+    for (let i = 0; i < pool.length; i++) {
+      const m = modOf(pool[i]);
+      const score = (m === prevMod ? 0 : 1000) + count.get(m) * 2 + (connected(m, prevMod) ? 1 : 0);
+      if (score > bestScore) { bestScore = score; best = i; }
+    }
+    const chosen = pool.splice(best, 1)[0], cm = modOf(chosen);
+    out.push(chosen);
+    count.set(cm, count.get(cm) - 1);
+    prevMod = cm;
+  }
+  return out;
+}
+
+// Aggregate spaced-repetition records per module for the Memory Map.
+// retention = mean exp(-daysSinceScheduled / max(1, interval*ease)), capped 0..1.
+function moduleStats(progress) {
+  const today = new Date(todayISO() + "T00:00:00"), tISO = todayISO();
+  const acc = {};
+  for (const rv of Object.values((progress && progress.reviews) || {})) {
+    const mod = rv.module;
+    if (!mod) continue;
+    const s = acc[mod] || (acc[mod] = { count: 0, held: 0, overdue: 0, easeSum: 0, retSum: 0 });
+    s.count++;
+    s.easeSum += rv.ease || 2.5;
+    const overdue = !!(rv.due && rv.due < tISO);
+    if (overdue) s.overdue++;
+    if ((rv.reps || 0) >= 1 && !overdue) s.held++;
+    let ret = 0;
+    if (rv.due) {
+      const interval = rv.interval || 1;
+      const from = new Date(rv.due + "T00:00:00");
+      from.setDate(from.getDate() - interval);         // the day it was last scheduled
+      const days = Math.max(0, Math.round((today - from) / 86400000));
+      ret = Math.exp(-days / Math.max(1, interval * (rv.ease || 2.5)));
+    }
+    s.retSum += Math.max(0, Math.min(1, ret));
+  }
+  const out = {};
+  for (const [mod, s] of Object.entries(acc)) {
+    out[mod] = { count: s.count, held: s.held, overdue: s.overdue, avgEase: s.easeSum / s.count, retention: s.retSum / s.count };
+  }
+  return out;
+}
+
+// Display name for a module key ("hld/caching" -> "caching") — matches extract.py.
+const modDisplay = (mod) => String(mod).split("/").pop().replace(/_/g, " ");
+
+// Confusion tally: increment "<a>|<b>" (canonical order set by caller), cap 50 keys.
+function tallyConfusion(p, key) {
+  const c = (p.confusions = p.confusions || {});
+  c[key] = (c[key] || 0) + 1;
+  const keys = Object.keys(c);
+  if (keys.length > 50) {
+    let minK = keys[0];
+    for (const k of keys) if (c[k] < c[minK]) minK = k;
+    if (minK !== key) delete c[minK];
+  }
+}
+
 /* ---------- sound (zero-asset Web Audio) ---------- */
 const sfx = (() => {
   let ctx;
@@ -443,7 +606,8 @@ async function flushPendingSessions() {
   localStorage.setItem("sd_pending_sessions", JSON.stringify(remaining));
 }
 
-async function saveSession(session) {
+async function saveSession(session, opts = {}) {
+  if (opts.quiet) return saveSessionLocal(session, opts);   // [A2] prime: local-only, no XP/streak
   if (IS_STATIC) return saveSessionLocal(session);
   try {
     const data = await postSession(session);
@@ -479,23 +643,31 @@ function scheduleReview(rv, status, today) {
 
 // Mirrors record_session's streak-freeze + SM-2 logic in server.py.
 // Used for static hosting (GitHub Pages) and as the offline server fallback.
-function saveSessionLocal(session) {
+function saveSessionLocal(session, opts = {}) {
   const p = state.progress;
   if (p.freezes == null) p.freezes = 2;
   if (!p.freezeUsedOn) p.freezeUsedOn = [];
   const reviews = (p.reviews = p.reviews || {});
   let correct = 0;
   for (const res of session.results || []) {
-    const sec = (p.sections[res.section] = p.sections[res.section] || { seen: 0, correct: 0 });
-    sec.seen += 1;
-    sec.lastPlayed = session.date;
-    if (res.status === "correct") { sec.correct += 1; correct += 1; }
+    // [A2] quiet (prime): write only review records — no section tallies, XP, or streak.
+    if (!opts.quiet) {
+      const sec = (p.sections[res.section] = p.sections[res.section] || { seen: 0, correct: 0 });
+      sec.seen += 1;
+      sec.lastPlayed = session.date;
+      if (res.status === "correct") { sec.correct += 1; correct += 1; }
+    }
     if (res.id) {
       const rv = reviews[res.id] || { ease: 2.5, interval: 0, reps: 0, lapses: 0 };
       rv.section = res.section; rv.module = res.module;
       scheduleReview(rv, res.status, session.date);
       reviews[res.id] = rv;
     }
+    if (res.confusion) tallyConfusion(p, res.confusion);   // [A2] confusion-pair tally (cap 50)
+  }
+  if (opts.quiet) {                                        // [A2] side-effect-free save (prime)
+    localStorage.setItem("sd_progress", JSON.stringify(p));
+    return { xp: 0, freezeUsed: false };
   }
   const dayMs = 86400000, atMidnight = (iso) => new Date(iso + "T00:00:00");
   let freezeUsed = false, advanced = false;
@@ -643,6 +815,37 @@ function renderHome() {
   const rustyNote = rusty
     ? `<button class="rusty-note" id="rustyBtn">${ICON("clock")} <b>${esc(label(rusty.s))}</b> is getting rusty &mdash; ${rusty.days} days since you practiced it. Refresh it &rarr;</button>`
     : "";
+  /* [A2] confusion drill card: the pair you mix up most (count >= 3) */
+  const conf = state.progress.confusions || {};
+  let topPair = null;
+  for (const [k, n] of Object.entries(conf)) if (n >= 3 && (!topPair || n > topPair.n)) topPair = { k, n };
+  let confCard = "";
+  if (topPair) {
+    const [ma, mb] = topPair.k.split("|");
+    confCard = `<button class="review-card confuse" id="confuseBtn">
+         <div><div class="eyebrow warn">Confusion spotted</div>
+         <h2>You keep mixing up ${esc(modDisplay(ma))} and ${esc(modDisplay(mb))}</h2>
+         <p class="msg">Missed ${topPair.n}&times; by picking one when the other was right &mdash; drill the pair.</p></div>
+         <span class="review-go warn">Drill &rarr;</span>
+       </button>`;
+  }
+  /* [A2] fading-this-week card: >=5 questions due within 7 days whose module retention < 0.5 */
+  const mstats = moduleStats(state.progress);
+  const t7 = (() => { const d = new Date(todayISO() + "T00:00:00"); d.setDate(d.getDate() + 7); return d.toLocaleDateString("en-CA"); })();
+  const fadingIds = [], fadingMods = new Set();
+  for (const [id, rv] of Object.entries(state.progress.reviews || {})) {
+    if (!rv.due || rv.due > t7) continue;
+    const ms = mstats[rv.module];
+    if (ms && ms.retention < 0.5) { fadingIds.push(id); fadingMods.add(rv.module); }
+  }
+  const fadingCard = fadingIds.length >= 5
+    ? `<button class="review-card fading" id="fadingBtn">
+         <div><div class="eyebrow good">Spaced repetition</div>
+         <h2>Fading this week: ${fadingIds.length} questions across ${fadingMods.size} modules</h2>
+         <p class="msg">Retention is slipping on these. Refresh them before they're gone.</p></div>
+         <span class="review-go">Refresh &rarr;</span>
+       </button>`
+    : "";
   const secs = state.index.sections, p = state.progress;
   const tiles = Object.keys(secs).sort().map((s) => {
     const st = (p.sections && p.sections[s]) || { seen: 0, correct: 0 };
@@ -669,12 +872,16 @@ function renderHome() {
       <button class="cta" id="startBtn">Start &mdash; ${QUESTIONS_PER_BLITZ} questions<small>~5 min &middot; ${deckMode() === "flash" ? "flashcards" : "multiple choice"}</small></button>
     </div>
     ${reviewCard}
+    ${confCard}
+    ${fadingCard}
     ${weakCard}
     ${rustyNote}
     <h2 class="section-h">Or pick a section &mdash; then choose sub-topics</h2>
     <div class="grid">${tiles}</div>`;
   el("#startBtn").addEventListener("click", () => startBlitz(section));
   if (due.length) el("#reviewBtn").addEventListener("click", startReview);
+  if (topPair) el("#confuseBtn").addEventListener("click", () => startConfusionDrill(topPair.k));   // [A2]
+  if (fadingCard) el("#fadingBtn").addEventListener("click", () => startRefresh(fadingIds));        // [A2]
   if (worst) el("#weakBtn").addEventListener("click", startWeakSpots);
   if (rusty) el("#rustyBtn").addEventListener("click", () => startBlitz(rusty.s));
   document.querySelectorAll(".tile").forEach((b) =>
@@ -753,7 +960,13 @@ async function openTopics(section) {
 }
 
 /* ---------- deck building ---------- */
-function makeItem(q) {
+function makeItem(q, flipQuestions) {
+  // [A2] flip round: the prompt becomes the ANSWER and the 4 options are QUESTION
+  // texts (own question = correct + the 3 questions behind the distractors).
+  if (flipQuestions && flipQuestions.length === 3) {
+    const opts = shuffle([{ t: q.question, ok: true }, ...flipQuestions.map((t) => ({ t, ok: false }))]);
+    return { q, opts, status: "pending", boss: false, flip: true };
+  }
   const opts = shuffle([{ t: q.correct, ok: true }, ...q.distractors.map((d) => ({ t: d, ok: false }))]);
   return { q, opts, status: "pending", boss: false };
 }
@@ -761,17 +974,23 @@ function makeItem(q) {
 // Quiz vs flashcard is a global, persisted preference toggled from the top bar.
 function deckMode() { return localStorage.getItem("sd_mode") === "flash" ? "flash" : "quiz"; }
 
-function startDeck(questions, replayFn) {
-  state.mode = deckMode();
-  const items = questions.map(makeItem);
+function startDeck(questions, replayFn, opts = {}) {
+  state.prime = !!opts.prime;                          // [A2] pretest deck: no XP/streak/combo
+  state.mode = opts.prime ? "quiz" : deckMode();       // [A2] prime always uses the MCQ path
+  state.hard = !!opts.hard;
+  const flipMap = state.mode === "flash" ? null : (opts.flip || null);   // [A2] qid -> [3 question texts]
+  const ilv = opts.interleave;                         // [A2] graph pairs ([] = module-only) or undefined
+  const items = questions.map((q) => makeItem(q, flipMap && flipMap.get(q.id)));
   if (state.mode === "flash") {
-    state.deck = shuffle(items);                 // no boss ordering for self-grade cards
+    state.deck = ilv ? orderInterleaved(shuffle(items), ilv) : shuffle(items);   // no boss ordering for cards
   } else {
     // boss round: advanced-difficulty questions go last and are worth 2x
     const normal = items.filter((it) => it.q.difficulty !== "advanced");
     const boss = items.filter((it) => it.q.difficulty === "advanced");
     boss.forEach((it) => (it.boss = true));
-    state.deck = [...normal, ...boss];
+    // [A2] interleave the NON-BOSS prefix only, so pulling boss items out can't
+    // re-cluster same-module questions.
+    state.deck = [...(ilv ? orderInterleaved(normal, ilv) : normal), ...boss];
   }
   state.queue = state.deck.map((_, i) => i);
   state.cursor = 0;
@@ -791,7 +1010,15 @@ async function startBlitz(section, modules) {
   state.section = section;
   state.modules = modules && modules.length ? modules : null;
   const picked = shuffle(bank.slice()).slice(0, QUESTIONS_PER_BLITZ);
-  startDeck(picked, () => startBlitz(section, state.modules));
+  // [A2] confusion-aware interleaving for multi-module decks: no two consecutive
+  // questions share a module, and graph-connected topics are placed adjacently.
+  // Applied to the non-boss prefix inside startDeck.
+  let interleave;
+  if (new Set(picked.map((q) => q.module)).size > 1) {
+    const g = await loadGraph(section);
+    interleave = (g && g.pairs) || [];
+  }
+  startDeck(picked, () => startBlitz(section, state.modules), interleave ? { interleave } : {});
 }
 
 async function startReview() {
@@ -814,7 +1041,21 @@ async function startReview() {
   }
   if (!items.length) { renderHome(); return; }
   state.section = "review"; state.modules = null;
-  startDeck(items.slice(0, QUESTIONS_PER_BLITZ), startReview);
+  const deck = items.slice(0, QUESTIONS_PER_BLITZ);
+  // [A2] flip rounds: ~30% of items (deterministic per day+qid) whose 3 distractors
+  // all resolve to real same-section questions become answer->question flips.
+  const dateSeed = todayISO();
+  const flipP = window.__a2ForceFlip ? 1 : 0.3;        // QA can force all-eligible via ?qa
+  const flipMap = new Map();
+  for (const q of deck) {
+    if (a2Rand(a2Hash(dateSeed + q.id))() >= flipP) continue;
+    const srcs = q.distractors.map((d) => distractorSource(q, d));
+    if (!srcs.every(Boolean)) continue;
+    const qs = srcs.map((s) => s.question);
+    if (new Set([q.question, ...qs]).size === 4) flipMap.set(q.id, qs);   // all distinct
+  }
+  // [A2] cross-section interleave (by module only — no single graph spans sections).
+  startDeck(deck, startReview, { flip: flipMap, interleave: [] });
 }
 
 /* ---------- weak spots ---------- */
@@ -854,6 +1095,143 @@ async function startWeakSpots() {
   startDeck(items.slice(0, QUESTIONS_PER_BLITZ), startWeakSpots);
 }
 
+/* ---------- [A2] confusion drill + fading refresh decks ---------- */
+// Mixed deck of two mixed-up modules (module keys carry their section prefix, so
+// the pair may span sections). Alternate the two modules (A-B-A-B) so the
+// contrast is front-and-center.
+async function startConfusionDrill(key) {
+  app.innerHTML = `<div class="loading">Building your mix-up drill&hellip;</div>`;
+  const items = [];
+  for (const mod of key.split("|")) {
+    const bank = await loadBank(mod.split("/")[0]);
+    if (bank) items.push(...bank.filter((q) => q.module === mod));
+  }
+  if (!items.length) { renderHome(); return; }
+  const picked = shuffle(items).slice(0, QUESTIONS_PER_BLITZ);
+  state.section = "drill"; state.modules = null;
+  startDeck(picked, () => startConfusionDrill(key), { interleave: [] });   // [A2] alternate the two modules
+}
+
+// Exactly the fading question ids, capped at 10 (hard mode off).
+async function startRefresh(ids) {
+  app.innerHTML = `<div class="loading">Gathering your refresh deck&hellip;</div>`;
+  const bySec = {};
+  for (const id of ids) {
+    const rv = (state.progress.reviews || {})[id];
+    if (rv && rv.section) (bySec[rv.section] = bySec[rv.section] || []).push(id);
+  }
+  const items = [];
+  for (const sec of Object.keys(bySec)) {
+    const bank = await loadBank(sec);
+    if (!bank) continue;
+    const byId = new Map(bank.map((q) => [q.id, q]));
+    for (const id of bySec[sec]) { const q = byId.get(id); if (q) items.push(q); }
+  }
+  if (!items.length) { renderHome(); return; }
+  state.section = "refresh"; state.modules = null;
+  startDeck(items.slice(0, QUESTIONS_PER_BLITZ), () => startRefresh(ids), { interleave: [] });   // [A2]
+}
+
+/* ---------- [A2] prime: pretest before reading ---------- */
+function primeEligible(section, m, bank) {
+  if (Object.values(state.progress.reviews || {}).some((r) => r.module === m.module)) return false;  // already quizzed
+  if (bank.filter((q) => q.module === m.module).length < 3) return false;
+  let opt = 0; try { opt = +localStorage.getItem("sd_prime_opt") || 0; } catch { }
+  return opt < 3;                                       // stop offering after 3 "Just read" in a row
+}
+// Returns true if it took over navigation (showed the sheet); false -> caller reads now.
+function maybePrime(section, m, bank, justRead) {
+  if (!primeEligible(section, m, bank)) return false;
+  showPrimeSheet(section, m, justRead);
+  return true;
+}
+function showPrimeSheet(section, m, justRead) {
+  const ov = document.createElement("div");
+  ov.className = "sheet-overlay";
+  ov.innerHTML = `<div class="sheet" role="dialog" aria-label="Prime your brain">
+      <h2>Prime your brain</h2>
+      <p>3 quick guesses before you read. Nothing counts.</p>
+      <div class="sheet-actions">
+        <button class="cta inline" id="primeGo">Prime me</button>
+        <button class="ghost" id="primeSkip">Just read</button>
+      </div></div>`;
+  document.body.appendChild(ov);
+  const close = () => ov.remove();
+  el("#primeGo").addEventListener("click", () => {
+    try { localStorage.setItem("sd_prime_opt", "0"); } catch { }   // engagement resets the opt-out
+    close(); startPrime(section, m.module, m.name);
+  });
+  el("#primeSkip").addEventListener("click", () => {
+    let opt = 0; try { opt = +localStorage.getItem("sd_prime_opt") || 0; } catch { }
+    try { localStorage.setItem("sd_prime_opt", String(opt + 1)); } catch { }
+    close(); justRead();
+  });
+  ov.addEventListener("click", (e) => { if (e.target === ov) { close(); justRead(); } });   // backdrop = just read
+}
+async function startPrime(section, module, moduleName) {
+  const bank = await loadBank(section);
+  if (!bank) { openReader(module, moduleName); return; }
+  let pool = bank.filter((q) => q.module === module && q.difficulty === "core");
+  if (pool.length < 3) pool = bank.filter((q) => q.module === module);   // fall back to any difficulty
+  const picked = shuffle(pool.slice()).slice(0, 3);
+  if (picked.length < 3) { openReader(module, moduleName); return; }
+  state.section = "prime"; state.modules = null;
+  startDeck(picked, null, { prime: true });
+}
+async function finishPrime() {
+  state.inQuiz = false;
+  const first = state.deck[0].q;
+  const results = state.deck.map((d) => ({ id: d.q.id, section: d.q.section, module: d.q.module, status: "learned" }));
+  await saveSession({ date: todayISO(), section: "prime", results, bonusXp: 0 }, { quiet: true });
+  state.prime = false;
+  refreshStats();
+  openReader(first.module, first.moduleName);           // land in the reader at the module
+}
+
+/* ---------- [A2] explain-back ---------- */
+const a2Explained = new Set();                          // qids that already earned the bonus this session
+function explainBackHTML(item) {
+  return `<details class="explain-back" data-qid="${esc(item.q.id)}">
+      <summary>Say it in your own words (E)</summary>
+      <div class="eb-body">
+        <textarea class="eb-input" rows="3" placeholder="Explain the idea from memory&hellip;"></textarea>
+        <button class="ghost eb-submit">Check my words</button>
+        <div class="eb-result" aria-live="polite"></div>
+      </div>
+    </details>`;
+}
+function wireExplainBack(root, item) {
+  const det = root.querySelector(".explain-back");
+  if (!det) return;
+  det.querySelector(".eb-submit").addEventListener("click", () => runExplainBack(det, item));
+}
+function runExplainBack(det, item) {
+  const text = (det.querySelector(".eb-input").value || "").trim();
+  const resEl = det.querySelector(".eb-result");
+  const words = text.split(/\s+/).filter(Boolean);
+  const concepts = conceptsOf(item.q);
+  const userToks = new Set(a2Tokenize(text));
+  const hit = concepts.filter((c) => userToks.has(c));
+  const conceptSet = new Set(concepts);
+  // Echo the user's own words with matched concept tokens glowing.
+  const echoed = esc(text).replace(/[A-Za-z0-9]+/g, (w) =>
+    conceptSet.has(w.toLowerCase()) ? `<span class="hit">${w}</span>` : w);
+  // Show the model answer with the concept tokens the user MISSED glowing.
+  const missed = new Set(concepts.filter((c) => !userToks.has(c)));
+  const ans = esc(item.q.answerFull).replace(/[A-Za-z0-9]+/g, (w) =>
+    missed.has(w.toLowerCase()) ? `<span class="missterm">${w}</span>` : w);
+  let bonus = "";
+  if (words.length >= 8 && !a2Explained.has(item.q.id)) {   // +5 XP once per question per session
+    a2Explained.add(item.q.id);
+    state.sessionXp += 5;
+    bonus = ` &middot; <b>+5 XP</b>`;
+    floatXP(5, det);
+  }
+  resEl.innerHTML = `<div class="eb-score">Key terms covered: ${hit.length}/${concepts.length}${bonus}</div>
+      <div class="eb-echo">${echoed || "&mdash;"}</div>
+      <div class="eb-ans"><b>Model answer:</b> ${ans}</div>`;
+}
+
 /* ---------- quiz ---------- */
 function isLastInQueue() { return state.cursor >= state.queue.length - 1; }
 
@@ -883,18 +1261,20 @@ function renderQuestion() {
       <span class="qright"><span class="dots" role="img" aria-label="Question ${state.cursor + 1} of ${state.queue.length}">${dots}</span><span class="qnum">${state.cursor + 1}/${state.queue.length}</span></span>
     </div>
     ${bossBanner}${teachBlock}
-    <div class="qtext">${esc(q.question)} ${comboChip}</div>
+    ${item.flip
+      ? `<div class="flip-eyebrow">Which question does this answer?</div><div class="qtext flip-item">${esc(q.correct)} ${comboChip}</div>`
+      : `<div class="qtext">${esc(q.question)} ${comboChip}</div>`}
     <div class="options">
       ${opts.map((o, i) => `<button class="opt" data-i="${i}"><kbd>${i + 1}</kbd>${esc(o.t)}<span class="mark"></span></button>`).join("")}
     </div>
     <div class="reveal" id="reveal"></div>
     <div class="qactions">
-      ${item.status === "pending" ? `<button class="skip" id="skipBtn">Skip for now (S) &rarr;</button>` : "<span></span>"}
+      ${item.status === "pending" && !item.flip && !state.prime ? `<button class="skip" id="skipBtn">Skip for now (S) &rarr;</button>` : "<span></span>"}
       <button class="next" id="nextBtn">${isLastInQueue() ? "Finish" : "Next (↵)"}</button>
     </div>`;
   document.querySelectorAll(".opt").forEach((b) =>
     b.addEventListener("click", () => answer(parseInt(b.dataset.i, 10))));
-  if (item.status === "pending") el("#skipBtn").addEventListener("click", skipQuestion);
+  if (item.status === "pending" && !item.flip && !state.prime) el("#skipBtn").addEventListener("click", skipQuestion);
   el("#nextBtn").addEventListener("click", nextQuestion);
   app.focus({ preventScroll: true });              // keep keyboard + SR context on the new question
 }
@@ -919,22 +1299,40 @@ function answer(i) {
     item.status = "learned";
   } else if (right) {
     item.status = "correct";
-    state.combo += 1; state.maxCombo = Math.max(state.maxCombo, state.combo);
-    const gain = 10 * comboMult() * (item.boss ? 2 : 1);
-    state.sessionXp += gain;
-    floatXP(gain, optBtns[i]);
-    if (state.combo === 3 || state.combo === 5 || state.combo >= 7) { sfx.combo(); ripple(optBtns[i]); }
-    else sfx.correct();
+    if (state.prime) { sfx.correct(); }                  // [A2] prime: reveal only, no XP/combo
+    else {
+      state.combo += 1; state.maxCombo = Math.max(state.maxCombo, state.combo);
+      const gain = 10 * comboMult() * (item.boss ? 2 : 1);
+      state.sessionXp += gain;
+      floatXP(gain, optBtns[i]);
+      if (state.combo === 3 || state.combo === 5 || state.combo >= 7) { sfx.combo(); ripple(optBtns[i]); }
+      else sfx.correct();
+    }
   } else {
     item.status = "wrong";
-    state.combo = 0;
+    if (!state.prime) state.combo = 0;
     sfx.wrong();
   }
   const sk = el("#skipBtn"); if (sk) sk.remove();
   if (!teach) {
     const rev = el("#reveal");
-    rev.innerHTML = `<b>Full answer:</b> ${esc(q.answerFull)}
+    let provHTML = "";
+    // [A2] confusion-aware why-wrong: name the module the wrong pick came from and
+    // record the mix-up. Skipped for flip items (there the options ARE questions).
+    if (!right && !item.flip) {
+      const src = distractorSource(q, opts[i].t);
+      if (src && src.module !== q.module) {
+        item.confusion = [q.module, src.module].sort().join("|");
+        provHTML = `<div class="prov">That option is the direct answer to a <b>${esc(src.moduleName)}</b> question &mdash; easy to confuse with ${esc(q.moduleName)}.</div>`;
+      }
+    }
+    rev.innerHTML = `<b>Full answer:</b> ${esc(q.answerFull)}${provHTML}
       <button class="deeper" id="deeperBtn">Dive deeper into ${esc(q.moduleName)} &rarr;</button>`;
+    // [A2] explain-back on a wrong answer (not in prime — nothing counts there).
+    if (!right && !item.flip && !state.prime) {
+      rev.insertAdjacentHTML("beforeend", explainBackHTML(item));
+      wireExplainBack(rev, item);
+    }
     rev.classList.add("show");
     el("#deeperBtn").addEventListener("click", () => openReader(q.module, q.moduleName));
   }
@@ -952,6 +1350,7 @@ function skipQuestion() {
 function nextQuestion() {
   state.cursor++;
   if (state.cursor < state.queue.length) renderQuestion();
+  else if (state.prime) finishPrime();                 // [A2] prime deck: save quietly, open reader
   else finish();
 }
 
@@ -984,10 +1383,13 @@ function renderCard() {
 function revealCard() {
   if (state.answered) return;
   state.answered = true;
-  const { q } = state.deck[state.queue[state.cursor]];
+  const item = state.deck[state.queue[state.cursor]];
+  const { q } = item;
   const rev = el("#reveal");
   rev.innerHTML = `<b>Answer:</b> ${esc(q.answerFull)}
     <button class="deeper" id="deeperBtn">Dive deeper into ${esc(q.moduleName)} &rarr;</button>`;
+  rev.insertAdjacentHTML("beforeend", explainBackHTML(item));   // [A2] explain-back on card reveal
+  wireExplainBack(rev, item);
   rev.classList.add("show");
   announce(`Answer: ${q.answerFull}`);
   el("#deeperBtn").addEventListener("click", () => openReader(q.module, q.moduleName));
@@ -1018,7 +1420,7 @@ async function finish() {
   const correct = state.deck.filter((d) => d.status === "correct").length;
   const learned = state.deck.filter((d) => d.status === "learned").length;
   const bonusXp = Math.max(0, state.sessionXp - correct * 10);
-  const results = state.deck.map((d) => ({ id: d.q.id, section: d.q.section, module: d.q.module, status: d.status }));
+  const results = state.deck.map((d) => ({ id: d.q.id, section: d.q.section, module: d.q.module, status: d.status, confusion: d.confusion }));
   const { xp, freezeUsed } = await saveSession({ date: todayISO(), section: state.section, results, bonusXp });
   refreshStats();
   const pct = Math.round((correct / total) * 100);
@@ -1244,6 +1646,7 @@ async function openStudySection(section) {
   const files = (state.index && state.index.files) || {};
   // Practiced = any spaced-repetition entry from this module (real history only).
   const practiced = new Set(Object.values(state.progress.reviews || {}).map((r) => r.module).filter(Boolean));
+  const mstats = moduleStats(state.progress);          // [A2] Module Memory Map retention tints
   // "You are here" = last page opened in the reader, if it lives in this section.
   let lastRead = null;
   try { lastRead = JSON.parse(localStorage.getItem("sd_last_read")); } catch { }
@@ -1258,13 +1661,21 @@ async function openStudySection(section) {
     const multi = mFiles.length > 1;
     const isHere = m.module === hereMod;
     const isOpen = openFans.has(m.module);
+    // [A2] Memory Map: tint each node by estimated retention (+ amber pulse if overdue).
+    const ms = mstats[m.module];
+    let mmCls = " mm-cold", retTxt = "no review data yet";
+    if (ms) {
+      mmCls = ms.retention >= 0.75 ? " mm-fresh" : ms.retention >= 0.5 ? " mm-warm" : " mm-fading";
+      retTxt = `est. retention ${Math.round(ms.retention * 100)}%, ${ms.overdue} due`;
+      if (ms.overdue > 0) mmCls += " mm-overdue";
+    }
     const leaves = multi ? mFiles.map((fn, k) => {
       const p = `${m.module}/${fn}`;
       return `<button class="pathleaf${p === herePath ? " here" : ""}" data-idx="${i}" data-path="${esc(p)}" style="animation-delay:${k * 30}ms">${esc(leafLabel(fn))}</button>`;
     }).join("") : "";
     return `<div class="pathstep${isOpen ? " open" : ""}">
-      <div class="pathnode${practiced.has(m.module) ? " practiced" : ""}${isHere ? " here" : ""}">
-        <button class="pn-main" data-idx="${i}" aria-label="Step ${i + 1} of ${mods.length}: ${esc(m.name)}, ${m.count} questions${peers[i].size ? `, connects to ${peers[i].size} other topics` : ""}">
+      <div class="pathnode${practiced.has(m.module) ? " practiced" : ""}${isHere ? " here" : ""}${mmCls}" title="${esc(retTxt)}">
+        <button class="pn-main" data-idx="${i}" aria-label="Step ${i + 1} of ${mods.length}: ${esc(m.name)}, ${m.count} questions, ${retTxt}${peers[i].size ? `, connects to ${peers[i].size} other topics` : ""}">
           <span class="pn-num">${String(i + 1).padStart(2, "0")}</span>
           <span class="pn-body">
             <span class="pn-name">${esc(m.name)}</span>
@@ -1492,8 +1903,10 @@ async function openStudySection(section) {
 
   wrap.querySelectorAll(".pn-main").forEach((b) => b.addEventListener("click", () => {
     const idx = +b.dataset.idx;
-    reader.back = [];                              // a fresh reading session
-    openReaderPath(list[idx].path, list[idx].title, { list, idx });
+    const openIt = () => { reader.back = []; openReaderPath(list[idx].path, list[idx].title, { list, idx }); };
+    // [A2] Prime: offer a 3-question pretest for a never-quizzed module before reading.
+    if (maybePrime(section, mods[idx], bank, openIt)) return;
+    openIt();
   }));
   wrap.querySelectorAll(".pathleaf").forEach((b) => b.addEventListener("click", () => {
     const idx = +b.dataset.idx;
@@ -2791,7 +3204,10 @@ function closeReader() {
 
 /* ---------- keyboard ---------- */
 document.addEventListener("keydown", (e) => {
-  const typing = (e.target.tagName || "").toLowerCase() === "input";
+  const tag = (e.target.tagName || "").toLowerCase();
+  const typing = tag === "input" || tag === "textarea";   // [A2] textarea: explain-back input
+  // [A2] toggle explain-back with E (never while typing into its textarea)
+  const toggleEB = () => { const det = el(".explain-back"); if (det) { det.open = !det.open; if (det.open) det.querySelector(".eb-input")?.focus(); } };
   if (e.key === "Escape" && el("#helpOverlay")) { el("#helpOverlay").remove(); return; }
   if (e.key === "?" && !typing) { e.preventDefault(); toggleHelp(); return; }
   if (document.body.classList.contains("reader-open")) {
@@ -2814,16 +3230,18 @@ document.addEventListener("keydown", (e) => {
   }
   if (!state.inQuiz) return;
   if (e.repeat) return;   // holding a key must not auto-advance/grade a deck
-  if ((e.target.tagName || "").toLowerCase() === "input") return;
+  if (typing) return;
   if (state.mode === "flash") {
     if (!state.answered) {
       if (e.key === " " || e.key === "Enter") { e.preventDefault(); revealCard(); }
-    } else if (e.key === "1") { e.preventDefault(); gradeCard(false); }
+    } else if (e.key === "e" || e.key === "E") { e.preventDefault(); toggleEB(); }   // [A2]
+    else if (e.key === "1") { e.preventDefault(); gradeCard(false); }
     else if (e.key === "2" || e.key === "Enter") { e.preventDefault(); gradeCard(true); }
     return;
   }
   if (state.answered) {
     if (e.key === "Enter") { e.preventDefault(); nextQuestion(); }
+    else if (e.key === "e" || e.key === "E") { e.preventDefault(); toggleEB(); }      // [A2]
     return;
   }
   if (/^[1-4]$/.test(e.key)) {
@@ -2885,6 +3303,10 @@ async function boot() {
     });
   }
   syncModeBtn();
+  // [A2] QA-only debug handle (guarded by ?qa=1): read state + call helpers headlessly.
+  if (new URLSearchParams(location.search).get("qa") === "1") {
+    window.__qa = { state, moduleStats, conceptsOf, distractorSource, orderInterleaved, loadGraph, loadBank, bankCache };
+  }
   renderHome();
 }
 

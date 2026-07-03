@@ -1267,3 +1267,99 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   margin: 8px 0 0; font-family: var(--mono); font-size: 11px;
   color: var(--muted); letter-spacing: 0.02em;
 }
+
+/* ---------- [A2] selection / graph learning features ------------------------ */
+
+/* confusion-aware why-wrong note inside the reveal */
+.prov {
+  margin: 10px 0 0; padding: 9px 12px; border-radius: 10px; font-size: 13.5px;
+  color: var(--text); line-height: 1.5;
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+}
+.prov b { color: var(--warn); }
+
+/* explain-back: articulate the idea in your own words */
+.explain-back { margin-top: 12px; border-top: 1px dashed var(--glass-brd); padding-top: 10px; }
+.explain-back summary {
+  cursor: pointer; font-size: 13px; font-weight: 600; color: var(--accent); list-style: none;
+}
+.explain-back summary::-webkit-details-marker { display: none; }
+.explain-back summary::before { content: "\203A\00a0"; }
+.explain-back[open] summary::before { content: "\2039\00a0"; }
+.explain-back summary:hover { color: var(--text); }
+.eb-body { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.eb-input {
+  width: 100%; resize: vertical; padding: 10px 12px; border-radius: 10px;
+  font: inherit; font-size: 14px; color: var(--text);
+  background: var(--glass); border: 1px solid var(--glass-brd);
+}
+.eb-input:focus { outline: none; border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+.eb-submit { align-self: flex-start; padding: 8px 16px; font-size: 13.5px; }
+.eb-result:empty { display: none; }
+.eb-score { font-weight: 700; color: var(--text); margin-bottom: 6px; }
+.eb-echo { font-size: 13.5px; color: var(--muted); margin-bottom: 8px; line-height: 1.5; }
+.eb-ans { font-size: 13.5px; color: var(--muted); line-height: 1.55; }
+.eb-ans b { color: var(--text); }
+.hit { color: var(--good); font-weight: 700; text-shadow: 0 0 10px color-mix(in srgb, var(--good) 60%, transparent); }
+.missterm { color: var(--warn); font-weight: 700; text-shadow: 0 0 10px color-mix(in srgb, var(--warn) 55%, transparent); }
+
+/* flip rounds: the prompt is the answer, options are the questions */
+.flip-eyebrow {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--accent-2); margin: 2px 0 6px;
+}
+.qtext.flip-item {
+  border-left: 3px solid color-mix(in srgb, var(--accent-2) 70%, transparent);
+  padding-left: 14px; font-style: italic;
+}
+
+/* home cards: confusion drill + fading-this-week */
+.review-card.confuse {
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--warn) 14%, transparent),
+    color-mix(in srgb, var(--bad) 8%, transparent));
+  border-color: color-mix(in srgb, var(--warn) 50%, transparent);
+}
+.review-card.confuse:hover { border-color: var(--warn); }
+.review-card.fading {
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--accent) 13%, transparent),
+    color-mix(in srgb, var(--good) 8%, transparent));
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.review-card.fading:hover { border-color: var(--accent); }
+
+/* prime interstitial sheet */
+.sheet-overlay {
+  position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center;
+  padding: 20px; background: rgba(0, 0, 0, 0.5);
+  -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
+  animation: fade 0.2s var(--ease-out);
+}
+.sheet {
+  width: min(420px, 100%); padding: 24px; border-radius: var(--radius-lg); text-align: center;
+  background: var(--glass); border: 1px solid var(--glass-brd-hi);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4); backdrop-filter: blur(24px) saturate(1.4);
+  box-shadow: var(--shadow), var(--glass-hilite);
+}
+.sheet h2 { margin: 0 0 6px; font-size: 20px; letter-spacing: -0.01em; }
+.sheet p { margin: 0 0 18px; color: var(--muted); font-size: 14.5px; }
+.sheet-actions { display: flex; gap: 10px; justify-content: center; align-items: center; }
+
+/* Module Memory Map: retention tint bar on each learning-path node */
+.pathnode.mm-fresh::before,
+.pathnode.mm-warm::before,
+.pathnode.mm-fading::before,
+.pathnode.mm-cold::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; z-index: 1;
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+.pathnode.mm-fresh::before  { background: var(--good); }
+.pathnode.mm-warm::before   { background: var(--accent); }
+.pathnode.mm-fading::before { background: var(--warn); }
+.pathnode.mm-cold::before   { background: var(--faint); opacity: 0.45; }
+.pathnode.mm-overdue::before {
+  width: 4px; background: var(--warn); animation: mm-pulse 2s ease-in-out infinite;
+}
+@keyframes mm-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
