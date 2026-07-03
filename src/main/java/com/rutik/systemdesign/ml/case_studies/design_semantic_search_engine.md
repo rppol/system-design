@@ -69,47 +69,42 @@ Why this system exists: Keyword search (BM25) breaks down when queries and docum
 
 ## 3. High-Level Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                    QUERY PROCESSING                              │
-│  Raw query → Preprocessor (tokenize, normalize) → Query Encoder │
-│  (SBERT bi-encoder, 5ms) → Query embedding (128-dim)           │
-└──────────────────────────────┬───────────────────────────────────┘
-                               │
-              ┌────────────────┴────────────────┐
-              │ (parallel)                      │
-  ┌───────────▼──────────┐          ┌───────────▼──────────┐
-  │  SEMANTIC RETRIEVAL  │          │  KEYWORD RETRIEVAL   │
-  │  (FAISS IVF, ~4ms)   │          │  (Elasticsearch BM25 │
-  │  → top-150 candidates│          │   ~15ms)             │
-  │  with dot-product    │          │  → top-150 candidates│
-  │  similarity scores   │          │  with BM25 scores    │
-  └───────────┬──────────┘          └───────────┬──────────┘
-              │                                 │
-  ┌───────────▼─────────────────────────────────▼──────────┐
-  │              HYBRID MERGE (RRF, ~1ms)                  │
-  │  Reciprocal Rank Fusion: score = Σ 1/(rank_i + k)      │
-  │  → merged top-200 candidates                           │
-  └──────────────────────────┬─────────────────────────────┘
-                             │
-  ┌──────────────────────────▼─────────────────────────────┐
-  │         CROSS-ENCODER RE-RANKER (~50ms)                │
-  │  BERT cross-encoder: jointly encodes query + doc       │
-  │  Input: [CLS] query [SEP] document [SEP]               │
-  │  Output: relevance score per (query, doc) pair         │
-  │  → reranks top-100 with higher accuracy                │
-  └──────────────────────────┬─────────────────────────────┘
-                             │
-  ┌──────────────────────────▼─────────────────────────────┐
-  │         RESULTS (top-K, with snippets)                 │
-  └────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  ┌──────────────────────────────────────────────────────────────────┐
-  │                    OFFLINE INDEXING PIPELINE                     │
-  │  New docs → Doc Encoder (SBERT) → FAISS index update           │
-  │  (incremental: < 60 min latency; full rebuild: weekly)          │
-  └──────────────────────────────────────────────────────────────────┘
+    Q(["Raw query"]) --> PP["Preprocessor\ntokenize + normalize"]
+    PP --> QE["Query encoder\nSBERT bi-encoder ~5ms"]
+    QE --> EMB(["Query embedding\n128-dim"])
+
+    EMB --> SR["Semantic retrieval\nFAISS IVF ~4ms\ntop-150 by dot-product"]
+    EMB --> KR["Keyword retrieval\nElasticsearch BM25 ~15ms\ntop-150 by BM25"]
+
+    SR --> RRF{"Hybrid merge — RRF ~1ms\nscore = Σ 1/(rank+k)\nmerged top-200"}
+    KR --> RRF
+
+    RRF --> CE["Cross-encoder re-ranker ~50ms\nMiniLM-L6 joint query+doc\nreranks top-100"]
+    CE --> RES(["Results\ntop-K with snippets"])
+
+    subgraph OFF["Offline indexing pipeline"]
+        ND(["New docs"]) --> DE["Doc encoder\nSBERT"]
+        DE --> IDX[("FAISS index\nincremental < 60 min\nfull rebuild weekly")]
+    end
+
+    IDX -.-> SR
+
+    class Q,EMB,RES,ND io
+    class QE,DE train
+    class PP,SR,KR,RRF mathOp
+    class CE lossN
+    class IDX base
 ```
+
+*The query path runs the two retrievers in parallel, fuses their rankings with RRF, then spends the bulk of the latency budget on the cross-encoder re-rank (red = critical path); the offline pipeline (dotted) keeps the FAISS index fresh without blocking serving.*
 
 **Component inventory:**
 - Query encoder: SBERT fine-tuned on domain data; produces 128-dim query embedding.

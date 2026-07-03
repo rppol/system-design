@@ -56,44 +56,48 @@
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    txt([Text Input]) --> pre["Text Preprocessor\nsentence split + offset track"]
+    pre --> win["Sliding Window\nstride=256 · 64-tok overlap"]
+    win --> tok["Tokenizer\nWordPiece"]
+    tok --> enc["BERT-CRF Encoder\nViterbi decode"]
+    enc --> tags(["Tag Sequence\nB-PER, I-PER, O, B-ORG ..."])
+    tags --> span["Span Extractor\nBIO decoder"]
+    span --> dedup["Entity Deduplicator\noffset normalization"]
+    dedup --> out([Entity Spans])
+
+    subgraph AL["Active Learning Loop"]
+        conf{"confidence < 0.75?"}
+        ui["Human Annotation UI"]
+        store["Annotation Store\nPostgres"]
+        retrain["Weekly Retrain\nKubeflow"]
+        conf -->|"yes → queue"| ui
+        ui --> store
+        store --> retrain
+    end
+
+    dedup --> conf
+    retrain -.->|"fine-tuned weights"| enc
+
+    class txt,out,tags io
+    class pre,win,tok,span,dedup mathOp
+    class enc train
+    class conf lossN
+    class ui req
+    class store base
+    class retrain frozen
 ```
-                        ┌──────────────────────────────────────────────────────────┐
-                        │                    NER System                            │
-                        │                                                          │
- Text Input  ──────────>│  Text Preprocessor  ──>  Tokenizer (WordPiece)          │
-                        │         │                       │                        │
-                        │         v                       v                        │
-                        │  Sentence Splitter       BERT-CRF Encoder               │
-                        │         │                       │                        │
-                        │         v                       v                        │
-                        │  Sliding Window          Tag Sequence [B-PER,           │
-                        │  (stride=256)             I-PER, O, B-ORG, ...]         │
-                        │                                 │                        │
-                        │                                 v                        │
-                        │                        Span Extractor                   │
-                        │                         (BIO decoder)                   │
-                        │                                 │                        │
-                        │                                 v                        │
-                        │                        Entity Deduplicator              │
-                        │                         (offset normalization)          │
-                        │                                 │                        │
-                        └─────────────────────────────────┼────────────────────────┘
-                                                          │
-                        ┌─────────────────────────────────┼────────────────────────┐
-                        │        Active Learning Loop      │                        │
-                        │                                  v                        │
-                        │                        Confidence Filter                 │
-                        │                         (score < 0.75 → queue)           │
-                        │                                  │                        │
-                        │         Human Annotation UI <────┘                       │
-                        │                  │                                        │
-                        │                  v                                        │
-                        │         Annotation Store (Postgres)                      │
-                        │                  │                                        │
-                        │                  v                                        │
-                        │         Weekly Retrain Trigger (Kubeflow)                │
-                        └──────────────────────────────────────────────────────────┘
-```
+
+The synchronous path (blue input → orange preprocessing → green BERT-CRF → orange span extraction) tags text end to end; spans below 0.75 confidence branch into the active-learning loop, whose weekly retrain feeds fine-tuned weights back into the encoder (dotted).
 
 **Component inventory:**
 - **Text Preprocessor:** sentence splitter (spaCy), sliding window for long docs, offset tracker
@@ -542,30 +546,66 @@ def enumerate_candidate_spans(
 ## 8. Operational Playbook
 
 ### (a) Eval Pipeline
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    gold(["golden_set.json\n500 docs · 4,200 spans · IAA κ > 0.85"])
+    gold --> f1["Entity-level F1\nseqeval strict: start+end+type"]
+    gold --> brk["Entity-type breakdown\nweak types e.g. ORG vs PER"]
+    gold --> dom["Per-domain score\ngeneral / medical / legal"]
+    gold --> cal["Confidence calibration\npred confidence vs precision"]
+    f1 --> gate{"F1 drop > 1% vs best?"}
+    brk --> gate
+    dom --> gate
+    cal --> gate
+    gate -->|"yes"| block([Block deployment])
+    gate -->|"no"| ship([Ship model])
+
+    class gold io
+    class f1,brk,dom,cal mathOp
+    class gate lossN
+    class block lossN
+    class ship train
 ```
-golden_set.json (500 documents, 4,200 spans, 4 annotators, IAA Cohen's κ > 0.85)
-    │
-    ├── entity-level F1 (seqeval strict: span start + end + type must all match)
-    ├── entity-type breakdown (surface under-performing types, e.g., ORG vs PER)
-    ├── per-domain score (general vs medical vs legal — gate retraining per domain)
-    ├── confidence calibration (predicted confidence vs actual precision at that threshold)
-    └── regression gate: F1 drop > 1% vs previous best → block deployment
-```
+
+Every candidate model scores against the frozen golden set; the four entity-level metrics feed a single regression gate that blocks any deployment dropping more than 1% F1 versus the current best.
 
 Reference: [../cross_cutting/drift_monitoring_and_retraining.md](cross_cutting/drift_monitoring_and_retraining.md) for retraining trigger criteria.
 
 ### (b) Observability
 
 Trace hierarchy (OpenTelemetry):
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    root(["ner_request · root span"]) --> pre["preprocess\nsentence_split · sliding_window"]
+    pre --> tok["tokenize\nwordpiece · offset_mapping"]
+    tok --> bert["bert_forward\nGPU time · batch_size · seq_len"]
+    bert --> crf["crf_viterbi\nnum_tags · seq_len"]
+    crf --> span["span_extract\nnum_spans · num_chunks"]
+    span --> conf["confidence_filter\nspans_below_threshold · queue_depth"]
+
+    class root req
+    class pre,tok,crf,span mathOp
+    class bert train
+    class conf lossN
 ```
-ner_request (root span)
-├── preprocess (sentence_split, sliding_window)
-├── tokenize (wordpiece encoding, offset_mapping)
-├── bert_forward (GPU time, batch_size, seq_len)
-├── crf_viterbi (num_tags, seq_len)
-├── span_extract (num_spans, num_chunks)
-└── confidence_filter (spans_below_threshold, queue_depth)
-```
+
+Each OpenTelemetry child span wraps one pipeline stage in execution order; the per-span attributes (GPU time, seq_len, queue_depth) localize exactly where a latency regression originates.
 
 Key metrics:
 - `ner.latency_p95_ms` by doc_length bucket (< 128, 128–256, 256–512 tokens)

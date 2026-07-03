@@ -62,59 +62,81 @@ Why this system exists: Netflix reports that 80% of streamed content is discover
 
 ## 3. High-Level Architecture
 
-```
-  ┌──────────────────────────────────────────────────────────────────┐
-  │                    REQUEST ENTRY                                 │
-  │  User: {user_id, session_id, page_context, device, location}    │
-  └───────────────────────────────┬──────────────────────────────────┘
-                                  │
-  ┌───────────────────────────────▼──────────────────────────────────┐
-  │                FEATURE ASSEMBLY (< 10ms)                        │
-  │                                                                  │
-  │  ┌────────────────────┐  ┌─────────────────┐  ┌───────────────┐ │
-  │  │ Historical Features│  │ Session Features│  │ Context Feats │ │
-  │  │ (Redis, user_id)   │  │ (Redis,         │  │ device, time, │ │
-  │  │ - embedding vector │  │  session_id)    │  │ location      │ │
-  │  │ - affinities       │  │ - last 5 clicks │  │               │ │
-  │  │ - price tier       │  │ - search query  │  │               │ │
-  │  └────────────────────┘  │ - cart contents │  └───────────────┘ │
-  │                          └─────────────────┘                    │
-  └───────────────────────────────┬──────────────────────────────────┘
-                                  │
-  ┌───────────────────────────────▼──────────────────────────────────┐
-  │              RETRIEVAL — Two-Tower ANN (< 3ms)                  │
-  │  Query: fuse(user_hist_embedding, session_embedding, context)    │
-  │  FAISS HNSW: top-500 candidates from 500k active items          │
-  └───────────────────────────────┬──────────────────────────────────┘
-                                  │
-  ┌───────────────────────────────▼──────────────────────────────────┐
-  │         SCORING — Interaction Model (< 20ms)                    │
-  │  Score 500 candidates with full feature vector                  │
-  │  Model: LightGBM or shallow DNN (rank by P(engagement))         │
-  └───────────────────────────────┬──────────────────────────────────┘
-                                  │
-  ┌───────────────────────────────▼──────────────────────────────────┐
-  │         BUSINESS RULES + DIVERSITY LAYER (< 5ms)                │
-  │  - Filter: already purchased, out-of-stock, region-restricted   │
-  │  - Diversity: at most 2 items from same brand/category (MMR)    │
-  │  - Exploration: inject ε=0.05 random items from cold pool       │
-  │  - Sponsored items: inject at designated slots                  │
-  └───────────────────────────────┬──────────────────────────────────┘
-                                  │
-  ┌───────────────────────────────▼──────────────────────────────────┐
-  │         RESPONSE (top-20 ranked items)                          │
-  └──────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  ┌──────────────────────────────────────────────────────────────────┐
-  │                    ASYNC EVENT PROCESSING                        │
-  │                                                                  │
-  │  Click/view/purchase events → Kafka → Session Feature Updater   │
-  │    (Flink, sub-second latency → Redis session features)         │
-  │                                                                  │
-  │  Daily batch: recompute user historical embeddings (Spark)      │
-  │  Weekly: retrain two-tower and scoring model                    │
-  └──────────────────────────────────────────────────────────────────┘
+    req(["Request\nuser_id · session_id · page · device · location"])
+    subgraph FA["Feature Assembly · sub-10ms"]
+        hist["Historical Features\nRedis by user_id\nembedding · affinities · price tier"]
+        sess["Session Features\nRedis by session_id\nlast 5 clicks · search · cart"]
+        ctx["Context Features\ndevice · time · location"]
+    end
+    retr["Retrieval — Two-Tower ANN · sub-3ms\nfuse(user, session, context)\nFAISS HNSW top-500 of 500k items"]
+    score["Scoring — Interaction Model · sub-20ms\nLightGBM ranks 500 by P(engagement)"]
+    rules["Business Rules + Diversity · sub-5ms\nfilter · MMR max 2 per brand · epsilon=0.05 explore · sponsored"]
+    resp(["Response — top-20 ranked items"])
+
+    req --> hist
+    req --> sess
+    req --> ctx
+    hist --> retr
+    sess --> retr
+    ctx --> retr
+    retr --> score --> rules --> resp
+
+    class req req
+    class hist,sess,ctx base
+    class retr mathOp
+    class score train
+    class rules mathOp
+    class resp io
 ```
+
+Online serving path: three feature streams — stable historical, fresh session, request-time context — fuse into one query vector, then flow retrieval → scoring → business rules inside the 100ms p99 budget.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    events(["Click / view / purchase events"])
+    kafka["Kafka\nclick-event topic"]
+    flink["Flink · Session Feature Updater\nsub-second latency"]
+    redisSess["Redis\nsession features"]
+    spark["Spark · daily batch\nrecompute user embeddings"]
+    redisHist["Redis\nhistorical features"]
+    retrain["Weekly retrain\ntwo-tower + scoring model"]
+    models["Deployed models\nquery tower · FAISS · LightGBM"]
+    serve(["Serving path\nreads all features"])
+
+    events --> kafka --> flink --> redisSess
+    spark --> redisHist
+    retrain --> models
+    redisSess -.->|"sub-second"| serve
+    redisHist -.->|"daily"| serve
+    models -.->|"weekly"| serve
+
+    class events io
+    class kafka,redisSess,redisHist base
+    class flink,spark mathOp
+    class retrain train
+    class models frozen
+    class serve req
+```
+
+Async write path: user events stream through Kafka → Flink into sub-second session features, while Spark (daily) and retraining (weekly) refresh the slower stores — the two-stream design that keeps recommendations both fresh and stable.
 
 **Component inventory:**
 - Feature assembly: Redis GET pipeline (< 5ms for 3 key lookups).

@@ -56,60 +56,65 @@
 
 ## 3. High-Level Architecture
 
-```
-                          ┌────────────────────────────────────────────────────────┐
-                          │                 QA System                              │
-                          │                                                        │
-  Question  ─────────────>│  Query Processor                                      │
-                          │   - Question classification (factoid / complex)        │
-                          │   - Spelling correction, intent detection              │
-                          │          │                                             │
-                          │          v                                             │
-                          │  DPR Query Encoder (BERT-base)                        │
-                          │   - Encode question → 768-dim dense vector            │
-                          │          │                                             │
-                          │          v                                             │
-                          │  Hybrid Retriever                                     │
-                          │   ┌─────────────────────────────────┐                 │
-                          │   │  FAISS IVF (dense)              │                 │
-                          │   │  BM25 (sparse, Elasticsearch)   │                 │
-                          │   │  RRF merge → top-100 passages   │                 │
-                          │   └─────────────────────────────────┘                 │
-                          │          │                                             │
-                          │          v                                             │
-                          │  Cross-Encoder Reranker (MiniLM)                     │
-                          │   - Rerank top-100 → top-20                          │
-                          │          │                                             │
-                          │          v                                             │
-                          │  BERT-Large Reader                                    │
-                          │   - Extractive span prediction per passage            │
-                          │   - No-answer score computation                       │
-                          │   - Span aggregation → best answer                   │
-                          │          │                                             │
-                          │          v                                             │
-                          │  Answer Selector + Confidence Calibrator              │
-                          │   - Rank candidate answers across passages            │
-                          │   - Abstractive fallback (T5 if span confidence < 0.6) │
-                          │          │                                             │
-                          └──────────┼─────────────────────────────────────────────┘
-                                     │
-                                     v
-                              Answer Response
-                              { answer, source_doc, confidence, span_offsets }
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q(["Question"]) --> QP["Query Processor\nclassify factoid/complex,\nspell-correct, intent"]
+    QP --> ENC["DPR Query Encoder\nBERT-base to 768-dim vector"]
+    ENC --> FAISS
+    ENC --> BM25
+
+    subgraph RET["Hybrid Retriever"]
+        FAISS["FAISS IVF\ndense"] --> RRF["RRF merge\nto top-100"]
+        BM25["BM25 sparse\n(Elasticsearch)"] --> RRF
+    end
+
+    RRF --> RR["Cross-Encoder Reranker\nMiniLM: top-100 to top-20"]
+    RR --> RD["BERT-Large Reader\nextractive span + no-answer,\nspan aggregation to best answer"]
+    RD --> SEL["Answer Selector +\nConfidence Calibrator\nT5 fallback if conf < 0.6"]
+    SEL --> RESP(["Answer Response\nanswer, source_doc,\nconfidence, span_offsets"])
+
+    class Q,RESP io
+    class QP req
+    class ENC,RRF,RR,SEL mathOp
+    class FAISS,BM25 base
+    class RD lossN
 ```
 
-**Multi-hop flow (parallel sub-queries):**
-```
-Question: "Who founded the company that acquired DeepMind?"
-         │
-         ├─► Sub-query 1: "which company acquired DeepMind?"
-         │       └─► Passage retrieval → answer: "Google (Alphabet)"
-         │
-         └─► Sub-query 2: "who founded Google?"
-                 └─► Passage retrieval → answer: "Larry Page and Sergey Brin"
+**Multi-hop flow (sequential sub-queries chained through a bridge entity):**
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Bridge entity = "Google" → compose final answer: "Larry Page and Sergey Brin"
+    Q(["Question: Who founded the company\nthat acquired DeepMind?"]) --> SQ1["Sub-query 1:\nwhich company acquired DeepMind?"]
+    SQ1 --> R1["Passage retrieval"]
+    R1 --> A1(["answer: Google (Alphabet)"])
+    A1 --> BR["Bridge entity = Google"]
+    BR --> SQ2["Sub-query 2:\nwho founded Google?"]
+    SQ2 --> R2["Passage retrieval"]
+    R2 --> A2(["answer: Larry Page\nand Sergey Brin"])
+    A2 --> FIN(["Final answer:\nLarry Page and Sergey Brin"])
+
+    class Q,A1,A2,FIN io
+    class SQ1,SQ2 req
+    class R1,R2 mathOp
+    class BR base
 ```
+
+The second hop cannot run until the first hop resolves the bridge entity ("Google"), so hop errors compound multiplicatively (overall EM ≈ per-hop EM²).
 
 ---
 
@@ -540,16 +545,30 @@ class MultiHopQAEngine:
 
 ### (a) Eval Pipeline
 
-```
-golden_qa_set.json (1,000 question-answer pairs, labeled by domain experts)
-    │
-    ├── Exact Match (EM): answer_normalized == ground_truth_normalized
-    │     (lowercase, strip punctuation, articles — standard SQuAD normalization)
-    ├── F1 (token overlap): max over all gold answers of token-level F1
-    ├── Retrieval recall@100: fraction of questions where gold passage is in top-100
-    ├── No-answer accuracy: precision/recall on "I don't know" questions (SQuAD 2.0 split)
-    ├── Multi-hop EM: subset of 200 multi-hop questions in golden set
-    └── Regression gate: EM drop > 1.5% or recall@100 drop > 2% → block deployment
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    G(["golden_qa_set.json\n1,000 expert-labeled pairs"]) --> EM["Exact Match\nnormalized == gold"]
+    G --> F1["F1\ntoken overlap, max over golds"]
+    G --> RC["Retrieval recall@100\ngold passage in top-100"]
+    G --> NA["No-answer accuracy\nprec/recall on I-dont-know"]
+    G --> MH["Multi-hop EM\n200-question subset"]
+
+    EM --> GATE{"Regression gate:\nEM drop > 1.5% or\nrecall@100 drop > 2%?"}
+    RC --> GATE
+    GATE -->|"yes"| BLOCK(["Block deployment"])
+    GATE -->|"no"| SHIP(["Ship"])
+
+    class G,BLOCK,SHIP io
+    class EM,F1,RC,NA,MH mathOp
+    class GATE lossN
 ```
 
 Reference: [../cross_cutting/experimentation_and_online_evaluation.md](cross_cutting/experimentation_and_online_evaluation.md) for A/B experiment design on answer quality.
