@@ -1,0 +1,341 @@
+{
+ "section": "cuda",
+ "pairs": [
+  {
+   "a": "cuda/occupancy_and_launch_configuration",
+   "b": "cuda/profiling_and_performance_analysis",
+   "w": 0.8808,
+   "links": 3,
+   "lex": 0.1684
+  },
+  {
+   "a": "cuda/memory_coalescing_and_access_patterns",
+   "b": "cuda/profiling_and_performance_analysis",
+   "w": 0.4012,
+   "links": 1,
+   "lex": 0.1563
+  },
+  {
+   "a": "cuda/debugging_correctness_and_numerics",
+   "b": "cuda/profiling_and_performance_analysis",
+   "w": 0.3711,
+   "links": 1,
+   "lex": 0.1283
+  },
+  {
+   "a": "cuda/cuda_memory_model_and_hierarchy",
+   "b": "cuda/shared_memory_and_bank_conflicts",
+   "w": 0.3,
+   "links": 0,
+   "lex": 0.2794
+  },
+  {
+   "a": "cuda/gpu_hardware_architecture",
+   "b": "cuda/occupancy_and_launch_configuration",
+   "w": 0.2717,
+   "links": 0,
+   "lex": 0.253
+  },
+  {
+   "a": "cuda/python_gpu_ecosystem",
+   "b": "cuda/triton_and_kernel_dsls",
+   "w": 0.2665,
+   "links": 0,
+   "lex": 0.2482
+  },
+  {
+   "a": "cuda/gpu_computing_foundations",
+   "b": "cuda/warps_and_simt_execution",
+   "w": 0.2637,
+   "links": 0,
+   "lex": 0.2456
+  },
+  {
+   "a": "cuda/memory_coalescing_and_access_patterns",
+   "b": "cuda/shared_memory_and_bank_conflicts",
+   "w": 0.2565,
+   "links": 0,
+   "lex": 0.2389
+  },
+  {
+   "a": "cuda/warp_level_primitives_and_cooperative_groups",
+   "b": "cuda/warps_and_simt_execution",
+   "w": 0.2552,
+   "links": 0,
+   "lex": 0.2377
+  },
+  {
+   "a": "cuda/cuda_memory_model_and_hierarchy",
+   "b": "cuda/occupancy_and_launch_configuration",
+   "w": 0.2512,
+   "links": 0,
+   "lex": 0.234
+  },
+  {
+   "a": "cuda/cuda_memory_model_and_hierarchy",
+   "b": "cuda/memory_coalescing_and_access_patterns",
+   "w": 0.2406,
+   "links": 0,
+   "lex": 0.224
+  },
+  {
+   "a": "cuda/debugging_correctness_and_numerics",
+   "b": "cuda/synchronization_and_atomics",
+   "w": 0.2326,
+   "links": 0,
+   "lex": 0.2166
+  },
+  {
+   "a": "cuda/cuda_programming_model_and_kernels",
+   "b": "cuda/debugging_correctness_and_numerics",
+   "w": 0.231,
+   "links": 0,
+   "lex": 0.2151
+  },
+  {
+   "a": "cuda/parallel_patterns_reduction_scan_histogram",
+   "b": "cuda/warp_level_primitives_and_cooperative_groups",
+   "w": 0.2284,
+   "links": 0,
+   "lex": 0.2127
+  },
+  {
+   "a": "cuda/occupancy_and_launch_configuration",
+   "b": "cuda/shared_memory_and_bank_conflicts",
+   "w": 0.2268,
+   "links": 0,
+   "lex": 0.2112
+  },
+  {
+   "a": "cuda/cuda_math_and_dnn_libraries",
+   "b": "cuda/python_gpu_ecosystem",
+   "w": 0.2199,
+   "links": 0,
+   "lex": 0.2048
+  },
+  {
+   "a": "cuda/synchronization_and_atomics",
+   "b": "cuda/warps_and_simt_execution",
+   "w": 0.2186,
+   "links": 0,
+   "lex": 0.2035
+  },
+  {
+   "a": "cuda/memory_management_and_data_transfer",
+   "b": "cuda/streams_events_and_concurrency",
+   "w": 0.2167,
+   "links": 0,
+   "lex": 0.2018
+  },
+  {
+   "a": "cuda/synchronization_and_atomics",
+   "b": "cuda/warp_level_primitives_and_cooperative_groups",
+   "w": 0.2146,
+   "links": 0,
+   "lex": 0.1999
+  },
+  {
+   "a": "cuda/shared_memory_and_bank_conflicts",
+   "b": "cuda/warp_level_primitives_and_cooperative_groups",
+   "w": 0.2144,
+   "links": 0,
+   "lex": 0.1997
+  },
+  {
+   "a": "cuda/cuda_graphs",
+   "b": "cuda/python_gpu_ecosystem",
+   "w": 0.2117,
+   "links": 0,
+   "lex": 0.1972
+  },
+  {
+   "a": "cuda/cuda_graphs",
+   "b": "cuda/streams_events_and_concurrency",
+   "w": 0.2108,
+   "links": 0,
+   "lex": 0.1963
+  },
+  {
+   "a": "cuda/tensor_cores_and_mixed_precision",
+   "b": "cuda/triton_and_kernel_dsls",
+   "w": 0.2095,
+   "links": 0,
+   "lex": 0.1951
+  },
+  {
+   "a": "cuda/cuda_programming_model_and_kernels",
+   "b": "cuda/dynamic_parallelism_and_advanced_kernels",
+   "w": 0.2083,
+   "links": 0,
+   "lex": 0.194
+  },
+  {
+   "a": "cuda/cuda_programming_model_and_kernels",
+   "b": "cuda/python_gpu_ecosystem",
+   "w": 0.207,
+   "links": 0,
+   "lex": 0.1928
+  },
+  {
+   "a": "cuda/cuda_math_and_dnn_libraries",
+   "b": "cuda/tensor_cores_and_mixed_precision",
+   "w": 0.2065,
+   "links": 0,
+   "lex": 0.1924
+  },
+  {
+   "a": "cuda/cuda_memory_model_and_hierarchy",
+   "b": "cuda/gpu_hardware_architecture",
+   "w": 0.2026,
+   "links": 0,
+   "lex": 0.1887
+  },
+  {
+   "a": "cuda/gpu_hardware_architecture",
+   "b": "cuda/tensor_cores_and_mixed_precision",
+   "w": 0.2003,
+   "links": 0,
+   "lex": 0.1865
+  },
+  {
+   "a": "cuda/cuda_graphs",
+   "b": "cuda/gpu_computing_foundations",
+   "w": 0.1994,
+   "links": 0,
+   "lex": 0.1857
+  },
+  {
+   "a": "cuda/gpu_computing_foundations",
+   "b": "cuda/shared_memory_and_bank_conflicts",
+   "w": 0.1978,
+   "links": 0,
+   "lex": 0.1842
+  },
+  {
+   "a": "cuda/shared_memory_and_bank_conflicts",
+   "b": "cuda/synchronization_and_atomics",
+   "w": 0.1962,
+   "links": 0,
+   "lex": 0.1827
+  },
+  {
+   "a": "cuda/cuda_memory_model_and_hierarchy",
+   "b": "cuda/gpu_computing_foundations",
+   "w": 0.1958,
+   "links": 0,
+   "lex": 0.1824
+  },
+  {
+   "a": "cuda/memory_management_and_data_transfer",
+   "b": "cuda/multi_gpu_programming_and_nccl",
+   "w": 0.194,
+   "links": 0,
+   "lex": 0.1807
+  },
+  {
+   "a": "cuda/gpu_hardware_architecture",
+   "b": "cuda/warp_level_primitives_and_cooperative_groups",
+   "w": 0.1922,
+   "links": 0,
+   "lex": 0.179
+  },
+  {
+   "a": "cuda/cuda_graphs",
+   "b": "cuda/profiling_and_performance_analysis",
+   "w": 0.1898,
+   "links": 0,
+   "lex": 0.1767
+  },
+  {
+   "a": "cuda/dynamic_parallelism_and_advanced_kernels",
+   "b": "cuda/shared_memory_and_bank_conflicts",
+   "w": 0.1877,
+   "links": 0,
+   "lex": 0.1748
+  },
+  {
+   "a": "cuda/gpu_hardware_architecture",
+   "b": "cuda/warps_and_simt_execution",
+   "w": 0.1867,
+   "links": 0,
+   "lex": 0.1738
+  },
+  {
+   "a": "cuda/memory_coalescing_and_access_patterns",
+   "b": "cuda/warps_and_simt_execution",
+   "w": 0.1866,
+   "links": 0,
+   "lex": 0.1738
+  },
+  {
+   "a": "cuda/triton_and_kernel_dsls",
+   "b": "cuda/warps_and_simt_execution",
+   "w": 0.1857,
+   "links": 0,
+   "lex": 0.173
+  },
+  {
+   "a": "cuda/cuda_programming_model_and_kernels",
+   "b": "cuda/shared_memory_and_bank_conflicts",
+   "w": 0.1855,
+   "links": 0,
+   "lex": 0.1728
+  },
+  {
+   "a": "cuda/gpu_portability_hip_sycl_and_beyond",
+   "b": "cuda/python_gpu_ecosystem",
+   "w": 0.1844,
+   "links": 0,
+   "lex": 0.1717
+  },
+  {
+   "a": "cuda/dynamic_parallelism_and_advanced_kernels",
+   "b": "cuda/python_gpu_ecosystem",
+   "w": 0.1828,
+   "links": 0,
+   "lex": 0.1702
+  },
+  {
+   "a": "cuda/profiling_and_performance_analysis",
+   "b": "cuda/triton_and_kernel_dsls",
+   "w": 0.1827,
+   "links": 0,
+   "lex": 0.1702
+  },
+  {
+   "a": "cuda/occupancy_and_launch_configuration",
+   "b": "cuda/tensor_cores_and_mixed_precision",
+   "w": 0.1822,
+   "links": 0,
+   "lex": 0.1697
+  },
+  {
+   "a": "cuda/debugging_correctness_and_numerics",
+   "b": "cuda/shared_memory_and_bank_conflicts",
+   "w": 0.1819,
+   "links": 0,
+   "lex": 0.1694
+  },
+  {
+   "a": "cuda/streams_events_and_concurrency",
+   "b": "cuda/synchronization_and_atomics",
+   "w": 0.1815,
+   "links": 0,
+   "lex": 0.1691
+  },
+  {
+   "a": "cuda/cuda_toolkit_and_compilation",
+   "b": "cuda/debugging_correctness_and_numerics",
+   "w": 0.1805,
+   "links": 0,
+   "lex": 0.1681
+  },
+  {
+   "a": "cuda/dynamic_parallelism_and_advanced_kernels",
+   "b": "cuda/warp_level_primitives_and_cooperative_groups",
+   "w": 0.1805,
+   "links": 0,
+   "lex": 0.1681
+  }
+ ]
+}
