@@ -64,6 +64,17 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
+## Learning Paths (Full + Interview-Specific)
+
+`README.md` documents two routes through the section: the **Full Path** (all 52 modules
+= "Recommended Learning Order") and a curated **Interview-Specific Path** (30 modules).
+The interview subset is a **dual-source list** — it lives in both `README.md`
+("## Learning Paths") and `game/app.js` (`STUDY_PATHS.llm.interview`, which drives the
+game's Study Full/Interview toggle). **If you change one, change the other** — they must
+list the same modules in the same order. Non-Q&A narrative only; no `extract.py` re-run needed.
+
+---
+
 ## Planned / Missing Topics (not yet created)
 
 The following are gaps for senior AI engineer coverage, identified by the 2026-06-14 full-section gap audit. This is a roadmap, not a queue — pursue only on explicit user request. The 2026-06-14 audit's other 9 items (2 new modules, 4 sub-file slots covering 5 sub-files, 3 content expansions) were built on 2026-06-15; this single row — explicitly out of scope for that build — is the only remaining gap.

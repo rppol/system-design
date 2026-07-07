@@ -314,6 +314,47 @@ decoding) adjacently, both contrasted against the dense-autoregressive default.
 
 ---
 
+## Learning Paths
+
+This section is deliberately exhaustive — 52 modules covering the full LLM lifecycle. That is the right
+depth for a reference, but the wrong shape for someone with an interview in two weeks. So there are **two
+ways through it**. Pick based on your goal; the browser learning game's **Study** view surfaces both as a
+**Full / Interview** toggle (Full is the default).
+
+### Full Path (52 modules)
+
+The complete curriculum, in the order above — see [Recommended Learning Order](#recommended-learning-order).
+Use this when you want genuine mastery of the whole field: research frontier (diffusion LMs, VLA/robotics,
+mechanistic interpretability), breadth (multimodal, edge SLMs, ecosystem, regulations), and every
+specialized agent type. Nothing is dropped.
+
+### Interview-Specific Path (30 modules)
+
+A ruthless cut to what a **senior AI engineer interview** actually probes, curated from this section's own
+[Knowledge-Question Map](#knowledge-question-map) and [8-Week Study Plan](#8-week-zero-to-hero-study-plan)
+(both already encode interview priority). Same learning order, ~40% fewer modules. Each group below says
+why it earns interview time.
+
+| Phase | Modules | Why it's tested |
+|-------|---------|-----------------|
+| Foundations | [Foundations & Architecture](foundations_and_architecture/README.md), [Tokenization & Embeddings](tokenization_and_embeddings/README.md), [Embeddings & Similarity Search](embeddings_and_similarity_search/README.md), [Pre-Training](pre_training/README.md) | "Explain self-attention", scaling laws, BPE, HNSW — the guaranteed openers |
+| Training | [Fine-Tuning](fine_tuning/README.md), [Alignment & RLHF](alignment_and_rlhf/README.md) | LoRA/QLoRA and RLHF-vs-DPO-vs-GRPO are the two most-asked training topics |
+| Using LLMs | [Prompt Engineering](prompt_engineering/README.md), [RAG Fundamentals](rag_fundamentals/README.md), [Advanced RAG](advanced_rag/README.md), [Context Engineering](context_engineering/README.md), [Reasoning Models](reasoning_models/README.md) | RAG design and "RAG vs fine-tune vs long context" are near-universal; o1/R1 test-time compute is current |
+| Agents | [Agents & Tool Use](agents_and_tool_use/README.md), [Agentic Workflow Patterns](agentic_workflow_patterns/README.md), [Multi-Agent Systems](multi_agent_systems/README.md), [MCP](mcp_model_context_protocol/README.md) | Function calling / ReAct mechanics, the Anthropic workflow taxonomy, and MCP are hot |
+| Serving | [Inference & Decoding](inference_and_decoding/README.md), [Context Windows & Long Context](context_windows_and_long_context/README.md), [Inference Engines](inference_engines/README.md), [vLLM Deep Dive](vllm_deep_dive/README.md), [Optimization & Quantization](optimization_and_quantization/README.md) | KV cache, speculative decoding, RoPE/YaRN, PagedAttention, GPTQ/AWQ/FP8 — the systems core |
+| Operate | [Deployment & MLOps](deployment_and_mlops/README.md), [LLM Caching](llm_caching/README.md), [Token Economics & Cost Optimization](token_economics_and_cost_optimization/README.md), [LLM Routing & Model Selection](llm_routing_and_model_selection/README.md) | "Cut serving cost 10x" is a staple system-design ask |
+| Quality & Safety | [Evaluation & Benchmarks](evaluation_and_benchmarks/README.md), [LLM Testing Strategies](llm_testing_strategies/README.md), [Guardrails & Content Safety](guardrails_and_content_safety/README.md), [Safety & Alignment](safety_and_alignment/README.md), [LLM Security](llm_security/README.md) | LLM-as-judge pitfalls, prompt injection defense, hallucination mitigation |
+| Architecture | [Mixture of Experts](mixture_of_experts/README.md) | MoE training/serving tradeoffs come up whenever frontier models are discussed |
+
+**Deliberately deferred to the Full Path** (still valuable, just lower interview yield): training
+infrastructure, synthetic data, Constitutional AI, code generation, agentic frameworks, coding/voice/
+browser agents, distillation & merging, observability, LLMOps platforms, PromptOps, mechanistic
+interpretability, AI regulations, multimodal & vision-language models, VLA & robotics, small/edge models,
+diffusion LMs, AI applications, ecosystem & landscape, and data flywheels. A niche flagged in an interview
+(e.g. "have you looked at Mamba/SSMs?") is a bonus, not a gate — reach for these once the 30 above are solid.
+
+---
+
 ## LLM System Design Interview Framework
 
 When asked to design an LLM-powered system, use this 5-step framework:

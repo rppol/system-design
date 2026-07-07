@@ -120,6 +120,40 @@ const STUDY_ORDER = {
   ],
 };
 
+// Curated "Interview-Specific" learning paths — an ordered SUBSET of STUDY_ORDER
+// per section, focused on what a senior interview actually probes. Only sections
+// with an entry here show the Full/Interview toggle in the Study view; all others
+// behave exactly as before (Full only). Slugs are the same "<section>/<module>"
+// form as STUDY_ORDER and MUST stay in sync with that section's README
+// "Learning Paths" list (LLM pilot; other sections added later).
+const STUDY_PATHS = {
+  llm: {
+    interview: [
+      "llm/foundations_and_architecture","llm/tokenization_and_embeddings","llm/embeddings_and_similarity_search","llm/pre_training",
+      "llm/fine_tuning","llm/alignment_and_rlhf",
+      "llm/prompt_engineering","llm/rag_fundamentals","llm/advanced_rag","llm/context_engineering","llm/reasoning_models",
+      "llm/agents_and_tool_use","llm/agentic_workflow_patterns","llm/multi_agent_systems","llm/mcp_model_context_protocol",
+      "llm/inference_and_decoding","llm/context_windows_and_long_context","llm/inference_engines","llm/vllm_deep_dive","llm/optimization_and_quantization",
+      "llm/deployment_and_mlops","llm/llm_caching","llm/token_economics_and_cost_optimization","llm/llm_routing_and_model_selection",
+      "llm/evaluation_and_benchmarks","llm/llm_testing_strategies","llm/guardrails_and_content_safety",
+      "llm/safety_and_alignment","llm/llm_security","llm/mixture_of_experts",
+    ],
+  },
+};
+
+// Which path the learner picked for a section, persisted as a JSON map keyed by
+// section: { llm: "interview" } etc. Defaults to "full" (backward-compatible).
+function getStudyPath(section) {
+  try { return (JSON.parse(localStorage.getItem("sd_study_path") || "{}")[section]) || "full"; }
+  catch { return "full"; }
+}
+function setStudyPath(section, path) {
+  let m = {};
+  try { m = JSON.parse(localStorage.getItem("sd_study_path") || "{}"); } catch { }
+  m[section] = path;
+  localStorage.setItem("sd_study_path", JSON.stringify(m));
+}
+
 /* ---------- themes ---------- */
 // data-theme on <html> drives every color token in style.css. The inline script
 // in index.html applies the saved theme before first paint (no flash).
@@ -3188,7 +3222,17 @@ async function openStudySection(section) {
     errorScreen(`Couldn't load ${label(section)}`, `Check your connection and try again.${devDetail(`Run <code>python3 extract.py</code>.`)}`, () => openStudySection(section));
     return;
   }
-  const mods = modulesOf(bank);
+  let mods = modulesOf(bank);
+  // Interview-Specific path (LLM pilot): if this section has a curated subset and
+  // the learner chose it, restrict the skill tree to those modules. mods is already
+  // in STUDY_ORDER order (== the interview list's order), so a filter preserves it;
+  // `list` and the graph chords derive from mods, so scoping happens for free.
+  const interviewPath = STUDY_PATHS[section] && STUDY_PATHS[section].interview;
+  const studyPath = getStudyPath(section);              // "full" | "interview"
+  if (studyPath === "interview" && interviewPath) {
+    const keep = new Set(interviewPath);
+    mods = mods.filter((m) => keep.has(m.module));
+  }
   // v2: weighted prerequisite edges from graph/<section>.json (real repo
   // cross-links + lexical Q&A overlap). Pairs are undirected; orient each one
   // forward along the path order. Missing/failed file -> plain v1 path.
@@ -3256,14 +3300,22 @@ async function openStudySection(section) {
     </div>`;
   }).join("");
 
+  const onInterview = studyPath === "interview" && interviewPath;
+  const pathSwitchHtml = interviewPath ? `
+      <div class="pathswitch" role="radiogroup" aria-label="Learning path">
+        <span class="pathswitch-label">Path</span>
+        <button class="pathopt${onInterview ? "" : " on"}" role="radio" aria-checked="${!onInterview}" data-path="full">Full</button>
+        <button class="pathopt${onInterview ? " on" : ""}" role="radio" aria-checked="${!!onInterview}" data-path="interview">Interview</button>
+      </div>` : "";
   app.innerHTML = `
     <div class="path-screen">
     <div class="hero"><h1>${esc(label(section))}</h1>
-      <p>${mods.length} topics &middot; start at 01 &mdash; the path snakes across each row in the section's learning order.</p>
+      <p>${mods.length} topics${onInterview ? " &middot; interview-specific path" : ""} &middot; start at 01 &mdash; the path snakes across each row in the section's learning order.</p>
       ${graph ? `<p class="path-legend">${crossLinks
         ? `strongest prerequisite links drawn &middot; hover a topic to see all its connections &middot; ${crossLinks} cross-links mapped`
         : "no cross-link data yet &mdash; path order shown"}</p>` : ""}</div>
     <div class="topicbar">
+      ${pathSwitchHtml}
       <input type="search" class="filter" id="studyFilter" placeholder="Filter topics" aria-label="Filter topics" />
       <span class="selcount" id="pathCount" role="status"></span>
     </div>
@@ -3556,6 +3608,12 @@ async function openStudySection(section) {
     openReaderPath(list[idx].path, list[idx].title, { list, idx });
   });
   el("#studyBack").addEventListener("click", () => go("#/study"));
+  document.querySelectorAll(".pathopt").forEach((b) => b.addEventListener("click", () => {
+    if (b.classList.contains("on")) return;            // already active
+    setStudyPath(section, b.dataset.path);
+    announce(b.dataset.path === "interview" ? "Interview-specific path" : "Full path");
+    openStudySection(section);                         // re-render with the new subset
+  }));
   let rzT = 0;
   const onResize = () => {                         // debounced; self-removes once the screen is gone
     if (!document.body.contains(wrap)) { window.removeEventListener("resize", onResize); return; }

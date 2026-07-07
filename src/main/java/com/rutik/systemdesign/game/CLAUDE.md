@@ -48,3 +48,10 @@ The `game/` directory is an application, not study content — see
   `sourceFile`, `difficulty`, `question`/`questionMd`, `answerFull`/`answerFullMd`,
   `correct`/`correctMd`, `distractors`/`distractorsMd`, `distractorIds`, `concepts`.
   **Re-run `python3 extract.py` after editing any module's Q&A**, then reload.
+- **`STUDY_PATHS` in `app.js` is the Study view's Full/Interview toggle.** Each
+  section may have an `interview` array — an ordered SUBSET of that section's
+  `STUDY_ORDER` — and it MUST stay in sync with that section's README "Learning
+  Paths" list (same hand-maintained discipline as `STUDY_ORDER`). Sections absent
+  from `STUDY_PATHS` show no toggle (Full only). Choice persists in `sd_study_path`
+  (JSON map keyed by section). Currently only `llm` has an interview path; other
+  sections are added the same way (subset array + a README "Learning Paths" block).
