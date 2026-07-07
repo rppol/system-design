@@ -12,7 +12,8 @@ A comprehensive system design study repository. All content is Markdown — no r
 | **Database** | Relational, NoSQL, distributed DB, production ops — 29 modules, 6 case studies | [database/CLAUDE.md](src/main/java/com/rutik/systemdesign/database/CLAUDE.md) |
 | **Java** | Pure Java senior-engineer guide — 33 modules, 8 case studies | [java/CLAUDE.md](src/main/java/com/rutik/systemdesign/java/CLAUDE.md) |
 | **Spring** | Spring Framework guide — 39 modules, 9 case studies | [spring/CLAUDE.md](src/main/java/com/rutik/systemdesign/spring/CLAUDE.md) |
-| **Python** | Python + FastAPI guide — 40 modules, 6 case studies | [python/CLAUDE.md](src/main/java/com/rutik/systemdesign/python/CLAUDE.md) |
+| **Python** | Pure Python senior-engineer guide — 21 modules, 0 case studies | [python/CLAUDE.md](src/main/java/com/rutik/systemdesign/python/CLAUDE.md) |
+| **FastAPI** | FastAPI + ASGI production guide — 19 modules, 6 case studies | [fastapi/CLAUDE.md](src/main/java/com/rutik/systemdesign/fastapi/CLAUDE.md) |
 | **ML** | Machine Learning guide — 45 modules, 22 case studies | [ml/CLAUDE.md](src/main/java/com/rutik/systemdesign/ml/CLAUDE.md) |
 | **LLM** | LLM engineering guide — 52 modules, 29 case studies, 82 deep-dive sub-files | [llm/CLAUDE.md](src/main/java/com/rutik/systemdesign/llm/CLAUDE.md) |
 | **DevOps** | DevOps / Cloud / Platform guide — 41 modules, 13 case studies | [devops/CLAUDE.md](src/main/java/com/rutik/systemdesign/devops/CLAUDE.md) |
@@ -33,7 +34,8 @@ src/main/java/com/rutik/systemdesign/
 ├── database/     ← Database engineering + CLAUDE.md
 ├── java/         ← Pure Java guide + CLAUDE.md
 ├── spring/       ← Spring Framework guide + CLAUDE.md
-├── python/       ← Python + FastAPI guide + CLAUDE.md
+├── python/       ← Pure Python guide + CLAUDE.md
+├── fastapi/      ← FastAPI + ASGI guide + CLAUDE.md
 ├── ml/               ← Machine Learning guide + CLAUDE.md
 ├── llm/              ← LLM engineering guide + CLAUDE.md
 ├── devops/           ← DevOps / Cloud / Platform guide + CLAUDE.md

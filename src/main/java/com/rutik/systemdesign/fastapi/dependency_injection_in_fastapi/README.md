@@ -864,7 +864,7 @@ class QueryFilter:
 | Testable without framework | Yes (`dependency_overrides`) | Requires app context | Requires Django test runner | Yes (manual wiring) |
 | Teardown support | Yes (yield) | No native | No native | Yes (destroy callbacks) |
 
-Cross-reference: Compare with Spring's `@Autowired` and `@Bean` scopes in [`../../../spring/dependency_injection/README.md`](../../../spring/dependency_injection/README.md).
+Cross-reference: Compare with Spring's `@Autowired` and `@Bean` scopes in [`../../../spring/dependency_injection/README.md`](../../spring/dependency_injection/README.md).
 
 ---
 

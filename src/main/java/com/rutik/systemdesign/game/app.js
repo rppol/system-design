@@ -17,7 +17,7 @@ const SECTION_LABELS = {
   backend: "Backend Engineering", book: "Book Summaries",
   cs_fundamentals: "CS Fundamentals", cuda: "CUDA / GPGPU", database: "Databases", devops: "DevOps & Cloud",
   hld: "High-Level Design", java: "Java", lld: "Low-Level Design",
-  llm: "LLM Engineering", ml: "Machine Learning", python: "Python", spring: "Spring",
+  llm: "LLM Engineering", ml: "Machine Learning", python: "Python", fastapi: "FastAPI", spring: "Spring",
 };
 
 // Phase-order for the Study browser. Derived from each section's README learning path.
@@ -112,9 +112,11 @@ const STUDY_ORDER = {
     "python/data_model_and_objects","python/core_language_idioms","python/iterators_and_generators","python/decorators_and_closures","python/context_managers_and_exceptions","python/collections_and_data_structures","python/strings_bytes_encoding_and_regex","python/file_io_and_serialization",
     "python/cpython_memory_model","python/the_gil_and_free_threading","python/metaclasses_and_metaprogramming","python/the_type_system_and_typing","python/performance_and_profiling","python/functional_programming",
     "python/threading_and_multiprocessing","python/asyncio_and_event_loop","python/async_patterns_and_pitfalls","python/design_patterns_in_python","python/stdlib_datetime_and_logging","python/testing_with_pytest","python/packaging_and_project_tooling",
-    "python/fastapi_fundamentals_asgi","python/pydantic_v2_deep_dive","python/routing_and_request_handling","python/dependency_injection_in_fastapi","python/middleware_and_lifecycle","python/configuration_and_settings_management",
-    "python/async_database_sqlalchemy","python/authentication_and_security","python/error_handling_and_validation","python/websockets_sse_and_streaming","python/background_jobs_and_task_queues","python/testing_fastapi","python/http_clients_and_external_apis","python/message_queues_and_event_driven",
-    "python/production_deployment_and_scaling","python/observability_and_monitoring","python/caching_and_performance","python/api_design_and_versioning","python/security_hardening_and_owasp",
+  ],
+  fastapi: [
+    "fastapi/fastapi_fundamentals_asgi","fastapi/pydantic_v2_deep_dive","fastapi/routing_and_request_handling","fastapi/dependency_injection_in_fastapi","fastapi/middleware_and_lifecycle","fastapi/configuration_and_settings_management",
+    "fastapi/async_database_sqlalchemy","fastapi/authentication_and_security","fastapi/error_handling_and_validation","fastapi/websockets_sse_and_streaming","fastapi/background_jobs_and_task_queues","fastapi/testing_fastapi","fastapi/http_clients_and_external_apis","fastapi/message_queues_and_event_driven",
+    "fastapi/production_deployment_and_scaling","fastapi/observability_and_monitoring","fastapi/caching_and_performance","fastapi/api_design_and_versioning","fastapi/security_hardening_and_owasp",
   ],
   spring: [
     "spring/ioc_container","spring/bean_lifecycle","spring/dependency_injection","spring/spring_configuration",
@@ -223,8 +225,12 @@ const STUDY_PATHS = {
       "python/data_model_and_objects","python/core_language_idioms","python/iterators_and_generators","python/decorators_and_closures","python/context_managers_and_exceptions","python/collections_and_data_structures",
       "python/cpython_memory_model","python/the_gil_and_free_threading","python/the_type_system_and_typing","python/functional_programming",
       "python/asyncio_and_event_loop","python/async_patterns_and_pitfalls","python/testing_with_pytest",
-      "python/fastapi_fundamentals_asgi","python/pydantic_v2_deep_dive","python/dependency_injection_in_fastapi","python/async_database_sqlalchemy","python/authentication_and_security","python/error_handling_and_validation",
-      "python/production_deployment_and_scaling","python/observability_and_monitoring","python/caching_and_performance",
+    ],
+  },
+  fastapi: {
+    interview: [
+      "fastapi/fastapi_fundamentals_asgi","fastapi/pydantic_v2_deep_dive","fastapi/dependency_injection_in_fastapi","fastapi/async_database_sqlalchemy","fastapi/authentication_and_security","fastapi/error_handling_and_validation",
+      "fastapi/production_deployment_and_scaling","fastapi/observability_and_monitoring","fastapi/caching_and_performance",
     ],
   },
   devops: {
@@ -6452,6 +6458,12 @@ async function boot() {
   const todayPick = coachPick();
   const todayMsg = coachMessage(todayPick);
   state.today = { date: todayISO(), ...todayPick, message: todayMsg.text, templateId: todayMsg.templateId };
+  const brandB = el("#brandHome");                 // brand logo -> home (guarded so a live blitz pauses first)
+  if (brandB) {
+    const goHome = () => guardedNav(() => go("#/home"));
+    brandB.addEventListener("click", goHome);
+    brandB.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); goHome(); } });
+  }
   el("#navProgress").addEventListener("click", () => guardedNav(() => go("#/progress")));
   const studyB = el("#navStudy");
   if (studyB) studyB.addEventListener("click", () => guardedNav(() => go("#/study")));

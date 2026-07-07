@@ -21,7 +21,7 @@ This module covers:
 - Webhook receipt: HMAC signature verification and async dispatch
 - Testing: `respx` and `httpx.MockTransport`
 
-Cross-cutting dependencies: [`../../async_patterns_and_pitfalls/README.md`](../../async_patterns_and_pitfalls/README.md)
+Cross-cutting dependencies: [`../../async_patterns_and_pitfalls/README.md`](../../python/async_patterns_and_pitfalls/README.md)
 
 ---
 

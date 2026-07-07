@@ -4,7 +4,7 @@ Phase 5 — FastAPI Production Concerns
 
 Cross-links:
 - [Background Jobs and Task Queues](../background_jobs_and_task_queues/README.md)
-- [HLD Message Queue Patterns](../../../hld/case_studies/README.md)
+- [HLD Message Queue Patterns](../../hld/case_studies/README.md)
 
 ---
 

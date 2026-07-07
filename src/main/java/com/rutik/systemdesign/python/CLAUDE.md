@@ -2,11 +2,11 @@
 
 Section root: `src/main/java/com/rutik/systemdesign/python/`
 Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
-Build manifest / status tracker: `README.md` §8 — check NEXT UP pointer before starting a new module.
+Build manifest / status tracker: `README.md` §7 — check Batch Plan before starting a new module.
 
 ---
 
-## Module List — 40 Modules
+## Module List — 21 Modules
 
 | Module Directory | Phase | Key Concepts |
 |-----------------|-------|-------------|
@@ -31,57 +31,37 @@ Build manifest / status tracker: `README.md` §8 — check NEXT UP pointer befor
 | `stdlib_datetime_and_logging/` | 3 | `datetime`/`zoneinfo`, structured logging, `argparse`, `subprocess` |
 | `testing_with_pytest/` | 3 | pytest, fixtures, `parametrize`, `monkeypatch`, `hypothesis`, `pytest-asyncio` |
 | `packaging_and_project_tooling/` | 3 | `pyproject.toml`, `uv`/poetry/pip, `ruff`/mypy, wheels, dependency resolution |
-| `fastapi_fundamentals_asgi/` | 4 | ASGI vs WSGI, Starlette, Uvicorn, `lifespan`, ASGI 3 scope/receive/send, auto OpenAPI |
-| `pydantic_v2_deep_dive/` | 4 | Validation, serialization, `@field_validator`, `pydantic-core` Rust, v1→v2 migration |
-| `routing_and_request_handling/` | 4 | Path operations, `APIRouter`, response models, status codes, content negotiation |
-| `dependency_injection_in_fastapi/` | 4 | `Depends`, sub-dependencies, `yield` deps, caching/scopes, `dependency_overrides` |
-| `middleware_and_lifecycle/` | 4 | Middleware stack, `BackgroundTasks`, CORS/GZip, custom middleware, exception handler ordering |
-| `configuration_and_settings_management/` | 4 | `pydantic-settings`, 12-factor config, env vars/secrets, layered settings |
-| `async_database_sqlalchemy/` | 5 | SQLAlchemy 2.0 async, `AsyncSession`, async engine, Alembic, SQLModel, N+1 |
-| `authentication_and_security/` | 5 | OAuth2 password flow, JWT, scopes, passlib/bcrypt/argon2, OIDC, CSRF/CORS |
-| `error_handling_and_validation/` | 5 | `HTTPException`, custom handlers, `RequestValidationError`, RFC 7807 Problem Details |
-| `testing_fastapi/` | 5 | `TestClient`, `httpx.AsyncClient`, `pytest-asyncio`, `dependency_overrides`, rollback |
-| `websockets_sse_and_streaming/` | 5 | WebSockets, SSE, `StreamingResponse`, Redis pub/sub fan-out, backpressure |
-| `background_jobs_and_task_queues/` | 5 | `BackgroundTasks` vs Celery vs ARQ vs Dramatiq, idempotency, retries, DLQ |
-| `http_clients_and_external_apis/` | 5 | `httpx`/`aiohttp`, connection pooling, retries/backoff, circuit breakers |
-| `message_queues_and_event_driven/` | 5 | `aiokafka`/`aio-pika`, outbox pattern, consumer groups, idempotent consumers |
-| `production_deployment_and_scaling/` | 6 | Gunicorn+Uvicorn workers, K8s, graceful shutdown, ASGI scaling, blue-green |
-| `observability_and_monitoring/` | 6 | Structured logging, OpenTelemetry, Prometheus metrics, health/readiness probes |
-| `caching_and_performance/` | 6 | Redis caching, response/in-process caching, connection pooling, async pitfalls |
-| `api_design_and_versioning/` | 6 | REST best practices, versioning, cursor pagination, rate limiting, idempotency keys |
-| `security_hardening_and_owasp/` | 6 | OWASP API Top 10 in FastAPI, injection/SSRF, secrets handling, pip-audit |
 
 ---
 
-## Sub-Files (5 total — 14-section template, 15+ Q&As each)
+## Sub-Files (3 total — 14-section template, 15+ Q&As each)
 
 | File | Parent Module |
 |------|--------------|
 | `asyncio_and_event_loop/event_loop_internals.md` | asyncio_and_event_loop/ |
 | `asyncio_and_event_loop/structured_concurrency.md` | asyncio_and_event_loop/ |
-| `pydantic_v2_deep_dive/pydantic_core_and_performance.md` | pydantic_v2_deep_dive/ |
 | `the_type_system_and_typing/protocols_and_structural_typing.md` | the_type_system_and_typing/ |
-| `dependency_injection_in_fastapi/yield_dependencies_and_scopes.md` | dependency_injection_in_fastapi/ |
 
 ---
 
 ## Learning Paths (Full + Interview-Specific)
 
-`README.md` documents two routes: the **Full Path** (all 40 modules = "6-Phase Learning
-Path") and a curated **Interview-Specific Path** (22 modules). The interview subset is a
+`README.md` documents two routes: the **Full Path** (all 21 modules = "3-Phase Learning
+Path") and a curated **Interview-Specific Path** (13 modules). The interview subset is a
 **dual-source list** — it lives in both `README.md` ("## Learning Paths") and
 `game/app.js` (`STUDY_PATHS.python.interview`, which drives the game's Study
 Full/Interview toggle). **Change one, change the other** — same modules, same order.
 Non-Q&A narrative only; no `extract.py` re-run needed. The README also carries a
-Knowledge-Question Map and a 6-week Study Plan (interview-readiness prose; no toggle impact).
+Knowledge-Question Map and a 3-week Study Plan (interview-readiness prose; no toggle impact).
 
 ---
 
-## Case Studies — 6 Total
+## Relationship to fastapi/
 
-`case_studies/` — all use the 7-section legacy template (Problem Statement → Architecture Overview → Key Design Decisions → Implementation → Python/FastAPI Components Used → Tradeoffs and Alternatives → Interview Discussion Points).
-
-design_rate_limited_api_fastapi, design_multi_tenant_saas_api, design_realtime_chat_fastapi, design_async_task_queue, design_async_web_scraper, design_ml_inference_api_fastapi
+FastAPI (previously modules 22-40 of this section, back when it was "Python + FastAPI")
+is now its own section — see [`../fastapi/CLAUDE.md`](../fastapi/CLAUDE.md) and
+[`../fastapi/README.md`](../fastapi/README.md). This section has 0 case studies of its
+own; all 6 former case studies moved to `fastapi/case_studies/`.
 
 ---
 
@@ -100,7 +80,7 @@ Format: `[3.11]` inline or `Added in Python 3.11`.
 ## Q&A Minimums (Python-specific)
 
 - Standard modules: 10+ Q&As
-- Deep modules (15–18 required): `the_gil_and_free_threading`, `asyncio_and_event_loop`, `the_type_system_and_typing`, `pydantic_v2_deep_dive`, `dependency_injection_in_fastapi`, `async_database_sqlalchemy`, `authentication_and_security`
+- Deep modules (15–18 required): `the_gil_and_free_threading`, `asyncio_and_event_loop`, `the_type_system_and_typing`
 
 ## Adding a New Python Module
 
@@ -108,7 +88,7 @@ Format: `[3.11]` inline or `Added in Python 3.11`.
 2. All code in Python 3.11/3.12 with type hints (3.10+ syntax: `X | None` not `Optional[X]`)
 3. Add version tags for features introduced in specific Python versions
 4. Meet the Q&A minimum for the module's depth level
-5. Flip the module's Status from `pending` → `done` in `README.md` §8 tracker; advance "NEXT UP" pointer
+5. Flip the module's Status from `pending` → `done` in `README.md` §7 tracker
 6. Update root `README.md` Phase table under the Python section
 7. Update root `CLAUDE.md` Python module table
 

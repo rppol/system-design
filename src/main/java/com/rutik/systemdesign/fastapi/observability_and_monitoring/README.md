@@ -996,5 +996,5 @@ async def process_payment(payment: dict) -> dict:
   configuration, Gunicorn/Uvicorn worker tuning, graceful shutdown
 - [Async Database SQLAlchemy](../async_database_sqlalchemy/README.md) — SQLAlchemy
   `SQLAlchemyInstrumentor` for automatic DB span generation
-- [OpenTelemetry for LLM Apps](../../../llm/case_studies/cross_cutting/opentelemetry_for_llm_apps.md)
+- [OpenTelemetry for LLM Apps](../../llm/case_studies/cross_cutting/opentelemetry_for_llm_apps.md)
   — OTel span conventions for LLM token usage, model latency, and prompt tracing
