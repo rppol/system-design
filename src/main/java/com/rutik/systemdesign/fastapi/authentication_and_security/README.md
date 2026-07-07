@@ -56,11 +56,16 @@ Python version: 3.11/3.12. FastAPI version: 0.110+. Pydantic version: v2.
 
 The simplest grant type: the client (typically your own SPA) sends username + password directly to your token endpoint. The server returns an access token (and optionally a refresh token). Suitable for first-party clients only — never use this for third-party integrations.
 
+```mermaid
+sequenceDiagram
+    participant C as Client (SPA)
+    participant S as Token Endpoint
+
+    C->>S: POST /token<br/>username=alice&password=s3cr3t
+    S-->>C: access_token, refresh_token<br/>token_type: bearer
 ```
-POST /token
-  username=alice&password=s3cr3t
-  -> { "access_token": "...", "token_type": "bearer", "refresh_token": "..." }
-```
+
+*The client sends the raw username and password directly to the server's own token endpoint — acceptable only because it is a first-party client the same operator controls.*
 
 ### 4.2 Authorization Code Flow (OIDC / Third-Party)
 
@@ -84,82 +89,129 @@ Server-side sessions stored in Redis or a database. The cookie carries only a se
 
 ### JWT Authentication Dependency Chain
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["Request<br/>Authorization: Bearer token"]) --> B["oauth2_scheme<br/>extract token from header"]
+    B --> C["get_current_user<br/>decode + validate claims<br/>fetch user from DB"]
+    C --> D{"token valid?"}
+    D -->|"no"| E(["401 Unauthorized"])
+    D -->|"yes"| F{"user.is_active?"}
+    F -->|"no"| G(["400 Inactive user"])
+    F -->|"yes"| H["Route handler<br/>business logic"]
+
+    class A io
+    class B,C,D,F mathOp
+    class E,G lossN
+    class H train
 ```
-Request (Authorization: Bearer <token>)
-        |
-        v
-  oauth2_scheme (OAuth2PasswordBearer)
-  - Extracts token string from header
-        |
-        v
-  get_current_user(token: str = Depends(oauth2_scheme))
-  - jwt.decode(token, secret, algorithms=["HS256"])
-  - Validate exp, iat, sub claims
-  - Fetch user from DB by sub
-  - Return User object (or raise 401)
-        |
-        v
-  get_current_active_user(user: User = Depends(get_current_user))
-  - Check user.is_active flag
-  - Return user (or raise 400 "Inactive user")
-        |
-        v
-  Route handler(current_user: User = Depends(get_current_active_user))
-  - Business logic
-```
+
+*Each dependency runs before the handler body executes; a failed check short-circuits with 401 or 400 rather than letting a partially authenticated identity reach business logic — the fail-closed principle from Section 3.*
 
 ### Token Endpoint Flow
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["POST /auth/token<br/>username + password + scope"]) --> B["authenticate_user<br/>fetch by username<br/>verify_password ~250ms"]
+    B --> C{"credentials valid?"}
+    C -->|"fail"| D(["401 Unauthorized"])
+    C -->|"ok"| E["create_access_token<br/>create_refresh_token"]
+    E --> F["store refresh hash<br/>in Redis, TTL 7 days"]
+    F --> G(["TokenResponse<br/>access_token, refresh_token,<br/>expires_in: 900"])
+
+    class A,G io
+    class B,C mathOp
+    class D lossN
+    class E train
+    class F base
 ```
-POST /auth/token
-  OAuth2PasswordRequestForm (username, password, scope)
-        |
-        v
-  authenticate_user(username, password)
-  - Fetch user by username
-  - verify_password(plain, hashed)   <- bcrypt.verify (250 ms)
-        |
-  ------+------
-  |           |
-fail         ok
-401      create_access_token(sub=user.id, scopes=requested)
-         create_refresh_token(sub=user.id)
-         store refresh_token hash in Redis (TTL 7 days)
-              |
-              v
-         TokenResponse { access_token, refresh_token, expires_in: 900 }
-```
+
+*`verify_password` costs about 250 ms at bcrypt cost 12 — the dominant latency on this path — before the endpoint issues both tokens and persists only the refresh token's hash, never the raw value, in Redis.*
 
 ### Refresh Token Rotation
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as Auth Service
+    participant R as Redis
+
+    C->>A: POST /auth/refresh (refresh_token)
+    A->>A: Hash incoming token to SHA-256
+    A->>R: Lookup by hash
+    alt not found or expired
+        R-->>A: miss
+        A-->>C: 401 Token reuse detected
+        A->>R: Revoke entire token family
+    else found
+        R-->>A: user_id
+        A->>R: Delete old entry (one-time use)
+        A->>A: Issue new access_token (15 min)
+        A->>A: Issue new refresh_token (7 days)
+        A->>R: Store new refresh hash
+        A-->>C: New access_token + refresh_token
+    end
 ```
-POST /auth/refresh
-  { "refresh_token": "<opaque-token>" }
-        |
-        v
-  Hash incoming token -> SHA-256
-  Lookup in Redis by hash
-  If not found or expired -> 401 "Token reuse detected" + revoke family
-  If found:
-    - Delete old entry (one-time use)
-    - Issue new access_token (15 min)
-    - Issue new refresh_token (7 days), store hash
-    - Return both tokens
+
+*A hash that is not found — already deleted or never issued — is treated as theft: the endpoint revokes the whole token family instead of trusting the single presented token.*
+
+### Refresh Token Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Active : issued, hash stored in Redis (TTL 7d)
+    Active --> Rotated : used once via POST /auth/refresh
+    Active --> Expired : TTL elapses unused
+    Active --> ReuseDetected : same raw token presented again
+    Rotated --> [*] : old hash deleted, new token becomes Active
+    Expired --> [*]
+    ReuseDetected --> FamilyRevoked : theft assumed
+    FamilyRevoked --> [*] : entire token family deleted
 ```
+
+*Rotation is what makes reuse detectable: a legitimate refresh always retires the old token into a fresh `Active` one, so a second use of the same raw value can only mean the token already leaked (see Q5 and Q19).*
 
 ### Scope-Based Authorization
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["GET /admin/users"]) --> B["Depends<br/>require_scope: admin:read"]
+    B --> C["SecurityScopes<br/>scopes: admin:read"]
+    C --> D["get_current_user<br/>decode JWT"]
+    D --> E{"all required scopes<br/>present in token?"}
+    E -->|"missing"| F(["403 Forbidden<br/>WWW-Authenticate lists scopes"])
+    E -->|"present"| G(["Handler executes"])
+
+    class A io
+    class B,C,D,E mathOp
+    class F lossN
+    class G train
 ```
-route: GET /admin/users
-  Depends(require_scope("admin:read"))
-        |
-  SecurityScopes(scopes=["admin:read"])
-        |
-  get_current_user(security_scopes, token)
-  - Decode JWT
-  - Check: all required scopes present in token["scopes"]
-  - Missing scope -> 403 with WWW-Authenticate header listing required scopes
-```
+
+*A missing scope returns 403, not 401 — the token itself is valid, but the principal lacks permission for this operation (see Pitfall 6).*
 
 ---
 
@@ -557,6 +609,38 @@ async def get_api_key(
 
 ## 9. When to Use / When NOT to Use
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q1{"who is the client?"} -->|"human user"| Q2{"third-party login<br/>needed?"}
+    Q1 -->|"service or script"| R5(["API Keys<br/>M2M"])
+
+    Q2 -->|"yes"| R1(["Authorization Code Flow<br/>+ PKCE"])
+    Q2 -->|"no"| Q3{"server-rendered<br/>HTML app?"}
+
+    Q3 -->|"yes"| R2(["Session Cookies"])
+    Q3 -->|"no"| Q4{"need horizontal scaling,<br/>no shared session state?"}
+
+    Q4 -->|"yes"| R3(["JWT Access Tokens"])
+    Q4 -->|"no"| R4(["OAuth2 Password Flow<br/>first-party only"])
+
+    class Q1,Q2,Q3,Q4 mathOp
+    class R1 frozen
+    class R2 base
+    class R3 train
+    class R4 io
+    class R5 req
+```
+
+*This traversal distills the Use / Do-not-use guidance below into one path: third-party login always routes to authorization-code-plus-PKCE, server-rendered apps keep session cookies, and the deciding factor between JWT and the password flow is whether the deployment needs to scale horizontally without shared state.*
+
 **Use OAuth2 password flow when:**
 - Building a first-party SPA or mobile app that you fully control
 - Simplicity is a priority and you do not need third-party login
@@ -783,44 +867,30 @@ Token family tracking groups all refresh tokens issued in a single login session
 
 **Architecture.**
 
-```
-                   +----------------------------------+
-Browser SPA        |        FastAPI Auth Service       |
-    |              |                                  |
-    | POST /token  |  1. Verify password (argon2id)   |
-    |------------->|  2. Issue access token (15 min)  |
-    |              |  3. Issue refresh token (7 days) |
-    |              |     - Store SHA-256 hash in Redis|
-    |<-------------|  4. Return both tokens            |
-    |              +----------------------------------+
-    |
-    | GET /api/items  (Authorization: Bearer <access_token>)
-    |
-    v
-+----------------------------------+
-|      FastAPI Resource Service     |
-|                                  |
-|  get_current_user dependency:    |
-|  1. Extract token from header    |
-|  2. jwt.decode (RS256, JWKS)     |
-|  3. Check jti blacklist (Redis)  |
-|  4. Verify scope: "items:read"   |
-|  5. Return TenantUser object     |
-+----------------------------------+
+```mermaid
+sequenceDiagram
+    participant B as Browser SPA
+    participant Auth as FastAPI Auth Service
+    participant Res as FastAPI Resource Service
+    participant W as Worker Service
 
-Internal service-to-service:
-+--------------------+        X-API-Key: <raw_key>
-| Worker Service     |------------------------------+
-+--------------------+                             |
-                                                   v
-                               +----------------------------------+
-                               | FastAPI Resource Service         |
-                               | get_api_key dependency:          |
-                               | 1. SHA-256(incoming key)         |
-                               | 2. Lookup in DB                  |
-                               | 3. Check tenant_id scope         |
-                               +----------------------------------+
+    B->>Auth: POST /token
+    Auth->>Auth: Verify password (argon2id)
+    Auth->>Auth: Issue access token (15 min)
+    Auth->>Auth: Issue refresh token (7 days)
+    Note over Auth: Store SHA-256 hash in Redis
+    Auth-->>B: access_token + refresh_token
+
+    B->>Res: GET /api/items<br/>Authorization: Bearer access_token
+    Note over Res: get_current_user dependency<br/>1. Extract token from header<br/>2. jwt.decode RS256, JWKS<br/>3. Check jti blacklist in Redis<br/>4. Verify scope items:read<br/>5. Return TenantUser object
+    Res-->>B: 200 OK
+
+    W->>Res: X-API-Key: raw_key
+    Note over Res: get_api_key dependency<br/>1. SHA-256 of incoming key<br/>2. Lookup in DB<br/>3. Check tenant_id scope
+    Res-->>W: 200 OK
 ```
+
+*Three independent trust paths converge on the same resource service: the browser presents a short-lived RS256 JWT verified via JWKS, while the worker presents a hashed API key checked against the database — each dependency enforces tenant isolation its own way.*
 
 **Settings module.**
 

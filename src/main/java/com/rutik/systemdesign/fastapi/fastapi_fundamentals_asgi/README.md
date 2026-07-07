@@ -97,15 +97,36 @@ the loop. You pay for thread overhead only when you opt in to synchronous code.
 
 ### Response Class Hierarchy
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    respBase("Response<br/>(base)")
+    json("JSONResponse")
+    html("HTMLResponse")
+    plain("PlainTextResponse")
+    redirect("RedirectResponse")
+    file("FileResponse")
+    stream("StreamingResponse")
+
+    respBase -->|"default;<br/>orjson/json"| json
+    respBase -->|"text/html"| html
+    respBase -->|"text/plain"| plain
+    respBase -->|"307/301/302"| redirect
+    respBase -->|"disk + Range<br/>header"| file
+    respBase -->|"async gen;<br/>SSE / large"| stream
+
+    class respBase base
+    class json,html,plain,redirect,file,stream io
 ```
-Response (base)
-├── JSONResponse          — default for route handlers; body serialized by orjson/json
-├── HTMLResponse          — Content-Type: text/html
-├── PlainTextResponse     — Content-Type: text/plain
-├── RedirectResponse      — 307/301/302; Location header
-├── FileResponse          — streams a file from disk; supports Range header
-└── StreamingResponse     — streams an async generator; for SSE or large payloads
-```
+
+*All response types inherit from Starlette's base `Response`; FastAPI defaults to `JSONResponse` for dict/`BaseModel` returns unless `response_class` or a different return type selects another (§6.6).*
 
 ### Path Parameter Type Resolution
 
@@ -127,109 +148,128 @@ FastAPI maps Python built-in types and Pydantic types to OpenAPI schema types:
 
 ### Full ASGI Request Flow
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client<br/>browser / curl / httpx"])
+
+    subgraph UV["Uvicorn"]
+        loop("libuv / asyncio<br/>event loop")
+        parser("HTTP parser h11:<br/>builds scope dict")
+        loop --> parser
+    end
+
+    subgraph ST["Starlette"]
+        mw("Middleware stack:<br/>CORS, GZip, etc.")
+        router("Router:<br/>Radix-trie match")
+        mw --> router
+    end
+
+    subgraph FA["FastAPI"]
+        dep("Dependency solver:<br/>DI graph per request")
+        val("Pydantic validator:<br/>body / path / query")
+        handler("async route<br/>handler runs")
+        dep --> handler
+        val --> handler
+    end
+
+    subgraph RS["Response Layer"]
+        serialize("Pydantic v2<br/>serialization")
+        respClass(["JSONResponse or<br/>StreamingResponse"])
+        serialize --> respClass
+    end
+
+    clientDone(["Client receives<br/>response bytes"])
+
+    client -->|"TCP bytes<br/>HTTP/1.1 or HTTP/2"| UV
+    UV -->|"await app(scope, receive, send)"| ST
+    ST --> FA
+    FA -->|"return value or<br/>raise HTTPException"| RS
+    RS -->|"send(response.start),<br/>send(response.body)"| clientDone
+
+    class client,clientDone,respClass io
+    class loop req
+    class parser,mw,router,dep,val,serialize mathOp
+    class handler train
 ```
-Client (browser / curl / httpx)
-        |
-        | TCP bytes (HTTP/1.1 or HTTP/2)
-        v
-+-----------------------------------------------+
-|                 Uvicorn                        |
-|  +-----------+   +--------------------------+ |
-|  | libuv /   |   |  HTTP parser (h11)       | |
-|  | asyncio   |-->|  builds scope dict       | |
-|  | event loop|   |  wraps socket in         | |
-|  +-----------+   |  receive / send coros    | |
-+------------------+----------+---------------+-+
-                               |
-                  await app(scope, receive, send)
-                               |
-+------------------------------v------------------+
-|                   Starlette                     |
-|  +-------------------+  +--------------------+ |
-|  | Middleware Stack  |  |  Router            | |
-|  | (CORS, GZip, etc.)|  |  Route matching    | |
-|  | each wraps app    |  |  (Radix trie)      | |
-|  +-------------------+  +--------------------+ |
-+--------------------------------------------------+
-                               |
-+------------------------------v------------------+
-|                   FastAPI                       |
-|  +--------------------+  +-------------------+ |
-|  | Dependency Solver  |  | Pydantic Validator| |
-|  | (DI graph at       |  | request body,     | |
-|  |  request time)     |  | path/query params | |
-|  +--------------------+  +-------------------+ |
-|                               |                 |
-|            async def route_handler(...)         |
-+--------------------------------------------------+
-                               |
-                      return value / raise HTTPException
-                               |
-+------------------------------v------------------+
-|  response_model serialization (Pydantic v2)    |
-|  -> JSONResponse / StreamingResponse / etc.    |
-+--------------------------------------------------+
-                               |
-                   send({"type": "http.response.start", ...})
-                   send({"type": "http.response.body", ...})
-                               |
-                           Client receives bytes
-```
+
+*Each layer wraps the next: Uvicorn parses raw bytes into the ASGI `scope` dict, Starlette resolves middleware and routing, and FastAPI's dependency/validation pass hands off to the handler before the response is serialized and streamed back over the same connection.*
 
 ### Starlette Middleware Stack
 
 Each middleware is an ASGI callable that receives the inner app as a constructor argument
 and wraps it. The outermost middleware is called first on the way in and last on the way out.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    reqIn(["incoming<br/>request"])
+    trusted("TrustedHost<br/>Middleware")
+    gzip("GZip<br/>Middleware")
+    cors("CORS<br/>Middleware")
+    router("FastAPI<br/>Router")
+    respOut(["outgoing<br/>response"])
+
+    reqIn --> trusted --> gzip --> cors --> router
+    router -.->|"response"| cors
+    cors -.->|"response"| gzip
+    gzip -.->|"response"| trusted
+    trusted -.->|"response"| respOut
+
+    class reqIn,respOut io
+    class trusted,gzip,cors mathOp
+    class router base
 ```
-Incoming request
-      |
-      v
-+------------------+   wraps
-| TrustedHostMiddle|---------> +------------------+
-| ware             |           | GZipMiddleware   |---->+------------------+
-+------------------+           +------------------+     | CORSMiddleware   |
-                                                         +--------+---------+
-                                                                  |
-                                                         +--------v---------+
-                                                         | FastAPI (Router) |
-                                                         +------------------+
-Outgoing response flows back through the same chain in reverse order.
-```
+
+*Outgoing response flows back through the same chain in reverse order — the middleware added last (innermost, closest to the router) is called first on the way out.*
 
 ### lifespan State Machine
 
+```mermaid
+stateDiagram-v2
+    [*] --> Startup: process starts
+
+    state "Lifespan Startup" as Startup
+    Startup --> Running: yield db + model pool
+
+    state "Running (serving HTTP)" as Running
+    Running --> Shutdown: SIGTERM / SIGINT received
+
+    state "Lifespan Shutdown" as Shutdown
+    Shutdown --> [*]: process exits cleanly
+
+    note right of Startup
+        connect DB
+        load ML model
+        warm caches
+    end note
+
+    note right of Running
+        request.state.db / .model<br/>available to every handler
+    end note
+
+    note right of Shutdown
+        close DB pool
+        flush buffers
+        release GPU
+    end note
 ```
-Application process starts
-         |
-         v
-+-------------------+
-|  lifespan starts  |  <- asynccontextmanager body runs up to yield
-|  - connect DB     |
-|  - load ML model  |
-|  - warm caches    |
-+--------+----------+
-         |
-         | yield {"db": pool, "model": model}
-         |   <- state dict available as request.state.*
-         v
-+-------------------+
-|  App is RUNNING   |  <- all requests handled here
-|  (serving HTTP)   |
-+--------+----------+
-         |
-         | SIGTERM / SIGINT received
-         v
-+-------------------+
-|  lifespan resumes |  <- code after yield runs
-|  - close DB pool  |
-|  - flush buffers  |
-|  - release GPU    |
-+-------------------+
-         |
-         v
-   Process exits cleanly
-```
+
+*The `dict` yielded between startup and shutdown becomes `app.state` / `request.state` for the entire `Running` period; the shutdown half only runs on graceful termination (SIGTERM/SIGINT), not `SIGKILL` (see Pitfall 1).*
 
 ---
 
@@ -388,6 +428,36 @@ async def read_item(item_id: int, name: str = "default") -> ItemResponse:
 The route `/items/abc` returns `422` because `abc` fails `int` validation before the
 handler function is ever called.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    sig("route signature<br/>inspected once<br/>at startup")
+    inPath{"name appears as<br/>a path placeholder?"}
+    pathP("path parameter:<br/>PathField validator")
+    hasDefault{"parameter has<br/>a default value?"}
+    reqQ("required<br/>query parameter")
+    optQ("optional query<br/>parameter + default")
+
+    sig --> inPath
+    inPath -->|"yes"| pathP
+    inPath -->|"no"| hasDefault
+    hasDefault -->|"no"| reqQ
+    hasDefault -->|"yes"| optQ
+
+    class sig base
+    class inPath,hasDefault mathOp
+    class pathP,reqQ,optQ req
+```
+
+*This per-parameter classification runs once at startup, in the same reflection pass shown below — it decides whether Pydantic validates a value as a path segment, a required query key, or an optional one (the three-way split Q14 asks about).*
+
 ### 6.5 response_model and Field Filtering
 
 ```python
@@ -423,6 +493,36 @@ async def get_user(user_id: int) -> UserDB:
 # The client receives: {"id": 1, "username": "alice", "email": "alice@example.com"}
 # hashed_password is stripped by Pydantic during response_model serialization.
 ```
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    handler("handler returns<br/>UserDB instance")
+    declared{"response_model<br/>declared?"}
+    filter("model_validate +<br/>model_dump via UserPublic")
+    safe(["client gets<br/>id, username, email"])
+    leaked(["hashed_password<br/>would leak"])
+
+    handler --> declared
+    declared -->|"yes"| filter
+    filter --> safe
+    declared -.->|"no (see Pitfall 3)"| leaked
+
+    class handler io
+    class declared mathOp
+    class filter mathOp
+    class safe train
+    class leaked lossN
+```
+
+*`response_model` runs every return value through `UserPublic.model_validate().model_dump()`, silently dropping any field the response model does not declare (Q6); skip the declaration entirely and the full internal model — `hashed_password` included — serializes as-is (Pitfall 3).*
 
 ### 6.6 Response Classes
 

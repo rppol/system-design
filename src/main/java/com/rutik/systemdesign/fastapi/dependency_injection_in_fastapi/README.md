@@ -194,81 +194,80 @@ def read_items(user: User = Security(get_current_user, scopes=["items:read"])):
 
 ### Diagram 1: Dependency Graph for a Protected Route
 
-```
-GET /admin/items
-       |
-       v
- route handler: list_admin_items
-       |
-       +---> get_current_active_superuser (Depends)
-       |             |
-       |             +---> get_current_user (Depends)
-       |                         |
-       |                         +---> get_db (Depends)  <---+
-       |                         |         |                 |
-       |                         |    [SessionLocal()]       |
-       |                         |    yield db               |
-       |                         |                           |
-       |                         +---> oauth2_scheme (Depends)
-       |                                   |
-       |                              Authorization: Bearer <token>
-       |
-       +---> paginator: Paginator (Depends)
-                   |
-              __init__(skip, limit) from query params
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    reqIn(["GET /admin/items"]) --> handler["route handler<br/>list_admin_items"]
+    handler --> superuser("get_current_active_superuser<br/>Depends")
+    handler --> paginator("Paginator<br/>skip, limit from query params")
+    superuser --> curUser("get_current_user<br/>Depends")
+    curUser --> dbDep("get_db<br/>SessionLocal · yield db")
+    curUser --> oauth("oauth2_scheme<br/>Authorization: Bearer token")
 
-Cache boundary: get_db is called ONCE per request even if referenced
-by both get_current_user and any other sub-dep in the same request.
+    class reqIn req
+    class handler io
+    class superuser,curUser mathOp
+    class dbDep base
+    class oauth frozen
+    class paginator io
 ```
+
+*Cache boundary: `get_db` is called ONCE per request no matter how many sub-dependencies request it — `get_current_user` above receives the cached session, and any other sub-dependency (not pictured) that also depends on `get_db` in the same request receives that identical object, never a fresh call.*
 
 ### Diagram 2: yield Dependency Lifecycle
 
+```mermaid
+stateDiagram-v2
+    [*] --> RequestArrives
+    RequestArrives --> SetupPhase: dependency resolution begins
+    state "Setup Phase" as SetupPhase
+    SetupPhase --> HandlerExecutes: db created and yielded
+    state "Handler Executes" as HandlerExecutes
+    HandlerExecutes --> ResponseSent: normal return
+    HandlerExecutes --> ExceptionPropagates: exception raised
+    state "Response Sent" as ResponseSent
+    state "Exception Propagates" as ExceptionPropagates
+    ResponseSent --> TeardownPhase
+    ExceptionPropagates --> TeardownPhase: response still sent
+    state "Teardown Phase" as TeardownPhase
+    TeardownPhase --> [*]: finally block closes db
 ```
-  HTTP Request arrives
-          |
-          v
-  [Dependency setup phase]
-  get_db() called
-     db = SessionLocal()   <-- setup
-     yield db              <-- value injected into handler
-          |
-          v
-  [Route handler executes]
-  list_admin_items(db=<session>, ...)
-     ... business logic ...
-     return response_data
-          |
-          v
-  [Response serialized and sent to client]
-          |
-          v
-  [Dependency teardown phase — AFTER response sent]
-  finally: db.close()     <-- teardown (LIFO if multiple yield deps)
 
-  If handler raised an exception:
-     Exception propagates to FastAPI
-     Response sent (500 or re-raised HTTPException)
-     finally block STILL runs — session is closed
-```
+*Setup always runs before the handler, and teardown always runs after the response is sent — even on the exception path — because FastAPI drains the yield-dependency stack only once the response is committed.*
 
 ### Diagram 3: Dependency Caching Within a Request
 
-```
-Request R1:
-  dep_graph.resolve(get_db)
-    -> calls get_db() -> session_1
-    -> caches: {get_db: session_1}
-  dep_graph.resolve(get_current_user)
-    -> needs get_db
-    -> cache HIT: returns session_1  (NOT a new call)
-  dep_graph.resolve(some_other_dep_that_also_needs_db)
-    -> cache HIT: returns session_1
+```mermaid
+sequenceDiagram
+    participant H as Route Handler
+    participant DG as Dependency Cache
+    participant DB as get_db()
 
-Request R2:
-  cache is empty (per-request scope)
-    -> calls get_db() -> session_2
+    Note over H,DB: Request R1
+    H->>DG: resolve(get_db)
+    DG->>DB: call get_db()
+    DB-->>DG: session_1
+    DG-->>H: session_1, cached
+    H->>DG: resolve(get_current_user)
+    DG-->>H: session_1, cache HIT, no new call
+    H->>DG: resolve(other sub-dep needing db)
+    DG-->>H: session_1, cache HIT
+
+    Note over H,DB: Request R2, fresh cache
+    H->>DG: resolve(get_db)
+    DG->>DB: call get_db()
+    DB-->>DG: session_2
+    DG-->>H: session_2, fresh
 ```
+
+*The per-request cache dict makes `get_db` execute once no matter how many sub-dependencies reference it within request R1; request R2 starts with an empty cache, so `get_db` runs again and produces `session_2`.*
 
 ---
 
@@ -317,6 +316,23 @@ async def handler(
     return {"a": a, "b": b}
 # Output order: a setup, b setup, [response sent], b teardown, a teardown
 ```
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant H as Handler
+    participant A as dep_a
+    participant B as dep_b
+
+    A->>A: a setup
+    B->>B: b setup
+    H->>C: response sent
+    Note over A,B: teardown unwinds LIFO
+    B->>B: b teardown
+    A->>A: a teardown
+```
+
+*Setup order is `dep_a` then `dep_b`; teardown unwinds LIFO, so `dep_b` — the most recently entered — tears down first, exactly matching the `# runs FIRST` / `# runs SECOND` comments above.*
 
 ### 6.4 Simple sync DB dependency
 
@@ -665,6 +681,31 @@ Routes in the beta router declare `Depends(get_feature_flags)` and check flags b
 | `use_cache=False` | Called every invocation | Nonces, timestamps, idempotency keys |
 | App startup (`lifespan`) | Once per process | DB engine, connection pools |
 | Background task | Not cached — new context | Heavy async jobs |
+
+These four scopes actually nest inside one another — the flat rows above hide that containment:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    proc(["Process<br/>lifespan · once"]) --> reqA("Request A<br/>default cache · once per request")
+    proc --> reqB("Request B<br/>default cache · once per request")
+    reqA --> call1("use_cache=False<br/>fresh every call site")
+    proc -.->|"detached, escapes request cache"| bg("Background task<br/>new context · never cached")
+
+    class proc base
+    class reqA,reqB train
+    class call1 mathOp
+    class bg frozen
+```
+
+*Process scope (`lifespan`) is outermost and built once; each request gets its own cache shared across every sub-dependency in that request (`reqA`, `reqB`); `use_cache=False` opts a single call site back out of the request cache; a background task runs in a detached context that was never part of the request's cache at all.*
 
 | Dependency style | Best for | Limitation |
 |---|---|---|
@@ -1270,25 +1311,33 @@ async def test_read_me(client: AsyncClient):
 
 #### Dependency graph for this case study
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    reqIn(["GET /admin/users"]) --> superuser("get_current_active_superuser<br/>router-level dep")
+    reqIn --> dbDep("get_db<br/>cached session")
+    reqIn --> paginator("Paginator<br/>skip, limit from query params")
+    superuser --> activeUser("get_current_active_user")
+    activeUser --> curUser("get_current_user")
+    curUser --> oauth("oauth2_scheme")
+    curUser --> dbDep
+    curUser --> settingsDep("get_settings<br/>lru_cache")
+
+    class reqIn req
+    class superuser,activeUser,curUser mathOp
+    class dbDep base
+    class oauth,settingsDep frozen
+    class paginator io
 ```
-GET /admin/users
-      |
-      +---> get_current_active_superuser (router-level dep)
-      |             |
-      |             +---> get_current_active_user
-      |                         |
-      |                         +---> get_current_user
-      |                                     |
-      |                                     +---> oauth2_scheme
-      |                                     +---> get_db  <------ (cached)
-      |                                     +---> get_settings <-- (lru_cache)
-      |
-      +---> db: AsyncDB = Depends(get_db)  <-- cache HIT (same session as above)
-      |
-      +---> paginator: Paginator = Depends()
-                  |
-            __init__(skip: int, limit: int)  from query params
-```
+
+*`get_db` resolves to the same cached `AsyncSession` whether reached via the top-level `db` parameter or through the nested `get_current_user` chain — one node with two incoming edges above, i.e., a single session opened per request.*
 
 All sub-components are testable in isolation by overriding only the relevant dependency. The route handler contains zero auth logic, zero DB connection management — it is pure business logic.
 

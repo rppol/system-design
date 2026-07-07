@@ -61,6 +61,35 @@ Never conflate them.
 I/O-bound (DB queries, HTTP calls): `2 * CPU_count + 1`. CPU-bound (image processing,
 crypto): `CPU_count`. Mixed: profile first, start with `2 * CPU + 1` and tune.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start{"Workload<br/>character?"}
+    IO(I/O-bound<br/>DB queries, HTTP calls)
+    CPUB(CPU-bound<br/>image processing, crypto)
+    Mixed(Mixed workload)
+    F1(["2 × CPU_count + 1"])
+    F2(["CPU_count"])
+    F3(["Profile first,<br/>start at 2 × CPU + 1"])
+
+    Start --> IO --> F1
+    Start --> CPUB --> F2
+    Start --> Mixed --> F3
+
+    class Start mathOp
+    class IO,CPUB,Mixed req
+    class F1,F2,F3 train
+```
+
+The worker-count formula branches on workload character: I/O-bound services double the CPU count (plus one) to keep the CPU busy while other workers wait on network/DB, CPU-bound services use the raw core count, and mixed workloads start from the I/O-bound formula and get tuned from a profile.
+
 **3. Graceful shutdown is non-negotiable**
 Every SIGTERM must drain in-flight requests, run `lifespan` cleanup (close DB pools, flush
 metrics), and exit cleanly within `--graceful-timeout` (default 30s).
@@ -121,96 +150,91 @@ and the app to return HTTP 200 on readiness before Kubernetes routes traffic.
 
 ### 5.1 Bare-VM: Gunicorn + Uvicorn Workers
 
-```
-Internet
-   |
-   v
-[Nginx / Load Balancer] :443/:80
-   |
-   v
-[Gunicorn (process supervisor)]  <-- reads gunicorn.conf.py
-   |-- SIGTERM management
-   |-- Worker lifecycle (respawn crashed workers)
-   |-- Pre-fork model: workers share loaded app module
-   |
-   +-- [UvicornWorker 1]  asyncio event loop  <-- handles ~1000 concurrent conns
-   |       |__ FastAPI app instance
-   |
-   +-- [UvicornWorker 2]  asyncio event loop
-   |       |__ FastAPI app instance
-   |
-   +-- [UvicornWorker 3]  asyncio event loop
-   |       |__ FastAPI app instance
-   |
-   +-- [UvicornWorker 4]  asyncio event loop
-           |__ FastAPI app instance
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Worker count formula: 2 * nproc + 1  (for I/O-bound)
-4-core VM: 2*4+1 = 9 workers, each ~80MB = ~720MB RAM
+    Internet([Internet]) --> LB(Nginx / Load Balancer<br/>:443 / :80)
+    LB --> Gun(Gunicorn<br/>process supervisor<br/>reads gunicorn.conf.py)
+    subgraph Workers["Pre-fork pool — workers share loaded app module"]
+        direction TB
+        W1(UvicornWorker 1<br/>asyncio loop + FastAPI)
+        W2(UvicornWorker 2<br/>asyncio loop + FastAPI)
+        W3(UvicornWorker 3<br/>asyncio loop + FastAPI)
+        W4(UvicornWorker 4<br/>asyncio loop + FastAPI)
+    end
+    Gun --> W1
+    Gun --> W2
+    Gun --> W3
+    Gun --> W4
+
+    class Internet io
+    class LB req
+    class Gun mathOp
+    class W1,W2,W3,W4 train
 ```
+
+Gunicorn owns SIGTERM handling and respawns any crashed worker; each pre-forked `UvicornWorker` runs its own asyncio event loop and handles roughly 1,000 concurrent connections. Worker count follows `2 * nproc + 1`: a 4-core VM computes to 9 workers at ~80MB each, ~720MB total RAM.
 
 ### 5.2 Kubernetes: Single Uvicorn per Pod
 
-```
-Internet
-   |
-   v
-[Ingress Controller (nginx/traefik)]  :443
-   |
-   v
-[Kubernetes Service]  (ClusterIP / LoadBalancer)
-   |
-   +---------------------+---------------------+
-   |                     |                     |
-   v                     v                     v
-[Pod 1]              [Pod 2]              [Pod N]
-uvicorn :8000        uvicorn :8000        uvicorn :8000
-FastAPI app          FastAPI app          FastAPI app
-1 event loop         1 event loop         1 event loop
-~80MB RAM            ~80MB RAM            ~80MB RAM
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-         ^
-         |
-[HPA] -- CPU target 60% or RPS target 200/s
-         |
-         v
-[Deployment] replicas: 3..50
-   rollingUpdate:
-     maxSurge: 1
-     maxUnavailable: 0
+    Internet([Internet]) --> Ingress(Ingress Controller<br/>nginx / traefik<br/>:443)
+    Ingress --> Svc(Kubernetes Service<br/>ClusterIP / LoadBalancer)
+    subgraph Pods["Pods — uvicorn :8000, 1 event loop, ~80MB each"]
+        direction TB
+        Pod1(Pod 1)
+        Pod2(Pod 2)
+        PodN(Pod N)
+    end
+    Svc --> Pod1
+    Svc --> Pod2
+    Svc --> PodN
+    Pods -.->|"CPU / RPS metrics"| HPA{"HPA<br/>CPU 60% or<br/>RPS 200/s target"}
+    HPA -.->|"scale decision"| Deploy(Deployment<br/>replicas 3..50<br/>maxSurge 1, maxUnavailable 0)
+    Deploy -.-> Pods
 
-Each pod exposes:
-  /healthz  -> livenessProbe   (is process alive?)
-  /ready    -> readinessProbe  (is app ready to serve?)
-  /metrics  -> Prometheus scrape
+    class Internet io
+    class Ingress req
+    class Svc base
+    class Pod1,Pod2,PodN train
+    class HPA mathOp
+    class Deploy frozen
 ```
+
+Each pod also exposes `/healthz` (livenessProbe — is the process alive?), `/ready` (readinessProbe — is the app ready to serve?), and `/metrics` (Prometheus scrape). The HPA watches per-pod CPU/RPS and the Deployment controller adjusts replica count between 3 and 50 under a `maxSurge=1, maxUnavailable=0` rollout policy.
 
 ### 5.3 Graceful Shutdown Sequence
 
+```mermaid
+sequenceDiagram
+    participant K8s
+    participant Pod as Uvicorn + FastAPI
+
+    K8s->>Pod: SIGTERM
+    Pod->>Pod: Stop accepting new connections
+    Note over Pod: Drain in-flight requests<br/>up to graceful-timeout 30s
+    Pod->>Pod: lifespan shutdown block<br/>close DB engine, flush OTel spans,<br/>drain Kafka producer queue
+    Pod-->>K8s: Process exits 0
+    K8s->>K8s: Remove pod from Service endpoints
 ```
-K8s sends SIGTERM to pod
-       |
-       v
-Uvicorn receives SIGTERM
-       |
-       v
-Stop accepting new connections
-       |
-       v
-Drain in-flight requests (up to --graceful-timeout 30s)
-       |
-       v
-FastAPI lifespan 'shutdown' block runs
-   - close SQLAlchemy async engine
-   - flush OpenTelemetry spans
-   - drain Kafka producer queue
-       |
-       v
-Process exits 0
-       |
-       v
-K8s removes pod from Service endpoints (if not already)
-```
+
+The shutdown handoff runs entirely between Kubernetes and the pod: SIGTERM stops new connections, in-flight requests drain for up to `--graceful-timeout` (30s), then FastAPI's `lifespan` shutdown block releases the DB engine, telemetry, and queue resources before the process exits and the pod leaves the Service endpoint list.
 
 ---
 
@@ -308,6 +332,16 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 - asyncio default loop: ~28,000 req/s
 - uvloop: ~65,000 req/s (~2.3x)
 - uvloop + httptools parser: ~72,000 req/s
+
+```mermaid
+xychart-beta
+    title "Techempower Plaintext Throughput, 4-core (req/s)"
+    x-axis ["asyncio default", "uvloop", "uvloop + httptools"]
+    y-axis "Requests / sec" 0 --> 80000
+    bar [28000, 65000, 72000]
+```
+
+uvloop delivers roughly 2.3x the throughput of the default asyncio loop on this benchmark; layering in the httptools HTTP parser adds another step to ~72k req/s, a 2.6x improvement over baseline with zero application code changes.
 
 `uvloop` is a drop-in CPython `asyncio` replacement built on `libuv` (the C event loop
 underneath Node.js). It outperforms the pure-Python `asyncio` loop on syscall-heavy I/O.
@@ -814,32 +848,37 @@ graceful shutdown.
 
 ### Architecture Diagram
 
-```
-         Internet
-            |
-      [ALB / Ingress]   :443  (TLS termination)
-            |
-     [K8s Service]  ClusterIP
-            |
-    +-------+-------+--------+
-    |       |       |        |
-  Pod1    Pod2    Pod3  ...  PodN   (HPA: 3..30 replicas)
-  uvi     uvi     uvi        uvi
-  :8000   :8000   :8000      :8000
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Each pod:
-    uvicorn app.main:app --workers 1 --loop uvloop
-    resources: req 250m CPU / 256Mi, limit 1000m / 1Gi
-    readinessProbe: /ready  (checks DB pool + model loaded)
-    livenessProbe:  /healthz
-    startupProbe:   /healthz (30 * 10s = 5m startup budget for model load)
-    preStop: sleep 5
+    Internet([Internet]) --> ALB(ALB / Ingress<br/>:443 TLS termination)
+    ALB --> Svc(K8s Service<br/>ClusterIP)
+    subgraph Pods["Pods — HPA: 3..30 replicas"]
+        direction TB
+        Pod1(Pod 1<br/>uvicorn :8000)
+        Pod2(Pod 2<br/>uvicorn :8000)
+        Pod3(Pod 3<br/>uvicorn :8000)
+        PodN(Pod N<br/>uvicorn :8000)
+    end
+    Svc --> Pod1
+    Svc --> Pod2
+    Svc --> Pod3
+    Svc --> PodN
 
-  HPA target: avg CPU 60%
-  At 800 req/s (each ~5ms model inference + ~2ms DB):
-    ~1000 concurrent connections across 10 pods = 100 per pod
-    Per pod: 100 * 7ms avg = 700ms "work" per second on 1 CPU => ~70% => HPA scales to 12 pods
+    class Internet io
+    class ALB req
+    class Svc base
+    class Pod1,Pod2,Pod3,PodN train
 ```
+
+Each pod runs `uvicorn app.main:app --workers 1 --loop uvloop` with `250m`/`256Mi` requests and `1000m`/`1Gi` limits, a `readinessProbe` on `/ready` (DB pool + model loaded), a `startupProbe` budget of 5 minutes (`30 * 10s`) for model load, and `preStop: sleep 5`. At 800 req/s (~5ms inference + ~2ms DB per request), 1,000 concurrent connections spread across 10 pods average 100 per pod — about 700ms of work per second per CPU (~70% utilization) — so the 60%-target HPA scales the deployment to roughly 12 pods.
 
 ### Implementation
 

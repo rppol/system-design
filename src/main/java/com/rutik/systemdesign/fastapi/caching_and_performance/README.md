@@ -111,6 +111,50 @@ Redis is the de-facto distributed cache for Python web applications. The `redis.
   DB (not the application). Requires a cache layer that understands the data model (e.g.,
   custom Redis functions or Momento).
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph CA["Cache-Aside"]
+        direction LR
+        A1(["App"]) -->|"miss"| C1("Cache")
+        A1 -->|"load + populate"| D1[("DB")]
+    end
+
+    subgraph WT["Write-Through"]
+        direction LR
+        A2(["App"]) -->|"write"| C2("Cache")
+        C2 -->|"write"| D2[("DB")]
+    end
+
+    subgraph WB["Write-Behind"]
+        direction LR
+        A3(["App"]) -->|"write"| C3("Cache")
+        C3 -.->|"async flush"| D3[("DB")]
+    end
+
+    subgraph RT["Read-Through"]
+        direction LR
+        A4(["App"]) -->|"read"| C4("Cache")
+        C4 -->|"loads on miss"| D4[("DB")]
+    end
+
+    class A1,A2,A3,A4 io
+    class C1,C2,C3,C4 base
+    class D1,D2,D4 frozen
+    class D3 lossN
+```
+
+*The arrow direction is the tell: the application drives cache-aside and write-through, the
+cache itself drives read-through, and write-behind is the only pattern with a dotted
+(asynchronous) path to the database — the source of the data-loss risk noted above.*
+
 For FastAPI services, cache-aside is the most common pattern because it keeps the application
 in control of cache population and invalidation.
 
@@ -134,52 +178,105 @@ headers or a middleware.
 
 ### Cache Hierarchy in a FastAPI Service
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client(["Client<br/>browser / mobile"])
+    CDN{"CDN / Reverse Proxy<br/>nginx, CloudFront"}
+    Worker{"FastAPI Worker<br/>lru_cache / TTLCache"}
+    Redis{"Redis<br/>distributed cache"}
+    DB[("Database /<br/>External API")]
+    Resp(["Response"])
+
+    Client -->|"HTTP request<br/>Cache-Control / ETag"| CDN
+    CDN -->|"HIT"| Resp
+    CDN -->|"MISS"| Worker
+    Worker -->|"HIT sub-µs"| Resp
+    Worker -->|"MISS"| Redis
+    Redis -->|"HIT"| Resp
+    Redis -->|"MISS"| DB
+    DB -->|"SETEX Redis<br/>+ populate in-process"| Resp
+
+    class Client,Resp io
+    class CDN,Worker,Redis base
+    class DB frozen
 ```
- Client (browser / mobile)
-    │
-    │  HTTP Cache-Control / ETag
-    ▼
- CDN / Reverse Proxy (nginx, CloudFront)
-    │
-    │  cache HIT → return cached response
-    │  cache MISS ↓
-    ▼
- FastAPI Worker Process
-    │
-    │  In-Process Check (lru_cache / TTLCache)
-    │  HIT → return immediately (sub-microsecond)
-    │  MISS ↓
-    ▼
- Redis (distributed cache)
-    │
-    │  HIT → return, update in-process cache
-    │  MISS ↓
-    ▼
- Database / External API
-    │
-    └──→ Store result in Redis (SETEX key value ttl)
-         Store result in in-process cache
-         Return to client
-```
+
+*Each layer only pays its own cost on a miss — CDN, in-process, and Redis all short-circuit
+straight to the response on a HIT, and only the database write-back needs to populate every
+cache layer behind it.*
 
 ### Cache-Aside Pattern (Request Flow)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Req(["Request"])
+    Check{"Check Redis"}
+    DB[("Query DB")]
+    Set("SETEX key val ttl")
+    Resp(["Response"])
+
+    Req --> Check
+    Check -->|"HIT"| Resp
+    Check -->|"MISS"| DB
+    DB --> Set
+    Set --> Resp
+
+    class Req,Resp io
+    class Check mathOp
+    class DB frozen
+    class Set train
 ```
- Request ──► Check Redis ──► HIT ──────────────────────► Response
-                │
-                └── MISS ──► Query DB ──► SETEX key val ttl ──► Response
-```
+
+*A hit returns in one hop; a miss pays for the DB query plus the `SETEX` that populates the
+cache so the next request hits.*
 
 ### Stampede Protection with Mutex Lock
 
+```mermaid
+sequenceDiagram
+    participant A as Request A
+    participant B as Request B
+    participant C as Request C
+    participant R as Redis
+    participant DB as Database
+
+    Note over R: T=0ms — key expires
+    A->>R: T=1ms GET key (miss)
+    A->>R: SET lock:key 1 NX EX 5
+    R-->>A: lock acquired
+    B->>R: T=1ms GET key (miss)
+    R-->>B: lock held — stale value or wait
+    C->>R: T=1ms GET key (miss)
+    R-->>C: lock held — stale value or wait
+    A->>DB: T=3ms query DB
+    DB-->>A: row returned
+    A->>R: SETEX key val 300
+    A->>R: release lock
+    B->>R: T=3ms re-check key
+    R-->>B: HIT — serve immediately
+    C->>R: re-check key
+    R-->>C: HIT — serve immediately
 ```
- T=0ms  Key expires
- T=1ms  Request A: cache miss → acquires Redis lock (SET lock:key 1 NX EX 5)
- T=1ms  Request B: cache miss → lock held → returns stale value or waits
- T=1ms  Request C: cache miss → lock held → returns stale value or waits
- T=3ms  Request A: query DB → SETEX key val 300 → release lock
- T=3ms  Request B/C: re-check cache → HIT → serve immediately
-```
+
+*Only Request A ever touches the database — B and C detect the held lock, back off, and
+re-check Redis once A releases it at T=3ms, so one popular key never fans out into N
+concurrent DB queries.*
 
 ---
 
@@ -776,6 +873,20 @@ lock is needed; the key is never fully expired, so no stampede window exists. A 
 simpler but creates a "lock wait" period; XFetch eliminates this at the cost of occasionally
 doing redundant recomputations.
 
+```mermaid
+xychart-beta
+    title "Recompute probability as TTL nears expiry"
+    x-axis ["TTL 100%", "75%", "50%", "25%", "10%", "0% expiry"]
+    y-axis "P(this request recomputes)" 0 --> 100
+    line [2, 5, 15, 35, 65, 100]
+    bar [0, 0, 0, 0, 0, 100]
+```
+
+*Illustrative shape, not measured data: XFetch's recompute probability (line) climbs smoothly
+as the remaining TTL shrinks, spreading recomputation across many requests, while a mutex
+(bar) does nothing until T=0 and then every waiting request contends at once — the single
+spike this module's stampede scenario protects against.*
+
 **Q10: How do you size a Redis connection pool for a FastAPI application?**
 The formula is: `max_connections ≥ num_workers × max_simultaneous_redis_ops_per_worker`.
 For 4 Uvicorn workers each handling 200 concurrent requests, where 10% of requests touch
@@ -856,34 +967,40 @@ reduce DB load to under 10% of peak at steady state.
 
 #### Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client(["Browser /<br/>Mobile Client"])
+    CDN{"CDN<br/>CloudFront / Fastly"}
+    Worker{"FastAPI Service<br/>4 Uvicorn workers, L1 TTLCache"}
+    Redis{"Redis Cluster<br/>3 shards"}
+    PG[("PostgreSQL<br/>read replica")]
+    Resp(["Response"])
+
+    Client -->|"max-age=60<br/>s-maxage=30, ETag"| CDN
+    CDN -->|"HIT ~0ms"| Resp
+    CDN -->|"MISS TTL 30s expired"| Worker
+    Worker -->|"L1 HIT ~0µs"| Resp
+    Worker -->|"L1 MISS"| Redis
+    Redis -->|"HIT ~0.5ms<br/>TTL 300s"| Resp
+    Redis -->|"MISS"| PG
+    PG -->|"SETEX Redis + populate L1<br/>then return"| Resp
+
+    class Client,Resp io
+    class CDN,Worker,Redis base
+    class PG frozen
 ```
- Browser / Mobile Client
-        │
-        │  Cache-Control: public, max-age=60, s-maxage=30
-        │  ETag: "<product-hash>"
-        ▼
-   CDN (CloudFront / Fastly)
-        │
-        │  Cache HIT: ~0ms (edge, no origin request)
-        │  Cache MISS (30s TTL expired) ↓
-        ▼
-   FastAPI Service (4 Uvicorn workers)
-        │
-        │  L1: In-process TTLCache (maxsize=2000, ttl=10s)
-        │  HIT: ~0µs
-        │  MISS ↓
-        ▼
-   Redis Cluster (3 shards, decode_responses=True)
-        │
-        │  Key: "v2:product:{id}:detail"
-        │  TTL: 300s
-        │  HIT: ~0.5ms
-        │  MISS ↓
-        ▼
-   PostgreSQL (read replica)
-        │
-        └── SETEX to Redis, populate L1, return response
-```
+
+*Three progressively slower fallbacks — CDN edge, in-process L1, Redis L2 — each absorb most
+of the traffic on a HIT, so only the sliver that misses all three reaches PostgreSQL, keeping
+DB CPU at 7% instead of 100% (see Results below).*
 
 #### Implementation
 

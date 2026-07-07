@@ -141,70 +141,92 @@ adapter.validate_python(["1", "2", "3"])  # [1, 2, 3]
 
 ### Validation Pipeline (single field)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["Input value (raw)"]) -.->|optional| B("mode=before<br/>@field_validator")
+    B --> C["pydantic-core Rust validator<br/>(coercion + constraint checks)"]
+    C -.->|optional| D("mode=after<br/>@field_validator")
+    D --> E(["Stored field value"])
+
+    class A io
+    class B mathOp
+    class C mathOp
+    class D mathOp
+    class E base
 ```
-Input value (raw)
-        |
-        v
-  [mode="before" @field_validator]   <-- optional, pre-coercion
-        |
-        v
-  [pydantic-core Rust validator]     <-- type coercion + constraint checks
-        |                               (ge, le, max_length, pattern, ...)
-        v
-  [mode="after" @field_validator]    <-- optional, post-coercion
-        |
-        v
-  Stored field value
-```
+
+*Only the `pydantic-core` Rust validator is mandatory — the two `@field_validator` hooks are optional and fire only when declared, one before coercion and one after.*
 
 ### Full Model Lifecycle
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph VAL["Validation"]
+        direction LR
+        A(["User.__init__(raw_data)"]) -.->|optional| B("mode=before<br/>@model_validator")
+        B --> C["Per-field pipeline<br/>x N fields"]
+        C -.->|optional| D("mode=after<br/>@model_validator")
+        D --> E(["Model instance stored"])
+    end
+
+    subgraph SER["Serialization"]
+        direction LR
+        F(["model.model_dump()"]) --> G["Serializer pipeline<br/>(include / exclude)"]
+        G --> H(["dict / JSON output"])
+    end
+
+    E -->|later| F
+
+    class A,F,H io
+    class B,C,D,G mathOp
+    class E base
 ```
-User.__init__(raw_data)
-        |
-        v
-  [mode="before" @model_validator]   <-- optional, sees raw dict
-        |
-        v
-  Per-field pipeline (above) x N fields
-        |
-        v
-  [mode="after" @model_validator]    <-- optional, sees validated model
-        |
-        v
-  Model instance stored
-        |
-   model.model_dump()
-        |
-        v
-  [Serializer pipeline]              <-- field serializers, include/exclude
-        |
-        v
-  dict / JSON output
-```
+
+*Validation (left) runs once at construction, bracketed by the optional `@model_validator` before/after hooks around the N per-field pipelines; serialization (right) runs later, whenever `model_dump()` / `model_dump_json()` is called.*
 
 ### pydantic-core Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["BaseModel subclass<br/>(Python layer)"]) -->|"class creation,<br/>once"| B["CoreSchema construction<br/>(validation rules dict)"]
+    B --> C{"pydantic-core (Rust via PyO3)<br/>validate_python()"}
+    C -->|cached validators| D["Fast path"]
+    C -->|custom validators| E["Slow path"]
+    D --> M((·))
+    E --> M
+    M --> F(["Validated Python object"])
+
+    class A,F io
+    class B,C,M mathOp
+    class D train
+    class E frozen
 ```
-Python layer (pydantic 2.x)
-  BaseModel subclass definition
-        |
-        v (class creation time, once)
-  CoreSchema construction
-  (Python dict describing validation rules)
-        |
-        v
-  pydantic-core (Rust, via PyO3)
-  SchemaValidator.validate_python(data)
-        |
-   fast path:         slow path:
-   cached validators  custom Python validators
-        |                   |
-        +-------------------+
-                |
-                v
-        Validated Python object
-```
+
+*The Rust `SchemaValidator` is compiled once from the `CoreSchema` at class-definition time; at call time it takes the cached fast path when no custom `@field_validator`/`@model_validator` callbacks are present, or drops into the slower Python-callback path when they are.*
 
 ---
 
@@ -521,6 +543,16 @@ Benchmark: 1 million `User(id=i, name="Alice", email="alice@example.com")` valid
 | Pydantic v2.0 | 0.18 s | ~5.6 M/s |
 | Speedup | ~17.8x | — |
 
+```mermaid
+xychart-beta
+    title "1M User Validations: Throughput by Pydantic Version"
+    x-axis ["Pydantic v1.10", "Pydantic v2.0"]
+    y-axis "Throughput (k validations / sec)" 0 --> 6000
+    bar [312, 5600]
+```
+
+*Same benchmark as the table above, expressed on one axis — the bar length gap is the ~17.8x jump the Rust `pydantic-core` engine buys over pure-Python field-by-field validation.*
+
 For deeply nested models with complex validators the speedup narrows to ~5x; for flat models with only primitive types it reaches ~50x. The Rust core (`SchemaValidator`) handles coercion and constraint checks; Python callbacks are invoked only when `@field_validator` or `@model_validator` decorators are present.
 
 Model construction cost is paid once at class definition, not per validation call.
@@ -528,6 +560,38 @@ Model construction cost is paid once at class definition, not per validation cal
 ### 6.10 Discriminated Unions
 
 Without a discriminator, Pydantic tries every branch in order (O(n) worst case). With a discriminator on a `Literal` field, it does a single O(1) dict lookup:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph PU["Plain Union — O(n) worst case"]
+        direction LR
+        P1(["Input dict"]) --> P2{"Try Cat schema"}
+        P2 -.->|fails| P3{"Try Dog schema"}
+        P3 -->|matches| P4(["Dog instance"])
+    end
+
+    subgraph DU["Discriminated Union — O(1)"]
+        direction LR
+        Q1(["Input dict"]) --> Q2["Read type field"]
+        Q2 --> Q3{"dict lookup"}
+        Q3 -->|direct jump| Q4(["Dog instance"])
+    end
+
+    class P1,P4,Q1,Q4 io
+    class P2 lossN
+    class P3 train
+    class Q2,Q3 mathOp
+```
+
+*Plain `Union` validation retries each branch in sequence until one matches (Cat fails, Dog succeeds) — O(n) attempts. A discriminated union reads the `type` field once and jumps straight to the matching model — O(1), with a clearer error when nothing matches.*
 
 ```python
 from typing import Literal, Union, Annotated

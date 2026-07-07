@@ -93,41 +93,118 @@ Other SRE pillars: **eliminating toil through automation**, **blameless postmort
 
 ## 5. Architecture Diagrams
 
+**SLI, SLO, SLA — how the three terms nest**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    sli(["SLI<br/>measured good/total ratio"]) --> slo("SLO<br/>internal target 99.9%")
+    slo --> margin{"Safety margin<br/>~0.4 pts"}
+    margin --> sla(["SLA<br/>contractual 99.5%"])
+    sla -.->|"breach"| penalty(["Refunds /<br/>credits"])
+
+    class sli req
+    class slo base
+    class margin mathOp
+    class sla frozen
+    class penalty lossN
 ```
-The error-budget loop (the heart of SRE)
 
-  define SLI (good/total ratio) --> set SLO (e.g. 99.9% / 30d)
-                                         |
-                          error budget = 1 - SLO = 0.1% = 43.2 min/30d
-                                         |
-            measure SLI continuously (PromQL) -> compute budget consumed
-                                         |
-              +-------------- budget remaining? --------------+
-              | YES                                           | NO (exhausted)
-              v                                               v
-        ship features / take risk                  freeze risky launches;
-        (spend the budget)                          all hands on reliability
-                                         |
-              burn rate alerts page when spend is too fast (14.4x / 6x)
+The SLA is always set looser than the SLO, so day-to-day reality breaches the internal target long before a contractual, revenue-bearing breach ever happens — the gap between 99.9% (SLO) and 99.5% (SLA) is the safety margin.
 
+**The error-budget loop (the heart of SRE)**
 
-Nines vs cost (why 100% is wrong)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  cost
-   ^                                           * 99.999%
-   |                                  * 99.99%
-   |                       * 99.95%
-   |            * 99.9%
-   |     * 99%
-   +------------------------------------------> reliability
-   user-perceptible gap shrinks to ~0 long before cost stops exploding
+    sli2(["Define SLI<br/>good/total ratio"]) --> slo2("Set SLO<br/>e.g. 99.9% / 30d")
+    slo2 --> budget("Error budget = 1 - SLO<br/>0.1% = 43.2 min/30d")
+    budget --> measure("Measure SLI continuously<br/>PromQL")
+    measure --> compute{"Budget<br/>remaining?"}
+    compute -->|"YES"| ship(["Ship features,<br/>take risk"])
+    compute -->|"NO, exhausted"| freeze(["Freeze risky launches;<br/>all hands on reliability"])
+    ship --> burn("Burn-rate alerts page<br/>if spend too fast<br/>14.4x / 6x")
+    freeze --> burn
+    burn -.-> measure
 
-
-Toil budget
-
-  SRE time:  [#### project/automation 50%+ ####][~~ toil <=50% ~~][on-call]
-  if toil > 50% sustained -> hire/automate; toil scales with service = bug
+    class sli2 io
+    class slo2 base
+    class budget mathOp
+    class measure req
+    class compute mathOp
+    class ship train
+    class freeze lossN
+    class burn lossN
 ```
+
+SLIs are measured continuously against the SLO-derived budget: while budget remains, teams ship freely; once it's exhausted, launches freeze until reliability recovers, and burn-rate alerts (14.4x fast, 6x slower) page when the spend rate itself gets dangerous — closing the loop back into measurement.
+
+**Nines vs. cost — why 100% is the wrong target**
+
+```mermaid
+xychart-beta
+    title "Cost vs. reliability target"
+    x-axis ["99%", "99.9%", "99.95%", "99.99%", "99.999%"]
+    y-axis "Relative cost (x)" 0 --> 60
+    line [1, 4, 6, 11, 55]
+```
+
+Cost compounds steeply as the target climbs another nine, but the user-perceptible gap between 99.9% and 100% is already close to zero — see the nines/downtime/cost table above for the exact per-tier multipliers this curve is drawn from.
+
+**Toil budget**
+
+```mermaid
+pie showData
+    title SRE time budget (target split)
+    "Project / automation (50%+ target)" : 50
+    "Toil (under 50% cap)" : 35
+    "On-call" : 15
+```
+
+Google's guidance keeps project/automation work at half or more of an SRE's time; if sustained toil pushes past the 50% cap, that's a signal to hire or automate — toil that scales with the service is treated as a bug, not a fact of life.
+
+**Multi-window, multi-burn-rate alert routing**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    short(["Short window<br/>confirms still active"]) --> gate{"Short AND long<br/>both breach a tier?"}
+    long(["Long window<br/>confirms burn is real"]) --> gate
+    gate -->|"14.4x, ~2% in 1h"| page("Page fast")
+    gate -->|"6x, ~5% in 6h"| pt("Page / ticket")
+    gate -->|"1x, ~10% in 3d"| ticket("Ticket, slow")
+    gate -->|"below all tiers"| ok(["No alert"])
+
+    class short,long io
+    class gate mathOp
+    class page lossN
+    class pt lossN
+    class ticket req
+    class ok train
+```
+
+A single-window alert either flaps on noise or fires too slowly — pairing a short window (proves the burn is still happening) with a long window (proves it's sustained, not a blip) across the three severity tiers from the burn-rate table above is exactly what the alert config in Section 6 implements.
 
 ---
 
@@ -206,16 +283,18 @@ The short window confirms the burn is *current* (and lets the alert resolve quic
 
 ### Error-budget policy (the document that gives SLOs teeth)
 
+```mermaid
+stateDiagram-v2
+    [*] --> Healthy
+    Healthy --> Healthy: budget remaining above 0<br/>ship features, canary risky changes
+    Healthy --> Exhausted: budget exhausted<br/>or under 10%
+    Exhausted --> Exhausted: freeze non-critical launches<br/>reliability bugs become P1<br/>postmortems outrank roadmap
+    Exhausted --> Healthy: budget recovers<br/>rolling 30d window
+    Exhausted --> Revisit: repeated exhaustion
+    Revisit --> Healthy: loosen the SLO or<br/>invest in reliability
 ```
-ERROR BUDGET POLICY (signed by eng + product leadership)
-  - If budget remaining > 0:  feature work proceeds; risky changes allowed with canary.
-  - If budget exhausted (or <10%):
-      * freeze non-critical feature launches
-      * all reliability bugs become P1
-      * postmortem action items take priority over roadmap
-      * resume normal velocity only when budget recovers (rolling 30d window)
-  - Repeated exhaustion -> revisit the SLO (too strict?) or invest in reliability (too fragile).
-```
+
+The policy (signed by eng + product leadership) is a two-mode state machine: budget remaining keeps the team in `Healthy` (ship freely, canary risk), exhaustion (or under 10%) flips it to `Exhausted` (freeze, P1 reliability work), and repeated exhaustion escalates to revisiting the SLO itself rather than living in a permanent freeze.
 
 ### Capacity planning math
 

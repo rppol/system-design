@@ -95,84 +95,108 @@ SQLAlchemy's `scoped_session` uses thread-locals, which have no equivalent in as
 
 **Savepoints.** `async with session.begin_nested():` creates a `SAVEPOINT`. Useful for partial rollback within a larger transaction (e.g., attempt an insert, roll back only that insert if it fails, continue the outer transaction).
 
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Active : first execute() or DML<br/>auto-begins transaction
+    state Active {
+        [*] --> Direct
+        Direct --> Nested : begin_nested()<br/>opens SAVEPOINT
+        Nested --> Direct : nested block exits
+    }
+    Active --> Committed : await session.commit()
+    Active --> RolledBack : await session.rollback()<br/>or exception
+    Committed --> [*]
+    RolledBack --> [*]
+```
+
+There is no explicit "start transaction" call: the first `execute()`/DML auto-begins it, `begin_nested()` opens a `SAVEPOINT` inside that same transaction for partial rollback, and the transaction as a whole always ends in either `Committed` or `RolledBack`.
+
 ---
 
 ## 5. Architecture Diagrams
 
 ### 5.1 Request lifecycle with async session
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant DI as DI Resolver
+    participant Dep as get_async_session()
+    participant Eng as AsyncEngine + Pool
+    participant DB as PostgreSQL (asyncpg)
+    participant H as Route Handler
+
+    C->>DI: FastAPI Request
+    DI->>Dep: resolve yield dependency
+    Dep->>Eng: borrow connection
+    Eng->>DB: checkout connection
+    DB-->>Eng: connection granted
+    Eng-->>Dep: AsyncSession
+    Dep->>H: hand off session
+    H->>Dep: await session.execute(select(...))
+    Dep->>DB: compiled SQL sent via asyncpg
+    DB-->>Dep: rows returned
+    Dep-->>H: result rows
+    H->>Dep: await session.commit()
+    Dep->>DB: COMMIT (or ROLLBACK on error)
+    H-->>C: Response serialized (Pydantic)
+    Note over Dep,Eng: finally block in yield dependency
+    Dep->>Eng: await session.close()
+    Eng-->>DB: connection returned to pool
 ```
-FastAPI Request
-      |
-      v
- DI Graph Resolution
-      |
-      +---> get_async_session() [yield dependency]
-      |           |
-      |           v
-      |     AsyncEngine
-      |           |
-      |           v
-      |     Connection Pool  <----> PostgreSQL (asyncpg)
-      |           |
-      |     AsyncSession (borrowed connection)
-      |           |
-      v           v
- Route Handler receives session
-      |
-      +---> await session.execute(select(...))
-      |           |
-      |           v
-      |     SQL compiled + sent via asyncpg
-      |           |
-      |     rows returned
-      |           |
-      +---> await session.commit()  [or rollback on error]
-      |
-      v
- Response serialized (Pydantic)
-      |
- [finally block in yield dep]
-      |
-      v
- await session.close()  [connection returned to pool]
-```
+
+The `get_async_session()` yield dependency borrows a connection from the pool, hands the `AsyncSession` to the route handler, and — whether the handler succeeds or raises — commits or rolls back before its `finally` block returns the connection to the pool.
 
 ### 5.2 N+1 query problem: before and after
 
+```mermaid
+xychart-beta
+    title "N+1 elimination: 101 queries to 2 queries"
+    x-axis ["Broken: N+1 loop", "Fixed: selectinload"]
+    y-axis "Total queries (100 users)" 0 --> 110
+    bar [101, 2]
 ```
-BROKEN — N+1 pattern:
-  SELECT * FROM users  (1 query, returns 100 users)
-  SELECT * FROM posts WHERE user_id = 1
-  SELECT * FROM posts WHERE user_id = 2
-  ...
-  SELECT * FROM posts WHERE user_id = 100
-  Total: 101 queries
 
-FIX — selectinload:
-  SELECT * FROM users  (1 query)
-  SELECT * FROM posts WHERE user_id IN (1,2,3,...,100)  (1 query)
-  Total: 2 queries
-```
+The broken loop issues 1 query for the users plus 100 individual per-user `SELECT`s (101 total); `selectinload` replaces the 100 individual queries with a single batched `SELECT ... WHERE user_id IN (...)` (2 total).
 
 ### 5.3 Connection pool sizing
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PG(["PostgreSQL server<br/>max_connections = 200"])
+    LB("PgBouncer / LB<br/>optional")
+    W1(Worker-1)
+    W2(Worker-2)
+    W3(Worker-3)
+    W4(Worker-4)
+    TOTAL(("Total: 4 × 15 = 60<br/>connections"))
+
+    PG --> LB
+    LB -->|"pool_size=5<br/>max_overflow=10"| W1
+    LB -->|"pool_size=5<br/>max_overflow=10"| W2
+    LB -->|"pool_size=5<br/>max_overflow=10"| W3
+    LB -->|"pool_size=5<br/>max_overflow=10"| W4
+    W1 --> TOTAL
+    W2 --> TOTAL
+    W3 --> TOTAL
+    W4 --> TOTAL
+
+    class PG base
+    class LB mathOp
+    class W1,W2,W3,W4 req
+    class TOTAL mathOp
 ```
-PostgreSQL server
-  max_connections = 200 (default)
-       |
-       | accepts up to 200 simultaneous connections
-       |
-  Load Balancer / PgBouncer (optional)
-       |
-  +---------+---------+---------+
-  |         |         |         |
-Worker-1  Worker-2  Worker-3  Worker-4   (4 Uvicorn workers)
-pool_size=5, max_overflow=10
-each worker: up to 15 connections
-total: 4 × 15 = 60 connections
-(leaves headroom for admin, migrations, monitoring)
-```
+
+Four Uvicorn workers × (`pool_size=5` + `max_overflow=10`) = 60 connections total, leaving headroom under PostgreSQL's default `max_connections=200` for admin sessions, migrations, and monitoring.
 
 ---
 
@@ -445,6 +469,23 @@ else:
 | **Alembic support** | Yes (with run_sync wrapper) | Yes (native) | Yes (via SA) | Limited (own migration tool) |
 | **Driver ecosystem** | asyncpg, aiopg, aiomysql | psycopg2, pymysql, cx_Oracle | Inherits SA | asyncpg, aiopg |
 | **Django-style ActiveRecord** | No | No | Partial | Yes |
+
+```mermaid
+quadrantChart
+    title Throughput vs Complexity across ORM choices
+    x-axis Low Complexity --> High Complexity
+    y-axis Low Throughput --> High Throughput
+    quadrant-1 Powerful but heavy
+    quadrant-2 Best of both worlds
+    quadrant-3 Simple, limited scale
+    quadrant-4 Avoid: cost without payoff
+    Async SQLAlchemy 2.0: [0.85, 0.85]
+    Sync SQLAlchemy 2.0: [0.2, 0.4]
+    SQLModel: [0.5, 0.8]
+    Tortoise ORM: [0.2, 0.85]
+```
+
+Async SQLAlchemy 2.0 buys its high throughput with high complexity (eager loading required everywhere); Tortoise ORM and SQLModel land in the "best of both worlds" quadrant by keeping throughput high at lower complexity than raw async SQLAlchemy; Sync SQLAlchemy trades throughput for simplicity rather than losing on both axes.
 
 **SQLModel tradeoffs in detail.**
 
@@ -821,36 +862,36 @@ Scale: 500 RPS peak, PostgreSQL RDS `db.r6g.2xlarge` (8 vCPU, 64 GB), 4 Uvicorn 
 
 ### Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CLIENT([Client Request]) --> UVI(["Uvicorn Worker<br/>4 workers"]) --> APP(FastAPI App)
+    APP --> AUTH{"Auth dependency<br/>JWT validation"}
+    APP --> SESS("get_async_session<br/>yield dep")
+    SESS --> ENGINE(AsyncEngine)
+    ENGINE -->|"pool_size=5, max_overflow=10<br/>pool_recycle=1800, pool_pre_ping=true"| PG(["PostgreSQL RDS"])
+    AUTH --> ROUTE(Route Handler)
+    PG --> ROUTE
+    ROUTE --> SVC("Service Layer<br/>document_service.py")
+    SVC --> REPO("Repository Layer<br/>user_repo.py + document_repo.py")
+    REPO --> ORM(["SQLAlchemy 2.0<br/>async ORM"])
+
+    class CLIENT io
+    class UVI,APP req
+    class AUTH,SESS mathOp
+    class ENGINE base
+    class PG frozen
+    class ROUTE,SVC,REPO,ORM train
 ```
-Client Request
-     |
-     v
-Uvicorn Worker (4 workers)
-     |
-     v
-FastAPI App
-     |
-     +---> Auth dependency (JWT validation)
-     |
-     +---> get_async_session [yield dep] -----> AsyncEngine
-     |                                              |
-     |                                         pool_size=5
-     |                                         max_overflow=10
-     |                                         pool_recycle=1800
-     |                                         pool_pre_ping=True
-     |                                              |
-     v                                         PostgreSQL RDS
-Route Handler
-     |
-     v
-Service Layer (service/document_service.py)
-     |
-     v
-Repository Layer (repositories/user_repo.py, document_repo.py)
-     |
-     v
-SQLAlchemy 2.0 async ORM
-```
+
+Every request passes through JWT auth and the `get_async_session` dependency — which owns the pooled `AsyncEngine` — before reaching the route handler, service layer, repository layer, and finally the async ORM; this deployment reuses the same pool settings sized in §5.3.
 
 ### Models
 

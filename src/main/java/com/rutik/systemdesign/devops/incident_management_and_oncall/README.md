@@ -89,42 +89,121 @@ The whole system is judged by **MTTD/MTTR** (lower is better — fast detection 
 | MTTR (resolve) | Detect → resolved | Runbooks, automation, clear roles |
 | MTBF (between failures) | Reliability over time | Postmortem action items, hardening |
 
+**Metrics as one incident timeline**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Problem<br/>starts"]) -->|"MTTD"| detected("Detected<br/>/ paged")
+    detected -->|"MTTA"| acked("Acknowledged")
+    acked -->|"MTTR"| resolved("Resolved")
+    resolved -.->|"MTBF"| nextIncident(["Next<br/>incident"])
+
+    class start io
+    class detected req
+    class acked mathOp
+    class resolved train
+    class nextIncident frozen
+```
+
+*The four metrics are consecutive segments of one incident's timeline, not independent numbers: MTTD ends at detection, MTTA at acknowledgement, MTTR at resolution, and MTBF is the gap until the next incident starts.*
+
 ---
 
 ## 5. Architecture Diagrams
 
+**Incident lifecycle**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    alertFires(["Alert fires<br/>(burn-rate / symptom)"]) -->|"MTTD"| paged(["On-call paged"])
+    paged -->|"ack (MTTA)"| declare("Declare incident,<br/>assign SEV")
+    declare --> assignIC("Assign IC,<br/>open war room / Slack bridge")
+    assignIC --> diagnose("Diagnose<br/>metric, trace, log")
+    assignIC -.-> commsLead("Comms Lead<br/>updates status page")
+    assignIC -.-> scribe("Scribe logs<br/>timeline")
+    diagnose --> mitigate("Mitigate first<br/>rollback / failover / scale")
+    commsLead -.-> mitigate
+    scribe -.-> mitigate
+    mitigate -->|"MTTR"| restored("Service restored,<br/>resolve & downgrade SEV")
+    restored --> postmortem("Blameless postmortem<br/>timeline, root cause, action items")
+    postmortem --> actionItems(["Action items<br/>tracked to done"])
+    actionItems -.->|"raises MTBF"| alertFires
+
+    class alertFires io
+    class paged,commsLead,scribe req
+    class declare,diagnose,postmortem mathOp
+    class assignIC base
+    class mitigate lossN
+    class restored,actionItems train
 ```
-Incident lifecycle
 
-  alert fires (burn-rate / symptom)  --MTTD-->  on-call paged
-        |                                            | ack (MTTA)
-        v                                            v
-   DECLARE incident + assign SEV  -->  assign IC, open war room/Slack bridge
-        |
-   DIAGNOSE (observability: metric -> trace -> log)   |  Comms Lead updates status page
-        |                                             |  Scribe logs timeline
-   MITIGATE FIRST (rollback / failover / scale)  <----+  IC coordinates, decides
-        |
-   service restored  --MTTR-->  RESOLVE, downgrade severity, close
-        |
-   BLAMELESS POSTMORTEM (timeline, root cause, action items w/ owners + dates)
-        |
-   action items tracked to done -> raises MTBF, lowers next MTTR
+*Detection (MTTD) chains into mitigation and resolution (MTTR); the blameless postmortem's tracked action items close the loop by raising MTBF and shrinking the next incident's MTTR.*
 
+**Escalation policy (paging tool)**
 
-Escalation policy (paging tool)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  alert -> PRIMARY on-call --no ack in 10m--> SECONDARY --no ack 10m--> MANAGER
-                |ack
-           respond / declare
+    alert(["Alert"]) --> primary("PRIMARY<br/>on-call")
+    primary -->|"ack"| respond("Respond<br/>/ declare")
+    primary -.->|"no ack in 10m"| secondary("SECONDARY<br/>on-call")
+    secondary -->|"ack"| respond
+    secondary -.->|"no ack in 10m"| manager(["MANAGER"])
 
-Roles in a SEV1 (nobody steps on anyone)
-
-  Incident Commander  --coordinates--> Operations/SMEs (fix)
-        |                               (do NOT also manage comms)
-        +--> Communications Lead (status page, execs)
-        +--> Scribe (timeline)
+    class alert io
+    class primary,secondary req
+    class respond train
+    class manager lossN
 ```
+
+*A missed acknowledgement inside the 10-minute window bumps the page up a tier — primary to secondary to manager — so an unanswered page is never silently dropped.*
+
+**Roles in a SEV1 (nobody steps on anyone)**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ic("Incident<br/>Commander") -->|"coordinates"| ops("Operations / SMEs<br/>(fix)")
+    ic --> comms("Communications Lead<br/>(status page, execs)")
+    ic --> scribe("Scribe<br/>(timeline)")
+
+    class ic mathOp
+    class ops train
+    class comms req
+    class scribe base
+```
+
+*The IC coordinates but never personally fixes the bug — Operations/SMEs own the technical fix while Comms and Scribe run in parallel, so no one is doing two jobs during a SEV1.*
 
 ---
 
@@ -234,6 +313,16 @@ MTTR = mean(resolved_time - detected_time) across incidents  -> lower with runbo
 Availability impact: a 99.9% / 30d SLO = 43.2 min budget. One 38-min SEV1 burns 88% of it.
   -> cutting MTTR via runbooks/auto-rollback directly protects the error budget (see ../sre_principles_and_slos).
 ```
+
+```mermaid
+xychart-beta
+    title "30-Day Error Budget vs. One SEV1 (99.9% SLO)"
+    x-axis ["Monthly budget", "Burned by this SEV1", "Remaining"]
+    y-axis "Minutes" 0 --> 45
+    bar [43.2, 38, 5.2]
+```
+
+*A single 38-minute SEV1 burns 88% of the entire month's 43.2-minute error budget, leaving about 5 minutes to spare — this is why cutting MTTR via runbooks and auto-rollback directly protects the budget.*
 
 ---
 

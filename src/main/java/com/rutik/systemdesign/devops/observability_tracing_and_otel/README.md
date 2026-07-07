@@ -77,40 +77,73 @@ The defining cost problem in tracing is **volume**: capturing every span on ever
 
 ## 5. Architecture Diagrams
 
+**Distributed trace as a span tree (one request)**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["span A · GET /checkout<br/>820ms total"]) --> B("span B · auth-svc.verify<br/>40ms")
+    A --> C("span C · cart-svc.get<br/>120ms")
+    A --> D("span D · order-svc.create<br/>610ms · hot path")
+    D --> E("span E · db.insert order<br/>30ms")
+    D --> F("span F · payment-svc.charge<br/>560ms · the culprit")
+    F --> G("span G · db.SELECT x3<br/>N+1 query · 510ms")
+
+    class A io
+    class B,C,E train
+    class D,F,G lossN
 ```
-Distributed trace as a span tree (one request)
 
-  trace_id = 4bf92f...                                 time ->
-  [span A: GET /checkout              | 820ms ]
-     [span B: auth-svc.verify    | 40ms ]
-     [span C: cart-svc.get           | 120ms ]
-     [span D: order-svc.create                | 610ms ]   <-- the hot path
-        [span E: db.insert order   | 30ms ]
-        [span F: payment-svc.charge       | 560ms ]        <-- the culprit
-           [span G: db.SELECT (N+1 x3)  | 510ms ]
+*The 820ms request is a causal span tree, not a flat list: `order-svc.create` (610ms) is the hot path, and inside it `payment-svc.charge` (560ms) is the culprit — a 510ms N+1 (`db.SELECT` x3).*
 
-OTel two-tier collection pipeline
+**OTel two-tier collection pipeline**
 
-  apps (OTel SDK, OTLP) --+
-                          |  add resource attrs, batch
-        Agent Collector (DaemonSet/sidecar) --OTLP-->  Gateway Collector
-                                                          |  tail sampling:
-                                                          |   keep ERROR + latency>1s,
-                                                          |   sample 5% of the rest
-                                                          v
-                                              +-----------+-----------+
-                                              v                       v
-                                         Jaeger / Tempo          metrics (spanmetrics)
-                                              |                       |
-                                          trace UI <--trace_id--> logs (Loki/ELK)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    Apps(["apps<br/>OTel SDK · OTLP"]) -->|"batch +<br/>add resource attrs"| Agent("Agent Collector<br/>DaemonSet/sidecar")
+    Agent -->|OTLP| Gateway{"Gateway Collector<br/>tail sampling"}
+    Gateway -->|"keep ERROR + latency<br/>over 1s, sample 5% rest"| Backends("Jaeger / Tempo")
+    Gateway --> Metrics("metrics<br/>spanmetrics")
+    Backends -.->|trace_id| UI(["trace UI"])
+    UI -.->|trace_id| Logs("logs<br/>Loki/ELK")
 
-Context propagation (the thing that breaks traces)
-
-  service A --HTTP w/ header: traceparent: 00-4bf92f...-00f067aa-01--> service B
-     B extracts context, starts child span, re-injects header --> service C
-  If B forgets to propagate -> C starts a NEW trace -> the trace splits in two (broken)
+    class Apps,UI io
+    class Agent,Gateway mathOp
+    class Backends,Metrics,Logs base
 ```
+
+*Agents batch spans and tag resource attributes locally; the gateway tier is where tail sampling actually decides — keep everything ERROR or over 1s, sample 5% of the rest — before fanning out to trace, metric, and log backends that all pivot on `trace_id`.*
+
+**Context propagation (the thing that breaks traces)**
+
+```mermaid
+sequenceDiagram
+    participant A as service A
+    participant B as service B
+    participant C as service C
+
+    A->>B: HTTP + traceparent header<br/>00-4bf92f...-00f067aa-01
+    Note over B: extracts context,<br/>starts child span,<br/>re-injects header
+    B->>C: HTTP + traceparent header<br/>(new span_id, same trace_id)
+    Note over B,C: if B forgets to propagate,<br/>C starts a NEW trace -<br/>the trace splits in two (broken)
+```
+
+*Every hop must extract and re-inject `traceparent`; the moment one service (here B) skips it, the downstream service starts a brand-new root trace and the original trace splits into disconnected fragments.*
 
 ---
 
@@ -180,6 +213,34 @@ service:
 
 ### Head vs tail sampling — why the choice matters
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["trace starts<br/>at the root"]) --> Choice{"sampling<br/>strategy?"}
+    Choice -->|"head - decide now,<br/>1% sampled"| HeadDrop("drop ~99%<br/>blind to outcome")
+    HeadDrop -.-> Lost("the one error trace<br/>is gone")
+
+    Choice -->|"tail - buffer<br/>the full trace"| Buffer(["decision_wait 10s<br/>buffer all spans"])
+    Buffer --> TailRule{"error, or<br/>latency over 1s?"}
+    TailRule -->|yes| KeepAll(["keep 100%"])
+    TailRule -->|no| Sample5(["sample 5%<br/>of the rest"])
+
+    class Start io
+    class Choice,TailRule mathOp
+    class HeadDrop,Lost lossN
+    class Buffer req
+    class KeepAll,Sample5 train
+```
+
+*Head sampling gambles at the root — at 1% it discards ~99% of traces, including the rare one that errored. Tail sampling waits for the full trace (`decision_wait: 10s`) before deciding, so it can keep 100% of errors and slow traces while sampling only 5% of the boring successes.*
+
 ```yaml
 # BROKEN: head sampling at 1% blindly. The one trace where checkout threw a 500 had a
 # 99% chance of being discarded at the root before anyone knew it errored -> you can't debug the incident.
@@ -206,12 +267,25 @@ connectors:
 
 ### Correlating a trace to its logs
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    M(["metric alert<br/>api p99 over 1s"]) -->|jump via exemplar| T{"representative trace<br/>span F payment-svc · 560ms"}
+    T -->|copy trace_id| L[("query logs<br/>trace_id = 4bf92f...")]
+
+    class M req
+    class T lossN
+    class L base
 ```
-1. metric alert: api p99 > 1s  ->  jump to a representative trace via exemplar
-2. trace shows span F (payment-svc) took 560ms with a DB N+1
-3. copy trace_id, query logs:  {app="payment-svc"} | json | trace_id="4bf92f..."
-   -> read the exact SQL + error for that request
-```
+
+*The three-pillar pivot in three hops: a p99-over-1s alert jumps via exemplar to the representative trace, which localizes the 560ms `payment-svc` span (a DB N+1), whose `trace_id` then filters the logs straight to the failing query.*
 
 This three-pillar pivot is the payoff of putting `trace_id` in logs (see [observability_logging](../observability_logging/)) and exemplars on metrics (see [observability_metrics_prometheus](../observability_metrics_prometheus/)).
 
@@ -352,6 +426,16 @@ Instrumentation adds per-span CPU/memory and the network cost of exporting spans
 ### Scenario: Checkout p99 doubles, and 1% head sampling means the error traces are gone
 
 An e-commerce platform with 18 microservices sees checkout p99 jump from 400ms to 1.2s, and the 5xx rate on `/checkout` climbs to 3%. The team has OTel SDKs but exports directly to Jaeger with 1% probabilistic head sampling. When they search Jaeger for failed checkouts, almost none exist — the 1% root-level sampling discarded ~99% of the error traces. Worse, one service (`recommendations-svc`) uses a hand-rolled HTTP client that drops `traceparent`, so traces split there and the downstream `payment-svc` spans never link to the checkout trace.
+
+```mermaid
+xychart-beta
+    title "Checkout p99 latency through the incident (ms)"
+    x-axis [Baseline, Incident, "After fix"]
+    y-axis "p99 latency (ms)" 0 --> 1300
+    bar [400, 1200, 420]
+```
+
+*Checkout p99 held at a healthy 400ms baseline, spiked to 1.2s once the incident hit, and settled back to ~420ms only after both the broken propagation and the N+1 query were fixed — 1% head sampling alone would never have surfaced which query to fix.*
 
 ```python
 # BROKEN 1: non-propagating client splits the trace.

@@ -123,55 +123,153 @@ across service boundaries. OTel handles propagation automatically when you confi
 
 ### 5.1 Three-pillar observability stack
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph FASTAPI["FastAPI Process"]
+        CIM(CorrelationId<br/>Middleware) --> OTM(OTel ASGI<br/>Middleware) --> RH(Route handler)
+    end
+
+    RH --> LOG(structlog<br/>JSON logs)
+    RH --> MET(prometheus_client<br/>metrics)
+    RH --> TRC(tracer<br/>spans)
+
+    LOG --> STD(["stdout / stderr"])
+    MET --> MEP(["/metrics HTTP"])
+    TRC --> OTL(["OTLP gRPC :4317"])
+
+    STD --> VEC(Vector / Fluentd)
+    MEP --> PSC(Prometheus scrape)
+    OTL --> OCL(OTel Collector)
+
+    VEC --> LOKI(Loki)
+    PSC --> GRAF(Grafana)
+    OCL --> JAEG(Jaeger / Tempo)
+
+    class CIM,OTM,RH mathOp
+    class LOG,MET,TRC io
+    class STD,MEP,OTL req
+    class VEC,PSC,OCL base
+    class LOKI,GRAF,JAEG frozen
 ```
-  FastAPI Process
-  ┌────────────────────────────────────────────────────────┐
-  │  CorrelationIdMiddleware                                │
-  │  ┌──────────────────────────────────────────────────┐  │
-  │  │  OTel ASGI Middleware  (auto-span per request)   │  │
-  │  │  ┌────────────────────────────────────────────┐  │  │
-  │  │  │  Route handler                             │  │  │
-  │  │  │  ├── structlog (JSON logs to stdout)       │  │  │
-  │  │  │  ├── prometheus_client (in-memory metrics) │  │  │
-  │  │  │  └── tracer.start_as_current_span(...)     │  │  │
-  │  │  └────────────────────────────────────────────┘  │  │
-  │  └──────────────────────────────────────────────────┘  │
-  └────────────────────────────────────────────────────────┘
-        │                │                     │
-        ▼                ▼                     ▼
-   stdout/stderr    /metrics (HTTP)     OTLP gRPC :4317
-        │                │                     │
-        ▼                ▼                     ▼
-   Vector/Fluentd   Prometheus scrape    OTel Collector
-        │                │                     │
-        ▼                ▼                     ▼
-      Loki            Grafana            Jaeger / Tempo
-```
+
+Every request fans out from the route handler into three independent signal pipelines — logs,
+metrics, and traces — that reconverge only through the shared correlation ID carried in every log
+line.
 
 ### 5.2 Span hierarchy for a single request
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant F as FastAPI (http.server)
+    participant D as Orders DB
+    participant P as Payment Service
+    participant PD as Payment DB
+    participant R as Redis
+
+    C->>F: POST /orders (trace_id=abc123)
+    Note over F: http.server span, 0ms to 120ms
+    F->>D: db.query (INSERT orders)
+    Note over D: 5ms to 18ms
+    D-->>F: ok
+    F->>P: http.client to payment-svc
+    Note over P: payment-svc span, 20ms to 90ms
+    P->>PD: db.query (payment-svc)
+    Note over PD: 25ms to 45ms
+    PD-->>P: ok
+    P-->>F: charge result
+    F->>R: redis.set (cache order)
+    Note over R: 95ms to 98ms
+    R-->>F: ok
+    F-->>C: response sent
 ```
-  HTTP POST /orders  (trace_id=abc123)
-  ├── [span] http.server          0ms ─────────────── 120ms
-  │   ├── [span] db.query (INSERT orders)   5ms ─ 18ms
-  │   ├── [span] http.client → payment-svc  20ms ────── 90ms
-  │   │   └── [span] db.query (payment-svc) 25ms ── 45ms
-  │   └── [span] redis.set (cache order)    95ms ─ 98ms
-  └── (response sent)
-```
+
+Each span nests inside its parent — the payment-service call spans 20ms to 90ms and itself contains
+a 25ms-to-45ms DB span — while the outer http.server span bounds the full 0ms-to-120ms request.
 
 ### 5.3 Correlation ID propagation
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant F as FastAPI
+    participant P as Payment Service
+
+    C->>F: X-Request-ID: req-7f2e
+    F-->>C: X-Request-ID: req-7f2e (echoed)
+    Note over F: Log: request_id=req-7f2e,<br/>event=order.created
+    F->>P: X-Request-ID: req-7f2e
+    Note over F,P: Log: request_id=req-7f2e,<br/>event=charge.ok
 ```
-  Client
-    │  X-Request-ID: req-7f2e  ──────────────►  FastAPI
-    │                                              │
-    │  ◄── X-Request-ID: req-7f2e  ───────────────┤
-    │                                              │  Log: {"request_id":"req-7f2e","event":"order.created"}
-    │                                              │
-    │                                              │  ──► Payment service  (X-Request-ID: req-7f2e)
-    │                                              │       Log: {"request_id":"req-7f2e","event":"charge.ok"}
+
+The same X-Request-ID (req-7f2e) travels from the client into FastAPI, is echoed back in the
+response, and is forwarded to the payment service — every log line along the path carries the
+identical `request_id` field.
+
+### 5.4 Tail-based sampling decision
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    T(["Trace completes<br/>all spans buffered"]) --> E{Has error?}
+    E -->|"yes"| KEEP1(Keep 100%)
+    E -->|"no"| P{p99 over 1s?}
+    P -->|"yes"| KEEP2(Keep 100%)
+    P -->|"no"| S(Healthy + fast)
+    S --> SAMPLE{Sample 1%?}
+    SAMPLE -->|"yes"| KEEP3(Keep)
+    SAMPLE -->|"no"| DROP(Drop 99%)
+
+    class T io
+    class E,P,SAMPLE mathOp
+    class KEEP1,KEEP2,KEEP3 train
+    class S req
+    class DROP lossN
 ```
+
+Errors and slow (p99 over 1s) traces are always kept at 100% — only the remaining healthy-and-fast
+population is downsampled to 1%, which is why tail-based sampling preserves nearly all actionable
+signal while cutting storage by an order of magnitude.
+
+### 5.5 Pod lifecycle across health probes
+
+```mermaid
+stateDiagram-v2
+    [*] --> Starting
+
+    Starting --> Alive: startupProbe passes
+    Alive --> Ready: readinessProbe passes (DB + Redis reachable)
+    Alive --> NotReady: readinessProbe fails
+
+    Ready --> Serving: added to load balancer
+    Serving --> NotReady: readinessProbe fails (2 × 10s = 20s)
+    NotReady --> Ready: dependency recovers
+
+    Alive --> Restarting: livenessProbe fails (3 × 15s = 45s)
+    Serving --> Restarting: livenessProbe fails (3 × 15s = 45s)
+
+    Restarting --> [*]: pod killed and recreated
+```
+
+A readiness failure only removes the pod from the load balancer (20s at the default 2 × 10s
+threshold) and self-heals once the dependency recovers; a liveness failure is the only path to a
+restart (45s at 3 × 15s) — so checking the database inside `/health` short-circuits straight into
+the restart path, producing the thundering-herd loop described in Pitfall 3.
 
 ---
 
@@ -803,23 +901,41 @@ latency breakdown in Grafana, distributed traces to Jaeger, and automated canary
 
 #### Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CL([Client]) --> ING("Nginx Ingress<br/>forwards X-Request-ID")
+
+    subgraph POD["FastAPI Pod ×3"]
+        CIM(CorrelationId<br/>Middleware) --> OTM(OTel ASGI<br/>Middleware) --> RH(Route handlers)
+        RH --> HP(["/health<br/>liveness"])
+        RH --> RP(["/ready<br/>PG + Redis"])
+    end
+
+    ING --> CIM
+
+    RH --> LOG(structlog<br/>JSON logs) --> STD(stdout) --> PTAIL(Promtail) --> LOKI(Loki)
+    RH --> MET(prometheus_client) --> MEP(["/metrics :9090"]) --> PROMETHEUS(Prometheus) --> GRAF(Grafana)
+    RH --> TRC(manual OTel spans) --> BSP(BatchSpanProcessor) --> OCOL(OTel Collector) --> JAEG(Jaeger)
+
+    class CL io
+    class ING,CIM,OTM,RH mathOp
+    class HP,RP,LOG,MET,TRC io
+    class STD,MEP,BSP req
+    class PTAIL,PROMETHEUS,OCOL base
+    class LOKI,GRAF,JAEG frozen
 ```
-  Client
-    │
-    ▼
-  Nginx Ingress   (passes X-Request-ID downstream)
-    │
-    ▼
-  FastAPI Pod (×3)
-  ├── CorrelationIdMiddleware    → sets request_id_var
-  ├── OTel ASGI Middleware       → creates root HTTP span, propagates traceparent
-  ├── Route handlers
-  │   ├── structlog JSON logs    → stdout → Promtail → Loki
-  │   ├── prometheus_client      → /metrics:9090 → Prometheus → Grafana
-  │   └── manual OTel spans      → BatchSpanProcessor → OTel Collector → Jaeger
-  ├── /health   (liveness)
-  └── /ready    (readiness, checks PG + Redis)
-```
+
+Nginx forwards the client's X-Request-ID into one of three FastAPI pods, whose route handlers fan
+out into the same three pipelines as the single-service view — now labeled with this deployment's
+concrete backends (Promtail, port 9090, BatchSpanProcessor) and readiness dependencies (PG + Redis).
 
 #### Full application setup
 

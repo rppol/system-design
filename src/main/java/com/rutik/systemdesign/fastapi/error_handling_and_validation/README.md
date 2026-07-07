@@ -45,11 +45,26 @@ Cross-references:
 
 **Mental model:** Think of error handling as three concentric rings.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Inner(["Inner ring<br/>Route / service<br/>raises exceptions"]) --> Middle("Middle ring<br/>Exception handlers<br/>typed dispatch")
+    Middle -.->|"unhandled"| Outer("Outer ring<br/>Middleware<br/>catches everything")
+
+    class Inner req
+    class Middle mathOp
+    class Outer lossN
 ```
-[Outer ring]  Middleware          — catches everything, including handler panics
-[Middle ring] Exception handlers  — typed dispatch, one handler per exception class
-[Inner ring]  Route / service     — raises domain or HTTP exceptions; never shapes responses
-```
+
+Most errors resolve at the middle ring's typed dispatch; only a handler-less exception type or a
+panic inside a handler ever reaches the outer ring's middleware backstop.
 
 **Why it matters:** Poorly structured error responses are one of the top API usability complaints.
 Clients either parse status codes and guess at the body, or they treat every non-200 as fatal.
@@ -306,71 +321,94 @@ together.
 
 ### 5.1 Exception handling pipeline
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Req([HTTP Request]) --> MW("ASGI middleware stack<br/>logging, auth")
+    MW --> Route("FastAPI routing<br/>path match, param extract")
+    Route --> Validate{"Pydantic<br/>validation"}
+    Validate -->|"fails"| VErr("RequestValidationError<br/>422")
+    Validate -->|"passes"| Deps{"Dependency<br/>resolution"}
+    Deps -->|"fails"| DErr("HTTPException or<br/>domain exception")
+    Deps -->|"passes"| Handler("Route handler")
+    Handler -->|"raises"| DomainErr("Domain exception<br/>propagates up stack")
+
+    subgraph Registry["Exception handler registry (reverse-registration order)"]
+        direction TB
+        R1("UserNotFoundError<br/>to 404")
+        R2("QuotaExceededError<br/>to 429")
+        R3("AppError<br/>to 500")
+        R4("HTTPException<br/>own status code")
+        R5("Exception<br/>to 500")
+    end
+
+    VErr --> Registry
+    DErr --> Registry
+    DomainErr --> Registry
+    Registry --> Resp("JSONResponse /<br/>ProblemDetail")
+    Resp --> Out([HTTP Response])
+
+    class Req,Out,Resp io
+    class MW base
+    class Route,Validate,Deps,R1,R2,R3,R4,R5 mathOp
+    class Handler train
+    class VErr,DErr,DomainErr lossN
 ```
-HTTP Request
-     |
-     v
-+-----------------------------+
-| ASGI Middleware stack       |  <-- outermost; catches everything,
-| (e.g. logging, auth)        |      including unhandled exceptions
-+-----------------------------+
-     |
-     v
-+-----------------------------+
-| FastAPI routing             |
-| (path match, param extract) |
-+-----------------------------+
-     |
-     v
-+-----------------------------+
-| Pydantic validation         |  -- fails --> RequestValidationError (422)
-+-----------------------------+
-     |
-     v
-+-----------------------------+
-| Dependency resolution       |  -- fails --> HTTPException or domain exc
-+-----------------------------+
-     |
-     v
-+-----------------------------+
-| Route handler               |  -- raises domain exception
-+-----------------------------+
-          |
-          | exception propagates up call stack
-          v
-+-----------------------------+
-| Exception handler registry  |  registered with @app.exception_handler
-| (reverse-registration order)|
-|   UserNotFoundError  -> 404 |
-|   QuotaExceededError -> 429 |
-|   AppError           -> 500 |
-|   HTTPException      -> ... |
-|   Exception          -> 500 |
-+-----------------------------+
-     |
-     v
-+-----------------------------+
-| JSONResponse / ProblemDetail|
-+-----------------------------+
-     |
-     v
-HTTP Response
-```
+
+Three independent failure sources — validation, dependency resolution, and the route handler
+itself — all funnel into the same exception handler registry, which is why one envelope shape
+can cover every error path shown here.
 
 ### 5.2 Layered error translation
 
-```
-Repository layer          Service layer          API layer
------------------         -------------          ---------
-find() returns None  -->  raise UserNotFoundError  -->  exception_handler
-                                                         returns 404 JSON
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-DB constraint error  -->  raise DuplicateEmailError --> exception_handler
-                                                         returns 409 JSON
+    subgraph Repo["Repository Layer"]
+        direction TB
+        R1(["find() returns None"])
+        R2(["DB constraint error"])
+        R3(["Network timeout"])
+    end
+    subgraph Svc["Service Layer"]
+        direction TB
+        S1("raise UserNotFoundError")
+        S2("raise DuplicateEmailError")
+        S3("raise ExternalServiceError")
+    end
+    subgraph Api["API Layer"]
+        direction TB
+        A1(["exception_handler<br/>to 404 JSON"])
+        A2(["exception_handler<br/>to 409 JSON"])
+        A3(["exception_handler<br/>to 502 JSON"])
+    end
 
-Network timeout      -->  raise ExternalServiceError -> exception_handler
-                                                         returns 502 JSON
+    R1 --> S1 --> A1
+    R2 --> S2 --> A2
+    R3 --> S3 --> A3
+
+    class R1,R2,R3 lossN
+    class S1,S2,S3 mathOp
+    class A1,A2,A3 io
 ```
+
+Each layer has exactly one job: the repository detects the failure, the service translates it
+into a typed exception, and the API layer's exception handler shapes the final status code and
+body.
 
 ### 5.3 Consistent error envelope
 
@@ -418,6 +456,32 @@ and raise `UserNotFoundError(AppError)`, the `AppError` handler fires even if th
 specific `UserNotFoundError` handler.
 
 Practical consequence: you get subclass dispatch for free via Python's MRO.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Raise(["UserNotFoundError<br/>raised"]) --> Own{"Handler registered<br/>for UserNotFoundError?"}
+    Own -->|"yes"| RunOwn("Run UserNotFoundError<br/>handler")
+    Own -->|"no, walk MRO up"| Parent{"Handler registered<br/>for AppError?"}
+    Parent -->|"yes"| RunParent("Run AppError<br/>handler")
+    Parent -->|"no, walk MRO up"| Backstop("Run Exception<br/>backstop handler")
+
+    class Raise io
+    class Own,Parent mathOp
+    class RunOwn,RunParent train
+    class Backstop lossN
+```
+
+Starlette walks the MRO, not registration order — `UserNotFoundError(AppError)` checks for its
+own handler first and only falls back to the `AppError` handler, and ultimately the bare
+`Exception` backstop, if no more specific handler is registered.
 
 ```python
 # This setup handles all AppError subclasses with one handler:
@@ -965,32 +1029,44 @@ errors that customer engineering teams can handle programmatically.
 
 #### Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Req([Request]) --> RIM("RequestIDMiddleware<br/>generates UUID,<br/>stores in request.state")
+    RIM --> Auth("AuthMiddleware<br/>raises TenantNotFoundError /<br/>AuthenticationError")
+    Auth --> Routing("FastAPI routing + Pydantic<br/>raises RequestValidationError")
+    Routing --> Handler("Route handler<br/>calls services;<br/>services raise domain exceptions")
+    Handler --> Registry
+
+    subgraph Registry["Exception handler registry"]
+        direction TB
+        H1("RequestValidationError<br/>to 422 + envelope")
+        H2("AuthenticationError<br/>to 401 + envelope")
+        H3("AuthorizationError<br/>to 403 + envelope")
+        H4("QuotaExceededError<br/>to 429 + envelope + Retry-After")
+        H5("ResourceNotFoundError<br/>to 404 + envelope")
+        H6("ConflictError<br/>to 409 + envelope")
+        H7("AppError catch-all<br/>to 500 + generic message + log")
+        H8("Exception backstop<br/>to 500 + generic message + log")
+    end
+
+    class Req io
+    class RIM base
+    class Auth,Routing mathOp
+    class Handler train
+    class H1,H2,H3,H4,H5,H6,H7,H8 mathOp
 ```
-Request
-  |
-  v
-[RequestIDMiddleware]         -- generates UUID, stores in request.state.request_id
-  |
-  v
-[AuthMiddleware]              -- raises TenantNotFoundError or AuthenticationError
-  |
-  v
-[FastAPI routing + Pydantic]  -- raises RequestValidationError on bad input
-  |
-  v
-[Route handler]               -- calls services; services raise domain exceptions
-  |
-  v
-[Exception handler registry]
-  |- RequestValidationError -> 422 + envelope
-  |- AuthenticationError    -> 401 + envelope
-  |- AuthorizationError     -> 403 + envelope
-  |- QuotaExceededError     -> 429 + envelope + Retry-After header
-  |- ResourceNotFoundError  -> 404 + envelope
-  |- ConflictError          -> 409 + envelope
-  |- AppError (catch-all)   -> 500 + generic message + log
-  |- Exception (backstop)   -> 500 + generic message + log
-```
+
+Every one of the eight registered exception types resolves to the same envelope shape with a
+request-scoped `instance` id, so the only thing that varies per error is the status code and
+(for quota errors) the `Retry-After` header.
 
 #### Implementation
 
