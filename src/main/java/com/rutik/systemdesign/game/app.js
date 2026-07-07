@@ -4636,14 +4636,20 @@ function mdRender(src) {
   let qaPending = false;                            // true right after a bold question paragraph
   while (i < lines.length) {
     const line = lines[i];
-    const fence = line.match(/^```(.*)$/);
+    const fence = line.match(/^(\s*)```(.*)$/);
     if (fence) {                                   // fenced code / ASCII diagram
-      const lang = fence[1].trim();
+      const indent = fence[1].length;              // fences indented under a list marker (§10/§14 BROKEN→FIX)
+      const lang = fence[2].trim();
+      // Close only on a fence indented no more than the opener. For column-0 openers
+      // this is identical to the old `^```` rule, so an ASCII diagram that *shows*
+      // indented ```lang fences as literal content is never split early.
+      const isClose = (l) => { const m = l.match(/^(\s*)```/); return !!m && m[1].length <= indent; };
       const body = [];
       i++;
-      while (i < lines.length && !/^```/.test(lines[i])) { body.push(lines[i]); i++; }
+      while (i < lines.length && !isClose(lines[i])) { body.push(lines[i]); i++; }
       i++;                                         // skip closing fence
-      const raw = body.join("\n");
+      const strip = new RegExp(`^ {0,${indent}}`); // drop the opener's indent, keep relative indentation
+      const raw = body.map((l) => l.replace(strip, "")).join("\n");
       // Mermaid fences: wrap in a div that mermaid.js will render after page load.
       if (lang === "mermaid") { out.push(`<div class="mermaid">${esc(raw)}</div>`); qaPending = false; continue; }
       // Known languages -> code highlighter; otherwise diagram highlighter when it
@@ -4674,19 +4680,28 @@ function mdRender(src) {
       out.push(`<blockquote>${mdInline(body.join(" "))}</blockquote>`);
       qaPending = false; continue;
     }
-    if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
-      const ordered = /^\s*\d+\.\s+/.test(line), tag = ordered ? "ol" : "ul";
+    const listOpen = line.match(/^\s*(\d+)\.\s+/) || line.match(/^\s*([-*+])\s+/);
+    if (listOpen) {
+      const ordered = /\d/.test(listOpen[1]), tag = ordered ? "ol" : "ul";
+      const startNum = ordered ? parseInt(listOpen[1], 10) : 1;  // resume numbering after an interrupting code block
       let items = "";
       while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])) {
-        items += `<li>${mdInline(lines[i].replace(/^\s*([-*+]|\d+\.)\s+/, ""))}</li>`; i++;
+        const parts = [lines[i].replace(/^\s*([-*+]|\d+\.)\s+/, "")]; i++;
+        // absorb wrapped continuation lines (indented, non-blank, not a new marker/fence)
+        while (i < lines.length && /^\s+\S/.test(lines[i]) &&
+               !/^\s*([-*+]|\d+\.)\s+/.test(lines[i]) && !/^\s*```/.test(lines[i])) {
+          parts.push(lines[i].trim()); i++;
+        }
+        items += `<li>${mdInline(parts.join(" "))}</li>`;
       }
-      out.push(`<${tag}>${items}</${tag}>`);
+      const startAttr = (ordered && startNum !== 1) ? ` start="${startNum}"` : "";
+      out.push(`<${tag}${startAttr}>${items}</${tag}>`);
       qaPending = false; continue;
     }
     if (/^\s*$/.test(line)) { i++; continue; }
     const para = [];
     while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^(#{1,6})\s/.test(lines[i]) &&
-           !/^```/.test(lines[i]) && !/^>\s?/.test(lines[i]) &&
+           !/^\s*```/.test(lines[i]) && !/^>\s?/.test(lines[i]) &&
            !/^\s*([-*+]|\d+\.)\s+/.test(lines[i]) && !/^(---+|\*\*\*+)\s*$/.test(lines[i])) {
       para.push(lines[i]); i++;
     }
