@@ -883,53 +883,53 @@ __global__ void producerConsumerFixed(float* data, float* out) {
 
 ## 12. Interview Questions with Answers
 
-**Why is dynamic parallelism often slower than a well-designed flat grid?**
+**Q: Why is dynamic parallelism often slower than a well-designed flat grid?**
 Every child launch pays several microseconds of device-runtime bookkeeping
 overhead regardless of how little work it does, so unless each child launch
 amortizes that cost over substantial work, the accumulated overhead across
 many small child grids exceeds a single flat, worst-case-sized grid's cost.
 
-**What happens if every thread of a large parent grid launches its own tiny
+**Q: What happens if every thread of a large parent grid launches its own tiny
 child kernel?** The per-launch bookkeeping cost (roughly 3-8 microseconds)
 multiplies by the thread count — for a million-thread parent grid that is
 several seconds of pure launch overhead before any child does useful work,
 almost always worse than inlining the child's logic into a flat grid-stride
 loop.
 
-**What is the CUDA Dynamic Parallelism nesting-depth limit, and why does it
+**Q: What is the CUDA Dynamic Parallelism nesting-depth limit, and why does it
 matter?** The device runtime defaults to a maximum of 24 nested-launch levels
 (`cudaLimitDevRuntimeSyncDepth`) because each level reserves device memory up
 front for its synchronization state, so deep recursion either hits the
 ceiling and fails or consumes memory proportional to the configured depth.
 
-**What is `cudaLimitDevRuntimePendingLaunchCount`, and what happens if you
+**Q: What is `cudaLimitDevRuntimePendingLaunchCount`, and what happens if you
 exceed it?** It caps how many child grids can be concurrently pending at
 once (default 2048); exceeding it returns
 `cudaErrorLaunchPendingCountExceeded` rather than silently queuing further
 launches, so an unchecked error here often surfaces as a confusing
 downstream failure.
 
-**Why do persistent kernels risk hanging if you don't size the grid to
+**Q: Why do persistent kernels risk hanging if you don't size the grid to
 actual occupancy?** A persistent kernel's blocks never complete on their own
 — they loop until the queue drains — so if the launch has more blocks than
 the device can run simultaneously, the excess blocks queue forever behind a
 resident set that never yields, deadlocking any grid-wide assumption
 (busy-wait signaling, `grid.sync()`).
 
-**What is the deprecation status of CDP1 versus CDP2, and what build flags
+**Q: What is the deprecation status of CDP1 versus CDP2, and what build flags
 does dynamic parallelism require?** CDP1 (explicit per-thread
 `cudaDeviceSynchronize()`, CUDA 5.0) has been deprecated since CUDA 11.6 and
 removed from CUDA 12.0 in favor of the simpler, faster CDP2 model shipped in
 CUDA 10.1; either model requires compiling with `nvcc -rdc=true` and linking
 `libcudadevrt`.
 
-**How does a child grid launch differ from a host launch in its
+**Q: How does a child grid launch differ from a host launch in its
 synchronization semantics?** A child launch is asynchronous relative to the
 launching thread and, under CDP2, is implicitly synchronized only when the
 entire parent grid completes — code written against CDP1's per-thread
 `cudaDeviceSynchronize()` expectations must be re-audited for CDP2.
 
-**What is a persistent kernel, and how does it avoid relaunch overhead?**
+**Q: What is a persistent kernel, and how does it avoid relaunch overhead?**
 A
 persistent kernel launches exactly once, sized to the blocks the device can
 run simultaneously (`cudaOccupancyMaxActiveBlocksPerMultiprocessor` x SM
@@ -937,65 +937,65 @@ count), and each resident block loops pulling work from a shared queue via
 `atomicAdd` until drained — replacing many launches with cheap atomics and
 loop iterations.
 
-**How does a grid-stride loop generalize into a persistent work-queue
+**Q: How does a grid-stride loop generalize into a persistent work-queue
 loop?** A grid-stride loop advances a fixed index by `blockDim.x *
 gridDim.x` over a known-size array; grid-stride persistence instead has each
 block atomically claim the next chunk from a shared counter each iteration,
 so the same resident blocks can drain a queue whose size may not even be
 known at launch time.
 
-**What is required to use grid-wide synchronization (`grid.sync()`) in a
+**Q: What is required to use grid-wide synchronization (`grid.sync()`) in a
 persistent kernel?** The kernel must be launched via
 `cudaLaunchCooperativeKernel` rather than `<<<...>>>()`, with a grid size
 that does not exceed the device's resident-block capacity, since `grid.sync()`
 is a true barrier that can only complete if every block is actually running.
 
-**Why do you need `__threadfence()` in a producer-consumer kernel instead of
+**Q: Why do you need `__threadfence()` in a producer-consumer kernel instead of
 just `__syncthreads()`?** `__syncthreads()` only orders memory within one
 thread block; a producer and consumer in different blocks need
 `__threadfence()` to guarantee a data write is visible to every SM before a
 paired flag write or read is observed.
 
-**What is the difference between a memory fence and a barrier here?**
+**Q: What is the difference between a memory fence and a barrier here?**
 A
 barrier (`__syncthreads()`, `grid.sync()`) makes every participant wait until
 all reach the same point; a fence (`__threadfence()`) makes no thread wait —
 it only orders one thread's own writes, which is why one-directional
 producer-to-consumer hand-offs need a fence, not a barrier.
 
-**What is adaptive mesh refinement, and why does dynamic parallelism map to
+**Q: What is adaptive mesh refinement, and why does dynamic parallelism map to
 it naturally?** AMR increases grid resolution only where a local error
 estimate is high (shock fronts, turbulence), and it fits CDP because the
 refinement decision and refined computation are both expressible as
 parent/child kernels, with each child handling an entire refined region
 rather than one output value.
 
-**When would you prefer CUDA graphs over dynamic parallelism or a persistent
+**Q: When would you prefer CUDA graphs over dynamic parallelism or a persistent
 kernel?** When the sequence of kernels is static and known ahead of time,
 even if argument values differ per run — graphs capture that sequence once
 and replay it for a fraction of a microsecond of host overhead regardless of
 node count.
 
-**What is a megakernel, and why do some ray tracers and inference engines
+**Q: What is a megakernel, and why do some ray tracers and inference engines
 use one?** A megakernel fuses many logically separate stages (intersection,
 shading, ray spawning; or QKV projection, attention, softmax) into one large,
 often persistent kernel with internal work queues per stage, eliminating
 both launch overhead and inter-stage HBM round-trips.
 
-**Can Python frameworks like Numba, CuPy, or Triton issue device-side kernel
+**Q: Can Python frameworks like Numba, CuPy, or Triton issue device-side kernel
 launches?** No — the mainstream Python GPU stack targets the host-launch
 model only; Python code needing AMR-like recursion either issues successive
 host-side launches per level or calls a hand-written CUDA C++ persistent
 kernel through a `RawKernel`/extension.
 
-**How would you debug a persistent kernel that appears to hang?**
+**Q: How would you debug a persistent kernel that appears to hang?**
 Check the
 launch sizing first (resident blocks must not exceed occupancy capacity),
 then check every cross-block signal for a missing `__threadfence()` or a
 non-atomic flag the compiler cached — `compute-sanitizer`'s
 `synccheck`/`racecheck` and Nsight Compute's occupancy view isolate which.
 
-**Why can a child grid's occupancy be worse than its parent's?**
+**Q: Why can a child grid's occupancy be worse than its parent's?**
 Child grids
 launched by dynamic parallelism are often small, and a small grid frequently
 cannot supply enough resident warps per SM to hide memory latency the way a

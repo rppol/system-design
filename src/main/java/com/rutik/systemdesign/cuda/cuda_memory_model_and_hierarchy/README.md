@@ -709,58 +709,58 @@ roofline — see the full guided-analysis workflow in `../profiling_and_performa
 
 ## 12. Interview Questions with Answers
 
-**Why is "local memory" not actually fast, despite the name suggesting it's private and close to the thread?**
+**Q: Why is "local memory" not actually fast, despite the name suggesting it's private and close to the thread?**
 "Local" describes scope (private per-thread), not speed or physical location. Local memory is carved out of the same off-chip global DRAM as global memory, so a local-memory access pays the same ~400-800 cycle latency as an uncached global access — the name is a scope label, not a performance guarantee, and this mismatch is the single most common trap in this module.
 
-**What causes a per-thread array to spill from registers into local memory?**
+**Q: What causes a per-thread array to spill from registers into local memory?**
 Two triggers: the array is indexed by a runtime value the compiler cannot resolve at compile time, or its total size exceeds the per-thread register budget. That budget is shared across all resident threads on the SM, so fix a spill by shrinking the per-thread footprint, unrolling with compile-time indices, or — for shared working sets — moving the data to actual `__shared__` memory instead.
 
-**Walk through the memory-latency numbers from fastest to slowest.**
+**Q: Walk through the memory-latency numbers from fastest to slowest.**
 Registers are ~1 cycle, shared memory/L1 is ~20-30 cycles, the L2 cache is ~200 cycles, and global memory/HBM is ~400-800 cycles — each level is roughly an order of magnitude slower than the one above it. Local memory shares global memory's ~400-800 cycle latency because it is physically the same DRAM.
 
-**What is the difference in scope and lifetime between shared and global memory?**
+**Q: What is the difference in scope and lifetime between shared and global memory?**
 Shared memory is scoped to a single block and dies when that block retires, while global memory is scoped to the whole device and persists for the life of the allocation. This is why cross-block communication must go through global memory (or a grid-wide primitive), not shared memory — a shared-memory tile in one block simply does not exist for another block to read.
 
-**What does `__restrict__` actually do, and can it cause a bug?**
+**Q: What does `__restrict__` actually do, and can it cause a bug?**
 It tells the compiler a pointer does not alias any other pointer parameter, letting it keep loaded values in registers across reuses and route eligible reads through the read-only cache. It is a promise, not an enforced contract — marking two pointers that actually do overlap as `__restrict__` produces silent undefined behavior (wrong numbers), not a compile error.
 
-**Is Unified Virtual Addressing (UVA) the same thing as Unified Memory?**
+**Q: Is Unified Virtual Addressing (UVA) the same thing as Unified Memory?**
 No — UVA is a static addressing scheme (since CUDA 4.0) that puts host and device pointers into one virtual address range so a generic pointer resolves correctly. Unified Memory (`cudaMallocManaged`) is a different, page-migrating abstraction with real first-touch and page-fault costs; UVA never makes any access faster, it only unifies the pointer arithmetic, not the hardware backing it.
 
-**How big is the register file per SM, and why does that number matter?**
+**Q: How big is the register file per SM, and why does that number matter?**
 64K 32-bit registers per SM (256 KB) is the number, and it matters because that budget is divided across every thread resident on the SM at once. A kernel using more registers per thread reduces how many threads (and warps) can be resident simultaneously, directly capping occupancy — the register side of the occupancy tradeoff covered fully in `../occupancy_and_launch_configuration/`.
 
-**How much shared memory is available per SM, and is it a fixed, separate pool from L1?**
+**Q: How much shared memory is available per SM, and is it a fixed, separate pool from L1?**
 Up to 48-228 KB per SM depending on generation, and on most architectures it is not a separate pool from L1 but a configurable split of the same on-chip SRAM. `cudaFuncAttributePreferredSharedMemoryCarveout` lets a kernel request more of one or the other, but a large shared-memory carveout for one kernel reduces the L1 available to it and to co-resident kernels.
 
-**Why is a constant-memory read only fast when every thread in the warp reads the same address?**
+**Q: Why is a constant-memory read only fast when every thread in the warp reads the same address?**
 The constant cache's hardware fast path is a single broadcast fetch that serves all 32 warp lanes in one cycle-equivalent access, but only when every lane requests the same address. If lanes diverge to different addresses, the accesses serialize one at a time, degrading toward the latency of an uncached global read — which is why constant memory fits kernel-wide parameters, not per-thread-varying data.
 
-**What is the practical difference between texture memory and a `const __restrict__` global pointer, given both are read-only caches?**
+**Q: What is the practical difference between texture memory and a `const __restrict__` global pointer, given both are read-only caches?**
 Texture memory's cache is tuned for 2D/3D spatial locality with hardware interpolation and boundary handling, which benefits image/stencil lookups that a linear scan cannot capture. `const __restrict__` gives the same general read-only caching benefit for ordinary linear access patterns without the API overhead of a texture object — reserve texture objects for when spatial-locality or interpolation features are actually needed.
 
-**Why does over-sized shared-memory usage hurt performance even though shared memory itself is fast?**
+**Q: Why does over-sized shared-memory usage hurt performance even though shared memory itself is fast?**
 Shared memory is a fixed per-SM budget (up to 48-228 KB) shared across every block resident on that SM at once. A kernel requesting a large tile per block can leave room for only one resident block, collapsing the extra-block-level parallelism the scheduler needs to hide remaining memory latency — fast-per-access does not mean free-in-aggregate.
 
-**How does a global-memory pointer differ physically from a local-memory pointer, given both hit the same DRAM?**
+**Q: How does a global-memory pointer differ physically from a local-memory pointer, given both hit the same DRAM?**
 They don't differ physically — both route through the same off-chip HBM and the same L1/L2 caching path. The difference is purely in scope: a global pointer's address range is visible to every thread across every block, while a local-memory range is private per thread — precisely why "local" is a scope word, not a speed word.
 
-**Give an example of when reads from the same array should go through global memory versus shared memory in the same kernel.**
+**Q: Give an example of when reads from the same array should go through global memory versus shared memory in the same kernel.**
 In a tiled matrix multiply, the initial load of an operand tile must come from global memory because that is where the full matrices live. Once the tile is staged into `__shared__` memory, every subsequent reuse by other threads in the block reads shared memory instead, turning N global reads per element into one global read shared across the whole tile.
 
-**What is the cached-vs-uncached distinction between the six memory spaces?**
+**Q: What is the cached-vs-uncached distinction between the six memory spaces?**
 Registers are the fastest tier and are not "cached" in the traditional sense — they are the storage itself. Shared memory is on-chip SRAM with no further cache beneath it, global and local memory are backed by the L1/L2 hardware caches, constant memory has its own dedicated 64 KB cache, and texture memory has its own cache tuned for spatial locality — knowing which cache backs a space explains why Nsight Compute hit-rate metrics differ per space.
 
-**Why might `nvcc --ptxas-options=-v` be the first tool to reach for when a kernel is unexpectedly slow?**
+**Q: Why might `nvcc --ptxas-options=-v` be the first tool to reach for when a kernel is unexpectedly slow?**
 It prints the exact register count and any spilled local-memory bytes per thread at compile time — the cheapest way to catch a register spill before a full profiling session. A nonzero "spill stores/loads" count in that output is a direct signal that a variable meant for registers is paying global-memory latency instead.
 
-**What does the `volatile` qualifier do to a device pointer, and when would you actually need it?**
+**Q: What does the `volatile` qualifier do to a device pointer, and when would you actually need it?**
 It forces every read and write to go to memory rather than letting the compiler reuse a previously loaded register value. This matters when another thread or the host may change the value between your reads, such as a spin-wait flag another block sets — most kernels never need it because CUDA's default single-thread caching assumptions already hold for data no other thread concurrently modifies.
 
-**How does global-memory transaction granularity (the 128-byte L1 line / 32-byte L2 sector) connect to why coalescing matters?**
+**Q: How does global-memory transaction granularity (the 128-byte L1 line / 32-byte L2 sector) connect to why coalescing matters?**
 A warp's 32 threads each requesting 4 contiguous bytes sums to exactly 128 bytes, matching one L1 cache line, so a fully coalesced access is serviced in a single transaction. A strided or scattered pattern spans multiple lines per warp, issuing several partial transactions that waste the excess bytes each one fetches — the full coalescing optimization discipline is in `../memory_coalescing_and_access_patterns/`.
 
-**Why can shared memory still be slow even though its raw latency (~20-30 cycles) is an order of magnitude better than global memory?**
+**Q: Why can shared memory still be slow even though its raw latency (~20-30 cycles) is an order of magnitude better than global memory?**
 Because shared memory is organized into 32 banks, and when multiple threads in a warp hit different addresses in the *same* bank, those accesses serialize instead of completing in parallel. A bank conflict can erase most of the latency advantage shared memory otherwise provides — the full bank layout, conflict patterns, and padding fix are covered in `../shared_memory_and_bank_conflicts/`.
 
 ---

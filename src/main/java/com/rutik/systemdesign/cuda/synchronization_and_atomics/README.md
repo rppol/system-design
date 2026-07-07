@@ -761,7 +761,7 @@ instead of atomics, when determinism is a requirement).
 
 ## 12. Interview Questions with Answers
 
-**What does `__syncthreads()` actually guarantee?**
+**Q: What does `__syncthreads()` actually guarantee?**
 It guarantees every
 thread in the block reaches that exact call before any thread proceeds past
 it, and that every shared/global memory write issued before the barrier by
@@ -770,7 +770,7 @@ synchronize threads in other blocks, and it is not merely a performance
 hint — skipping it when a later read depends on an earlier write is a
 correctness bug, not a slowdown.
 
-**Why does a divergent `__syncthreads()` deadlock the kernel?**
+**Q: Why does a divergent `__syncthreads()` deadlock the kernel?**
 Because the
 barrier requires every thread in the block to arrive, and if a branch lets
 some threads skip the call entirely, the threads that did call it wait for
@@ -778,28 +778,28 @@ arrivals that will never come. The fix is to make the barrier call
 unconditional and move any divergent logic to before or after it, never
 around it.
 
-**What is a data race in a CUDA kernel, and how does it usually show up?**
+**Q: What is a data race in a CUDA kernel, and how does it usually show up?**
 It is a read of shared or global memory that can execute before the write
 it depends on has completed, because no barrier or fence enforces the
 ordering. It typically shows up as intermittently wrong output — correct
 on some runs or GPUs, silently wrong on others — which is exactly why it is
 dangerous and why `compute-sanitizer --tool racecheck` exists.
 
-**Why is a single global `atomicAdd` counter hit by thousands of threads so
+**Q: Why is a single global `atomicAdd` counter hit by thousands of threads so
 slow?** Because every atomic on the same address must execute one at a
 time — the hardware serializes them regardless of how many threads or SMs
 are otherwise free, turning parallel work into a queue. A directly
 contended global counter can run 10-100x slower than the same total update
 count restructured through privatization or a tree reduction.
 
-**What's the difference between `atomicAdd` and `atomicCAS`?**
+**Q: What's the difference between `atomicAdd` and `atomicCAS`?**
 `atomicAdd` performs one specific indivisible operation (add-and-return-old
 value), while `atomicCAS` (compare-and-swap) is the general-purpose
 primitive every other atomic can be built from via a read-compute-CAS retry
 loop. Use CAS when you need an atomic update with no dedicated intrinsic —
 for example, atomic float-max via reinterpreting bit patterns.
 
-**What does `__threadfence()` do that `__syncthreads()` does not?**
+**Q: What does `__threadfence()` do that `__syncthreads()` does not?**
 It
 orders the visibility of the calling thread's prior memory writes relative
 to other threads' future reads, at device scope, without requiring any
@@ -807,21 +807,21 @@ other thread to reach the same point — it is not a rendezvous. Pairing it
 with an atomic completion counter is the standard way to build a
 "last-block-detects-completion" cross-block handshake.
 
-**What's the difference between `__threadfence_block()`,
+**Q: What's the difference between `__threadfence_block()`,
 `__threadfence()`, and `__threadfence_system()`?** They order write
 visibility at progressively wider scopes — within the issuing thread's
 block, across the whole device, and including host memory and peer devices
 over PCIe/NVLink, respectively. Each wider scope costs more, so pick the
 narrowest one that satisfies your actual cross-thread dependency.
 
-**Does a memory fence guarantee anything about execution order?**
+**Q: Does a memory fence guarantee anything about execution order?**
 No — a
 fence only orders when writes become *visible* to other threads, not when
 the issuing thread's own instructions execute; it never waits for any
 other thread's progress the way a barrier does. Confusing "visible" with
 "waited for" is the most common source of fence-related bugs.
 
-**What is privatization, and why does it fix atomic contention?**
+**Q: What is privatization, and why does it fix atomic contention?**
 It gives
 each block (or warp) a private, low-contention copy of the shared data
 structure — typically in shared memory — that absorbs the bulk of the
@@ -830,14 +830,14 @@ atomic per block instead of one per thread. It turns "N threads contend on
 one global address" into "N threads contend on a cheap shared address, and
 only (N / threads-per-block) atomics ever touch the expensive global one."
 
-**What is warp-aggregated atomics?**
+**Q: What is warp-aggregated atomics?**
 Each warp first combines its lanes'
 contributions locally (via shuffle/ballot) into a single value, then issues
 one atomic per warp instead of up to 32 — cutting global atomic traffic by
 close to 32x for that warp. It is the finest-grained version of the same
 idea as privatization, applied at warp scope instead of block scope.
 
-**Why is an `atomicAdd` on shared memory cheaper than the same call on
+**Q: Why is an `atomicAdd` on shared memory cheaper than the same call on
 global memory under contention?** Shared memory is on-chip with latency in
 the tens of cycles, while a contended global-memory atomic must arbitrate
 through the memory controller across a ~400-800 cycle round trip per
@@ -845,7 +845,7 @@ serialized update. Moving the hot address from global to shared memory
 does not remove the serialization, but it makes every serialized step far
 cheaper.
 
-**What is `cuda::atomic` / `cuda::atomic_ref`, and why use it over the raw
+**Q: What is `cuda::atomic` / `cuda::atomic_ref`, and why use it over the raw
 intrinsics?** It is the CUDA C++ memory model's libcu++ type, bringing
 C++20 `std::atomic`-style explicit memory order (`relaxed`,
 `acquire`/`release`, `acq_rel`, `seq_cst`) and `thread_scope`
@@ -853,7 +853,7 @@ C++20 `std::atomic`-style explicit memory order (`relaxed`,
 implicit, easy-to-misplace `__threadfence()` calls with an ordering
 annotation attached directly to the atomic operation that needs it.
 
-**What do acquire and release mean in this memory model?**
+**Q: What do acquire and release mean in this memory model?**
 A `release`
 store guarantees all of the issuing thread's prior writes are visible to
 any thread that later performs a matching `acquire` load of the same
@@ -862,14 +862,14 @@ published" side of that same handshake. Together they express a
 publish/subscribe dependency explicitly, instead of relying on informal
 fence placement.
 
-**How does cooperative-groups `this_thread_block().sync()` relate to
+**Q: How does cooperative-groups `this_thread_block().sync()` relate to
 `__syncthreads()`?** It provides the exact same block-wide barrier
 guarantee, just wrapped in a composable `cg::thread_block` object instead
 of a bare intrinsic call. Cooperative groups' real value add is beyond the
 block — `cg::grid_group::sync()` offers a grid-wide barrier that
 `__syncthreads()` has no way to express at all.
 
-**Can atomics or barriers span the whole grid, not just one block?**
+**Q: Can atomics or barriers span the whole grid, not just one block?**
 `__syncthreads()` cannot; a grid-wide rendezvous requires either a
 cooperative-groups `grid_group::sync()` under a cooperative launch, or
 splitting the work across two kernel launches and relying on the implicit
@@ -877,7 +877,7 @@ barrier at the launch boundary. Atomics, by contrast, already work at
 device (grid) scope by default — the address, not the operation, defines
 the scope.
 
-**Why can atomic-order-dependent floating-point summation be
+**Q: Why can atomic-order-dependent floating-point summation be
 nondeterministic across runs?** Because floating-point addition is not
 associative, and `atomicAdd` commits contending threads' updates in
 whatever order the hardware happens to schedule them, which can vary
@@ -886,14 +886,14 @@ between launches. See
 for when this matters and how a fixed-order tree reduction restores
 bit-reproducibility at the cost of the flexibility atomics give you.
 
-**What happens if you skip the atomic and just do a plain read-modify-write
+**Q: What happens if you skip the atomic and just do a plain read-modify-write
 from multiple threads on the same address?** Two threads can both read the
 same old value, both compute the same "old + 1", and both write it back —
 one increment is silently lost, with no error or warning. This is exactly
 the failure mode atomics exist to prevent, and it is why "just increment a
 counter" is never safe across threads without one.
 
-**What tool would you use to catch a missing barrier or an atomic you
+**Q: What tool would you use to catch a missing barrier or an atomic you
 forgot, before it ships?** `compute-sanitizer` with `--tool racecheck`
 flags shared-memory races (the missing-barrier class of bug), and
 `--tool synccheck` flags illegal/divergent barrier usage — run both on

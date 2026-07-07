@@ -741,7 +741,7 @@ framework in full depth.
 
 ## 12. Interview Questions with Answers
 
-**Why is the naive interleaved-addressing reduction (`if (tid % (2*s) == 0)`) slow?**
+**Q: Why is the naive interleaved-addressing reduction (`if (tid % (2*s) == 0)`) slow?**
 It is both warp-divergent and bank-conflicted. The modulo test leaves active threads
 scattered throughout every warp instead of packed contiguously, forcing the warp
 scheduler to serialize active and inactive lanes at every step, and the growing
@@ -749,7 +749,7 @@ stride `s` causes multiple active threads to map to the same shared-memory bank 
 the loop progresses. Sequential addressing (`if (tid < s)`) fixes both defects with
 a one-line change to the loop bounds and index test.
 
-**What does sequential addressing change, mechanically, versus interleaved
+**Q: What does sequential addressing change, mechanically, versus interleaved
 addressing?** It swaps the loop and index test so active threads stay a contiguous,
 warp-aligned prefix at every step instead of a modulo-scattered set. Concretely,
 `for (s=1; s<blockDim.x; s*=2) if (tid % (2*s)==0)` becomes
@@ -757,7 +757,7 @@ warp-aligned prefix at every step instead of a modulo-scattered set. Concretely,
 pattern becomes unit-stride within the active range, removing the bank conflicts
 that grow with `s` in the naive version.
 
-**Why does a global-atomic histogram collapse under contention, and what fixes
+**Q: Why does a global-atomic histogram collapse under contention, and what fixes
 it?** Every thread's `atomicAdd` targets one of a small number of global-memory
 bins, so threads across the entire grid that land in the same bin serialize against
 each other. With 256 bins and millions of threads, average contention per bin can
@@ -766,21 +766,21 @@ sub-histogram (fast, block-local atomics), then merges into the global histogram
 with exactly one atomic per bin per block, confining contention to a single
 block's threads.
 
-**What is the complexity difference between Hillis-Steele and Blelloch scan?**
+**Q: What is the complexity difference between Hillis-Steele and Blelloch scan?**
 Hillis-Steele is step-efficient at `O(log n)` sequential steps but work-inefficient
 at `O(n log n)` total additions, because every step processes up to `n` elements.
 Blelloch is work-efficient at `O(n)` total additions via an up-sweep/down-sweep
 structure, at the cost of `2 * log2(n)` steps instead of `log2(n)` — twice the
 rounds for roughly `log2(n)/2` times less total work at large `n`.
 
-**What is the difference between inclusive and exclusive scan?**
+**Q: What is the difference between inclusive and exclusive scan?**
 Inclusive scan's output at position `i` includes the input value at `i` itself
 (`out[i] = sum(in[0..i])`); exclusive scan's output at `i` excludes it
 (`out[i] = sum(in[0..i-1])`, `out[0] = identity`). Exclusive scan is what stream
 compaction and sort need, because the write offset for element `i` must be
 computed from everything *before* it, not including it.
 
-**When should you just call Thrust/CUB/CuPy instead of hand-rolling a reduction,
+**Q: When should you just call Thrust/CUB/CuPy instead of hand-rolling a reduction,
 scan, or histogram kernel?** Call the library whenever the operation stands alone
 with no adjacent computation to fuse it with. Thrust's `reduce`/`inclusive_scan`
 and CuPy's `sum`/`cumsum`/`histogram` dispatch CUB's architecture-tuned
@@ -789,21 +789,21 @@ hand-roll only when you need to fuse the pattern into a larger kernel to avoid a
 extra HBM round-trip, or when an interviewer is specifically testing whether you
 understand the mechanics.
 
-**What is the time and work complexity of a tree reduction?**
+**Q: What is the time and work complexity of a tree reduction?**
 A tree reduction over `n` elements takes `O(log n)` sequential steps and `O(n)`
 total work. The parallelism comes from collapsing what would be `n-1` sequential
 dependent additions into `log2(n)` sequential rounds (the tree depth), each round
 doing many additions in parallel while the total addition count stays `n-1`,
 matching a serial sum.
 
-**Concretely, what does a bank conflict look like in the naive interleaved
+**Q: Concretely, what does a bank conflict look like in the naive interleaved
 reduction?** Shared memory has 32 banks of 4 bytes each, and as the stride `s` in
 the naive loop grows, active threads increasingly map to the same bank modulo 32.
 At `s=16` with `blockDim.x=256`, groups of active threads collide 2-way on
 shared-memory banks, serializing what should be a single-cycle broadcast into
 multiple cycles.
 
-**How do you combine per-block partial reductions into one final value?**
+**Q: How do you combine per-block partial reductions into one final value?**
 Launch the reduction kernel once per block to produce one partial sum per block
 into a small output array. From there, either launch a second (smaller) reduction
 kernel over that array, or use a single atomic per block to accumulate directly
@@ -811,14 +811,14 @@ into a global result — the second approach trades a kernel-launch round-trip f
 small amount of atomic contention proportional to the (small) number of blocks,
 not the (large) number of threads.
 
-**Why is Hillis-Steele called "step-efficient" but not "work-efficient"?**
+**Q: Why is Hillis-Steele called "step-efficient" but not "work-efficient"?**
 "Step-efficient" refers to the number of sequential rounds (`log2(n)`, optimal for
 a parallel scan); "work-efficient" refers to total operations across all threads.
 Hillis-Steele does up to `n` additions at every one of its `log2(n)` steps, so
 total work is `n * log2(n)` — more total arithmetic than the theoretical minimum
 of `O(n)`, even though it uses the theoretically minimal number of steps.
 
-**What is the up-sweep/down-sweep structure of a Blelloch scan?**
+**Q: What is the up-sweep/down-sweep structure of a Blelloch scan?**
 Up-sweep builds a reduction tree in place (the same shape as a plain reduction,
 `n-1` additions total, `log2(n)` steps), leaving partial sums at power-of-two
 offsets; the root is then zeroed to seed an exclusive scan. Down-sweep traverses
@@ -826,7 +826,7 @@ the tree back down for another `log2(n)` steps, at each node swapping a partial 
 into its sibling's slot and adding — distributing the accumulated totals to their
 final output positions.
 
-**How exactly does histogram privatization avoid contention, step by step?**
+**Q: How exactly does histogram privatization avoid contention, step by step?**
 Each block first zeroes a `__shared__` sub-histogram sized to the bin count, then
 every thread in the block does `atomicAdd` against that block-local shared array
 while processing its assigned data. Contention is now scoped to one block's warps
@@ -835,7 +835,7 @@ sub-histogram into the global histogram with one `atomicAdd` per bin, so the tot
 number of global-memory atomics becomes `bins * numBlocks` instead of one per input
 element.
 
-**When does histogram privatization itself become a bottleneck?**
+**Q: When does histogram privatization itself become a bottleneck?**
 It stops helping once the bin count outgrows a per-block sub-histogram's shared-
 memory budget, or once bin count approaches thread count. Concretely, a per-block
 sub-histogram must fit within the SM's shared-memory budget (up to 228 KB on
@@ -844,14 +844,14 @@ privatization — a smaller warp-private layer merged into the block-private lay
 before the final global merge — which is what `cub::DeviceHistogram` implements
 internally.
 
-**How are reduction and scan related?**
+**Q: How are reduction and scan related?**
 Scan is a strict generalization of reduction that retains every intermediate
 partial sum instead of discarding all but the final one; the last element of an
 inclusive scan *is* the reduction result. Structurally, Blelloch's scan up-sweep
 phase is literally the reduction tree from §5 — scan reuses reduction's
 tree-building step and adds a down-sweep to recover the discarded partial sums.
 
-**Why might `cupy.sum` or `thrust::reduce` outperform a hand-rolled two-kernel
+**Q: Why might `cupy.sum` or `thrust::reduce` outperform a hand-rolled two-kernel
 reduction you write yourself?** Because they dispatch CUB's implementation, which
 already applies every rung of the optimization ladder and is re-tuned per compute
 capability by NVIDIA. That ladder runs sequential addressing, first-add-during-load,
@@ -860,7 +860,7 @@ cooperative groups — matching it by hand requires implementing and validating 
 seven rungs, which is exactly the depth covered in
 [`../case_studies/implement_high_performance_reduction.md`](../case_studies/implement_high_performance_reduction.md).
 
-**Does a GPU tree-reduction give the exact same floating-point result as a CPU
+**Q: Does a GPU tree-reduction give the exact same floating-point result as a CPU
 serial sum over the same data?** Not necessarily, because floating-point addition
 is not associative in finite precision. Reordering the additions — serial
 left-to-right on a CPU versus tree-paired on a GPU — changes accumulated rounding

@@ -722,7 +722,7 @@ CUDA_CHECK(cudaStreamSynchronize(stream)); // catches everything queued
 
 ## 12. Interview Questions with Answers
 
-**What is the difference between pinned and pageable host memory?**
+**Q: What is the difference between pinned and pageable host memory?**
 Pinned
 (page-locked) memory cannot be swapped or relocated by the OS, so the GPU's
 DMA engine can read it directly at full interconnect bandwidth; pageable
@@ -730,95 +730,95 @@ memory forces the CUDA driver to stage through an internal pinned buffer
 first, roughly halving achievable bandwidth and making the transfer
 effectively synchronous.
 
-**Why does a `cudaMemcpy` from pageable memory run at about half the
+**Q: Why does a `cudaMemcpy` from pageable memory run at about half the
 bandwidth of pinned memory?** The driver cannot let the DMA engine touch
 pageable memory directly because the OS could move or evict it mid-transfer,
 so it inserts a full-speed CPU `memcpy` into an internal pinned staging buffer
 before the actual DMA — that extra copy plus the serialization is where the
 roughly 2× bandwidth loss comes from.
 
-**Why does `cudaMemcpyAsync` require pinned memory to actually be
+**Q: Why does `cudaMemcpyAsync` require pinned memory to actually be
 asynchronous?** Only pinned memory can be handed to the DMA engine without a
 staging copy, so passing a pageable pointer to `cudaMemcpyAsync` forces the
 driver to fall back to a synchronous staged copy — the call still "succeeds"
 but silently gives up all overlap.
 
-**What happens if you forget to check the return value of an async CUDA
+**Q: What happens if you forget to check the return value of an async CUDA
 call?** The error is recorded internally by the driver but never raised at
 the call site, so execution continues with corrupted or garbage data and the
 failure typically surfaces as a wrong numerical result far from its actual
 cause; always follow async work with `cudaGetLastError()` and a synchronize.
 
-**What is Unified (Managed) memory and how does it decide when to move
+**Q: What is Unified (Managed) memory and how does it decide when to move
 data?** Unified Memory (`cudaMallocManaged`) exposes one pointer valid on
 both host and device, migrating pages on demand via a page fault the first
 time either processor touches an unmigrated page — 4 KB up to 2 MB per
 migration depending on architecture and access pattern.
 
-**Why would you call `cudaMemPrefetchAsync` on Unified Memory if migration
+**Q: Why would you call `cudaMemPrefetchAsync` on Unified Memory if migration
 already happens automatically?** Automatic migration is reactive — the
 kernel stalls on the fault before the page arrives — while
 `cudaMemPrefetchAsync` moves pages proactively before the kernel needs them,
 turning an unpredictable stall into a scheduled, overlappable async copy.
 
-**What does `cudaMemAdviseSetReadMostly` do and when is it useful?**
+**Q: What does `cudaMemAdviseSetReadMostly` do and when is it useful?**
 It hints
 that a memory range is read far more often than written, so the runtime
 replicates read-only copies of its pages across multiple accessing GPUs
 instead of migrating (and thrashing) a single copy back and forth — valuable
 for shared read-only weights or lookup tables in multi-GPU workloads.
 
-**What is zero-copy (mapped) memory, and why is it dangerous for data reused
+**Q: What is zero-copy (mapped) memory, and why is it dangerous for data reused
 across many kernel launches?** Zero-copy lets a kernel read pinned host
 memory directly over PCIe/NVLink without ever copying it into device memory,
 which is efficient for data touched once but disastrous for reused data
 because every single access pays interconnect latency instead of the much
 faster on-device HBM latency.
 
-**Why can over-pinning host memory hurt overall system performance?**
+**Q: Why can over-pinning host memory hurt overall system performance?**
 Page-locking memory removes it from the OS's pool of pages eligible for
 eviction or relocation, so pinning a large fraction of system RAM can starve
 other processes of swappable memory or force the OS into aggressive reclaim
 elsewhere on the host.
 
-**What is the actual bandwidth difference between PCIe Gen4 x16, PCIe Gen5
+**Q: What is the actual bandwidth difference between PCIe Gen4 x16, PCIe Gen5
 x16, and NVLink on an H100?** PCIe Gen4 x16 tops out around 32 GB/s, PCIe Gen5
 x16 around 64 GB/s, while NVLink on an H100 reaches roughly 900 GB/s
 aggregate — nearly 30× the PCIe Gen4 figure, which is why multi-GPU
 all-reduce traffic is routed over NVLink whenever possible.
 
-**Given a training loop stalling on host-to-device transfer, what two
+**Q: Given a training loop stalling on host-to-device transfer, what two
 changes give the highest-leverage fix?** Switch the input buffer to pinned
 memory (`pin_memory=True` in PyTorch, `cudaHostAlloc` in C++) and issue the
 copy asynchronously on its own stream so it overlaps with the previous
 iteration's compute — together these are usually a 1.5-2x wall-clock win for
 a five-line change.
 
-**What is the difference between `cudaMemcpyDeviceToDevice` and peer-to-peer
+**Q: What is the difference between `cudaMemcpyDeviceToDevice` and peer-to-peer
 (P2P) copy between two GPUs?** `cudaMemcpyDeviceToDevice` moves data within a
 single device's memory; a true cross-GPU copy either routes through the host
 (slow, no P2P) or, with P2P/NVLink enabled, transfers directly GPU-to-GPU
 without staging through host memory at all.
 
-**Does `cudaFree` block the calling thread?**
+**Q: Does `cudaFree` block the calling thread?**
 Yes — like `cudaMalloc`,
 `cudaFree` is synchronous and can also implicitly synchronize the device,
 which is why repeatedly allocating and freeing inside a hot loop is
 expensive; pre-allocate buffers once and reuse them instead.
 
-**Why is `cudaMallocPitch` used for 2D arrays instead of a flat
+**Q: Why is `cudaMallocPitch` used for 2D arrays instead of a flat
 `cudaMalloc`?** `cudaMallocPitch` pads each row to an alignment boundary
 optimal for coalesced access, returning a pitch (row stride in bytes) the
 kernel must use for indexing instead of assuming `width * sizeof(element)` —
 trading a small amount of extra memory for guaranteed-aligned row starts.
 
-**In PyTorch, why does `tensor.cuda(non_blocking=True)` sometimes silently
+**Q: In PyTorch, why does `tensor.cuda(non_blocking=True)` sometimes silently
 behave like a blocking call?** `non_blocking=True` only has an effect when
 the source tensor is in pinned memory; if the tensor is an ordinary pageable
 CPU tensor, PyTorch falls back to a synchronous copy with no error or warning,
 so the "async" flag alone does not guarantee overlap.
 
-**What is the purpose of a `CUDA_CHECK` macro, and why wrap even
+**Q: What is the purpose of a `CUDA_CHECK` macro, and why wrap even
 seemingly-infallible calls like `cudaFree`?** The macro centralizes checking
 every CUDA API's `cudaError_t` return value and aborts with file/line context
 on failure, and wrapping "infallible" calls matters because a prior

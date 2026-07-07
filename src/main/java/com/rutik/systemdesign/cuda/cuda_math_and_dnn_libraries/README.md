@@ -653,55 +653,55 @@ cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
 
 ## 12. Interview Questions with Answers
 
-**Why does a hand-written naive GEMM kernel typically reach only around 5% of a GPU's peak FLOP/s?**
+**Q: Why does a hand-written naive GEMM kernel typically reach only around 5% of a GPU's peak FLOP/s?**
 Every thread re-reads its row/column of the input matrices directly from global memory with no data reuse and no shared-memory tiling, so the kernel is bound by global-memory bandwidth rather than compute. cuBLAS reaches a few percent of peak on the identical hardware and shape because it applies shared-memory tiling, register blocking, and Tensor-Core dispatch that a naive implementation has none of.
 
-**Why did calling `cublasSgemm` on ordinary row-major C/NumPy/PyTorch data produce a transposed result with no error message?**
+**Q: Why did calling `cublasSgemm` on ordinary row-major C/NumPy/PyTorch data produce a transposed result with no error message?**
 cuBLAS assumes column-major storage for every input, while C/C++/NumPy/PyTorch default to row-major, and the exact same flat memory buffer represents a different logical matrix under each convention. There is no runtime check for this mismatch — it silently computes the transpose of the intended product, which is why the standard fix is to swap operand order and dimensions (`C^T = B^T @ A^T`) rather than physically transposing any data.
 
-**When should you write a custom CUDA kernel instead of calling cuBLAS/cuDNN/CUTLASS?**
+**Q: When should you write a custom CUDA kernel instead of calling cuBLAS/cuDNN/CUTLASS?**
 Only when you can fuse two or more operations to eliminate an intermediate tensor's round-trip through HBM — you essentially never beat a single, standard, unfused library operation by hand-writing it yourself. FlashAttention is the canonical example: it fuses softmax into the attention matmul specifically to avoid materializing the full attention-score matrix in global memory twice.
 
-**What is CUTLASS, and why does it exist alongside cuBLAS and cuDNN?**
+**Q: What is CUTLASS, and why does it exist alongside cuBLAS and cuDNN?**
 CUTLASS is an open-source C++ template library exposing the same tiling, pipelining, and Tensor-Core-dispatch building blocks that cuBLAS/cuDNN use internally, letting you compose a custom GEMM or convolution at compile time. It exists because cuBLAS/cuDNN's fixed function signatures can't express every fused epilogue or non-standard quantization scheme a production inference engine needs, while still reaching near-cuBLAS performance instead of a from-scratch kernel.
 
-**What does cuBLASLt add on top of classic cuBLAS?**
+**Q: What does cuBLASLt add on top of classic cuBLAS?**
 It adds a descriptor-based API for fused epilogues — folding a bias add, an activation function, or an INT8/FP8 quantization scale directly into the GEMM kernel — plus explicit control over algorithm heuristic selection. This avoids the extra kernel launches and HBM round-trips that a separate bias/activation kernel after a plain `cublasSgemm` call would cost.
 
-**How does PyTorch decide whether to call cuDNN, cuBLAS, or a CUTLASS-based kernel for a given op?**
+**Q: How does PyTorch decide whether to call cuDNN, cuBLAS, or a CUTLASS-based kernel for a given op?**
 PyTorch's ATen dispatcher routes each op by its dispatch key (device, dtype, op type) to a registered backend implementation, and for CUDA tensors that implementation is almost always a thin wrapper calling cuBLAS/cuBLASLt for matmul-shaped ops or cuDNN for convolution/RNN-shaped ops. No matmul or convolution loop exists inside PyTorch's own Python or C++ code — the dispatcher's job is purely to route to the right library call for the given shape and dtype.
 
-**What is the difference in scope between cuBLAS and cuDNN?**
+**Q: What is the difference in scope between cuBLAS and cuDNN?**
 cuBLAS covers general dense linear algebra (GEMM, GEMV, and the classic BLAS levels), with no concept of a "layer"; cuDNN covers primitives specific to deep-learning layers — convolution, pooling, RNN cells, normalization, and fused attention — several of which are themselves implemented on top of GEMM internally. A convolution can be lowered to a GEMM (implicit-GEMM or im2col-then-GEMM), which is exactly the kind of internal choice cuDNN's algorithm search makes for you.
 
-**Why is FlashAttention implemented as a custom fused kernel instead of a sequence of cuBLAS/cuDNN calls?**
+**Q: Why is FlashAttention implemented as a custom fused kernel instead of a sequence of cuBLAS/cuDNN calls?**
 Naive attention is three separately near-optimal library operations (QK^T, softmax, attention-weights times V) connected by two full round-trips of the attention-score matrix through HBM, and each individual op being fast hides that aggregate bandwidth cost. FlashAttention fuses all three into one kernel using an online-softmax algorithm so the score matrix never leaves shared memory/registers, which is a win only fusion — not a faster individual matmul — can deliver.
 
-**What is Thrust, and when would you reach for it instead of writing a raw kernel?**
+**Q: What is Thrust, and when would you reach for it instead of writing a raw kernel?**
 Thrust is an STL-like C++ library providing parallel algorithms (`sort`, `reduce`, `transform`, `scan`) over `device_vector` containers with iterator-based composition, letting you prototype a parallel algorithm without hand-writing a kernel or managing a launch configuration. It is the right tool when the operation is already one of its supported algorithm shapes and raw-kernel-level control isn't needed; for a hot, fixed-size, latency-critical case, a hand-tuned kernel using CUB's primitives directly can still edge it out.
 
-**What is CUB, and how does it relate to Thrust?**
+**Q: What is CUB, and how does it relate to Thrust?**
 CUB provides the lower-level, block- and warp-scoped cooperative primitives — `BlockReduce`, `WarpScan`, `DeviceRadixSort` — that Thrust's higher-level algorithms are partly built from, and that a hand-written custom kernel can call directly when it needs a fast, correct reduction or scan as one component of a larger fused kernel. Reach for CUB directly, rather than Thrust, when you're already inside a custom `__global__` kernel and need a block-scoped primitive rather than a whole-array operation on a `device_vector`.
 
-**What does cuFFT provide, and where might it show up inside a DNN pipeline even though it's not a "DNN" library?**
+**Q: What does cuFFT provide, and where might it show up inside a DNN pipeline even though it's not a "DNN" library?**
 cuFFT computes Fast Fourier Transforms on the GPU (1D/2D/3D, real or complex), and it is one of the algorithm choices cuDNN's convolution autotuner can select internally — FFT-based convolution — when it measures that path as faster than implicit-GEMM convolution for a given large-kernel shape. Outside DNNs, it's the standard tool for spectral/signal-processing pipelines (radio astronomy, medical-imaging reconstruction) that happen to run on the same GPU.
 
-**What is cuSPARSE for, and why doesn't cuBLAS just handle sparse matrices?**
+**Q: What is cuSPARSE for, and why doesn't cuBLAS just handle sparse matrices?**
 cuSPARSE implements linear algebra over sparse storage formats (CSR, COO, blocked-sparse), skipping arithmetic on structural zeros that a dense cuBLAS GEMM would otherwise waste FLOPs on. It only pays off past a workload-dependent sparsity threshold (commonly cited around 90-95%) — below that, the extra indexing overhead of a sparse format can make cuSPARSE slower than simply running the equivalent dense cuBLAS call.
 
-**What does cuRAND provide that a CPU-side `rand()` call, copied to the device, doesn't?**
+**Q: What does cuRAND provide that a CPU-side `rand()` call, copied to the device, doesn't?**
 cuRAND generates random numbers directly on the GPU using per-thread parallel generators (XORWOW, Philox, MRG32k3a), avoiding both the host-device transfer and the serialization of a single CPU-side generator. It's the standard tool for Monte Carlo simulation and on-device dropout-mask generation at the scale a DNN training loop needs, without a host round-trip on every batch.
 
-**Why are nvJPEG and NPP relevant to a math/DNN-library discussion when they're not math libraries?**
+**Q: Why are nvJPEG and NPP relevant to a math/DNN-library discussion when they're not math libraries?**
 A DNN training or inference pipeline's data-loading and preprocessing stage (JPEG decode, resize, color-space conversion) can become the actual bottleneck if it stays on the CPU while the GPU sits idle waiting for the next batch. nvJPEG and NPP move that preprocessing onto the GPU itself, keeping the whole pipeline — decode through inference — on-device without a host round-trip between stages.
 
-**How does CuPy relate to cuBLAS and cuDNN — is it a competing implementation?**
+**Q: How does CuPy relate to cuBLAS and cuDNN — is it a competing implementation?**
 CuPy is a NumPy/SciPy-shaped array API that dispatches its linear-algebra and DNN-adjacent calls (`cupy.dot`, `cupy.linalg.svd`, `cupyx.scipy.signal.fftconvolve`) directly into cuBLAS, cuSOLVER, and cuFFT under the hood. It adds a familiar Python array syntax, not a competing math kernel — the performance characteristics are identical to calling the underlying library from CUDA C++ directly.
 
-**What is a kernel-selection heuristic, and why might the same GEMM shape dispatch to a different kernel on two different runs?**
+**Q: What is a kernel-selection heuristic, and why might the same GEMM shape dispatch to a different kernel on two different runs?**
 cuBLAS and cuDNN maintain internal, architecture-specific tables mapping operation shape and dtype to a best-known kernel variant, and for cuBLASLt/cuDNN's `benchmark`-style APIs can additionally run a one-time runtime search across candidate kernels and cache the winner. The result can differ across GPU driver/library versions (the heuristic table itself gets updated) or across runs if the autotuning search is nondeterministic under contention — which is why a benchmark's first iteration should always be discarded as a warmup.
 
-**Why might CUTLASS reach "near-cuBLAS" performance but not always match it exactly?**
+**Q: Why might CUTLASS reach "near-cuBLAS" performance but not always match it exactly?**
 cuBLAS's closed-source heuristics and kernel variants are tuned against a much broader internal benchmark matrix of shapes and architectures than most individual CUTLASS instantiations sweep, so a single hand-picked CUTLASS tile configuration can leave a few percent on the table relative to cuBLAS's best-known variant for that exact shape. Closing that remaining gap typically requires the same kind of shape-specific autotuning sweep cuBLAS itself was built from, applied to your specific CUTLASS instantiation.
 
 ---

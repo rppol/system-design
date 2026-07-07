@@ -659,7 +659,7 @@ float fixed_sum(const float* h_x, int n) {
 
 ## 12. Interview Questions with Answers
 
-**Is a GPU always faster than a CPU for parallel code?**
+**Q: Is a GPU always faster than a CPU for parallel code?**
 No — a GPU only wins once there is
 enough uniform, independent work to keep thousands of ALUs busy and amortize the transfer
 cost. A single GPU thread is individually slower than a single CPU thread; arithmetic
@@ -667,59 +667,59 @@ intensity must also be high enough to justify the PCIe/NVLink round trip. Interv
 this to test whether a candidate reaches for the GPU reflexively or reasons about workload
 shape first.
 
-**Why did my "GPU-accelerated" function get slower after porting it to CUDA?**
+**Q: Why did my "GPU-accelerated" function get slower after porting it to CUDA?**
 The most likely
 cause is that transfer time exceeded compute time. This happens whenever the workload is small
 or has low arithmetic intensity, so the `cudaMemcpy` round trip dominates the measured
 runtime. Always time the full round trip — H2D copy, kernel, D2H copy — not just the kernel
 launch, before claiming a speedup.
 
-**Does Amdahl's Law mean GPUs can never deliver more than a small constant speedup?**
+**Q: Does Amdahl's Law mean GPUs can never deliver more than a small constant speedup?**
 No —
 Amdahl's Law only bounds speedup for a *fixed-size* problem. It says nothing about workloads
 where the problem grows with available compute, which is where Gustafson's Law applies:
 speedup there grows roughly linearly with processor count because the serial fraction shrinks
 in relative terms.
 
-**Is SIMT the same thing as SIMD?**
+**Q: Is SIMT the same thing as SIMD?**
 No — SIMD (CPU AVX) requires the programmer to explicitly
 pack data into one wide vector register. SIMT (GPU) instead lets each of the 32 threads in a
 warp run ordinary scalar-looking code that the hardware executes in lockstep, transparently
 masking divergent threads. The ergonomic difference is real even though both exploit
 data-level parallelism at the hardware level.
 
-**If I launch a thousand tiny kernels in a loop, why is my program slow even though each
+**Q: If I launch a thousand tiny kernels in a loop, why is my program slow even though each
 kernel is fast?** Each kernel launch carries a fixed CPU-side overhead of a few microseconds,
 so a thousand tiny launches accumulate milliseconds of pure overhead regardless of kernel
 speed. Batch the work into fewer, larger launches, or use CUDA graphs (see
 [cuda_graphs](../cuda_graphs/)) to amortize the launch cost.
 
-**What is arithmetic intensity, and why does it decide whether a kernel is worth offloading?**
+**Q: What is arithmetic intensity, and why does it decide whether a kernel is worth offloading?**
 Arithmetic intensity is FLOPs performed per byte moved from memory, and it decides whether a
 kernel is compute-bound or memory/transfer-bound. Dense matrix multiply reaches hundreds of
 FLOPs/byte and is a textbook GPU win; a single elementwise vector add sits around 0.125
 FLOPs/byte and is dominated by transfer cost instead.
 
-**What is the difference between throughput and latency, and which does a GPU optimize for?**
+**Q: What is the difference between throughput and latency, and which does a GPU optimize for?**
 Latency is the time to finish one unit of work; throughput is total units of work finished per
 second across many units, and a GPU optimizes for throughput. It deliberately accepts higher
 per-thread latency in exchange for far more concurrent threads, while a CPU minimizes the
 latency of a single instruction stream.
 
-**How does a GPU hide the ~400-800 cycle latency of a global memory load?**
+**Q: How does a GPU hide the ~400-800 cycle latency of a global memory load?**
 A GPU keeps far
 more warps resident on each SM than can execute in a single cycle. When one warp stalls on a
 memory load, the scheduler instantly issues an instruction from a different, ready warp at
 zero switching cost — latency hiding via parallelism, in contrast to a CPU's cache-based
 approach.
 
-**What is a warp, and why is 32 the number that matters?**
+**Q: What is a warp, and why is 32 the number that matters?**
 A warp is the fixed group of 32
 threads that a GPU's SM schedules and executes together in lockstep on shared instruction
 fetch/decode hardware. Treating "32" as a hardware constant, not a tunable parameter, is
 foundational to divergence cost, coalescing, and occupancy math covered in later modules.
 
-**Concretely, what is the host/device execution model?**
+**Q: Concretely, what is the host/device execution model?**
 The CPU (host) and GPU (device) have
 physically separate memory, so a program must explicitly move data between them. It allocates
 device memory, copies inputs across PCIe/NVLink, launches an asynchronous kernel, copies
@@ -727,20 +727,20 @@ results back, and frees device memory — five steps CUDA C++ exposes directly v
 `cudaMalloc`/`cudaMemcpy`/kernel-launch/`cudaFree`, which Python wrappers like CuPy hide inside
 array construction and `.get()`.
 
-**How much faster is on-device HBM than the PCIe link to the host, and why does that matter?**
+**Q: How much faster is on-device HBM than the PCIe link to the host, and why does that matter?**
 On-device HBM3 delivers roughly 3 TB/s on an H100, versus roughly 32-64 GB/s per direction over
 PCIe Gen4/5 — a 50-100x gap. This gap is why the general strategy for any multi-kernel pipeline
 is to move data to the device once and keep it resident across as many kernel launches as
 possible.
 
-**When would NVLink matter instead of PCIe, and how much faster is it?**
+**Q: When would NVLink matter instead of PCIe, and how much faster is it?**
 NVLink matters
 specifically for GPU-to-GPU communication within a multi-GPU server, such as all-reduce during
 distributed training. It delivers roughly 900 GB/s aggregate bandwidth on Hopper versus PCIe's
 32-64 GB/s for host-to-device transfer — over an order of magnitude more bandwidth, but only
 for the GPU-to-GPU case.
 
-**Can Amdahl's Law and Gustafson's Law give different answers for the "same" workload?**
+**Q: Can Amdahl's Law and Gustafson's Law give different answers for the "same" workload?**
 Yes —
 they answer different questions about the same system. Amdahl's Law asks how much faster a
 fixed-size job gets with more processors (bounded, saturating); Gustafson's Law asks how much
@@ -748,14 +748,14 @@ bigger a job finishes in the same wall-clock time with more processors (roughly 
 Quoting one without specifying which question was asked is a common source of contradictory
 speedup claims.
 
-**Is a kernel launch itself free once data is already on the device?**
+**Q: Is a kernel launch itself free once data is already on the device?**
 No — even with data
 already resident on the device, each kernel launch carries a fixed CPU-side overhead of
 roughly a few microseconds for driver dispatch and grid setup. A workload broken into
 thousands of tiny launches can be dominated by that launch overhead rather than compute, even
 with zero additional transfer cost.
 
-**What happens if a workload's data does not fit in the GPU's on-device HBM at once?**
+**Q: What happens if a workload's data does not fit in the GPU's on-device HBM at once?**
 The
 program must either stream data in tiles across the ~32-64 GB/s PCIe link, paying that
 transfer cost repeatedly, or spill to unified/managed memory that pages between host and
@@ -763,7 +763,7 @@ device. Both reintroduce the exact transfer bottleneck the GPU's fast HBM was su
 avoid, which is why working-set size belongs in the "should this run on the GPU" calculation
 alongside raw FLOP count.
 
-**Is the "one long-running kernel vs many small kernels" choice purely stylistic?**
+**Q: Is the "one long-running kernel vs many small kernels" choice purely stylistic?**
 No — it is
 a real scheduling tradeoff. A single long-running persistent kernel avoids per-launch driver
 overhead entirely but gives up the scheduler's ability to interleave other work on the GPU,

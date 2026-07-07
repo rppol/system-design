@@ -751,55 +751,55 @@ __device__ float warpReduceFixed(float val, unsigned mask = 0xffffffff) {
 
 ## 12. Interview Questions with Answers
 
-**Why must every `__shfl_*_sync` intrinsic take an explicit participation mask on Volta and newer GPUs?**
+**Q: Why must every `__shfl_*_sync` intrinsic take an explicit participation mask on Volta and newer GPUs?**
 Volta introduced independent thread scheduling, so divergent lanes are no longer guaranteed to reconverge automatically before the next instruction. The mask tells the hardware exactly which lanes are exchanging data at this instruction; omitting it (or using a pre-Volta implicit-warp-synchronous shuffle) is undefined behavior, not just a style issue.
 
-**What mask should you use inside a divergent branch, and why is `0xffffffff` wrong there?**
+**Q: What mask should you use inside a divergent branch, and why is `0xffffffff` wrong there?**
 Use `__activemask()`, captured at that point in the code, because `0xffffffff` claims all 32 lanes are participating when only the lanes that took this branch actually are. Passing the wrong mask can hang the warp or silently corrupt the shuffled values.
 
-**How many `__shfl_down_sync` steps does a full 32-lane warp reduction need, and why?**
+**Q: How many `__shfl_down_sync` steps does a full 32-lane warp reduction need, and why?**
 Exactly 5 steps, because `log2(32) = 5` and each step halves the number of lanes whose value still needs combining. The offsets used are 16, 8, 4, 2, then 1.
 
-**Does a warp-shuffle reduction use any shared memory or `__syncthreads()`?**
+**Q: Does a warp-shuffle reduction use any shared memory or `__syncthreads()`?**
 No — it uses zero bytes of shared memory and zero barriers, because all 32 lanes execute the shuffle instruction in lockstep by construction. This is the single biggest reason it beats a shared-memory reduction for the final warp of any block-level reduction.
 
-**What replaces the pre-Volta assumption that a warp is always fully synchronized?**
+**Q: What replaces the pre-Volta assumption that a warp is always fully synchronized?**
 `__activemask()` — it returns the actual set of lanes active at the current instruction, which must be passed to any subsequent `_sync` intrinsic in that code path instead of guessing `0xffffffff`.
 
-**What is a warp-aggregated atomic, and why is it faster than a plain per-thread atomic?**
+**Q: What is a warp-aggregated atomic, and why is it faster than a plain per-thread atomic?**
 It elects one leader lane per warp (via `__ballot_sync` + `__ffs`) to issue a single `atomicAdd` for the whole warp's combined contribution, cutting the number of atomic-unit operations by up to 32x versus every thread hitting the counter individually. This is the standard fix when Nsight Compute shows an atomic-heavy kernel bottlenecked on contention.
 
-**How do you elect a leader lane inside a warp?**
+**Q: How do you elect a leader lane inside a warp?**
 Take the active-lane mask from `__ballot_sync`, then `__ffs(mask) - 1` gives the index of the lowest-numbered active lane, which becomes the leader. Any deterministic, mask-derived choice works as long as every lane agrees on the same leader.
 
-**What is the difference between `__shfl_down_sync` and `__shfl_xor_sync` for a reduction?**
+**Q: What is the difference between `__shfl_down_sync` and `__shfl_xor_sync` for a reduction?**
 `__shfl_down_sync` collapses the sum toward lane 0 only — other lanes hold stale partial sums after the loop — while `__shfl_xor_sync` performs a butterfly exchange that leaves every lane holding the same final total. Use xor when every lane needs the answer (e.g. softmax row-sum rescaling), down when only one lane needs it (e.g. before an `atomicAdd`).
 
-**When would you use `__shfl_up_sync` instead of `__shfl_down_sync`?**
+**Q: When would you use `__shfl_up_sync` instead of `__shfl_down_sync`?**
 For a prefix scan (running sum/max), where lane `i` needs contributions only from lower-indexed lanes — `__shfl_up_sync(mask, val, offset)` reads from lane `i - offset`, which is exactly the Hillis-Steele scan recurrence. A reduction, in contrast, only cares about the final total and conventionally uses the down-shuffle.
 
-**What does `cg::tiled_partition<32>` give you beyond raw warp intrinsics?**
+**Q: What does `cg::tiled_partition<32>` give you beyond raw warp intrinsics?**
 A named C++ object with `.shfl_down()`, `.any()`, `.all()`, and `.reduce()` methods that generalizes cleanly to sub-warp tile sizes (2, 4, 8, 16) without hand-computing masks. It is the same underlying instructions with a safer, composable API.
 
-**What is `cg::reduce`, and what does it save you from writing?**
+**Q: What is `cg::reduce`, and what does it save you from writing?**
 A library function that reduces a value across an entire Cooperative Groups group (warp, tile, or block) using the fastest available instruction sequence for that group's size, replacing the manual `log2(N)`-step shuffle loop with one call. It supports operators like `cg::plus`, `cg::less`, and `cg::greater` out of the box.
 
-**What has to be true before you can call `cg::this_grid().sync()`?**
+**Q: What has to be true before you can call `cg::this_grid().sync()`?**
 The kernel must be launched with `cudaLaunchCooperativeKernel` (never the `<<<...>>>` syntax), and the launch's total block count must not exceed the number of blocks the device can run simultaneously. If either condition is violated, the grid sync either fails to launch or hangs waiting for blocks that will never be scheduled.
 
-**How do you compute the maximum safe block count for a cooperative (grid-sync) launch?**
+**Q: How do you compute the maximum safe block count for a cooperative (grid-sync) launch?**
 Call `cudaOccupancyMaxActiveBlocksPerMultiprocessor` for the kernel and multiply by the device's SM count (`cudaDevAttrMultiProcessorCount`) — that product is the hard ceiling on concurrently resident blocks. Launching more than this for a grid-sync kernel is a silent-hang bug, not a crash.
 
-**Why would you replace two separate kernel launches with one kernel using `cg::this_grid().sync()`?**
+**Q: Why would you replace two separate kernel launches with one kernel using `cg::this_grid().sync()`?**
 To remove the per-launch overhead (roughly 5-10us each) and the global-memory round trip of writing/reading intermediate results between launches, which matters for iterative algorithms like Jacobi solvers that repeat many short passes. The tradeoff is the occupancy ceiling above — grid sync only wins when the block count already fits.
 
-**What is the difference between `__any_sync`/`__all_sync` and `__ballot_sync`?**
+**Q: What is the difference between `__any_sync`/`__all_sync` and `__ballot_sync`?**
 `__ballot_sync` returns the full 32-bit per-lane predicate mask, while `__any_sync`/`__all_sync` collapse that mask to a single boolean answering "did any/all participating lanes see true." Use ballot when you need per-lane detail (e.g. leader election), any/all when you only need a warp-wide yes/no (e.g. an early-exit check).
 
-**Can `cg::tiled_partition` create groups smaller than a full warp, and why would you want that?**
+**Q: Can `cg::tiled_partition` create groups smaller than a full warp, and why would you want that?**
 Yes — `tiled_partition<8>` or `<16>` partitions a warp into 4 or 2 independent sub-groups respectively, useful when the natural unit of work (e.g. an 8-wide dot product) is smaller than 32 elements. Each sub-tile gets its own `.reduce()`/`.shfl_down()` scoped to just its lanes.
 
-**Does replacing shared memory with `__syncwarp()` alone remove the memory-hierarchy cost that shuffle removes?**
+**Q: Does replacing shared memory with `__syncwarp()` alone remove the memory-hierarchy cost that shuffle removes?**
 No — `__syncwarp()` only removes the cross-warp barrier semantics of `__syncthreads()`; the shared-memory reads/writes and their bank-conflict/latency cost still happen. Only `__shfl_*_sync` removes the memory access itself by reading the source lane's register directly.
 
 ---

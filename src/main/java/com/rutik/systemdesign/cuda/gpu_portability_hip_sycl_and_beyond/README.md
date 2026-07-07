@@ -670,58 +670,58 @@ Other common pitfalls:
 
 ## 12. Interview Questions with Answers
 
-**Does `hipify`-translating a CUDA kernel to HIP automatically make it fast on AMD hardware?**
+**Q: Does `hipify`-translating a CUDA kernel to HIP automatically make it fast on AMD hardware?**
 No — `hipify` gets you correctness and compilation, not tuning, because it performs a largely mechanical API translation without knowing anything about the target's actual hardware constants. The classic failure is a warp-shuffle reduction whose loop bound was tuned for CUDA's 32-wide warp silently under-covering AMD's 64-wide wavefront, producing a wrong partial result rather than a compile error.
 
-**What is the single biggest architectural constant that differs between a CUDA warp and an AMD wavefront, and why does it matter?**
+**Q: What is the single biggest architectural constant that differs between a CUDA warp and an AMD wavefront, and why does it matter?**
 CUDA's warp is 32 threads; AMD's CDNA wavefront is 64 threads (RDNA also supports a 32-wide "wave32" mode). Any code whose correctness or tuning depends on that width — shuffle-based reductions, shared-memory/LDS bank-conflict avoidance, occupancy math — must be re-derived for the target, not copy-pasted; treating it as a portable constant is the root cause of the most common silent-correctness bug in a naive CUDA-to-HIP port.
 
-**If you write a hot kernel directly in OpenCL "to be portable," what do you typically give up on your NVIDIA fleet?**
+**Q: If you write a hot kernel directly in OpenCL "to be portable," what do you typically give up on your NVIDIA fleet?**
 You lose CUDA-only performance features that OpenCL's lowest-common-denominator abstraction cannot expose. Tensor Core instruction shapes, Hopper's Tensor Memory Accelerator, and warp-specialized producer/consumer patterns all disappear, because a cross-vendor standard can only expose what every supported backend can implement — for a fleet where the overwhelming majority of capacity is NVIDIA, this usually means paying a portability tax with no matching payoff.
 
-**What is HIP, and why can `hipify` translate CUDA source into it so mechanically?**
+**Q: What is HIP, and why can `hipify` translate CUDA source into it so mechanically?**
 HIP (Heterogeneous-computing Interface for Portability) is AMD's C++ GPU programming model, deliberately engineered to mirror CUDA's runtime API function-for-function. `hipMalloc` mirrors `cudaMalloc` and `hipLaunchKernelGGL` mirrors the triple-chevron launch, so `hipify-perl`/`hipify-clang` can rewrite most straightforward CUDA kernels with a high automated-translation rate, unlike a rewrite into a genuinely different abstraction like SYCL or OpenCL.
 
-**How does SYCL differ from HIP in its basic design philosophy?**
+**Q: How does SYCL differ from HIP in its basic design philosophy?**
 HIP is a translation target — an API deliberately shaped to match CUDA so mechanical porting works — while SYCL is an abstraction defined independently of any one vendor's API. It is expressed as single-source standard C++ with a `queue`/`parallel_for` model that must be implementable across NVIDIA, AMD, Intel, and CPU backends, which is exactly why porting CUDA to SYCL is a genuine rewrite rather than a mechanical translation.
 
-**Why does a portability layer typically lag CUDA's newest hardware features by a generation or more?**
+**Q: Why does a portability layer typically lag CUDA's newest hardware features by a generation or more?**
 A cross-vendor API can only expose a capability once every backend it claims to support can implement it. A brand-new CUDA-only feature — a new Tensor-Core instruction shape, a new async-copy primitive — has no reason to appear in HIP/SYCL/Metal/WebGPU until the abstraction's maintainers add and validate it, so plan any cross-vendor roadmap around that lag rather than assuming day-one parity.
 
-**What does Apple's unified memory architecture change about how you should think about a CUDA/HIP port to Metal?**
+**Q: What does Apple's unified memory architecture change about how you should think about a CUDA/HIP port to Metal?**
 CPU and GPU share one physical memory pool on Apple Silicon, so there is no explicit host↔device copy the way discrete-GPU models require. Code "optimized" by minimizing transfer calls may be solving a problem that does not exist on that hardware while missing the actual bottleneck (GPU compute or bandwidth), which is why a naive port needs re-profiling against Apple's real cost model, not just re-syntaxing into MSL.
 
-**What is the practical difference between SYCL's buffer/accessor model and USM, and which would you pick for a performance-critical kernel?**
+**Q: What is the practical difference between SYCL's buffer/accessor model and USM, and which would you pick for a performance-critical kernel?**
 Buffers let the SYCL runtime infer data dependencies and schedule host↔device transfers automatically, at the cost of runtime dependency-tracking overhead. USM (Unified Shared Memory) instead exposes explicit device/host/shared pointers closer to CUDA's mental model, and performance-critical SYCL code commonly prefers USM for the same reason CUDA/HIP programmers prefer explicit memory management over a scheduler they can't fully see into.
 
-**Why is WebGPU not simply "CUDA that runs in a browser"?**
+**Q: Why is WebGPU not simply "CUDA that runs in a browser"?**
 WGSL has no raw pointers and enforces a validation layer that rejects patterns CUDA permits freely, such as unbounded array indexing or pointer aliasing. The browser must run arbitrary code from arbitrary websites safely inside a sandbox, so a port from CUDA to WGSL is frequently a real restructuring of memory-access patterns, not a syntax-only translation.
 
-**When would you choose to maintain three separate native GPU backends (CUDA, HIP, Metal) for one kernel instead of writing it once in a portable layer like SYCL or OpenCL?**
+**Q: When would you choose to maintain three separate native GPU backends (CUDA, HIP, Metal) for one kernel instead of writing it once in a portable layer like SYCL or OpenCL?**
 When the kernel is performance-critical enough on every target that a shared abstraction's portability tax (typically 5-20%+ against a hand-tuned native kernel) is unacceptable across all three. Blender's Cycles renderer is a concrete example: it ships native CUDA, HIP, and Metal backends for the same ray-tracing logic rather than one portable path, because rendering throughput is exactly this performance-critical.
 
-**What is the "framework-level portability" most engineers actually rely on, and why does it matter?**
+**Q: What is the "framework-level portability" most engineers actually rely on, and why does it matter?**
 It is writing application code against a high-level framework (PyTorch, CuPy) whose maintainers have already absorbed the CUDA/HIP/Metal translation cost once, centrally. `torch.device("cuda")` transparently means HIP on a ROCm build and `torch.device("mps")` routes through Metal on Apple Silicon, so most engineers never have to make the HIP-vs-SYCL-vs-Metal decision directly — that decision is reserved for the small fraction of hot, hand-written kernels.
 
-**Is OpenCL still relevant for a new ML infrastructure project started today?**
+**Q: Is OpenCL still relevant for a new ML infrastructure project started today?**
 Rarely as a first choice for data-center ML, but yes for embedded, mobile, or legacy targets where SYCL and HIP toolchains are unavailable or unsupported. OpenCL remains the broadest genuinely cross-vendor, cross-device-class standard (GPUs, CPUs, some DSPs/FPGAs), but its C99-based kernel language and verbose host-side platform/device/context enumeration make HIP or SYCL the more ergonomic choice wherever they are actually available.
 
-**Can HIP source run on NVIDIA hardware, and why would you want that?**
+**Q: Can HIP source run on NVIDIA hardware, and why would you want that?**
 Yes — HIP's NVIDIA backend is a thin wrapper over the CUDA runtime, so a single HIP codebase can build for both AMD and NVIDIA from one source tree. This is attractive for a team that wants one maintained kernel language across both major discrete-GPU vendors without adopting a fuller abstraction like SYCL.
 
-**A `hipify`-ported kernel passes correctness tests on AMD hardware but runs at only 60% of a hand-tuned native HIP kernel's throughput on the same GPU. What would you check first?**
+**Q: A `hipify`-ported kernel passes correctness tests on AMD hardware but runs at only 60% of a hand-tuned native HIP kernel's throughput on the same GPU. What would you check first?**
 Check the launch configuration and any hardcoded 32-wide assumptions first. Block/wavefront sizing tuned for CUDA's warp=32, shared-memory tiling padded against CUDA's bank-conflict numbers, and shuffle-based reduction loop bounds are the usual culprits, because `hipify` translates API calls correctly but cannot re-derive tuning constants for AMD's different wavefront width and LDS layout — profile with `rocprof` to confirm which constant is costing the gap.
 
-**Why is "write everything in the most portable API available" usually the wrong default for a new GPU project?**
+**Q: Why is "write everything in the most portable API available" usually the wrong default for a new GPU project?**
 Because portability and peak performance trade off, and defaulting to the most portable option (typically OpenCL) pays that tax on every kernel even when most of the fleet runs on one vendor. The better default is framework-level portability for the majority of code, with a deliberate, per-kernel decision to add a vendor-specific fast path only where profiling shows the hot path actually needs it.
 
-**How does Intel's `dpct`/SYCLomatic migration tool compare to `hipify`, and why does it typically need more manual cleanup for the same source kernel?**
+**Q: How does Intel's `dpct`/SYCLomatic migration tool compare to `hipify`, and why does it typically need more manual cleanup for the same source kernel?**
 Both mechanically translate CUDA source, but `dpct`/SYCLomatic targets SYCL — an abstraction defined independently of CUDA — while `hipify` targets HIP, which was built to mirror CUDA's shape directly. The further the destination language sits from CUDA's own API shape, the more of the translation cannot be purely mechanical — the translate-vs-abstract dial from §2 showing up in tooling, not just runtime performance.
 
-**Why does WGSL have no raw pointers, and what does that cost a CUDA programmer porting a kernel to it?**
+**Q: Why does WGSL have no raw pointers, and what does that cost a CUDA programmer porting a kernel to it?**
 WebGPU must safely execute arbitrary compute code submitted by any website a user visits, so WGSL enforces bounds-checked storage-buffer access instead of pointer arithmetic. That eliminates an entire class of out-of-bounds and aliasing bugs by construction, but it costs a CUDA programmer any pattern that relied on raw pointer arithmetic or pointer-type casting — those usually need restructuring around WGSL's typed buffer model, not a direct syntax swap.
 
-**Does Apple's unified memory architecture mean a Metal port never needs to think about memory placement?**
+**Q: Does Apple's unified memory architecture mean a Metal port never needs to think about memory placement?**
 No — unified memory removes the explicit host↔device copy CUDA/HIP require, but the GPU and CPU still contend for the same physical bandwidth. Large working sets can still be bandwidth- or cache-bound on the GPU side exactly as on a discrete-GPU architecture, so the optimization target shifts from "minimize transfer count" to "minimize GPU-side memory traffic," not away from memory reasoning altogether.
 
 ---

@@ -822,63 +822,63 @@ CUDA_CHECK(cudaGraphDestroy(newGraph));
 
 ## 12. Interview Questions with Answers
 
-**What problem do CUDA graphs solve?**
+**Q: What problem do CUDA graphs solve?**
 They eliminate the fixed ~5-10
 microsecond CPU-side launch overhead paid on every kernel launch or memcpy by
 capturing a whole sequence once and replaying it with a single API call,
 which matters most for workloads made of many small, fast kernels where that
 per-launch overhead dominates the actual GPU compute time.
 
-**Why does a workload with dozens of tiny kernels become launch-bound
+**Q: Why does a workload with dozens of tiny kernels become launch-bound
 instead of compute-bound?** Each kernel launch costs a roughly fixed 5-10us
 of CPU/driver overhead regardless of GPU execution time, so when the kernels
 themselves finish in a similar handful of microseconds, the GPU spends more
 time idle waiting for the next launch than it spends actually computing — the
 classic profile of a batch-1 LLM decode step.
 
-**What is the difference between stream capture and explicit graph
+**Q: What is the difference between stream capture and explicit graph
 construction?** Stream capture records the graph by observing ordinary
 stream API calls you already wrote between `cudaStreamBeginCapture` and
 `cudaStreamEndCapture`, requiring no rewrite, while explicit construction
 builds the DAG node-by-node through the Graph API directly, giving precise
 control at the cost of far more verbose authoring code.
 
-**What does `cudaGraphInstantiate` actually do, and why is it a separate
+**Q: What does `cudaGraphInstantiate` actually do, and why is it a separate
 step from launching?** It compiles the captured or explicitly built
 `cudaGraph_t` into a fixed, executable `cudaGraphExec_t`, resolving launch
 configurations and dependency structure once; this compile-like step costs
 noticeably more than a single kernel launch, which is exactly why it must be
 amortized over many cheap replays rather than repeated per iteration.
 
-**Why does replaying an already-instantiated graph cost roughly one launch's
+**Q: Why does replaying an already-instantiated graph cost roughly one launch's
 worth of CPU overhead, no matter how many nodes it contains?** `cudaGraphLaunch`
 hands the entire pre-resolved DAG to the GPU's own hardware scheduler in a
 single driver call, and the scheduler — not the CPU — fires each node as its
 dependencies complete, so the per-node CPU round trip that eager launches pay
 simply does not happen on replay.
 
-**What happens if you change a device pointer's value in your CPU code and
+**Q: What happens if you change a device pointer's value in your CPU code and
 then call `cudaGraphLaunch` again without updating the graph?** Nothing
 changes in the graph — its kernel nodes still reference whatever
 pointers/arguments were captured at instantiate time, so the graph silently
 keeps reading and writing the original buffers, producing stale or wrong
 results with no error raised.
 
-**What does `cudaGraphExecUpdate` require to succeed, and what happens when
+**Q: What does `cudaGraphExecUpdate` require to succeed, and what happens when
 that requirement isn't met?** It requires the new graph's topology — node
 count, node types, and dependency structure — to exactly match the currently
 instantiated executable's topology; if it doesn't match, the call fails and
 returns an error that must be checked, at which point the only remaining
 option is a full re-instantiate.
 
-**Why can't a CUDA graph handle data-dependent control flow, like an
+**Q: Why can't a CUDA graph handle data-dependent control flow, like an
 early-exit loop?** A graph's node structure is fixed at capture/instantiate
 time — it is a static DAG — so any code path where the number or identity of
 kernels to run depends on a runtime value cannot be represented without
 re-capturing for every possible branch outcome, which defeats the purpose of
 amortizing capture cost.
 
-**Why must you warm up a stream before capturing it into a graph?**
+**Q: Why must you warm up a stream before capturing it into a graph?**
 The
 first call into a library like cuBLAS or cuDNN often triggers lazy handle
 initialization or JIT compilation, and capturing that first-call side effect
@@ -886,7 +886,7 @@ can behave unreliably; running the sequence once outside capture forces that
 one-time setup to happen before the graph records only steady-state kernel
 launches.
 
-**In PyTorch, why does copying data into a static tensor (`static_input.copy_
+**Q: In PyTorch, why does copying data into a static tensor (`static_input.copy_
 (batch)`) work for graph replay but rebinding the Python name
 (`static_input = batch`) does not?** The captured graph's kernels reference
 the specific memory address that was live when `torch.cuda.graph(...)`
@@ -894,20 +894,20 @@ captured them; an in-place `copy_` writes new data into that same address,
 while rebinding the Python name only changes what the name points to in
 Python, leaving the graph still reading the old, now-stale buffer.
 
-**When does a CUDA graph actually pay off versus eager launching, in terms
+**Q: When does a CUDA graph actually pay off versus eager launching, in terms
 of iteration count?** Only after enough replays have occurred to amortize the
 one-time capture-plus-instantiate cost against the per-iteration launch-
 overhead savings — a graph run only once or twice is pure overhead with no
 payoff, while one run thousands of times (a long decode loop or many
 training steps) reaps nearly the full benefit.
 
-**What kinds of GPU work can a graph node represent besides a kernel
+**Q: What kinds of GPU work can a graph node represent besides a kernel
 launch?** Memory copies, memsets, host-function callbacks, event
 record/wait operations, and even child graphs embedding other graphs — the
 DAG is a general description of dependent GPU (and host-callback) work, not
 solely a sequence of kernel launches.
 
-**Why do inference engines like vLLM capture separate CUDA graphs per
+**Q: Why do inference engines like vLLM capture separate CUDA graphs per
 batch-size "bucket" instead of one graph for all batch sizes?** A graph's
 topology (and typically its launch configuration) is fixed at capture time,
 so a different batch size is effectively a different topology; bucketing
@@ -915,14 +915,14 @@ captures one graph per common batch size ahead of time and dispatches
 incoming requests to the matching bucket rather than trying to force one
 graph to cover every possible shape.
 
-**What roughly is the throughput improvement production LLM inference
+**Q: What roughly is the throughput improvement production LLM inference
 engines report from wrapping the decode step in a CUDA graph?** Commonly
 cited figures are in the range of roughly 1.2-2x on the decode-step
 throughput of launch-bound, small-batch autoregressive generation, since
 collapsing dozens of small kernel launches into a single graph launch removes
 most of the CPU-driver overhead that dominated that regime.
 
-**Why is debugging code inside a captured-and-replayed graph harder than
+**Q: Why is debugging code inside a captured-and-replayed graph harder than
 debugging the same code run eagerly?** Conventional breakpoint and `printf`-
 based debugging assumes a CPU round trip accompanies each kernel, which is
 exactly the overhead a graph removes on replay — the GPU's own scheduler

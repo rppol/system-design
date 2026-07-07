@@ -600,58 +600,58 @@ __global__ void scaleFixed(float* data, float k, int n) {
 
 ## 12. Interview Questions with Answers
 
-**Why does a kernel with an out-of-bounds write often "work fine" instead of crashing?**
+**Q: Why does a kernel with an out-of-bounds write often "work fine" instead of crashing?**
 An out-of-bounds write is undefined behavior, not a guaranteed crash — the extra thread's write frequently lands in unused allocator padding or an adjacent allocation that happens not to be read again before the program exits, so it silently corrupts memory without producing any visible symptom on that particular run, input size, or GPU.
 
-**What does `CUDA_LAUNCH_BLOCKING=1` actually change, and why is it the first thing to try when a crash's stack trace points at the wrong kernel?**
+**Q: What does `CUDA_LAUNCH_BLOCKING=1` actually change, and why is it the first thing to try when a crash's stack trace points at the wrong kernel?**
 It forces every kernel launch to execute synchronously instead of asynchronously, so an execution error surfaces immediately after the kernel that caused it rather than after some later, unrelated launch that merely happened to be the next synchronization point. Without it, the host queues launches and moves on immediately, so a crash reported during a later `cudaMemcpy` can actually be attributable to a kernel launched several calls earlier.
 
-**What is a "sticky" CUDA error, and why can't `cudaGetLastError()` simply clear it?**
+**Q: What is a "sticky" CUDA error, and why can't `cudaGetLastError()` simply clear it?**
 A sticky error (e.g. an illegal memory address or illegal instruction detected during kernel execution) corrupts the CUDA context itself, so every subsequent API call — even ones unrelated to the original failure — keeps returning that same error until the process exits and a fresh context is created. `cudaGetLastError()` can clear non-sticky errors (like a bad launch configuration), but a sticky error reflects context-level corruption that no API-level call can repair in-process.
 
-**What is the difference between `compute-sanitizer`'s `memcheck` and `racecheck` tools?**
+**Q: What is the difference between `compute-sanitizer`'s `memcheck` and `racecheck` tools?**
 `memcheck` instruments memory accesses to catch out-of-bounds, misaligned, and use-after-free bugs on individual threads, while `racecheck` instruments shared-memory accesses across threads to catch data races — a thread reading a shared-memory location another thread wrote without an intervening `__syncthreads()`. A kernel can be perfectly `memcheck`-clean (every individual access is in-bounds) while still having a `racecheck`-detectable race, because the two tools check entirely different properties.
 
-**What does `synccheck` catch that `memcheck` and `racecheck` do not?**
+**Q: What does `synccheck` catch that `memcheck` and `racecheck` do not?**
 `synccheck` detects illegal or divergent uses of block/warp-level barriers (`__syncthreads()`, `__syncwarp()`) — for example, a subset of a block's threads reaching a `__syncthreads()` inside an `if` branch that other threads in the block never enter, which is undefined behavior and typically manifests as a hang or corrupted results rather than a memory-safety violation.
 
-**What does `initcheck` catch, and what symptom typically points at it?**
+**Q: What does `initcheck` catch, and what symptom typically points at it?**
 `initcheck` flags reads of global memory that was allocated but never written by any kernel, which typically manifests as NaN or garbage output that appears only on the first use of freshly allocated memory (because `cudaMalloc` does not zero-initialize) and can disappear on subsequent runs if the same memory happens to be reused with leftover valid-looking bits from a prior allocation.
 
-**Why does `CUDA_CHECK` around a kernel launch line, by itself, not actually check the kernel's execution correctness?**
+**Q: Why does `CUDA_CHECK` around a kernel launch line, by itself, not actually check the kernel's execution correctness?**
 A kernel launch (`kernel<<<...>>>(...)`) returns `void`, not a `cudaError_t`, and executes asynchronously — wrapping the launch line in a macro expecting a return value doesn't compile or check anything meaningful; the launch's *configuration* error is available synchronously via `cudaGetLastError()` right after, but the kernel's *execution* error only surfaces once you force a synchronization point with `cudaDeviceSynchronize()`.
 
-**Why can a GPU result legitimately differ from a CPU reference even when the kernel has no bug?**
+**Q: Why can a GPU result legitimately differ from a CPU reference even when the kernel has no bug?**
 GPUs fuse multiply-add into a single rounding by default (FMA) instead of the two separate roundings a naive CPU implementation performs, and parallel reductions sum values in a tree order rather than a CPU's strict sequential order — floating-point addition is not associative, so both effects can shift results in the low-order bits without indicating an actual defect. See [numerical_precision_and_determinism](../case_studies/cross_cutting/numerical_precision_and_determinism.md) for the full mechanism.
 
-**Does setting temperature/sampling aside, does `torch.use_deterministic_algorithms(True)` guarantee bit-identical output to a CPU run?**
+**Q: Does setting temperature/sampling aside, does `torch.use_deterministic_algorithms(True)` guarantee bit-identical output to a CPU run?**
 No — it only guarantees that PyTorch will prefer deterministic kernel implementations (and raise an error rather than silently run nondeterministically for unsupported ops) so that repeated runs on the *same* GPU and software stack produce identical results; it does not change FMA contraction, reduction order, or precision, so it does not by itself make GPU output match a CPU reference bit-for-bit.
 
-**Why is TF32 described as a "silent" debugging trap on Ampere and later?**
+**Q: Why is TF32 described as a "silent" debugging trap on Ampere and later?**
 TF32 is the default compute mode for FP32 matrix multiplies and convolutions routed through Tensor Cores on Ampere+ — tensors are still stored as full FP32, but the multiply-accumulate internally uses only TF32's ~10 mantissa bits, so a model can lose precision or gain a 4-8x speedup purely from running on newer hardware with zero code changes, which is easy to misdiagnose as either a numerics bug or an unexplained hardware anomaly rather than an opt-out-able default.
 
-**How do you compile a kernel for `cuda-gdb` line-level debugging, and what does it cost?**
+**Q: How do you compile a kernel for `cuda-gdb` line-level debugging, and what does it cost?**
 Compile with `nvcc -G -g`, where `-G` generates debug information for device code and disables most compiler optimizations so source lines map cleanly to executed instructions; the cost is a meaningfully slower binary and, because it changes instruction scheduling and timing, a debug build can mask or alter the reproduction of timing-sensitive races that only appear at full optimization.
 
-**What CUDA-specific `cuda-gdb` command lets you inspect one specific thread among thousands?**
+**Q: What CUDA-specific `cuda-gdb` command lets you inspect one specific thread among thousands?**
 `cuda thread (x,y,z) block (a,b,c)` switches the debugger's focus to that exact thread, after which ordinary `gdb` commands like `print` and `next` operate on that thread's local variables and control flow; `info cuda threads` first lists all resident threads/blocks so you know which coordinates to target, typically taken directly from a `compute-sanitizer` report's thread/block indices.
 
-**What are the practical limits of in-kernel `printf`?**
+**Q: What are the practical limits of in-kernel `printf`?**
 Output is written to a fixed-size FIFO buffer (`cudaLimitPrintfFifoSize`, default 1 MB grid-wide) that silently drops output once full, it is only flushed to the host at a synchronization point, and there is no guaranteed ordering across threads or blocks — so `printf` is useful for "what value did thread N compute" but unsafe for reasoning about relative timing or interleaving between threads.
 
-**When should you use `assert()` in a kernel instead of an explicit `if` bounds check?**
+**Q: When should you use `assert()` in a kernel instead of an explicit `if` bounds check?**
 `assert()` is appropriate for catching programmer-error invariants during development (an index that should be mathematically impossible to exceed a bound) because it aborts loudly with file/line/thread information, but it is compiled out entirely when `NDEBUG` is defined — any check that must still run in a release build (like the bounds guard in a kernel that legitimately receives untrusted sizes) needs an explicit `if`, not an `assert`.
 
-**Why does `compute-sanitizer --tool racecheck` typically run 10-100x slower than an unsanitized kernel, and what's the practical workaround?**
+**Q: Why does `compute-sanitizer --tool racecheck` typically run 10-100x slower than an unsanitized kernel, and what's the practical workaround?**
 `racecheck` must track every shared-memory access's ordering relative to every other thread in the block to detect hazards, which is far more expensive to instrument than `memcheck`'s per-access bounds check; the practical workaround is to shrink the grid/data size to the smallest input that still reproduces the nondeterministic symptom before sanitizing, rather than running it against a full production-scale workload.
 
-**Describe a "heisenbug" caused by a missing `__syncthreads()` — why does it only sometimes reproduce?**
+**Q: Describe a "heisenbug" caused by a missing `__syncthreads()` — why does it only sometimes reproduce?**
 A block's threads write to shared memory and then read a neighbor's write without an intervening `__syncthreads()` between the write and the read phase; whether the bug manifests depends on the actual warp-scheduling order the hardware happens to choose for that launch, so it can appear to work correctly across many runs and then produce wrong output only when scheduling happens to interleave the write and read in the unsafe order — exactly the symptom `racecheck` is built to catch regardless of which scheduling order actually occurred.
 
-**Can `cuda-gdb` and `compute-sanitizer` be used together, and in what order would you typically reach for them?**
+**Q: Can `cuda-gdb` and `compute-sanitizer` be used together, and in what order would you typically reach for them?**
 Yes — the typical workflow runs `compute-sanitizer` first to get an exact thread index, block index, and source line for the violation, then attaches `cuda-gdb` (with a `-G` build) and uses `cuda thread`/`cuda block` to jump directly to that reported location and step through the surrounding logic, rather than using either tool alone to search blindly.
 
-**If a kernel is `compute-sanitizer`-clean across all four tools, is it numerically correct?**
+**Q: If a kernel is `compute-sanitizer`-clean across all four tools, is it numerically correct?**
 Not necessarily — the sanitizer tools verify memory safety and synchronization correctness (no OOB access, no race, no illegal barrier, no uninitialized read), which is a different property from numerical correctness; a kernel can be perfectly memory-safe and race-free while still computing the wrong reduction order, using an inappropriate reduced-precision path, or containing a logic bug the sanitizer has no way to detect.
 
 ---

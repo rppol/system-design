@@ -104,7 +104,7 @@ When a module would restate one of the above, link it and add only the kernel-le
 
 ## Adding a New CUDA Module
 
-1. Create `<module_name>/README.md` — 14-section template; 15 Q&As minimum (18 for the deep modules listed above), ordered by interview frequency (gotchas first).
+1. Create `<module_name>/README.md` — 14-section template; 15 Q&As minimum (18 for the deep modules listed above), ordered by interview frequency (gotchas first). **Prefix every §12 question with `Q: ` inside the bold** (`**Q: <question>?**`) — repo-wide convention (root `CLAUDE.md` → Interview Q&A Rules); `extract.py` strips the label for the MCQ bank.
 2. Follow the CUDA-specific content rules above (dual-language code, concrete numbers, BROKEN→FIX, diagram policy).
 3. Update `README.md` §3 module table AND flip the file's status in the §8 build manifest.
 4. Add the module dir to `STUDY_ORDER.cuda` in `game/app.js` at its learning-path position (and to `STUDY_PATHS.cuda.interview` if it belongs in the interview cut — keep in sync with README).

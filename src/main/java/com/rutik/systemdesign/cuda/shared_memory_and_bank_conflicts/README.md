@@ -685,7 +685,7 @@ which is exactly the race in the BROKEN example above.
 
 ## 12. Interview Questions with Answers
 
-**What is a shared-memory bank conflict?**
+**Q: What is a shared-memory bank conflict?**
 A bank conflict is when two or more threads in the
 same warp access different addresses that map to the same one of the 32 shared-memory banks,
 forcing those accesses to serialize instead of completing in one cycle. Shared memory is split
@@ -694,21 +694,21 @@ completes in 1 cycle, while an N-way conflict takes N sequential cycles for that
 instruction — the "free" 100x-faster-than-global speedup of shared memory can silently regress
 toward global-memory-like latency for exactly the colliding instructions.
 
-**Why does a straight column access into a `tile[32][32]` array cause a 32-way conflict?**
+**Q: Why does a straight column access into a `tile[32][32]` array cause a 32-way conflict?**
 Because the row stride (32 words) is an exact multiple of the bank count (32), so the bank
 formula `(row*32 + col) mod 32` reduces to just `col` — independent of row. A column access
 (`tile[threadIdx.x][fixedCol]`) varies the row per thread while holding `col` fixed, so every
 one of the 32 threads computes the identical bank, and the hardware serializes all 32 into
 one bank: the worst possible case.
 
-**How does padding the tile to `[32][33]` fix the conflict?**
+**Q: How does padding the tile to `[32][33]` fix the conflict?**
 Padding changes the row stride
 from 32 to 33, and since `33 mod 32 = 1`, the bank formula becomes `(row + col) mod 32` — now
 row-dependent. Across 32 consecutive rows this sweeps through all 32 distinct bank values, so
 the same column access that was a 32-way conflict on the unpadded array becomes fully
 conflict-free on the padded one, at the cost of 4 wasted bytes per row.
 
-**What happens if you forget `__syncthreads()` between writing to shared memory and reading it
+**Q: What happens if you forget `__syncthreads()` between writing to shared memory and reading it
 back?** You get a data race: some threads may read stale or partially-written shared-memory
 values because there is no guarantee every thread's write has completed before another thread
 reads it. The bug is often nondeterministic — it can pass in testing under low occupancy and
@@ -716,14 +716,14 @@ fail intermittently in production — which is why `compute-sanitizer --tool rac
 specifically to catch this class of bug; see [Synchronization & Atomics](../synchronization_and_atomics/)
 for the full barrier semantics.
 
-**What is broadcast access and why is it conflict-free regardless of warp size?**
+**Q: What is broadcast access and why is it conflict-free regardless of warp size?**
 Broadcast is
 when every thread in a warp reads the exact same shared-memory word, and the hardware detects
 this special case and services all 32 reads as a single conflict-free transaction. It is
 common whenever a block shares one scalar result — a reduction total, a computed pivot, a
 softmax row-max — that every thread subsequently reads back.
 
-**What is the difference between static `__shared__` and dynamic `extern __shared__`?**
+**Q: What is the difference between static `__shared__` and dynamic `extern __shared__`?**
 Static
 shared memory has its size fixed at compile time and is compiler bounds-checked, while dynamic
 shared memory takes its size as a runtime launch parameter. Static declares
@@ -732,7 +732,7 @@ shared memory takes its size as a runtime launch parameter. Static declares
 `<<<grid, block, bytes>>>` launch argument, letting one compiled kernel serve different tile
 sizes chosen at runtime (e.g. by an occupancy-tuning pass).
 
-**Why is shared memory roughly 100x faster than global memory?**
+**Q: Why is shared memory roughly 100x faster than global memory?**
 Shared memory is on-chip SRAM
 inside the SM at roughly 20-30 cycle latency, while global memory is an off-chip HBM round
 trip at roughly 400-800 cycles. The gap is architectural — locality, not just clock speed —
@@ -740,21 +740,21 @@ because a discrete memory chip carries DRAM row-activation and queuing overhead 
 SRAM does not, which is exactly why tiling data through shared memory once and reusing it many
 times is the single highest-leverage optimization for memory-bound kernels.
 
-**Why is shared memory block-scoped rather than thread-scoped?**
+**Q: Why is shared memory block-scoped rather than thread-scoped?**
 Because tiling requires
 cross-thread cooperation: one thread loads element X, a different thread later consumes it —
 that only works if every thread in the block sees the same memory. A thread-private scratchpad
 (registers, or spilled local memory) cannot support the load-once-reuse-many-times pattern that
 is the entire point of shared memory.
 
-**How much shared memory is available per SM, and is that number fixed?**
+**Q: How much shared memory is available per SM, and is that number fixed?**
 It is configurable,
 not fixed — the default cap is around 48 KB per block on most generations. Calling
 `cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)` can opt a
 kernel into a larger per-SM carveout, up to roughly 164 KB/SM on Ampere and roughly 228 KB/SM
 on Hopper, at the direct expense of the L1 cache's share of that same physical SRAM.
 
-**What is the tradeoff between a kernel's shared-memory footprint and its occupancy?**
+**Q: What is the tradeoff between a kernel's shared-memory footprint and its occupancy?**
 A
 kernel that claims more shared memory per block leaves room for fewer blocks resident on the
 same SM, which can reduce occupancy even as the larger tile increases data reuse. Formally,
@@ -763,27 +763,27 @@ shared-memory claim can halve the number of resident blocks (and therefore warps
 [Occupancy & Launch Configuration](../occupancy_and_launch_configuration/) for how to check
 which resource (shared memory, registers, or thread count) is the binding constraint.
 
-**How would you detect a bank conflict without reasoning through the address arithmetic by
+**Q: How would you detect a bank conflict without reasoning through the address arithmetic by
 hand?** Profile the kernel with Nsight Compute and check the "Shared Memory Bank Conflicts"
 line in the Memory Workload Analysis section. It is backed by the
 `l1tex__data_bank_conflicts_pipe_lsu` counter — a nonzero value there means some warp,
 somewhere, is colliding on a bank, and the profiler localizes it to the offending source line.
 
-**Why does an N-way conflict cost exactly N cycles rather than some fixed penalty?**
+**Q: Why does an N-way conflict cost exactly N cycles rather than some fixed penalty?**
 Because
 each bank can service only one address per cycle, so the hardware issues one transaction per
 distinct address group sharing that bank. A 2-way conflict costs 2 cycles for that
 instruction, a 32-way conflict costs 32 — the cost scales linearly with the size of the
 largest colliding group, not a flat "conflict tax."
 
-**Shared memory and L1 cache both live on the same physical SRAM — what's the practical
+**Q: Shared memory and L1 cache both live on the same physical SRAM — what's the practical
 difference?** L1 cache is hardware-managed while shared memory is entirely programmer-managed.
 The hardware decides what L1 caches and evicts with no explicit addressing, but the programmer
 declares, loads, and controls a `__shared__` array's lifetime directly; because the two share
 the same physical capacity on most generations, growing a kernel's shared-memory carveout via
 `cudaFuncSetAttribute` directly shrinks the L1 space left for that kernel's global accesses.
 
-**Does the padding trick change depending on the data type (float vs double vs float4)?**
+**Q: Does the padding trick change depending on the data type (float vs double vs float4)?**
 Yes —
 the bank is defined in 4-byte words, so an 8-byte `double` spans 2 banks per element and a
 16-byte `float4` spans 4 banks per element, changing what stride actually triggers a collision.
@@ -791,14 +791,14 @@ The general fix is the same idea — add enough padding that the row stride in *
 longer a multiple of 32 — but the exact padding amount must be recomputed for the wider
 element size rather than blindly reusing the `+1` float trick.
 
-**Is padding always exactly one extra column?**
+**Q: Is padding always exactly one extra column?**
 No — one extra element only removes the
 conflict when the base stride is a multiple of 32 and the element is 4 bytes wide. For a
 `double` tile (8 bytes/element, 2 banks/element) a single padding element only shifts the
 word-stride by 2, not 1, so it may still leave a smaller residual conflict; the padding amount
 must be chosen so the resulting word-stride is coprime with 32 for the actual element width.
 
-**Are memory coalescing and shared-memory bank conflicts the same concept?**
+**Q: Are memory coalescing and shared-memory bank conflicts the same concept?**
 No — they are
 analogous but apply to different memory spaces with different hardware. Coalescing is about
 whether a warp's *global*-memory addresses fall into as few 128-byte DRAM transactions as
@@ -808,28 +808,28 @@ still suffer a severe bank conflict on its shared-memory reads, and vice versa �
 [Memory Coalescing & Access Patterns](../memory_coalescing_and_access_patterns/) for the
 global-memory side.
 
-**How do you handle bank conflicts in a shared-memory transpose kernel, where both the read
+**Q: How do you handle bank conflicts in a shared-memory transpose kernel, where both the read
 and write directions matter?** Pad the shared tile once to `[TILE][TILE+1]`, which resolves
 both directions simultaneously. A naive transpose reads a tile row-major (conflict-free) but
 must later write it out column-major or vice versa, so one direction of an unpadded
 `[TILE][TILE]` tile is always the conflicting one; the padding fixes the column-access
 direction while the row-access direction was already fine.
 
-**Why can't a compiler just automatically pad every shared-memory array to avoid this class of
+**Q: Why can't a compiler just automatically pad every shared-memory array to avoid this class of
 bug?** Because the compiler cannot always statically prove which access pattern the kernel
 will actually use against a given array. A `tile[32][32]` might be accessed purely row-major
 (already conflict-free, where padding would only waste memory) in one kernel and column-major
 (needs padding) in another; that decision depends on the algorithm's data-flow, which is a
 programmer-level optimization the compiler does not perform automatically.
 
-**What is the maximum theoretical slowdown a single bank conflict can cause, and when do you
+**Q: What is the maximum theoretical slowdown a single bank conflict can cause, and when do you
 actually see it?** The theoretical maximum is a 32-way conflict, costing roughly 32x the
 cycles of a conflict-free access for that one instruction. This is exactly what happens with
 an unpadded `[32][32]` tile under a pure column access, which is why it is the textbook
 example — not a contrived worst case, but the natural result of the most common tiling layout
 before the padding fix is applied.
 
-**If shared memory is so much faster than global memory, why not always over-allocate a large
+**Q: If shared memory is so much faster than global memory, why not always over-allocate a large
 shared-memory tile "to be safe"?** Because shared memory is a hard per-SM capacity limit
 shared across every resident block, and over-allocating wastes it for no benefit. A tile
 larger than the reuse pattern actually needs can silently cap the number of resident blocks

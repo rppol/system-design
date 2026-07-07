@@ -727,7 +727,7 @@ an "after" run at throttled clocks manufactures a fake regression or a fake win.
 
 ## 12. Interview Questions with Answers
 
-**Why does timing a kernel with the host's `clock()` give a misleadingly small number?**
+**Q: Why does timing a kernel with the host's `clock()` give a misleadingly small number?**
 A
 kernel launch is asynchronous — the host call returns as soon as the launch is enqueued, not
 when the kernel finishes executing, so a host-side clock measures launch overhead
@@ -735,7 +735,7 @@ when the kernel finishes executing, so a host-side clock measures launch overhea
 CUDA events (`cudaEventRecord`/`cudaEventElapsedTime`) with an explicit
 `cudaEventSynchronize`, or `torch.cuda.synchronize()` before reading a Python-side timer.
 
-**Why doesn't adding more arithmetic to a memory-bound kernel make it faster?**
+**Q: Why doesn't adding more arithmetic to a memory-bound kernel make it faster?**
 A
 memory-bound kernel's throughput is capped by bytes moved per second, not FLOPs issued, so
 extra math has spare ALU cycles to run in while warps are already stalled on memory and adds
@@ -743,55 +743,55 @@ zero wall-clock benefit. The profiler shows this directly as a high SOL Memory b
 with a low SOL Compute bar — the fix is fewer or better-coalesced bytes moved, never more
 computation.
 
-**What is the difference between Nsight Systems and Nsight Compute, and in what order do you use them?**
+**Q: What is the difference between Nsight Systems and Nsight Compute, and in what order do you use them?**
 Nsight Systems (`nsys`) is a low-overhead, whole-application timeline profiler that shows where time goes across CPU, transfers, and kernel launches; Nsight Compute (`ncu`) is a high-overhead, per-kernel deep profiler that explains why one specific kernel is slow. Always run `nsys` first to find the dominant kernel or phase, then `ncu` on just that kernel — reversing the order buries the signal in 10-100x replay overhead applied to kernels that don't matter.
 
-**Why is running `ncu --set full` on an entire application an anti-pattern?**
+**Q: Why is running `ncu --set full` on an entire application an anti-pattern?**
 `ncu` instruments and replays every kernel launch it captures, at 10-100x slowdown per launch, so applying the full metric set to an entire run (rather than one named kernel) can turn a 50ms step into a 30-second replay while drowning the one kernel that matters in metrics for dozens that don't. Scope it with `-k kernelname --launch-count 1` after `nsys` has already identified the target.
 
-**What do the two SOL (Speed-Of-Light) bars in an `ncu` report mean, and how do you read them together?**
+**Q: What do the two SOL (Speed-Of-Light) bars in an `ncu` report mean, and how do you read them together?**
 SOL Memory is DRAM throughput as a percentage of the GPU's peak bandwidth, and SOL Compute is SM issue throughput as a percentage of peak FLOP/instruction rate. High memory / low compute means memory-bound (fix access patterns); high compute / low memory means compute-bound (fix instruction mix or use Tensor Cores); both low means something else is gating the kernel — check occupancy and warp-stall reasons next.
 
-**Is 90%+ DRAM throughput always a sign the kernel is already well-optimized?**
+**Q: Is 90%+ DRAM throughput always a sign the kernel is already well-optimized?**
 No — high DRAM throughput only means the memory pipe is busy, not that the bytes moved are useful. A kernel can hit 88% DRAM SOL while wasting three out of every four bytes on a strided, uncoalesced access, which only becomes visible by also checking global load/store efficiency (sectors per request); coalescing that same kernel keeps DRAM SOL roughly unchanged but raises store efficiency from 25% to 100% and cuts wall-clock time by a similar factor.
 
-**Is higher achieved occupancy always better?**
+**Q: Is higher achieved occupancy always better?**
 No — occupancy is a capacity metric for hiding latency, not a throughput metric, and a kernel can plateau at 50-60% occupancy with zero further benefit from more resident warps once memory latency is already hidden. Pushing occupancy further (e.g. via smaller per-thread work) can even force register spills that make the kernel slower, so always cross-check occupancy against the SOL bars before treating it as the target metric.
 
-**What does a "long scoreboard" warp stall reason mean?**
+**Q: What does a "long scoreboard" warp stall reason mean?**
 It means warps are stalled waiting on a global memory load to complete, which is the single most common stall reason in a memory-bound kernel and directly corroborates a high SOL Memory / low SOL Compute reading. Other common reasons: `barrier` (waiting at `__syncthreads`, indicating tiling/sync imbalance), `short scoreboard` (shared-memory or texture-load latency), and `not selected` (the scheduler chose another eligible warp — usually benign, meaning enough parallelism exists to hide latency).
 
-**What is the roofline model, and how do you use it before ever opening a profiler?**
+**Q: What is the roofline model, and how do you use it before ever opening a profiler?**
 The roofline model plots achievable performance against arithmetic intensity (FLOPs per byte moved from HBM), with a sloped bandwidth-limited region below the ridge point and a flat compute-limited roof above it; computing a kernel's theoretical AI by hand (algorithm FLOPs divided by minimum bytes it must move) predicts which regime it should land in before any measurement. `ncu`'s roofline chart then plots the kernel's *measured* AI and achieved performance against the same roofs, and a mismatch between the prediction and the measurement (e.g. AI predicts compute-bound but SOL Memory is pinned at 90%) usually means the implementation wastes bytes relative to the algorithm.
 
-**Why must you profile a release build with `-lineinfo`, never a debug (`-G`) build?**
+**Q: Why must you profile a release build with `-lineinfo`, never a debug (`-G`) build?**
 A `-G` build disables most compiler optimizations and inserts extra debug checks, so the metrics it produces describe debug-mode behavior, not the production kernel's actual performance characteristics. `-lineinfo` keeps full optimization on while embedding source-line correlation, letting `ncu`'s Source view map SOL/stall findings back to specific lines without disabling the optimizations you actually care about measuring.
 
-**Why should you always warm up before timing, and skip early iterations in a loop?**
+**Q: Why should you always warm up before timing, and skip early iterations in a loop?**
 The first kernel launch pays one-time costs — CUDA context initialization, JIT compilation of PTX to SASS on a cache miss, and cold instruction/data caches — that inflate the measured time and do not represent steady-state per-call cost. Always run at least one untimed warmup call, and for kernels launched repeatedly in a loop, use `ncu --launch-skip N` to profile a representative steady-state launch instead of the first one.
 
-**Why can comparing two profiling runs manufacture a fake regression or a fake win?**
+**Q: Why can comparing two profiling runs manufacture a fake regression or a fake win?**
 GPU boost clocks vary with thermal state and concurrent load, so a "before" run captured at full boost and an "after" run captured while the GPU is throttled (or vice versa) will show a timing difference that has nothing to do with the code change being tested. Use `ncu --clock-control base` (or lock clocks at the driver level) whenever two profiles need to be compared side by side with confidence.
 
-**What is an NVTX range, and what problem does it solve in a profiler timeline?**
+**Q: What is an NVTX range, and what problem does it solve in a profiler timeline?**
 An NVTX range (`nvtxRangePush`/`nvtxRangePop`, or PyTorch's `record_function`) is a user-defined, named, colored band that appears in the `nsys` timeline spanning whatever kernels and API calls occur between the push and pop. Without it, a timeline shows only anonymous kernel names and CUDA API calls; with it, the same timeline reads as labeled application phases (`"attention_layer_12"`, `"optimizer_step"`), turning a multi-hour manual correlation exercise into a five-minute visual read.
 
-**How does `torch.profiler` differ from raw `nsys`/`ncu`, and when do you reach for it instead?**
+**Q: How does `torch.profiler` differ from raw `nsys`/`ncu`, and when do you reach for it instead?**
 `torch.profiler` operates at the PyTorch op level — it wraps CUDA events per op, tracks CPU-side Python overhead, and can export a Chrome-trace-format JSON viewable in `chrome://tracing` or TensorBoard, without needing to leave a Python session or install Nsight tooling. Reach for it first when triaging a PyTorch training/inference pipeline (is the slowdown a data-loader stall, a specific op, or GPU-bound?); reach for `nsys`/`ncu` when you need system-level CUDA-stream detail or per-kernel hardware metrics that `torch.profiler`'s op-level view cannot show.
 
-**Why must `torch.cuda.synchronize()` be called before reading `torch.cuda.Event.elapsed_time()`?**
+**Q: Why must `torch.cuda.synchronize()` be called before reading `torch.cuda.Event.elapsed_time()`?**
 GPU work queued from Python is asynchronous exactly like a C++ kernel launch, so `end.record()` only enqueues a timestamp marker — if `elapsed_time()` is called before the GPU has actually reached that marker, it either raises an error or (in careless code) reads a stale or incomplete measurement. `torch.cuda.synchronize()` blocks the Python thread until all queued CUDA work completes, guaranteeing both the `start` and `end` events have fired before the elapsed time is computed.
 
-**What is Nsight Compute's Guided Analysis / rule engine, and what does it save you from doing manually?**
+**Q: What is Nsight Compute's Guided Analysis / rule engine, and what does it save you from doing manually?**
 It is a built-in set of heuristic rules that scan a captured kernel's metrics and surface specific, human-readable findings directly in the report — e.g. flagging low occupancy caused by register pressure, or uncoalesced global memory access with an estimated speedup from fixing it — instead of requiring the engineer to manually cross-reference every metric against known patterns. It is a starting point, not a replacement for understanding the SOL bars and stall reasons yourself, since the rules cover common patterns but not every kernel-specific nuance.
 
-**What does global load/store efficiency (sectors per request) tell you that DRAM throughput alone does not?**
+**Q: What does global load/store efficiency (sectors per request) tell you that DRAM throughput alone does not?**
 DRAM throughput measures how much of the peak bandwidth is being consumed, while sectors-per-request measures what fraction of the bytes actually fetched were useful — a coalesced 128-byte transaction across a 32-thread warp needs exactly 4 sectors, so 100% efficiency means zero waste, while 25% means four times the necessary traffic is being moved. A kernel can be at 90% DRAM throughput and 25% efficiency simultaneously, meaning the memory pipe is busy but mostly wasting bandwidth — the two metrics together, not either alone, tell you whether the kernel is already efficient or merely saturated.
 
-**How do you use `nsys` to distinguish a transfer-bound pipeline from a launch-overhead-bound one?**
+**Q: How do you use `nsys` to distinguish a transfer-bound pipeline from a launch-overhead-bound one?**
 In the `nsys` timeline, a transfer-bound pipeline shows large memcpy bars with the GPU compute engine idle alongside them (no overlap), while a launch-overhead-bound pipeline shows many small kernels back-to-back with visible gaps between them relative to each kernel's own duration. The fixes differ accordingly: transfer-bound calls for streams and pinned memory to overlap compute with copy; launch-overhead-bound calls for batching work into fewer, larger launches or capturing the sequence into a CUDA graph.
 
-**Why is it important to change only one thing between two profiling measurements?**
+**Q: Why is it important to change only one thing between two profiling measurements?**
 If a fix bundles multiple changes (e.g. shared-memory tiling plus a larger block size plus vectorized loads) applied together, an observed improvement or regression cannot be attributed to any single change, which breaks the ability to build a reliable mental model of what actually helped. The profiling loop's discipline is one hypothesis, one fix, one re-measurement, repeated — anything else turns evidence-based optimization back into guesswork with extra steps.
 
 ---

@@ -650,61 +650,61 @@ Other common pitfalls:
 
 ## 12. Interview Questions with Answers
 
-**What is warp divergence, and why does a checkerboard predicate (`threadIdx.x % 2`) make it worse than the same split done another way?**
+**Q: What is warp divergence, and why does a checkerboard predicate (`threadIdx.x % 2`) make it worse than the same split done another way?**
 Warp divergence is when the 32 threads of a warp disagree on which branch to take, forcing the hardware to execute each taken path as a separate serialized pass. A checkerboard predicate guarantees every warp in the kernel contains both outcomes, so every warp pays the divergence cost — whereas the identical 50/50 global split, if aligned to warp boundaries instead, produces zero diverging warps.
 
-**Does warp divergence cost scale with the ratio of threads on each side of the branch?**
+**Q: Does warp divergence cost scale with the ratio of threads on each side of the branch?**
 No — divergence cost depends on the number of distinct paths a warp must execute, not on how the threads are distributed across those paths. A 31-versus-1 split inside one warp still costs two full instruction-issue passes, exactly like a 16-versus-16 split, because the hardware must issue each path's instructions at least once regardless of how many lanes are active on it.
 
-**What is Independent Thread Scheduling, and which architecture introduced it?**
+**Q: What is Independent Thread Scheduling, and which architecture introduced it?**
 Independent Thread Scheduling (ITS), introduced with Volta (compute capability 7.0), gives each thread in a warp its own program counter and call stack, rather than one shared per-warp PC. This lets threads within a warp interleave divergent execution more flexibly and guarantees forward progress for every thread, including threads waiting on a peer within the same warp — something the old shared-PC model could not safely support.
 
-**Why did `__syncwarp()` become necessary on Volta and later, when older code never needed it?**
+**Q: Why did `__syncwarp()` become necessary on Volta and later, when older code never needed it?**
 Pre-Volta hardware executed all active lanes of a warp in strict lockstep within a divergent path, so a value written by one lane was implicitly visible to another lane on the very next instruction. Independent Thread Scheduling removes that implicit guarantee, so any code relying on cross-lane visibility within a warp (classic shared-memory warp reductions) must add an explicit `__syncwarp()` between steps, or it can silently read stale data.
 
-**What breaks if you keep using implicit warp-synchronous code (no `__syncwarp()`) on a Volta+ GPU?**
+**Q: What breaks if you keep using implicit warp-synchronous code (no `__syncwarp()`) on a Volta+ GPU?**
 A lane can read a shared-memory or `volatile` value before a peer lane in the same warp has actually written it, producing an intermittently wrong result. Independent Thread Scheduling no longer guarantees all lanes reach the same instruction on the same cycle, so this is a heisenbug class — it often runs correctly and fails only under a different scheduling interleave, block size, or GPU load — which is exactly the pattern `compute-sanitizer --tool synccheck` is built to catch.
 
-**What is predication, and how does the compiler decide between a branch and a predicated select?**
+**Q: What is predication, and how does the compiler decide between a branch and a predicated select?**
 Predication converts a conditional into instructions every lane executes unconditionally, with a per-lane predicate register suppressing the write-back for lanes where the condition is false. This avoids a real branch and its reconvergence bookkeeping entirely; `nvcc`/`ptxas` auto-predicate short conditional bodies (roughly single-digit instruction counts) because the always-pay-for-both cost is cheaper than branch overhead at that size, while longer bodies compile to a real branch so a warp that happens to be uniform at runtime can skip the untaken path for free.
 
-**What is the "active mask," and how do you inspect it inside a kernel?**
+**Q: What is the "active mask," and how do you inspect it inside a kernel?**
 The active mask is the 32-bit hardware record of which lanes of a warp are currently live (not masked out) at a given instruction, retrievable via `__activemask()`. Warp-vote and warp-shuffle intrinsics (`__ballot_sync`, `__shfl_sync`) take an explicit mask argument specifically so the caller states which lanes must participate, rather than silently assuming all 32 are present under possible divergence.
 
-**Can two threads in the same warp genuinely execute different instructions at the same instant under Independent Thread Scheduling?**
+**Q: Can two threads in the same warp genuinely execute different instructions at the same instant under Independent Thread Scheduling?**
 No — the SM still issues exactly one instruction per warp per cycle, so two lanes never execute genuinely different SASS instructions simultaneously. What ITS changes is that the scheduler can interleave which path's instructions it issues from cycle to cycle far more flexibly than the old single-shared-PC model, and it guarantees every thread's PC eventually advances rather than one path starving; the net divergence cost (roughly one pass per distinct path) is unchanged — only the scheduling flexibility and forward-progress guarantee are new.
 
-**Why is a stalled warp's context switch essentially free on a GPU, unlike a CPU thread context switch?**
+**Q: Why is a stalled warp's context switch essentially free on a GPU, unlike a CPU thread context switch?**
 A GPU's register file (64K 32-bit registers per SM) holds the full state of every resident warp at once, so switching warps needs no save or restore at all. A CPU thread switch, by contrast, must spill and reload registers plus flush pipeline state, which is why CPUs favor few, fast threads while GPUs favor many, latency-tolerant warps.
 
-**What is the difference between SIMD and SIMT in one sentence?**
+**Q: What is the difference between SIMD and SIMT in one sentence?**
 SIMD requires the programmer to explicitly pack data into fixed-width vector registers and manage masks by hand. SIMT lets the programmer write ordinary-looking per-thread scalar code instead, while the hardware transparently groups 32 threads into a warp and manages the active mask for them — this is why GPU kernels read like scalar C++ despite executing 32-wide underneath.
 
-**How does the warp scheduler hide the ~400-800 cycle latency of a global memory load?**
+**Q: How does the warp scheduler hide the ~400-800 cycle latency of a global memory load?**
 The scheduler keeps many warps resident on the SM simultaneously and instantly switches to any warp that is ready to issue the moment the current warp stalls on a long-latency operation. This keeps the SM's ALUs busy as long as at least one resident warp has a ready instruction, which is why occupancy (how many warps are resident, not how many threads exist in total) is the metric that predicts latency-hiding capacity — see [Occupancy & Launch Configuration](../occupancy_and_launch_configuration/).
 
-**Is a data-dependent loop trip count (e.g., each thread processing a different-length row) a divergence problem?**
+**Q: Is a data-dependent loop trip count (e.g., each thread processing a different-length row) a divergence problem?**
 Yes — a loop whose iteration count varies per thread causes shorter-running lanes to finish and sit masked while longer-running lanes in the same warp keep going. This is functionally identical to branch divergence, just spread across many iterations instead of one branch; the standard fix is to restructure the work so the loop bound is warp-uniform — pad every thread to the row length, or assign one *warp* per row (CSR-vector SpMV) so length variance only occurs between warps, not within one.
 
-**How do warp-vote functions like `__ballot_sync` relate to divergence?**
+**Q: How do warp-vote functions like `__ballot_sync` relate to divergence?**
 Warp-vote functions let a warp query, at runtime, exactly which lanes satisfy a predicate, returning a 32-bit mask built from the same active-mask machinery that drives divergence bookkeeping. Code can use this to detect that a warp happens to be uniform for a given predicate at runtime and skip a divergent path entirely, or to elect a single "leader" lane to perform a warp-aggregated operation (e.g., one atomic instead of 32 contending ones) — see [Warp-Level Primitives & Cooperative Groups](../warp_level_primitives_and_cooperative_groups/).
 
-**Why can predication be the wrong choice for expensive branch bodies, even though it "avoids divergence"?**
+**Q: Why can predication be the wrong choice for expensive branch bodies, even though it "avoids divergence"?**
 Predication does not avoid the cost of both paths — it guarantees every lane always executes both paths' instructions, every single time, regardless of whether the warp is actually divergent at runtime. A real branch, by contrast, lets a warp that happens to be uniform (all lanes take the same side) skip the other path's instructions entirely for free — a win predication can never capture, which is why predication is reserved for short bodies where the always-pay-for-both cost is small.
 
-**What tool would you use to confirm whether a suspected divergence problem is real, before rewriting the kernel?**
+**Q: What tool would you use to confirm whether a suspected divergence problem is real, before rewriting the kernel?**
 Nsight Compute's warp execution efficiency and branch efficiency metrics quantify exactly how many issued instructions were wasted on masked lanes versus how many warps took a divergent path. This turns a suspicion into a measured number before investing engineering time in a restructure — profile first, restructure second, since a kernel that looks divergent in source code may still show near-100% warp efficiency if the actual runtime data happens to keep warps uniform.
 
-**Give a concrete example of restructuring data to eliminate warp divergence rather than relying on predication.**
+**Q: Give a concrete example of restructuring data to eliminate warp divergence rather than relying on predication.**
 Sparse matrix-vector multiply in CSR format has per-row nonzero counts that vary, causing a naive one-thread-per-row kernel to diverge on the inner loop bound. The CSR-vector method instead assigns one *warp* per row and has all 32 lanes cooperatively stride across that row's nonzeros with a warp-shuffle reduction at the end — divergence now only comes from row-length variance between different warps' rows, not within any single warp's execution.
 
-**Why is `warpSize` a runtime-readable variable instead of a hardcoded literal `32` in portable CUDA code?**
+**Q: Why is `warpSize` a runtime-readable variable instead of a hardcoded literal `32` in portable CUDA code?**
 `warpSize` is a built-in that the compiler and runtime expose precisely so kernels are not silently wrong if NVIDIA ever ships a different warp width. Every architecture from Tesla through Blackwell has used 32, so in practice treating it as a constant is safe, but library code (CUB, Thrust, cooperative groups) still reads `warpSize` rather than hardcoding 32 as defensive future-proofing.
 
-**How did hardware reconvergence work before Independent Thread Scheduling, and what replaced it?**
+**Q: How did hardware reconvergence work before Independent Thread Scheduling, and what replaced it?**
 Pre-Volta hardware tracked divergence with an explicit per-warp SIMT stack that pushed both paths' active masks and reconvergence program counters on a divergent branch. It executed one path fully, popped the stack, then executed the other before resuming lockstep; Volta+ replaces that explicit stack with a scheduler-managed convergence mechanism plus per-thread program counters, giving the same reconvergence outcome but with finer-grained, more flexible interleaving and an explicit forward-progress guarantee.
 
-**Why should `cooperative_groups::coalesced_threads()` be preferred over hand-rolling `__activemask()` in new code?**
+**Q: Why should `cooperative_groups::coalesced_threads()` be preferred over hand-rolling `__activemask()` in new code?**
 `coalesced_threads()` captures the currently converged set of active threads as a typed group object that shuffle, reduce, and vote operations can consume directly and safely. This avoids manually threading a raw 32-bit mask through every intrinsic call by hand, which reduces the chance of passing a stale or incorrect mask to a shuffle/vote intrinsic — one of the more common Volta+ correctness bugs in newly written warp-cooperative code.
 
 ---

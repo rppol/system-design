@@ -628,38 +628,38 @@ a ready alternative.
 
 ## 12. Interview Questions with Answers
 
-**Why does increasing block size sometimes make a kernel slower instead of faster?**
+**Q: Why does increasing block size sometimes make a kernel slower instead of faster?**
 A larger block can push a kernel past one of the three occupancy ceilings — usually the
 register-file budget — causing the compiler to spill registers to slow local memory or
 the block to fail to fit at all, both of which lower effective throughput even though
 the block "looks" more parallel on paper.
 
-**What actually caps the number of resident warps on an SM?**
+**Q: What actually caps the number of resident warps on an SM?**
 The minimum of three independent budgets: the register file (65,536 32-bit
 registers/SM), the shared-memory pool (up to 228 KB/SM), and a hard thread/block count
 cap (2048 resident threads/SM, 1024 threads/block) — whichever ceiling is lowest for a
 given kernel and block size determines occupancy.
 
-**Is higher occupancy always better performance?**
+**Q: Is higher occupancy always better performance?**
 No — occupancy is a latency-hiding *capacity*, not a throughput measure, and many
 kernels peak at 50-60% occupancy because pushing higher forces register spills or
 smaller per-thread working sets that hurt instruction-level parallelism more than the
 extra warps help hide latency.
 
-**What is the difference between "resident" and "active" warps on an SM?**
+**Q: What is the difference between "resident" and "active" warps on an SM?**
 A resident warp has its registers and shared memory reserved on the SM for its block's
 entire lifetime, while an active (or "selected") warp is the one specific warp a
 partition's scheduler is issuing an instruction to in the current cycle — an SM can
 have 16 resident warps per partition but issues from only one of them per cycle.
 
-**Why can a kernel using 1024 threads/block with 96 registers/thread fail to reach any
+**Q: Why can a kernel using 1024 threads/block with 96 registers/thread fail to reach any
 occupancy at all?**
 Because 1024 threads × 96 registers = 98,304 registers exceeds the entire 65,536-register
 SM budget, so a single block of that shape cannot be made resident under any
 configuration — the fix is capping registers/thread (via `__launch_bounds__` or reduced
 unrolling) or shrinking the block size, not adding more SMs or a faster GPU.
 
-**What does "independent thread scheduling," introduced in Volta, actually change?**
+**Q: What does "independent thread scheduling," introduced in Volta, actually change?**
 Before Volta, a diverged warp executed both branch paths serially with a single shared
 program counter, reconverging only at an implicit point after the branch; Volta gives
 each thread its own program counter and call stack so diverged threads can interleave
@@ -667,7 +667,7 @@ progress and reconverge at a point the compiler chooses, but this also means
 warp-synchronous idioms that relied on implicit lockstep now require an explicit
 `__syncwarp()` to be correct.
 
-**Why does querying `cudaDeviceProp` at runtime matter instead of hardcoding numbers
+**Q: Why does querying `cudaDeviceProp` at runtime matter instead of hardcoding numbers
 from a spec sheet?**
 Because the same compiled binary is routinely deployed across a fleet mixing GPU
 generations (e.g., A100s and H100s in the same cluster), and each generation has a
@@ -675,26 +675,26 @@ different SM count, register-file size, and L2 capacity — a kernel or launch
 configuration tuned against one generation's numbers can silently under- or
 over-provision resources on another.
 
-**What is the relationship between SM count and "CUDA core count" on a spec sheet?**
+**Q: What is the relationship between SM count and "CUDA core count" on a spec sheet?**
 Total CUDA cores = SM count × cores per SM (e.g., H100: 132 SMs × 128 FP32 cores/SM =
 16,896), but those cores execute in lockstep groups of 32 within a warp, not as
 independent scalar processors, so core count alone does not predict performance on
 divergent or latency-bound code the way SM count and per-SM occupancy do.
 
-**What changed structurally in the SM between Volta and Hopper?**
+**Q: What changed structurally in the SM between Volta and Hopper?**
 Both keep the same 4-processing-partition layout with per-partition warp schedulers and
 register-file slices, but Hopper adds the Tensor Memory Accelerator (a dedicated engine
 for bulk async tile copies as a single instruction) and thread-block clusters, which let
 blocks on different SMs share a "distributed shared memory" region — extending the
 locality unit from one SM to a cluster of SMs.
 
-**What is `cp.async`, and what problem did it solve that earlier generations lacked?**
+**Q: What is `cp.async`, and what problem did it solve that earlier generations lacked?**
 `cp.async` (Ampere+) issues an asynchronous copy from global memory directly into shared
 memory without routing the data through a register first, freeing register capacity
 that the pre-Ampere global→register→shared copy path consumed and letting the copy
 overlap with unrelated compute on the same warp.
 
-**Why is a GPU's L2 cache size (~40 MB on Ampere/Hopper) relevant to kernel design, not
+**Q: Why is a GPU's L2 cache size (~40 MB on Ampere/Hopper) relevant to kernel design, not
 just an implementation detail?**
 An L2 that size is large enough to fully cache moderate-sized reused structures (e.g.
 attention score matrices at common sequence lengths), so a kernel that re-reads the same
@@ -702,7 +702,7 @@ global-memory region across multiple thread blocks can get an implicit speedup f
 residency even without explicit shared-memory tiling — but relying on this implicitly is
 fragile since L2 is shared and evicted by every other concurrently running kernel.
 
-**When do Tensor Cores actually engage inside an SM, and what happens if they don't?**
+**Q: When do Tensor Cores actually engage inside an SM, and what happens if they don't?**
 Tensor Cores engage only for matrix-multiply-shaped operations at supported precisions
 (FP16/BF16/TF32/FP8/INT8) with compatible tile dimensions, invoked via `mma`/WMMA
 intrinsics or automatically inside a library call; a kernel that performs the same
@@ -710,21 +710,21 @@ arithmetic as ordinary scalar FP32 instructions on the regular CUDA cores runs a
 fraction of the Tensor Core throughput with no compiler warning that it missed the fast
 path.
 
-**What is a thread-block cluster (Hopper), and why would a kernel author use one?**
+**Q: What is a thread-block cluster (Hopper), and why would a kernel author use one?**
 A thread-block cluster is a group of thread blocks, potentially resident on different
 SMs, that the hardware guarantees are scheduled together and that can address each
 other's shared memory as "distributed shared memory" — it extends cooperative-tiling
 patterns (previously limited to one SM's shared memory) across multiple SMs without
 routing through the slower L2/HBM path.
 
-**Why does the register-limited occupancy ceiling favor exactly 32 registers/thread as
+**Q: Why does the register-limited occupancy ceiling favor exactly 32 registers/thread as
 a rule of thumb on modern GPUs?**
 Because `max_threads_per_sm / regs_per_sm` = 2048 / 65,536 = 32 — at exactly 32
 registers/thread, the register-file ceiling and the thread-count ceiling coincide, so
 32 registers/thread is the largest per-thread register budget that still permits 100%
 theoretical occupancy on a GPU with these two constants.
 
-**What is the difference between shared memory and L1 cache on modern NVIDIA SMs, and
+**Q: What is the difference between shared memory and L1 cache on modern NVIDIA SMs, and
 why are they unified into one physical pool?**
 Shared memory is explicitly managed by the kernel (`__shared__` arrays the programmer
 addresses directly), while L1 is a hardware-managed cache for ordinary global-memory

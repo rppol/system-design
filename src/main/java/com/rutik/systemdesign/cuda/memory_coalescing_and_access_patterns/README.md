@@ -686,70 +686,70 @@ __global__ void columnSumFixed(const float* data, float* colSums,
 
 ## 12. Interview Questions with Answers
 
-**What is memory coalescing?**
+**Q: What is memory coalescing?**
 Coalescing is the GPU hardware merging the 32 individual memory requests of a warp into the fewest possible physical transactions when the requested addresses are consecutive and aligned. A fully coalesced 32-bit warp load hits exactly 4 sectors (128 bytes) and wastes none of it; a poorly shaped access can cost up to 32 separate sectors for the same 128 bytes of useful data.
 
-**Why is a stride-2 access 50% wasted rather than merely "half as fast"?**
+**Q: Why is a stride-2 access 50% wasted rather than merely "half as fast"?**
 Because the hardware still fetches whole 32-byte sectors even when only half the bytes in each sector are the ones a lane wanted. A warp reading `arr[tid * 2]` spans twice the address range of the unit-stride case, doubling the sectors fetched (8 instead of 4) while the useful payload stays the same 128 bytes, so exactly half of every transacted byte is thrown away.
 
-**Why can a fully scattered access cost up to 32 separate transactions?**
+**Q: Why can a fully scattered access cost up to 32 separate transactions?**
 Because when no two lanes' 4-byte words share a 32-byte sector, the hardware cannot combine any of the 32 requests and must issue one sector fetch per lane. That is up to 32 x 32 bytes = 1024 bytes moved to deliver 128 bytes of useful data — an 8x waste in the best scattered case, and effectively worse (more transactions, more serialized latency) under a fully random/pointer-chased pattern.
 
-**Does alignment matter even for a unit-stride access?**
+**Q: Does alignment matter even for a unit-stride access?**
 Yes — a consecutive, unit-stride warp access that starts at an address not aligned to 128 bytes straddles two cache lines and costs two transactions instead of one. `cudaMalloc` returns 256-byte-aligned base pointers, but sub-array offsets, `cudaMallocPitch` misuse, or manual pointer arithmetic can reintroduce misalignment further into a kernel.
 
-**Why is AoS (Array of Structures) a coalescing trap?**
+**Q: Why is AoS (Array of Structures) a coalescing trap?**
 Because reading "one field for every thread in the warp" — the most common warp-wide access pattern — means consecutive lanes' copies of that field are separated by `sizeof(struct)` bytes, not 4 bytes. A `{x,y,z,w}` struct turns a would-be unit-stride load into a 16-byte-stride load, dropping bus efficiency from 100% to roughly 25%.
 
-**How does SoA (Structure of Arrays) fix that?**
+**Q: How does SoA (Structure of Arrays) fix that?**
 By storing each field in its own contiguous array, so "read field x for all 32 threads" becomes a plain unit-stride load again — back to the 4-sector, 100%-efficient baseline. SoA does not reduce how much data the algorithm needs; it changes which bytes are adjacent to which so the warp's natural access shape lines up with the hardware's transaction shape.
 
-**What does a `float4` vectorized load actually buy you?**
+**Q: What does a `float4` vectorized load actually buy you?**
 It moves 16 bytes per thread in a single instruction instead of issuing four separate 4-byte loads, cutting instruction count roughly 4x while a fully warp-coalesced `float4` access still transacts at 100% bus efficiency (32 lanes x 16 bytes = 512 bytes serviced as four back-to-back 128-byte transactions). The catch is it requires 16-byte pointer alignment and an element count divisible by 4, with a scalar tail loop for the remainder.
 
-**Why does the classic matrix-transpose kernel expose a coalescing problem that can't be "indexed away"?**
+**Q: Why does the classic matrix-transpose kernel expose a coalescing problem that can't be "indexed away"?**
 Because a transpose fundamentally requires reading row-major and writing column-major (or vice versa) — whichever indexing you choose for the read, the write ends up striding by the matrix width, and swapping the loop order just moves the same strided cost to the other operation. The only fix is to decouple the two: stage a tile through shared memory so both the global read and the global write are coalesced, and let the strided reindexing happen on-chip instead of in global memory (see §14).
 
-**How do you spot an uncoalesced access in Nsight Compute?**
+**Q: How do you spot an uncoalesced access in Nsight Compute?**
 Open the Memory Workload Analysis section and check "sectors per request" against the ideal of 4 (for a 32-bit-element, fully coalesced warp load) — a much higher number, or a low "Global Load/Store Efficiency" percentage, both indicate wasted transactions. The roofline chart then tells you whether fixing it is even worth doing (only if the kernel sits below the memory-bandwidth roof).
 
-**Is coalescing the same mechanism as shared-memory bank conflicts?**
+**Q: Is coalescing the same mechanism as shared-memory bank conflicts?**
 No — coalescing governs how a warp's *global*-memory addresses map to DRAM/L2 sector transactions, while bank conflicts govern how a warp's *shared*-memory addresses map to the 32 on-chip banks; the two are analogous in spirit (warp-wide parallel access vs. hardware-imposed granularity) but are different hardware paths with different fixes — see [shared_memory_and_bank_conflicts](../shared_memory_and_bank_conflicts/).
 
-**Does `__ldg` or marking a pointer `const __restrict__` fix a strided access pattern?**
+**Q: Does `__ldg` or marking a pointer `const __restrict__` fix a strided access pattern?**
 No — those route reads through the read-only data cache, which reduces the cost of *repeated* fetches to the same addresses, but the first-touch sector math is unchanged for a genuinely strided or scattered pattern. Caching and coalescing are orthogonal levers; profile before assuming one fixes the other.
 
-**Does increasing occupancy fix a coalescing problem?**
+**Q: Does increasing occupancy fix a coalescing problem?**
 No — occupancy hides *latency* by keeping more warps in flight, but a poorly coalesced access wastes *bandwidth*, and more resident warps issuing the same wasteful pattern simply multiplies the wasted traffic rather than fixing it. A kernel bottlenecked on DRAM/L2 throughput needs a layout or indexing fix, not more parallelism.
 
-**How did coalescing rules differ on older architectures (pre-Fermi/Fermi) vs modern GPUs?**
+**Q: How did coalescing rules differ on older architectures (pre-Fermi/Fermi) vs modern GPUs?**
 Pre-Fermi GPUs required strict half-warp (16-thread) alignment to a single 64-or-128-byte segment or the access split into multiple transactions with no partial credit; Fermi and later (including all architectures covered in this guide, Volta through Blackwell) coalesce at the sector granularity described here, are far more forgiving of moderate misalignment, and route through an L1/L2 cache hierarchy that can partially mask a suboptimal pattern — but the underlying "consecutive and aligned wins" principle has not changed.
 
-**Why use `cudaMallocPitch` instead of a plain `cudaMalloc` for a 2D array?**
+**Q: Why use `cudaMallocPitch` instead of a plain `cudaMalloc` for a 2D array?**
 Because a row width that is not a multiple of 128/256 bytes causes each successive row's start address to drift out of alignment, silently turning what looks like a row-major coalesced access into a misaligned one as the kernel advances through rows. `cudaMallocPitch` pads each row to a hardware-friendly stride and returns that pitch, which the kernel must use instead of the logical row width for its index math.
 
-**Can the compiler auto-vectorize scalar loads into `float4` loads for you?**
+**Q: Can the compiler auto-vectorize scalar loads into `float4` loads for you?**
 Generally no for arbitrary pointer-indexed code — the compiler cannot prove aliasing and alignment safety across an arbitrary kernel, so vectorized loads are almost always written explicitly by reinterpreting the pointer as `float4*`/`int4*` and handling the tail manually, sometimes assisted by `__restrict__` and `__align__` annotations that make the compiler's job easier without guaranteeing it happens.
 
-**What happens to coalescing efficiency in a grid-stride loop?**
+**Q: What happens to coalescing efficiency in a grid-stride loop?**
 It is preserved as long as the per-iteration index expression (`tid + i * gridDim.x * blockDim.x`) still maps consecutive `threadIdx.x` to consecutive addresses within each iteration — the loop changes *which* elements a thread visits over time, not the warp-wide address pattern within any single iteration, so a coalesced base kernel stays coalesced when converted to a grid-stride loop.
 
-**Why might a warp-wide reduction over an AoSoA layout beat both pure AoS and pure SoA?**
+**Q: Why might a warp-wide reduction over an AoSoA layout beat both pure AoS and pure SoA?**
 Because AoSoA groups threads into warp-sized (or SIMD-width) chunks that are SoA *within* the chunk (preserving per-field coalescing for a warp) while keeping different fields of the same chunk physically close (improving cache locality when a kernel reads several fields of the same elements back-to-back) — a compromise used in some HPC/physics codes when neither pure layout is a clean win.
 
-**What is the practical difference between a "sector" and a "transaction"?**
+**Q: What is the practical difference between a "sector" and a "transaction"?**
 A sector (32 bytes) is the smallest unit the memory system will ever fetch; a transaction is the set of sectors — up to four, forming 128 bytes — that the hardware bundles together to service one warp instruction. A perfectly coalesced load needs exactly one 4-sector transaction; a badly shaped load may need many single-sector transactions that never combine.
 
-**If a kernel is compute-bound, is it still worth checking coalescing?**
+**Q: If a kernel is compute-bound, is it still worth checking coalescing?**
 It's worth a quick check but not worth deep investment — if Nsight Compute's roofline chart places the kernel near the compute ceiling rather than the memory-bandwidth ceiling, even a perfect coalescing fix will not move wall-clock time meaningfully, because the ALUs (not the memory bus) are the bottleneck; effort is better spent on instruction mix or Tensor Core utilization in that regime.
 
-**Give an example where fixing coalescing made the biggest measured difference you'd expect in an interview answer.**
+**Q: Give an example where fixing coalescing made the biggest measured difference you'd expect in an interview answer.**
 The classic naive-vs-tiled matrix transpose: the naive kernel's uncoalesced writes limit it to roughly 10-15% of a GPU's peak HBM bandwidth, while a shared-memory-tiled version that makes both the read and the write coalesced typically reaches 70-90% of peak — commonly cited as a 6-8x wall-clock improvement on the transpose operation alone (see §14 for the full BROKEN -> FIX kernel pair).
 
-**Why does `cudaMallocPitch` matter for 2D arrays specifically, and not for 1D arrays?**
+**Q: Why does `cudaMallocPitch` matter for 2D arrays specifically, and not for 1D arrays?**
 A 1D array has no "next row" whose start address can drift, but a 2D array's row-to-row stride equals its logical width, and if that width is not a multiple of 128/256 bytes, every subsequent row starts progressively misaligned relative to a coalescing boundary. `cudaMallocPitch` pads the stride so every row begins aligned, and the kernel must use the returned pitch (not the logical width) for its address math.
 
-**Why is AoSoA sometimes preferred over pure SoA in HPC/physics codes?**
+**Q: Why is AoSoA sometimes preferred over pure SoA in HPC/physics codes?**
 Because a kernel that reads several fields of the *same* element in quick succession (position, velocity, force for one particle) pays a cache-locality cost under pure SoA — those fields live in entirely separate arrays, potentially far apart in memory — while pure AoS pays the warp-wide single-field coalescing cost. AoSoA groups threads into warp-sized chunks that are SoA within the chunk (so a warp's single-field read is still coalesced) while keeping a chunk's several fields physically close, trading indexing complexity for both wins at once.
 
 ---

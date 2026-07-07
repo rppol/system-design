@@ -731,61 +731,61 @@ In practice the choice of layer is dictated by altitude, not preference: reach f
 
 ## 12. Interview Questions with Answers
 
-**What happens if two ranks call collectives in a different order or count?**
+**Q: What happens if two ranks call collectives in a different order or count?**
 The job deadlocks silently — NCCL collectives are barriers across the whole communicator, so a rank waiting on a collective that a peer never issues blocks forever with no error message. Always structure code so every rank calls the identical sequence of collectives; gate data content on rank, never the collective call itself.
 
-**Why is a host-staged `cudaMemcpy` D2H-then-H2D wasteful when NVLink is available?**
+**Q: Why is a host-staged `cudaMemcpy` D2H-then-H2D wasteful when NVLink is available?**
 It pays for two PCIe hops (~64 GB/s each) plus host-buffer overhead when a direct P2P copy over NVLink could run at ~900 GB/s on an H100 pair. Enable peer access with `cudaDeviceEnablePeerAccess` (both directions) and use `cudaMemcpyPeer` instead.
 
-**What does `ncclAllReduce` actually do internally?**
+**Q: What does `ncclAllReduce` actually do internally?**
 It runs a reduce-scatter phase (each GPU ends with one fully-reduced shard) followed by an all-gather phase (every GPU collects every shard), moving a bandwidth-optimal `2·(N-1)/N · size` bytes per GPU. This ring decomposition is what makes NCCL scale to hundreds of GPUs without per-GPU traffic growing with N.
 
-**Why must `cudaDeviceEnablePeerAccess` be called from both GPUs, not just one?**
+**Q: Why must `cudaDeviceEnablePeerAccess` be called from both GPUs, not just one?**
 Peer access is directional — enabling it on GPU0 only lets GPU0 read/write GPU1's memory, not the reverse. A bidirectional copy or NCCL ring needs both directions enabled, or the driver silently falls back to the host-staged path.
 
-**What is the difference between `ncclCommInitAll` and `ncclCommInitRank`?**
+**Q: What is the difference between `ncclCommInitAll` and `ncclCommInitRank`?**
 `ncclCommInitAll` sets up every communicator from one process, while `ncclCommInitRank` sets up one communicator per process from a shared unique ID. The latter is the pattern every multi-process/multi-node launcher (`torchrun`, MPI) uses, since it avoids one process owning many CUDA contexts and the Python GIL.
 
-**Why does forgetting `grad /= world_size` after `dist.all_reduce(op=SUM)` break training?**
+**Q: Why does forgetting `grad /= world_size` after `dist.all_reduce(op=SUM)` break training?**
 `all_reduce` with `ReduceOp.SUM` returns the *sum* of gradients across all ranks, not the mean, so skipping the division silently multiplies the effective gradient (and thus the effective learning rate) by the GPU count. This can look like instability or divergence with no obvious root cause in the loss curve alone.
 
-**What is the concrete bandwidth gap between NVLink and PCIe that makes P2P matter?**
+**Q: What is the concrete bandwidth gap between NVLink and PCIe that makes P2P matter?**
 NVLink 4 on H100 delivers roughly 900 GB/s aggregate bidirectional bandwidth per GPU, versus roughly 64 GB/s for PCIe Gen4/5 x16 — more than a 10x gap that host-staged copies pay twice (device→host, host→device).
 
-**Ring vs. tree all-reduce — when does NCCL pick which?**
+**Q: Ring vs. tree all-reduce — when does NCCL pick which?**
 Ring is bandwidth-optimal but has O(N) latency, so it wins for large messages, while tree has O(log N) latency at a small bandwidth cost and wins for small messages and very large GPU counts. NCCL selects automatically per call based on message size, GPU count, and detected topology.
 
-**What is GPUDirect RDMA, and what does it remove from the data path?**
+**Q: What is GPUDirect RDMA, and what does it remove from the data path?**
 It lets a network adapter DMA directly into or out of GPU memory over InfiniBand/RoCE, removing the host CPU and host memory entirely from an inter-node transfer. Without it, an inter-node collective must stage through host memory on both the sending and receiving node, adding latency and consuming host memory bandwidth.
 
-**What is an NVSwitch, and what problem does it solve that pairwise NVLink does not?**
+**Q: What is an NVSwitch, and what problem does it solve that pairwise NVLink does not?**
 NVSwitch is an all-to-all crossbar connecting up to 8 (or more, in newer NVLink-domain designs) GPUs so that every GPU reaches every other GPU at full NVLink bandwidth with no extra hop. Without it, GPUs are typically cross-wired in pairs, so a ring spanning all 8 GPUs must cross a slower PCIe/host segment for at least one ring edge.
 
-**Single-process-multi-GPU vs. multi-process-per-GPU — which does production training use, and why?**
+**Q: Single-process-multi-GPU vs. multi-process-per-GPU — which does production training use, and why?**
 Production launchers (`torchrun`, MPI) use one process per GPU, since a single Python process hits the GIL and one CUDA context juggling many devices, neither of which scales across nodes. Single-process-multi-GPU stays useful for small demos or `ncclCommInitAll`-style scripts confined to one node.
 
-**Why does DDP overlap the all-reduce with backward()?**
+**Q: Why does DDP overlap the all-reduce with backward()?**
 DDP buckets gradients (default ~25 MB) and fires each bucket's `ncclAllReduce` as soon as it is ready, while backward is still computing gradients for earlier layers. This overlap, not a faster collective, is the main reason DDP throughput scales close to linearly with GPU count.
 
-**What is `ncclGroupStart`/`ncclGroupEnd` for, and what breaks without it?**
+**Q: What is `ncclGroupStart`/`ncclGroupEnd` for, and what breaks without it?**
 It batches multiple per-device NCCL calls issued from one process so they launch concurrently instead of each call blocking until that device's portion completes before the next is issued. Without it, driving several devices' collectives from a single process serializes work that should overlap, quietly destroying the concurrency multi-GPU was supposed to buy.
 
-**Why can two GPUs in the same server sometimes NOT do P2P?**
+**Q: Why can two GPUs in the same server sometimes NOT do P2P?**
 `cudaDeviceCanAccessPeer` returns false when the pair has no NVLink connection and sits behind different PCIe root complexes with no supported path between them. In that case the driver's only option is the host-staged copy, which is why code must always check `cudaDeviceCanAccessPeer` rather than assuming P2P is available.
 
-**What does `ncclReduceScatter` give you that plain `ncclAllReduce` does not, and where is it used directly?**
+**Q: What does `ncclReduceScatter` give you that plain `ncclAllReduce` does not, and where is it used directly?**
 It leaves each rank holding only its *shard* of the reduced result, rather than the full buffer `ncclAllReduce` gives every rank. ZeRO/FSDP use exactly this shard-only primitive to avoid ever materializing the full tensor on every rank; `ncclAllReduce` itself is `ncclReduceScatter` followed by `ncclAllGather`.
 
-**Is a single NCCL communicator safe to call from multiple host threads at once?**
+**Q: Is a single NCCL communicator safe to call from multiple host threads at once?**
 No — by default a `ncclComm_t` is not thread-safe for concurrent collective calls, so each communicator should be driven by exactly one thread, typically the same thread that owns the corresponding CUDA device context. Sharing one communicator across threads without external locking is a race condition, not a supported pattern.
 
-**Why can two ranks silently end up bound to the same physical GPU?**
+**Q: Why can two ranks silently end up bound to the same physical GPU?**
 If `CUDA_VISIBLE_DEVICES` is inconsistent across a job's processes, each process's local index `0` can map to a different physical GPU, colliding two ranks onto one GPU with no error raised. Production launchers set it identically and derive the local device from `LOCAL_RANK`, not an assumed ordering.
 
-**What does `NCCL_DEBUG=INFO` show you that helps diagnose a hung or slow job?**
+**Q: What does `NCCL_DEBUG=INFO` show you that helps diagnose a hung or slow job?**
 It prints the topology NCCL detected and the ring/tree algorithm and transport it chose, confirming whether NVLink/NVSwitch/GPUDirect RDMA is actually engaged versus a slow PCIe or TCP fallback. It is the first thing to check before assuming a hang is a code bug rather than a topology or network issue.
 
-**Why do tensor-parallel inference deployments care more about all-reduce latency than data-parallel training does?**
+**Q: Why do tensor-parallel inference deployments care more about all-reduce latency than data-parallel training does?**
 Inference's all-reduce runs once per sharded layer on every forward pass, adding directly to per-token latency with nothing to overlap it against, while training's all-reduce hides behind the next step's compute. That is why NCCL favors the low-latency tree/protocol path for the small, frequent messages typical of tensor-parallel inference.
 
 ---

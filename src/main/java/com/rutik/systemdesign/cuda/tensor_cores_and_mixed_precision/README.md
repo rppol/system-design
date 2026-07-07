@@ -719,70 +719,70 @@ Additional pitfalls:
 
 ## 12. Interview Questions with Answers
 
-**Why isn't my matmul getting the Tensor Core speedup I expected?**
+**Q: Why isn't my matmul getting the Tensor Core speedup I expected?**
 The most common cause is a dimension that is not a multiple of the hardware's tile granularity (8 as the library minimum, 16 for the canonical WMMA tile) — cuBLAS/cuDNN silently fall back to the CUDA-core GEMM path with no error, and the only symptom is throughput far below the GPU's advertised peak. Check the actual M/N/K of the failing call, not just the "obvious" batch dimension. Padding the offending dimension to a multiple of 16 with zeros is the standard fix.
 
-**Why did my FP32 unit test start failing after I upgraded to an Ampere GPU?**
+**Q: Why did my FP32 unit test start failing after I upgraded to an Ampere GPU?**
 TF32 is the default precision for FP32 matmuls and convolutions on Ampere and later, and it truncates FP32's 23 mantissa bits down to 10 before the multiply — producing results that differ from true FP32 at roughly FP16 precision. Either relax the test's numerical tolerance to account for TF32, or explicitly disable it (`torch.backends.cuda.matmul.allow_tf32 = False` / `cublasSetMathMode(..., CUBLAS_DEFAULT_MATH)`) when exact FP32 reproducibility is required.
 
-**My FP16 training run is producing NaN losses after a few hundred steps — why?**
+**Q: My FP16 training run is producing NaN losses after a few hundred steps — why?**
 The near-universal cause is missing loss scaling: FP16's 5 exponent bits give it a much narrower dynamic range than FP32, so small gradient values common in deep learning underflow to zero, and once enough gradients vanish the optimizer state or a subsequent division produces NaN/Inf. Wrap the training step in `torch.cuda.amp.GradScaler` (which multiplies the loss up before backward and divides gradients back down before the optimizer step, skipping any step where it detects an overflow) or switch to BF16, which does not need loss scaling at all.
 
-**What is a Tensor Core, mechanically?**
+**Q: What is a Tensor Core, mechanically?**
 It is a dedicated hardware unit, separate from ordinary CUDA cores, that computes a fixed-shape matrix-multiply-accumulate — for example a 16×16×16 tile — as one warp-level instruction instead of many independent scalar FMAs. Each of the 32 threads in a warp holds a small, architecture-defined slice of the input/output tiles in registers (a "fragment"), and a single `mma_sync`/`mma.sync` instruction retires the entire tile's multiply-accumulate in a handful of cycles.
 
-**What is the `nvcuda::wmma` API and why does it exist instead of just using `mma.sync` directly?**
+**Q: What is the `nvcuda::wmma` API and why does it exist instead of just using `mma.sync` directly?**
 WMMA is a portable CUDA C++ abstraction — `fragment`, `load_matrix_sync`, `mma_sync`, `store_matrix_sync` — over the raw `mma.sync` PTX instruction, whose exact per-thread register layout is undocumented and differs across compute capabilities. Writing to the WMMA fragment API rather than hand-coding per-lane register assignments keeps kernel source portable across GPU generations while the compiler handles the architecture-specific lowering.
 
-**Why must WMMA fragment dimensions be 16×16×16 (or another fixed supported shape) rather than arbitrary sizes?**
+**Q: Why must WMMA fragment dimensions be 16×16×16 (or another fixed supported shape) rather than arbitrary sizes?**
 The Tensor Core hardware itself only implements a small, fixed set of tile shapes per precision (16×16×16 and variants like 32×8×16/8×32×16 for FP16 on many generations) — there is no hardware path for an arbitrary MMA size. A GEMM of any dimension is built by tiling the K loop into 16-deep chunks (as in §6.1) and by padding M/N/K up to the nearest supported multiple when the true problem size doesn't divide evenly.
 
-**Why does accumulation happen in FP32 even when the inputs are FP16 or BF16?**
+**Q: Why does accumulation happen in FP32 even when the inputs are FP16 or BF16?**
 Summing hundreds or thousands of K-dimension products in the same narrow format as the inputs would compound rounding error at every addition, and for FP16 in particular could overflow its ~65504 maximum magnitude well before the reduction finishes. FP32 accumulation (or FP16 for the newer FP8 paths, still wider than the FP8 inputs) keeps the running sum's precision and range far above the per-term error, so only the final cast-down to the output dtype introduces meaningful rounding.
 
-**What is loss scaling and why does only FP16 (not BF16) need it?**
+**Q: What is loss scaling and why does only FP16 (not BF16) need it?**
 Loss scaling multiplies the loss by a constant (or dynamically adjusted) factor before `backward()`, shifting gradient magnitudes up into FP16's representable range, then divides the gradients by the same factor before the optimizer reads them. BF16 has the same 8-bit exponent range as FP32, so the small-magnitude underflow problem loss scaling exists to solve for FP16's narrow 5-bit exponent simply does not occur in BF16 — which is why BF16 training code has no `GradScaler` at all.
 
-**What is the difference between static and dynamic loss scaling?**
+**Q: What is the difference between static and dynamic loss scaling?**
 Static loss scaling fixes one scale factor for the entire run, requiring manual tuning to avoid both underflow (scale too low) and overflow (scale too high). Dynamic loss scaling (PyTorch's `GradScaler` default) starts at a large scale, halves it whenever it detects an Inf/NaN in the unscaled gradients (skipping that optimizer step entirely), and grows it back by a small factor after a run of clean steps — self-tuning to the largest scale that doesn't overflow.
 
-**What is TF32 and why is it described as a "free" speedup?**
+**Q: What is TF32 and why is it described as a "free" speedup?**
 TF32 is a 19-bit compute format — FP32's 8 exponent bits, FP16's 10 mantissa bits — that Tensor Cores consume while the data still lives in ordinary 32-bit FP32 storage, so existing FP32 model code needs zero source changes to benefit; the truncation to 19 bits happens only inside the Tensor Core multiply. It has been the default for FP32 matmul/convolution on Ampere and later since its introduction, trading some mantissa precision (roughly FP16-level) for FP32's full dynamic range and a 4-8x throughput gain.
 
-**What is the difference between FP8 E4M3 and E5M2, and when do you use each?**
+**Q: What is the difference between FP8 E4M3 and E5M2, and when do you use each?**
 E4M3 (4 exponent bits, 3 mantissa bits) has a smaller maximum magnitude (~448) but more mantissa precision, making it the default choice for weights and activations in forward-pass inference. E5M2 (5 exponent, 2 mantissa) trades precision for a much larger range (~57344), which better suits gradients during backward passes where dynamic range varies more widely — NVIDIA's Transformer Engine picks between the two per-tensor automatically rather than requiring a manual choice.
 
-**How does cuBLAS decide whether to route a GEMM onto Tensor Cores?**
+**Q: How does cuBLAS decide whether to route a GEMM onto Tensor Cores?**
 cuBLAS's internal heuristic checks the operand dtype (must be FP16/BF16/TF32/FP8/INT8) and whether the M/N/K dimensions meet the tile-alignment threshold (8 as the practical minimum, 16 to hit the canonical tile exactly); if both hold, it selects a Tensor Core kernel variant, and if either fails, it silently falls back to its ordinary CUDA-core GEMM kernel with no error or warning. This is why profiling actual achieved TFLOP/s against the GPU's advertised peak — not just "did the code run" — is the only reliable way to confirm engagement.
 
-**What is CUTLASS and when would you reach for it instead of cuBLAS?**
+**Q: What is CUTLASS and when would you reach for it instead of cuBLAS?**
 CUTLASS is NVIDIA's open-source C++ template library implementing the full tiling hierarchy (thread-block tile → warp tile → `mma.sync` instruction) with pipelining and customizable epilogues, and it is what cuBLAS itself is built from internally on newer architectures. Reach for CUTLASS directly when you need a fused operation cuBLAS's fixed epilogue set doesn't offer — for example a GEMM fused with a custom activation and a quantization rescale in a single kernel — trading a steep template-metaprogramming learning curve for near-cuBLAS performance plus fusion.
 
-**How does `torch.autocast` decide which operations run in reduced precision?**
+**Q: How does `torch.autocast` decide which operations run in reduced precision?**
 `autocast` maintains a per-op allowlist/denylist: matmuls and convolutions (the FLOP-dominant, Tensor-Core-eligible ops) run in the requested reduced precision (FP16 or BF16), while numerically sensitive reductions like softmax, layer normalization, and loss computation are automatically kept in FP32 regardless of the context manager's dtype argument. This default split is why naively casting an entire model to `.half()` without `autocast` is a common way to introduce NaNs that `autocast` itself avoids.
 
-**Why might a model trained fine in FP32 diverge when switched to FP16 mixed precision, but train fine in BF16?**
+**Q: Why might a model trained fine in FP32 diverge when switched to FP16 mixed precision, but train fine in BF16?**
 FP16's narrow 5-bit exponent range is the near-universal cause: gradients or activations that were small-but-nonzero in FP32 round to exactly zero in FP16, and once enough values vanish, normalization layers or optimizer moment estimates can divide by (near-)zero and produce NaN/Inf. BF16 shares FP32's 8-bit exponent range, so the same small values remain representable (just with fewer significant digits), which is why switching the `autocast` dtype from `float16` to `bfloat16` is a common one-line fix for FP16-specific training instability on Ampere+ hardware.
 
-**What is the NVIDIA Transformer Engine and what problem does it solve?**
+**Q: What is the NVIDIA Transformer Engine and what problem does it solve?**
 It is a Hopper/Blackwell-generation software+hardware feature that automates FP8 mixed-precision training for transformer layers — selecting E4M3 vs E5M2 per tensor and computing per-tensor scaling factors dynamically each step, rather than requiring a hand-tuned static quantization scheme. It is used inside frameworks like Megatron-LM and NeMo to reach roughly 2x the throughput of BF16 training with comparable convergence on very large models.
 
-**How would you use Nsight Compute to confirm a kernel is actually using Tensor Cores?**
+**Q: How would you use Nsight Compute to confirm a kernel is actually using Tensor Cores?**
 Profile the kernel and look at pipeline-utilization metrics such as `sm__pipe_tensor_op_hmma_cycles_active` (or the analogous IMMA/FP8 metric) — a near-zero value means the launch never engaged Tensor Cores regardless of what the source code intended, while a high value close to the SM's tensor-pipe capacity confirms engagement. This is the only reliable confirmation; a kernel that "runs correctly" and even runs "fast" by CUDA-core standards can still be silently missing Tensor Core engagement entirely if a dimension/precision condition failed.
 
-**When would you deliberately avoid Tensor Cores / lower precision even though they're available?**
+**Q: When would you deliberately avoid Tensor Cores / lower precision even though they're available?**
 When the operation is a small, precision-sensitive reduction that's cheap in FLOPs regardless (softmax, layernorm, a loss computation) — the accuracy risk isn't worth the negligible time saved, which is exactly why `autocast`'s allowlist already excludes these ops by default. Also avoid forcing it onto dimensions too small or irregular to pad without dominating the actual tile size, and avoid it entirely when a workload demands bit-exact FP32 reproducibility, such as certain scientific-computing or regulated financial calculations.
 
-**What is INT8 Tensor Core support and how does it differ from the floating-point paths?**
+**Q: What is INT8 Tensor Core support and how does it differ from the floating-point paths?**
 INT8 Tensor Cores (available since Turing, 2nd generation) compute integer matrix multiplies at roughly double FP16's throughput, but require a quantization scheme — a per-tensor or per-channel scale factor mapping the original floating-point range into the 8-bit integer range `-128..127` — established via calibration on representative data or quantization-aware fine-tuning, rather than the drop-in dtype cast that FP16/BF16 autocast provides. This is the inference-time counterpart to FP8, generally reserved for post-training deployment rather than training itself — see [`../../ml/model_compression_and_efficiency/`](../../ml/model_compression_and_efficiency/) for the calibration mechanics.
 
-**What happens if you request a WMMA fragment type the target architecture doesn't support?**
+**Q: What happens if you request a WMMA fragment type the target architecture doesn't support?**
 The compilation fails outright rather than silently degrading — a BF16 or TF32 `wmma::fragment` declaration compiled with `-arch=sm_70` (Volta) produces a compile-time error because those element types simply don't exist in that architecture's header definitions. This is actually the safer failure mode compared to the dimension/dtype mismatches elsewhere in this module: a wrong `-arch` flag for WMMA code fails loudly at build time, whereas a wrong dimension for a cuBLAS call fails silently at runtime with only a throughput regression to notice.
 
-**How does structured 2:4 sparsity interact with the precision choice covered in this module?**
+**Q: How does structured 2:4 sparsity interact with the precision choice covered in this module?**
 They are independent, multiplicative levers rather than alternatives — 2:4 sparsity (available from Ampere onward) exploits a hardware-recognized zero pattern in the weight matrix to roughly double throughput on top of whatever precision speedup (BF16, FP8, etc.) is already in effect, at the cost of a separate prune-then-fine-tune cycle to reach the required pattern without unacceptable accuracy loss. A common mistake is treating sparsity as "instead of" a precision choice rather than "in addition to" it.
 
-**Does arithmetic intensity (the roofline model) matter for deciding whether Tensor Cores help a given kernel?**
+**Q: Does arithmetic intensity (the roofline model) matter for deciding whether Tensor Cores help a given kernel?**
 Yes — Tensor Cores raise the compute *ceiling*, but a kernel that is memory-bandwidth-bound (low arithmetic intensity, as in single-token autoregressive decode) is already below the ridge point and gains little to nothing from a higher compute ceiling it never reaches. Tensor Cores pay off precisely for compute-bound kernels (high arithmetic intensity, as in prefill or large-batch training matmuls) — see the CUDA section's roofline cross-cutting file for the general framework this module's precision-engagement rules plug into.
 
 ---

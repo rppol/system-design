@@ -107,6 +107,7 @@ Every `case_studies/` directory MUST contain a `README.md` with these 5 sections
 ## Interview Q&A Rules
 
 - **Bold the question**, plain text the answer
+- **Prefix every question with `Q: `** inside the bold, i.e. `**Q: <question>?**` (the LLM-section convention standardized repo-wide in ae92f65). The leading `Q: ` is display-only — `extract.py` strips it when building the MCQ bank, so it never leaks into the game. New sections MUST adopt this from the start (CUDA missed it because it was authored after the sweep).
 - First sentence = direct answer; following sentences = mechanism / example / gotcha; final sentence = practical guidance
 - **Minimum 15 Q&As per module** — this is a hard floor; see section CLAUDE.md for modules that require 18+
 - **Order by interview importance**: highest-frequency gotchas and traps first, then internal mechanics, then edge cases and advanced scenarios last
