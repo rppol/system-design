@@ -224,7 +224,8 @@ main { flex: 1; width: 100%; max-width: 780px; margin: 0 auto; padding: 30px 22p
   backdrop-filter: blur(22px) saturate(1.7);
   border-bottom: 1px solid var(--glass-brd);
 }
-.brand { font-weight: 800; letter-spacing: -0.02em; font-size: 19px; white-space: nowrap; }
+.brand { font-weight: 800; letter-spacing: -0.02em; font-size: 19px; white-space: nowrap; cursor: pointer; }
+.brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
 .brand span {
   background: linear-gradient(120deg, var(--accent), var(--accent-2));
   -webkit-background-clip: text; background-clip: text; color: transparent;
