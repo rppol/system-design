@@ -3771,6 +3771,9 @@ const LANG_DEFS = {
     kw: set("if then else elif fi for while do done case esac in function select until return break continue export local readonly declare set unset shift source exit trap"),
     bi: set("echo printf cd pwd ls cat grep sed awk curl wget python python3 pip docker kubectl git make true false") },
   json: { str: '"', num: 1, bi: set("true false null") },
+  cpp: { block: 1, line: ["//"], str: '"\'', num: 1, capType: 1, fn: 1,
+    kw: set("alignas alignof asm auto break case catch class concept const consteval constexpr constinit const_cast continue co_await co_return co_yield decltype default delete do dynamic_cast else enum explicit export extern for friend goto if inline mutable namespace new noexcept operator override private protected public register reinterpret_cast requires return sizeof static static_assert static_cast struct switch template this thread_local throw try typedef typeid typename union using virtual volatile while __global__ __device__ __host__ __shared__ __constant__ __restrict__ __forceinline__ __launch_bounds__ __managed__ __noinline__ __align__"),
+    bi: set("void bool char short int long float double signed unsigned wchar_t char8_t char16_t char32_t size_t ptrdiff_t intptr_t uintptr_t nullptr NULL true false int8_t int16_t int32_t int64_t uint8_t uint16_t uint32_t uint64_t uint half float2 float3 float4 double2 double4 int2 int3 int4 uint2 uint3 uint4 char4 uchar4 dim3 cudaError_t cudaStream_t cudaEvent_t threadIdx blockIdx blockDim gridDim warpSize std string vector cout cin cerr endl") },
   properties: { line: ["#", "!"], num: 0 },
   dockerfile: { line: ["#"], str: '"\'', num: 1, ciKw: 1,
     kw: set("from run cmd label expose env add copy entrypoint volume user workdir arg onbuild stopsignal healthcheck shell maintainer as"),
@@ -3781,6 +3784,8 @@ const LANG_ALIAS = {
   sh: "bash", shell: "bash", zsh: "bash", console: "bash", yml: "yaml",
   postgres: "sql", postgresql: "sql", mysql: "sql", plsql: "sql",
   jsonc: "json", docker: "dockerfile", props: "properties",
+  cuda: "cpp", cu: "cpp", cuh: "cpp", c: "cpp", cc: "cpp", cxx: "cpp",
+  "c++": "cpp", h: "cpp", hpp: "cpp", ptx: "cpp",
 };
 const langKey = (t) => { const k = (t || "").trim().toLowerCase(); return LANG_ALIAS[k] || k; };
 const isHighlightable = (t) => !!LANG_DEFS[langKey(t)];
