@@ -96,6 +96,18 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 
 ---
 
+## Learning Paths (Full + Interview-Specific)
+
+`README.md` documents two routes: the **Full Path** (all 34 modules = the "9-Phase
+Learning Path") and a curated **Interview-Specific Path** (18 modules). The interview
+subset is a **dual-source list** — it lives in both `README.md` ("## Learning Paths")
+and `game/app.js` (`STUDY_PATHS.backend.interview`, which drives the game's Study
+Full/Interview toggle). **Change one, change the other** — same modules, same order.
+Non-Q&A narrative only; no `extract.py` re-run needed. The README also carries a
+Knowledge-Question Map and a 5-week Study Plan (interview-readiness prose; no toggle impact).
+
+---
+
 ## Case Studies — 5 Total
 
 `case_studies/` directory. Learning-path index: `case_studies/README.md` (mandatory; update with every new case study).

@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 40 Modules
+## Module List — 45 Modules
 
 | Module Directory | Phase | Key Concepts | Sub-files |
 |-----------------|-------|-------------|-----------|
@@ -24,7 +24,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `training_deep_networks/` | 3 | LR warmup, gradient clipping, mixed precision, augmentation | — |
 | `generative_models/` | 3 | VAEs, GANs, Diffusion (DDPM), mode collapse, FID | — |
 | `computer_vision/` | 4 | Object detection, segmentation, ViT, CLIP, SSL | object_detection, image_segmentation, vision_transformers, self_supervised_vision |
-| `natural_language_processing/` | 4 | Word2Vec, GloVe, TF-IDF, NER, CRF, topic modeling | bert_and_pretrained_models, attention_and_seq2seq, text_representation_and_retrieval, nlp_evaluation_and_metrics, tokenization_deep_dive |
+| `natural_language_processing/` | 4 | Word2Vec, GloVe, TF-IDF, NER, CRF, topic modeling | bert_and_pretrained_models, attention_and_seq2seq, text_representation_and_retrieval, nlp_evaluation_and_metrics, tokenization_deep_dive, word_embeddings, sequence_labeling_and_crf, text_classification, topic_modeling, language_modeling, syntactic_parsing |
 | `recommender_systems/` | 4 | Two-tower, collaborative filtering, LTR, bandits | collaborative_filtering, deep_learning_recommenders, retrieval_and_ranking, content_and_hybrid, online_learning_and_bandits |
 | `time_series_forecasting/` | 4 | ARIMA, Prophet, DeepAR, Temporal Fusion Transformer | — |
 | `reinforcement_learning/` | 4 | MDP, Q-learning, DQN, PPO, actor-critic, RLHF | — |
@@ -49,6 +49,11 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `privacy_preserving_ml/` | 7 | Differential privacy, DP-SGD, federated learning (FedAvg), secure aggregation, PATE, membership inference | — |
 | `multi_task_and_multi_objective_learning/` | 4 | Shared-bottom, MMoE, PLE, uncertainty weighting, PCGrad, Pareto, multi-objective ranking | — |
 | `anomaly_detection/` | 4 | Isolation Forest, One-Class SVM, LOF, autoencoders, EVT thresholds, streaming detection, PR-AUC | — |
+| `imbalanced_data_and_leakage_traps/` | 2 | SMOTE/ADASYN, class weights, focal loss, cost-sensitive learning, PR-AUC vs ROC, threshold moving; target/temporal/group leakage, leaky CV, fit-inside-fold | — |
+| `information_retrieval_and_search/` | 4 | Inverted index, BM25, dense/hybrid retrieval (HNSW/RRF), cross-encoder reranking, learning-to-rank (LambdaMART), NDCG/MRR/MAP | — |
+| `speech_and_audio_ml/` | 4 | Spectrograms/MFCC, ASR (CTC/RNN-T/Whisper/wav2vec2), speaker ID/diarization, TTS, WER, SpecAugment | — |
+| `meta_learning_and_few_shot/` | 7 | N-way K-shot, Prototypical Networks, MAML/Reptile, episodic training, metric vs optimization-based | — |
+| `fairness_and_responsible_ai/` | 7 | Fairness definitions + impossibility, disparate impact, pre/in/post mitigation, proxies, model cards, EU AI Act | — |
 
 ---
 
@@ -65,6 +70,33 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `unsupervised_learning/` | gaussian_mixtures_and_em |
 | `model_evaluation_and_selection/` | automl_and_nas |
 | `active_learning_and_weak_supervision/` | semi_supervised_learning |
+
+---
+
+## Learning Paths (Full + Interview-Specific)
+
+`README.md` documents two routes: the **Full Path** (all 45 modules = "Recommended
+Learning Order") and a curated **Interview-Specific Path** (25 modules). The interview
+subset is a **dual-source list** — it lives in both `README.md` ("## Learning Paths")
+and `game/app.js` (`STUDY_PATHS.ml.interview`, which drives the game's Study
+Full/Interview toggle). **Change one, change the other** — same modules, same order.
+Non-Q&A narrative only; no `extract.py` re-run needed. The README also carries a
+Knowledge-Question Map and a 6-week Study Plan (interview-readiness prose; no toggle impact).
+
+---
+
+## Planned / Missing Topics (not yet created)
+
+Gaps surfaced by the 2026-07-07 interview-path audit. Roadmap, not a queue — build only
+on explicit request (each needs the full "Adding a New ML Module" procedure + STUDY_ORDER sync).
+
+| Topic | Priority | Note |
+|-------|----------|------|
+| Imbalanced data & leakage traps | DONE (2026-07-07) | Built as `imbalanced_data_and_leakage_traps/` — the top interview gap |
+| Speech / audio ML | DONE (2026-07-07) | Built as `speech_and_audio_ml/` |
+| Meta-learning / few-shot | DONE (2026-07-07) | Built as `meta_learning_and_few_shot/` |
+| Fairness / Responsible AI | DONE (2026-07-07) | Built as `fairness_and_responsible_ai/` (standalone) |
+| Information retrieval / search | DONE (2026-07-07) | Built as `information_retrieval_and_search/` (standalone) |
 
 ---
 
@@ -158,7 +190,8 @@ volumes). All render on GitHub and in the game reader.
 
 Run `/mermaid-diagrams` before authoring or converting any diagram — it holds the
 decision table, the One-Dark palette + `classDef` block, and the render gotchas
-(notably: **color all flowchart nodes or none**; see root `CLAUDE.md` →
+(notably: **colour every flowchart node** — the reader auto-tints only unstyled
+nodes, so hand-colour all of them for semantic consistency; see root `CLAUDE.md` →
 "Game / Reader / Q&A Compatibility").
 
 Keep **ASCII** (via `/visual-intuition-diagrams`) only for shapes Mermaid cannot

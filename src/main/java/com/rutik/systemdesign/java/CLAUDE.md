@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 27 Modules
+## Module List — 33 Modules
 
 | Module Directory | Topic |
 |-----------------|-------|
@@ -36,6 +36,12 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `java_time_datetime/` | Instant vs LocalDateTime, ZoneId/ZoneOffset, Duration vs Period, ChronoUnit, TemporalAdjuster, DateTimeFormatter, Clock (testable time), DST gaps/overlaps, legacy Date interop |
 | `bytecode_and_classfile/` | .class structure + constant pool, opcode families, all 5 invoke*, invokedynamic (LambdaMetafactory/StringConcatFactory), javap, verification, ASM/Byte Buddy, java agents + Instrumentation |
 | `security_and_cryptography/` | JCA/JCE providers, MessageDigest/Mac, AES-GCM vs CBC, RSA-OAEP/ECDH, KeyStore, SecureRandom, PBKDF2/bcrypt/Argon2, Signature, TLS/SSLEngine handshake + mTLS, JAAS |
+| `json_processing_jackson/` | ObjectMapper thread-safety + reuse, streaming/tree/databind, records/@JsonCreator, TypeReference generics, @JsonTypeInfo + polymorphic-typing CVEs, PolymorphicTypeValidator, JavaTimeModule, FAIL_ON_UNKNOWN_PROPERTIES |
+| `logging/` | SLF4J facade + bindings, Logback/Log4j2, parameterized logging, MDC across threads/pools/virtual-threads, async appenders (Disruptor), structured JSON, Log4Shell (CVE-2021-44228) |
+| `java_platform_module_system/` | JPMS: module-info, requires/exports/opens, requires transitive, automatic modules, split packages, services (ServiceLoader), jlink |
+| `reference_types_and_cleaners/` | Strong/Soft/Weak/Phantom references, ReferenceQueue, WeakHashMap, Cleaner vs finalize, ThreadLocal/ClassLoader leaks |
+| `graalvm_native_image/` | GraalVM native-image AOT, closed-world reachability, reflection/resource/proxy metadata, build-time vs runtime init |
+| `build_tools_maven_gradle/` | Maven (lifecycle, dependency mediation, BOM, shade) + Gradle (task graph, build cache, version catalogs), dependency hell |
 
 **Deep-dive sub-files** (group under their parent module's game topic; no separate `STUDY_ORDER` entry):
 - `strings_and_text/regex_engine_and_redos.md` — backtracking NFA engine, catastrophic backtracking / ReDoS, possessive/atomic groups, mitigations.
@@ -43,9 +49,30 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
+## Learning Paths (Full + Interview-Specific)
+
+`README.md` documents two routes: the **Full Path** (all 33 modules = "8-Phase Learning
+Path") and a curated **Interview-Specific Path** (17 modules). The interview subset is a
+**dual-source list** — it lives in both `README.md` ("## Learning Paths") and
+`game/app.js` (`STUDY_PATHS.java.interview`, which drives the game's Study Full/Interview
+toggle). **Change one, change the other** — same modules, same order. Non-Q&A narrative
+only; no `extract.py` re-run needed. The README also carries a Knowledge-Question Map and
+a 5-week Study Plan (interview-readiness prose; no toggle impact).
+
+---
+
 ## Planned / Missing Topics (not yet created)
 
-None currently — the previously-planned gaps (`reactive_programming`, `microservices_patterns`, `grpc_protobuf`, `annotation_processing`) are all built and listed in the Module List above. Add future senior-coverage gaps here following the adding guide below.
+The 2026-07-07 interview-path audit added `json_processing_jackson/` and `logging/` (both
+built, in the Module List above). A same-day follow-up build then closed every remaining
+gap below — the table has no pending items left; retained as a historical record.
+
+| Topic | Priority | Note |
+|-------|----------|------|
+| Build tools & dependency management (Maven/Gradle, shading, classpath vs module-path) | DONE (2026-07-07) | Built as `build_tools_maven_gradle/` |
+| JPMS deep-dive (module resolution, split packages, `requires transitive`) | DONE (2026-07-07) | Built as `java_platform_module_system/` |
+| Reference types & leak hunting (Weak/Soft/Phantom, ReferenceQueue, Cleaner vs finalize) | DONE (2026-07-07) | Built as `reference_types_and_cleaners/` |
+| GraalVM native image / AOT (pure-Java) | DONE (2026-07-07) | Built as `graalvm_native_image/` |
 
 ---
 
@@ -151,9 +178,11 @@ authoring or converting any diagram — it has the One-Dark `classDef` palette,
 supported types, and gotchas.
 
 **Reader contract:** Mermaid renders in the game reader (v11, pitch-black
-surface). Color **every** flowchart node with the One-Dark `classDef` or **none**
-(the reader auto-tints uncolored flowcharts, but bails to flat gray if even one
-node is authored-colored). Never set a light background inside a diagram.
+surface). Colour **every** flowchart node with the One-Dark `classDef` — the reader
+auto-tints only the nodes you leave unstyled (authored colours are always respected,
+so it degrades per node, never a flat-grey bail), but its order-based hues are
+arbitrary, so hand-colour all nodes for semantic consistency. Never set a light
+background inside a diagram.
 
 **Keep ASCII only** for shapes Mermaid cannot draw — byte/memory-layout maps
 (Compact Strings `byte[]`, MemoryLayout field offsets), the JVM heap-region grid,

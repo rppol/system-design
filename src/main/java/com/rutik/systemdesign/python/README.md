@@ -146,6 +146,75 @@ Phase 6 — Deployment, Observability & Scale (5 modules)
 
 ---
 
+## Learning Paths
+
+This section is exhaustive by design — 40 modules spanning pure Python internals, concurrency, and the full FastAPI production stack. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
+
+### Full Path (40 modules)
+
+The complete curriculum in the order above — see [6-Phase Learning Path](#3-6-phase-learning-path). Use it for genuine mastery: deep CPython internals (metaclasses, descriptors, packaging/tooling, `dis`/profiling), the full concurrency toolkit (`threading`/`multiprocessing` alongside `asyncio`), stdlib depth (strings/bytes/regex, file I/O, datetime/logging), Pythonic design patterns, every layer of the FastAPI request lifecycle (routing, middleware, configuration, WebSockets/SSE), and the complete production-hardening set (FastAPI-specific testing, external HTTP clients, message-queue consumers, background job queues, API versioning, OWASP hardening). Nothing is dropped.
+
+### Interview-Specific Path (22 modules)
+
+A ruthless cut to what a **senior Python / backend interview** actually probes, anchored on the modules this section already flags as highest-yield (language core, the GIL, asyncio, and the FastAPI + production spine). Same learning order, ~45% fewer modules. Each group below says why it earns interview time.
+
+| Group | Modules | Why it's tested |
+|-------|---------|-----------------|
+| Language Core & Data Model | [data_model_and_objects](data_model_and_objects/), [core_language_idioms](core_language_idioms/), [iterators_and_generators](iterators_and_generators/), [decorators_and_closures](decorators_and_closures/), [context_managers_and_exceptions](context_managers_and_exceptions/), [collections_and_data_structures](collections_and_data_structures/) | Dunder methods, `__slots__`, MRO/C3, EAFP vs LBYL, the iterator protocol, closures, `ExceptionGroup`/`except*`, and dict/list Big-O — the fundamentals nearly every Python interview opens with, screen or onsite |
+| CPython Internals & Type System | [cpython_memory_model](cpython_memory_model/), [the_gil_and_free_threading](the_gil_and_free_threading/), [the_type_system_and_typing](the_type_system_and_typing/), [functional_programming](functional_programming/) | Reference counting vs generational GC, the GIL's release points and PEP 703 free-threading, `Protocol`/`TypeVar`/variance, and functional idioms — the internals that separate mid from senior |
+| Concurrency, Async & Testing | [asyncio_and_event_loop](asyncio_and_event_loop/), [async_patterns_and_pitfalls](async_patterns_and_pitfalls/), [testing_with_pytest](testing_with_pytest/) | Event-loop internals, `TaskGroup` structured concurrency, blocking-in-async detection, and pytest fixtures/mocking — proof you can write and verify correct async code, not just describe it |
+| FastAPI Core & ASGI | [fastapi_fundamentals_asgi](fastapi/fastapi_fundamentals_asgi/), [pydantic_v2_deep_dive](fastapi/pydantic_v2_deep_dive/), [dependency_injection_in_fastapi](fastapi/dependency_injection_in_fastapi/) | ASGI scope/receive/send, Pydantic v2's Rust core and the v1->v2 migration, and the `Depends` dependency graph — the framework internals every FastAPI-focused interview opens with |
+| FastAPI Production Concerns | [async_database_sqlalchemy](fastapi/async_database_sqlalchemy/), [authentication_and_security](fastapi/authentication_and_security/), [error_handling_and_validation](fastapi/error_handling_and_validation/) | Async SQLAlchemy session-per-request and N+1 avoidance, OAuth2/JWT flows, and RFC 7807 error contracts — what shows up the moment a toy API becomes a real service |
+| Deployment, Observability & Scale | [production_deployment_and_scaling](fastapi/production_deployment_and_scaling/), [observability_and_monitoring](fastapi/observability_and_monitoring/), [caching_and_performance](fastapi/caching_and_performance/) | Uvicorn/Gunicorn worker sizing, graceful shutdown and K8s probes, OpenTelemetry/Prometheus, and Redis caching — the "how does this run at 100k RPS" half of a senior loop |
+
+**Deliberately deferred to the Full Path** (valuable, lower interview yield): deep CPython/tooling internals (metaclasses & descriptors, packaging & project tooling, performance profiling), string/bytes/regex internals, file I/O & serialization, `threading`/`multiprocessing` (asyncio dominates the async story above), Pythonic design patterns, stdlib datetime & logging, and the more specialized FastAPI/production modules — routing & request handling, middleware & lifecycle, configuration & settings management, WebSockets/SSE, background job queues, FastAPI-specific testing, HTTP clients for external APIs, message-queue-driven consumers, API design & versioning, and OWASP security hardening. A niche flagged in an interview (e.g. "have you used Celery?" or "how do you version a REST API?") is a bonus, not a gate — reach for these once the 22 above are solid.
+
+---
+
+## Knowledge-Question Map
+
+The highest-frequency Python / FastAPI *knowledge* questions mapped to the file that answers them. For *system design* ("design X") questions, use the interview-prep shortcuts in [fastapi/case_studies/README.md](fastapi/case_studies/README.md).
+
+| Interview question | Where the answer lives |
+|--------------------|------------------------|
+| How does Python's attribute lookup work (MRO, descriptors, data vs non-data), and when do you actually need `__slots__`? | [data_model_and_objects](data_model_and_objects/) |
+| EAFP vs LBYL; comprehensions vs `map`/`filter`/`reduce` — which is idiomatic, and why? | [core_language_idioms](core_language_idioms/), [functional_programming](functional_programming/) |
+| How do `yield`/`yield from` work, and what distinguishes an iterator from an iterable? | [iterators_and_generators](iterators_and_generators/) |
+| What is a closure, and how does late binding cause the classic loop-variable bug? | [decorators_and_closures](decorators_and_closures/) |
+| What changed with `ExceptionGroup`/`except*` in Python 3.11? | [context_managers_and_exceptions](context_managers_and_exceptions/) |
+| What's the time complexity of common `dict`/`list` operations, and how does a dict resize under the hood? | [collections_and_data_structures](collections_and_data_structures/) |
+| Explain CPython reference counting — when does the cyclic garbage collector have to step in? | [cpython_memory_model](cpython_memory_model/) |
+| When exactly is the GIL released, and how does PEP 703 free-threading change that model? | [the_gil_and_free_threading](the_gil_and_free_threading/) |
+| What is a `Protocol`, and how does structural typing differ from nominal typing? | [the_type_system_and_typing](the_type_system_and_typing/) |
+| Explain the async/await execution model, and what does `TaskGroup` (3.11) improve over `gather`? | [asyncio_and_event_loop](asyncio_and_event_loop/) |
+| What happens if you call a blocking call like `requests.get()` inside `async def`? | [async_patterns_and_pitfalls](async_patterns_and_pitfalls/) |
+| How do you mock an async dependency and assert on it with pytest? | [testing_with_pytest](testing_with_pytest/) |
+| How does the ASGI protocol (scope/receive/send) work, and how does it differ from WSGI? | [fastapi_fundamentals_asgi](fastapi/fastapi_fundamentals_asgi/) |
+| How does Pydantic v2 differ from v1, and why is validation 5-50x faster? | [pydantic_v2_deep_dive](fastapi/pydantic_v2_deep_dive/) |
+| How does FastAPI resolve the `Depends` graph, and how do `yield` dependencies clean up after the response is sent? | [dependency_injection_in_fastapi](fastapi/dependency_injection_in_fastapi/) |
+| How do you avoid N+1 queries in async SQLAlchemy 2.0? | [async_database_sqlalchemy](fastapi/async_database_sqlalchemy/) |
+| Walk through the OAuth2 password flow and JWT validation in FastAPI. | [authentication_and_security](fastapi/authentication_and_security/) |
+| How do you turn a `RequestValidationError` into an RFC 7807 Problem Details response? | [error_handling_and_validation](fastapi/error_handling_and_validation/) |
+| How do readiness probes, graceful shutdown, and OpenTelemetry tracing work together during a zero-downtime rolling update? | [production_deployment_and_scaling](fastapi/production_deployment_and_scaling/), [observability_and_monitoring](fastapi/observability_and_monitoring/) |
+| How do you cache a FastAPI response in Redis without serving stale data? | [caching_and_performance](fastapi/caching_and_performance/) |
+
+---
+
+## Study Plan
+
+A 6-week plan over the Interview-Specific Path. Each week pairs modules with one case study to rehearse the "design X" format.
+
+| Week | Focus | Modules | Case study |
+|------|-------|---------|------------|
+| 1 | Language Core & Data Model | [data_model_and_objects](data_model_and_objects/), [core_language_idioms](core_language_idioms/), [iterators_and_generators](iterators_and_generators/), [decorators_and_closures](decorators_and_closures/), [context_managers_and_exceptions](context_managers_and_exceptions/), [collections_and_data_structures](collections_and_data_structures/) | skim [Async Web Scraper](fastapi/case_studies/design_async_web_scraper.md) (generator-driven crawl queue, closures for parse callbacks) |
+| 2 | CPython Internals & Type System | [cpython_memory_model](cpython_memory_model/), [the_gil_and_free_threading](the_gil_and_free_threading/), [the_type_system_and_typing](the_type_system_and_typing/), [functional_programming](functional_programming/) | skim [Async Task Queue](fastapi/case_studies/design_async_task_queue.md) (CPU- vs I/O-bound worker sizing, typed task payloads) |
+| 3 | Concurrency, Async & Testing | [asyncio_and_event_loop](asyncio_and_event_loop/), [async_patterns_and_pitfalls](async_patterns_and_pitfalls/), [testing_with_pytest](testing_with_pytest/) | [Real-Time Chat System](fastapi/case_studies/design_realtime_chat_fastapi.md) (WebSocket concurrency + backpressure) |
+| 4 | FastAPI Core & ASGI | [fastapi_fundamentals_asgi](fastapi/fastapi_fundamentals_asgi/), [pydantic_v2_deep_dive](fastapi/pydantic_v2_deep_dive/), [dependency_injection_in_fastapi](fastapi/dependency_injection_in_fastapi/) | [ML Inference API with FastAPI](fastapi/case_studies/design_ml_inference_api_fastapi.md) (`lifespan` model loading, Pydantic-validated payloads) |
+| 5 | FastAPI Production Concerns | [async_database_sqlalchemy](fastapi/async_database_sqlalchemy/), [authentication_and_security](fastapi/authentication_and_security/), [error_handling_and_validation](fastapi/error_handling_and_validation/) | [Multi-Tenant SaaS API](fastapi/case_studies/design_multi_tenant_saas_api.md) (async SQLAlchemy tenant isolation + JWT/RBAC) |
+| 6 | Deployment, Observability & Scale + drills | [production_deployment_and_scaling](fastapi/production_deployment_and_scaling/), [observability_and_monitoring](fastapi/observability_and_monitoring/), [caching_and_performance](fastapi/caching_and_performance/) | [Rate-Limited API with FastAPI](fastapi/case_studies/design_rate_limited_api_fastapi.md) (Redis caching + `Depends`-injected rate limiter) |
+
+---
+
 ## 4. Python Version Matrix
 
 | Feature | Version | Notes |

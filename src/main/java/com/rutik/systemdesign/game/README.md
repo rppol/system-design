@@ -136,6 +136,8 @@ whole repo root to Pages.
 - **One Dark surface** — code gets IntelliJ-style highlighting; ASCII §5 diagrams get
   alignment-safe colouring; **Mermaid** fences render via a lazy CDN import (flowchart,
   sequence, state, xychart, pie, quadrant, timeline, sankey), column-aware and themed.
+  Authored diagrams follow four style rules — **colour every node**, **horizontal-first**
+  (`LR`), **no spillover text**, **rounded corners** (see the authoring contract below).
 - **Evaluate me** — every module page ends with a "Quiz this topic" launcher.
 - **Comfort + deep links** — drag-resize, fullscreen, collapsible index + module tree,
   reading-progress bar, `A−`/`A+` font, back-to-top, working cross-links, an interactive
@@ -239,6 +241,15 @@ python3 extract.py     # re-run after editing ANY module's Q&A, then reload the 
 - Every new module directory must be added to `STUDY_ORDER["<section>"]` in `app.js` at
   its learning-path position (sub-files need no entry — they group under their parent).
 - Mermaid fences are valid only in study section files, never in `game/` or `CLAUDE.md`.
+- **Mermaid diagram style rules (owner-set 2026-07-07) — all four, every diagram:**
+  (1) **Colour every node** with the One-Dark `classDef` palette, semantic-by-role — the
+  reader's grey auto-tint is only a fallback for legacy diagrams, not the target.
+  (2) **Horizontal-first** — default `flowchart LR`; `TD`/`TB` only for genuinely vertical
+  hierarchies/lifecycles or when `LR` would overflow (then `subgraph`s).
+  (3) **No spillover text** — short labels, wrap long ones with `<br/>`.
+  (4) **Rounded corners** — the reader rounds every box; use rounded shapes
+  `(label)`/`([label])` for GitHub parity. Full detail: root `CLAUDE.md` → "Mermaid
+  Diagrams" and the `/mermaid-diagrams` skill.
 
 ---
 

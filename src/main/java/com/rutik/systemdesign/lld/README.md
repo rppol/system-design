@@ -256,6 +256,81 @@ Put it all together with end-to-end LLD exercises.
 
 ---
 
+## Learning Paths
+
+This section is exhaustive by design — 9 modules spanning design vocabulary, all
+three GoF pattern families, pattern-selection judgment, anti-patterns, concurrency
+idioms, and 12 end-to-end system design problems. That is the right depth for a
+reference and the wrong shape for someone one week from an LLD round. So there are
+**two ways through it**; the browser learning game's **Study** view surfaces both as
+a **Full / Interview** toggle (Full is the default).
+
+### Full Path (9 modules)
+
+The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: the design vocabulary (SOLID Principles and Design Principles), every GoF family (Creational, Structural, Behavioral), pattern-selection judgment (Pattern Comparisons), what to avoid (Anti-Patterns), thread-safety idioms (Concurrency Patterns), and all 12 System Design Problems. Nothing is dropped.
+
+### Interview-Specific Path (7 modules)
+
+A ruthless cut to what a **senior LLD interview** actually probes: the GoF vocabulary plus the "design a parking lot / rate limiter" round every LLD interview runs on. Same learning order, 2 modules fewer. Each group below says why it earns interview time.
+
+| Group | Modules | Why it's tested |
+|-------|---------|-----------------|
+| Foundations | [SOLID Principles](solid_principles/README.md) | SRP/OCP/LSP violations are the standard "what's wrong with this class" opener, and justify every pattern discussed afterward |
+| Creational Patterns | [Creational Patterns](creational/README.md) | Thread-safe Singleton (DCL + volatile) and Factory Method vs Abstract Factory vs Builder — the creation-strategy question nearly every interview touches |
+| Structural Patterns | [Structural Patterns](structural/README.md) | Decorator vs Proxy, Adapter vs Facade — composition-based flexibility questions test whether you reach for inheritance by default |
+| Behavioral Patterns | [Behavioral Patterns](behavioral/README.md) | Strategy, Observer, State, Command, Template Method — the core vocabulary; most "design X" problems resolve to two or three of these |
+| Pattern Mastery | [Pattern Comparisons](pattern_comparisons/README.md) | Strategy vs State, Decorator vs Proxy — interviewers probe judgment ("why this pattern, not that one"), not memorization |
+| Anti-Patterns | [Anti-Patterns](anti_patterns/README.md) | "How would you refactor this?" rounds test recognition of God Object, Service Locator, and Circular Dependencies before you can propose a fix |
+| Apply: System Design Problems | [System Design Problems](system_design_problems/README.md) | The actual 30-45 minute round — Parking Lot, Rate Limiter, LRU Cache — where every principle above gets combined under time pressure |
+
+**Deliberately deferred to the Full Path**: Design Principles (DRY, KISS, YAGNI, Law of Demeter, Composition over Inheritance, Program to Interface — folded into SOLID above, since interviewers rarely test these by name even though their instincts run through every pattern discussion) and Concurrency Patterns (Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, Thread Pool — the deep mechanics live in [java/concurrency](../java/concurrency/README.md); LLD rounds rarely dedicate time to raw concurrency primitives). A niche flagged in an interview (e.g. "how would you make this thread-safe?") is a bonus, not a gate — reach for these once the 7 above are solid.
+
+---
+
+## Knowledge-Question Map
+
+The highest-frequency LLD *knowledge* questions mapped to the file that answers them. For *system design* ("design X") questions, use the interview-prep shortcuts in [case_studies/README.md](case_studies/README.md).
+
+| Interview question | Where the answer lives |
+|--------------------|------------------------|
+| What's a real Single Responsibility Principle violation, and how do you split it? | [SOLID Principles](solid_principles/README.md) |
+| What is the Open/Closed Principle, and which pattern is its textbook embodiment? | [SOLID Principles](solid_principles/README.md) |
+| What does a Liskov Substitution Principle violation actually look like? | [SOLID Principles](solid_principles/README.md) |
+| Factory Method vs Abstract Factory vs Builder — how do you choose? | [Creational Patterns](creational/README.md), [Factory vs AbstractFactory vs Builder](pattern_comparisons/Factory_vs_AbstractFactory_vs_Builder.md) |
+| How do you make a Singleton thread-safe without synchronizing every call? | [Singleton](creational/singleton/README.md) |
+| Deep vs shallow copy in the Prototype pattern — which do you need, and when? | [Prototype](creational/prototype/README.md) |
+| Decorator vs Proxy — both wrap an object, so what's the real distinction? | [Decorator vs Proxy](pattern_comparisons/Decorator_vs_Proxy.md) |
+| Adapter vs Bridge vs Facade — when do you reach for each? | [Adapter vs Bridge vs Facade](pattern_comparisons/Adapter_vs_Bridge_vs_Facade.md) |
+| Composite vs Decorator — tree structure vs enhancement chain, how do you tell them apart? | [Composite vs Decorator](pattern_comparisons/Composite_vs_Decorator.md) |
+| Strategy vs State — both swap behavior at runtime, so what actually differs? | [Strategy vs State](pattern_comparisons/Strategy_vs_State.md) |
+| Observer vs Mediator — broadcast vs coordinated communication? | [Observer vs Mediator](pattern_comparisons/Observer_vs_Mediator.md) |
+| Command vs Strategy — both encapsulate "a thing to run" — what's the real distinction? | [Command vs Strategy](pattern_comparisons/Command_vs_Strategy.md) |
+| Chain of Responsibility vs Command — chained handlers vs a single request object? | [ChainOfResponsibility vs Command](pattern_comparisons/ChainOfResponsibility_vs_Command.md) |
+| Template Method vs Strategy — inheritance-based skeleton vs composition? | [Template vs Strategy](pattern_comparisons/Template_vs_Strategy.md) |
+| How does Visitor add a new operation without touching the classes it operates on? | [Visitor](behavioral/visitor/README.md) |
+| What is a God Object, and what's your refactoring plan for one? | [God Object](anti_patterns/GodObject.md) |
+| What's wrong with Service Locator versus explicit Dependency Injection? | [Service Locator](anti_patterns/ServiceLocator.md) |
+| How would you design a parking lot's spot allocation and pricing strategy? | [Parking Lot](system_design_problems/ParkingLot_README.md) |
+| How do you implement an O(1) LRU cache and make it thread-safe? | [LRU Cache](system_design_problems/LRUCache_README.md) |
+| Token bucket vs sliding window — what tradeoffs separate rate-limiting algorithms? | [Rate Limiter](system_design_problems/RateLimiter_README.md) |
+
+---
+
+## Study Plan
+
+A 6-week plan over the Interview-Specific Path. Each week pairs the pattern theory with one problem from `system_design_problems/` to rehearse the "design X" format — see [case_studies/README.md](case_studies/README.md) for the full pattern-dependency map and interview-prep shortcuts across all 12 problems.
+
+| Week | Focus | Modules | Practice problem |
+|------|-------|---------|-------------------|
+| 1 | Foundations | [SOLID Principles](solid_principles/README.md) | skim [Vending Machine](system_design_problems/VendingMachine_README.md) — cleanest FSM, see the vocabulary applied before you've learned the individual patterns |
+| 2 | Creational Patterns | [Creational Patterns](creational/README.md) — Singleton, Factory Method, Abstract Factory, Builder, Prototype | [Parking Lot](system_design_problems/ParkingLot_README.md) — Factory (spot type) + Strategy (pricing); the most common LLD opener |
+| 3 | Structural Patterns | [Structural Patterns](structural/README.md) — Adapter, Decorator, Proxy, Facade, Composite, Bridge, Flyweight | [LRU Cache](system_design_problems/LRUCache_README.md) — Decorator as a thread-safe wrapper around the core cache |
+| 4 | Behavioral Patterns | [Behavioral Patterns](behavioral/README.md) — Strategy, Observer, Command, State, Template Method, and 6 more | [Ride Sharing](system_design_problems/RideSharing_README.md) — Strategy (fare), Observer (status), Factory (vehicle), State (ride lifecycle) |
+| 5 | Pattern Mastery + Anti-Patterns | [Pattern Comparisons](pattern_comparisons/README.md), [Anti-Patterns](anti_patterns/README.md) | [ATM](system_design_problems/ATM_README.md) — justify State + Template Method over the alternatives; spot the anti-patterns a naive transaction flow invites |
+| 6 | Apply: System Design Problems | [System Design Problems](system_design_problems/README.md) | timeboxed 30-minute runs through the remaining problems via the [interview shortcuts](case_studies/README.md) |
+
+---
+
 ## Key Tradeoffs in LLD
 
 | Decision | Option A | Option B | Deciding Factor |

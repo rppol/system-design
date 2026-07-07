@@ -233,6 +233,7 @@ A comprehensive, one-stop reference for mastering **pure Java** — language int
 | [Annotation Processing](src/main/java/com/rutik/systemdesign/java/annotation_processing/) | JSR 269 rounds, AbstractProcessor, Filer/Messager, JavaPoet codegen, Lombok AST mutation, MapStruct, compile-time vs runtime |
 | [Generics & Type System](src/main/java/com/rutik/systemdesign/java/generics_and_type_system/) | PECS, type erasure, bridge methods, wildcards, dynamic proxies |
 | [Exceptions & I/O](src/main/java/com/rutik/systemdesign/java/exceptions_and_io/) | Checked/unchecked, try-with-resources, NIO.2, serialization security |
+| [JSON Processing with Jackson](src/main/java/com/rutik/systemdesign/java/json_processing_jackson/) | ObjectMapper thread-safety + reuse, streaming/tree/databind, records, TypeReference, polymorphic-typing CVEs, JavaTimeModule |
 
 #### Phase 2 — Modern Java
 | Module | Key Concepts |
@@ -267,6 +268,7 @@ A comprehensive, one-stop reference for mastering **pure Java** — language int
 | [Java Interview Patterns](src/main/java/com/rutik/systemdesign/java/java_interview_patterns/) | Immutable class, Builder, equals contract, Integer cache, enum singleton |
 | [Design Patterns in Java](src/main/java/com/rutik/systemdesign/java/design_patterns_in_java/) | GoF patterns with Java idioms, concurrency patterns, anti-patterns, Effective Java references |
 | [Testing with JUnit & Mockito](src/main/java/com/rutik/systemdesign/java/testing_junit_mockito/) | JUnit 5 lifecycle, Mockito argument matchers, test doubles, AAA pattern, parameterized tests |
+| [Logging](src/main/java/com/rutik/systemdesign/java/logging/) | SLF4J facade, Logback/Log4j2, parameterized logging, MDC across threads/virtual-threads, async appenders, Log4Shell |
 
 #### Java Case Studies
 | Case Study | Core Concepts |
@@ -615,7 +617,7 @@ See the [Database Engineering Master Index](src/main/java/com/rutik/systemdesign
 
 ### Machine Learning (ML) — Senior ML/AI Engineer & Interview Prep Guide
 
-A comprehensive, senior-engineer-level guide to Machine Learning — from mathematical foundations through production MLOps. Covers classical algorithms, deep learning, ML system design, domain specializations (CV, RecSys, NLP, RL, time series), trust-and-safety topics (adversarial ML and robustness, uncertainty quantification and conformal prediction, active learning and weak supervision), a dedicated algorithm-selection module (#33), interpretability and explainability, privacy-preserving ML, multi-task and multi-objective learning, anomaly detection, and 22 end-to-end case studies (12 using the principal 11-section template, 5 cross-cutting shared-primitive files). 40 modules across 8 phases. Deliberately scoped to not overlap with the LLM section (which handles transformers, fine-tuning, RAG, and agents).
+A comprehensive, senior-engineer-level guide to Machine Learning — from mathematical foundations through production MLOps. Covers classical algorithms, deep learning, ML system design, domain specializations (CV, RecSys, NLP, RL, time series), trust-and-safety topics (adversarial ML and robustness, uncertainty quantification and conformal prediction, active learning and weak supervision), a dedicated algorithm-selection module (#33), interpretability and explainability, privacy-preserving ML, multi-task and multi-objective learning, anomaly detection, imbalanced data and leakage traps, and 22 end-to-end case studies (12 using the principal 11-section template, 5 cross-cutting shared-primitive files). 41 modules across 8 phases. Deliberately scoped to not overlap with the LLM section (which handles transformers, fine-tuning, RAG, and agents).
 
 #### Phase 1 — Mathematical Foundations
 | Module | Key Concepts |
@@ -633,6 +635,7 @@ A comprehensive, senior-engineer-level guide to Machine Learning — from mathem
 | [Unsupervised Learning](src/main/java/com/rutik/systemdesign/ml/unsupervised_learning/) | k-means, DBSCAN, hierarchical clustering, PCA, t-SNE, UMAP |
 | [Feature Engineering](src/main/java/com/rutik/systemdesign/ml/feature_engineering/) | Encoding, scaling, imputation, target encoding, feature selection, Pipeline patterns |
 | [Model Evaluation and Selection](src/main/java/com/rutik/systemdesign/ml/model_evaluation_and_selection/) | Cross-validation, AUC-ROC/AUC-PR, calibration, bias-variance, Optuna hyperparameter search |
+| [Imbalanced Data and Leakage Traps](src/main/java/com/rutik/systemdesign/ml/imbalanced_data_and_leakage_traps/) | SMOTE/class weights/focal loss, PR-AUC vs ROC under imbalance, target/temporal/group leakage, fit-inside-fold discipline |
 
 #### Phase 3 — Deep Learning Foundations
 | Module | Key Concepts |
@@ -817,9 +820,75 @@ See the [DevOps Master Index](src/main/java/com/rutik/systemdesign/devops/README
 
 ---
 
+### GPGPU & CUDA Programming — Senior Engineer & Interview Prep Guide
+
+A comprehensive, senior-engineer-level guide to **general-purpose GPU programming with CUDA**, from the **kernel author's** viewpoint — from the SIMT execution model and GPU hardware architecture through the core CUDA programming model, the performance-engineering discipline that dominates senior GPU interviews (coalescing, shared-memory tiling, occupancy, warp primitives), advanced execution (streams, CUDA graphs, multi-GPU/NCCL), the library and Tensor-Core ecosystem, and the profiling/debugging/portability toolchain. 24 modules across 6 phases + 6 principal case studies. Code is dual CUDA C++ + Python (CuPy/Numba/Triton/PyTorch). Deliberately scoped to cross-reference (not duplicate) the GPU material in `ml/`, `llm/`, and `devops/`.
+
+#### Phase 1 — GPU Foundations
+| Module | Key Concepts |
+|--------|-------------|
+| [GPU Computing Foundations](src/main/java/com/rutik/systemdesign/cuda/gpu_computing_foundations/) | Throughput vs latency, SIMT vs SIMD, Amdahl/Gustafson, host/device model, PCIe vs NVLink, when the GPU wins |
+| [GPU Hardware Architecture](src/main/java/com/rutik/systemdesign/cuda/gpu_hardware_architecture/) | SM anatomy, CUDA cores, warp schedulers, register file, L1/L2/HBM, generations (Volta→Blackwell), compute capability, Tensor Cores |
+| [CUDA Toolkit & Compilation](src/main/java/com/rutik/systemdesign/cuda/cuda_toolkit_and_compilation/) | nvcc pipeline, PTX vs SASS, fatbin/JIT, `compute_XX`/`sm_XX`, `__CUDA_ARCH__`, driver vs runtime API, nvrtc |
+
+#### Phase 2 — Core CUDA Programming
+| Module | Key Concepts |
+|--------|-------------|
+| [CUDA Programming Model & Kernels](src/main/java/com/rutik/systemdesign/cuda/cuda_programming_model_and_kernels/) | `<<<grid,block>>>`, thread hierarchy, `threadIdx`/`blockIdx`, 1D/2D/3D indexing, grid-stride loops, function qualifiers |
+| [Warps & SIMT Execution](src/main/java/com/rutik/systemdesign/cuda/warps_and_simt_execution/) | warp=32, lockstep, warp scheduling, divergence + predication, `__syncwarp`, active mask, independent thread scheduling |
+| [CUDA Memory Model & Hierarchy](src/main/java/com/rutik/systemdesign/cuda/cuda_memory_model_and_hierarchy/) | global/shared/local/constant/texture/register, scope + lifetime, unified virtual addressing, L1/L2/HBM, `__restrict__` |
+| [Memory Management & Data Transfer](src/main/java/com/rutik/systemdesign/cuda/memory_management_and_data_transfer/) | `cudaMalloc`/`cudaMemcpy`, pinned vs pageable, unified memory (prefetch/advise), zero-copy, async copy, error checking |
+
+#### Phase 3 — Performance Engineering (the interview core)
+| Module | Key Concepts |
+|--------|-------------|
+| [Memory Coalescing & Access Patterns](src/main/java/com/rutik/systemdesign/cuda/memory_coalescing_and_access_patterns/) | Coalesced vs strided, 128-byte transactions, alignment, AoS vs SoA, vectorized loads (`float4`), the transpose problem |
+| [Shared Memory & Bank Conflicts](src/main/java/com/rutik/systemdesign/cuda/shared_memory_and_bank_conflicts/) | Tiling, 32 banks, conflicts + padding, broadcast, dynamic shared memory, shared-mem GEMM tile |
+| [Occupancy & Launch Configuration](src/main/java/com/rutik/systemdesign/cuda/occupancy_and_launch_configuration/) | Occupancy, register/shared-mem limits, occupancy calculator, block-size tuning, latency hiding, `__launch_bounds__` |
+| [Synchronization & Atomics](src/main/java/com/rutik/systemdesign/cuda/synchronization_and_atomics/) | `__syncthreads`, races, `atomicAdd`/CAS, memory fences, atomic contention, `cuda::atomic`, cooperative groups |
+| [Parallel Patterns: Reduction, Scan, Histogram](src/main/java/com/rutik/systemdesign/cuda/parallel_patterns_reduction_scan_histogram/) | Reduction ladder, scan/prefix-sum, histogram, the canonical optimization walkthroughs |
+| [Warp-Level Primitives & Cooperative Groups](src/main/java/com/rutik/systemdesign/cuda/warp_level_primitives_and_cooperative_groups/) | `__shfl_*_sync`, vote/ballot, warp-aggregated atomics, cooperative groups, grid sync, warp reduction |
+
+#### Phase 4 — Advanced Execution & Multi-GPU
+| Module | Key Concepts |
+|--------|-------------|
+| [Streams, Events & Concurrency](src/main/java/com/rutik/systemdesign/cuda/streams_events_and_concurrency/) | Streams, async, events/timing, overlap compute+transfer, default vs per-thread-default stream, priorities, callbacks |
+| [CUDA Graphs](src/main/java/com/rutik/systemdesign/cuda/cuda_graphs/) | Graph capture, instantiate, launch-overhead reduction, graph update, when it wins |
+| [Multi-GPU Programming & NCCL](src/main/java/com/rutik/systemdesign/cuda/multi_gpu_programming_and_nccl/) | P2P, NVLink/NVSwitch, GPUDirect, device selection, NCCL collectives, data/model decomposition |
+| [Dynamic Parallelism & Advanced Kernels](src/main/java/com/rutik/systemdesign/cuda/dynamic_parallelism_and_advanced_kernels/) | Device-side launch, nested parallelism, persistent kernels, producer-consumer, when it helps vs hurts |
+
+#### Phase 5 — Libraries, Tensor Cores & Ecosystem
+| Module | Key Concepts |
+|--------|-------------|
+| [Tensor Cores & Mixed Precision](src/main/java/com/rutik/systemdesign/cuda/tensor_cores_and_mixed_precision/) | WMMA/`mma`, FP16/BF16/TF32/FP8, matrix fragments, loss scaling, cuBLAS/cuDNN TC paths, when TC engages |
+| [CUDA Math & DNN Libraries](src/main/java/com/rutik/systemdesign/cuda/cuda_math_and_dnn_libraries/) | cuBLAS, cuDNN, CUTLASS, cuFFT, cuSPARSE, cuRAND, Thrust; library-vs-custom-kernel; CUTLASS templating |
+| [Python GPU Ecosystem](src/main/java/com/rutik/systemdesign/cuda/python_gpu_ecosystem/) | CuPy, Numba CUDA, PyCUDA, PyTorch custom CUDA/C++ extensions, `torch.compile`/Inductor, DLPack |
+| [Triton & Kernel DSLs](src/main/java/com/rutik/systemdesign/cuda/triton_and_kernel_dsls/) | Triton programming model, block-level abstraction, autotuning, Triton vs CUDA C++, where Triton wins/loses |
+
+#### Phase 6 — Profiling, Correctness & Portability
+| Module | Key Concepts |
+|--------|-------------|
+| [Profiling & Performance Analysis](src/main/java/com/rutik/systemdesign/cuda/profiling_and_performance_analysis/) | Nsight Systems vs Compute, roofline, achieved occupancy, DRAM throughput, warp-stall reasons, guided analysis |
+| [Debugging, Correctness & Numerics](src/main/java/com/rutik/systemdesign/cuda/debugging_correctness_and_numerics/) | cuda-gdb, compute-sanitizer (memcheck/racecheck/synccheck/initcheck), error macros, FP/FMA, determinism, fast-math |
+| [GPU Portability: HIP, SYCL & Beyond](src/main/java/com/rutik/systemdesign/cuda/gpu_portability_hip_sycl_and_beyond/) | HIP/ROCm, SYCL/oneAPI, Metal, WebGPU, legacy OpenCL, `hipify`, portability-vs-peak-performance tradeoff |
+
+#### CUDA Case Studies
+| Case Study | What It Covers |
+|------------|----------------|
+| [Optimize a Matrix Multiplication Kernel](src/main/java/com/rutik/systemdesign/cuda/case_studies/optimize_matrix_multiplication_kernel.md) | The full GEMM ladder: naive → coalesced → shared-mem tiled → register-blocked → Tensor Core, with roofline at each rung |
+| [Implement a High-Performance Reduction](src/main/java/com/rutik/systemdesign/cuda/case_studies/implement_high_performance_reduction.md) | The 7-rung reduction ladder from divergent addressing to warp-shuffle and cooperative-groups grid reduction |
+| [Build a Flash Attention Kernel](src/main/java/com/rutik/systemdesign/cuda/case_studies/build_a_flash_attention_kernel.md) | Fused softmax-attention, online softmax, shared-memory tiling — the "why fuse to avoid HBM round-trips" argument |
+| [Accelerate 2D Convolution & Stencil](src/main/java/com/rutik/systemdesign/cuda/case_studies/accelerate_2d_convolution_and_stencil.md) | Shared-memory tiling with halo regions, separable filters, constant memory |
+| [Port a CPU Pipeline to GPU](src/main/java/com/rutik/systemdesign/cuda/case_studies/port_a_cpu_pipeline_to_gpu.md) | End-to-end methodology: profile → Amdahl budget → incremental port → transfer overlap → verify numerics |
+| [Optimize LLM Inference Kernels](src/main/java/com/rutik/systemdesign/cuda/case_studies/optimize_llm_inference_kernels.md) | GEMV/attention/KV-cache kernels, INT8/FP8 matmul, fusion — the kernel-level twin of the LLM inference platform |
+
+See the [CUDA Master Index](src/main/java/com/rutik/systemdesign/cuda/README.md) for the full 6-phase learning path, the Full/Interview learning paths, the GPU architecture & compute-capability reference, the cross-reference map, and the build-status tracker.
+
+---
+
 ### CS Fundamentals — Senior Engineer & Interview Prep Guide
 
-The language-agnostic computer-science spine: 20 modules across 6 phases + 6 interview-problem walkthrough case studies. Teaches DS&A, operating systems, computer architecture, systems foundations, and cryptography at the CS-theory level, with explicit crosslinks to the deep applied treatments in `java/`, `python/`, `backend/`, `database/`, and `devops/`.
+The language-agnostic computer-science spine: 24 modules across 6 phases + 6 interview-problem walkthrough case studies. Teaches DS&A, operating systems, computer architecture, systems foundations, and cryptography at the CS-theory level, with explicit crosslinks to the deep applied treatments in `java/`, `python/`, `backend/`, `database/`, and `devops/`.
 
 #### Phase 1 — Complexity & Computation
 

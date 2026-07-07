@@ -25,6 +25,18 @@ AWS is the default cloud in worked examples; GCP/Azure appear in comparison tabl
 
 ---
 
+## Learning Paths (Full + Interview-Specific)
+
+`README.md` documents two routes: the **Full Path** (all 41 modules = "8-Phase Learning
+Path") and a curated **Interview-Specific Path** (22 modules). The interview subset is a
+**dual-source list** — it lives in both `README.md` ("## Learning Paths") and
+`game/app.js` (`STUDY_PATHS.devops.interview`, which drives the game's Study
+Full/Interview toggle). **Change one, change the other** — same modules, same order.
+Non-Q&A narrative only; no `extract.py` re-run needed. The README also carries a
+Knowledge-Question Map and a 6-week Study Plan (interview-readiness prose; no toggle impact).
+
+---
+
 ## Case Studies — 13 Total
 
 `case_studies/` — all use the 11-section principal template.

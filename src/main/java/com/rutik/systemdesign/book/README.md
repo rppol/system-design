@@ -49,6 +49,12 @@ exists to answer), so you always know why you're reading it.
 
 ---
 
+## Interview-Specific Reading Path (planned)
+
+Unlike the module sections, `book/` is chapter summaries and is **not** wired into the learning game's Study toggle (no `STUDY_ORDER` entry, so no Full/Interview switch). A prose **interview-priority reading order** is **planned** instead: for *Designing Data-Intensive Applications*, prioritize the chapters that dominate system-design interviews — **Replication**, **Partitioning**, **Transactions**, **Consistency & Consensus**, and **The Trouble with Distributed Systems** — over a linear front-to-back read. The remaining chapters (encoding, batch/stream processing, the future of data systems) are valuable context; read them once the five above are solid.
+
+---
+
 ## Cross-Reference Map
 
 | When the book discusses… | Drill deeper in… |

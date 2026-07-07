@@ -53,5 +53,6 @@ The `game/` directory is an application, not study content — see
   `STUDY_ORDER` — and it MUST stay in sync with that section's README "Learning
   Paths" list (same hand-maintained discipline as `STUDY_ORDER`). Sections absent
   from `STUDY_PATHS` show no toggle (Full only). Choice persists in `sd_study_path`
-  (JSON map keyed by section). Currently only `llm` has an interview path; other
-  sections are added the same way (subset array + a README "Learning Paths" block).
+  (JSON map keyed by section). **All game sections have interview paths** — every
+  section except `book` (which has no `STUDY_ORDER` entry / no game presence). Each
+  is added the same way (a subset array here + a README "Learning Paths" block).

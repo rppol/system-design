@@ -10,13 +10,14 @@ A comprehensive system design study repository. All content is Markdown — no r
 | **HLD** | Distributed system concepts (CAP, caching, queues, sharding) | [hld/CLAUDE.md](src/main/java/com/rutik/systemdesign/hld/CLAUDE.md) |
 | **Backend** | Networking, API design, performance, resilience, security, microservices — 34 modules, 5 case studies | [backend/CLAUDE.md](src/main/java/com/rutik/systemdesign/backend/CLAUDE.md) |
 | **Database** | Relational, NoSQL, distributed DB, production ops — 29 modules, 6 case studies | [database/CLAUDE.md](src/main/java/com/rutik/systemdesign/database/CLAUDE.md) |
-| **Java** | Pure Java senior-engineer guide — 20 modules, 8 case studies | [java/CLAUDE.md](src/main/java/com/rutik/systemdesign/java/CLAUDE.md) |
-| **Spring** | Spring Framework guide — 27 modules, 9 case studies | [spring/CLAUDE.md](src/main/java/com/rutik/systemdesign/spring/CLAUDE.md) |
+| **Java** | Pure Java senior-engineer guide — 33 modules, 8 case studies | [java/CLAUDE.md](src/main/java/com/rutik/systemdesign/java/CLAUDE.md) |
+| **Spring** | Spring Framework guide — 39 modules, 9 case studies | [spring/CLAUDE.md](src/main/java/com/rutik/systemdesign/spring/CLAUDE.md) |
 | **Python** | Python + FastAPI guide — 40 modules, 6 case studies | [python/CLAUDE.md](src/main/java/com/rutik/systemdesign/python/CLAUDE.md) |
-| **ML** | Machine Learning guide — 33 modules, 22 case studies | [ml/CLAUDE.md](src/main/java/com/rutik/systemdesign/ml/CLAUDE.md) |
+| **ML** | Machine Learning guide — 45 modules, 22 case studies | [ml/CLAUDE.md](src/main/java/com/rutik/systemdesign/ml/CLAUDE.md) |
 | **LLM** | LLM engineering guide — 52 modules, 29 case studies, 82 deep-dive sub-files | [llm/CLAUDE.md](src/main/java/com/rutik/systemdesign/llm/CLAUDE.md) |
 | **DevOps** | DevOps / Cloud / Platform guide — 41 modules, 13 case studies | [devops/CLAUDE.md](src/main/java/com/rutik/systemdesign/devops/CLAUDE.md) |
-| **CS Fundamentals** | Language-agnostic CS spine — 20 modules, 6 case studies + DSA pattern playbooks sub-section (25-pattern recognition engine, interview execution playbook, Blind 75/NeetCode 150 study plans — complete) | [cs_fundamentals/CLAUDE.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/CLAUDE.md) |
+| **CUDA** | GPGPU / CUDA programming guide (kernel-author viewpoint) — 24 modules, 6 case studies | [cuda/CLAUDE.md](src/main/java/com/rutik/systemdesign/cuda/CLAUDE.md) |
+| **CS Fundamentals** | Language-agnostic CS spine — 24 modules, 6 case studies + DSA pattern playbooks sub-section (25-pattern recognition engine, interview execution playbook, Blind 75/NeetCode 150 study plans — complete) | [cs_fundamentals/CLAUDE.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/CLAUDE.md) |
 | **Book** | Chapter-by-chapter book summaries (book-faithful chapter template, not the 14-section module template) — Designing Data-Intensive Applications (Kleppmann): 12 chapters + preface | [book/CLAUDE.md](src/main/java/com/rutik/systemdesign/book/CLAUDE.md) |
 | **Game** | Pages-deployed daily learning game (a static SPA, NOT 14-section content — template-exempt). 5-min MCQ blitz auto-built from all sections' Q&As via `extract.py`; SM-2 spaced-repetition review, daily sealed Gauntlet, and an in-app coach; `localStorage` is the single source of truth (no server). | [game/CLAUDE.md](src/main/java/com/rutik/systemdesign/game/CLAUDE.md) |
 
@@ -36,6 +37,7 @@ src/main/java/com/rutik/systemdesign/
 ├── ml/               ← Machine Learning guide + CLAUDE.md
 ├── llm/              ← LLM engineering guide + CLAUDE.md
 ├── devops/           ← DevOps / Cloud / Platform guide + CLAUDE.md
+├── cuda/             ← GPGPU / CUDA programming guide + CLAUDE.md
 ├── cs_fundamentals/  ← CS Fundamentals guide + CLAUDE.md
 ├── book/             ← Book summaries (chapter-by-chapter) + CLAUDE.md
 └── game/             ← Browser learning game (app, not study content) + README.md
@@ -221,6 +223,16 @@ quadrantChart for two-axis tradeoffs, timeline for evolution, sankey-beta for fl
 volumes. Keep ASCII only for constraint grids/masks, alignment-critical layout
 maps, and vector geometry, which Mermaid cannot draw.
 
+**Four style rules (owner-set 2026-07-07) — every Mermaid diagram must satisfy all four:**
+(1) **Colour every node** with the One-Dark `classDef` palette, semantic-by-role — the
+reader's grey auto-tint is a fallback for legacy diagrams, not the target.
+(2) **Horizontal-first** — default to `flowchart LR`; use `TD`/`TB` only for genuinely
+vertical hierarchies/lifecycles or when an `LR` row would overflow (then use `subgraph`s).
+(3) **No spillover text** — short labels, wrap with `<br/>`; don't rely on the reader's
+auto-widen of under-measured boxes.
+(4) **Rounded corners** — the reader rounds every box; for GitHub parity prefer rounded node
+shapes `(label)`/`([label])`, and never hand-set a light fill or a square-corner override.
+
 **Skill:** run `/mermaid-diagrams` (at `.claude/skills/mermaid-diagrams/`) before
 authoring or converting any diagram. The skill contains the full decision table
 (which form for which shape), the One-Dark color palette and `classDef` block, the
@@ -306,11 +318,17 @@ silently dropped from the game or renders wrong. These rules are derived from
 - The reader renders every ```` ```mermaid ```` fence via CDN `mermaid@11`
   (flowchart, sequenceDiagram, stateDiagram-v2, xychart-beta, pie, quadrantChart,
   timeline, sankey-beta). Offline → raw source shown, retried next open.
-- **Flowcharts: color ALL nodes or NONE.** The reader auto-tints an uncolored
-  flowchart from the One-Dark palette, but that auto-tint **bails entirely if even
-  one node carries an authored color** — mixed coloring renders flat gray. Either
-  apply the One-Dark `classDef` block (from `/mermaid-diagrams`) to every node, or
-  leave all nodes uncolored and let the reader tint them.
+- **Flowcharts: colour EVERY node** with the One-Dark `classDef` block (from
+  `/mermaid-diagrams`), semantic-by-role — that is the standard (owner-set 2026-07-07).
+  The reader's grey auto-tint fills **only** the nodes you leave unstyled, assigning
+  One-Dark hues in node order (`mmTintPlain`, `app.js`) — authored colours are always
+  respected, so it degrades **per node**, never all-or-nothing and never a flat-grey
+  bail. Colour every node anyway: the auto-tint's order-based hues are semantically
+  arbitrary and can collide with your authored ones (an auto-blue box beside your
+  authored-blue box), so hand-colouring every node is the only way each colour *means*
+  something. Also **horizontal-first**
+  (`flowchart LR` default), **short labels** (no spillover — wrap with `<br/>`), and
+  **rounded shapes** (the reader rounds every box; use `(label)`/`([label])` for GitHub parity).
 - The reader surface is **pitch-black One-Dark in every theme** — never hand-set a
   light background or theme-tinted colors inside a diagram.
 - Mermaid fences are valid **only** in study section files (`<section>/…`) — never

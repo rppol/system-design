@@ -26,7 +26,7 @@ This section covers:
 - **Phase 2 — Data Structures**: dynamic arrays and hash tables (collision resolution, load factor, resize); linked lists, stacks, queues, deques, circular buffers; binary trees, BST, AVL and red-black trees (concept), B/B+ trees as a concept; binary heap, heapify, d-ary heaps, priority queues; graph representations (adjacency list/matrix), trie, union-find/DSU, segment tree, Fenwick tree, Bloom filter concept
 - **Phase 3 — Algorithms**: comparison sorts (merge/quick/heap) and non-comparison sorts (counting/radix), binary search and variants; dynamic programming (memoisation vs tabulation, knapsack/LCS/edit distance/coin change families); greedy algorithms and proofs, divide-and-conquer recurrences, Huffman, interval scheduling; BFS/DFS/Dijkstra/Bellman-Ford/Kruskal/Prim/topological sort; string algorithms (KMP, Rabin-Karp, Z-algorithm)
 - **Phase 4 — Operating Systems**: process vs thread, address spaces, user/kernel mode, syscall overhead, context-switch cost (~1–10 µs); CPU scheduling (FCFS/SJF/Round-Robin/MLFQ/CFS); virtual memory, paging (4 KB pages), TLB, page-replacement algorithms; mutex/semaphore/monitor (concept), Coffman conditions, deadlock prevention/avoidance/detection, dining-philosophers problem
-- **Phase 5 — Systems & Security Foundations**: CPU pipeline, branch prediction, cache hierarchy (L1 64 B cache line, ~1–4 ns; L2 ~10 ns; L3 ~40 ns; RAM ~100 ns), NUMA; OSI/TCP-IP primer, TCP vs UDP, DNS, TLS handshake concept; ACID/BASE, isolation levels, indexing concept, storage hierarchy (SSD vs HDD); hash functions, symmetric vs asymmetric encryption, HMAC, digital signatures, Diffie-Hellman key exchange, salting
+- **Phase 5 — Systems & Security Foundations**: CPU pipeline, branch prediction, cache hierarchy (L1 64 B cache line, ~1–4 ns; L2 ~10 ns; L3 ~40 ns; RAM ~100 ns), NUMA; OSI/TCP-IP primer, TCP vs UDP, DNS, TLS handshake concept; ACID/BASE, isolation levels, indexing concept, storage hierarchy (SSD vs HDD); hash functions, symmetric vs asymmetric encryption, HMAC, digital signatures, Diffie-Hellman key exchange, salting; character encoding theory (Unicode code points/planes, UTF-8/16/32, surrogate pairs, normalization, grapheme clusters, mojibake)
 
 ---
 
@@ -48,6 +48,8 @@ This section teaches concepts at the **language-agnostic CS-theory level**. Wher
 | [`devops/linux_and_os_fundamentals`](../devops/linux_and_os_fundamentals/) | cgroups v2, namespaces, OOM killer, /proc | Process vs thread, context switch, scheduling algorithms as CS concepts |
 | [`backend/backend_security_owasp`](../backend/backend_security_owasp/) | BCrypt cost factor, A02 Cryptographic Failures | Hash functions, symmetric/asymmetric crypto, HMAC, key exchange as CS-theory foundations |
 | [`backend/auth_and_authorization_systems`](../backend/auth_and_authorization_systems/) | JWT, OAuth 2, mTLS applied | Digital signatures and key-exchange concept |
+| [`python/strings_bytes_encoding_and_regex`](../python/strings_bytes_encoding_and_regex/) | Full codec API (`str.encode`/`bytes.decode`), the `codecs`/`unicodedata` modules, regex engine internals | Unicode code point/plane model, UTF-8/16/32 transformation-format theory, normalization forms (NFC/NFD/NFKC/NFKD), grapheme-cluster segmentation (UAX #29) as language-agnostic foundations |
+| [`java/strings_and_text`](../java/strings_and_text/) | Compact Strings internals, `codePoints()`/`String` API specifics | Same Unicode/encoding/normalization theory, applied via a different runtime's string model |
 
 **CS Fundamentals owns**: language-agnostic DSA, asymptotic analysis, OS scheduling/synchronization/paging theory, computer architecture (CPU pipeline, cache hierarchy), abstract cryptography theory, and the conceptual networking/database vocabulary that interviews assume without referencing a specific implementation.
 
@@ -77,6 +79,10 @@ This section teaches concepts at the **language-agnostic CS-theory level**. Wher
 | 18 | [networking_fundamentals](networking_fundamentals/) | 5 — Systems & Security | Intermediate | OSI vs TCP-IP conceptual primer, IP addresses/CIDR/ports/NAT, TCP (reliable, ordered, connection-oriented) vs UDP (unreliable, stateless), DNS resolution chain, TLS 1.3 handshake concept |
 | 19 | [database_and_storage_fundamentals](database_and_storage_fundamentals/) | 5 — Systems & Security | Intermediate | ACID properties (atomicity, consistency, isolation, durability), BASE, transaction concept, isolation levels (read uncommitted/committed/repeatable read/serializable), B+tree index concept, normalisation concept, storage hierarchy (registers → cache → RAM → SSD → HDD) with latency numbers |
 | 20 | [cryptography_fundamentals](cryptography_fundamentals/) | 5 — Systems & Security | Intermediate | Hash functions (one-way, collision resistance, SHA-256), symmetric encryption (AES, shared-key), asymmetric encryption (RSA, public/private key), HMAC, digital signatures, Diffie-Hellman key exchange, salting vs peppering, why bcrypt/scrypt beat SHA for passwords |
+| 21 | [character_encoding_deep_dive](character_encoding_deep_dive/) | 5 — Systems & Security | Intermediate | Unicode code points/planes (BMP vs astral), UTF-8/UTF-16/UTF-32 transformation formats, surrogate pairs, byte-order mark (BOM), normalization (NFC/NFD/NFKC/NFKD), grapheme clusters (UAX #29), mojibake, IDN homograph attacks |
+| 22 | [discrete_math_for_engineers](discrete_math_for_engineers/) | 1 — Complexity & Computation | Intermediate | Propositional/predicate logic, sets/relations/functions, induction & strong induction, combinatorics, recurrences (Master Theorem), probability (linearity of expectation), modular arithmetic |
+| 23 | [theory_of_computation](theory_of_computation/) | 5 — Systems & Security | Advanced | Finite automata (DFA/NFA), regular languages & the pumping lemma, CFG/PDA, Turing machines, the halting problem, P vs NP, NP-completeness (Cook-Levin, SAT) |
+| 24 | [how_code_runs_compilers_and_interpreters](how_code_runs_compilers_and_interpreters/) | 5 — Systems & Security | Advanced | Lexer/parser/AST, symbol tables, IR & optimization, codegen, compiler vs interpreter, JIT vs AOT, linker/loader, ELF |
 
 ---
 
@@ -115,8 +121,8 @@ Phase 4 — Operating Systems        Phase 5 — Systems & Security Foundations
 |  cpu_scheduling_algorithms  |    |  networking_fundamentals           |
 |  memory_management_and_     |    |  database_and_storage_fundamentals |
 |  virtual_memory             |    |  cryptography_fundamentals         |
-|  deadlocks_and_             |    +------------------------------------+
-|  synchronization            |
+|  deadlocks_and_             |    |  character_encoding_deep_dive      |
+|  synchronization            |    +------------------------------------+
 +-----------------------------+
               |                                 |
               +------------------+--------------+
@@ -147,6 +153,75 @@ Phase 4 — Operating Systems        Phase 5 — Systems & Security Foundations
 - Phase 1 (Complexity) is a prerequisite for everything — you cannot analyse an algorithm without asymptotic vocabulary.
 - Phases 4 and 5 are largely independent of Phases 2–3 (OS/systems theory does not require DSA fluency) — they can be studied in parallel with Phase 3 once Phase 1 is solid.
 - The Case Studies draw from all phases; `design_lru_cache` requires Phase 2; DP/graph studies require Phase 3; `autocomplete_and_string_search` requires Phase 3 string algorithms.
+
+---
+
+## Learning Paths
+
+This section is exhaustive by design — 24 modules from asymptotic foundations through operating-system internals to systems/security/theory depth. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
+
+### Full Path (24 modules)
+
+The complete curriculum in the order above — see [5-Phase Learning Path](#4-5-phase-learning-path). Use it for genuine mastery: every data-structure and algorithm family, the full operating-systems core, and the systems/security/theory foundations (computer architecture, networking, database storage, cryptography, character encoding). Nothing is dropped.
+
+### Interview-Specific Path (16 modules)
+
+A ruthless cut to what a **senior software engineering interview** actually probes: the coding-round spine plus the OS core that comes up in systems questions. Same learning order, 16 of the 24 modules. Each group below says why it earns interview time.
+
+| Group | Modules | Why it's tested |
+|-------|---------|-----------------|
+| Complexity & Computation Foundations | [complexity_analysis_and_big_o](complexity_analysis_and_big_o/), [number_systems_and_bit_manipulation](number_systems_and_bit_manipulation/), [recursion_and_problem_solving_patterns](recursion_and_problem_solving_patterns/) | Every answer starts with a complexity claim — Big-O/amortized analysis is the shared vocabulary a grader anchors to; bit tricks and two's complement are fast, memorable wins; recursion patterns (two-pointer, sliding window, backtracking) are the first branch point in problem recognition |
+| Core Data Structures | [arrays_strings_and_hashing](arrays_strings_and_hashing/), [linked_lists_stacks_and_queues](linked_lists_stacks_and_queues/) | Hash-map lookups, in-place array tricks, and linked-list reversal/cycle detection are the substrate of the majority of coding-round questions |
+| Trees, Heaps & Graph Structures | [trees_and_binary_search_trees](trees_and_binary_search_trees/), [heaps_and_priority_queues](heaps_and_priority_queues/), [graphs_tries_and_advanced_structures](graphs_tries_and_advanced_structures/) | BST invariants, heap extract-min/max, and graph representation tradeoffs are the second-most-probed structure family; trie and union-find variants separate senior from mid candidates |
+| Core Algorithms | [sorting_and_searching](sorting_and_searching/), [dynamic_programming](dynamic_programming/), [greedy_and_divide_and_conquer](greedy_and_divide_and_conquer/) | Sorting/searching complexity and the DP-vs-greedy fork are asked directly ("why quicksort over merge sort", "DP or greedy here") more than almost any other algorithmic decision |
+| Graph & String Algorithms | [graph_and_string_algorithms](graph_and_string_algorithms/) | BFS/Dijkstra/topological sort anchor "design a route or dependency system" prompts; KMP/Rabin-Karp separate candidates who can only brute-force string matching from those who know the O(n+m) trick |
+| Operating Systems Core | [processes_threads_and_context_switching](processes_threads_and_context_switching/), [cpu_scheduling_algorithms](cpu_scheduling_algorithms/), [memory_management_and_virtual_memory](memory_management_and_virtual_memory/), [deadlocks_and_synchronization](deadlocks_and_synchronization/) | Context-switch cost, scheduling starvation, virtual-memory paging, and the four Coffman conditions are the standard OS-fundamentals gate at senior-level onsite loops |
+
+**Deliberately deferred to the Full Path** (valuable, lower interview yield): the systems/theory depth that rounds out mastery — computer architecture & memory hierarchy, networking fundamentals, database & storage fundamentals, cryptography fundamentals, and character encoding deep dive — plus the foundational theory modules still being written (theory of computation, how code runs: compilers & interpreters, discrete math for engineers). A niche flagged in an interview (e.g. "how does TLS actually work?") is a bonus, not a gate — reach for these once the 16 above are solid.
+
+---
+
+## Knowledge-Question Map
+
+The highest-frequency CS-fundamentals *knowledge* questions mapped to the file that answers them. For applied practice, pair these with the `dsa_patterns/` playbooks and `case_studies/` walkthroughs in the Study Plan below.
+
+| Interview question | Where the answer lives |
+|---------------------|------------------------|
+| What's the time/space complexity of this nested loop or recursive call, and how do you derive it? | [complexity_analysis_and_big_o](complexity_analysis_and_big_o/) |
+| Why is dynamic-array append O(1) amortized despite occasional O(n) resizes? | [complexity_analysis_and_big_o](complexity_analysis_and_big_o/) |
+| Explain two's complement, and why it lets signed and unsigned addition share the same circuit. | [number_systems_and_bit_manipulation](number_systems_and_bit_manipulation/) |
+| When do you reach for recursion vs iteration, and what actually causes a stack overflow? | [recursion_and_problem_solving_patterns](recursion_and_problem_solving_patterns/) |
+| How do you recognize a sliding-window problem versus a two-pointer or backtracking one? | [recursion_and_problem_solving_patterns](recursion_and_problem_solving_patterns/) |
+| What's the average-case time complexity of a hash-table lookup, and when does it degrade to O(n)? | [arrays_strings_and_hashing](arrays_strings_and_hashing/) |
+| How do you detect a cycle in a linked list without extra memory? | [linked_lists_stacks_and_queues](linked_lists_stacks_and_queues/) |
+| What invariant makes a binary search tree valid, and what does naive deletion break? | [trees_and_binary_search_trees](trees_and_binary_search_trees/) |
+| Why do AVL and red-black trees bound worst-case operations at O(log n) where a naive BST can degrade to O(n)? | [trees_and_binary_search_trees](trees_and_binary_search_trees/) |
+| When should you use a heap instead of a sorted array or a BST? | [heaps_and_priority_queues](heaps_and_priority_queues/) |
+| Explain union-find with path compression and union by rank, and its amortized cost. | [graphs_tries_and_advanced_structures](graphs_tries_and_advanced_structures/) |
+| What's the space/time tradeoff between an adjacency list and an adjacency matrix? | [graphs_tries_and_advanced_structures](graphs_tries_and_advanced_structures/) |
+| Why is quicksort usually faster in practice than merge sort despite the same average complexity? | [sorting_and_searching](sorting_and_searching/) |
+| When do you reach for DP versus greedy, and what makes a greedy choice provably safe? | [dynamic_programming](dynamic_programming/), [greedy_and_divide_and_conquer](greedy_and_divide_and_conquer/) |
+| When do you use Dijkstra versus Bellman-Ford, and what does a negative-weight cycle break? | [graph_and_string_algorithms](graph_and_string_algorithms/) |
+| How does KMP achieve O(n+m) string matching instead of the naive O(nm)? | [graph_and_string_algorithms](graph_and_string_algorithms/) |
+| What's the difference between a process and a thread, and why does a context switch cost ~1-10 microseconds? | [processes_threads_and_context_switching](processes_threads_and_context_switching/) |
+| What causes starvation in a scheduler, and how does aging fix it? | [cpu_scheduling_algorithms](cpu_scheduling_algorithms/) |
+| What's a page fault, and what separates a soft fault from a hard one? | [memory_management_and_virtual_memory](memory_management_and_virtual_memory/) |
+| What are the four Coffman conditions for deadlock, and why does breaking any one prevent it? | [deadlocks_and_synchronization](deadlocks_and_synchronization/) |
+
+---
+
+## Study Plan
+
+A 6-week plan over the Interview-Specific Path. cs_fundamentals has no per-topic `case_studies/` written for every week, so each week pairs its modules with the closest `dsa_patterns/` recognition-engine playbooks and, where a genuine fit exists, one of the six `case_studies/` interview-problem walkthroughs.
+
+| Week | Focus | Modules | Practice Companion |
+|------|-------|---------|---------------------|
+| 1 | Complexity & Computation Foundations | complexity_analysis_and_big_o, number_systems_and_bit_manipulation, recursion_and_problem_solving_patterns | [dsa_patterns/README.md](dsa_patterns/README.md) (recognition engine + UMPIRE method), [two_pointers.md](dsa_patterns/two_pointers.md), [sliding_window.md](dsa_patterns/sliding_window.md), [bit_manipulation.md](dsa_patterns/bit_manipulation.md) |
+| 2 | Core Data Structures | arrays_strings_and_hashing, linked_lists_stacks_and_queues | [hashing_patterns.md](dsa_patterns/hashing_patterns.md), [fast_and_slow_pointers.md](dsa_patterns/fast_and_slow_pointers.md), [in_place_linked_list_reversal.md](dsa_patterns/in_place_linked_list_reversal.md); [Design LRU Cache](case_studies/design_lru_cache.md) |
+| 3 | Trees, Heaps & Graph Structures | trees_and_binary_search_trees, heaps_and_priority_queues, graphs_tries_and_advanced_structures | [tree_bfs.md](dsa_patterns/tree_bfs.md), [tree_dfs.md](dsa_patterns/tree_dfs.md), [two_heaps.md](dsa_patterns/two_heaps.md), [top_k_elements.md](dsa_patterns/top_k_elements.md), [trie_patterns.md](dsa_patterns/trie_patterns.md), [union_find.md](dsa_patterns/union_find.md); [Top-K and Streaming Problems](case_studies/top_k_and_streaming_problems.md) |
+| 4 | Core Algorithms | sorting_and_searching, dynamic_programming, greedy_and_divide_and_conquer | [modified_binary_search.md](dsa_patterns/modified_binary_search.md), [dynamic_programming.md](dsa_patterns/dynamic_programming.md), [greedy.md](dsa_patterns/greedy.md); [Dynamic Programming Patterns](case_studies/dynamic_programming_patterns.md) |
+| 5 | Graph & String Algorithms | graph_and_string_algorithms | [graph_traversal.md](dsa_patterns/graph_traversal.md), [shortest_path.md](dsa_patterns/shortest_path.md), [topological_sort.md](dsa_patterns/topological_sort.md); [Graph Traversal and Shortest Path](case_studies/graph_traversal_and_shortest_path.md), [Autocomplete and String Search](case_studies/autocomplete_and_string_search.md) |
+| 6 | Operating Systems Core | processes_threads_and_context_switching, cpu_scheduling_algorithms, memory_management_and_virtual_memory, deadlocks_and_synchronization | No DSA-pattern companion — pure OS theory; rehearse via [Interval and Scheduling Problems](case_studies/interval_and_scheduling_problems.md) (interval scheduling is the closest DSA analogue to CPU scheduling) and cross-link to [`java/concurrency`](../java/concurrency/) / [`devops/linux_and_os_fundamentals`](../devops/linux_and_os_fundamentals/) for the applied angle |
 
 ---
 
@@ -202,6 +277,7 @@ Phase 4 — Operating Systems        Phase 5 — Systems & Security Foundations
 | [networking_fundamentals](networking_fundamentals/) | [`backend/osi_model_and_networking`](../backend/osi_model_and_networking/); [`backend/tcp_ip_deep_dive`](../backend/tcp_ip_deep_dive/); [`backend/http_protocols`](../backend/http_protocols/) |
 | [database_and_storage_fundamentals](database_and_storage_fundamentals/) | [`database/database_fundamentals`](../database/database_fundamentals/); [`database/indexing_deep_dive`](../database/indexing_deep_dive/); [`database/schema_design_and_normalization`](../database/schema_design_and_normalization/) |
 | [cryptography_fundamentals](cryptography_fundamentals/) | [`backend/backend_security_owasp`](../backend/backend_security_owasp/); [`backend/auth_and_authorization_systems`](../backend/auth_and_authorization_systems/); [`devops/secrets_management`](../devops/secrets_management/) |
+| [character_encoding_deep_dive](character_encoding_deep_dive/) | [`python/strings_bytes_encoding_and_regex`](../python/strings_bytes_encoding_and_regex/) — codec API, `str`/`bytes` split; [`java/strings_and_text`](../java/strings_and_text/) — Compact Strings, surrogate pairs in practice |
 | [dsa_patterns/](dsa_patterns/) (pattern playbooks) | All Phase 1–3 concept modules (recognition layer above them); [`../../java/collections_internals`](../java/collections_internals/) — per-collection Big-O; [`../../hld/caching`](../hld/caching/) — LRU/LFU as applied DS; [`../../hld/rate_limiting`](../hld/rate_limiting/) — sliding window; [`../../backend/osi_model_and_networking`](../backend/osi_model_and_networking/) — Dijkstra/Bellman-Ford; [`../../devops/infrastructure_as_code_terraform`](../devops/infrastructure_as_code_terraform/) — topological sort |
 
 ---
@@ -249,9 +325,9 @@ The 6 case studies in [case_studies/](case_studies/) are the **worked-example co
 
 ## 7. Build Status & Implementation Tracker
 
-> **Original 20 modules + 6 case studies: COMPLETE.** DSA Pattern Playbooks sub-section: Chunks P0–P6 COMPLETE — master README + 25 pattern files + 2 guides (`interview_execution_playbook.md`, `study_plans.md`) + 100 bidirectional "See Also" links across the 12 Phase 1–3 concept modules. P6 (2026-06-10): all problem banks expanded to ≥15, `matrix_traversal.md` added as pattern #25.
+> **Original 20 modules + 6 case studies: COMPLETE.** DSA Pattern Playbooks sub-section: Chunks P0–P6 COMPLETE — master README + 25 pattern files + 2 guides (`interview_execution_playbook.md`, `study_plans.md`) + 100 bidirectional "See Also" links across the 12 Phase 1–3 concept modules. P6 (2026-06-10): all problem banks expanded to ≥15, `matrix_traversal.md` added as pattern #25. **2026-07-07**: `character_encoding_deep_dive/` built as module 21 (see §3), plus the Interview-Specific learning path (see "Learning Paths", directly below §4).
 >
-> **NEXT UP**: None queued for `cs_fundamentals/`. See `CLAUDE.md` "Planned Topics" (`theory_of_computation/`, `how_code_runs_compilers_and_interpreters/`, `discrete_math_for_engineers/`, `character_encoding_deep_dive/`) for candidate future modules if this section is revisited.
+> **NEXT UP**: None queued for `cs_fundamentals/`. See `CLAUDE.md` "Planned Topics" (`theory_of_computation/`, `how_code_runs_compilers_and_interpreters/`, `discrete_math_for_engineers/`) for candidate future modules if this section is revisited.
 
 ### Chunk Plan — Original Modules
 

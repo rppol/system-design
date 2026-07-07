@@ -22,7 +22,7 @@ Forty modules organized across eight learning phases take you from linear algebr
 
 ---
 
-## All Topics (40 Modules)
+## All Topics (45 Modules)
 
 | # | Topic | Key Concepts | Phase | Difficulty |
 |---|-------|-------------|-------|------------|
@@ -41,7 +41,7 @@ Forty modules organized across eight learning phases take you from linear algebr
 | 13 | [Training Deep Networks](training_deep_networks/README.md) | Regularization, dropout, gradient clipping, mixed precision, distributed training basics | 3 — Deep Learning Foundations | Intermediate |
 | 14 | [Generative Models](generative_models/README.md) | VAEs, GANs, normalizing flows, diffusion models, mode collapse, FID score | 3 — Deep Learning Foundations | Advanced |
 | 15 | [Computer Vision](computer_vision/README.md) | Object detection, segmentation, vision transformers, self-supervised vision | 4 — Domain Specializations | Intermediate |
-| 16 | [Natural Language Processing](natural_language_processing/README.md) | Text preprocessing, word2vec, GloVe, sentiment analysis, NER, classical NLP pipelines — 5 sub-files: BERT fine-tuning, attention/seq2seq, retrieval, evaluation, tokenization | 4 — Domain Specializations | Intermediate |
+| 16 | [Natural Language Processing](natural_language_processing/README.md) | Text preprocessing, word2vec, GloVe, sentiment analysis, NER, classical NLP pipelines — 11 sub-files: BERT, attention/seq2seq, retrieval, evaluation, tokenization, word embeddings, sequence labeling/CRF, text classification, topic modeling, language modeling, syntactic parsing | 4 — Domain Specializations | Intermediate |
 | 17 | [Recommender Systems](recommender_systems/README.md) | Collaborative filtering, content-based, matrix factorization, deep recommenders, ranking | 4 — Domain Specializations | Intermediate |
 | 18 | [Time Series Forecasting](time_series_forecasting/README.md) | ARIMA, Prophet, temporal CNNs, LSTMs for time series, anomaly detection in streams | 4 — Domain Specializations | Intermediate |
 | 19 | [Reinforcement Learning](reinforcement_learning/README.md) | MDP, Q-learning, policy gradients, PPO, actor-critic, reward shaping, exploration | 4 — Domain Specializations | Advanced |
@@ -66,6 +66,11 @@ Forty modules organized across eight learning phases take you from linear algebr
 | 38 | [Privacy-Preserving ML](privacy_preserving_ml/README.md) | Differential privacy, DP-SGD, federated learning (FedAvg), secure aggregation, PATE, membership inference | 7 — Advanced Topics | Advanced |
 | 39 | [Multi-Task and Multi-Objective Learning](multi_task_and_multi_objective_learning/README.md) | Shared-bottom, MMoE, PLE, uncertainty weighting, PCGrad, Pareto optimization, multi-objective ranking | 4 — Domain Specializations | Advanced |
 | 40 | [Anomaly Detection](anomaly_detection/README.md) | Isolation Forest, One-Class SVM, LOF, autoencoders, EVT thresholds, streaming detection, PR-AUC evaluation | 4 — Domain Specializations | Intermediate |
+| 41 | [Imbalanced Data and Leakage Traps](imbalanced_data_and_leakage_traps/README.md) | Class imbalance (SMOTE, class weights, focal loss), PR-AUC vs ROC-AUC, threshold moving; data leakage (target/temporal/group), leaky CV, fit-inside-fold discipline | 2 — Classical ML | Intermediate |
+| 42 | [Information Retrieval and Search](information_retrieval_and_search/README.md) | Inverted index, BM25, dense/hybrid retrieval (HNSW, RRF), cross-encoder reranking, learning-to-rank (LambdaMART), NDCG/MRR/MAP | 4 — Domain Specializations | Advanced |
+| 43 | [Speech and Audio ML](speech_and_audio_ml/README.md) | Spectrograms/MFCC, ASR (CTC, RNN-T, Whisper, wav2vec2), speaker ID/diarization, TTS, WER, SpecAugment | 4 — Domain Specializations | Advanced |
+| 44 | [Meta-Learning and Few-Shot](meta_learning_and_few_shot/README.md) | N-way K-shot, Prototypical Networks, MAML/Reptile, episodic training, metric vs optimization-based | 7 — Advanced Topics | Advanced |
+| 45 | [Fairness and Responsible AI](fairness_and_responsible_ai/README.md) | Fairness definitions + impossibility, disparate impact, pre/in/post-processing mitigation, proxies, model cards, EU AI Act | 7 — Advanced Topics | Advanced |
 
 ---
 
@@ -201,7 +206,7 @@ All case studies are in `case_studies/`. Studies #1–10 use the legacy 12-secti
 
 ---
 
-## Learning Path
+## Recommended Learning Order
 
 ```
 Phase 1 — Mathematical Foundations
@@ -217,6 +222,7 @@ Phase 2 — Classical ML
   unsupervised_learning  -->  [sub-file: gaussian_mixtures_and_em]
   feature_engineering
   model_evaluation_and_selection  -->  [sub-file: automl_and_nas]
+  imbalanced_data_and_leakage_traps
         |
         v
 Phase 3 — Deep Learning Foundations
@@ -277,11 +283,80 @@ Phase 8 — Interview Consolidation
                                            experimentation, drift (read just-in-time)
 ```
 
-For interview preparation specifically, prioritize:
-- Phase 2 (classical ML) — appears in almost every ML interview screen
-- Phase 5 (ML system design) — the dominant format at senior levels
-- Phase 6 (production ML) — distinguishes senior from mid-level candidates
-- Phase 8 (interview patterns) — use as a final review and cheat sheet
+For interview preparation specifically, the curated subset in the next section is what actually gets probed.
+
+---
+
+## Learning Paths
+
+This section is exhaustive by design — 45 modules from the math spine to production ML and the research frontier. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
+
+### Full Path (45 modules)
+
+The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: the math foundations, every domain (CV, time series, RL, GNNs), the advanced-research row (causal, SSL, privacy, adversarial, conformal), and every infrastructure deep-dive. Nothing is dropped.
+
+### Interview-Specific Path (25 modules)
+
+A ruthless cut to what a **senior ML / MLE interview** actually probes, anchored on the phases this section already flags as highest-yield (classical ML, ML system design, production ML, interview consolidation). Same learning order, ~40% fewer modules. Each group below says why it earns interview time.
+
+| Phase | Modules | Why it's tested |
+|-------|---------|-----------------|
+| Foundations | [Probability & Statistics](probability_and_statistics/README.md), [Optimization Theory](optimization_theory/README.md), [Information Theory](information_theory/README.md) | Bias-variance, MLE/MAP, "derive gradient descent", cross-entropy/KL — the math you actually reason about aloud |
+| Classical ML | [Supervised Learning](supervised_learning/README.md), [Ensemble Methods](ensemble_methods/README.md), [Unsupervised Learning](unsupervised_learning/README.md), [Feature Engineering](feature_engineering/README.md), [Model Evaluation & Selection](model_evaluation_and_selection/README.md), [Imbalanced Data & Leakage Traps](imbalanced_data_and_leakage_traps/README.md) | XGBoost, regularization, PCA/k-means, ROC-vs-PR, and the leakage/imbalance gotchas in almost every screen |
+| Deep Learning | [Neural Network Fundamentals](neural_network_fundamentals/README.md), [Convolutional Neural Networks](convolutional_neural_networks/README.md), [Recurrent Neural Networks](recurrent_neural_networks/README.md), [Training Deep Networks](training_deep_networks/README.md) | Backprop by hand, conv arithmetic, LSTM gating, dropout/batch-norm/vanishing-gradient fixes |
+| Applied | [Natural Language Processing](natural_language_processing/README.md), [Recommender Systems](recommender_systems/README.md) | Classical NLP + embeddings and recsys/ranking — the two most common "design an ML feature" prompts |
+| ML Systems | [ML System Design](ml_system_design/README.md), [Data Pipelines & Processing](data_pipelines_and_processing/README.md), [Experiment Tracking & Versioning](experiment_tracking_and_versioning/README.md) | The dominant senior format: the 6-step design framework, feature/training pipelines, reproducibility |
+| Production | [Model Serving & Inference](model_serving_and_inference/README.md), [Model Compression & Efficiency](model_compression_and_efficiency/README.md), [Monitoring & Drift Detection](monitoring_and_drift_detection/README.md), [MLOps & CI/CD](mlops_and_ci_cd/README.md) | Latency/batching, quantization/distillation, drift + retraining triggers — what separates senior from mid |
+| Explainability | [Interpretability & Explainability](interpretability_and_explainability/README.md) | SHAP/LIME and "why did the model predict this" — near-universal at senior and in regulated domains |
+| Consolidation | [ML Interview Patterns](ml_interview_patterns/README.md), [Model Selection & Algorithm Choice](model_selection_and_algorithm_choice/README.md) | The design framework, anti-patterns, and the "which algorithm, when & why" matrix — final review |
+
+**Deliberately deferred to the Full Path** (valuable, lower interview yield): linear algebra & calculus (a prerequisite, rarely probed directly), generative models, computer vision, multi-task learning, time series forecasting, anomaly detection, reinforcement learning, distributed training, GPU/hardware optimization, active learning, graph neural networks, self-supervised/contrastive learning, causal inference, adversarial robustness, privacy-preserving ML, and uncertainty/conformal prediction. A niche flagged in an interview (e.g. "have you worked with GNNs?") is a bonus, not a gate — reach for these once the 25 above are solid.
+
+---
+
+## Knowledge-Question Map
+
+The highest-frequency ML *knowledge* questions mapped to the file that answers them. For *system design* ("design X") questions, use the interview-prep shortcuts in [case_studies/README.md](case_studies/README.md).
+
+| Interview question | Where the answer lives |
+|--------------------|------------------------|
+| Explain the bias-variance tradeoff and how it guides model choice. | [Model Evaluation & Selection](model_evaluation_and_selection/README.md) |
+| Why can 99% accuracy be useless? PR-AUC vs ROC-AUC under imbalance? | [Imbalanced Data & Leakage Traps](imbalanced_data_and_leakage_traps/README.md) |
+| What is data leakage and how do you prevent it (target/temporal/group)? | [Imbalanced Data & Leakage Traps](imbalanced_data_and_leakage_traps/README.md) |
+| Derive gradient descent. SGD vs Adam vs AdamW — when each? | [Optimization Theory](optimization_theory/README.md) |
+| L1 vs L2 regularization — what does each do geometrically? | [Supervised Learning](supervised_learning/README.md) |
+| How does gradient boosting work? Bagging vs boosting. | [Ensemble Methods](ensemble_methods/README.md) |
+| Walk through backpropagation for a 2-layer network. | [Neural Network Fundamentals](neural_network_fundamentals/README.md) |
+| Why convolutions and pooling? Parameter sharing intuition. | [Convolutional Neural Networks](convolutional_neural_networks/README.md) |
+| What causes vanishing gradients, and how do LSTM/GRU gates fix it? | [Recurrent Neural Networks](recurrent_neural_networks/README.md) |
+| What do dropout and batch norm actually do, and why? | [Training Deep Networks](training_deep_networks/README.md) |
+| Define cross-entropy and KL divergence; how are they related? | [Information Theory](information_theory/README.md) |
+| Precision/recall/F1 — which to optimize for which problem? | [Model Evaluation & Selection](model_evaluation_and_selection/README.md) |
+| k-fold vs time-series vs group CV — when does each matter? | [Model Evaluation & Selection](model_evaluation_and_selection/README.md), [Imbalanced Data & Leakage Traps](imbalanced_data_and_leakage_traps/README.md) |
+| How does target encoding leak, and how do you do it safely? | [Feature Engineering](feature_engineering/README.md) |
+| Collaborative vs content-based filtering; the cold-start problem. | [Recommender Systems](recommender_systems/README.md) |
+| Design a retrieval + ranking recommender (two-tower). | [Recommender Systems](recommender_systems/README.md), [ML System Design](ml_system_design/README.md) |
+| Walk me through designing an ML system end to end. | [ML System Design](ml_system_design/README.md), [ML Interview Patterns](ml_interview_patterns/README.md) |
+| A/B testing for ML — offline vs online metrics, guardrails. | [ML System Design](ml_system_design/README.md) |
+| Data drift vs concept drift — how do you detect each (PSI/KS)? | [Monitoring & Drift Detection](monitoring_and_drift_detection/README.md) |
+| Quantization vs pruning vs distillation — tradeoffs. | [Model Compression & Efficiency](model_compression_and_efficiency/README.md) |
+| SHAP vs LIME; global vs local explanations. | [Interpretability & Explainability](interpretability_and_explainability/README.md) |
+| Which algorithm would you pick for problem X, and why? | [Model Selection & Algorithm Choice](model_selection_and_algorithm_choice/README.md) |
+
+---
+
+## Study Plan
+
+A 6-week plan over the Interview-Specific Path. Each week pairs modules with one case study to rehearse the "design X" format.
+
+| Week | Focus | Modules | Case study |
+|------|-------|---------|------------|
+| 1 | Math + Classical ML I | Probability & Statistics, Optimization Theory, Information Theory, Supervised Learning | skim [Churn Prediction](case_studies/design_churn_prediction.md) |
+| 2 | Classical ML II + traps | Ensemble Methods, Unsupervised Learning, Feature Engineering, Model Evaluation & Selection, Imbalanced Data & Leakage Traps | [Fraud Detection](case_studies/design_fraud_detection.md) (imbalance + leakage) |
+| 3 | Deep Learning | Neural Network Fundamentals, Convolutional Neural Networks, Recurrent Neural Networks, Training Deep Networks | [Image Classification Pipeline](case_studies/design_image_classification_pipeline.md) |
+| 4 | Applied ML | Natural Language Processing, Recommender Systems | [Recommendation Engine](case_studies/design_recommendation_engine.md), [Search Ranking](case_studies/design_search_ranking.md) |
+| 5 | ML Systems + Production | ML System Design, Data Pipelines & Processing, Experiment Tracking & Versioning, Model Serving & Inference, Model Compression & Efficiency, Monitoring & Drift Detection, MLOps & CI/CD | [ML Platform](case_studies/design_ml_platform.md) |
+| 6 | Explainability + drills | Interpretability & Explainability, ML Interview Patterns, Model Selection & Algorithm Choice | 3-4 principal case studies via the [interview shortcuts](case_studies/README.md) |
 
 ---
 

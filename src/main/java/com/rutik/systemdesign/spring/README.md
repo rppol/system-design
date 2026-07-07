@@ -64,6 +64,10 @@ This section covers:
 | 33 | [spring_hateoas_rest_maturity](spring_hateoas_rest_maturity/) | 4 — Spring Web | Advanced | Richardson Maturity Model L0-L3, Spring HATEOAS (EntityModel/Link/assemblers), HAL/HAL-FORMS, @HttpExchange/RestClient, ProblemDetail |
 | 34 | [spring_grpc](spring_grpc/) | 4 — Spring Web | Advanced | @GrpcService beans, server/channel autoconfig, Server/ClientInterceptor, Status↔exception mapping, deadlines, streaming, security + tracing |
 | 35 | [spring_session](spring_session/) | 6 — Security | Advanced | SessionRepositoryFilter, Redis/JDBC/Hazelcast backends, session fixation, concurrent-session control, WebSession, JWT vs stateful tradeoff |
+| 36 | [spring_data_nosql](spring_data_nosql/) | 5 — Data & Transactions | Intermediate | Spring Data MongoDB (MongoTemplate, aggregation, transactions) + Redis (RedisTemplate, @RedisHash, pub/sub) + reactive repositories; NoSQL vs JPA |
+| 37 | [database_migrations](database_migrations/) | 5 — Data & Transactions | Intermediate | Flyway (versioned/repeatable, checksums) + Liquibase (changesets, rollback), expand-contract zero-downtime, Boot integration, Testcontainers |
+| 38 | [spring_websocket_stomp](spring_websocket_stomp/) | 7 — Cloud & Messaging | Advanced | WebSocket handshake, STOMP over WebSocket, simple vs external broker relay, SockJS, per-user destinations, scaling |
+| 39 | [spring_http_clients](spring_http_clients/) | 4 — Spring Web | Intermediate | RestTemplate vs WebClient vs RestClient (6.1) vs @HttpExchange, connection pooling, timeouts, error handling, MockRestServiceServer |
 
 **Deep-dive sub-files** (group under their parent module's game topic; no separate `STUDY_ORDER` entry): [spring_webflux/rsocket_reactive_messaging.md](spring_webflux/rsocket_reactive_messaging.md) — RSocket 4 interaction models, protocol-level backpressure, `@MessageMapping`/`RSocketRequester`; [request_handling/i18n_and_localization.md](request_handling/i18n_and_localization.md) — `MessageSource`, `LocaleResolver`/`LocaleChangeInterceptor`, locale-aware formatting.
 
@@ -142,10 +146,20 @@ Phase 4 additions:
 | validation_and_error_handling    |  (extends request_handling)
 | spring_hateoas_rest_maturity     |  (REST maturity L0-L3, hypermedia)
 | spring_grpc                      |  (gRPC endpoints in Spring)
+| spring_http_clients              |  (RestTemplate/WebClient/RestClient/@HttpExchange)
++----------------------------------+
+
+Phase 5 additions:
+| spring_data_nosql                |  (MongoDB + Redis, reactive repositories)
+| database_migrations              |  (Flyway/Liquibase, expand-contract)
 +----------------------------------+
 
 Phase 6 addition:
 | spring_session                   |  (distributed / Redis-backed sessions)
++----------------------------------+
+
+Phase 7 addition:
+| spring_websocket_stomp           |  (STOMP messaging, SockJS, broker relay)
 +----------------------------------+
 ```
 
@@ -153,6 +167,76 @@ Dependencies to note:
 - Phase 2 (Proxies & AOP) must come before Phase 5 (Transactions) and Phase 6 (Security), both of which rely on proxy mechanics.
 - Phase 3 (Boot) and Phase 4 (Web) can be studied in parallel after Phase 1.
 - Phase 7 (Cloud) assumes Phase 5 knowledge (transactions, caching in distributed systems).
+
+---
+
+## Learning Paths
+
+39 modules is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
+
+### Full Path (39 modules)
+
+The complete curriculum in the order above — see [8-Phase Learning Path](#3-8-phase-learning-path). Use it for genuine breadth: Modulith, GraphQL, gRPC, HATEOAS, Batch, Integration (EIP), Spring AI, Session, Cloud Config, native/GraalVM, and the full observability stack. Nothing is dropped.
+
+### Interview-Specific Path (21 modules)
+
+A ruthless cut to what a **senior Spring / Spring Boot interview** actually probes — the container internals, the proxy mechanics behind `@Transactional`/`@Cacheable`, the MVC request pipeline, and the data/security stack. Same learning order, ~40% fewer modules. Each group says why it earns interview time.
+
+| Phase | Modules | Why it's tested |
+|-------|---------|-----------------|
+| Core Container | [IoC Container](ioc_container/README.md), [Bean Lifecycle](bean_lifecycle/README.md), [Dependency Injection](dependency_injection/README.md), [Spring Configuration](spring_configuration/README.md) | ApplicationContext refresh, bean scopes, circular deps + the three-level cache, `@Configuration` full-vs-lite — the guaranteed openers |
+| Proxies & AOP | [Spring Proxies](spring_proxies/README.md), [Spring AOP](spring_aop/README.md) | JDK vs CGLIB and the self-invocation trap that silently disables `@Transactional`/`@Cacheable` — a near-universal gotcha |
+| Spring Boot | [Boot Autoconfiguration](spring_boot_autoconfiguration/README.md), [Boot Actuator](spring_boot_actuator/README.md) | `@EnableAutoConfiguration`/`AutoConfiguration.imports`/`@Conditional`, health probes and Micrometer metrics |
+| Spring Web | [Spring MVC Architecture](spring_mvc_architecture/README.md), [Request Handling](request_handling/README.md), [Filters & Interceptors](filters_and_interceptors/README.md), [Spring WebFlux](spring_webflux/README.md), [Validation & Error Handling](validation_and_error_handling/README.md) | DispatcherServlet pipeline, Filter vs Interceptor, Mono/Flux + backpressure, `@ControllerAdvice`/ProblemDetail |
+| Data & Transactions | [Spring Data JPA](spring_data_jpa/README.md), [Spring Transactions](spring_transactions/README.md), [Spring Caching](spring_caching/README.md) | N+1 and fetch strategies, propagation/isolation/rollback rules, cache stampede — the highest-value data round |
+| Security | [Security Architecture](spring_security_architecture/README.md), [JWT & OAuth2](spring_security_jwt_oauth/README.md) | SecurityFilterChain, authN vs authZ, JWT validation, OAuth2 resource server, PKCE |
+| Cloud & Messaging | [Spring Cloud Patterns](spring_cloud_patterns/README.md), [Spring Messaging](spring_messaging/README.md) | Gateway + Resilience4j circuit breakers, Kafka `@KafkaListener` with idempotency and DLQ |
+| Testing | [Spring Testing](spring_testing/README.md) | `@SpringBootTest` vs slice tests, `@MockBean`, MockMvc, Testcontainers |
+
+**Deliberately deferred to the Full Path** (valuable, lower interview yield): Boot configuration properties, Modulith, GraphQL, HATEOAS/REST maturity, gRPC, Session, Cloud Config, Batch, Events & Scheduling, Spring AI, Integration (EIP), performance tuning, observability/tracing, and native/GraalVM. A niche flagged in an interview (e.g. "have you used Spring Batch?") is a bonus, not a gate — reach for these once the 21 above are solid.
+
+---
+
+## Knowledge-Question Map
+
+The highest-frequency Spring *knowledge* questions mapped to the file that answers them. For *system design* ("design X") questions, use [case_studies/README.md](case_studies/README.md).
+
+| Interview question | Where the answer lives |
+|--------------------|------------------------|
+| Why does an internal `@Transactional`/`@Cacheable` call silently do nothing? | [Spring Proxies](spring_proxies/README.md), [Spring Transactions](spring_transactions/README.md) |
+| JDK dynamic proxy vs CGLIB — when does Spring use each? | [Spring Proxies](spring_proxies/README.md) |
+| Walk through the bean lifecycle; BeanPostProcessor vs BeanFactoryPostProcessor. | [Bean Lifecycle](bean_lifecycle/README.md) |
+| How does Spring resolve a circular dependency? When does it fail? | [Dependency Injection](dependency_injection/README.md) |
+| `@Transactional` propagation — REQUIRED vs REQUIRES_NEW vs NESTED. | [Spring Transactions](spring_transactions/README.md) |
+| Which exceptions roll back a transaction by default, and why? | [Spring Transactions](spring_transactions/README.md) |
+| Diagnose and fix N+1 in Spring Data JPA. | [Spring Data JPA](spring_data_jpa/README.md) |
+| How does `@EnableAutoConfiguration` actually work? | [Boot Autoconfiguration](spring_boot_autoconfiguration/README.md) |
+| Trace a request through the DispatcherServlet. | [Spring MVC Architecture](spring_mvc_architecture/README.md) |
+| Servlet Filter vs HandlerInterceptor — ordering and use cases. | [Filters & Interceptors](filters_and_interceptors/README.md) |
+| Centralized exception handling with `@ControllerAdvice` and ProblemDetail. | [Request Handling](request_handling/README.md), [Validation & Error Handling](validation_and_error_handling/README.md) |
+| Explain the SecurityFilterChain; authentication vs authorization. | [Security Architecture](spring_security_architecture/README.md) |
+| How do you validate a JWT? OAuth2 resource server and PKCE. | [JWT & OAuth2](spring_security_jwt_oauth/README.md) |
+| WebFlux Mono/Flux and backpressure — when reactive vs MVC + virtual threads? | [Spring WebFlux](spring_webflux/README.md) |
+| `@Cacheable` and preventing cache stampede. | [Spring Caching](spring_caching/README.md) |
+| Bean scopes — the prototype-in-singleton injection trap. | [Bean Lifecycle](bean_lifecycle/README.md), [IoC Container](ioc_container/README.md) |
+| `@Configuration` full vs lite mode — what is `@Bean` method interception? | [Spring Configuration](spring_configuration/README.md) |
+| `@SpringBootTest` vs slice tests; `@MockBean`; Testcontainers. | [Spring Testing](spring_testing/README.md) |
+| Resilience4j circuit breaker + retry in Spring Cloud. | [Spring Cloud Patterns](spring_cloud_patterns/README.md) |
+| `@KafkaListener` — idempotency, manual ack, and DLQ. | [Spring Messaging](spring_messaging/README.md) |
+
+---
+
+## Study Plan
+
+A 5-week plan over the Interview-Specific Path. Case studies live in [case_studies/](case_studies/README.md) and rehearse the "design X" format.
+
+| Week | Focus | Modules | Case study |
+|------|-------|---------|------------|
+| 1 | Core Container + AOP | IoC Container, Bean Lifecycle, Dependency Injection, Spring Configuration, Spring Proxies, Spring AOP | — |
+| 2 | Boot + Web | Boot Autoconfiguration, Boot Actuator, Spring MVC Architecture, Request Handling, Filters & Interceptors, Validation & Error Handling | [API Gateway](case_studies/design_api_gateway.md) |
+| 3 | Data + Transactions | Spring Data JPA, Spring Transactions, Spring Caching | [Distributed Caching](case_studies/design_distributed_caching.md) |
+| 4 | Security + Reactive | Security Architecture, JWT & OAuth2, Spring WebFlux | [OAuth2 Authorization Server](case_studies/design_oauth2_authorization_server.md) |
+| 5 | Cloud, Messaging, Testing + drills | Spring Cloud Patterns, Spring Messaging, Spring Testing | [Event-Driven Microservice](case_studies/design_event_driven_microservice.md), [Idempotent Payment API](case_studies/design_idempotent_payment_api.md) |
 
 ---
 

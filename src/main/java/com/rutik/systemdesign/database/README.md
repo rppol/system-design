@@ -140,6 +140,74 @@ Phase 7: Architecture & Selection
 
 ---
 
+## Learning Paths
+
+This section is exhaustive by design — 29 modules spanning storage internals, relational and NoSQL engines, distributed-systems theory, and production operations. That is the right depth for a reference and the wrong shape for someone two weeks from a database-heavy interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
+
+### Full Path (29 modules)
+
+The complete curriculum in the order above — see [Phase Diagram (ASCII)](#phase-diagram-ascii). Use it for genuine mastery: every phase from storage internals through full NoSQL breadth (document, wide-column, search, graph, time-series), the emerging-database frontier (NewSQL, in-memory), and the complete production-operations depth (connection pooling, performance tuning, backup/DR, security/compliance, polyglot persistence). Nothing is dropped.
+
+### Interview-Specific Path (16 modules)
+
+A ruthless cut to what a **senior backend / database-heavy interview** actually probes: the storage-and-concurrency vocabulary everything else depends on, PostgreSQL as the default RDBMS, the two NoSQL stores and the vector-search topic that come up most, and the distributed-systems and selection-framework questions that close almost every round. Same learning order, roughly half the modules.
+
+| Group | Modules | Why it's tested |
+|-------|---------|-----------------|
+| Storage & Concurrency Foundations | [Database Fundamentals](database_fundamentals/README.md), [Storage Engines Internals](storage_engines_internals/README.md), [Indexing Deep Dive](indexing_deep_dive/README.md), [Concurrency Control & Locking](concurrency_control_and_locking/README.md) | ACID/BASE/CAP vocabulary, B+tree vs LSM-tree tradeoffs, how an index actually narrows a scan, and MVCC/deadlock/gap-lock mechanics — the foundation every later answer builds on |
+| Relational Depth | [PostgreSQL Internals](postgresql_internals/README.md), [SQL Query Optimization](sql_query_optimization/README.md), [Schema Design & Normalization](schema_design_and_normalization/README.md) | PostgreSQL is the default RDBMS in almost every interview; EXPLAIN plan reading, join-algorithm choice, and normalize-vs-denormalize tradeoffs drive nearly every schema-design prompt |
+| NoSQL & Vector Stores | [Document Databases](document_databases/README.md), [Key-Value Stores](key_value_stores/README.md), [Vector Databases](vector_databases/README.md) | Embedding-vs-referencing and Redis data-structure choice are the two most common non-relational deep dives; HNSW/pgvector now appears in any RAG-adjacent design round |
+| Distributed Systems Core | [Replication & High Availability](replication_and_high_availability/README.md), [Sharding & Partitioning](sharding_and_partitioning/README.md), [Distributed Transactions](distributed_transactions/README.md), [Consistency Models & Consensus](consistency_models_and_consensus/README.md) | Replication topology, shard-key selection, 2PC/Saga, and Raft/linearizability are the spine of every "design a globally available database" question |
+| Caching & Selection | [Database Caching Patterns](database_caching_patterns/README.md), [Database Selection Framework](database_selection_framework/README.md) | Cache-aside vs write-through, and the "which database, and why" decision framework, are what close almost every database interview |
+
+**Deliberately deferred to the Full Path** (valuable, lower interview yield): a second RDBMS internals deep-dive (MySQL/InnoDB — PostgreSQL alone already covers the internals vocabulary an interview probes), zero-downtime migrations, the niche NoSQL stores (wide-column, search engines, graph databases, time-series databases, NewSQL/distributed SQL, in-memory databases), and the deep production-ops modules (connection pool internals, performance tuning, backup/DR, security & compliance, polyglot persistence patterns). A niche flagged in an interview (e.g. "have you used Cassandra?" or "how would you run a zero-downtime migration?") is a bonus, not a gate — reach for these once the 16 above are solid.
+
+---
+
+## Knowledge-Question Map
+
+The highest-frequency database *knowledge* questions mapped to the file that answers them. For *system design* ("design X") questions, use the interview-prep shortcuts in [case_studies/README.md](case_studies/README.md).
+
+| Interview question | Where the answer lives |
+|--------------------|------------------------|
+| ACID vs BASE — what do you give up moving from one model to the other? | [Database Fundamentals](database_fundamentals/README.md) |
+| State the CAP theorem, then explain what PACELC adds when there's no partition. | [Database Fundamentals](database_fundamentals/README.md) |
+| B+tree vs LSM-tree — which write/read pattern favors each, and why do LSM-trees need compaction? | [Storage Engines Internals](storage_engines_internals/README.md) |
+| What does the write-ahead log (WAL) guarantee, and how does it drive crash recovery? | [Storage Engines Internals](storage_engines_internals/README.md) |
+| When does a covering index eliminate a heap lookup, and why does composite-index column order matter? | [Indexing Deep Dive](indexing_deep_dive/README.md) |
+| What is MVCC, and why can a reader never block a writer under it? | [Concurrency Control & Locking](concurrency_control_and_locking/README.md) |
+| Walk through how two transactions deadlock, and how the database detects and breaks the cycle. | [Concurrency Control & Locking](concurrency_control_and_locking/README.md) |
+| What does PostgreSQL's VACUUM reclaim, and what happens when autovacuum falls behind on a hot table? | [PostgreSQL Internals](postgresql_internals/README.md) |
+| How do you read an EXPLAIN ANALYZE plan to tell a planner misestimate from a missing index? | [SQL Query Optimization](sql_query_optimization/README.md) |
+| Why does keyset (seek) pagination outperform OFFSET pagination as a table grows, and what is the N+1 query problem? | [SQL Query Optimization](sql_query_optimization/README.md) |
+| When do you denormalize a schema, and what invariant do you give up by doing it? | [Schema Design & Normalization](schema_design_and_normalization/README.md) |
+| Embedding vs referencing in a document database — what decides which one to use? | [Document Databases](document_databases/README.md) |
+| Which Redis data structure fits a leaderboard, and which fits a dedup/membership check? | [Key-Value Stores](key_value_stores/README.md) |
+| How does HNSW trade memory for recall, and what does IVF+PQ trade instead? | [Vector Databases](vector_databases/README.md) |
+| Synchronous vs asynchronous replication — what do you trade, and what causes split-brain? | [Replication & High Availability](replication_and_high_availability/README.md) |
+| How do you choose a shard key, and what access pattern creates a write hotspot? | [Sharding & Partitioning](sharding_and_partitioning/README.md) |
+| Two-phase commit vs the Saga pattern — when does each fit, and what does each give up? | [Distributed Transactions](distributed_transactions/README.md) |
+| What is linearizability, and how does Raft reach consensus when a node fails? | [Consistency Models & Consensus](consistency_models_and_consensus/README.md) |
+| Cache-aside vs write-through vs write-behind — what does each guarantee (or not) on a crash, and what is cache stampede? | [Database Caching Patterns](database_caching_patterns/README.md) |
+| How do you build a database-selection decision matrix, and what's a classic benchmark trap? | [Database Selection Framework](database_selection_framework/README.md) |
+
+---
+
+## Study Plan
+
+A 6-week plan over the Interview-Specific Path. Each week pairs modules with one case study to rehearse the "design X" format.
+
+| Week | Focus | Modules | Case study |
+|------|-------|---------|------------|
+| 1 | Storage & Concurrency Foundations | Database Fundamentals, Storage Engines Internals, Indexing Deep Dive, Concurrency Control & Locking | [Banking Ledger](case_studies/design_banking_ledger/README.md) (SERIALIZABLE isolation, locking, ACID under load) |
+| 2 | Relational Depth | PostgreSQL Internals, SQL Query Optimization, Schema Design & Normalization | [Multi-Tenant SaaS Database](case_studies/design_multitenant_saas_database/README.md) (RLS, schema-per-tenant, connection pooling) |
+| 3 | NoSQL & Vector Stores | Document Databases, Key-Value Stores, Vector Databases | [Social Media Feed Storage](case_studies/design_social_media_feed_storage/README.md) (Cassandra wide-rows, Redis leaderboards) |
+| 4 | Distributed Systems I — Replication & Sharding | Replication & High Availability, Sharding & Partitioning | [Real-Time Analytics Platform](case_studies/design_realtime_analytics_platform/README.md) (partitioned columnar storage, replica reads) |
+| 5 | Distributed Systems II — Transactions & Consensus | Distributed Transactions, Consistency Models & Consensus | [Monolith to Polyglot Migration](case_studies/design_monolith_to_polyglot_migration/README.md) (CDC dual-write, idempotency, cutover consistency) |
+| 6 | Caching & Selection | Database Caching Patterns, Database Selection Framework | [E-Commerce Catalog](case_studies/design_ecommerce_catalog/README.md) (Redis inventory counters, polyglot selection rationale) |
+
+---
+
 ## Case Studies
 
 | Case Study | Scenario | Key Databases | Level |

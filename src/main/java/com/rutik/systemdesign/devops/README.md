@@ -181,6 +181,76 @@ Phase 8 — Specialized Platforms & Performance (advanced electives)
 
 ---
 
+## Learning Paths
+
+This section is exhaustive by design — 41 modules from Linux/OS internals and container runtimes through the full Kubernetes stack, CI/CD, IaC, cloud platforms, observability, SRE, DevSecOps, and specialized GPU/MLOps and event-streaming platforms. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
+
+### Full Path (41 modules)
+
+The complete curriculum in the order above — see [8-Phase Learning Path](#4-8-phase-learning-path). Use it for genuine mastery: Linux/OS and Git foundations, the full Kubernetes stack (storage, Helm, Operators/CRDs), every CI/CD and IaC alternative, GCP/Azure alongside AWS, FinOps, the complete DevSecOps & Reliability phase, and the Specialized Platforms electives (GPU/MLOps, event streaming, performance testing). Nothing is dropped.
+
+### Interview-Specific Path (22 modules)
+
+A ruthless cut to what a **senior DevOps / SRE / Platform engineering interview** actually probes, anchored on the phases this section already flags as highest-yield (the Kubernetes core, CI/CD & GitOps, and Observability & SRE). Same learning order, ~46% fewer modules. Each group below says why it earns interview time.
+
+| Group | Modules | Why it's tested |
+|-------|---------|-----------------|
+| Foundations | [linux_and_os_fundamentals](linux_and_os_fundamentals/), [networking_for_devops](networking_for_devops/) | Process/cgroup/OOM-killer mechanics and DNS/CIDR/TLS/mTLS/L4-L7 load balancing are the substrate every "why did this break" question sits on |
+| Kubernetes Core | [containers_and_docker](containers_and_docker/), [kubernetes_architecture](kubernetes_architecture/), [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/), [kubernetes_networking](kubernetes_networking/), [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/), [kubernetes_security](kubernetes_security/) | The single highest-signal DevOps interview topic — control-plane reconciliation, workload objects, CNI/NetworkPolicy, HPA/VPA/Karpenter, and RBAC/Pod Security Standards come up in nearly every senior screen |
+| CI/CD & GitOps | [ci_cd_fundamentals](ci_cd_fundamentals/), [ci_cd_platforms](ci_cd_platforms/), [deployment_strategies](deployment_strategies/), [gitops_argocd_flux](gitops_argocd_flux/) | "How does a deploy actually happen" and "how does a canary shift traffic" are near-universal; push- vs pull-based GitOps is a classic tradeoff question |
+| IaC & Secrets | [infrastructure_as_code_terraform](infrastructure_as_code_terraform/), [secrets_management](secrets_management/) | Terraform state/plan/apply semantics and dynamic-secret rotation are the two most-probed "manage infrastructure safely" questions |
+| Cloud Platforms | [cloud_fundamentals_and_aws](cloud_fundamentals_and_aws/), [serverless_and_faas](serverless_and_faas/), [cloud_networking_and_cdn](cloud_networking_and_cdn/) | IAM/VPC/EC2/S3/EKS baseline literacy, cold-start/event-driven tradeoffs, and CDN/global routing — assumed knowledge in any cloud-facing interview |
+| Observability | [observability_metrics_prometheus](observability_metrics_prometheus/), [observability_logging](observability_logging/), [observability_tracing_and_otel](observability_tracing_and_otel/) | "How do you know it's broken, and where" — PromQL/cardinality control, structured logging at scale, and span propagation across services |
+| SRE & Incident Response | [sre_principles_and_slos](sre_principles_and_slos/), [incident_management_and_oncall](incident_management_and_oncall/) | Error-budget math and incident command/blameless postmortems separate senior candidates from mid — a near-guaranteed technical-behavioral hybrid question |
+
+**Deliberately deferred to the Full Path** (valuable, lower interview yield): `shell_scripting_and_automation` and `version_control_and_git_workflows` (assumed prerequisites, rarely probed directly), `container_runtimes_and_oci`, `kubernetes_storage_and_state`, `helm_and_package_management`, `kubernetes_operators_and_crds`, `artifact_and_registry_management`, `terraform_advanced_and_alternatives`, `configuration_management`, `gcp_and_azure_essentials`, `cloud_cost_optimization_finops`, `visualization_and_alerting`, and the entire DevSecOps & Reliability phase (`devsecops_and_supply_chain_security`, `policy_as_code_and_compliance`, `disaster_recovery_and_resilience`, `platform_engineering_and_idp`) plus the Specialized Platforms phase (`ml_platform_and_gpu_infrastructure`, `event_streaming_operations`, `performance_and_load_testing`). A niche flagged in an interview (e.g. "have you run Kafka in production?") is a bonus, not a gate — reach for these once the 22 above are solid.
+
+---
+
+## Knowledge-Question Map
+
+The highest-frequency DevOps *knowledge* questions mapped to the file that answers them. For *system design* ("design a CI/CD platform", "design an observability stack") questions, use the interview-prep shortcuts in [case_studies/README.md](case_studies/README.md).
+
+| Interview question | Where the answer lives |
+|--------------------|------------------------|
+| Why was my Pod OOMKilled even though the node had free memory? | [linux_and_os_fundamentals](linux_and_os_fundamentals/) |
+| DNS resolution, CIDR/subnetting, and TLS/mTLS — where does a request actually terminate and route? | [networking_for_devops](networking_for_devops/) |
+| What happens end-to-end when you `kubectl apply` a Deployment? | [kubernetes_architecture](kubernetes_architecture/) |
+| Deployment vs StatefulSet vs DaemonSet vs Job/CronJob — when does each apply? | [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/) |
+| How does a rolling update stay zero-downtime (maxUnavailable/maxSurge, readiness probes)? | [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/), [deployment_strategies](deployment_strategies/) |
+| How does a CNI plugin wire Pod-to-Pod networking, and how does NetworkPolicy restrict it? | [kubernetes_networking](kubernetes_networking/) |
+| Requests vs limits, QoS classes, and how HPA/VPA/Cluster Autoscaler/Karpenter interact? | [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/) |
+| Design RBAC and Pod Security Standards for a multi-tenant cluster. | [kubernetes_security](kubernetes_security/) |
+| Design a CI pipeline with caching, parallel stages, and ephemeral runners — how do GitHub Actions/GitLab CI/Jenkins compare? | [ci_cd_fundamentals](ci_cd_fundamentals/), [ci_cd_platforms](ci_cd_platforms/) |
+| How does a canary deployment shift traffic and decide to promote or roll back? | [deployment_strategies](deployment_strategies/) |
+| Push-based CI/CD vs pull-based GitOps (ArgoCD/Flux) — what's the real security/drift tradeoff? | [gitops_argocd_flux](gitops_argocd_flux/) |
+| What is Terraform state, and why is a stale or lost state file dangerous? | [infrastructure_as_code_terraform](infrastructure_as_code_terraform/) |
+| Dynamic secrets (Vault) vs static cloud secrets — why does rotation matter? | [secrets_management](secrets_management/) |
+| Walk through IAM, VPC, and security groups for a 3-tier AWS application. | [cloud_fundamentals_and_aws](cloud_fundamentals_and_aws/) |
+| Why do serverless functions have cold starts, and how do you mitigate them? | [serverless_and_faas](serverless_and_faas/) |
+| How does a CDN plus global load balancer cut latency for users worldwide? | [cloud_networking_and_cdn](cloud_networking_and_cdn/) |
+| Why is high-cardinality labeling dangerous in Prometheus? | [observability_metrics_prometheus](observability_metrics_prometheus/) |
+| Structured logging vs raw text at scale — why standardize on Loki/EFK? | [observability_logging](observability_logging/) |
+| How does a trace context propagate across service boundaries in OpenTelemetry? | [observability_tracing_and_otel](observability_tracing_and_otel/) |
+| What is an error budget, how does it gate release velocity, and how do you run a blameless postmortem? | [sre_principles_and_slos](sre_principles_and_slos/), [incident_management_and_oncall](incident_management_and_oncall/) |
+
+---
+
+## Study Plan
+
+A 6-week plan over the Interview-Specific Path. Each week pairs modules with one or two case studies to rehearse the "design X" format.
+
+| Week | Focus | Modules | Case study |
+|------|-------|---------|------------|
+| 1 | Foundations + Containers | [linux_and_os_fundamentals](linux_and_os_fundamentals/), [networking_for_devops](networking_for_devops/), [containers_and_docker](containers_and_docker/) | skim [Kubernetes Platform](case_studies/design_kubernetes_platform.md) |
+| 2 | Kubernetes Core | [kubernetes_architecture](kubernetes_architecture/), [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/), [kubernetes_networking](kubernetes_networking/), [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/), [kubernetes_security](kubernetes_security/) | [Kubernetes Platform](case_studies/design_kubernetes_platform.md) (full), [Autoscaling Platform](case_studies/design_autoscaling_platform.md) |
+| 3 | CI/CD & GitOps | [ci_cd_fundamentals](ci_cd_fundamentals/), [ci_cd_platforms](ci_cd_platforms/), [deployment_strategies](deployment_strategies/), [gitops_argocd_flux](gitops_argocd_flux/) | [CI/CD Platform](case_studies/design_ci_cd_platform.md), [GitOps Delivery Pipeline](case_studies/design_gitops_delivery_pipeline.md) |
+| 4 | IaC, Secrets & Cloud | [infrastructure_as_code_terraform](infrastructure_as_code_terraform/), [secrets_management](secrets_management/), [cloud_fundamentals_and_aws](cloud_fundamentals_and_aws/), [serverless_and_faas](serverless_and_faas/), [cloud_networking_and_cdn](cloud_networking_and_cdn/) | [Secrets Management Platform](case_studies/design_secrets_management_platform.md) |
+| 5 | Observability | [observability_metrics_prometheus](observability_metrics_prometheus/), [observability_logging](observability_logging/), [observability_tracing_and_otel](observability_tracing_and_otel/) | [Observability Platform](case_studies/design_observability_platform.md), [Log Aggregation Pipeline](case_studies/design_log_aggregation_pipeline.md) |
+| 6 | SRE + Incident + drills | [sre_principles_and_slos](sre_principles_and_slos/), [incident_management_and_oncall](incident_management_and_oncall/) | [Incident Response System](case_studies/design_incident_response_system.md); 2-3 more via the [interview shortcuts](case_studies/README.md) |
+
+---
+
 ## 5. Cloud Service Mapping (AWS ↔ GCP ↔ Azure)
 
 Worked examples use AWS; this is the quick translation table referenced throughout the section.

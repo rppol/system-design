@@ -103,6 +103,22 @@ LLD describes how individual components are implemented — class relationships,
 - Always include: when to use vs when NOT to use, common misuse/anti-pattern of this pattern
 - Cross-reference to HLD when the pattern has a system-design analogue (e.g., Observer → Event-Driven Architecture)
 
+---
+
+## Learning Paths (Full + Interview-Specific)
+
+`README.md` documents two routes: the **Full Path** (all 9 modules = "Recommended
+Learning Order") and a curated **Interview-Specific Path** (7 modules). The interview
+subset is a **dual-source list** — it lives in both `README.md` ("## Learning Paths")
+and `game/app.js` (`STUDY_PATHS.lld.interview`, which drives the game's Study
+Full/Interview toggle). **Change one, change the other** — same modules, same order.
+Non-Q&A narrative only; no `extract.py` re-run needed. The README also carries a
+Knowledge-Question Map and a 6-week Study Plan (interview-readiness prose; no toggle
+impact). The Study Plan pairs each week with a practice problem from
+`system_design_problems/` rather than a `case_studies/` file — LLD's `case_studies/`
+holds only a learning-path index (`case_studies/README.md`: pattern-dependency map +
+interview shortcuts) over the same 12 problems, not separate case-study write-ups.
+
 ## Adding a New LLD Pattern
 
 1. Create `<category>/<pattern_name>/README.md` — 14-section template

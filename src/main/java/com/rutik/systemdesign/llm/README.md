@@ -37,7 +37,7 @@ column reflects learning sequence, not addition order.
 | # | Phase | Topic | Key Concepts | Difficulty |
 |---|-------|-------|-------------|------------|
 | 1 | 1 — Foundations | [Foundations & Architecture](foundations_and_architecture/README.md) | Transformers, self-attention, scaling laws, GPT vs BERT — 4 sub-files: attention derivations, positional encoding, training dynamics, state-space/linear-attention alternatives | Intermediate |
-| 2 | 1 — Foundations | [Tokenization & Embeddings](tokenization_and_embeddings/README.md) | BPE, WordPiece, SentencePiece, vocabulary design | Beginner |
+| 2 | 1 — Foundations | [Tokenization & Embeddings](tokenization_and_embeddings/README.md) | BPE, WordPiece, SentencePiece, vocabulary design — with 1 deep-dive sub-file (byte-level & tokenizer-free) | Beginner |
 | 3 | 1 — Foundations | [Embeddings & Similarity Search](embeddings_and_similarity_search/README.md) | Sentence embeddings, HNSW, IVF, Matryoshka, FAISS | Intermediate |
 | 4 | 2 — Training | [Pre-Training](pre_training/README.md) | CLM, MLM, data curation, training dynamics, compute | Advanced |
 | 5 | 2 — Training | [Training Infrastructure](training_infrastructure/README.md) | Distributed training, tensor/pipeline parallelism, ZeRO, FSDP | Advanced |
@@ -102,6 +102,11 @@ Topics marked with sub-files above contain individual deep-dive files in additio
 | [positional_encoding.md](foundations_and_architecture/positional_encoding.md) | RoPE derivation (complex plane proof), ALiBi, NTK-aware scaling, YaRN, context extension |
 | [training_dynamics.md](foundations_and_architecture/training_dynamics.md) | Warmup theory, WSD schedule, loss spikes, BF16/FP16, critical batch size, muP, data mixing |
 | [state_space_models_and_linear_attention.md](foundations_and_architecture/state_space_models_and_linear_attention.md) | S4/S5, Mamba selective SSM, Mamba-2/SSD, RWKV v4-v7, RetNet, Jamba/Zamba hybrids, Hyena, gated linear attention |
+
+### Tokenization & Embeddings (`tokenization_and_embeddings/`)
+| File | Topic |
+|------|-------|
+| [byte_level_and_tokenizer_free.md](tokenization_and_embeddings/byte_level_and_tokenizer_free.md) | Byte-level & tokenizer-free models — BLT (entropy-based patching), MEGABYTE, ByT5; escaping the tokenizer |
 
 ### Fine-Tuning (`fine_tuning/`)
 | File | Topic |

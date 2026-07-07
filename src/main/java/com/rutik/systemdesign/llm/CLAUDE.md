@@ -10,7 +10,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | Module Directory | Topic | Sub-files |
 |-----------------|-------|-----------|
 | `foundations_and_architecture/` | Transformers, self-attention, scaling laws, GPT vs BERT | attention_mechanisms, positional_encoding, training_dynamics, state_space_models_and_linear_attention |
-| `tokenization_and_embeddings/` | BPE, WordPiece, SentencePiece, vocabulary design | — |
+| `tokenization_and_embeddings/` | BPE, WordPiece, SentencePiece, vocabulary design | byte_level_and_tokenizer_free |
 | `embeddings_and_similarity_search/` | Sentence embeddings, HNSW, IVF, Matryoshka, FAISS | — |
 | `pre_training/` | CLM, MLM, data curation, training dynamics, compute | — |
 | `training_infrastructure/` | Distributed training, tensor/pipeline parallelism, ZeRO, FSDP | — |
@@ -77,13 +77,13 @@ list the same modules in the same order. Non-Q&A narrative only; no `extract.py`
 
 ## Planned / Missing Topics (not yet created)
 
-The following are gaps for senior AI engineer coverage, identified by the 2026-06-14 full-section gap audit. This is a roadmap, not a queue — pursue only on explicit user request. The 2026-06-14 audit's other 9 items (2 new modules, 4 sub-file slots covering 5 sub-files, 3 content expansions) were built on 2026-06-15; this single row — explicitly out of scope for that build — is the only remaining gap.
+The following are gaps for senior AI engineer coverage, identified by the 2026-06-14 full-section gap audit. This is a roadmap, not a queue — pursue only on explicit user request. The 2026-06-14 audit's other 9 items (2 new modules, 4 sub-file slots covering 5 sub-files, 3 content expansions) were built on 2026-06-15; this single row — explicitly out of scope for that build — was the only remaining gap, and it closed on 2026-07-07. No open gaps remain.
 
 ### New Sub-Files (within existing topics)
 
-| Parent Module | Sub-File Topic | Priority |
-|---------------|-----------------|---------|
-| `tokenization_and_embeddings/` | Byte-level / tokenizer-free models — BLT, MEGABYTE | Low |
+| Parent Module | Sub-File Topic | Priority | Status |
+|---------------|-----------------|---------|--------|
+| `tokenization_and_embeddings/` | Byte-level / tokenizer-free models — BLT, MEGABYTE | Low | DONE (2026-07-07) — built as `byte_level_and_tokenizer_free.md` |
 
 ---
 

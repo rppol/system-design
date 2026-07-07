@@ -73,6 +73,20 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
+## Learning Paths (Full + Interview-Specific)
+
+`README.md` documents two routes: the **Full Path** (all 29 modules — the 7-phase
+order in "## Learning Path — 7 Phases" / "## Phase Diagram (ASCII)") and a curated
+**Interview-Specific Path** (16 modules). The interview subset is a **dual-source
+list** — it lives in both `README.md` ("## Learning Paths") and `game/app.js`
+(`STUDY_PATHS.database.interview`, which drives the game's Study Full/Interview
+toggle). **Change one, change the other** — same modules, same order. Non-Q&A
+narrative only; no `extract.py` re-run needed. The README also carries a
+Knowledge-Question Map and a 6-week Study Plan (interview-readiness prose; no
+toggle impact).
+
+---
+
 ## Case Studies — 6 Total
 
 `case_studies/` directory. Learning-path index: `case_studies/README.md` (mandatory; update with every new case study).

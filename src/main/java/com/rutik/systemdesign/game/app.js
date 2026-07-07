@@ -15,7 +15,7 @@ function deckLen() {
 const estMinutes = (n) => Math.max(1, Math.round(n * 0.5));   // ~30s/question, matches the original 10q/~5min ratio
 const SECTION_LABELS = {
   backend: "Backend Engineering", book: "Book Summaries",
-  cs_fundamentals: "CS Fundamentals", database: "Databases", devops: "DevOps & Cloud",
+  cs_fundamentals: "CS Fundamentals", cuda: "CUDA / GPGPU", database: "Databases", devops: "DevOps & Cloud",
   hld: "High-Level Design", java: "Java", lld: "Low-Level Design",
   llm: "LLM Engineering", ml: "Machine Learning", python: "Python", spring: "Spring",
 };
@@ -35,11 +35,19 @@ const STUDY_ORDER = {
     "backend/microservices_fundamentals","backend/api_gateway_patterns","backend/service_mesh_and_service_discovery","backend/distributed_system_operational_patterns","backend/container_and_deployment_patterns",
   ],
   cs_fundamentals: [
-    "cs_fundamentals/complexity_analysis_and_big_o","cs_fundamentals/number_systems_and_bit_manipulation","cs_fundamentals/recursion_and_problem_solving_patterns",
+    "cs_fundamentals/complexity_analysis_and_big_o","cs_fundamentals/discrete_math_for_engineers","cs_fundamentals/number_systems_and_bit_manipulation","cs_fundamentals/character_encoding_deep_dive","cs_fundamentals/recursion_and_problem_solving_patterns",
     "cs_fundamentals/arrays_strings_and_hashing","cs_fundamentals/linked_lists_stacks_and_queues","cs_fundamentals/trees_and_binary_search_trees","cs_fundamentals/heaps_and_priority_queues","cs_fundamentals/graphs_tries_and_advanced_structures",
     "cs_fundamentals/sorting_and_searching","cs_fundamentals/dynamic_programming","cs_fundamentals/greedy_and_divide_and_conquer","cs_fundamentals/graph_and_string_algorithms",
     "cs_fundamentals/processes_threads_and_context_switching","cs_fundamentals/cpu_scheduling_algorithms","cs_fundamentals/memory_management_and_virtual_memory","cs_fundamentals/deadlocks_and_synchronization",
-    "cs_fundamentals/computer_architecture_and_memory_hierarchy","cs_fundamentals/networking_fundamentals","cs_fundamentals/database_and_storage_fundamentals","cs_fundamentals/cryptography_fundamentals",
+    "cs_fundamentals/computer_architecture_and_memory_hierarchy","cs_fundamentals/networking_fundamentals","cs_fundamentals/database_and_storage_fundamentals","cs_fundamentals/cryptography_fundamentals","cs_fundamentals/theory_of_computation","cs_fundamentals/how_code_runs_compilers_and_interpreters",
+  ],
+  cuda: [
+    "cuda/gpu_computing_foundations","cuda/gpu_hardware_architecture","cuda/cuda_toolkit_and_compilation",
+    "cuda/cuda_programming_model_and_kernels","cuda/warps_and_simt_execution","cuda/cuda_memory_model_and_hierarchy","cuda/memory_management_and_data_transfer",
+    "cuda/memory_coalescing_and_access_patterns","cuda/shared_memory_and_bank_conflicts","cuda/occupancy_and_launch_configuration","cuda/synchronization_and_atomics","cuda/parallel_patterns_reduction_scan_histogram","cuda/warp_level_primitives_and_cooperative_groups",
+    "cuda/streams_events_and_concurrency","cuda/cuda_graphs","cuda/multi_gpu_programming_and_nccl","cuda/dynamic_parallelism_and_advanced_kernels",
+    "cuda/tensor_cores_and_mixed_precision","cuda/cuda_math_and_dnn_libraries","cuda/python_gpu_ecosystem","cuda/triton_and_kernel_dsls",
+    "cuda/profiling_and_performance_analysis","cuda/debugging_correctness_and_numerics","cuda/gpu_portability_hip_sycl_and_beyond",
   ],
   database: [
     "database/database_fundamentals","database/storage_engines_internals","database/indexing_deep_dive","database/concurrency_control_and_locking",
@@ -66,12 +74,12 @@ const STUDY_ORDER = {
     "hld/cdn","hld/consistent_hashing","hld/database_sharding","hld/microservices","hld/distributed_transactions","hld/observability","hld/security_and_auth","hld/resilience_patterns","hld/consensus_algorithms","hld/event_sourcing_cqrs",
   ],
   java: [
-    "java/core_language","java/strings_and_text","java/generics_and_type_system","java/exceptions_and_io",
-    "java/java8_features","java/java_time_datetime","java/java_streams","java/functional_programming","java/java9_to_21_features",
-    "java/jvm_internals","java/bytecode_and_classfile",
+    "java/core_language","java/strings_and_text","java/generics_and_type_system","java/exceptions_and_io","java/json_processing_jackson",
+    "java/java8_features","java/java_time_datetime","java/java_streams","java/functional_programming","java/java9_to_21_features","java/java_platform_module_system",
+    "java/jvm_internals","java/bytecode_and_classfile","java/reference_types_and_cleaners","java/graalvm_native_image",
     "java/concurrency","java/collections_internals","java/design_patterns_in_java",
     "java/performance_and_tuning","java/java_memory_model",
-    "java/java_interview_patterns","java/testing_junit_mockito","java/annotation_processing",
+    "java/java_interview_patterns","java/testing_junit_mockito","java/logging","java/annotation_processing","java/build_tools_maven_gradle",
     "java/structured_concurrency_and_loom","java/foreign_function_and_memory_api","java/reactive_programming",
     "java/networking_and_http_client","java/jdbc_and_database","java/security_and_cryptography","java/grpc_protobuf","java/microservices_patterns",
   ],
@@ -92,12 +100,12 @@ const STUDY_ORDER = {
   ],
   ml: [
     "ml/linear_algebra_and_calculus","ml/probability_and_statistics","ml/optimization_theory","ml/information_theory",
-    "ml/supervised_learning","ml/ensemble_methods","ml/unsupervised_learning","ml/feature_engineering","ml/model_evaluation_and_selection",
+    "ml/supervised_learning","ml/ensemble_methods","ml/unsupervised_learning","ml/feature_engineering","ml/model_evaluation_and_selection","ml/imbalanced_data_and_leakage_traps",
     "ml/neural_network_fundamentals","ml/convolutional_neural_networks","ml/recurrent_neural_networks","ml/training_deep_networks","ml/generative_models",
-    "ml/computer_vision","ml/natural_language_processing","ml/recommender_systems","ml/multi_task_and_multi_objective_learning","ml/time_series_forecasting","ml/anomaly_detection","ml/reinforcement_learning",
+    "ml/computer_vision","ml/natural_language_processing","ml/recommender_systems","ml/information_retrieval_and_search","ml/speech_and_audio_ml","ml/multi_task_and_multi_objective_learning","ml/time_series_forecasting","ml/anomaly_detection","ml/reinforcement_learning",
     "ml/ml_system_design","ml/data_pipelines_and_processing","ml/distributed_training","ml/experiment_tracking_and_versioning","ml/gpu_and_hardware_optimization","ml/active_learning_and_weak_supervision",
     "ml/model_serving_and_inference","ml/model_compression_and_efficiency","ml/monitoring_and_drift_detection","ml/mlops_and_ci_cd",
-    "ml/graph_neural_networks","ml/self_supervised_and_contrastive_learning","ml/causal_inference_and_ml","ml/adversarial_ml_and_robustness","ml/privacy_preserving_ml","ml/interpretability_and_explainability","ml/uncertainty_quantification_and_conformal_prediction",
+    "ml/graph_neural_networks","ml/self_supervised_and_contrastive_learning","ml/meta_learning_and_few_shot","ml/causal_inference_and_ml","ml/adversarial_ml_and_robustness","ml/privacy_preserving_ml","ml/interpretability_and_explainability","ml/fairness_and_responsible_ai","ml/uncertainty_quantification_and_conformal_prediction",
     "ml/ml_interview_patterns","ml/model_selection_and_algorithm_choice",
   ],
   python: [
@@ -112,10 +120,10 @@ const STUDY_ORDER = {
     "spring/ioc_container","spring/bean_lifecycle","spring/dependency_injection","spring/spring_configuration",
     "spring/spring_proxies","spring/spring_aop",
     "spring/spring_boot_autoconfiguration","spring/spring_boot_configuration","spring/spring_boot_actuator","spring/spring_modulith",
-    "spring/spring_mvc_architecture","spring/request_handling","spring/filters_and_interceptors","spring/spring_webflux","spring/spring_graphql","spring/spring_hateoas_rest_maturity","spring/spring_grpc","spring/validation_and_error_handling",
-    "spring/spring_data_jpa","spring/spring_transactions","spring/spring_caching",
+    "spring/spring_mvc_architecture","spring/request_handling","spring/filters_and_interceptors","spring/spring_webflux","spring/spring_graphql","spring/spring_hateoas_rest_maturity","spring/spring_http_clients","spring/spring_grpc","spring/validation_and_error_handling",
+    "spring/spring_data_jpa","spring/spring_data_nosql","spring/database_migrations","spring/spring_transactions","spring/spring_caching",
     "spring/spring_security_architecture","spring/spring_security_jwt_oauth","spring/spring_session",
-    "spring/spring_cloud_config","spring/spring_cloud_patterns","spring/spring_messaging","spring/spring_batch","spring/spring_events_and_scheduling","spring/spring_ai","spring/spring_integration",
+    "spring/spring_cloud_config","spring/spring_cloud_patterns","spring/spring_messaging","spring/spring_websocket_stomp","spring/spring_batch","spring/spring_events_and_scheduling","spring/spring_ai","spring/spring_integration",
     "spring/spring_testing","spring/spring_performance","spring/observability_and_tracing","spring/spring_native_graalvm",
   ],
 };
@@ -125,8 +133,17 @@ const STUDY_ORDER = {
 // with an entry here show the Full/Interview toggle in the Study view; all others
 // behave exactly as before (Full only). Slugs are the same "<section>/<module>"
 // form as STUDY_ORDER and MUST stay in sync with that section's README
-// "Learning Paths" list (LLM pilot; other sections added later).
+// "Learning Paths" list (LLM was the pilot; ML, Java, Spring now live too).
 const STUDY_PATHS = {
+  cuda: {
+    interview: [
+      "cuda/gpu_computing_foundations","cuda/gpu_hardware_architecture",
+      "cuda/cuda_programming_model_and_kernels","cuda/warps_and_simt_execution","cuda/cuda_memory_model_and_hierarchy","cuda/memory_management_and_data_transfer",
+      "cuda/memory_coalescing_and_access_patterns","cuda/shared_memory_and_bank_conflicts","cuda/occupancy_and_launch_configuration","cuda/synchronization_and_atomics","cuda/parallel_patterns_reduction_scan_histogram","cuda/warp_level_primitives_and_cooperative_groups",
+      "cuda/streams_events_and_concurrency","cuda/tensor_cores_and_mixed_precision",
+      "cuda/profiling_and_performance_analysis","cuda/debugging_correctness_and_numerics",
+    ],
+  },
   llm: {
     interview: [
       "llm/foundations_and_architecture","llm/tokenization_and_embeddings","llm/embeddings_and_similarity_search","llm/pre_training",
@@ -137,6 +154,95 @@ const STUDY_PATHS = {
       "llm/deployment_and_mlops","llm/llm_caching","llm/token_economics_and_cost_optimization","llm/llm_routing_and_model_selection",
       "llm/evaluation_and_benchmarks","llm/llm_testing_strategies","llm/guardrails_and_content_safety",
       "llm/safety_and_alignment","llm/llm_security","llm/mixture_of_experts",
+    ],
+  },
+  ml: {
+    interview: [
+      "ml/probability_and_statistics","ml/optimization_theory","ml/information_theory",
+      "ml/supervised_learning","ml/ensemble_methods","ml/unsupervised_learning","ml/feature_engineering","ml/model_evaluation_and_selection","ml/imbalanced_data_and_leakage_traps",
+      "ml/neural_network_fundamentals","ml/convolutional_neural_networks","ml/recurrent_neural_networks","ml/training_deep_networks",
+      "ml/natural_language_processing","ml/recommender_systems",
+      "ml/ml_system_design","ml/data_pipelines_and_processing","ml/experiment_tracking_and_versioning","ml/model_serving_and_inference","ml/model_compression_and_efficiency","ml/monitoring_and_drift_detection","ml/mlops_and_ci_cd",
+      "ml/interpretability_and_explainability",
+      "ml/ml_interview_patterns","ml/model_selection_and_algorithm_choice",
+    ],
+  },
+  java: {
+    interview: [
+      "java/core_language","java/strings_and_text","java/generics_and_type_system","java/exceptions_and_io","java/json_processing_jackson",
+      "java/java8_features","java/java_streams","java/java9_to_21_features",
+      "java/jvm_internals","java/concurrency","java/collections_internals","java/design_patterns_in_java","java/java_memory_model",
+      "java/java_interview_patterns","java/testing_junit_mockito",
+      "java/structured_concurrency_and_loom","java/jdbc_and_database",
+    ],
+  },
+  spring: {
+    interview: [
+      "spring/ioc_container","spring/bean_lifecycle","spring/dependency_injection","spring/spring_configuration",
+      "spring/spring_proxies","spring/spring_aop",
+      "spring/spring_boot_autoconfiguration","spring/spring_boot_actuator",
+      "spring/spring_mvc_architecture","spring/request_handling","spring/filters_and_interceptors","spring/spring_webflux","spring/validation_and_error_handling",
+      "spring/spring_data_jpa","spring/spring_transactions","spring/spring_caching",
+      "spring/spring_security_architecture","spring/spring_security_jwt_oauth",
+      "spring/spring_cloud_patterns","spring/spring_messaging",
+      "spring/spring_testing",
+    ],
+  },
+  lld: {
+    interview: [
+      "lld/solid_principles","lld/creational","lld/structural","lld/behavioral","lld/pattern_comparisons","lld/anti_patterns","lld/system_design_problems",
+    ],
+  },
+  hld: {
+    interview: [
+      "hld/scalability","hld/load_balancing","hld/caching","hld/database_design","hld/cap_theorem","hld/api_design","hld/message_queues","hld/rate_limiting",
+      "hld/cdn","hld/consistent_hashing","hld/database_sharding","hld/microservices","hld/distributed_transactions","hld/resilience_patterns",
+    ],
+  },
+  backend: {
+    interview: [
+      "backend/http_protocols","backend/rest_api_design","backend/grpc_and_protobuf",
+      "backend/connection_pooling_deep_dive","backend/caching_strategies_deep_dive","backend/async_and_concurrency_patterns",
+      "backend/database_internals_and_indexing","backend/query_optimization","backend/distributed_transactions_and_consistency",
+      "backend/fault_tolerance_patterns","backend/rate_limiting_in_depth","backend/observability_and_monitoring",
+      "backend/backend_security_owasp","backend/auth_and_authorization_systems",
+      "backend/event_driven_fundamentals","backend/kafka_deep_dive","backend/microservices_fundamentals","backend/api_gateway_patterns",
+    ],
+  },
+  database: {
+    interview: [
+      "database/database_fundamentals","database/storage_engines_internals","database/indexing_deep_dive","database/concurrency_control_and_locking",
+      "database/postgresql_internals","database/sql_query_optimization","database/schema_design_and_normalization",
+      "database/document_databases","database/key_value_stores","database/vector_databases",
+      "database/replication_and_high_availability","database/sharding_and_partitioning","database/distributed_transactions","database/consistency_models_and_consensus",
+      "database/database_caching_patterns","database/database_selection_framework",
+    ],
+  },
+  python: {
+    interview: [
+      "python/data_model_and_objects","python/core_language_idioms","python/iterators_and_generators","python/decorators_and_closures","python/context_managers_and_exceptions","python/collections_and_data_structures",
+      "python/cpython_memory_model","python/the_gil_and_free_threading","python/the_type_system_and_typing","python/functional_programming",
+      "python/asyncio_and_event_loop","python/async_patterns_and_pitfalls","python/testing_with_pytest",
+      "python/fastapi_fundamentals_asgi","python/pydantic_v2_deep_dive","python/dependency_injection_in_fastapi","python/async_database_sqlalchemy","python/authentication_and_security","python/error_handling_and_validation",
+      "python/production_deployment_and_scaling","python/observability_and_monitoring","python/caching_and_performance",
+    ],
+  },
+  devops: {
+    interview: [
+      "devops/linux_and_os_fundamentals","devops/networking_for_devops",
+      "devops/containers_and_docker","devops/kubernetes_architecture","devops/kubernetes_workloads_and_objects","devops/kubernetes_networking","devops/kubernetes_scheduling_and_autoscaling","devops/kubernetes_security",
+      "devops/ci_cd_fundamentals","devops/ci_cd_platforms","devops/deployment_strategies","devops/gitops_argocd_flux",
+      "devops/infrastructure_as_code_terraform","devops/secrets_management",
+      "devops/cloud_fundamentals_and_aws","devops/serverless_and_faas","devops/cloud_networking_and_cdn",
+      "devops/observability_metrics_prometheus","devops/observability_logging","devops/observability_tracing_and_otel","devops/sre_principles_and_slos","devops/incident_management_and_oncall",
+    ],
+  },
+  cs_fundamentals: {
+    interview: [
+      "cs_fundamentals/complexity_analysis_and_big_o","cs_fundamentals/number_systems_and_bit_manipulation","cs_fundamentals/recursion_and_problem_solving_patterns",
+      "cs_fundamentals/arrays_strings_and_hashing","cs_fundamentals/linked_lists_stacks_and_queues","cs_fundamentals/trees_and_binary_search_trees","cs_fundamentals/heaps_and_priority_queues","cs_fundamentals/graphs_tries_and_advanced_structures",
+      "cs_fundamentals/sorting_and_searching","cs_fundamentals/dynamic_programming","cs_fundamentals/greedy_and_divide_and_conquer","cs_fundamentals/graph_and_string_algorithms",
+      "cs_fundamentals/processes_threads_and_context_switching","cs_fundamentals/cpu_scheduling_algorithms","cs_fundamentals/memory_management_and_virtual_memory","cs_fundamentals/deadlocks_and_synchronization",
     ],
   },
 };
@@ -4186,9 +4292,10 @@ async function mmRenderNode(n, src) {
 
 // Consistency fallback: stateDiagrams (and any flowchart authored without the
 // classDef palette) render every node in flat mainBkg gray, which reads
-// broken next to fully-colored diagrams. When a rendered diagram has nodes
-// and NONE carries a color, tint them from the One Dark palette in definition
-// order. Diagrams with even one authored color are left untouched.
+// broken next to fully-colored diagrams. Tint each node still at the default
+// mainBkg fill from the One Dark palette in encounter order; nodes that carry
+// an authored color are skipped, so partial colouring degrades per node (your
+// colours kept, the gaps filled) rather than all-or-nothing.
 const MM_TINTS = [
   { f: "#61afef", s: "#2e86c1", t: "#1a1a1a" },   // blue
   { f: "#98c379", s: "#27ae60", t: "#1a1a1a" },   // green

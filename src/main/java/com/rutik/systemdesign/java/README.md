@@ -50,6 +50,12 @@ A comprehensive, one-stop reference for mastering **pure Java** — from languag
 | 25 | [Java Date/Time (java.time)](java_time_datetime/README.md) | Instant vs LocalDateTime, ZoneId/offsets, Duration vs Period, TemporalAdjuster, Clock (testable time), DST gaps/overlaps | Intermediate |
 | 26 | [Bytecode & Class-File Format](bytecode_and_classfile/README.md) | .class structure, constant pool, opcode families, invokedynamic, javap, ASM/Byte Buddy, java agents & Instrumentation | Advanced |
 | 27 | [Security & Cryptography](security_and_cryptography/README.md) | JCA/JCE, MessageDigest/Cipher/KeyStore/SecureRandom, AES-GCM, TLS/SSLEngine handshake, password hashing, JAAS | Advanced |
+| 28 | [JSON Processing with Jackson](json_processing_jackson/README.md) | ObjectMapper thread-safety + reuse, streaming vs tree vs databind, records/@JsonCreator, TypeReference generics, polymorphic deserialization CVEs, java.time module | Intermediate |
+| 29 | [Logging](logging/README.md) | SLF4J facade, Logback/Log4j2, parameterized logging, MDC propagation across threads/virtual-threads, async appenders, structured JSON, Log4Shell | Intermediate |
+| 30 | [JPMS — Java Platform Module System](java_platform_module_system/README.md) | module-info, requires/exports/opens, requires transitive, automatic modules, split packages, services (ServiceLoader), jlink | Advanced |
+| 31 | [Reference Types & Cleaners](reference_types_and_cleaners/README.md) | Strong/Soft/Weak/Phantom, ReferenceQueue, WeakHashMap, Cleaner vs finalize, ThreadLocal/ClassLoader leaks | Advanced |
+| 32 | [GraalVM Native Image](graalvm_native_image/README.md) | AOT native-image, closed-world reachability, reflection/resource metadata, build-time vs runtime init, startup vs throughput | Advanced |
+| 33 | [Build Tools — Maven & Gradle](build_tools_maven_gradle/README.md) | Maven lifecycle/dependency mediation/BOM/shade, Gradle task graph/build cache/version catalogs, dependency hell | Intermediate |
 
 > **Note**: `java8_features` covers Streams as part of the full Java 8 overview. `java_streams` is the dedicated deep dive — all 20+ operations, `Spliterator` internals, parallel rules, `reduce` vs `collect`, and the full `Collectors` catalogue.
 
@@ -59,21 +65,21 @@ A comprehensive, one-stop reference for mastering **pure Java** — from languag
 
 ### Phase 1 — Language Core
 ```
-core_language  -->  strings_and_text  -->  generics_and_type_system  -->  exceptions_and_io
+core_language  -->  strings_and_text  -->  generics_and_type_system  -->  exceptions_and_io  -->  json_processing_jackson
 ```
-Understand what Java code actually means at the semantic level — object contracts, string internals, type system rules, and resource management.
+Understand what Java code actually means at the semantic level — object contracts, string internals, type system rules, resource management, and JSON serialization/deserialization with Jackson (the de-facto data-binding library).
 
 ### Phase 2 — Modern Java
 ```
-java8_features  -->  java_time_datetime  -->  java_streams  -->  functional_programming  -->  java9_to_21_features
+java8_features  -->  java_time_datetime  -->  java_streams  -->  functional_programming  -->  java9_to_21_features  -->  java_platform_module_system
 ```
-Master the functional style, stream pipelines (full deep dive), the modern `java.time` date/time model, and the new language features from Java 8 through 21.
+Master the functional style, stream pipelines (full deep dive), the modern `java.time` date/time model, and the new language features from Java 8 through 21. `java_platform_module_system` closes the phase with the full JPMS deep-dive — `module-info`, `requires`/`exports`/`opens`, `requires transitive`, automatic modules, split packages, `ServiceLoader`, and `jlink` — beyond the single bullet inside `java9_to_21_features`.
 
 ### Phase 3 — JVM Internals (Show Depth)
 ```
-jvm_internals  -->  bytecode_and_classfile
+jvm_internals  -->  reference_types_and_cleaners  -->  bytecode_and_classfile  -->  graalvm_native_image
 ```
-Understand what the JVM does under the hood — GC algorithms, JIT compilation, memory model, and class loading. `bytecode_and_classfile` goes one level deeper: the `.class` format, opcodes, `invokedynamic`, and runtime bytecode manipulation (ASM/Byte Buddy, java agents) that powers proxies, mocks, and profilers. This phase separates senior from junior engineers at interviews.
+Understand what the JVM does under the hood — GC algorithms, JIT compilation, memory model, and class loading. `reference_types_and_cleaners` follows immediately: Strong/Soft/Weak/Phantom references, `ReferenceQueue`, `WeakHashMap`, and `Cleaner` vs `finalize` — the GC-adjacent mechanics behind caches and leak hunting (`ThreadLocal`/`ClassLoader` leaks). `bytecode_and_classfile` goes one level deeper: the `.class` format, opcodes, `invokedynamic`, and runtime bytecode manipulation (ASM/Byte Buddy, java agents) that powers proxies, mocks, and profilers. `graalvm_native_image` closes the phase: AOT `native-image` compilation, closed-world reachability, and reflection/resource metadata — the build-time counterpart to everything else in this phase. This phase separates senior from junior engineers at interviews.
 
 ### Phase 4 — Concurrency + Collections + Patterns (Most Tested)
 ```
@@ -89,9 +95,9 @@ Diagnose and fix real production performance problems. The Java Memory Model mod
 
 ### Phase 6 — Interview Consolidation + Testing
 ```
-java_interview_patterns  -->  testing_junit_mockito  -->  annotation_processing  -->  case_studies/
+java_interview_patterns  -->  testing_junit_mockito  -->  logging  -->  annotation_processing  -->  build_tools_maven_gradle  -->  case_studies/
 ```
-Lock in the patterns and recipes that appear on whiteboard interviews. Testing module teaches how to write verifiable code — also an interview topic. `annotation_processing` closes the phase: JSR 269 compile-time code generation (MapStruct/Dagger/Lombok) — the metaprogramming complement to runtime reflection from `generics_and_type_system`, and the build-time philosophy behind Spring AOT.
+Lock in the patterns and recipes that appear on whiteboard interviews. Testing module teaches how to write verifiable code — also an interview topic. `logging` covers the SLF4J facade, Logback/Log4j2, MDC correlation across threads and virtual threads, and the Log4Shell incident — production-critical and a frequent senior probe. `annotation_processing` covers JSR 269 compile-time code generation (MapStruct/Dagger/Lombok) — the metaprogramming complement to runtime reflection from `generics_and_type_system`, and the build-time philosophy behind Spring AOT. `build_tools_maven_gradle` closes the phase: Maven lifecycle/dependency mediation/BOM/shade and Gradle task graph/build cache/version catalogs — the dependency-hell mechanics behind every build in this guide.
 
 ### Phase 7 — New Java (Java 21+) Deep-Dives
 ```
@@ -105,6 +111,76 @@ networking_and_http_client  -->  jdbc_and_database  -->  security_and_cryptograp
 grpc_protobuf  -->  microservices_patterns
 ```
 Advanced topics for senior engineers building services that talk to other services and databases directly. `security_and_cryptography` covers the JCA/JCE toolkit — symmetric/asymmetric ciphers, AES-GCM, KeyStore, SecureRandom, password hashing, and the TLS handshake — that secures every one of those connections. `grpc_protobuf` covers the typed RPC transport between services; `microservices_patterns` covers correctness across them (Saga, outbox, idempotency, tracing, bulkhead) — both pure-Java foundations under the `backend/` and `spring/` framework treatments.
+
+---
+
+## Learning Paths
+
+33 modules is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
+
+### Full Path (33 modules)
+
+The complete curriculum in the order above — see [8-Phase Learning Path](#8-phase-learning-path). Use it for genuine depth: bytecode and the class-file format, Panama FFM, reactive programming, gRPC, networking internals, security/crypto, and the production/tooling modules. Nothing is dropped.
+
+### Interview-Specific Path (17 modules)
+
+A ruthless cut to what a **senior Java interview** actually probes — the language semantics, the JVM "show depth" round, and the concurrency/collections cluster that appears in nearly every screen. Same learning order, ~40% fewer modules. Each group says why it earns interview time.
+
+| Group | Modules | Why it's tested |
+|-------|---------|-----------------|
+| Language Core | [Core Language](core_language/README.md), [Strings & Text](strings_and_text/README.md), [Generics & Type System](generics_and_type_system/README.md), [Exceptions & I/O](exceptions_and_io/README.md), [JSON Processing (Jackson)](json_processing_jackson/README.md) | equals/hashCode contract, string immutability/interning, PECS/erasure, try-with-resources, and Jackson data-binding pitfalls — the guaranteed openers |
+| Modern Java | [Java 8 Features](java8_features/README.md), [Java Streams](java_streams/README.md), [Java 9-21 Features](java9_to_21_features/README.md) | lambdas/Optional, stream laziness + parallel rules, records/sealed/pattern-matching/virtual-threads |
+| JVM & Memory | [JVM Internals](jvm_internals/README.md), [Java Memory Model](java_memory_model/README.md) | GC algorithms (G1 ~200ms vs ZGC sub-ms), JIT, class loading, happens-before — the "show depth" separator |
+| Concurrency & Collections | [Concurrency](concurrency/README.md), [Collections Internals](collections_internals/README.md) | HashMap/ConcurrentHashMap internals, volatile vs synchronized, ThreadPoolExecutor, CAS/AQS — the most-tested cluster |
+| Patterns & Testing | [Design Patterns in Java](design_patterns_in_java/README.md), [Java Interview Patterns](java_interview_patterns/README.md), [Testing (JUnit 5 & Mockito)](testing_junit_mockito/README.md) | GoF-in-the-JDK, immutable/builder/singleton recipes, mocks vs spies vs captors |
+| Modern Concurrency | [Structured Concurrency & Loom](structured_concurrency_and_loom/README.md) | virtual threads vs reactive, carrier-thread pinning, StructuredTaskScope — the current hot topic |
+| Data Access | [JDBC & Database Access](jdbc_and_database/README.md) | transaction isolation levels, HikariCP pool sizing, PreparedStatement, batch inserts |
+
+**Deliberately deferred to the Full Path** (valuable, lower whiteboard yield): functional programming (folded into Java 8 + Streams for interviews), java.time, performance & tuning (staff-level depth), logging, annotation processing, bytecode & class-file format, Foreign Function & Memory API, reactive programming, networking & HTTP client, security & cryptography, gRPC & Protocol Buffers, and microservices patterns. A niche flagged in an interview (e.g. "have you used Panama?") is a bonus, not a gate — reach for these once the 17 above are solid.
+
+---
+
+## Knowledge-Question Map
+
+The highest-frequency Java *knowledge* questions mapped to the file that answers them. See also the [Java Interview Cheat Sheet](#java-interview-cheat-sheet) below for the rapid-fire "always know" list.
+
+| Interview question | Where the answer lives |
+|--------------------|------------------------|
+| The equals/hashCode contract — what breaks if you override one but not the other? | [Core Language](core_language/README.md), [Java Interview Patterns](java_interview_patterns/README.md) |
+| Why are Strings immutable? Explain the string pool and interning. | [Strings & Text](strings_and_text/README.md) |
+| HashMap internals — resize, load factor 0.75, treeification at 8. | [Collections Internals](collections_internals/README.md) |
+| ConcurrentHashMap vs synchronizedMap — how does CHM scale? | [Concurrency](concurrency/README.md), [Collections Internals](collections_internals/README.md) |
+| volatile vs synchronized — what does volatile NOT give you? | [Concurrency](concurrency/README.md), [Java Memory Model](java_memory_model/README.md) |
+| Explain the Java Memory Model and happens-before. | [Java Memory Model](java_memory_model/README.md) |
+| How does ThreadPoolExecutor work (core/max/queue/rejection)? | [Concurrency](concurrency/README.md) |
+| CompletableFuture — thenApply vs thenCompose, exception handling. | [Concurrency](concurrency/README.md) |
+| Virtual threads — how they work, carrier-thread pinning, vs platform threads. | [Structured Concurrency & Loom](structured_concurrency_and_loom/README.md) |
+| Generics — type erasure, PECS, why you can't do `new T[]`. | [Generics & Type System](generics_and_type_system/README.md) |
+| Stream laziness — when does a pipeline run, and when is parallel a trap? | [Java Streams](java_streams/README.md) |
+| Records, sealed classes, and pattern matching — what and why. | [Java 9-21 Features](java9_to_21_features/README.md) |
+| G1 vs ZGC — pause targets and when to choose which. | [JVM Internals](jvm_internals/README.md) |
+| JIT compilation — C1/C2, tiered compilation, inlining. | [JVM Internals](jvm_internals/README.md) |
+| try-with-resources, suppressed exceptions, checked vs unchecked. | [Exceptions & I/O](exceptions_and_io/README.md) |
+| Is ObjectMapper thread-safe? Streaming vs tree vs databind. | [JSON Processing (Jackson)](json_processing_jackson/README.md) |
+| How did polymorphic deserialization (default typing) cause RCEs? | [JSON Processing (Jackson)](json_processing_jackson/README.md) |
+| Design an immutable class — defensive copies, final fields. | [Java Interview Patterns](java_interview_patterns/README.md) |
+| GoF patterns in the JDK — Decorator in I/O, Strategy in Comparator. | [Design Patterns in Java](design_patterns_in_java/README.md) |
+| Mockito — mocks vs spies, verify, argument captors. | [Testing (JUnit 5 & Mockito)](testing_junit_mockito/README.md) |
+| Transaction isolation levels and HikariCP pool sizing. | [JDBC & Database Access](jdbc_and_database/README.md) |
+
+---
+
+## Study Plan
+
+A 5-week plan over the Interview-Specific Path. Case studies live in [case_studies/](case_studies/README.md) and rehearse the "implement X" format.
+
+| Week | Focus | Modules | Case study |
+|------|-------|---------|------------|
+| 1 | Language Core | Core Language, Strings & Text, Generics & Type System, Exceptions & I/O, JSON Processing (Jackson) | skim [LRU Cache](case_studies/design_lru_cache_java.md) |
+| 2 | Modern Java | Java 8 Features, Java Streams, Java 9-21 Features | — |
+| 3 | JVM + Concurrency (most tested) | JVM Internals, Concurrency, Collections Internals, Java Memory Model | [Thread Pool](case_studies/design_thread_pool_java.md), [Connection Pool](case_studies/design_connection_pool.md) |
+| 4 | Patterns, Testing, Modern Concurrency | Design Patterns in Java, Java Interview Patterns, Testing (JUnit 5 & Mockito), Structured Concurrency & Loom | [Circuit Breaker](case_studies/design_circuit_breaker_java.md) |
+| 5 | Data Access + drills | JDBC & Database Access | [Rate Limiter](case_studies/design_rate_limiter_java.md) + mock "implement X" from the case studies |
 
 ---
 

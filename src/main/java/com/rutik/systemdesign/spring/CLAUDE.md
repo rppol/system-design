@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 35 Modules
+## Module List — 39 Modules
 
 | Module Directory | Phase | Topic |
 |-----------------|-------|-------|
@@ -44,6 +44,10 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `spring_hateoas_rest_maturity/` | 4 | Richardson Maturity Model L0-L3, Spring HATEOAS (EntityModel/CollectionModel/Link, WebMvcLinkBuilder, assemblers, affordances), HAL/HAL-FORMS, @HttpExchange/RestClient, ProblemDetail, API versioning |
 | `spring_grpc/` | 4 | @GrpcService beans, server/channel autoconfig, Server/ClientInterceptor + ordering, @GrpcExceptionHandler Status mapping, deadlines/cancellation, 4 streaming modes, Security + Micrometer tracing, gRPC vs REST |
 | `spring_session/` | 6 | SessionRepositoryFilter, Redis/JDBC/Hazelcast/Mongo backends, serialization, session fixation (changeSessionId), concurrent-session control, cookie vs header id, WebSession, stateless-JWT vs stateful tradeoff |
+| `spring_data_nosql/` | 5 | Spring Data MongoDB (MongoTemplate, aggregation, transactions) + Redis (RedisTemplate, @RedisHash, pub/sub) + reactive repositories; NoSQL vs JPA |
+| `database_migrations/` | 5 | Flyway (versioned/repeatable, checksums) + Liquibase (changesets, rollback), expand-contract zero-downtime, Boot integration, Testcontainers |
+| `spring_websocket_stomp/` | 7 | WebSocket handshake, STOMP over WebSocket, simple vs external broker relay, SockJS, per-user destinations, scaling/sticky sessions |
+| `spring_http_clients/` | 4 | RestTemplate vs WebClient vs RestClient (6.1) vs @HttpExchange, connection pooling, timeouts, error handling, MockRestServiceServer |
 
 **Deep-dive sub-files** (group under parent module's game topic; NO separate `STUDY_ORDER` entry):
 - `spring_webflux/rsocket_reactive_messaging.md` — RSocket 4 interaction models, protocol-level backpressure (`REQUEST_N`), `@MessageMapping`/`RSocketRequester`, RSocket vs gRPC/WebSocket.
@@ -51,9 +55,30 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
+## Learning Paths (Full + Interview-Specific)
+
+`README.md` documents two routes: the **Full Path** (all 39 modules = "8-Phase Learning
+Path") and a curated **Interview-Specific Path** (21 modules). The interview subset is a
+**dual-source list** — it lives in both `README.md` ("## Learning Paths") and
+`game/app.js` (`STUDY_PATHS.spring.interview`, which drives the game's Study Full/Interview
+toggle). **Change one, change the other** — same modules, same order. Non-Q&A narrative
+only; no `extract.py` re-run needed. The README also carries a Knowledge-Question Map and
+a 5-week Study Plan (interview-readiness prose; no toggle impact).
+
+---
+
 ## Planned / Missing Topics (not yet created)
 
-None currently — the previously-planned gaps (`spring_ai`, `spring_native_graalvm`, `spring_integration`, `spring_modulith`, `spring_graphql`) are all built and listed in the Module List above. Add future senior-coverage gaps here following the adding guide below.
+No material interview gaps — every senior Spring topic has a module. The 2026-07-07
+interview-path audit noted only these lower-yield candidates (roadmap, not a queue; build
+only on explicit request following the adding guide below):
+
+| Topic | Priority | Note |
+|-------|----------|------|
+| Spring Data non-JPA (MongoDB/Redis/reactive repositories) | DONE (2026-07-07) | Built as `spring_data_nosql/` |
+| Database migrations (Flyway/Liquibase) as a module | DONE (2026-07-07) | Built as `database_migrations/` |
+| Spring WebSocket/STOMP as a module | DONE (2026-07-07) | Built as `spring_websocket_stomp/` |
+| HTTP clients deep-dive (RestClient/WebClient/`@HttpExchange`) | DONE (2026-07-07) | Built as `spring_http_clients/` |
 
 ---
 
@@ -168,9 +193,11 @@ comparisons. Run `/mermaid-diagrams` before authoring or converting any diagram 
 it has the One-Dark `classDef` palette, supported types, and gotchas.
 
 **Reader contract:** Mermaid renders in the game reader (v11, pitch-black
-surface). Color **every** flowchart node with the One-Dark `classDef` or **none**
-(the reader auto-tints uncolored flowcharts, but bails to flat gray if even one
-node is authored-colored). Never set a light background inside a diagram.
+surface). Colour **every** flowchart node with the One-Dark `classDef` — the reader
+auto-tints only the nodes you leave unstyled (authored colours are always respected,
+so it degrades per node, never a flat-grey bail), but its order-based hues are
+arbitrary, so hand-colour all nodes for semantic consistency. Never set a light
+background inside a diagram.
 
 **Keep ASCII only** for shapes Mermaid cannot draw — the `README.md` 8-Phase
 learning-path layout map, the `case_studies/README.md` dependency-map trees, the

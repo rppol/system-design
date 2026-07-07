@@ -166,6 +166,75 @@ See [case_studies/README.md](case_studies/README.md) for the full learning path,
 
 ---
 
+## Learning Paths
+
+This section is exhaustive by design — 18 modules spanning the full architectural-overview curriculum, from scalability fundamentals through consensus algorithms and event sourcing. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
+
+### Full Path (18 modules)
+
+The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: all four phases, including the advanced-topics row (consensus algorithms, event sourcing/CQRS, observability, security and auth) and the full run of 23 case studies. Nothing is dropped.
+
+### Interview-Specific Path (14 modules)
+
+A ruthless cut to what a **senior system design interview** actually probes — the building blocks that assemble into nearly every "design X at scale" question. Same relative order as the Full Path, 4 modules dropped. Each group below says why it earns interview time.
+
+| Group | Modules | Why it's tested |
+|-------|---------|-----------------|
+| Foundations | [Scalability](scalability/README.md), [Load Balancing](load_balancing/README.md), [Caching](caching/README.md), [Database Design](database_design/README.md) | The vocabulary every interview opens with — horizontal vs vertical scaling, traffic distribution, cache-aside/write-through, and SQL vs NoSQL schema tradeoffs |
+| Core Tradeoffs & Communication | [CAP Theorem](cap_theorem/README.md), [API Design](api_design/README.md), [Message Queues](message_queues/README.md) | The theorem you must state correctly (CP vs AP, PACELC), how services talk synchronously (REST/gRPC/GraphQL, versioning), and asynchronously (delivery guarantees, DLQ, backpressure) |
+| Protecting the System | [Rate Limiting](rate_limiting/README.md), [CDN](cdn/README.md) | The two standard "how do you protect and scale reads at the edge" follow-ups — token bucket vs sliding window, push vs pull edge caching |
+| Distributed Data Placement | [Consistent Hashing](consistent_hashing/README.md), [Database Sharding](database_sharding/README.md) | The standard answer to "how do you scale writes past one machine" — hash ring + virtual nodes, shard-key selection, resharding cost |
+| Large-Scale Architecture | [Microservices](microservices/README.md) | Service decomposition, bounded contexts, and data ownership — the senior-level "monolith vs microservices, and why" discussion |
+| Cross-Service Consistency & Failure Handling | [Distributed Transactions](distributed_transactions/README.md), [Resilience Patterns](resilience_patterns/README.md) | 2PC/Saga/TCC/outbox for consistency across service boundaries, plus circuit breakers/bulkheads/retries for the "what if this call fails" probe every interviewer asks |
+
+**Deliberately deferred to the Full Path** (valuable, lower interview yield): [Observability](observability/README.md), [Security and Authentication/Authorization](security_and_auth/README.md), [Consensus Algorithms](consensus_algorithms/README.md), and [Event Sourcing & CQRS](event_sourcing_cqrs/README.md). These matter a great deal in production, and do surface in senior/staff loops or infra-focused teams, but they are depth beyond the baseline gate. A niche flagged in an interview (e.g. "have you worked with Raft, or event sourcing?") is a bonus, not a gate — reach for these once the 14 above are solid.
+
+---
+
+## Knowledge-Question Map
+
+The highest-frequency HLD interview questions mapped to the module that answers them. For *system design* ("design X") questions, use the interview-prep shortcuts in [case_studies/README.md](case_studies/README.md).
+
+| Interview question | Where the answer lives |
+|--------------------|------------------------|
+| Horizontal vs vertical scaling — why does horizontal scaling dominate at internet scale? | [Scalability](scalability/README.md) |
+| Round-robin vs least-connections vs consistent-hash balancing — when does each break down? | [Load Balancing](load_balancing/README.md) |
+| L4 vs L7 load balancing — what can an L7 balancer inspect that L4 cannot? | [Load Balancing](load_balancing/README.md) |
+| Cache-aside vs write-through vs write-behind — what are the consistency and latency tradeoffs? | [Caching](caching/README.md) |
+| How do you avoid a thundering herd on cache expiry or invalidation? | [Caching](caching/README.md) |
+| SQL vs NoSQL — what access-pattern signals push you toward each? | [Database Design](database_design/README.md) |
+| Normalization vs denormalization — when do you trade write complexity for read speed? | [Database Design](database_design/README.md) |
+| State the CAP theorem precisely — why can't a partitioned system have both consistency and availability? | [CAP Theorem](cap_theorem/README.md) |
+| What is PACELC, and how does it extend CAP to the no-partition case? | [CAP Theorem](cap_theorem/README.md) |
+| REST vs gRPC vs GraphQL — how do you choose for a given API? | [API Design](api_design/README.md) |
+| How do you version an API without breaking existing clients? | [API Design](api_design/README.md) |
+| At-least-once vs exactly-once vs at-most-once delivery — how do message queues implement each? | [Message Queues](message_queues/README.md) |
+| Token bucket vs sliding window vs leaky bucket — how do they behave under bursty traffic? | [Rate Limiting](rate_limiting/README.md) |
+| Push vs pull CDN, and how does edge cache invalidation work? | [CDN](cdn/README.md) |
+| How does consistent hashing avoid remapping every key when a node joins or leaves the ring? | [Consistent Hashing](consistent_hashing/README.md) |
+| Range vs hash sharding — what does each do to hot-shard risk and range queries? | [Database Sharding](database_sharding/README.md) |
+| How do you reshard a live system without downtime? | [Database Sharding](database_sharding/README.md) |
+| How do you decompose a monolith into microservices — what defines a bounded context? | [Microservices](microservices/README.md) |
+| 2PC vs Saga vs TCC — how do you keep data consistent across service boundaries? | [Distributed Transactions](distributed_transactions/README.md) |
+| Circuit breaker vs bulkhead vs retry-with-backoff — which failure mode does each defend against? | [Resilience Patterns](resilience_patterns/README.md) |
+
+---
+
+## Study Plan
+
+A 6-week plan over the Interview-Specific Path. Each week pairs modules with one case study to rehearse the "design X" format.
+
+| Week | Focus | Modules | Case study |
+|------|-------|---------|------------|
+| 1 | Foundations | Scalability, Load Balancing, Caching, Database Design | [URL Shortener](case_studies/design_url_shortener.md) |
+| 2 | Core Tradeoffs & Communication | CAP Theorem, API Design, Message Queues | [Distributed Message Queue](case_studies/design_distributed_message_queue.md) |
+| 3 | Protecting the System | Rate Limiting, CDN | [Netflix](case_studies/design_netflix.md) |
+| 4 | Distributed Data Placement | Consistent Hashing, Database Sharding | [Distributed Key-Value Store](case_studies/design_key_value_store.md) |
+| 5 | Large-Scale Architecture | Microservices | [Uber](case_studies/design_uber.md) |
+| 6 | Cross-Service Consistency & Failure Handling | Distributed Transactions, Resilience Patterns | [Payment System](case_studies/design_payment_system.md) |
+
+---
+
 ## Key Tradeoffs in System Design
 
 | Decision | Option A | Option B | Deciding Factor |

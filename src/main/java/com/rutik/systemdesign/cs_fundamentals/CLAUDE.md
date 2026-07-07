@@ -14,17 +14,17 @@ This section is the **language-agnostic spine**: it teaches the concept at the C
 
 ---
 
-## Module List — 20 Modules (6 Phases)
+## Module List — 24 Modules (5 Phases)
 
 Code examples use Python (type-hinted, runnable-shaped) as the default language for algorithms and data structures. Java is noted where JVM-specific behaviour matters. This section deliberately **cross-references** `java/`, `python/`, `backend/`, `database/`, `devops/`, `hld/`, and `lld/` instead of duplicating applied depth — see the non-overlap boundary in `README.md` §2.
 
 | Phase | Modules |
 |-------|---------|
-| 1 — Complexity & Computation | complexity_analysis_and_big_o, number_systems_and_bit_manipulation, recursion_and_problem_solving_patterns |
+| 1 — Complexity & Computation | complexity_analysis_and_big_o, discrete_math_for_engineers, number_systems_and_bit_manipulation, recursion_and_problem_solving_patterns |
 | 2 — Data Structures | arrays_strings_and_hashing, linked_lists_stacks_and_queues, trees_and_binary_search_trees, heaps_and_priority_queues, graphs_tries_and_advanced_structures |
 | 3 — Algorithms | sorting_and_searching, dynamic_programming, greedy_and_divide_and_conquer, graph_and_string_algorithms |
 | 4 — Operating Systems | processes_threads_and_context_switching, cpu_scheduling_algorithms, memory_management_and_virtual_memory, deadlocks_and_synchronization |
-| 5 — Systems & Security Foundations | computer_architecture_and_memory_hierarchy, networking_fundamentals, database_and_storage_fundamentals, cryptography_fundamentals |
+| 5 — Systems & Security Foundations | computer_architecture_and_memory_hierarchy, networking_fundamentals, database_and_storage_fundamentals, cryptography_fundamentals, character_encoding_deep_dive, theory_of_computation, how_code_runs_compilers_and_interpreters |
 
 **Deep modules requiring 18+ Q&As:** complexity_analysis_and_big_o, arrays_strings_and_hashing, trees_and_binary_search_trees, heaps_and_priority_queues, graphs_tries_and_advanced_structures, sorting_and_searching, dynamic_programming, graph_and_string_algorithms
 
@@ -90,6 +90,7 @@ Reference for adapted template: see `../llm/case_studies/design_gpu_inference_pl
 | `networking_fundamentals/` | `../../backend/osi_model_and_networking/` — OSI 7-layer deep dive; `../../backend/tcp_ip_deep_dive/` — TCP internals; `../../backend/udp_and_quic/`; `../../backend/http_protocols/` |
 | `database_and_storage_fundamentals/` | `../../database/database_fundamentals/` — ACID/BASE/MVCC deep dive; `../../database/indexing_deep_dive/`; `../../database/schema_design_and_normalization/` |
 | `cryptography_fundamentals/` | `../../backend/backend_security_owasp/` — applied crypto (BCrypt, A02); `../../backend/auth_and_authorization_systems/` — JWT/TLS applied; `../../devops/secrets_management/` — Vault, key rotation |
+| `character_encoding_deep_dive/` | `../../python/strings_bytes_encoding_and_regex/` — codec API, `str`/`bytes` split; `../../java/strings_and_text/` — Compact Strings, surrogate pairs in practice |
 
 ---
 
@@ -166,14 +167,19 @@ This is an intentional exception to the rest of the repo's plain-text `LeetCode 
 
 ---
 
+## Learning Paths (Full + Interview-Specific)
+
+`README.md` documents two routes: the **Full Path** (all 21 modules = "5-Phase Learning Path", README §4) and a curated **Interview-Specific Path** (16 modules). The interview subset is a **dual-source list** — it lives in both `README.md` ("## Learning Paths") and `game/app.js` (`STUDY_PATHS.cs_fundamentals.interview`, which drives the game's Study Full/Interview toggle). **Change one, change the other** — same modules, same order. Non-Q&A narrative only; no `extract.py` re-run needed. The README also carries a Knowledge-Question Map and a 6-week Study Plan (interview-readiness prose; no toggle impact).
+
+---
+
 ## Planned Topics (NOT built this pass)
 
 Record these here so future sessions pick them up. Do not link to them as if they exist:
 
-- `theory_of_computation/` — finite automata, regular vs context-free languages, Turing machines, P/NP, NP-complete/NP-hard (Cook-Levin theorem, TSP, SAT, Hamiltonian path)
-- `how_code_runs_compilers_and_interpreters/` — lexer/parser/AST, symbol tables, IR, code generation, JIT vs AOT, linker/loader, ELF format
-- `discrete_math_for_engineers/` — propositional logic, sets/relations/functions, proof by induction, recurrences, combinatorics, graph theory basics
-- `character_encoding_deep_dive/` — likely a crosslink-only module (fully covered in `python/strings_bytes_encoding_and_regex/` and `java/strings_and_text/`)
+**DONE (2026-07-07):** `theory_of_computation/`, `how_code_runs_compilers_and_interpreters/`, and `discrete_math_for_engineers/` — all built as full standalone 14-section modules (see `README.md` §3 module table, modules 22-24; added to `STUDY_ORDER.cs_fundamentals`).
+
+**DONE (2026-07-07):** `character_encoding_deep_dive/` — built as a full standalone 14-section module (not the crosslink-only stub originally envisioned here); see `README.md` §3 module table (module 21) and the Cross-Reference Map above.
 
 ---
 

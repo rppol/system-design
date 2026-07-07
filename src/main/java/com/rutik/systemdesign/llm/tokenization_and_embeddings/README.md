@@ -10,6 +10,14 @@ The key insight of modern tokenization: instead of splitting on words (leads to 
 
 ---
 
+## Deep Dive Files
+
+| File | Topic |
+|------|-------|
+| [byte_level_and_tokenizer_free.md](byte_level_and_tokenizer_free.md) | Byte-level & tokenizer-free models — BLT (entropy-based patching), MEGABYTE, ByT5; escaping the tokenizer |
+
+---
+
 ## 2. Intuition
 
 > **One-line analogy**: Tokenization is like breaking a sentence into Lego bricks — common words are single bricks, rare words are split into recognizable pieces — before handing them to the model.

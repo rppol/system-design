@@ -33,6 +33,18 @@ HLD is the architectural overview layer. The `backend/` section contains product
 
 ---
 
+## Learning Paths (Full + Interview-Specific)
+
+`README.md` documents two routes: the **Full Path** (all 18 modules = "Recommended
+Learning Order") and a curated **Interview-Specific Path** (14 modules). The interview
+subset is a **dual-source list** — it lives in both `README.md` ("## Learning Paths")
+and `game/app.js` (`STUDY_PATHS.hld.interview`, which drives the game's Study
+Full/Interview toggle). **Change one, change the other** — same modules, same order.
+Non-Q&A narrative only; no `extract.py` re-run needed. The README also carries a
+Knowledge-Question Map and a 6-week Study Plan (interview-readiness prose; no toggle impact).
+
+---
+
 ## Planned / Missing Topics (not yet created)
 
 No topics currently planned. All expected senior engineer topics have been created.

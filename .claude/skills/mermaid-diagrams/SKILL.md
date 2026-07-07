@@ -19,6 +19,17 @@ no build step needed.
 
 ---
 
+## Four style rules (non-negotiable — owner-set 2026-07-07)
+
+Every Mermaid diagram in this repo must satisfy all four:
+
+1. **Colour every node.** Copy the One-Dark `classDef` block (see [Color System](#color-system)) and give *every* node a semantic class — colour by role, never leave a node unclassed. The reader's grey auto-tint is a fallback for legacy diagrams, NOT the target; the standard is a fully-classed, vividly-coloured diagram. (The reader tints only the nodes you leave unstyled — it always respects authored colours and degrades per node, so a half-coloured diagram is never flat grey. But the auto-tint picks hues by node *order*, which is semantically arbitrary and can collide with your authored ones — colour every node so each colour *means* something.)
+2. **Horizontal-first.** Default to `flowchart LR`. Use `TD`/`TB` only when the topology is genuinely vertical (a tall hierarchy, a top-down lifecycle) or when an `LR` row would be too wide — then group with `subgraph`s rather than one endless line. `sequenceDiagram`/`stateDiagram-v2`/`xychart-beta` keep their natural orientation.
+3. **No spillover text.** Keep node labels to a few words; wrap long labels with `<br/>` rather than letting text overflow the box. The reader auto-widens under-measured boxes, but short labels are the real fix — don't lean on the auto-widen.
+4. **Rounded corners.** The reader rounds every box automatically; for GitHub parity prefer rounded node shapes (`id(label)` round, `id([label])` stadium) over sharp `id[label]` rectangles. Never hand-set a light fill or a square-corner override.
+
+---
+
 ## Decision: which form?
 
 Match the concept's *topology* to a diagram type. Run this before touching any
@@ -86,7 +97,8 @@ Assign every node exactly one class. If none fits, use the closest analogy
 ## Diagram Types
 
 Use exactly one of these types per diagram. Pick the one that matches the
-concept's *topology*, not its name.
+concept's *topology*, not its name. **Flowcharts default to `LR` (horizontal-first,
+rule 2 above);** reach for `TD` only for genuinely vertical hierarchies.
 
 ### flowchart LR — left-to-right pipeline
 Best for: sequential processes, adapter bypass paths, request routing.
