@@ -38,24 +38,36 @@ Sharding is a database scaling technique that horizontally partitions data acros
 
 The key characteristic: each piece of data lives on exactly one shard. Shards are independent — they do not replicate each other's data (though each shard may have its own replicas for HA within itself).
 
-```
-Without Sharding:
-+------------------+
-|   Single DB      |  <-- All 10TB of user data
-|   Max ~500GB SSD |  <-- Physically limited
-|   Max ~50k QPS   |  <-- CPU/memory bottleneck
-+------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-With Sharding (4 shards):
-+----------+  +----------+  +----------+  +----------+
-| Shard 1  |  | Shard 2  |  | Shard 3  |  | Shard 4  |
-| Users    |  | Users    |  | Users    |  | Users    |
-| 0-24M    |  | 25M-49M  |  | 50M-74M  |  | 75M-99M  |
-| 2.5TB    |  | 2.5TB    |  | 2.5TB    |  | 2.5TB    |
-| 12.5k QPS|  | 12.5k QPS|  | 12.5k QPS|  | 12.5k QPS|
-+----------+  +----------+  +----------+  +----------+
-              Total: 10TB, ~50k QPS (scalable to more shards)
+    subgraph Before["Without sharding"]
+        Single(["Single DB<br/>10TB data<br/>~500GB SSD max<br/>~50k QPS max"])
+    end
+
+    subgraph After["With sharding: 4 shards"]
+        S1(["Shard 1<br/>0-24M users<br/>2.5TB · 12.5k QPS"])
+        S2(["Shard 2<br/>25-49M users<br/>2.5TB · 12.5k QPS"])
+        S3(["Shard 3<br/>50-74M users<br/>2.5TB · 12.5k QPS"])
+        S4(["Shard 4<br/>75-99M users<br/>2.5TB · 12.5k QPS"])
+    end
+
+    Single -->|"split ×4"| S1
+    Single --> S2
+    Single --> S3
+    Single --> S4
+
+    class Single lossN
+    class S1,S2,S3,S4 train
 ```
+*A single DB caps out around ~500GB / ~50k QPS long before Facebook- or Uber-scale data arrives; splitting the same 10TB / 50k QPS workload across 4 shards gives each one a comfortable 2.5TB / 12.5k QPS, and capacity keeps scaling as more shards are added.*
 
 ---
 
@@ -80,12 +92,26 @@ Large database backups, migrations, and VACUUM operations are slow and disruptiv
 
 ### Growth Trajectory
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["1M users<br/>single DB fine"]) --> B(["10M users<br/>read replicas + caching"])
+    B --> C(["100M users<br/>sharding becomes necessary"])
+    C --> D(["1B+ users<br/>deep sharding +<br/>specialized stores"])
+
+    class A train
+    class B mathOp
+    class C lossN
+    class D frozen
 ```
-Users: 1M      -> Single DB fine
-Users: 10M     -> Read replicas + caching
-Users: 100M    -> Sharding becomes necessary
-Users: 1B+     -> Deep sharding + specialized stores
-```
+*Single-DB headroom runs out around 100M users — the point most systems are forced into sharding.*
 
 ---
 
@@ -115,15 +141,30 @@ Users: 1B+     -> Deep sharding + specialized stores
 - Application must know which shard to route requests to
 
 **In practice, combine all three:**
-```
-[Shard 1 Primary] --> [Shard 1 Replica A]
-                  --> [Shard 1 Replica B]
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-[Shard 2 Primary] --> [Shard 2 Replica A]
-                  --> [Shard 2 Replica B]
+    subgraph Shard1["Shard 1 (date-range partitioned)"]
+        P1(["Primary"]) --> RA1(["Replica A"])
+        P1 --> RB1(["Replica B"])
+    end
 
-Each shard is internally partitioned by date range.
+    subgraph Shard2["Shard 2 (date-range partitioned)"]
+        P2(["Primary"]) --> RA2(["Replica A"])
+        P2 --> RB2(["Replica B"])
+    end
+
+    class P1,P2 train
+    class RA1,RB1,RA2,RB2 frozen
 ```
+*Sharding, replication, and partitioning combine in production: each shard has its own primary with replicas for HA, and each shard is further partitioned internally by date range.*
 
 ---
 
@@ -148,16 +189,54 @@ Values should be uniformly distributed across shards. Skewed distributions creat
 **Monotonic Keys**
 Auto-incrementing IDs and timestamps are monotonically increasing. New data always goes to the "last" shard, creating a write hotspot on the newest shard while all others are cold.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    S1(["Shard 1<br/>Jan-Mar 2024<br/>cold, read-only"]) --> S2(["Shard 2<br/>Apr-Jun 2024<br/>cold, read-only"])
+    S2 --> S3(["Shard 3<br/>Jul-Sep 2024<br/>cold, read-only"])
+    S3 --> S4(["Shard 4<br/>Oct+ 2024<br/>HOT - all writes"])
+
+    class S1,S2,S3 frozen
+    class S4 lossN
 ```
-Timestamps as shard key (bad):
-  Shard 1: Jan-Mar 2024 (cold, read-only mostly)
-  Shard 2: Apr-Jun 2024 (cold, read-only mostly)
-  Shard 3: Jul-Sep 2024 (cold, read-only mostly)
-  Shard 4: Oct+ 2024   (HOT - all writes go here)
-```
+*Timestamp as a shard key is monotonic: every new write lands on Shard 4 (all of Oct+ 2024), leaving Shards 1-3 cold and read-only while Shard 4 absorbs 100% of writes.*
 
 **Access Pattern Alignment**
 Ideally, the shard key matches your most frequent query pattern. If you primarily query by `user_id`, shard by `user_id`. This ensures most queries hit one shard.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Key(["candidate shard key"]) --> Card{"high cardinality?"}
+    Card -->|"no"| BadCard(["reject:<br/>caps max shard count"])
+    Card -->|"yes"| Dist{"uniformly distributed?"}
+    Dist -->|"no"| BadDist(["reject:<br/>hotspot shard"])
+    Dist -->|"yes"| Mono{"monotonic<br/>timestamp or auto-id?"}
+    Mono -->|"yes"| BadMono(["reject:<br/>newest-shard hotspot"])
+    Mono -->|"no"| Align{"aligned with<br/>dominant query?"}
+    Align -->|"no"| BadAlign(["risky:<br/>scatter-gather queries"])
+    Align -->|"yes"| Good(["good shard key<br/>e.g. user_id, tenant_id"])
+
+    class Key io
+    class Card,Dist,Mono,Align mathOp
+    class BadCard,BadDist,BadMono,BadAlign lossN
+    class Good train
+```
+*Evaluating a candidate shard key against these four properties in order — cardinality, distribution, monotonicity, then query alignment — surfaces exactly why `user_id`/`tenant_id` pass and `timestamp`/`status` fail.*
 
 ### Good Shard Key Examples
 
@@ -177,14 +256,14 @@ Ideally, the shard key matches your most frequent query pattern. If you primaril
 
 A hotspot occurs when one shard receives disproportionately more traffic than others:
 
+```mermaid
+xychart-beta
+    title "Traffic share per shard (hotspot example)"
+    x-axis ["Shard 1", "Shard 2", "Shard 3", "Shard 4"]
+    y-axis "Traffic share (%)" 0 --> 100
+    bar [5, 5, 85, 5]
 ```
-Shard 1: 5% traffic   (cold)
-Shard 2: 5% traffic   (cold)
-Shard 3: 85% traffic  (HOT - bottleneck!)
-Shard 4: 5% traffic   (cold)
-
-Adding more shards doesn't help — hotspot moves to the new "latest" shard.
-```
+*Shard 3 absorbs 85% of traffic while its three siblings sit at 5% each — adding a 5th shard doesn't fix this, it just relocates the hotspot to whichever shard is now the "latest" one.*
 
 **Solutions:**
 - Use hash-based sharding instead of range-based for write-heavy workloads
@@ -266,22 +345,28 @@ The hash function distributes keys pseudo-randomly across shards, achieving unif
 
 #### ASCII Diagram
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    U(["user_id<br/>e.g. 1001, 1004"]) --> H{"hash(user_id)"}
+    H --> M{"% 4"}
+    M -->|"= 0"| S0([Shard 0])
+    M -->|"= 1"| S1([Shard 1])
+    M -->|"= 2"| S2([Shard 2])
+    M -->|"= 3"| S3([Shard 3])
+
+    class U io
+    class H,M mathOp
+    class S0,S1,S2,S3 base
 ```
-hash(user_id) % 4:
-
-user_id: 1001  -> hash = 7238 -> 7238 % 4 = 2  -> Shard 2
-user_id: 1002  -> hash = 1847 -> 1847 % 4 = 3  -> Shard 3
-user_id: 1003  -> hash = 9201 -> 9201 % 4 = 1  -> Shard 1
-user_id: 1004  -> hash = 4356 -> 4356 % 4 = 0  -> Shard 0
-user_id: 1005  -> hash = 6712 -> 6712 % 4 = 0  -> Shard 0
-
-Distribution: ~25% of users per shard (uniform)
-
-Shard 0: [user1004, user1005, ...]
-Shard 1: [user1003, ...]
-Shard 2: [user1001, ...]
-Shard 3: [user1002, ...]
-```
+*Each user_id is hashed then reduced modulo 4; e.g. user 1001 hashes to 7238, 7238 % 4 = 2 → Shard 2, while user 1004 hashes to 4356, landing on Shard 0 — the pseudo-random hash spreads users roughly 25% per shard.*
 
 #### Routing Logic
 ```python
@@ -324,25 +409,28 @@ Maintain a lookup table (directory) that maps each key (or key range) to its sha
 
 #### Architecture
 
-```
-                    +------------------+
-                    |  Shard Directory |
-                    |  (Lookup Table)  |
-                    |                  |
-                    | user_1001 -> S3  |
-                    | user_1002 -> S1  |
-                    | tenant_A  -> S2  |
-                    | tenant_B  -> S4  |
-                    +------------------+
-                            |
-              +-------------+-------------+
-              |             |             |
-           +------+      +------+      +------+
-           |  S1  |      |  S3  |      |  S4  |
-           +------+      +------+      +------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Application queries directory -> gets shard ID -> queries that shard
+    App(["Application"]) -->|"lookup entity_id"| Dir[("Shard Directory<br/>user_1001→S3<br/>user_1002→S1<br/>tenant_A→S2<br/>tenant_B→S4")]
+    Dir -->|"shard id"| Route{"route to shard"}
+    Route --> S1([S1])
+    Route --> S3([S3])
+    Route --> S4([S4])
+
+    class App io
+    class Dir base
+    class Route mathOp
+    class S1,S3,S4 frozen
 ```
+*The application asks the directory for an entity's shard id, then queries that shard directly — flexible (any entity can move to any shard) but the directory is now a bottleneck and single point of failure unless cached and made HA.*
 
 #### Routing Logic
 ```python
@@ -382,14 +470,43 @@ class DirectoryShardRouter:
 #### Concept
 Partition data by geographic region or logical zone. Users in Europe are stored in EU shards; users in the US are stored in US shards.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph EUu["EU users"]
+        FR(["France"])
+        DE(["Germany"])
+        GB(["UK"])
+        IT(["Italy"])
+    end
+    subgraph USu["US users"]
+        US(["USA"])
+        CA(["Canada"])
+        MX(["Mexico"])
+        BR(["Brazil"])
+    end
+    subgraph APu["APAC users"]
+        JP(["Japan"])
+        AU(["Australia"])
+        IN(["India"])
+        SG(["Singapore"])
+    end
+
+    FR & DE & GB & IT --> EUShard[("EU Shard")]
+    US & CA & MX & BR --> USShard[("US Shard")]
+    JP & AU & IN & SG --> APShard[("APAC Shard")]
+
+    class FR,DE,GB,IT,US,CA,MX,BR,JP,AU,IN,SG io
+    class EUShard,USShard,APShard base
 ```
-[EU Shard]          [US Shard]           [APAC Shard]
-Users in:           Users in:            Users in:
-France              USA                  Japan
-Germany             Canada               Australia
-UK                  Mexico               India
-Italy               Brazil               Singapore
-```
+*Users are routed to the shard for their geographic zone — EU users' data never leaves EU shards, satisfying GDPR/data-residency requirements while also cutting latency.*
 
 #### Routing Logic
 ```python
@@ -418,6 +535,22 @@ def get_shard(user_id: str, user_country: str) -> str:
 - Global analytics queries require cross-shard aggregation across regions
 - Uneven shard sizes if user distribution is skewed geographically
 
+```mermaid
+quadrantChart
+    title Sharding strategy tradeoffs
+    x-axis Skewed or hotspot-prone --> Uniform distribution
+    y-axis Poor range queries --> Efficient range queries
+    quadrant-1 Best of both worlds
+    quadrant-2 Range-optimized, hotspot risk
+    quadrant-3 Weakest overall fit
+    quadrant-4 Point-lookup optimized
+    Range-based: [0.3, 0.85]
+    Hash-based: [0.85, 0.15]
+    Directory-based: [0.6, 0.25]
+    Geographic-based: [0.35, 0.4]
+```
+*Hash-based sharding trades range-query support for near-perfect distribution; range-based sharding makes the opposite trade; directory-based sits in the middle with the most operational flexibility; geographic sharding optimizes for compliance and locality rather than either axis.*
+
 ---
 
 ## Cross-Shard Queries
@@ -428,20 +561,30 @@ Cross-shard queries are one of the most significant operational challenges of sh
 
 The most common approach: send the query to all relevant shards in parallel, then merge results at the application layer.
 
-```
-Query: "Find all orders from user_id IN (list of 1000 users)"
-       -> users are on 4 different shards
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant S1 as Shard 1
+    participant S2 as Shard 2
+    participant S3 as Shard 3
+    participant S4 as Shard 4
 
-Application:
-  parallel_results = await gather([
-      shard1.query("SELECT * FROM orders WHERE user_id IN (...)"),
-      shard2.query("SELECT * FROM orders WHERE user_id IN (...)"),
-      shard3.query("SELECT * FROM orders WHERE user_id IN (...)"),
-      shard4.query("SELECT * FROM orders WHERE user_id IN (...)"),
-  ])
-  merged = flatten(parallel_results)
-  sorted_results = sort(merged, key='created_at')
+    par Scatter to all shards
+        App->>S1: SELECT orders WHERE user_id IN (...)
+    and
+        App->>S2: SELECT orders WHERE user_id IN (...)
+    and
+        App->>S3: SELECT orders WHERE user_id IN (...)
+    and
+        App->>S4: SELECT orders WHERE user_id IN (...)
+    end
+    S1-->>App: rows
+    S2-->>App: rows
+    S3-->>App: rows
+    S4-->>App: rows
+    Note over App: flatten + sort by created_at
 ```
+*Finding orders for 1,000 users spread across 4 shards means scattering the query to every shard in parallel and gathering results at the application layer; total latency is bounded by the slowest shard, not the sum of all four.*
 
 **Cost**: Latency is max(shard latencies), not sum. But all shards are loaded simultaneously.
 
@@ -499,53 +642,67 @@ Resharding is the process of redistributing data across a different number of sh
 
 ### The Problem with Simple Hash Resharding
 
-```
-4 shards: shard = hash(id) % 4
-5 shards: shard = hash(id) % 5
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-For user_id=1234:
-  hash(1234) = 7839
-  7839 % 4 = 3  (was on shard 3)
-  7839 % 5 = 4  (now belongs on shard 4)
+    U(["user_id 1234"]) --> H["hash = 7839"]
+    H --> M4{"% 4 shards"}
+    H --> M5{"% 5 shards"}
+    M4 --> S3old(["Shard 3<br/>(old placement)"])
+    M5 --> S4new(["Shard 4<br/>(new placement)"])
 
-~80% of all keys change shards when going from N to N+1 shards!
-This requires moving ~80% of all data — extremely disruptive.
+    class U io
+    class H,M4,M5 mathOp
+    class S3old base
+    class S4new lossN
 ```
+*The same hash (7839) reduced modulo 4 vs modulo 5 sends user 1234 to a completely different shard — this is why adding just one shard remaps roughly 80% of all keys under simple modulo hashing.*
 
 ### Consistent Hashing Approach
 
 Consistent hashing maps keys to a ring and adds/removes shards with minimal data movement. See the `consistent_hashing` module for full details.
 
+```mermaid
+xychart-beta
+    title "Data moved when adding one shard (4 to 5)"
+    x-axis ["Modulo hashing", "Consistent hashing"]
+    y-axis "Keys remapped (%)" 0 --> 100
+    bar [80, 25]
 ```
-4 shards: Only ~25% of keys affected when adding the 5th shard
-          (1/N data moves when adding the Nth shard)
-```
+*Simple modulo hashing remaps ~80% of keys when going from 4 to 5 shards; consistent hashing bounds this to ~1/N (~25% here) by moving only the keys that fall in the new shard's ring segment.*
 
 ### Online Resharding (Zero-Downtime)
 
 Production resharding must be done online, without service interruption:
 
+```mermaid
+stateDiagram-v2
+    [*] --> DualWrite
+
+    state "Dual-write" as DualWrite
+    state "Backfill" as Backfill
+    state "Verify" as Verify
+    state "Cutover" as Cutover
+    state "Cleanup" as Cleanup
+
+    DualWrite --> Backfill: writes go to both shards
+    Backfill --> Verify: historical data migrated
+    Verify --> Cutover: checksums match
+    Cutover --> Cleanup: reads switched, writes stopped
+    Cleanup --> [*]: old shard data deleted
+
+    note right of DualWrite: old shard still authoritative for reads
+    note right of Verify: shadow-read + compare results
+    note right of Cutover: monitor for errors before stopping old writes
 ```
-Phase 1: Dual-write
-  - Write new data to both old shard and new target shard
-  - Old shard is still authoritative for reads
-
-Phase 2: Backfill
-  - Migrate historical data from old shard to new shard
-  - Run as a background job with throttling to not impact production
-
-Phase 3: Verify
-  - Compare checksums / row counts between old and new shards
-  - Shadow-read from new shard and compare results
-
-Phase 4: Cutover
-  - Switch reads to new shard
-  - Monitor for errors
-  - Stop writes to old shard
-
-Phase 5: Cleanup
-  - Delete migrated data from old shard after verification period
-```
+*Zero-downtime resharding moves through five gated phases — dual-write, backfill, verify, cutover, cleanup — each phase only starts once the previous one's data-consistency guarantee holds.*
 
 ### Vitess and CockroachDB Approaches
 
@@ -567,10 +724,29 @@ Phase 5: Cleanup
 
 A celebrity user (Beyoncé, Elon Musk) has millions of followers. Any action they take — posting, going live — triggers millions of fan requests to the same shard.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Normal["Normal user"]
+        N1(["1 write"]) --> N2(["1 shard hit"])
+    end
+    subgraph Celeb["Celebrity user"]
+        C1(["1 write"]) --> C2["fan-out to<br/>10M followers"] --> C3(["millions of reads<br/>on 1 shard"])
+    end
+
+    class N1,C1 io
+    class N2 train
+    class C2 mathOp
+    class C3 lossN
 ```
-Normal user write: 1 notification -> 1 shard hit
-Celebrity write: 10M notifications -> millions of reads on 1 shard
-```
+*A normal user's write hits exactly one shard once; a celebrity's write fans out to 10M followers, turning one write into millions of reads concentrated on a single shard — the root cause of the celebrity hotspot.*
 
 ### Solutions for Write Hotspots
 
@@ -600,17 +776,32 @@ Add Redis/Memcached in front of the hot shard. Reads for celebrity profiles/cont
 
 Some designs cause a single user action to trigger writes to many shards:
 
-```
-User posts a tweet:
-  1. Write tweet to tweet shard (user_id shard)
-  2. Fan-out: write to timeline table for each follower
-     - If user has 1M followers on 4 shards -> 250K writes per shard
-     - This is write amplification!
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Solution: Hybrid fan-out
-  - Small accounts: push model (fan-out on write, fast reads)
-  - Large accounts (celebrities): pull model (fan-out on read, compute on read)
+    Post(["User posts tweet"]) --> Write["Write to tweet shard"]
+    Write --> Decide{"Follower count?"}
+    Decide -->|"small account"| Push["Push model:<br/>fan-out on write"]
+    Decide -->|"celebrity: 1M followers"| Pull["Pull model:<br/>fan-out on read"]
+    Push --> PushCost(["250K writes/shard<br/>(1M followers ÷ 4 shards)"])
+    Pull --> PullCost(["O(1) write,<br/>compute feed on read"])
+
+    class Post io
+    class Write train
+    class Decide mathOp
+    class Push train
+    class Pull frozen
+    class PushCost lossN
+    class PullCost base
 ```
+*A tweet write fans out to every follower's timeline; at 1M followers across 4 shards that's 250K writes per shard (write amplification). The fix is hybrid fan-out: push (fan-out-on-write) for small accounts, pull (fan-out-on-read) for celebrities.*
 
 ---
 
@@ -644,19 +835,28 @@ YouTube uses Vitess (MySQL sharding layer):
 ### MongoDB Sharding
 
 MongoDB has built-in sharding (called "sharded cluster"):
-```
-Components:
-  mongos (query router): routes client queries to correct shards
-  Config servers: store cluster metadata and shard mapping
-  Shards: each is a replica set (primary + secondary)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Sharding strategies in MongoDB:
-  - Hashed sharding: hash(shard_key) for even distribution
-  - Ranged sharding: range-based for range queries
-  - Zone sharding: geographic or logical zones
+    Client(["Client"]) --> Mongos{"mongos<br/>query router"}
+    Cfg[("Config servers<br/>cluster metadata")] -.->|"shard map"| Mongos
+    Mongos --> Sh1[("Shard 1<br/>primary + secondary")]
+    Mongos --> Sh2[("Shard 2<br/>primary + secondary")]
+    Mongos --> Sh3[("Shard 3<br/>primary + secondary")]
 
-mongos handles scatter-gather transparently for cross-shard queries.
+    class Client io
+    class Mongos mathOp
+    class Cfg base
+    class Sh1,Sh2,Sh3 frozen
 ```
+*mongos routes each query to the owning shard using metadata pulled from the config servers; MongoDB supports hashed, ranged, and zone sharding strategies, and mongos performs scatter-gather transparently across shards for cross-shard queries.*
 
 ---
 
@@ -808,36 +1008,32 @@ The strategy: 1000 logical shards mapped to 100 physical PostgreSQL instances (1
 
 ### Architecture Overview
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client(["Mobile / web client"]) --> API["API server (Django)<br/>shard_id = user_id % 1000"]
+    API -->|"lookup shard_id → host"| Redis[("Redis<br/>logical→physical map<br/>TTL 1 day")]
+    Redis --> PG1[("pg-01<br/>shards 0-9")]
+    Redis --> PG2[("pg-02<br/>shards 10-19")]
+    Redis --> PG99[("pg-99<br/>shards 990-999")]
+    PG1 --> S3b([S3 photo blobs])
+    PG2 --> S3b
+    PG99 --> S3b
+
+    class Client io
+    class API mathOp
+    class Redis base
+    class PG1,PG2,PG99 frozen
+    class S3b base
 ```
-   Mobile/web client
-        │
-        ▼
-   ┌───────────────────────────────┐
-   │   API server (Django)         │
-   │   shard_id = user_id % 1000   │
-   └──────────────┬────────────────┘
-                  │ lookup shard_id → host
-                  ▼
-   ┌───────────────────────────────┐
-   │  Redis (logical→physical map) │
-   │  shard_42 → pg-host-04        │
-   │  TTL 1 day; warm at startup   │
-   └──────────────┬────────────────┘
-                  │
-                  ▼
-   ┌─────────────────────────────────────────────────┐
-   │   100 PostgreSQL hosts × 10 shards each         │
-   │   ┌─────┐ ┌─────┐ ┌─────┐ ... ┌─────┐           │
-   │   │pg-01│ │pg-02│ │pg-03│     │pg-99│           │
-   │   │s0-9 │ │s10-19│ │s20-29│   │s990-9│          │
-   │   └─────┘ └─────┘ └─────┘     └─────┘           │
-   └─────────────────────────────────────────────────┘
-                  │
-                  ▼
-        ┌────────────────────┐
-        │   S3 (photo blobs) │
-        └────────────────────┘
-```
+*Requests flow from the client through the API layer's shard_id formula, a Redis-cached logical-to-physical map (99.97% cache hit rate), to one of 100 PostgreSQL hosts (10 shards each); photo blobs live separately in S3.*
 
 ### Key Design Decisions
 

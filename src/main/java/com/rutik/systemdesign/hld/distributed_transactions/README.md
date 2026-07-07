@@ -107,124 +107,141 @@ A client generates a unique key (a UUID) for a logical operation ("charge this c
 
 ### 5.1 Two-Phase Commit — Happy Path and the Blocking Failure
 
+```mermaid
+sequenceDiagram
+    participant Co as Coordinator
+    participant A as Participant A<br/>(Order DB)
+    participant B as Participant B<br/>(Payment DB)
+    participant C as Participant C<br/>(Inventory DB)
+
+    Note over Co,C: Phase 1 - PREPARE (vote)
+    Co->>A: PREPARE
+    Co->>B: PREPARE
+    Co->>C: PREPARE
+    A-->>Co: VOTE_YES (locks held, logged)
+    B-->>Co: VOTE_YES (locks held, logged)
+    C-->>Co: VOTE_YES (locks held, logged)
+
+    alt All participants voted YES
+        Note over Co,C: Phase 2 - COMMIT (decision)
+        Co->>A: COMMIT (release locks)
+        Co->>B: COMMIT
+        Co->>C: COMMIT
+    else Coordinator crashes before Phase 2
+        Note over Co: X - crashes here,<br/>never sends the decision
+        Note over A,C: A, B, C stay BLOCKED holding<br/>locks + connection-pool slots until<br/>the coordinator recovers - up to<br/>45 minutes, see Sec 10 War Story 1
+    end
 ```
-                       Phase 1: PREPARE (vote)
-   Coordinator  ------------------------------>  Participant A (Order DB)
-   Coordinator  ------------------------------>  Participant B (Payment DB)
-   Coordinator  ------------------------------>  Participant C (Inventory DB)
 
-   Each participant: acquire locks, write "PREPARED" to its log, reply YES/NO
-
-   All YES?
-     |
-     v
-                       Phase 2: COMMIT (decision)
-   Coordinator  ------------------------------>  A: COMMIT (release locks, apply)
-   Coordinator  ------------------------------>  B: COMMIT
-   Coordinator  ------------------------------>  C: COMMIT
-
-
-   --- THE BLOCKING FAILURE ---
-
-   Phase 1: all 3 vote YES, all 3 are now holding locks, "PREPARED" state
-
-                  X  <- Coordinator crashes here, before sending Phase 2
-
-   A, B, C: still holding locks. They cannot unilaterally commit (the
-   coordinator might have decided ABORT) or abort (it might have decided
-   COMMIT). They are BLOCKED until the coordinator recovers and reads its
-   log to find its decision. If the coordinator's recovery takes 45
-   minutes, A, B, and C hold row locks — and their connection-pool slots —
-   for 45 minutes. See §10, War Story 1.
-```
+The happy path (all three vote YES, then commit) versus the blocking failure: a coordinator crash after collecting votes but before broadcasting the decision leaves every participant stuck holding locks, unable to either commit or abort on its own.
 
 ### 5.2 TCC — Try / Confirm / Cancel (Flight Booking Example)
 
-```
-                    TRY (reserve, with TTL)
-  Orchestrator --> Flight Service:  hold seat 14C, expires in 15 min
-  Orchestrator --> Payment Service: authorize $450 (not captured), expires in 15 min
-  Orchestrator --> Hotel Service:   hold room 412, expires in 15 min
+```mermaid
+sequenceDiagram
+    participant O as Orchestrator
+    participant F as Flight Service
+    participant P as Payment Service
+    participant H as Hotel Service
 
-  All Try succeeded?
-    |
-    +-- YES --> CONFIRM (make permanent)
-    |             Flight: convert hold to booked seat
-    |             Payment: capture the $450 authorization
-    |             Hotel: convert hold to confirmed reservation
-    |
-    +-- NO (e.g. Hotel Try failed: room 412 sold out)
-                  --> CANCEL (release reservations made so far)
-                        Flight: release seat 14C hold
-                        Payment: void the $450 authorization (no capture, no fee)
+    Note over O,H: TRY (reserve, with TTL = 15 min)
+    O->>F: hold seat 14C
+    O->>P: authorize $450 (not captured)
+    O->>H: hold room 412
 
-  Key property: if the orchestrator crashes mid-flow, the TTL on each
-  Try expires automatically (Flight Service's own background job releases
-  seat 14C after 15 minutes) — no permanent lock, unlike 2PC.
+    alt All Try calls succeeded
+        Note over O,H: CONFIRM (make permanent)
+        O->>F: convert hold to booked seat
+        O->>P: capture the $450 authorization
+        O->>H: convert hold to confirmed reservation
+    else Hotel Try failed (room 412 sold out)
+        Note over O,H: CANCEL (release reservations so far)
+        O->>F: release seat 14C hold
+        O->>P: void $450 authorization<br/>(no capture, no fee)
+    end
+
+    Note over F: If the orchestrator crashes mid-flow, the<br/>TTL expires seat 14C automatically after<br/>15 min - no permanent lock, unlike 2PC
 ```
+
+All three Try calls succeed and Confirm makes them permanent, or any Try fails and Cancel unwinds the reservations made so far; the 15-minute TTL on each Try means a crashed orchestrator self-heals without a permanent lock.
 
 ### 5.3 Outbox Pattern — Collapsing the Dual Write
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph broken["WITHOUT OUTBOX (broken - dual write)"]
+        direction LR
+        b1(["1. INSERT INTO orders<br/>(commits)"]) --> b2["2. kafka.publish<br/>(separate network call)"]
+        b2 -.->|"crash between 1 and 2"| b3{{"event never published -<br/>Inventory never reserves stock"}}
+    end
+
+    subgraph fixed["WITH OUTBOX"]
+        direction LR
+        f1(["BEGIN"]) --> f2["INSERT order<br/>+ INSERT outbox row"] --> f3(["COMMIT"])
+        f3 -.->|"relay polls or<br/>CDC-tails outbox"| f4["SELECT unpublished<br/>FOR UPDATE SKIP LOCKED"]
+        f4 --> f5["kafka.publish(row.payload)"]
+        f5 --> f6["UPDATE outbox<br/>published_at = now()"]
+    end
+
+    class b1 train
+    class b2 req
+    class b3 lossN
+    class f1,f3 io
+    class f2,f6 train
+    class f4 mathOp
+    class f5 req
 ```
-  WITHOUT OUTBOX (broken — dual write):
 
-    Order Service:
-      1. INSERT INTO orders (...)        -- commits
-      2. kafka.publish("OrderCreated")   -- separate network call
-
-      Crash between 1 and 2 -> order exists, but no event is ever
-      published -> Inventory Service never reserves stock.
-
-
-  WITH OUTBOX:
-
-    Order Service (single local transaction):
-      BEGIN
-        INSERT INTO orders (id, status, ...) VALUES (...)
-        INSERT INTO outbox (id, aggregate_id, type, payload, published_at)
-          VALUES (uuid(), order.id, 'OrderCreated', '{...}', NULL)
-      COMMIT
-
-           |
-           v  (separate process, polls or CDC-tails the outbox table)
-
-    Outbox Relay (Debezium / polling publisher):
-      SELECT * FROM outbox WHERE published_at IS NULL
-        ORDER BY id LIMIT 100 FOR UPDATE SKIP LOCKED
-      --> kafka.publish(row.payload)
-      --> UPDATE outbox SET published_at = now() WHERE id = row.id
-
-  Crash after kafka.publish but before UPDATE -> event is republished on
-  restart -> consumer sees "OrderCreated" twice -> consumer MUST be
-  idempotent (§4.6). At-least-once delivery + idempotent consumer =
-  effectively-once processing.
-```
+Without the outbox, the INSERT and the `kafka.publish` are two separate operations that can diverge on a crash; with the outbox, they collapse into one local transaction and a relay delivers the event at-least-once (a crash after publish but before the `UPDATE` just republishes it, which is why consumers must be idempotent per §4.6).
 
 ### 5.4 Where This Fits in a Microservices Checkout Flow
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client([Client]) --> gw["API Gateway"]
+    gw --> orch
+
+    subgraph orch["Saga Orchestrator<br/>(Temporal / Camunda / custom)"]
+        direction LR
+        s1["1. CreateOrder<br/>(Order Service)"] --> s2["2. ReserveInventory<br/>(Inventory Svc, TCC)"] --> s3["3. ChargePayment<br/>(Payment Svc, TCC)"] --> s4["4. ConfirmOrder<br/>(Order Service)"]
+        s4 -.->|"failure at step N"| comp["run compensations<br/>N-1 .. 1, reverse order"]
+    end
+
+    orch --> orderDb[("Order DB<br/>+ outbox")]
+    orch --> invDb[("Inventory DB<br/>+ outbox")]
+    orch --> payDb[("Payment DB<br/>+ outbox")]
+
+    orderDb --> kafka(["Kafka (events)"])
+    invDb --> kafka
+    payDb --> kafka
+    kafka --> consumers["idempotent consumers"]
+
+    class client io
+    class gw req
+    class s1,s2,s3,s4 mathOp
+    class comp lossN
+    class orderDb,invDb,payDb base
+    class kafka base
+    class consumers req
 ```
-  Client
-    |
-    v
-  +----------------+      Saga Orchestrator (Temporal / Camunda / custom)
-  | API Gateway    | ---> +---------------------------------------------+
-  +----------------+      | 1. CreateOrder      (Order Service)          |
-                           | 2. ReserveInventory (Inventory Service, TCC) |
-                           | 3. ChargePayment    (Payment Service, TCC)   |
-                           | 4. ConfirmOrder     (Order Service)          |
-                           |                                               |
-                           | On failure at step N: run compensations      |
-                           | for steps N-1 .. 1 in reverse                 |
-                           +---------------------------------------------+
-                                   |              |              |
-                                   v              v              v
-                            [Order DB]    [Inventory DB]   [Payment DB]
-                              + outbox       + outbox        + outbox
-                                   \              |              /
-                                    \             v             /
-                                     ----->  Kafka (events)  <-
-                                          (idempotent consumers)
-```
+
+The orchestrator drives four steps across three services, each writing to its own database plus outbox; all three converge on Kafka for idempotent downstream consumers, and a failure at any step unwinds the prior steps' compensations in reverse order.
 
 ---
 
@@ -232,29 +249,19 @@ A client generates a unique key (a UUID) for a logical operation ("charge this c
 
 ### 6.1 2PC Protocol — Step by Step
 
-```
-COORDINATOR                          PARTICIPANT (e.g., Payment DB)
------------                          -------------------------------
-1. send PREPARE(txn_id)       --->   2. acquire all locks needed for txn_id
-                                      3. write <PREPARED, txn_id> to local
-                                         redo log (durable — survives crash)
-                                      4. reply VOTE_YES (or VOTE_NO if it
-                                         can't acquire locks / constraint
-                                         violation)
-5. collect votes from all
-   participants
-6. if ALL votes == YES:
-     write <GLOBAL_COMMIT, txn_id>
-     to coordinator's log (durable)
-   else:
-     write <GLOBAL_ABORT, txn_id>
+```mermaid
+sequenceDiagram
+    participant Co as Coordinator
+    participant P as Participant<br/>(e.g., Payment DB)
 
-7. send decision to all       --->   8. apply the decision (commit = make
-   participants                         writes durable + release locks;
-                                         abort = discard + release locks)
-                                      9. reply ACK
-10. once all ACKs received,
-    discard log entry for txn_id
+    Co->>P: 1. send PREPARE(txn_id)
+    Note over P: 2. acquire all locks needed<br/>3. write PREPARED,txn_id to durable<br/>redo log (survives crash)
+    P-->>Co: 4. VOTE_YES<br/>(or VOTE_NO on lock/constraint failure)
+    Note over Co: 5. collect votes from all participants<br/>6. write GLOBAL_COMMIT if ALL YES,<br/>else GLOBAL_ABORT, to durable log
+    Co->>P: 7. send decision
+    Note over P: 8. apply decision - commit = durable<br/>writes + release locks;<br/>abort = discard + release locks
+    P-->>Co: 9. ACK
+    Note over Co: 10. once all ACKs received,<br/>discard log entry for txn_id
 ```
 
 **The blocking window** is the gap between step 4 (participant has voted YES, is holding locks, has written PREPARED to its log) and step 8 (participant receives the decision). If the coordinator crashes in this window, the participant is in **doubt**: it cannot commit (coordinator may have decided ABORT after seeing another participant's NO) and cannot abort (coordinator may have decided COMMIT). It must wait for the coordinator to recover and re-send the decision from its durable log — or for an operator to manually intervene.
@@ -339,58 +346,70 @@ def relay_loop():
 
 ### 6.4 Saga Compensation — Why "Inverse" Is the Wrong Mental Model
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    f1(["ReserveInventory<br/>(sku, qty)"]) --> c1(["ReleaseInventory(sku, qty)<br/>true inverse - safe"])
+    f2(["ChargeCard $50<br/>(+ $1.50 processing fee)"]) --> c2["RefundCard $50 only -<br/>fee is NON-REFUNDABLE,<br/>a design decision"]
+    f3(["SendConfirmationEmail"]) --> c3["SendCancellationEmail -<br/>a different action,<br/>not an inverse at all"]
+
+    class f1,f2,f3 io
+    class c1 train
+    class c2,c3 lossN
 ```
-Forward steps:                          Compensations (NOT simple inverses):
 
-1. ReserveInventory(sku, qty)    <-->   ReleaseInventory(sku, qty)
-                                         (true inverse — safe)
-
-2. ChargeCard($50, processing    <-->   RefundCard($50)
-   fee $1.50 already deducted             BUT: $1.50 processing fee is
-   by payment processor)                  NON-REFUNDABLE.
-                                           Compensation = Refund $50,
-                                           customer is OUT $1.50.
-                                           This must be a DESIGN DECISION,
-                                           not a surprise (§10, War Story 4).
-
-3. SendConfirmationEmail          <-->   "Unsend" is impossible.
-                                           Compensation = SendCancellationEmail
-                                           (a different forward action, not
-                                           an inverse at all).
-```
+Only `ReleaseInventory` is a true inverse of its forward step (green); refunding a card and un-sending an email are separate actions with their own costs and edge cases (red) — never assume a compensation is a free undo.
 
 ### 6.5 Idempotency Key — Race Condition and Fix
 
+```mermaid
+sequenceDiagram
+    participant A as Request A
+    participant B as Request B
+    participant D as idempotency_keys (DB)
+
+    Note over A,D: BROKEN - two concurrent requests, same NEW key
+    A->>D: SELECT WHERE key='abc123'
+    D-->>A: not found
+    B->>D: SELECT WHERE key='abc123'
+    D-->>B: not found (race: A hasn't inserted yet)
+    A->>D: charge card $50,<br/>INSERT (key, result)
+    B->>D: charge card $50,<br/>INSERT (key, result)
+    Note over A,B: CUSTOMER CHARGED TWICE
 ```
-BROKEN: two concurrent requests with the same NEW idempotency key
 
-  Request A: SELECT * FROM idempotency_keys WHERE key = 'abc123'
-             -> not found
-  Request B: SELECT * FROM idempotency_keys WHERE key = 'abc123'
-             -> not found  (race: A hasn't inserted yet)
-  Request A: charge card $50, INSERT idempotency_keys (key, result)
-  Request B: charge card $50, INSERT idempotency_keys (key, result)
-             -> CUSTOMER CHARGED TWICE
+Two concurrent requests for the same new key both see "not found" before either has inserted — the race that charges the customer twice.
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-FIX: claim the key atomically BEFORE doing the work
+    start(["INSERT ... ON CONFLICT<br/>DO NOTHING RETURNING key"]) --> rows{"rows<br/>returned?"}
+    rows -->|"0 rows"| claimed{"existing key's<br/>status?"}
+    rows -->|"1 row"| own["this request owns the key -<br/>do the work"]
+    claimed -->|"IN_PROGRESS"| retry["return 409<br/>retry shortly / poll"]
+    claimed -->|"COMPLETED"| cached["return stored result -<br/>do not re-execute"]
+    own --> complete["UPDATE status = COMPLETED,<br/>store result"]
 
-  INSERT INTO idempotency_keys (key, status, created_at)
-    VALUES ('abc123', 'IN_PROGRESS', now())
-    ON CONFLICT (key) DO NOTHING
-    RETURNING key;
-
-  -- If 0 rows returned: another request already claimed this key.
-  --   -> if its status is IN_PROGRESS: return 409 "retry shortly" or block
-  --      with a short poll
-  --   -> if its status is COMPLETED: return the STORED result, do not
-  --      re-execute
-
-  -- If 1 row returned: this request owns the key. Do the work, then:
-  UPDATE idempotency_keys
-    SET status = 'COMPLETED', result = '{...}', completed_at = now()
-    WHERE key = 'abc123';
+    class start,rows,claimed mathOp
+    class own,complete,cached train
+    class retry lossN
 ```
+
+Claiming the key atomically before doing the work closes the race: only the request that successfully inserts proceeds, the other either waits on the in-progress attempt or reuses the already-stored result.
 
 ---
 
@@ -406,6 +425,27 @@ FIX: claim the key atomically BEFORE doing the work
 
 ## 8. Tradeoffs
 
+Every pattern in this module sits somewhere on the same plane: how much it blocks participants versus how strong a consistency guarantee it buys. No pattern reaches the top-left — that combination (strong, non-blocking, and tolerant of arbitrary failures) is exactly what §3's Core Principle 2 says is impossible.
+
+```mermaid
+quadrantChart
+    title Blocking Cost vs Consistency Strength
+    x-axis Non-blocking --> Blocking
+    y-axis Eventual --> Strong
+    quadrant-1 Strong but blocking
+    quadrant-2 Strong and non-blocking (rare)
+    quadrant-3 Eventual and non-blocking
+    quadrant-4 Eventual but blocking (avoid)
+    "2PC": [0.92, 0.95]
+    "3PC": [0.55, 0.78]
+    "TCC": [0.3, 0.68]
+    "Saga (orchestration)": [0.12, 0.32]
+    "Saga (choreography)": [0.05, 0.28]
+    "Outbox + Idempotency": [0.08, 0.4]
+```
+
+2PC buys strong consistency by blocking every participant until the coordinator decides (top-right); Saga and Outbox give up strong consistency to stay non-blocking (bottom-left); TCC and 3PC sit in between, trading a bounded amount of blocking for a stronger guarantee.
+
 | Dimension | 2PC | Saga | TCC | Outbox + Idempotency |
 |-----------|-----|------|-----|----------------------|
 | Consistency | Strong (ACID across participants) | Eventual | Strong-ish (bounded by TTL) | Eventual, "exactly-once effect" |
@@ -419,6 +459,35 @@ FIX: claim the key atomically BEFORE doing the work
 ---
 
 ## 9. When to Use / When NOT to Use
+
+A quick routing view of the rules below: the first fork is latency/participant count, the second is whether the resource supports a TTL-bounded reservation — and Outbox + Idempotency sits underneath all three, because nearly every service also has to publish an event as a side effect of its write.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    q1{"same DC/AZ, sub-ms latency,<br/>2-5 known participants,<br/>strong consistency required?"}
+    q1 -->|"yes"| twopc(["2PC"])
+    q1 -->|"no"| q2{"is the resource a business<br/>reservation (inventory, seat,<br/>funds) with a natural TTL?"}
+
+    q2 -->|"yes, participants expose<br/>Try / Confirm / Cancel"| tcc(["TCC"])
+    q2 -->|"no - spans orgs or<br/>long-running (secs to days)"| saga(["Saga<br/>(orchestration or choreography)"])
+
+    twopc -.->|"also publishing<br/>events downstream?"| outbox(["+ Outbox + Idempotency<br/>underneath, always"])
+    tcc -.-> outbox
+    saga -.-> outbox
+
+    class q1,q2 mathOp
+    class twopc frozen
+    class tcc,saga train
+    class outbox base
+```
 
 ### Use 2PC When
 - All participants are in the **same datacenter / availability zone** with sub-millisecond network latency.
@@ -569,92 +638,74 @@ Scale:
 
 ### Original Architecture (2PC) and Its Failure
 
-```
-   wallet-service                          payments-service
-   +----------------+   2PC (XA/JTA)      +-------------------+
-   | wallet_balances| <-----------------> | payment_ledger    |
-   | PREPARE: lock  |   coordinator:      | PREPARE: lock     |
-   | row, debit,    |   Atomikos          | row, insert       |
-   | write redo log |                     | ledger entry,     |
-   +----------------+                     | write redo log    |
-                                           +-------------------+
-                                                    |
-                                              (after COMMIT)
-                                                    v
-                                           External Payment Network
-                                           (NOT part of the 2PC —
-                                            can't 2PC a 3rd party!)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    wallet["wallet-service<br/>wallet_balances<br/>PREPARE: lock row,<br/>debit, write redo log"] -->|"2PC (XA/JTA)<br/>coordinator: Atomikos"| payments["payments-service<br/>payment_ledger<br/>PREPARE: lock row,<br/>insert ledger entry,<br/>write redo log"]
+    payments -->|"after COMMIT"| ext(["External Payment Network<br/>(NOT part of the 2PC -<br/>can't 2PC a 3rd party)"])
+
+    class wallet,payments frozen
+    class ext lossN
 ```
 
 The external payment network call happens **after** the 2PC commits — meaning the design already had a gap (what if the wallet is debited, the ledger entry created, but the external call fails?) that was "handled" with a manual reconciliation spreadsheet. On top of that gap, the 2PC itself caused the incident in §10 War Story 1 of this module: an Atomikos coordinator crash left both databases' rows locked for 45 minutes, during which `wallet-service`'s connection pool (size 50) was exhausted and **all wallet reads** (balance checks) failed across the platform — not just transfers.
 
 ### Target Architecture (Saga + Outbox + Idempotency)
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client<br/>POST /transfers<br/>Idempotency-Key, amount, destAccount"])
+
+    subgraph walletSvc1["wallet-service"]
+        direction TB
+        w1["1. claim idempotency key"] --> w2["2. debit wallet balance"] --> w3["3. INSERT outbox row<br/>'FundsDebited'"]
+    end
+
+    client --> walletSvc1
+    walletSvc1 -.->|"Debezium CDC<br/>tails outbox"| kafka(["Kafka topic<br/>wallet.funds-debited"])
+
+    subgraph paymentsSvc["payments-service (Saga step 2 - choreography)"]
+        direction TB
+        p1["on FundsDebited:<br/>INSERT ledger entry<br/>(status = PENDING)"] --> p2["INSERT outbox row<br/>'LedgerCreated'"]
+        p2 --> p3{"call External Payment Network<br/>(idempotency key = transfer_id)"}
+        p3 -->|"success"| p4["ledger.status = COMPLETED"]
+        p3 -->|"permanent failure"| p5["publish 'TransferFailed'"]
+    end
+
+    kafka --> paymentsSvc
+
+    subgraph walletSvc2["wallet-service (compensation)"]
+        direction TB
+        w4["on TransferFailed:<br/>CREDIT wallet balance back<br/>(true inverse, no fees here)"]
+    end
+
+    p5 -.->|"TransferFailed"| w4
+
+    class client io
+    class w1,w2,w3 train
+    class kafka base
+    class p1,p2 train
+    class p3 mathOp
+    class p4 train
+    class p5,w4 lossN
 ```
-  Client
-    |  POST /transfers  { Idempotency-Key: <uuid>, amount, destAccount }
-    v
-  +------------------+
-  | wallet-service   |
-  |                  |
-  | BEGIN TX:        |
-  |  1. claim        |
-  |     idempotency  |
-  |     key          |
-  |  2. debit wallet |
-  |     balance      |
-  |  3. INSERT       |
-  |     outbox row   |
-  |     'FundsDebited'|
-  | COMMIT           |
-  +--------+---------+
-           |  (Debezium CDC tails outbox table)
-           v
-       Kafka topic: wallet.funds-debited
-           |
-           v
-  +------------------+
-  | payments-service |  (Saga step 2 — choreography)
-  |                  |
-  | on FundsDebited: |
-  |  BEGIN TX:       |
-  |   1. INSERT      |
-  |      ledger entry|
-  |      (status=    |
-  |       PENDING)   |
-  |   2. INSERT      |
-  |      outbox row  |
-  |      'LedgerCreated'|
-  |  COMMIT          |
-  |                  |
-  |  THEN (separate, |
-  |  retryable step):|
-  |   call External  |
-  |   Payment Network|
-  |   with idempotency|
-  |   key = transfer_id|
-  |                  |
-  |  on success:     |
-  |   ledger.status =|
-  |     COMPLETED    |
-  |  on permanent    |
-  |  failure:        |
-  |   publish        |
-  |   'TransferFailed'|
-  +--------+---------+
-           |  (TransferFailed -> compensation)
-           v
-  +------------------+
-  | wallet-service   |
-  | on TransferFailed:|
-  |  CREDIT wallet   |
-  |  balance back    |
-  |  (compensating   |
-  |   transaction —  |
-  |   true inverse,  |
-  |   no fees here)  |
-  +------------------+
-```
+
+The wallet debit commits locally in single-digit milliseconds; Kafka carries the event to payments-service, which drives the external call and, on permanent failure, triggers a compensating credit back on the wallet — a true inverse here because PaySwift's internal debit carries no fee.
 
 ### Key Design Decisions
 

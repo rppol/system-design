@@ -139,58 +139,117 @@ The cache sits in front of the database. On a miss, the cache itself fetches fro
 ## 5. Architecture Diagrams
 
 ### Cache-Aside Pattern
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client([Client]) --> app("Application Server") --> decision{"In cache?"}
+    decision -->|"HIT"| cache("Cache")
+    decision -->|"MISS"| db("Database")
+    db -.->|"populate"| cache
+    cache -.->|"return"| app
+
+    class client io
+    class app req
+    class decision mathOp
+    class cache base
+    class db frozen
 ```
-Client
-  |
-  v
-Application Server
-  |          \
-  |           \-- [Cache Miss] --> Database
-  |                                   |
-  +------- [Cache Hit] <---------+    |
-  |                              |    v
-  +----------------------------> Cache <-- (populated on miss)
-```
+
+The application checks the cache first; a hit returns immediately, while a miss falls through to the database and then populates the cache so the next request for that key is a hit.
 
 ### Distributed Cache Architecture
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    lb("Load Balancer") --> app1("App1")
+    lb --> app2("App2")
+    lb --> app3("App3")
+    app1 --> redis("Redis Cluster")
+    app2 --> redis
+    app3 --> redis
+    redis --> shard1("Shard1")
+    redis --> shard2("Shard2")
+    redis --> shard3("Shard3")
+    redis --> shard4("Shard4")
+
+    class lb mathOp
+    class app1,app2,app3 req
+    class redis,shard1,shard2,shard3,shard4 base
 ```
-          Load Balancer
-         /      |      \
-      App1    App2    App3
-        \       |      /
-         \      |     /
-      [Redis Cluster]
-      /    |    |    \
-  Shard1 Shard2 Shard3 Shard4
-  (Primary + Replica for each shard)
-```
+
+Every shard is a primary + replica pair; the load balancer fans requests out across stateless app servers that all share the same Redis cluster, so any app node can serve any key.
 
 ### Write-Through Flow
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant Cache as Cache
+    participant DB as Database
+
+    App->>Cache: write(key, value)
+    Cache->>DB: write(key, value)
+    DB-->>Cache: ack
+    Cache-->>App: ack
+    Note over App,DB: Synchronous — write only completes after both confirm
 ```
-App --> Cache --> DB
-  <--   <--   <--
-   (sync write, both confirm)
-```
+
+The write only returns success once the database has confirmed, so cache and DB are never out of sync — at the cost of doubled write latency.
 
 ### Write-Back Flow
-```
-App --> Cache --> (async, batched) --> DB
-  <--   (immediate ack)
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant Cache as Cache
+    participant DB as Database
+
+    App->>Cache: write(key, value)
+    Cache-->>App: ack (immediate)
+    Note right of Cache: buffers and batches writes
+    Cache->>DB: flush batch (async)
+    DB-->>Cache: ack
 ```
 
+The application gets an immediate ack from cache; the database write happens later in an asynchronous batch, so throughput is high but a cache crash before flush loses data.
+
 ### Cache Stampede (Thundering Herd)
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ttl("TTL expires") --> miss("1000 concurrent<br/>requests MISS")
+    miss --> queries("1000 parallel<br/>DB queries")
+    queries --> down("DB overwhelmed<br/>/ timeout")
+
+    class ttl mathOp
+    class miss,queries,down lossN
 ```
-TTL expires
-     |
-     v
-1000 concurrent requests all MISS
-     |
-     v
-1000 parallel DB queries (!!!)
-     |
-     v
-DB overwhelmed / timeout
-```
+
+One hot key's expiry turns into 1000 simultaneous misses and 1000 parallel DB queries — exactly the cascade that mutex locks, XFetch, or TTL jitter (below) are designed to break.
 
 ---
 
@@ -225,6 +284,34 @@ Solutions:
 1. **TTL jitter**: Randomize expiration times.
 2. **Circuit breaker**: Stop forwarding requests to DB if it's struggling.
 3. **Multi-level cache**: L1 (local in-process) + L2 (distributed Redis). L1 absorbs the spike.
+
+Stampede, penetration, and avalanche are frequently confused in interviews — the diagram below distinguishes them by trigger condition and fix.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start{"What failed?"}
+    start -->|"1 hot key<br/>expires"| stampede("Stampede<br/>N requests race to<br/>refill same key")
+    start -->|"key never<br/>existed"| penetration("Penetration<br/>misses cache AND<br/>DB every time")
+    start -->|"many keys<br/>expire together"| avalanche("Avalanche<br/>flood of DB queries<br/>across many keys")
+
+    stampede --> fixS(["mutex + XFetch"])
+    penetration --> fixP(["null-cache +<br/>Bloom filter"])
+    avalanche --> fixA(["TTL jitter +<br/>circuit breaker"])
+
+    class start mathOp
+    class stampede,penetration,avalanche lossN
+    class fixS,fixP,fixA train
+```
+
+All three look like "the DB got slammed," but the trigger differs — one key (stampede), a key that never existed (penetration), or many keys at once (avalanche) — which is why TTL jitter shows up as a fix for two of the three but not penetration.
 
 ---
 
@@ -403,41 +490,40 @@ Build the timeline cache for a Twitter-scale social network.
 
 ### Architecture Overview
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Read["Read Path"]
+        client(["Client<br/>mobile/web"]) --> gateway("API Gateway")
+        gateway --> timeline("Timeline Service<br/>L1 Caffeine")
+        timeline -->|"L1 MISS"| redis("Redis Cluster<br/>200 shards")
+        timeline -.->|"L1 HIT"| returned(["Return timeline"])
+        redis -.->|"L2 HIT"| returned
+    end
+
+    subgraph Write["Write Path"]
+        writeapi(["Tweet Write API"]) --> kafka("Kafka topic")
+        kafka --> fanout("Fan-out Worker")
+    end
+
+    redis -->|"L2 MISS"| tweetdb("Tweet DB<br/>Manhattan")
+    fanout <--> tweetdb
+
+    class client,writeapi,returned io
+    class gateway,timeline req
+    class redis,kafka base
+    class tweetdb frozen
+    class fanout mathOp
 ```
-                   Client (mobile/web)
-                          |
-                          v
-                  +---------------+
-                  | API Gateway   |
-                  +-------+-------+
-                          |
-                          v
-               +----------+----------+
-               | Timeline Service    |
-               | (L1 Caffeine cache) |   <-- hot celebrity tweets, 100MB/node
-               +----+-----------+----+
-                    |           |
-        cache miss  |           | cache hit
-                    v           v
-            +-------+------+   return
-            | Redis Cluster |  pre-computed
-            | 200 shards    |  timeline
-            | feed:{uid} -> |
-            | sorted set    |
-            +-------+-------+
-                    | on miss
-                    v
-            +---------------+        +-------------------+
-            | Tweet DB      |<------>| Fan-out Worker    |
-            | (Manhattan)   |        | (Kafka consumer)  |
-            +---------------+        +---------+---------+
-                                               ^
-                                               |
-                                     +---------+---------+
-                                     | Tweet Write API   |
-                                     | -> Kafka topic    |
-                                     +-------------------+
-```
+
+The read path forks on two cache tiers — an L1 Caffeine miss falls through to the Redis cluster, and only a Redis miss reaches the Manhattan-backed Tweet DB; the write path fans out asynchronously through Kafka, decoupling the write API from the per-follower fan-out cost.
 
 ### Key Design Decisions
 
@@ -454,6 +540,37 @@ Build the timeline cache for a Twitter-scale social network.
 6. **Write-through invalidation on delete.** Tweet deletion publishes to a `tombstone` Kafka topic; fan-out workers ZREM the tweet from all follower timelines within 2s. *Alternative rejected:* TTL-based eventual cleanup — deleted tweets visible for up to 24h.
 
 7. **Per-key mutex for cache reconstruction.** On L2 miss, use `SET feed:{uid}:lock NX PX 5000` before rebuilding from DB. Other readers serve stale entry or block briefly. *Alternative rejected:* unbounded reconstruction — 1000 concurrent misses on the same key hammer the DB with identical queries.
+
+The hybrid fan-out decision (points 1 and 2 above) in one picture:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    tweet(["New tweet"]) --> check{"Follower count?"}
+    check -->|"under 10k"| write("Fan-out on write<br/>sync push to feeds")
+    check -->|"10k to 1M"| degraded("Fan-out on write<br/>async, lower priority")
+    check -->|"over 1M"| read("Fan-out on read<br/>merge live, skip push")
+
+    write --> feed("follower feed list")
+    degraded --> feed
+    read --> l1("L1 Caffeine cache")
+
+    class tweet io
+    class check mathOp
+    class write train
+    class degraded req
+    class read frozen
+    class feed,l1 base
+```
+
+Below 10k followers the tweet is pushed synchronously to every follower's feed; between 10k and 1M it is still pushed but asynchronously and lower-priority; above 1M followers (~1000 accounts) fan-out is skipped entirely and the timeline read merges celebrity tweets live from the L1 cache.
 
 ### Implementation
 

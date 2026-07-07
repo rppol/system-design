@@ -44,6 +44,38 @@ For every critical dependency, decide *in advance* what the response looks like 
 **6. Load shedding — under overload, deliberately reject low-priority work to protect the rest.**
 When a system is genuinely at or over capacity (not because of a downstream dependency, but because of the volume of incoming requests itself), the resilient response is to **reject some requests on purpose** — ideally the lowest-priority ones (e.g., background batch jobs, non-logged-in users, non-critical analytics calls) — so that the requests that matter most (checkout, login) continue to get served within acceptable latency.
 
+The four call-scoped patterns above (timeout, circuit breaker, bulkhead, retry) are not independent options to pick from — they layer together in a fixed order on every outbound call:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    oc([outbound call]) --> cb{"breaker open?"}
+    cb -->|yes| fail1("fail fast,<br/>no network call")
+    cb -->|no| bh{"bulkhead<br/>slot free?"}
+    bh -->|no| fail2("fail fast,<br/>pool full")
+    bh -->|yes| dep("call dependency<br/>bounded by timeout")
+    dep -->|success| ok("return result")
+    dep -->|failure| idem{"idempotent<br/>operation?"}
+    idem -->|no| fail3("return error,<br/>no retry")
+    idem -->|yes| retry("retry:<br/>backoff + jitter")
+    retry --> cb
+
+    class oc req
+    class cb,bh,idem mathOp
+    class dep base
+    class fail1,fail2,fail3 lossN
+    class ok,retry train
+```
+
+*The circuit breaker is checked first so an already-failing dependency never even reaches the bulkhead or the network; only an idempotent operation is allowed to retry, and that retry loops back through the same breaker check rather than around it (§12 Q9).*
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -116,158 +148,131 @@ Under genuine overload (not a downstream dependency problem — *this* service i
 
 ### 5.1 Circuit Breaker State Machine
 
-```
-                    failure_rate >= 50%
-                    over last 20 calls
-        +---------------------------------------+
-        |                                         |
-        v                                         |
-  +-----------+                            +-----------+
-  |  CLOSED   |                            |   OPEN    |
-  |           |                            |           |
-  | calls pass|                            | calls fail|
-  | through;  |                            | IMMEDIATELY|
-  | failures  |                            | (no network|
-  | counted   |                            |  call)     |
-  | over a    |                            |           |
-  | sliding   |                            | wait 30s  |
-  | window of |                            | cooldown  |
-  | last 20   |                            |           |
-  | calls     |                            +-----+-----+
-  +-----+-----+                                  |
-        ^                                        | 30s elapsed
-        |                                        v
-        |                                  +-----------+
-        | >= 4 of 5 trial               +->| HALF-OPEN |
-        | calls succeed                 |  |           |
-        |                                |  | allow 5   |
-        +--------------------------------+  | trial     |
-                                          |  | calls     |
-        any trial call fails ------------+  +-----+-----+
-        -> back to OPEN, restart 30s cooldown     |
-                                                   |
-                                          (waiting for 5
-                                           trial calls to
-                                           complete)
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+    state "Half-Open" as HalfOpen
+
+    Closed --> Open: failure rate 50%+<br/>over last 20 calls
+    Open --> HalfOpen: 30s cooldown elapsed
+    HalfOpen --> Closed: 4+ of 5 trial<br/>calls succeed
+    HalfOpen --> Open: any trial call fails,<br/>restart 30s cooldown
+
+    note right of Closed: calls pass through,<br/>failures counted over a<br/>sliding window of 20 calls
+    note right of Open: calls fail IMMEDIATELY,<br/>no network call attempted,<br/>wait 30s cooldown
+    note right of HalfOpen: allow 5 trial calls through<br/>to test if dependency recovered
 ```
 
 Concrete thresholds shown here (sliding window of 20, 50% failure rate, 30s cooldown, 5 trial calls, 80% trial success to close) are worked through with example call sequences in §6.1.
 
 ### 5.2 Bulkhead — Isolated Pools vs. Shared Pool
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph WO["Without Bulkheads: one shared pool, 50 threads"]
+        direction LR
+        co1([checkout]) --> sp("shared pool<br/>50 threads")
+        se1([search]) --> sp
+        pr1([profile]) --> sp
+        sp --> inv1("inventory-svc<br/>20ms")
+        sp --> src1("search-svc<br/>30ms")
+        sp --> rec1("recommendations-svc<br/>SLOW: 30s")
+        rec1 --> stuck1("all 50 threads<br/>stuck waiting")
+        stuck1 --> res1(["checkout & search get<br/>NO threads, time out too"])
+    end
+
+    subgraph WI["With Bulkheads: dedicated pool per dependency"]
+        direction LR
+        co2([checkout]) --> ip("inventory pool<br/>10 threads")
+        se2([search]) --> sep("search pool<br/>15 threads")
+        ho2([homepage]) --> rp("recs pool<br/>8 threads")
+        ip --> inv2("inventory-svc<br/>20ms OK")
+        sep --> src2("search-svc<br/>30ms OK")
+        rp --> rec2("recommendations-svc<br/>SLOW: 30s")
+        rec2 --> stuck2("only 8 recs-pool<br/>threads stuck")
+        stuck2 --> res2(["homepage degrades;<br/>checkout & search OK"])
+    end
+
+    class co1,se1,pr1,co2,se2,ho2 req
+    class sp,ip,sep,rp base
+    class inv1,src1,rec1,inv2,src2,rec2 frozen
+    class stuck1,res1,stuck2 lossN
+    class res2 train
 ```
-WITHOUT BULKHEADS — one shared thread pool (size 50)
 
-   checkout requests ---\
-   search requests   ----+--> [ shared pool: 50 threads ] --> calls to:
-   profile requests  ---/        |    |    |    |   |           - inventory-svc (fast, 20ms)
-                                  |    |    |    |   |           - search-svc (fast, 30ms)
-                                  v    v    v    v   v           - recommendations-svc
-                              all 50 threads stuck waiting          (SLOW: 30s, was 50ms)
-                              on recommendations-svc calls
-                                  |
-                                  v
-   RESULT: checkout and search requests, which don't even call
-   recommendations-svc, get NO threads -> they time out too.
-   ONE slow dependency took down THREE unrelated request paths.
-
-
-WITH BULKHEADS — dedicated pool per dependency
-
-   checkout  --> [ inventory pool: 10 threads ]  --> inventory-svc (fast, 20ms)  OK
-   search    --> [ search pool: 15 threads ]     --> search-svc (fast, 30ms)    OK
-   homepage  --> [ recs pool: 8 threads ]        --> recommendations-svc
-                  (all 8 stuck on slow calls)        (SLOW: 30s)
-                       |
-                       v
-   RESULT: only the 8 threads in the "recs pool" are exhausted.
-   Homepage requests fall back to a degraded response (§4.6) once
-   that pool is full. Checkout and search are completely unaffected.
-```
+*One slow dependency (recommendations-svc, degraded from 50ms to 30s) exhausts the entire 50-thread shared pool and drags checkout and search down with it; giving each dependency its own pool confines the damage to that dependency's own threads, so only the 8-thread recs pool is exhausted and checkout/search keep working.*
 
 ### 5.3 Retry with Exponential Backoff and Full Jitter — Timeline
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant D as Dependency
+
+    Note over C,D: base=100ms, cap=20s, full jitter — original request fails at t=0
+    C->>D: attempt 1 (t=140ms)
+    D-->>C: fail
+    C->>D: attempt 2 (t=450ms)
+    D-->>C: fail
+    C->>D: attempt 3 (t=540ms)
+    D-->>C: fail
+    C->>D: attempt 4 (t=1740ms)
+    D-->>C: success
+    Note over C,D: 10,000 clients with NO jitter all retry at the exact<br/>same instants (t=100/300/700ms) - a synchronized wave.<br/>Full jitter spreads attempt-1 retries across a 0-200ms window instead.
 ```
-Request fails at t=0. base=100ms, cap=20000ms (20s), full jitter.
 
-attempt 1: cap_n = min(20000, 100 * 2^1) =   200ms -> delay = random(0, 200)    e.g. 140ms
-attempt 2: cap_n = min(20000, 100 * 2^2) =   400ms -> delay = random(0, 400)    e.g. 310ms
-attempt 3: cap_n = min(20000, 100 * 2^3) =   800ms -> delay = random(0, 800)    e.g. 90ms
-attempt 4: cap_n = min(20000, 100 * 2^4) =  1600ms -> delay = random(0, 1600)   e.g. 1200ms
-attempt 5: cap_n = min(20000, 100 * 2^5) =  3200ms -> delay = random(0, 3200)   e.g. 2800ms
-attempt 6: cap_n = min(20000, 100 * 2^6) =  6400ms -> delay = random(0, 6400)   e.g. 500ms
-
-Timeline for THIS client (one possible random draw):
-  t=0      original request fails
-  t=140ms  attempt 1 (fails)
-  t=450ms  attempt 2 (140+310, fails)
-  t=540ms  attempt 3 (450+90, fails)
-  t=1740ms attempt 4 (540+1200, succeeds!)
-
-Compare to 10,000 OTHER clients that failed at the SAME t=0 with NO
-jitter (delay = exactly 100, 200, 400, 800...): every one of them
-retries at EXACTLY t=100ms, t=300ms, t=700ms... -- a synchronized
-wave hitting the recovering dependency at the same instants.
-
-With full jitter, each client's attempt-1 retry is uniformly spread
-across (0, 200ms) -- 10,000 clients spread their retries across a
-200ms window instead of arriving in a single instant.
-```
+*This one client's randomized delays (140ms, 310ms, 90ms, 1200ms) land its retries unevenly at t=140/450/540/1740ms; without jitter, 10,000 clients that failed at the same instant would all retry at exactly the same later instants, recreating the original spike just delayed.*
 
 ### 5.4 Cascading Failure — Broken vs. Fixed
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph BR["Broken: no timeout, no bulkhead, no breaker"]
+        direction LR
+        gw1([API Gateway]) --> os1("Order Service<br/>shared pool: 100 threads")
+        os1 -->|"no timeout"| ship1("Shipping-Rate API<br/>3rd party, now 60s")
+        ship1 --> stuck1("all 100 threads<br/>blocked waiting")
+        stuck1 --> down1(["Order Service unreachable,<br/>even for order-status calls"])
+    end
+
+    subgraph FX["Fixed: timeout + bulkhead + circuit breaker"]
+        direction LR
+        gw2([API Gateway]) --> os2("Order Service<br/>90 threads free")
+        os2 --> bh("shipping pool<br/>10 threads, 500ms timeout")
+        bh -->|"500ms timeout"| ship2("Shipping-Rate API<br/>3rd party, now 60s")
+        ship2 --> cb{"50%+ failures<br/>over 20 calls?"}
+        cb -->|yes| open("circuit OPEN 30s,<br/>fail fast, no call")
+        cb -->|"not yet"| fb1("flat-rate fallback<br/>after 500ms")
+        open --> fb2("flat-rate fallback<br/>immediately")
+        fb1 --> ok2(["order-status calls<br/>succeed normally"])
+        fb2 --> ok2
+    end
+
+    class gw1,gw2 io
+    class os1,os2,bh base
+    class ship1,ship2 frozen
+    class cb,open mathOp
+    class stuck1,down1 lossN
+    class fb1,fb2,ok2 train
 ```
-BROKEN: no timeout, no bulkhead, no circuit breaker
 
-  [API Gateway] --> [Order Service] --> [Shipping-Rate API (3rd party)]
-       |                  |                    ^
-       |                  |                    | starts taking 60s
-       |          (shared pool: 100 threads)   | instead of 200ms
-       |                  |                    |
-       |                  v                    |
-       |          all 100 threads blocked -----+
-       |          waiting on shipping-rate
-       |          calls with NO timeout
-       |
-       v
-  [API Gateway] now can't get ANY response from Order Service
-  (every thread busy) -- including for requests that have
-  NOTHING to do with shipping rates (e.g., "get order status").
-
-  RESULT: one third-party API outage = total Order Service outage
-          = total checkout outage.
-
-
-FIXED: timeout + bulkhead + circuit breaker
-
-  [API Gateway] --> [Order Service] --> [Shipping-Rate API (3rd party)]
-       |                  |                    ^
-       |                  |  dedicated pool    | starts taking 60s
-       |                  |  (10 threads),     | instead of 200ms
-       |                  |  read timeout 500ms|
-       |                  v                    |
-       |          10 threads time out at      |
-       |          500ms each, return fallback:|
-       |          "shipping rate unavailable, |
-       |           using flat-rate default"   |
-       |                  |                    |
-       |                  | after 50%+ failures|
-       |                  | over 20 calls:     |
-       |                  v                    |
-       |          CIRCUIT OPENS for 30s --> stops
-       |          calling shipping-rate API entirely;
-       |          returns flat-rate fallback IMMEDIATELY
-       |          (no 500ms wait at all)
-       |
-       v
-  [API Gateway] -- Order Service's other 90 threads are
-  completely unaffected. "Get order status" requests succeed
-  normally throughout the entire shipping-rate outage.
-
-  RESULT: third-party API outage = degraded shipping-rate display
-          (flat-rate fallback) for the affected feature ONLY.
-          Everything else keeps working.
-```
+*The only structural difference is a 500ms timeout, a 10-thread bulkhead, and a circuit breaker wrapped around one outbound call — that alone shrinks a third-party outage from "the entire Order Service and checkout are down" to "shipping-rate display is degraded, everything else works normally."*
 
 ---
 
@@ -275,36 +280,27 @@ FIXED: timeout + bulkhead + circuit breaker
 
 ### 6.1 Circuit Breaker — Concrete Configuration and Example Call Sequence
 
-```
-Configuration:
-  sliding window size:        20 calls (count-based)
-  failure rate threshold:     50%
-  open-state wait duration:   30 seconds
-  half-open trial calls:      5
-  half-open success threshold: >= 4 of 5 (80%) to CLOSE again
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Breaker as Circuit Breaker
 
-Example sequence (CLOSED state, window of last 20 calls):
-  Calls 1-15:  all succeed                       -> failure rate = 0%
-  Calls 16-20: all FAIL (downstream is degrading) -> failure rate
-               over last 20 = 5/20 = 25%          -> still CLOSED
-
-  Calls 21-25: all FAIL too. Sliding window now = calls 6-25,
-               of which calls 16-25 (10 calls) failed
-               -> failure rate = 10/20 = 50% -> THRESHOLD HIT
-               -> CIRCUIT OPENS
-
-  For the next 30 seconds: every call fails IMMEDIATELY with
-  "CircuitBreakerOpenException" -- zero network calls attempted,
-  zero threads/connections consumed.
-
-  At t=30s: HALF-OPEN. Allow 5 trial calls through.
-    Scenario A: 4 of 5 succeed (80%) -> CLOSE. Resume normal traffic,
-                window resets.
-    Scenario B: only 2 of 5 succeed (40%) -> back to OPEN, restart
-                the 30s cooldown. (Some implementations apply an
-                increasing cooldown on repeated reopenings, e.g.
-                30s -> 60s -> 120s, to avoid hammering a dependency
-                that needs longer to recover.)
+    Note over Caller,Breaker: config: 20-call window, 50% threshold,<br/>30s cooldown, 5 trial calls, 80% to close
+    Caller->>Breaker: calls 1-15
+    Breaker-->>Caller: all succeed (0% failure)
+    Caller->>Breaker: calls 16-20
+    Breaker-->>Caller: all fail (25% over last 20)
+    Note over Breaker: still CLOSED
+    Caller->>Breaker: calls 21-25
+    Breaker-->>Caller: all fail (50% over last 20)
+    Note over Breaker: threshold hit, circuit OPENS
+    Note over Caller,Breaker: next 30s: every call fails<br/>immediately, zero network calls attempted
+    Note over Breaker: t=30s, HALF-OPEN, allow 5 trial calls
+    alt 4 of 5 trials succeed (80%)
+        Breaker-->>Caller: CLOSE, resume normal traffic
+    else only 2 of 5 succeed (40%)
+        Breaker-->>Caller: back to OPEN, restart cooldown
+    end
 ```
 
 The key numbers to internalize: **20-call window and 50% threshold** mean the breaker needs to see a *sustained* problem (10+ failures within the last 20 calls) — a single transient blip (1-2 failures) doesn't trip it. The **30-second cooldown** is long enough to give a struggling dependency real breathing room, but short enough that recovery is detected within tens of seconds, not minutes.
@@ -338,45 +334,36 @@ longer than an end-to-end request deadline (§6.3) allows.
 
 ### 6.3 Timeout / Deadline Budget Propagation Across a Call Chain
 
+```mermaid
+sequenceDiagram
+    participant Cl as Client
+    participant GW as Gateway
+    participant AG as Search-Aggregator
+    participant A1 as Airline API 1
+    participant A2 as Airline API 2
+    participant A3 as Airline API 3
+
+    Cl->>GW: search flights (deadline 1000ms)
+    Note over GW: t=10ms, gateway overhead ~10ms,<br/>990ms budget remains
+    GW->>AG: search (deadline 980ms)
+    Note over AG: t=20ms, ~80ms margin reserved,<br/>~900ms per parallel call
+    par
+        AG->>A1: fetch fares (timeout 900ms)
+        A1-->>AG: respond in 150ms
+    and
+        AG->>A2: fetch fares (timeout 900ms)
+        A2-->>AG: respond in 300ms
+    and
+        AG->>A3: fetch fares (timeout 900ms)
+        A3-->>AG: times out at 900ms, no response
+    end
+    Note over AG: merge A1 + A2 results,<br/>flag 1 provider unavailable
+    AG-->>GW: partial results (t=950ms)
+    GW-->>Cl: response (t=995ms, under 1000ms budget)
+    Note over Cl,A3: without deadline propagation, a fixed 2s timeout<br/>per hop could burn 4+ seconds serving a client<br/>that already gave up after 1 second
 ```
-Client sets a total deadline of 1000ms for "search flights".
 
-  t=0ms     Request arrives at API Gateway. Deadline: 1000ms remaining.
-            Gateway's own overhead (auth, routing): ~10ms.
-
-  t=10ms    Gateway calls Search-Aggregator service.
-            Remaining budget: 1000 - 10 = 990ms.
-            Gateway sets its call timeout to 990ms (or slightly less,
-            e.g. 950ms, to leave margin for its own response handling).
-
-  t=20ms    Search-Aggregator received the request with 980ms remaining
-            (propagated via a deadline header, e.g. "X-Deadline-Ms: 980"
-            or an absolute timestamp). It needs to call 3 downstream
-            airline APIs IN PARALLEL (not sequentially).
-            Each parallel call gets a timeout of ~900ms (980ms minus
-            ~80ms margin for aggregating responses and returning).
-
-  t=920ms   Airline API #1 and #2 responded in 150ms and 300ms.
-            Airline API #3 has not responded -- it hits its 900ms
-            timeout (relative to t=20ms, i.e. at t=920ms).
-            -> Airline #3's result is dropped; Search-Aggregator
-               returns results from #1 and #2 plus a "1 provider
-               unavailable" flag (graceful degradation, §4.6).
-
-  t=950ms   Search-Aggregator returns to Gateway. Gateway has 50ms
-            of its original 1000ms budget left for final formatting
-            and response transmission.
-
-  t=995ms   Client receives response. Total: 995ms < 1000ms deadline. OK.
-
-WITHOUT deadline propagation: if each hop independently used a fixed
-"reasonable" 2-second timeout (Gateway: 2s, Aggregator: 2s, each
-airline call: 2s), a single slow airline API could cause the
-Aggregator to wait up to 2s, then the Gateway to wait up to 2s+ for
-the Aggregator -- a client that gave up after 1 second has no way to
-know the backend is still burning 4+ seconds of resources on a
-request nobody is waiting for anymore.
-```
+*Each hop derives its own timeout from the deadline it was handed rather than a fixed guess — the parallel airline calls get about 900ms each, and the whole round trip finishes at t=995ms, safely inside the 1000ms budget the client actually set.*
 
 ### 6.4 Bulkhead Sizing with Little's Law
 
@@ -416,39 +403,51 @@ fills up and EXCESS load gets a fast fallback rather than queuing
 behind an ever-growing backlog.
 ```
 
+```mermaid
+xychart-beta
+    title "Bulkhead sized for 10 concurrent slots"
+    x-axis ["Normal latency (200ms)", "Degraded latency (2000ms)"]
+    y-axis "Sustainable throughput (req/s)" 0 --> 60
+    bar [50, 5]
+```
+
+*At a fixed bulkhead size of 10, a 10x latency degradation (200ms to 2000ms) collapses sustainable throughput 10x too, from 50 req/s to 5 req/s — exactly why the other 45 req/s must be shed to a fallback instead of queuing behind it.*
+
 ### 6.5 Load Shedding — Queue-Depth Threshold Example
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    req1([incoming request]) --> qd{"queue depth?"}
+    qd -->|"under 50"| a1("accept all requests")
+    qd -->|"50 to 200"| a2{"high priority?"}
+    qd -->|"over 200"| a3{"checkout-critical?"}
+
+    a2 -->|yes| ok2("accept")
+    a2 -->|no| rej2("reject: 503<br/>Retry-After: 1")
+
+    a3 -->|yes| ok3("accept")
+    a3 -->|no| rej3("reject: 503<br/>Retry-After: 1")
+
+    a1 --> pool("worker pool<br/>20 workers, 50ms avg,<br/>400 req/s sustainable")
+    ok2 --> pool
+    ok3 --> pool
+
+    class req1 req
+    class qd,a2,a3 mathOp
+    class a1,ok2,ok3 train
+    class rej2,rej3 lossN
+    class pool base
 ```
-A service has a request queue in front of its worker pool.
-  worker pool size: 20
-  average request processing time: 50ms
-  -> normal sustainable throughput: 20 / 0.05 = 400 req/s
 
-Queue-depth-based shedding policy:
-  queue depth < 50:    accept all requests
-  queue depth 50-200:  accept only "high priority" requests
-                        (logged-in users, checkout flow);
-                        reject "low priority" (anonymous browsing,
-                        background prefetch, analytics beacons)
-                        with HTTP 503 + Retry-After: 1
-  queue depth > 200:   accept ONLY checkout-critical requests;
-                        reject everything else
-
-Example during a traffic spike (arrival rate jumps to 1000 req/s,
-2.5x sustainable capacity):
-  - without shedding: queue grows unbounded, queueing delay grows
-    from ~0ms to several SECONDS within tens of seconds, EVERY
-    request (including checkout) experiences the growing delay,
-    and eventually the queue hits a memory limit and the process
-    crashes -- taking down checkout along with everything else.
-
-  - with shedding: once queue depth exceeds 50 (reached in ~125ms
-    at the 600 req/s excess arrival rate), low-priority requests
-    start getting fast 503s. This caps the EFFECTIVE arrival rate
-    into the queue at roughly the worker pool's sustainable rate
-    for high-priority traffic, keeping checkout's queueing delay
-    bounded (low tens of ms) throughout the spike.
-```
+*During a spike to 1000 req/s (2.5x the pool's 400 req/s capacity), this ladder sheds low-priority traffic the instant queue depth passes 50, capping the effective arrival rate so checkout's queueing delay stays in the low tens of ms instead of growing unbounded until the process crashes.*
 
 ---
 
@@ -637,82 +636,86 @@ A travel-booking platform's flight search feature fans out a single user search 
 
 ### Current (Broken) Architecture
 
-```
-  User search request
-        |
-        v
-  +------------------+
-  | search-aggregator|
-  |  (shared HTTP    |
-  |   client, 30s    |
-  |   default timeout)|
-  +--------+----------+
-        |
-        +----+----+----+----+----+----+
-        v    v    v    v    v    v    v
-     [AA]  [DL]  [UA]  [BA]  [LH]  [Slow Airline X]
-     300ms 250ms 320ms 800ms 750ms  ... 25 SECONDS
-                                          (degraded today)
-        |    |    |    |    |    |
-        +----+----+----+----+----+
-             |
-             v
-     wait for ALL 6 (Promise.all-equivalent)
-     -> takes as long as the SLOWEST: 25 seconds
-     -> exceeds 2.5s SLA by 10x
-     -> if Slow Airline X times out at 30s with an
-        exception, the WHOLE search throws -- user
-        sees "Search failed, please try again" with
-        ZERO results, even though 5 of 6 airlines
-        responded successfully within 800ms.
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    user([user search request]) --> agg("search-aggregator<br/>shared client, 30s timeout")
+
+    agg --> aa("AA<br/>300ms")
+    agg --> dl("DL<br/>250ms")
+    agg --> ua("UA<br/>320ms")
+    agg --> ba("BA<br/>800ms")
+    agg --> lh("LH<br/>750ms")
+    agg --> slx("Slow Airline X<br/>25s, degraded today")
+
+    aa --> wait("wait for ALL 6<br/>about 25s - 10x over 2.5s SLA")
+    dl --> wait
+    ua --> wait
+    ba --> wait
+    lh --> wait
+    slx --> wait
+
+    wait --> res(["search fails: ZERO results,<br/>even though 5 of 6 succeeded"])
+
+    class user io
+    class agg mathOp
+    class aa,dl,ua,ba,lh,slx frozen
+    class wait,res lossN
 ```
 
 Observed impact before the fix: when "Slow Airline X" or "Slow Airline Y" (the two historically unreliable providers) is degraded — which happens for a cumulative ~3-4 hours/week across the two of them — **search p99 latency exceeds 20 seconds** and **~30% of searches during those windows return a complete error with zero results**, even though the other 4-5 airlines are working fine.
 
 ### Target (Fixed) Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    user([user search request<br/>deadline 2.5s]) --> agg("search-aggregator<br/>propagates ~2.2s budget")
+
+    agg --> aa("AA bulkhead<br/>pool 15, 600ms, 50% breaker")
+    agg --> dl("DL bulkhead<br/>pool 15, 600ms, 50% breaker")
+    agg --> mid("BA + LH bulkheads<br/>pool 15, 600ms, 50% breaker")
+    agg --> ax("Airline X bulkhead<br/>pool 6, 1200ms, 40% breaker")
+    agg --> ay("Airline Y bulkhead<br/>pool 6, 1200ms, 40% breaker")
+
+    aa --> ok1("responds 250ms")
+    dl --> ok2("responds 300ms")
+    mid --> ok3("responds within budget")
+    ax --> openx("circuit OPEN,<br/>fail fast, 0ms")
+    ay --> openy("circuit OPEN,<br/>fail fast, 0ms")
+
+    ok1 --> merge("aggregator merges 4 of 6<br/>+ 2 providers unavailable flag")
+    ok2 --> merge
+    ok3 --> merge
+    openx --> merge
+    openy --> merge
+
+    merge --> res(["response returned at ~900ms,<br/>well inside 2.5s SLA"])
+
+    class user io
+    class agg mathOp
+    class aa,dl,mid,ax,ay frozen
+    class ok1,ok2,ok3 train
+    class openx,openy lossN
+    class merge mathOp
+    class res train
 ```
-  User search request (deadline: 2.5s)
-        |
-        v
-  +-------------------------------------------+
-  | search-aggregator                          |
-  | propagates deadline budget: ~2.2s to       |
-  | airline calls (reserving ~0.3s for merge   |
-  | + sort + response serialization)           |
-  +--------+------------------------------------+
-        |
-        +----+----+----+----+----+----+
-        v    v    v    v    v    v    v
-   [AA bulkhead] [DL bulkhead] ... [Airline X bulkhead] [Airline Y bulkhead]
-   pool: 15      pool: 15           pool: 6              pool: 6
-   timeout: 600ms timeout: 600ms    timeout: 1200ms      timeout: 1200ms
-   breaker:       breaker:          breaker:             breaker:
-   20-call/50%    20-call/50%       20-call/40%          20-call/40%
-   (rarely opens) (rarely opens)    (frequently OPEN     (frequently OPEN
-                                      during incidents)    during incidents)
-        |    |    |    |    |    |
-        v    v    v    v    v    v
-     respond  respond ...   CIRCUIT OPEN     CIRCUIT OPEN
-     250ms    300ms          -> fail fast     -> fail fast
-                              IMMEDIATELY      IMMEDIATELY
-                              (0ms, no call)   (0ms, no call)
-        |    |    |    |    |    |
-        +----+----+----+----+----+
-             |
-             v
-     +---------------------------------------+
-     | aggregator: merge whatever responded   |
-     | within budget (e.g., 4 of 6 airlines)  |
-     | + "2 providers temporarily unavailable,|
-     |    showing results from 4 airlines"    |
-     +---------------------------------------+
-             |
-             v
-     Response returned at ~900ms (4 airlines
-     responded well within budget; 2 failed
-     fast via open circuit breakers)
-```
+
+*Per-airline bulkheads and circuit breakers turn the two chronically unreliable providers into a 0ms fail-fast path instead of a multi-second wait — the aggregator merges whatever responded within its 2.2s budget and returns at roughly 900ms, comfortably inside the 2.5s SLA.*
 
 ### Key Design Decisions
 

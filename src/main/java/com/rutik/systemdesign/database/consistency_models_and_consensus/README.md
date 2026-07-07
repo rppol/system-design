@@ -49,74 +49,86 @@ Eventual             | All replicas converge to same value        | Lowest
 
 ## 5. Architecture Diagrams
 
+**Consistency Hierarchy (strongest to weakest)**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    LIN("Linearizability<br/>real-time total order") --> SEQ("Sequential<br/>same order everywhere")
+    SEQ --> CAU("Causal<br/>causes precede effects")
+    CAU --> FIFO("FIFO / session<br/>ordered within a session")
+    FIFO --> MONO("Monotonic reads<br/>never go backward")
+    MONO --> RYW("Read-your-writes<br/>see your own writes")
+    RYW --> EVT("Eventual<br/>converges eventually")
+
+    class LIN lossN
+    class SEQ,CAU mathOp
+    class FIFO,MONO,RYW req
+    class EVT train
 ```
-Consistency Hierarchy (strongest to weakest)
-=============================================
 
-  Linearizability ─── "Real-time total order"
-        │
-  Sequential ────────── "Same order everywhere, not necessarily real-time"
-        │
-  Causal ────────────── "Causes precede effects"
-        │
-  FIFO (session) ─────── "Within a session: FIFO; across: arbitrary"
-        │
-  Monotonic reads ─────── "Reads don't go backward"
-        │
-  Read-your-writes ────── "You see your own writes"
-        │
-  Eventual ────────────── "Converges eventually"
+Strongest (red, top) to weakest (green, bottom) — color tracks the coordination cost from the Section 4 table, where red is the highest cost and green is the lowest.
 
+**Raft Consensus — Leader Election and Log Replication**
 
-Raft Consensus — Leader Election and Log Replication
-=====================================================
+```mermaid
+stateDiagram-v2
+    [*] --> Follower
+    Follower --> Candidate: no heartbeat within<br/>election timeout (150-300ms)
+    Candidate --> Candidate: split vote,<br/>new term, retry
+    Candidate --> Leader: quorum grants vote<br/>(N/2+1 nodes)
+    Candidate --> Follower: higher term or<br/>current leader discovered
+    Leader --> Follower: higher term discovered
+    note right of Leader
+        Sends AppendEntries heartbeats.
+        Client writes append to the log,
+        replicate to followers, then commit
+        once a quorum acknowledges.
+    end note
+```
 
-States: Follower → Candidate → Leader
+Randomized election timeouts keep followers from becoming candidates simultaneously; a candidate that wins votes from a quorum (N/2+1) becomes leader and drives every future write through its log.
 
-Follower:
-  - Receives heartbeats from Leader
-  - If no heartbeat for election timeout (150-300ms): becomes Candidate
-
-Candidate:
-  - Increments term
-  - Votes for itself
-  - Sends RequestVote to all nodes
-  - If quorum votes received → becomes Leader
-
-Leader:
-  - Sends periodic heartbeats (AppendEntries with empty payload)
-  - Receives client writes → appends to local log → sends AppendEntries to followers
-  - Once quorum acknowledges entry → marks as committed → applies to state machine
-
+```
 Log Replication:
   Leader log:   [1:set x=1] [2:set y=2] [3:set x=3] ← committed up to 3
   Follower A:   [1:set x=1] [2:set y=2] [3:set x=3] ← in sync
   Follower B:   [1:set x=1] [2:set y=2]              ← one entry behind
                                                          (will receive on next AE)
-
-
-Vector Clocks
-=============
-
-Three nodes: A, B, C
-
-Initial:  A=[0,0,0]  B=[0,0,0]  C=[0,0,0]
-
-A sends message m1 to B:
-  A increments: A=[1,0,0]
-  B receives m1, increments B's clock, merges: B=[1,1,0]
-
-B sends message m2 to C:
-  B increments: B=[1,2,0]
-  C receives m2, merges: C=[1,2,1]
-
-C independently sends m3 to A:
-  C increments: C=[1,2,2]
-  A receives m3, merges: A=[2,0,2]
-
-A=[2,0,2] and B=[1,2,0]: neither dominates (concurrent events)
-C=[1,2,2] > m2=[1,2,0] → C's state causally follows m2 ✓
 ```
+
+Column alignment shows the divergence directly: Follower B is missing entry 3 and will catch up on the next AppendEntries RPC.
+
+**Vector Clocks**
+
+```mermaid
+sequenceDiagram
+    participant A as Node A
+    participant B as Node B
+    participant C as Node C
+
+    Note over A,C: All vectors start at zero — A=[0,0,0], B=[0,0,0], C=[0,0,0]
+
+    A->>B: m1 — A increments to [1,0,0]
+    Note over B: B merges on receive → B=[1,1,0]
+
+    B->>C: m2 — B increments to [1,2,0]
+    Note over C: C merges on receive → C=[1,2,1]
+
+    C->>A: m3 — C increments to [1,2,2]
+    Note over A: A merges on receive → A=[2,0,2]
+
+    Note over A,C: A=[2,0,2] and B=[1,2,0] are concurrent — neither dominates.<br/>C=[1,2,2] dominates m2=[1,2,0], so C causally follows m2.
+```
+
+Three nodes exchange messages while each maintains its own vector clock; merging on receive (element-wise max) lets a node detect causal dependency, while two incomparable vectors reveal a pair of concurrent, unordered events.
 
 ---
 
@@ -243,14 +255,33 @@ In leaderless systems (Cassandra, DynamoDB), replicas can diverge. Two mechanism
 
 **Anti-entropy**: A background process (Merkle tree-based in Cassandra) compares replica data hashes to detect divergence, then syncs the differing portions. This catches divergence that read repair misses (data not recently read).
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    TRIG(["nodetool repair<br/>manual trigger"]) --> NA["Node A builds<br/>Merkle tree"]
+    TRIG --> NB["Node B builds<br/>Merkle tree"]
+    NA --> CMP{"compare<br/>root hashes"}
+    NB --> CMP
+    CMP -->|"differ"| DESC["descend only<br/>differing subtrees"]
+    DESC --> XFER(["transfer only the<br/>differing leaf data"])
+    CMP -->|"match"| DONE(["no data<br/>transfer needed"])
+
+    class TRIG req
+    class NA,NB mathOp
+    class CMP mathOp
+    class DESC mathOp
+    class XFER train
+    class DONE train
 ```
-Cassandra anti-entropy:
-  Node A hashes its token range data → builds Merkle tree
-  Node B does the same
-  Anti-entropy service compares root hashes → descends only differing subtrees
-  → Transfers only the different leaf data (efficient)
-  nodetool repair: triggers manual anti-entropy across cluster
-```
+
+nodetool repair manually triggers this Merkle-tree comparison; comparing root hashes lets Cassandra skip identical subtrees and transfer only the diverged leaf data, far cheaper than re-syncing an entire token range.
 
 ---
 
@@ -277,6 +308,24 @@ Causal             | Available    | Medium   | Medium     | Medium
 Eventual (CRDT)    | Available    | Low      | High       | Medium
 Eventual (LWW)     | Available    | Low      | High       | Low (with clock sync)
 ```
+
+```mermaid
+quadrantChart
+    title Consistency Strength vs Coordination Cost
+    x-axis Low Coordination Cost --> High Coordination Cost
+    y-axis Weak Consistency --> Strong Consistency
+    quadrant-1 Strong and Expensive
+    quadrant-2 Impossible Free Lunch
+    quadrant-3 Weak and Cheap
+    quadrant-4 Expensive Yet Weak
+    Linearizable: [0.92, 0.93]
+    Sequential: [0.8, 0.82]
+    Causal: [0.5, 0.5]
+    "Eventual (CRDT)": [0.15, 0.18]
+    "Eventual (LWW)": [0.1, 0.1]
+```
+
+Plotting the Latency/Complexity ratings from the table above onto coordination cost vs. consistency strength shows a straight diagonal band: Linearizable and Sequential sit in the expensive-but-strong corner, Eventual sits in the cheap-but-weak corner, and the top-left "free lunch" quadrant stays empty because no real system escapes this tradeoff.
 
 ---
 
@@ -413,6 +462,34 @@ Option 3: Centralized append-only log with OT server
 ```
 
 **Decision**: Use Yjs (CRDT) for real-time collaborative editing with peer-to-peer merging. Store the canonical document state in PostgreSQL (with the merged CRDT state serialized), updated via a background persistence worker. PostgreSQL consistency level relaxed to READ COMMITTED (no SERIALIZABLE needed — conflicts are handled by CRDT merge, not database isolation).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    START(["10K editors<br/>40% abort rate"]) --> OT["Option 1: OT<br/>server transforms ops"]
+    START --> CRDT["Option 2: CRDT<br/>Yjs, no coordination"]
+    START --> LOG["Option 3: Central log<br/>single sequencer"]
+
+    OT --> DEC{"chosen<br/>approach"}
+    CRDT --> DEC
+    LOG --> DEC
+    DEC --> WIN(["CRDT wins:<br/>0% aborts, 5ms edits"])
+
+    class START io
+    class OT,LOG mathOp
+    class CRDT train
+    class DEC mathOp
+    class WIN train
+```
+
+All three options trace back to the same 10K-editor, 40%-abort-rate problem; CRDTs win because each client merges locally with no server round trip, which is why the abort-rate and edit-latency numbers below both collapse.
 
 **Result**:
 - Transaction abort rate: 40% → 0% (CRDT merge never conflicts)

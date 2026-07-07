@@ -44,76 +44,145 @@ Write-around    | App reads from DB (bypass) | App writes to DB only | N/A (no c
 
 ## 5. Architecture Diagrams
 
+**Cache-Aside (Most Common)**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Read["Read Path"]
+        direction LR
+        A(["Application"]) -->|"GET key"| B{"Redis hit<br/>or miss?"}
+        B -->|"HIT"| C(["return data<br/>~0.5ms"])
+        B -->|"MISS"| D["DB query"]
+        D --> E["populate cache<br/>SETEX key value TTL"]
+        E --> F(["return data"])
+    end
+
+    subgraph Write["Write Path"]
+        direction LR
+        G(["Application"]) -->|"UPDATE row"| H["DB"]
+        H -->|"DEL key<br/>(or SET new value)"| I["Redis"]
+    end
+
+    class A,G,C,F io
+    class B mathOp
+    class D,H,E,I base
 ```
-Cache-Aside (Most Common)
-==========================
 
-Read:
-  Application → Redis GET(key)
-                    │
-              ┌─────┴──────┐
-           HIT │            │ MISS
-              ↓            ↓
-         return data    DB query
-                            │
-                      populate cache
-                      SETEX key value TTL
-                            │
-                       return data
+Reads check Redis first and fall through to the database only on a miss, repopulating the cache with a TTL; writes go straight to the database and then invalidate (or update) the cache key.
 
-Write:
-  Application → DB UPDATE(row)
-              → Redis DEL(key)  [or SET new value]
-  (invalidate or update cache after DB write)
+**Write-Through**
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Write-Through
-==============
+    A(["Application"]) -->|"UPDATE row<br/>wait for commit"| B["DB"]
+    B -->|"SET key, value, TTL<br/>atomic with write"| C["Redis"]
+    C -.->|"SET fails"| D["stale cache<br/>until TTL expires"]
 
-Write:
-  Application → DB UPDATE(row)  [wait for commit]
-              → Redis SET(key, new_value, TTL)  [update cache atomically with write]
-
-Risk: if Redis SET fails after DB commit, cache is stale until TTL expires
-
-
-Write-Behind (Write-Back)
-==========================
-
-Write:
-  Application → Redis SET(key, value)  [fast, returns immediately]
-              ← success
-              [async background]
-              → DB UPDATE(row)  [persisted later]
-
-Risk: data loss if Redis crashes before async persist completes
-Use: write-heavy counters, analytics (not financial data)
-
-
-Cache Stampede Prevention
-==========================
-
-Normal flow (10K requests hit same expired key simultaneously):
-  All 10K requests → Redis MISS → All 10K query DB → DB overloaded
-
-Probabilistic Early Expiration:
-  Read:
-    value, ttl = Redis GET_WITH_TTL(key)
-    if ttl < random(0, delta) * -log(random()):
-      recalculate and refresh proactively before expiration
-    return value
-
-Mutex / Distributed Lock:
-  value = Redis GET(key)
-  if miss:
-    if Redis SET(key:lock, 1, NX, PX=5000):  ← acquire lock
-      value = DB_query()
-      Redis SET(key, value, TTL)
-      Redis DEL(key:lock)
-    else:
-      sleep(100ms); retry  ← other requests wait
-  return value
+    class A io
+    class B,C base
+    class D lossN
 ```
+
+The write is atomic with the DB commit; if the Redis SET fails after the DB commit, the cache stays stale until TTL expiry (the red path above).
+
+**Write-Behind (Write-Back)**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["Application"]) -->|"SET key, value"| B["Redis"]
+    B -->|"success<br/>returns immediately"| C(["response"])
+    B -.->|"async background"| D["DB UPDATE<br/>persisted later"]
+    D -.->|"crash before flush"| E["data loss"]
+
+    class A,C io
+    class B,D base
+    class E lossN
+```
+
+Use for write-heavy counters and analytics, not financial data: if Redis crashes before the async persist completes, the unsynced writes are lost.
+
+**Cache Stampede Prevention — Unprotected**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["10K requests<br/>same expired key"]) --> B["Redis: MISS"]
+    B --> C["10K DB queries<br/>at once"]
+    C --> D["DB overloaded"]
+
+    class A req
+    class B,C base
+    class D lossN
+```
+
+When a popular key expires, every concurrent request misses the cache at the same instant and queries the database simultaneously, overloading it.
+
+**Cache Stampede Prevention — Techniques**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph PEE["Probabilistic Early Expiration"]
+        direction LR
+        A(["GET key<br/>+ remaining TTL"]) --> B{"ttl below<br/>random threshold?"}
+        B -->|"yes"| C["refresh proactively<br/>before expiry"]
+        B -->|"no"| D(["return value"])
+    end
+
+    subgraph LOCK["Mutex / Distributed Lock"]
+        direction LR
+        E(["Redis GET key"]) --> F{"hit or<br/>miss?"}
+        F -->|"hit"| G(["return value"])
+        F -->|"miss"| H{"SET lock<br/>NX PX=5000?"}
+        H -->|"acquired"| I["query DB<br/>SET key, value, TTL<br/>DEL lock"]
+        H -->|"already locked"| J["sleep 100ms<br/>retry"]
+    end
+
+    class A,E,G,D io
+    class B,F,H mathOp
+    class C,I train
+    class J lossN
+```
+
+Probabilistic early expiration refreshes a key proactively before it expires once the remaining TTL drops below a random cutoff, so refreshes spread out instead of clustering; the mutex lock lets only the request that acquires the lock query the database, while every other concurrent request sleeps and retries instead of piling onto the database.
 
 ---
 
@@ -212,59 +281,71 @@ public void flushPageViews() {
 
 A cache stampede occurs when a popular cache entry expires and many concurrent requests simultaneously miss the cache, all query the database, and all try to repopulate the cache at the same time.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["page TTL expires<br/>10K req/s (normal: 100 req/s)"]) --> B["10K requests<br/>hit DB at once"]
+    B --> C["DB overwhelmed<br/>cascade failure"]
+
+    A -.-> D["Option 1: Mutex lock<br/>serialize to 1 DB query"]
+    D --> E(["others wait + retry<br/>latency during lock hold"])
+
+    A -.-> F["Option 2: Background refresh<br/>refresh before expiry"]
+    F --> G(["no stampede, no stale serving"])
+
+    A -.-> H["Option 3: TTL jitter<br/>base + random(0, 20%)"]
+    H --> I(["expirations spread out<br/>3600s to 4320s"])
+
+    class A req
+    class B base
+    class C lossN
+    class D,F,H mathOp
+    class E,G,I train
 ```
-Without protection:
-  10K req/s to a popular page
-  Page TTL expires
-  → 10K requests simultaneously hit DB (normal DB load = 100 req/s)
-  → DB overwhelmed → cascade failure
 
-Protection option 1: Mutex lock
-  First request acquires Redis lock, queries DB, repopulates cache, releases lock
-  Other requests wait (with sleep+retry) → serialize DB access to 1 request
-  Drawback: waiting requests see increased latency during lock hold
-
-Protection option 2: Background refresh
-  Monitor TTL proactively:
-    if remaining_ttl < 20% of original TTL:
-      trigger background refresh (non-blocking)
-      serve stale value to current request
-  Result: cache is refreshed before expiration; no stampede, no stale serving
-
-Protection option 3: Add jitter to TTL
-  TTL = base_ttl + random(0, base_ttl * 0.2)
-  Example: base=3600s → actual TTL between 3600s and 4320s
-  Prevents all entries set at the same time from expiring simultaneously
-  Most effective for bulk cache loads (e.g., after a cache flush)
-```
+Without protection, 10K requests per second hit the database at once when a popular page's TTL expires (versus a normal load of 100 req/s), overwhelming it; mutex locking, background refresh, and TTL jitter each prevent the pile-up in a different way.
 
 ### Hot Key Problem
 
 A hot key is a cache key accessed at a rate far exceeding what a single Redis node can handle (typically > 100K ops/second per key).
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["trending:top10<br/>500K ops/sec"]) --> B["single Redis node<br/>limit ~100K ops/sec"]
+    B --> C["node CPU-bound<br/>latency spikes for all keys"]
+
+    C -.-> D["1. Local L1 cache<br/>Caffeine, 100ms TTL"]
+    D --> E(["1M app-level hits<br/>10K Redis hits"])
+
+    C -.-> F["2. Key replication<br/>10 shards, random read"]
+    F --> G(["10x storage<br/>temporary inconsistency"])
+
+    C -.-> H["3. Read from replicas<br/>REPLICA_PREFERRED"]
+    H --> I(["reads spread out<br/>slight replication lag"])
+
+    class A req
+    class B,D,F base
+    class C lossN
+    class H frozen
+    class E,G,I train
 ```
-Example: "trending:top10" accessed 500K times/second
-Single Redis node: ~100K ops/second limit for one key
-Result: Redis node CPU-bound, latency spikes for all keys on that node
 
-Solutions:
-1. Local in-process cache (L1):
-   Caffeine cache with 100ms TTL for hot keys
-   Application first checks Caffeine, then Redis
-   10K RPS × 100 application instances → 1M Caffeine hits, 10K Redis hits
-   Trade-off: 100ms stale window; memory per JVM instance
-
-2. Key replication (read fan-out):
-   Store key as: "trending:top10:0" through "trending:top10:9"
-   Random shard selection on read: key + rand(0, 9)
-   Writes update all 10 shards
-   Trade-off: 10× storage; write complexity; temporary inconsistency across shards
-
-3. Redis Cluster read from replicas:
-   redis.opsForValue().get(key, ReadFrom.REPLICA_PREFERRED)
-   Distributes reads across primary + replicas
-   Trade-off: slight replication lag (async)
-```
+A single key at 500K ops/second exceeds one Redis node's ~100K ops/second limit and makes that node CPU-bound; a local L1 cache, key replication across shards, and reading from replicas each redistribute the load differently.
 
 ### Cache Invalidation Strategies
 
@@ -307,24 +388,29 @@ public void updateUser(long userId, UpdateUserRequest req) {
 
 For read-heavy content (product pages, static assets, API responses for public data), CDN functions as a distributed HTTP cache.
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant CDN as CDN Edge Cache
+    participant O as Origin Server
+
+    C->>CDN: GET /products/42
+    CDN->>O: forward (cache empty)
+    O-->>CDN: 200 OK, Cache-Control max-age=3600, stale-while-revalidate=60
+    CDN-->>C: 200 OK (cached 1 hour)
+
+    Note over C,CDN: after max-age expires, within the 60s SWR window
+    C->>CDN: GET /products/42, If-None-Match "abc123"
+    CDN->>O: revalidate
+    O-->>CDN: 304 Not Modified
+    CDN-->>C: 304 Not Modified (serves cached body)
+
+    Note over O,CDN: on a price update
+    O->>CDN: POST purge_cache, files /products/42
+    CDN-->>O: purge acknowledged
 ```
-Cache-Control headers:
-  Cache-Control: public, max-age=3600, stale-while-revalidate=60
-  → CDN caches for 1 hour; after expiry, serves stale for 60s while revalidating
 
-  Cache-Control: private, no-store
-  → Not cached by CDN; appropriate for user-specific data
-
-ETag / If-None-Match:
-  Server: ETag: "abc123"  (hash of content)
-  Client: If-None-Match: "abc123"
-  Server: 304 Not Modified  → CDN serves cached version, no bandwidth used
-
-CDN purge API:
-  On product price update:
-    curl -X POST "https://api.cloudflare.com/zones/{id}/purge_cache"
-          -d '{"files":["https://example.com/products/42"]}'
-```
+The first request is a cache miss and gets a fresh response carrying Cache-Control directives (1-hour max-age plus a 60-second stale-while-revalidate window); a later conditional GET with the ETag returns 304 without re-sending the body; the origin can force-evict one URL via the purge API on a price update. `Cache-Control: private, no-store` skips the CDN tier entirely for user-specific responses.
 
 ---
 
@@ -362,6 +448,33 @@ Write-around     | N/A             | DB only       | DB only       | Low
 
 **Cache-aside vs write-through**: Cache-aside is simpler; the cache is populated on demand. Write-through ensures the cache is always warm after writes. Choose write-through when read latency on cache misses is unacceptable (e.g., initial user session load must be < 50ms).
 
+**Which caching pattern should I use?**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["new data path"]) --> B{"read-heavy with<br/>tolerable staleness?"}
+    B -->|"no"| C["avoid caching<br/>(write-around)"]
+    B -->|"yes"| D{"can writes tolerate<br/>eventual loss?"}
+    D -->|"yes, write-heavy<br/>e.g. counters"| E["write-behind"]
+    D -->|"no"| F{"cache-miss read<br/>latency unacceptable?"}
+    F -->|"yes, e.g. must<br/>be under 50ms"| G["write-through"]
+    F -->|"no"| H["cache-aside<br/>(default)"]
+
+    class A io
+    class B,D,F mathOp
+    class C,E,G,H train
+```
+
+A quick decision path from the guidance above: tolerance for write loss favors write-behind, an unacceptable cache-miss read latency favors write-through, and everything else defaults to cache-aside.
+
 ---
 
 ## 10. Common Pitfalls
@@ -375,6 +488,26 @@ Write-around     | N/A             | DB only       | DB only       | Low
 **Hot key causing Redis node saturation**: A "flash sale active" flag is checked on every request (100K/second). All requests go to one Redis key on one node. That node hits 100% CPU. Other keys on that node also slow down. Fix: cache the flag locally in the application process (Caffeine/Guava cache) with a 100ms TTL; check Redis only on miss. This reduces Redis reads for that key by 99%.
 
 **Cache invalidation race condition**: Application reads user from DB, starts writing to cache. Simultaneously, another request updates the user in DB and deletes the cache key. The first request finishes and writes the OLD user to cache (the delete happened before the write). Cache now has stale data until TTL. Fix: use `SET NX` (set only if not exists) when repopulating after a delete, or use version-based keys.
+
+```mermaid
+sequenceDiagram
+    participant A as Request A (reader)
+    participant B as Request B (writer)
+    participant DB as Database
+    participant R as Redis
+
+    A->>DB: read user (cache miss)
+    Note over A,DB: A's read is in flight (slow)
+    B->>DB: UPDATE user to v2
+    DB-->>B: commit ok
+    B->>R: DEL user key
+    R-->>B: ack
+    DB-->>A: return user v1
+    A->>R: SET user key = v1
+    Note over R: delete already ran first;<br/>cache now holds stale v1 until TTL expiry
+```
+
+Request A's read started first but is slow; Request B's update-and-delete completes while A's read is still in flight, so A's stale v1 arrives after the delete and repopulates the cache, leaving stale data until TTL expiry (the fix above: SET NX, or version-based keys).
 
 ---
 
@@ -486,15 +619,31 @@ Cache poisoning: a malicious user causes an incorrect response to be cached and 
 **Q: How does two-level caching (L1 + L2) work?**
 L1 (local in-process cache, e.g., Caffeine) is checked first. L2 (shared distributed cache, e.g., Redis) is checked on L1 miss. Database is queried only on L2 miss.
 
-```
-Read:
-  App → Caffeine (L1): hit → return (0.1ms)
-       → Redis (L2): hit → populate Caffeine, return (0.5ms)
-       → DB: query, populate Redis, populate Caffeine, return (10ms)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-L1 TTL: 30–100 seconds (short — local memory, bounded staleness)
-L2 TTL: 5–30 minutes (longer — shared, lower miss rate)
+    A(["App read"]) --> B{"Caffeine L1<br/>hit?"}
+    B -->|"hit (0.1ms)"| C(["return"])
+    B -->|"miss"| D{"Redis L2<br/>hit?"}
+    D -->|"hit (0.5ms)"| E["populate L1"]
+    E --> C
+    D -->|"miss"| F["DB query (10ms)"]
+    F --> G["populate L2 + L1"]
+    G --> C
+
+    class A,C io
+    class B,D mathOp
+    class E,F,G base
 ```
+
+L1 is checked first and returns in about 0.1ms; an L1 miss falls through to L2 (about 0.5ms), which repopulates L1; only an L2 miss reaches the database (about 10ms), which then repopulates both cache levels.
 
 L1 caches ultra-hot data locally, reducing Redis network traffic by 90%+ for the hottest keys. Tradeoff: L1 entries on different application instances may be stale relative to each other for up to the L1 TTL. On L2 invalidation (explicit delete), L1 entries continue serving stale data until their own TTL expires. Acceptable for configuration data and slowly changing reference data; not acceptable for user-facing profile data that must reflect writes quickly.
 
@@ -521,20 +670,29 @@ L1 caches ultra-hot data locally, reducing Redis network traffic by 90%+ for the
 
 **Caching design**:
 
-```
-Layer 1: Caffeine (JVM in-process, 500ms TTL)
-  Keys: product:{id}, pricing:{product_id}:{user_segment}
-  Hit rate target: 80% (ultra-hot products)
-  Benefit: 0.05ms lookup, no network call
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Layer 2: Redis (shared, 5-minute TTL)
-  Keys: product:{id}, pricing:{product_id}:{user_segment}, inventory:{product_id}
-  Hit rate target: 95%
-  Note: user-specific discounts NOT cached here (vary per user; use Caffeine)
+    A(["50K req/s"]) --> B["Layer 1: Caffeine<br/>JVM in-process, 500ms TTL"]
+    B -->|"80% hit rate<br/>0.05ms, no network"| C(["return"])
+    B -.->|"miss"| D["Layer 2: Redis<br/>shared, 5-min TTL"]
+    D -->|"95% hit rate"| C
+    D -.->|"miss"| E["Layer 3: PostgreSQL<br/>cache-miss path only"]
+    E -->|"~2,500 QPS<br/>5% miss x 50K req/s"| C
 
-Layer 3: PostgreSQL (cache miss path only)
-  Expected QPS after caching: ~2,500 (5% miss rate × 50K req/s)
+    class A req
+    class B,D,E base
+    class C io
 ```
+
+Product and pricing keys are cached in both layers; user-specific discounts vary per user and live only in Caffeine (Layer 1), while inventory keys live only in Layer 2 (Redis) with acceptable 60-second staleness. The design projects roughly 2,500 database queries per second at 50K req/s — a 5% miss rate cascading through both cache layers.
 
 **Cache invalidation**:
 - Product data updated: outbox event → Debezium → Kafka → cache invalidation service deletes Redis key

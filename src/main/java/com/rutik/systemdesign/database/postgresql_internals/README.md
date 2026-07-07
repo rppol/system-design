@@ -20,19 +20,37 @@ PostgreSQL's design philosophy: correctness first, then performance. Every archi
 
 ### Process Model
 
-```
-postmaster (PID 1)
-├── shared memory segments (buffer pool, lock table, WAL buffers)
-├── checkpointer     — flushes dirty pages, manages WAL checkpoints
-├── background writer (bgwriter) — proactively flushes dirty pages
-├── WAL writer       — flushes WAL buffers to disk
-├── autovacuum launcher → autovacuum workers (up to autovacuum_max_workers=3)
-├── stats collector  — collects pg_stat_* tables
-├── logical replication launcher → logical worker processes
-└── backend processes (one per client connection)
-    ├── backend 1234 — handles client queries, uses shared memory
-    ├── backend 1235
-    └── ...
+*The postmaster forks a fixed set of background workers plus one backend process per client connection:*
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PM(postmaster<br/>PID 1) --> SHM(shared memory<br/>buffer pool · lock table · WAL buffers)
+    PM --> CKPT(checkpointer<br/>flushes dirty pages)
+    PM --> BGW(background writer<br/>proactive page flush)
+    PM --> WALW(WAL writer<br/>flush WAL buffers to disk)
+    PM --> AVL(autovacuum launcher)
+    AVL --> AVW(autovacuum workers<br/>up to 3 by default)
+    PM --> STATS(stats collector<br/>collects pg_stat views)
+    PM --> LRL(logical replication<br/>launcher)
+    LRL --> LRW(logical worker<br/>processes)
+    PM --> BE([backend processes<br/>one per client connection])
+    BE --> BE1(backend 1234)
+    BE --> BE2(backend 1235)
+    BE --> BEN(more backends)
+
+    class PM,SHM base
+    class CKPT,BGW,WALW train
+    class AVL,AVW mathOp
+    class STATS,BE,BE1,BE2,BEN req
+    class LRL,LRW frozen
 ```
 
 Each backend process is a separate OS process (~5-10 MB RSS). This is different from MySQL's thread-per-connection model. PostgreSQL 14+ introduced connection pooling via `pg_hba.conf` improvements, but external poolers (PgBouncer) remain essential at scale.
@@ -68,6 +86,31 @@ For a 10M-row table: 50 + 0.2 × 10,000,000 = 2,000,050 dead tuples before autov
 
 This means a table receiving 200K updates/day won't trigger autovacuum for 10 days — 2M dead tuples accumulate.
 
+*The trigger is a single threshold gate: bloat keeps growing until the dead-tuple count crosses it, then autovacuum fires:*
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    DT(dead tuples<br/>accumulating) --> CMP{"tuples over<br/>threshold?"}
+    THR(threshold<br/>50 + 0.2 × rows) --> CMP
+    CMP -->|"no · still under<br/>2,000,050 on 10M rows"| WAIT(bloat keeps growing<br/>no autovacuum yet)
+    CMP -->|"yes · 2,000,050+<br/>dead tuples"| FIRE(autovacuum worker<br/>fires on table)
+    WAIT -.-> DT
+
+    class DT req
+    class THR base
+    class CMP mathOp
+    class WAIT lossN
+    class FIRE train
+```
+
 Per-table override (recommended for high-write tables):
 ```sql
 ALTER TABLE high_write_table SET (
@@ -80,6 +123,33 @@ ALTER TABLE high_write_table SET (
 ### XID Wraparound
 
 PostgreSQL transaction IDs (XIDs) are 32-bit unsigned integers cycling after ~2.1 billion transactions. If a table's relfrozenxid falls more than 2 billion XIDs behind the current XID, PostgreSQL forcibly shuts down to prevent wraparound (catastrophic data corruption). Autovacuum's `--freeze` mode (`autovacuum_freeze_max_age = 200M` XIDs by default) ensures tables are frozen before the danger zone.
+
+*Autovacuum's freeze pass should cycle every table back to Healthy long before the alert thresholds monitored in Pitfall 5 are ever reached:*
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Healthy
+    Healthy --> Aging: transactions<br/>consume XIDs
+    Aging --> Healthy: autovacuum freeze<br/>age under 200M default
+    Aging --> Alert: datfrozenxid age<br/>passes 1 billion
+    Alert --> Emergency: age passes<br/>1.8 billion
+    Emergency --> Shutdown: age nears<br/>2.1 billion limit
+    Shutdown --> Healthy: VACUUM FREEZE<br/>on all tables
+
+    class Healthy train
+    class Aging base
+    class Alert mathOp
+    class Emergency lossN
+    class Shutdown frozen
+```
 
 ---
 
@@ -109,24 +179,41 @@ After VACUUM:
 | live |  FSM | live |  FSM | live |  ← Dead tuples replaced by Free Space
 | VM=1 | VM=1 | VM=1 | VM=1 | VM=1 |  ← All pages all-visible
 +------+------+------+------+------+
+```
 
-QUERY PLANNER PIPELINE:
+*VM=1 lets VACUUM skip a page outright; only VM=0 pages get scanned, their dead tuples reclaimed into the Free Space Map, and the bit flipped back to 1 — no space returns to the OS until `VACUUM FULL` or `pg_repack` runs.*
 
-SQL Query
-    ↓
-Parser (SQL → Parse Tree)
-    ↓
-Analyzer (Semantic Analysis, Type Checking)
-    ↓
-Rewriter (Rule System: views, security policies)
-    ↓
-Planner / Optimizer
-  ├── Statistics: pg_statistic (column histograms, n_distinct, correlation)
-  ├── Cost Model: seq_page_cost, random_page_cost, cpu_tuple_cost, cpu_index_tuple_cost
-  ├── Plan nodes: SeqScan, IndexScan, BitmapScan, NestLoop, HashJoin, MergeJoin, Sort, Agg
-  └── Cost estimated in arbitrary units; planner picks minimum-cost plan
-    ↓
-Executor (Execute plan, return rows)
+**Query planner pipeline**: every statement passes through four fixed stages before the cost-based optimizer picks a plan from `pg_statistic` and the cost model.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q([SQL query]) --> P(Parser<br/>SQL to parse tree)
+    P --> AN(Analyzer<br/>semantic analysis)
+    AN --> RW(Rewriter<br/>views · security policies)
+    RW --> PL{"Planner / Optimizer"}
+    PL --> EX([Executor<br/>runs plan, returns rows])
+
+    subgraph PLANOPT["Cost-based plan selection"]
+        STAT(Statistics<br/>pg_statistic histograms)
+        COST(Cost model<br/>seq/random/cpu costs)
+        NODES(Plan nodes<br/>SeqScan · IndexScan · HashJoin)
+    end
+
+    PL -.-> STAT
+    PL -.-> COST
+    PL -.-> NODES
+
+    class Q,EX io
+    class P,AN,RW,PL mathOp
+    class STAT,COST,NODES base
 ```
 
 ---

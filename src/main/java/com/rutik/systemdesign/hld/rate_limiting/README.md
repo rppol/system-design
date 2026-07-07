@@ -63,25 +63,15 @@ The key insight: the bucket has a maximum capacity ("burst size"). You can accum
 
 #### ASCII Diagram
 
+```mermaid
+xychart-beta
+    title "Token Bucket Fill Over Time (refill 10 tok/s, capacity 50)"
+    x-axis ["0s start", "0s after burst", "1s refilled", "1s after 5 req", "6s capped"]
+    y-axis "Tokens in bucket" 0 --> 50
+    bar [10, 0, 10, 5, 50]
 ```
-Refill rate: 10 tokens/sec
-Bucket capacity: 50 tokens (max burst)
 
-Time 0s:   [##########]  10 tokens
-           Burst arrives: 10 requests consumed
-           [          ]  0 tokens
-
-Time 1s:   [##########]  10 new tokens added
-           5 requests come in
-           [#####     ]  5 tokens remaining
-
-Time 6s:   [##################################################]  50 tokens (full, capped)
-           100 requests arrive -> 50 allowed, 50 rejected
-
-Refill:   +10 tok/s  -->  [ tok | tok | tok | ... ]  <-- Requests drain tokens
-                                    ^
-                               max capacity = 50
-```
+At 6s the bucket is full at its 50-token cap; when 100 requests arrive at once, only 50 are allowed and 50 are rejected — the bucket absorbs bursts up to capacity, then sheds the rest.
 
 #### Pseudocode
 
@@ -130,22 +120,29 @@ The key difference from Token Bucket: output rate is constant and smooth. There 
 
 #### ASCII Diagram
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    input(["Bursty input<br/>20 req at once"]) --> queue("Queue<br/>capacity 20")
+    queue --> leak("Leak rate<br/>5 req/sec")
+    leak --> output(["Smooth output<br/>constant rate"])
+    queue -.->|"req21, req22, ..."| dropped(["Dropped<br/>overflow"])
+
+    class input io
+    class queue req
+    class leak mathOp
+    class output io
+    class dropped lossN
 ```
-Leak rate: 5 requests/sec (constant output)
-Queue capacity: 20 requests
 
-Incoming:  ||||||||||||||||||||  (20 req arrive at once)
-           Queue fills up:
-           [ req1 | req2 | req3 | ... | req20 ]  <- 20 queued
-
-           req21, req22 arrive -> DROPPED (overflow)
-
-Processing: req1 out --> req2 out --> req3 out ... (5/sec steady)
-
-Input (bursty)         Output (smooth)
-  |||  |||||  ||   -->  | | | | | | | | |
-  ^variable              ^constant rate
-```
+The queue absorbs the burst up to its 20-request capacity; anything past that is dropped, while the leak rate drains it at a fixed 5 requests/sec regardless of how bursty the input was.
 
 #### Pseudocode
 
@@ -196,27 +193,15 @@ This is the critical flaw of fixed windows. If a user sends requests at the very
 
 #### ASCII Diagram
 
+```mermaid
+xychart-beta
+    title "Boundary Spike: 200 Requests in a 2-Second Span"
+    x-axis ["Window 1 (0-59s)", "Window 2 (60-119s)", "Boundary span (~2s)"]
+    y-axis "Requests" 0 --> 200
+    bar [100, 100, 200]
 ```
-Limit: 100 requests per minute
 
-Window 1: [00:00 --------- 00:59]
-Window 2: [01:00 --------- 01:59]
-
-Normal case:
-  Window 1: 100 requests spread evenly -> OK
-  Window 2: 100 requests spread evenly -> OK
-
-Boundary attack:
-  Window 1: 100 requests at 00:59 -> OK (100/100)
-  Window 2: 100 requests at 01:00 -> OK (100/100)
-
-  In the 2-second span 00:59-01:00: 200 requests processed!
-  = 2x the intended rate limit
-
-  |...........||||||||||||||  |||||||||||||...........|
-  ^window 1   ^boundary spike^window 2
-              200 req in ~2s!
-```
+Both windows individually stay within the 100/min limit, but the 2-second span straddling the boundary (00:59-01:00) sees all 200 requests — double the intended rate. The sliding-window approaches below close this gap.
 
 #### Pseudocode
 
@@ -311,26 +296,15 @@ Where `elapsed` is the time elapsed since the start of the current window.
 
 #### How It Works
 
+```mermaid
+xychart-beta
+    title "Sliding Window Estimate at t=01:15 (elapsed 15s of 60s window)"
+    x-axis ["Previous Window", "Current Window", "Weighted Estimate", "Limit"]
+    y-axis "Requests" 0 --> 100
+    bar [84, 36, 99, 100]
 ```
-window_size = 60 seconds
-limit = 100 requests
 
-          Previous Window          Current Window
-          [00:00 ------ 00:59]     [01:00 ------ 01:59]
-          count = 84               count = 36
-                                        ^
-                                        now = 01:15 (elapsed = 15s)
-
-Estimated rate:
-  = 36 + 84 * (1 - 15/60)
-  = 36 + 84 * 0.75
-  = 36 + 63
-  = 99  <- just under the limit of 100, request allowed
-
-Intuition: we assume the 84 previous requests were uniformly distributed.
-The 75% of the window that "overlaps" with our sliding window contributes
-75% of those requests to our estimate.
-```
+We assume the 84 previous-window requests were uniformly distributed, so the 75% of the previous window that still overlaps the sliding view contributes 75% of them (63) to the estimate: 36 + 63 = 99, just under the limit of 100, so the request is allowed.
 
 #### Why It Works
 The approximation is statistically sound when traffic is roughly uniform. In practice, the error is very small (usually < 1%). Redis uses a similar approach in its sliding window rate limiter.
@@ -391,13 +365,29 @@ class SlidingWindowCounter:
 
 In a horizontally scaled system with multiple API servers, each server has its own local memory. If you run a fixed-window counter locally on each server, each server independently tracks counts — a client can hit all N servers and consume N times the intended limit.
 
-```
-Client --> Server A (count: 90/100) --> Backend
-       --> Server B (count: 90/100) --> Backend
-       --> Server C (count: 90/100) --> Backend
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Client effectively gets 270 requests when limit is 100!
+    client(["Client"]) --> serverA("Server A<br/>90/100")
+    client --> serverB("Server B<br/>90/100")
+    client --> serverC("Server C<br/>90/100")
+    serverA --> backend(["Backend"])
+    serverB --> backend
+    serverC --> backend
+
+    class client io
+    class serverA,serverB,serverC mathOp
+    class backend train
 ```
+
+Each server tracks its own local counter against the same 100/min limit; a client load-balanced across all three effectively gets 270 requests through — 2.7x the intended cap.
 
 ### Solutions
 
@@ -463,13 +453,29 @@ Route each client to the same server (via consistent hashing on client ID). That
 
 Move rate limiting entirely to the API Gateway (Kong, AWS API Gateway, Nginx). The gateway is the single entry point and can maintain state centrally.
 
-```
-Client --> [API Gateway with Rate Limiter] --> Service A
-                      |                   --> Service B
-                   [Redis]               --> Service C
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client"]) --> gw("API Gateway<br/>+ Rate Limiter")
+    gw --> svcA(["Service A"])
+    gw --> svcB(["Service B"])
+    gw --> svcC(["Service C"])
+    gw --> redis[("Redis")]
+
+    class client io
+    class gw mathOp
+    class svcA,svcB,svcC train
+    class redis base
 ```
 
-This is the most common production architecture. The gateway handles:
+The gateway is the single chokepoint: it checks Redis once per request, then fans out to whichever service the route targets. This is the most common production architecture. The gateway handles:
 - Rate limit checks (Redis-backed)
 - Response headers (X-RateLimit-*)
 - 429 responses with Retry-After
@@ -478,63 +484,76 @@ This is the most common production architecture. The gateway handles:
 
 ## 5. Architecture Diagrams
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client<br/>Mobile / Web"]) --> gw("API Gateway<br/>Kong / NGINX / AWS GW")
+    gw -->|"extract client id"| check{"Rate check<br/>rl:user:123<br/>84/100"}
+    check -->|"within limit"| backend(["Backend Services<br/>+ X-RateLimit headers"])
+    check -->|"exceeds limit"| reject(["429 Too Many Requests<br/>+ Retry-After"])
+    gw -->|"INCR rl:key:window"| redis[("Redis Cluster<br/>HA")]
+
+    class client io
+    class gw mathOp
+    class check mathOp
+    class backend train
+    class reject lossN
+    class redis base
 ```
-                                    Rate Limiter Architecture
 
-    +-----------+     +-----------+     +-------------------+     +-----------+
-    |  Client   | --> | API       | --> | Rate Limit Check  | --> | Backend   |
-    |  (Mobile/ |     | Gateway   |     | (Redis)           |     | Services  |
-    |   Web)    |     | (Kong /   |     |                   |     |           |
-    +-----------+     |  Nginx /  |     | Key: rl:user:123  |     +-----------+
-                      |  AWS GW)  |     | Count: 84/100     |
-                      +-----------+     +-------------------+
-                            |                    |
-                            |     +----------+   |
-                            +---->| Redis    |<--+
-                                  | Cluster  |
-                                  | (HA)     |
-                                  +----------+
+The gateway extracts the client ID, increments the count in Redis, and branches on the result: within limit forwards to the backend with rate-limit headers attached, over limit returns 429 with `Retry-After`.
 
-    Request Flow:
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    1. Client sends request
-    2. API Gateway extracts client ID (user_id / api_key / IP)
-    3. Gateway queries Redis: INCR rl:{client_id}:{window}
-    4a. Count <= limit  ->  Forward to backend, add X-RateLimit headers
-    4b. Count > limit   ->  Return 429, add Retry-After header
+    primary[("Redis Primary<br/>writes")] -->|replication| replica1[("Redis Replica 1<br/>reads")]
+    primary -->|replication| replica2[("Redis Replica 2<br/>reads")]
 
-    Redis HA Setup:
-
-    +----------+     +----------+     +----------+
-    | Redis    | --> | Redis    |     | Redis    |
-    | Primary  |     | Replica 1|     | Replica 2|
-    +----------+     +----------+     +----------+
-         |
-    (Writes go to primary, reads can go to replicas)
-    (Redis Sentinel or Cluster for failover)
+    class primary train
+    class replica1,replica2 frozen
 ```
+
+Writes always go to the primary; reads can be served from either replica. Redis Sentinel or Cluster promotes a replica to primary automatically on failure.
 
 ### Where Rate Limiting Lives in the Request Path
 
-```
-  Client SDK        Edge / API Gateway      Service Mesh Sidecar     Application Code
-  (proactive,        (centralized,           (per-pod local +         (business-aware,
-   self-throttle)     single chokepoint)      global descriptors)      fine-grained)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  +--------+         +-------------+         +----------------+       +---------------+
-  | Client | ------> | Gateway     | ------> | Envoy sidecar   | ----> | Service logic |
-  | (knows |         | (Kong/AWS/  |         | (Istio local    |       | e.g. "1 more  |
-  |  limit)|         |  NGINX)     |         |  rate limit)    |       | if mid-       |
-  +--------+         +-------------+         +----------------+       |  checkout"    |
-                            |                                          +---------------+
-                     [Redis / ratelimit
-                      service: shared
-                      counters & policy]
+    client(["Client SDK<br/>self-throttle"]) --> gw("Edge / API Gateway<br/>Kong / AWS / NGINX")
+    gw --> sidecar("Service Mesh Sidecar<br/>Envoy / Istio local")
+    sidecar --> app(["Application Code<br/>business-aware"])
+    gw --- redis[("Redis / ratelimit service<br/>shared counters & policy")]
 
-  Each layer can reject early (saving downstream resources) or pass
-  through with headers for the next layer to make a finer decision.
-  Most production systems combine at least two of these layers.
+    class client io
+    class gw mathOp
+    class sidecar mathOp
+    class app train
+    class redis base
 ```
+
+Each layer can reject early (saving downstream resources) or pass through with headers for the next layer to make a finer decision. Most production systems combine at least two of these layers.
 
 ---
 
@@ -656,6 +675,26 @@ checks = [
 | Sliding Window Log | None (precise) | O(N) — 1 timestamp/request | Exact | Medium | Low-volume, compliance-sensitive limits |
 | Sliding Window Counter | Bounded, no 2x spike | O(1) — 2 counters | ~99% accurate (uniform-traffic assumption) | Medium | High-volume APIs needing accuracy + low memory (most production systems) |
 
+The table above lists each algorithm's burst handling and complexity separately; plotting them together shows the actual tradeoff space you're choosing from:
+
+```mermaid
+quadrantChart
+    title Rate Limiting Algorithm Tradeoff Space
+    x-axis Low Complexity --> High Complexity
+    y-axis Poor Burst Control --> Good Burst Control
+    quadrant-1 Complex and bursty
+    quadrant-2 Simple and bursty
+    quadrant-3 Simple and smooth
+    quadrant-4 Complex and smooth
+    Fixed Window: [0.12, 0.12]
+    Token Bucket: [0.42, 0.88]
+    Leaky Bucket: [0.42, 0.08]
+    Sliding Log: [0.8, 0.15]
+    Sliding Counter: [0.72, 0.62]
+```
+
+Token Bucket and Sliding Window Counter sit in the upper half because they tolerate bursts; Fixed Window's apparent simplicity comes at the cost of the worst burst control (the 2x boundary spike from §3); Sliding Window Log buys exactness with the most memory and no burst allowance at all.
+
 ### Distributed Enforcement Strategy Comparison
 
 | Strategy | Consistency | Latency Added | Operational Cost | Failure Mode |
@@ -705,6 +744,29 @@ checks = [
 **4. No defined behavior when the rate limiter's own dependency fails**
 *Broken:* The Redis instance backing the rate limiter goes down. The rate-limit check throws an exception, and the API gateway returns 500 to *every* request — a rate-limiter outage becomes a full API outage.
 *Fix:* Wrap the rate-limit check in a timeout + circuit breaker. Decide explicitly: fail-open (allow traffic, log for post-hoc analysis — appropriate when availability matters more than strict enforcement, e.g. payments) or fail-closed (reject traffic — appropriate when unmetered access is dangerous, e.g. auth endpoints).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    down{"Rate-limit store<br/>unreachable?"} -->|"no"| normal(["Enforce limit<br/>normally"])
+    down -->|"yes"| priority{"Availability matters<br/>more than enforcement?"}
+    priority -->|"yes, e.g. payments"| failopen(["Fail-open:<br/>allow + log bypass"])
+    priority -->|"no, e.g. auth"| failclosed(["Fail-closed:<br/>reject the request"])
+
+    class down,priority mathOp
+    class normal train
+    class failopen train
+    class failclosed lossN
+```
+
+Stripe's own case study (§14) chooses fail-open — payment availability outweighs brief unmetered traffic — while an authentication endpoint should fail-closed instead, since unmetered access there is the more dangerous failure.
 
 **5. Shared quota across logically distinct clients**
 *Broken:* A platform issues one API key per top-level account, but that account has 1,000 sub-merchants making calls under it. One misbehaving sub-merchant exhausts the shared bucket, blocking all 999 others.
@@ -864,34 +926,27 @@ The mechanism: a token bucket per API key per endpoint stored in Redis. A Lua sc
 
 ### Architecture Overview
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    merchant(["Merchant integrations"]) --> gw("API Gateway<br/>NGINX + Lua<br/>authenticates, extracts key")
+    gw -->|"EVALSHA script_sha<br/>key:api_key:endpoint"| redis[("Redis Cluster<br/>6 nodes, RF=2")]
+    redis -->|"allow / deny<br/>+ headers"| svc(["API Service<br/>charges, etc."])
+
+    class merchant io
+    class gw mathOp
+    class redis base
+    class svc train
 ```
-   Merchant integrations
-            │
-            ▼
-   ┌────────────────────┐
-   │   API Gateway      │  ◀── authenticates, extracts key
-   │   (NGINX + Lua)    │
-   └─────────┬──────────┘
-             │ EVALSHA <script_sha> 1 key:<key>:<endpoint>
-             ▼
-   ┌────────────────────────────────────────┐
-   │   Redis Cluster (6 nodes, RF=2)        │
-   │                                        │
-   │   Sharded by API key hash:             │
-   │   key:sk_live_abc:charges → node 2     │
-   │   key:sk_live_xyz:refunds → node 5     │
-   │                                        │
-   │   Token bucket Lua script (atomic):    │
-   │   if tokens >= 1 then dec; allow       │
-   │   else return 429 + retry_after        │
-   └────────────────┬───────────────────────┘
-                    │ allow / deny + headers
-                    ▼
-           ┌─────────────────────┐
-           │   API service       │
-           │   (charges, etc.)   │
-           └─────────────────────┘
-```
+
+Sharded by API key hash across 6 nodes (RF=2) — e.g. `key:sk_live_abc:charges` maps to node 2 — so the Lua token-bucket script executes atomically on whichever shard owns that key.
 
 ### Key Design Decisions
 

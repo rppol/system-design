@@ -110,6 +110,17 @@ When going from N to N+1 servers, only `1/(N+1)` of keys need to move — the th
 | 9 → 10 servers | ~10%                               | ~90%                   |
 | 99 → 100 servers | ~1%                              | ~99%                   |
 
+```mermaid
+xychart-beta
+    title "Keys Remapped: Modulo vs Consistent Hashing"
+    x-axis ["3 → 4", "9 → 10", "99 → 100"]
+    y-axis "Keys Remapped (%)" 0 --> 100
+    bar [75, 90, 99]
+    line [25, 10, 1]
+```
+
+Bars = naive modulo hashing, climbing toward ~99% of keys remapped as the cluster grows; line = consistent hashing, staying near ~1% — this divergence is the entire reason consistent hashing exists.
+
 ---
 
 ## The Hash Ring
@@ -171,6 +182,30 @@ Lookup key K3 with hash 320 (wraps around to 90):
   --> K3 maps to Node A
 ```
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    key(["key"]) --> h["hash(key)"]
+    h --> ceil{"node at or after<br/>this position?"}
+    ceil -->|"yes"| next["first node<br/>clockwise"]
+    ceil -->|"no, past<br/>last node"| wrap["wrap to<br/>smallest position"]
+    next --> owner(["owning node"])
+    wrap --> owner
+
+    class key,owner io
+    class h,ceil mathOp
+    class next,wrap train
+```
+
+Every lookup is one ceiling search on the sorted ring: hash the key, jump to the first node at or after that position, and wrap to the smallest position if the hash falls past the last node — exactly the `ceilingEntry` / `firstEntry` fallback used in the implementation below.
+
 ---
 
 ## Adding and Removing Nodes
@@ -179,35 +214,69 @@ Lookup key K3 with hash 320 (wraps around to 90):
 
 Only keys in the arc immediately counter-clockwise of the new node need to move.
 
-```
-Before (3 nodes):
-  0 ----[A:100]----[B:200]----[C:300]---- 2^32 (wraps)
-  Keys in range (300, 100] --> A
-  Keys in range (100, 200] --> B
-  Keys in range (200, 300] --> C
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Add Node D at position 150:
-  0 ----[A:100]----[D:150]----[B:200]----[C:300]---- 2^32
-  Keys in range (300, 100] --> A  (unchanged)
-  Keys in range (100, 150] --> D  (NEW: previously went to B)
-  Keys in range (150, 200] --> B  (reduced range for B)
-  Keys in range (200, 300] --> C  (unchanged)
+    subgraph before1["Before: 3 nodes"]
+        direction LR
+        a1["Node A<br/>pos 100"] -->|"owns arc to 200"| b1["Node B<br/>pos 200"]
+        b1 -->|"owns arc to 300"| c1["Node C<br/>pos 300"]
+    end
 
-Only keys in range (100, 150] need to migrate from B to D.
-That is roughly 1/4 of B's previous keys, or 1/(N+1) total keys.
+    subgraph after1["After: Node D added at 150"]
+        direction LR
+        a2["Node A<br/>pos 100"] -->|"unchanged"| d2["Node D<br/>pos 150 (new)"]
+        d2 -->|"new arc,<br/>taken from B"| b2["Node B<br/>pos 200"]
+        b2 -->|"shrunk arc"| c2["Node C<br/>pos 300"]
+    end
+
+    before1 ~~~ after1
+
+    class a1,b1,c1,a2,b2,c2 base
+    class d2 train
 ```
+
+Only the arc between B and the new Node D — keys in `(100, 150]` — migrates: roughly 1/4 of B's previous keys, matching the theoretical 1/(N+1) bound.
 
 ### Removing a node (failure or decommission):
 
 Only keys that were mapped to the removed node need to move — to the next node clockwise.
 
-```
-Remove Node B at position 200:
-  0 ----[A:100]----[C:300]---- 2^32
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Keys previously going to B (range 100-200) now go to C.
-  Only B's keys are affected; A's and C's existing keys are untouched.
+    subgraph before2["Before: Node B present"]
+        direction LR
+        a3["Node A<br/>pos 100"] --> b3["Node B<br/>pos 200<br/>(to be removed)"]
+        b3 --> c3["Node C<br/>pos 300"]
+    end
+
+    subgraph after2["After: Node B removed"]
+        direction LR
+        a4["Node A<br/>pos 100"] -->|"keys 100-200<br/>migrate to C"| c4["Node C<br/>pos 300"]
+    end
+
+    before2 ~~~ after2
+
+    class a3,c3,a4,c4 base
+    class b3 lossN
 ```
+
+Only B's keys (positions 100–200) move to C; A's and C's existing keys are untouched.
 
 ### Visual:
 
@@ -304,12 +373,15 @@ Rule of thumb: 100–200 vnodes per physical node is a good default.
 
 ### Effect of vnode count on distribution:
 
+```mermaid
+xychart-beta
+    title "Load Std Dev vs Vnodes per Physical Node"
+    x-axis ["1", "10", "100", "256"]
+    y-axis "Std Dev (%)" 0 --> 50
+    bar [45, 15, 5, 3]
 ```
-Standard deviation of load across nodes (lower = more balanced):
 
-Vnodes/node:  1      10     100    256
-Std Dev:      45%    15%    5%     3%
-```
+Standard deviation of load drops from 45% at 1 vnode/node to just 3% at 256 — this is why Cassandra defaults to hundreds of vnodes per physical node.
 
 ---
 
@@ -319,28 +391,49 @@ When the ring topology changes (node added/removed), only a subset of keys need 
 
 ### Migration process on node addition:
 
+```mermaid
+sequenceDiagram
+    participant N as New Node N
+    participant Ring as Ring / Coordinator
+    participant P as Predecessor Node
+
+    N->>Ring: Announce position P
+    Ring-->>P: New node detected at P
+    P->>P: Identify keys in (pred_of_N, P]
+    P->>N: Transfer owned keys
+    N-->>P: Transfer complete
+    N->>N: Begin serving requests<br/>for transferred keys
+    Note over P: Deletes transferred keys<br/>(immediately or lazily via TTL)
 ```
-1. New node N announces itself with position P on ring.
-2. Predecessor node (the one immediately counter-clockwise of P) identifies
-   keys in range (predecessor_of_N, P] that it currently owns.
-3. These keys are transferred to N.
-4. Once transfer is complete, N begins serving requests for those keys.
-5. Old node deletes the transferred keys (or lazily, after TTL).
-```
+
+The predecessor streams only the keys in its own `(predecessor, P]` arc to the new node — every other node on the ring is untouched during the handoff.
 
 ### Migration with vnodes:
 
 With vnodes, a new physical node places V virtual nodes on the ring. Each vnode receives keys from a different predecessor. Data migration happens from V different source nodes in parallel.
 
-```
-New node with 3 vnodes:
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Vnode A_1 at 150 receives keys from B_2 (predecessor range 100-150)
-  Vnode A_2 at 250 receives keys from C_1 (predecessor range 200-250)
-  Vnode A_3 at 350 receives keys from D_3 (predecessor range 320-350)
+    bnode["Node B_2<br/>range 100-150"] -->|"transfer"| av1["Vnode A_1<br/>pos 150"]
+    cnode["Node C_1<br/>range 200-250"] -->|"transfer"| av2["Vnode A_2<br/>pos 250"]
+    dnode["Node D_3<br/>range 320-350"] -->|"transfer"| av3["Vnode A_3<br/>pos 350"]
+    av1 --> newNode(["New Physical<br/>Node A"])
+    av2 --> newNode
+    av3 --> newNode
 
-Migration is parallelized across 3 source nodes.
+    class bnode,cnode,dnode base
+    class av1,av2,av3,newNode train
 ```
+
+Each of the new node's 3 vnodes pulls from a different predecessor, so the transfers run concurrently instead of bottlenecking on one source node.
 
 This is a significant advantage: migration bandwidth is distributed across many nodes rather than one overloaded source.
 
@@ -527,14 +620,32 @@ Cassandra uses consistent hashing with configurable vnodes (default: 256 per nod
 - Replication factor (RF) configurable per keyspace; keys replicate to RF consecutive ring owners.
 - Gossip protocol for node discovery and ring state propagation.
 
-```
-Cassandra ring with RF=3:
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Ring: [A]--[B]--[C]--[D]--[E]
-Key K maps to node B.
-With RF=3: K is stored on B, C, and D.
-If B fails, reads/writes go to C and D (quorum).
+    k(["Key K"]) -->|"maps to"| b("Node B<br/>primary")
+    a("Node A") --> b
+    b -->|"replica"| c("Node C")
+    c -->|"replica"| d("Node D")
+    d --> e("Node E")
+    b -.->|"B fails"| quorum{"Quorum<br/>2 of 3"}
+    c --> quorum
+    d --> quorum
+
+    class k req
+    class a,e base
+    class b,c,d train
+    class quorum mathOp
 ```
+
+K's replica set is B plus the next two clockwise — C and D (RF=3); if B fails, C and D still form a quorum (2 of 3) so reads and writes continue.
 
 ### Memcached (libketama)
 
@@ -617,10 +728,12 @@ Prefer Murmur3 or xxHash over MD5 or SHA-1. They are faster (critical in high-th
 
 ### Heterogeneous Hardware
 If nodes have different capacities (e.g., 32 GB vs 64 GB RAM), assign proportionally more vnodes to larger nodes:
-```
-32 GB node: 100 vnodes
-64 GB node: 200 vnodes
-96 GB node: 300 vnodes
+```mermaid
+xychart-beta
+    title "Vnode Allocation by Node RAM Capacity"
+    x-axis ["32 GB", "64 GB", "96 GB"]
+    y-axis "Virtual Nodes" 0 --> 320
+    bar [100, 200, 300]
 ```
 This naturally routes proportionally more traffic to larger nodes.
 
@@ -676,28 +789,37 @@ Database comfortably handles this with headroom.
 
 ### Migration procedure:
 
+```mermaid
+sequenceDiagram
+    participant C9 as New Node C9
+    participant RM as Ring Mgmt Service
+    participant Pred as Predecessor Nodes
+    participant Cli as Client Libraries
+
+    Note over C9: Provisioned, not yet on ring
+    C9->>RM: Announce C9 (160 vnodes)
+    RM->>Pred: New vnodes at positions P...
+    Pred->>Pred: Identify keys in (pred_pos, P]
+    Pred->>C9: Replicate owned keys
+    C9-->>RM: Replication verified<br/>for all 160 vnodes
+    RM->>RM: Mark C9 active in ring
+    RM-->>Cli: Ring view updated (gossip)
+    Note over Pred: Deletes migrated keys<br/>lazily (or on TTL)
 ```
-Step 1: Provision new node C9, not yet on ring.
-Step 2: Announce C9 to ring management service.
-Step 3: For each of C9's 160 vnodes at position P:
-         - Predecessor node identifies keys in (pred_pos, P]
-         - These keys are replicated to C9
-Step 4: Once replication is verified for all vnodes,
-         C9 is marked active in the ring.
-Step 5: Client libraries update their ring view via gossip.
-Step 6: Predecessor nodes delete migrated keys lazily (or on TTL).
-```
+
+Replication runs per-vnode against each of C9's 160 predecessors; only after every vnode's transfer is verified does the ring management service mark C9 active and gossip the new view to clients.
 
 ### Outcome:
 
+```mermaid
+xychart-beta
+    title "Cache Hit Rate Through the Node-Addition Window"
+    x-axis ["Before add", "During add", "After add"]
+    y-axis "Cache Hit Rate (%)" 80 --> 100
+    line [95, 89, 95]
 ```
-Before add: 8 nodes, ~62,500 keys/node (avg), cache hit rate 95%
-During add:  cache hit rate drops to ~89% for ~30 seconds (migration window)
-After add:  9 nodes, ~55,556 keys/node (avg), cache hit rate returns to 95%
 
-Database load during migration: +55,000 QPS (within capacity)
-Database load with modulo hash: +335,000 QPS (OVERLOAD)
-```
+Hit rate dips from 95% to ~89% only during the ~30-second window while 8 nodes become 9, then fully recovers; database load in that window is ~55,000 QPS — versus the ~335,000 QPS a naive modulo-hash resize would have caused (see the naive-hashing problem above).
 
 Adding new nodes in groups of 1–2 at a time, with monitoring between each addition, is the safe operational practice.
 
@@ -760,29 +882,33 @@ Cassandra distributes data using consistent hashing on the partition key. The Mu
 
 ### Architecture Overview
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    wr(["Write / Read"]) --> coord("Coordinator<br/>any Cassandra node")
+    coord -->|"partition_key → murmur3 → token"| ring["Token Ring<br/>range 2^-63 .. 2^63-1<br/>N1...N20, 256 vnodes each"]
+    ring --> r1["Replica 1<br/>AZ-a"]
+    ring --> r2["Replica 2<br/>AZ-b"]
+    ring --> r3["Replica 3<br/>AZ-c"]
+    r1 --> maint["Gossip (1s tick)<br/>Hinted handoff<br/>Read repair + anti-entropy"]
+    r2 --> maint
+    r3 --> maint
+
+    class wr io
+    class coord mathOp
+    class ring base
+    class r1,r2,r3 train
+    class maint frozen
 ```
-                  ┌──────────────────────────────────┐
-   Write/Read ───▶│   Coordinator (any Cassandra)    │
-                  └──────────────┬───────────────────┘
-                                 │ partition_key → murmur3 → token
-                                 ▼
-              ┌────────────────────────────────────────────┐
-              │   Token Ring (range 2^-63 .. 2^63 - 1)     │
-              │                                            │
-              │     N1(vnodes)─N2─N3─N4─...─N20─N1         │
-              │      ▲          ▲          ▲               │
-              │      │          │          │               │
-              │   Replica 1  Replica 2  Replica 3          │
-              │   (AZ-a)     (AZ-b)     (AZ-c)             │
-              └────────────────────────────────────────────┘
-                                 │
-                                 ▼
-              ┌────────────────────────────────────────────┐
-              │  Gossip protocol (1s tick) for membership   │
-              │  Hinted handoff for transient failures      │
-              │  Read repair + anti-entropy (Merkle trees)  │
-              └────────────────────────────────────────────┘
-```
+
+The coordinator hashes the partition key to a token and routes to the ring position, which fans out to 3 rack-aware replicas; gossip, hinted handoff, and read-repair run continuously underneath to keep the ring converged.
 
 ### Key Design Decisions
 

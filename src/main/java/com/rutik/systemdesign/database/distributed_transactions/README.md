@@ -44,78 +44,100 @@ TCC (Try-Confirm-Cancel) | Strong     | Medium      | Reserve → confirm/cancel
 
 ## 5. Architecture Diagrams
 
+**Two-Phase Commit (2PC)**
+
+```mermaid
+sequenceDiagram
+    participant C as Coordinator
+    participant A as Participant A
+    participant B as Participant B
+
+    Note over C,B: Phase 1 — Prepare
+    C->>A: Prepare?
+    C->>B: Prepare?
+    A-->>C: Yes (ready)
+    B-->>C: Yes (ready)
+
+    Note over C,B: Phase 2 — Commit
+    C->>A: Commit
+    C->>B: Commit
+    A-->>C: Done
+    B-->>C: Done
+
+    Note over C,B: Failure a — coordinator crashes after Phase 1
+    Note over A,B: Both hold locks and block until the coordinator recovers
+
+    Note over C,B: Failure b — B crashes during Phase 2 (A already committed)
+    C->>B: retry Commit
+    B-->>C: Done (recovers, replays commit)
 ```
-Two-Phase Commit (2PC)
-========================
 
-Phase 1 — Prepare:
-  Coordinator → "Prepare?" → Participant A
-  Coordinator → "Prepare?" → Participant B
-  Participant A → "Yes (ready)"
-  Participant B → "Yes (ready)"
+Phase 1 collects a unanimous vote before Phase 2 commits; a coordinator crash between the two phases leaves both participants holding locks until the coordinator recovers — typically 30s–5min (see Section 6).
 
-Phase 2 — Commit:
-  Coordinator → "Commit" → Participant A
-  Coordinator → "Commit" → Participant B
-  A commits, returns "Done"
-  B commits, returns "Done"
+**Saga Pattern (Orchestration)**
 
-Failure scenarios:
-  a) Coordinator crashes after Phase 1 but before Phase 2:
-     A and B are in prepared state, holding locks, waiting indefinitely.
-     → Blocking: participants cannot commit or abort without coordinator decision.
+```mermaid
+sequenceDiagram
+    participant O as Orchestrator<br/>Order Service
+    participant P as Payment Service
+    participant I as Inventory Service
+    participant S as Shipping Service
 
-  b) Participant B crashes during Phase 2 after A committed:
-     A committed. B is unknown. Coordinator retries B.
-     → B recovers, finds prepared state, coordinator replays commit.
+    O->>P: 1. reserve $100
+    P-->>O: SUCCESS
+    O->>I: 2. reserve 2 units
+    I-->>O: SUCCESS
+    O->>S: 3. create shipment
+    S-->>O: FAILURE (warehouse closed)
 
-
-Saga Pattern (Orchestration)
-=============================
-
-Orchestrator (Order Service)
-  │
-  ├─[1]→ Payment Service: reserve $100
-  │         ↓ SUCCESS
-  ├─[2]→ Inventory Service: reserve 2 units
-  │         ↓ SUCCESS
-  ├─[3]→ Shipping Service: create shipment
-  │         ↓ FAILURE (warehouse closed)
-  │
-  [ROLLBACK]
-  ├─[C2]→ Inventory Service: release 2 units
-  └─[C1]→ Payment Service: release $100
+    Note over O: Rollback — compensate in reverse order
+    O->>I: C2. release 2 units
+    O->>P: C1. release $100
+```
 
 Each step and its compensating action must be idempotent.
 
+**Outbox Pattern**
 
-Outbox Pattern
-==============
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Order Service DB (single transaction):
-┌──────────────────────────────────┐
-│  BEGIN;                          │
-│  INSERT INTO orders ...;         │
-│  INSERT INTO outbox (             │
-│    event_type = 'ORDER_CREATED', │
-│    payload = '...',               │
-│    status = 'PENDING'            │
-│  );                              │
-│  COMMIT;                         │
-└──────────────────────────────────┘
-         │
-         ▼
-[Relay / CDC (Debezium)]
-  Reads outbox table via WAL tailing or polling
-  Publishes to Kafka topic: 'order-events'
-  Marks outbox row status = 'PUBLISHED'
-         │
-         ▼
-[Inventory Service]         [Notification Service]
-  Consumes 'order-events'    Consumes 'order-events'
-  Idempotent: dedup by       Idempotent: dedup by
-  event_id in inbox table    event_id in sent_events
+    txn[("Order DB<br/>1 txn: order + outbox<br/>status PENDING")] --> relay("Relay / CDC<br/>Debezium tails WAL<br/>or polls")
+    relay -->|"publish, mark<br/>PUBLISHED"| topic(["Kafka topic<br/>order-events"])
+    topic --> inv("Inventory Service<br/>dedup by event_id")
+    topic --> notif("Notification Service<br/>dedup by event_id")
+
+    class txn base
+    class relay mathOp
+    class topic req
+    class inv,notif io
 ```
+
+The order row and its outbox event commit in the same local transaction, so the relay only ever ships events that truly happened — a broker outage just delays the publish, it never loses or fabricates one.
+
+**TCC (Try-Confirm-Cancel)**
+
+```mermaid
+stateDiagram-v2
+    state "Try<br/>reserve, no commit" as Try
+    state "Confirm<br/>capture + decrement" as Confirm
+    state "Cancel<br/>release all holds" as Cancel
+
+    [*] --> Try
+    Try --> Confirm: all reservations succeed
+    Try --> Cancel: any reservation fails
+    Confirm --> [*]
+    Cancel --> [*]
+```
+
+TCC trades 2PC's cross-service row locks for an explicit reservation phase: Try holds a soft reservation per resource, then a single all-or-nothing decision either Confirms every resource or Cancels every hold.
 
 ---
 
@@ -181,19 +203,28 @@ public void transferMoney(long fromAccount, long toAccount, BigDecimal amount) {
 
 **Choreography**: Each service publishes events; downstream services react to events and publish their own. No central coordinator.
 
-```
-Order Service publishes: OrderCreated
-  → Payment Service subscribes, charges card, publishes: PaymentProcessed
-    → Inventory Service subscribes, reserves stock, publishes: StockReserved
-      → Shipping Service subscribes, creates shipment
+```mermaid
+sequenceDiagram
+    participant O as Order Service
+    participant P as Payment Service
+    participant I as Inventory Service
+    participant S as Shipping Service
 
-Failure: StockReserved fails
-  Shipping Service publishes: StockReservationFailed
-  → Payment Service subscribes, refunds card
-  → Order Service subscribes, marks order Failed
+    O->>P: OrderCreated
+    Note over P: charges card
+    P->>I: PaymentProcessed
+    Note over I: reserves stock
+    I->>S: StockReserved
+    Note over S: creates shipment
 
-Tradeoff: no single place to see the saga state; harder to debug; cyclic event dependencies
+    Note over S: Failure — shipment creation fails
+    S->>P: StockReservationFailed
+    S->>O: StockReservationFailed
+    Note over P: refunds card
+    Note over O: marks order Failed
 ```
+
+Tradeoff: no single place to see the saga state; harder to debug; cyclic event dependencies.
 
 **Orchestration**: A central orchestrator service drives the saga.
 
@@ -347,6 +378,31 @@ PostgreSQL advisory lock (transaction-scoped):
   SELECT pg_advisory_xact_lock(42);  -- auto-released at transaction end
   -- Better: no forget-to-unlock bug
 ```
+
+```mermaid
+sequenceDiagram
+    participant A as Client A
+    participant B as Client B
+    participant L as Lock Server
+    participant St as Storage
+
+    A->>L: acquire lock (ttl)
+    L-->>A: granted, token 33
+    Note over A: GC pause / slow disk —<br/>A stalls past ttl
+
+    Note over L: TTL expires
+    B->>L: acquire lock (ttl)
+    L-->>B: granted, token 34
+
+    Note over A: A resumes, unaware<br/>lock was reassigned
+    A->>St: write (token 33)
+    St-->>A: rejected — stale token
+
+    B->>St: write (token 34)
+    St-->>B: accepted — latest token
+```
+
+The lock's TTL expires mid-pause, so both clients briefly believe they hold it; the storage layer — not the lock — resolves the split-brain by rejecting client A's stale token 33 and accepting client B's newer token 34.
 
 ---
 

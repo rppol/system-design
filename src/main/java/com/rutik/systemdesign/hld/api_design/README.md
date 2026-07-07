@@ -92,63 +92,60 @@ Reverse API — the server pushes data to the client by calling a URL registered
 
 ### REST API Request Lifecycle
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant GW as API Gateway
+    participant US as User Service
+    participant DB as Database
+
+    C->>GW: GET /api/v1/users/42
+    Note over GW: Authenticate (JWT), rate limit<br/>(token bucket), then route to service
+    GW->>US: forward request
+    Note over US: Controller, service layer,<br/>then repository
+    US->>DB: query
+    DB-->>US: rows
+    US-->>GW: JSON payload
+    GW-->>C: JSON payload
 ```
-Client
-  |
-  |  HTTP Request (GET /api/v1/users/42)
-  v
-API Gateway
-  |-- Authentication (validate JWT)
-  |-- Rate Limiting (check token bucket)
-  |-- Routing (match path to service)
-  v
-User Service
-  |-- Controller (parse request, validate)
-  |-- Service Layer (business logic)
-  |-- Repository (DB query)
-  v
-Database
-  |
-  | Response
-  v
-User Service --> API Gateway --> Client
-                (JSON payload)
-```
+
+The request threads through gateway checks (auth, rate limiting, routing) and service-layer logic before reaching the database, then retraces the same path back to the client as the response.
 
 ### GraphQL vs REST Data Fetching
 
-```
-REST (N+1 requests):
-Client --> GET /users/1         --> { id, name, avatarId }
-Client --> GET /avatars/99      --> { url, size }
-Client --> GET /posts?userId=1  --> [{ id, title }, ...]
-(3 round trips)
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
 
-GraphQL (1 request):
-Client --> POST /graphql
-  query {
-    user(id: 1) {
-      name
-      avatar { url }
-      posts { title }
-    }
-  }
---> single response with all data
-(1 round trip)
+    Note over C,S: REST — N+1 problem (3 round trips)
+    C->>S: GET /users/1
+    S-->>C: id, name, avatarId
+    C->>S: GET /avatars/99
+    S-->>C: avatar url, size
+    C->>S: GET /posts?userId=1
+    S-->>C: list of posts
+
+    Note over C,S: GraphQL — 1 round trip
+    C->>S: POST /graphql (user + avatar + posts)
+    S-->>C: single response, all fields
 ```
+
+REST's resource-per-endpoint model costs 3 round trips to assemble one view; GraphQL's single query resolves the same data in 1 round trip.
 
 ### gRPC Internal Service Communication
 
+```mermaid
+sequenceDiagram
+    participant A as Service A (Go)
+    participant B as Service B (Python)
+
+    Note over A: proto-generated client stub
+    A->>B: HTTP/2 + Protobuf (binary, multiplexed)
+    B-->>A: response stream
 ```
-Service A (Go)                   Service B (Python)
-    |                                   |
-    | proto-generated client stub       |
-    |                                   |
-    |------- HTTP/2 + Protobuf -------->|
-    |       (binary, multiplexed)       |
-    |<------ response stream -----------|
-    |                                   |
-```
+
+A single stub call is transparently carried as multiplexed binary Protobuf frames over one HTTP/2 connection, with the server able to stream back multiple responses.
 
 ---
 
@@ -199,6 +196,28 @@ Status codes carry semantic meaning:
 2. Client Credentials (service-to-service) — no user involved
 3. Implicit (deprecated) — was for SPAs, now replaced by Authorization Code + PKCE
 4. Resource Owner Password (legacy) — avoid
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start{"Which client type?"} -->|"web app,<br/>server-side"| ac["Authorization Code<br/>(+ PKCE)"]
+    start -->|"service-to-service,<br/>no user"| cc["Client Credentials"]
+    start -->|"browser-only SPA"| im["Implicit<br/>(deprecated)"]
+    start -->|"legacy first-party app"| rop["Resource Owner<br/>Password (legacy)"]
+
+    class start mathOp
+    class ac,cc train
+    class im,rop lossN
+```
+
+Only two of the four grant types belong in a new system today — Authorization Code (+PKCE) for user-facing apps and Client Credentials for service-to-service calls — while Implicit and Resource Owner Password are legacy paths to avoid.
 
 **JWT (JSON Web Token)** — self-contained token with header, payload, signature. Stateless verification (server checks signature without DB lookup). Structure: `base64(header).base64(payload).signature`.
 
@@ -486,49 +505,35 @@ Design the `POST /v1/charges` endpoint at Stripe.
 
 ### Architecture Overview
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client SDK<br/>retries on timeout"]) -->|"Idempotency-Key: ik_4242"| gw["API Gateway<br/>rate limit + auth"]
+    gw --> mw{"Idempotency Middleware<br/>key = sha256(account+ik+route)<br/>lookup in Redis"}
+    mw -->|hit| cached(["return cached response"])
+    mw -->|miss| lock["SET key=STARTED NX PX 60000<br/>(distributed lock)"]
+    lock --> psm["Payment State Machine<br/>(Saga)"]
+    psm --> pg["Postgres<br/>(charges)"]
+    psm --> card["Card Network"]
+    pg --> persist["Persist final response<br/>+ result to Redis (24h)"]
+    card --> persist
+
+    class client io
+    class gw req
+    class mw,psm mathOp
+    class cached,persist train
+    class lock,card frozen
+    class pg base
 ```
-       Client SDK (retries on timeout)
-              |
-              | Idempotency-Key: ik_4242
-              v
-     +--------+--------+
-     |  API Gateway    |
-     |  (rate limit,   |
-     |  auth)          |
-     +--------+--------+
-              |
-              v
-     +--------+----------------------------+
-     |  Idempotency Middleware             |
-     |  - key = sha256(account+ik+route)   |
-     |  - lookup in Redis                  |
-     +---+--------------+------------------+
-         | hit          | miss
-         |              |
-         v              v
-   +-----+----+   +-----+--------------------+
-   | return    |   | SET key=STARTED NX PX   |
-   | cached    |   | 60000 (distributed lock)|
-   | response  |   +-----+--------------------+
-   +-----------+         |
-                         v
-              +----------+----------+
-              | Payment State       |
-              | Machine (Saga)      |
-              +----+----------+-----+
-                   |          |
-                   v          v
-         +---------+--+  +----+-----+
-         | Postgres   |  | Card     |
-         | (charges)  |  | Network  |
-         +-----+------+  +----+-----+
-               |              |
-               v              v
-     +---------+--------------+--+
-     | Persist final response    |
-     | + result to Redis (24h)   |
-     +---------------------------+
-```
+
+A Redis-backed idempotency check either short-circuits with a cached response (hit) or acquires a 60-second distributed lock before invoking the payment state machine and the card network (miss); the successful result then persists to Postgres and back to Redis for 24 hours.
 
 ### Key Design Decisions
 
@@ -545,6 +550,20 @@ Design the `POST /v1/charges` endpoint at Stripe.
 6. **Redis fail-closed.** If Redis is unreachable, return 503 rather than process without dedup check. *Alternative rejected:* fail-open (process anyway) — risks double-charge during Redis outage.
 
 7. **24h key TTL.** Long enough for client retries (max retry window = 30 min), short enough to bound Redis memory at ~40GB. *Alternative rejected:* permanent storage — unbounded growth, no business need beyond retry window.
+
+```mermaid
+stateDiagram-v2
+    [*] --> New
+    New --> STARTED: request arrives, lock SET NX PX 60000
+    STARTED --> STARTED: retry within 60s returns 409
+    STARTED --> New: lock expires, no completion (crash)
+    STARTED --> SUCCEEDED: handler returns under 500
+    STARTED --> FAILED: handler returns 500 or higher
+    SUCCEEDED --> [*]: 24h TTL expiry
+    FAILED --> [*]: 24h TTL expiry
+```
+
+The idempotency key's lifecycle is what makes retries safe: a same-key retry inside the 60-second lock window gets back a 409, a mid-flight crash lets the lock expire and reopens the key to a fresh attempt, and terminal SUCCEEDED/FAILED results are replayed to any retry for the full 24-hour TTL.
 
 ### Implementation
 

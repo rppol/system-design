@@ -64,10 +64,32 @@ Availability (A)------Partition Tolerance (P)
 
 CAP only covers behavior during partitions. PACELC adds the else case: even when no partition, there is a tradeoff between **Latency** and **Consistency**.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Read/write<br/>request"]) --> p{"Partition<br/>occurring?"}
+    p -->|"PAC: yes"| ac{"pick one"}
+    p -->|"ELC: else"| lc{"pick one"}
+    ac --> avail["Availability"]
+    ac --> cons1["Consistency"]
+    lc --> lat["Latency"]
+    lc --> cons2["Consistency"]
+
+    class start req
+    class p,ac,lc mathOp
+    class avail train
+    class cons1,cons2 frozen
+    class lat io
 ```
-PAC: if Partition → choose Availability or Consistency
-ELC: ELse       → choose Latency or Consistency
-```
+
+PACELC's else-branch is the everyday case: PostgreSQL with synchronous replication pays latency to stay consistent, while Cassandra's default pays consistency to stay fast — a tradeoff CAP never mentions because no partition is happening.
 
 Examples:
 - PostgreSQL with sync replication: PA/EC (partitions → consistent, no partition → low latency sacrificed for consistency)
@@ -80,31 +102,31 @@ Examples:
 
 From strongest to weakest:
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A["Linearizability<br/>real-time order,<br/>coordinate every read"] --> B["Sequential Consistency<br/>program order per process"]
+    B --> C["Causal Consistency<br/>preserves happens-before"]
+    C --> D["Read-Your-Writes<br/>client sees its own write"]
+    D --> E["Monotonic Read<br/>never regress to older value"]
+    E --> F["Eventual Consistency<br/>replicas converge, no ordering"]
+
+    class A train
+    class B mathOp
+    class C req
+    class D io
+    class E frozen
+    class F lossN
 ```
-Linearizability (strongest)
-    └── Real-time ordering. Every read reflects the latest write.
-        Cost: coordination on every read. Used in: etcd, ZooKeeper, Spanner.
 
-Sequential Consistency
-    └── Operations appear to execute in some sequential order, consistent
-        with program order per process. No real-time guarantee.
-
-Causal Consistency
-    └── Causally related operations appear in correct order.
-        Concurrent ops can be seen in different orders by different nodes.
-        Used in: MongoDB (sessions), some Cassandra configurations.
-
-Read-Your-Writes
-    └── After a write, the same client always sees that write.
-        Implemented by sticky sessions to primary, or by versioned reads.
-
-Monotonic Read
-    └── If you read a value, you never read an older value in future reads.
-
-Eventual Consistency (weakest)
-    └── All replicas eventually converge. No ordering guarantee.
-        Used in: DNS, S3 (historically), Cassandra at CL=ONE.
-```
+Each rung down this ladder drops a guarantee to buy back latency: linearizability forces a coordination round-trip on every read (etcd, ZooKeeper, Spanner), while eventual consistency (DNS, S3, Cassandra at CL=ONE) gives no ordering promise at all in exchange for never blocking.
 
 ---
 
@@ -190,6 +212,52 @@ COMMIT;                             COMMIT;
 -- Result: 0 doctors on call — constraint violated!
 -- Fix: Use SERIALIZABLE isolation or SELECT FOR UPDATE
 ```
+
+The two sessions race on the same snapshot, so each `UPDATE` looks safe in isolation while the pair together breaks the constraint:
+
+```mermaid
+sequenceDiagram
+    participant S1 as Session 1
+    participant DB as oncall table
+    participant S2 as Session 2
+
+    S1->>DB: BEGIN
+    S2->>DB: BEGIN
+    S1->>DB: SELECT COUNT(*) WHERE on_duty=true
+    DB-->>S1: 2
+    S2->>DB: SELECT COUNT(*) WHERE on_duty=true
+    DB-->>S2: 2 (same snapshot)
+    S1->>DB: UPDATE doctor 1 on_duty=false
+    S2->>DB: UPDATE doctor 2 on_duty=false
+    S1->>DB: COMMIT
+    S2->>DB: COMMIT
+    Note over S1,S2: Both commit — 0 doctors on call, constraint violated
+```
+
+Neither session ever sees the other's write before committing, because both take the same snapshot (`COUNT = 2`) — the fix is SERIALIZABLE isolation or an explicit `SELECT ... FOR UPDATE` lock.
+
+### Two-Phase Commit (2PC) Protocol
+
+2PC implements distributed atomicity across independent participants with a coordinator-driven prepare/vote/commit handshake:
+
+```mermaid
+sequenceDiagram
+    participant C as Coordinator
+    participant P1 as Participant 1
+    participant P2 as Participant 2
+
+    C->>P1: PREPARE
+    C->>P2: PREPARE
+    P1-->>C: vote yes
+    P2-->>C: vote yes
+    Note over C: all voted yes
+    C->>P1: COMMIT
+    C->>P2: COMMIT
+    P1-->>C: ack
+    P2-->>C: ack
+```
+
+If the coordinator crashes after sending PREPARE but before sending COMMIT, both participants are left holding locks in an uncertain state until it recovers — a blocking window that typically runs 30 seconds to 5 minutes depending on timeout settings.
 
 ---
 

@@ -38,6 +38,30 @@ Understanding when to use each, how to model data effectively, and how to scale 
 
 ## 3. SQL vs. NoSQL
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q1{Need flexible ad-hoc<br/>queries or joins?} -->|yes| SQL([SQL<br/>Postgres, MySQL, Spanner])
+    Q1 -->|no| Q2{What is the<br/>access pattern?}
+
+    Q2 -->|simple key lookup| KV(Key-Value<br/>Redis, DynamoDB)
+    Q2 -->|flexible JSON docs| DOC(Document<br/>MongoDB, Firestore)
+    Q2 -->|write-heavy time series| WIDE(Wide-Column<br/>Cassandra, HBase)
+    Q2 -->|graph traversal| GRAPH(Graph<br/>Neo4j, Neptune)
+    Q2 -->|full-text search| SEARCH(Search<br/>Elasticsearch, Solr)
+
+    class Q1,Q2 mathOp
+    class SQL,KV,DOC,WIDE,GRAPH,SEARCH base
+```
+*The whole SQL-vs-NoSQL choice collapses to two questions: do you need flexible ad-hoc queries, and if not, which access pattern dominates — each NoSQL family below is optimized for exactly one answer to that second question.*
+
 ### SQL (Relational)
 
 **Examples:** PostgreSQL, MySQL, Amazon Aurora, CockroachDB, Google Spanner
@@ -180,11 +204,26 @@ Replication copies data from one node (primary) to others (replicas).
 
 ### Primary-Replica (Master-Slave)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    W([Writes]) --> P(Primary)
+    P -->|WAL / binlog| R1(Replica 1)
+    P -->|WAL / binlog| R2(Replica 2)
+    P -->|WAL / binlog| R3(Replica 3<br/>read traffic)
+
+    class W req
+    class P base
+    class R1,R2,R3 frozen
 ```
-Writes --> Primary --> WAL/binlog --> Replica 1
-                                  --> Replica 2
-                                  --> Replica 3 (read traffic)
-```
+*Writes land on the primary and stream via WAL/binlog to every replica; whether the primary waits for a replica to confirm (below) determines the durability/latency tradeoff.*
 
 - **Synchronous replication**: Primary waits for at least one replica to confirm before acknowledging write. Stronger durability, higher write latency.
 - **Asynchronous replication**: Primary acknowledges immediately; replicas catch up. Lower latency, risk of data loss on failover.
@@ -194,6 +233,22 @@ Writes --> Primary --> WAL/binlog --> Replica 1
 - Direct read traffic to replicas, writes to primary.
 - Replicas may lag (replication lag) — stale reads possible.
 - Scale reads horizontally without scaling writes.
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant P as Primary
+    participant R as Replica
+
+    App->>P: write balance = 900
+    P-->>App: write ack
+    P->>R: async replication in flight
+    App->>R: read balance
+    Note over R: replication lag window<br/>update not yet applied
+    R-->>App: balance = 1000, stale
+    Note over P,R: replica catches up moments later
+```
+*Because replication is asynchronous, a read sent to the replica immediately after a write to the primary can still return the pre-write value — the read-your-own-writes gap called out in Common Pitfall #7.*
 
 ### Multi-Primary (Multi-Master)
 - Multiple nodes accept writes. Conflict resolution required.
@@ -209,45 +264,73 @@ Writes --> Primary --> WAL/binlog --> Replica 1
 ## 8. Architecture Diagrams
 
 ### Primary-Replica Setup
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A([Application]) -->|write| P(Primary)
+    A -->|read| R1(Replica 1)
+    A -->|read| R2(Replica 2)
+    P -.->|async replication| R1
+    P -.->|async replication| R2
+
+    class A io
+    class P base
+    class R1,R2 frozen
 ```
-         Application
-        /     |      \
-       /      |       \
-   Write    Read     Read
-     |        |        |
-  Primary  Replica1  Replica2
-     |
-     +---async replication---> Replica1
-     +---async replication---> Replica2
-```
+*The application routes writes to the primary and reads to either replica; the primary asynchronously streams changes to both replicas after it has already acknowledged the write.*
 
 ### Cassandra Quorum
-```
-N=3 replicas, W=2, R=2 (W+R > N => consistent reads)
+```mermaid
+sequenceDiagram
+    participant CL as Client
+    participant NA as Node A / Coordinator
+    participant NB as Node B
+    participant NC as Node C
 
-Write: Client --> Node A (coord) --> Node A, B, C
-                                     (2 of 3 ack required)
+    CL->>NA: write key, value
+    NA->>NB: replicate
+    NA->>NC: replicate
+    NB-->>NA: ack
+    NC-->>NA: ack
+    Note over NA: 2 of 3 acks received, write succeeds
+    NA-->>CL: write ack
 
-Read:  Client --> Node A (coord) --> Node A, B
-                                     (2 of 3, latest wins)
+    CL->>NA: read key
+    NA->>NB: read
+    NB-->>NA: value at timestamp
+    Note over NA: 2 of 3 responses, latest value wins
+    NA-->>CL: read response
 ```
+*With N=3, W=2, R=2 (W+R > N), the coordinator only needs 2-of-3 acks to satisfy a write and 2-of-3 responses to resolve a read to the latest value — guaranteeing at least one replica overlaps between any write and any read.*
 
 ### ACID Transaction Flow
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    T([BEGIN TRANSACTION<br/>2 UPDATEs + COMMIT]) --> W(WAL persisted to disk<br/>before commit ack)
+    W --> B(Data pages updated<br/>in buffer pool)
+    B --> C([Committed<br/>durable, atomic])
+
+    class T req
+    class W mathOp
+    class B base
+    class C train
 ```
-BEGIN TRANSACTION
-  UPDATE accounts SET balance = balance - 100 WHERE id = 1;
-  UPDATE accounts SET balance = balance + 100 WHERE id = 2;
-COMMIT
-    |
-    v
-WAL (Write-Ahead Log) persisted to disk BEFORE commit acks
-    |
-    v
-Data pages updated in buffer pool
-    |
-    v
-Committed (durable, atomic)
-```
+*The WAL is fsynced to disk before the client's COMMIT is acknowledged — durability comes from the log, not from the later, buffered data-page write.*
 
 ---
 
@@ -469,33 +552,32 @@ The goal was to shard while keeping MySQL wire-protocol compatibility so the exi
 
 ### Architecture Overview
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    App([App services<br/>Rails / Java]) -->|MySQL wire protocol| GW(VTGate proxy<br/>stateless, autoscale)
+
+    GW -->|routes by VSchema| T0(VTTablet shard0<br/>MySQL)
+    GW -->|routes by VSchema| T1(VTTablet shard1<br/>MySQL)
+    GW -->|routes by VSchema| T2(VTTablet shard2<br/>MySQL)
+
+    T0 --> Topo(Topology service<br/>etcd / ZooKeeper)
+    T1 --> Topo
+    T2 --> Topo
+
+    class App io
+    class GW mathOp
+    class T0,T1,T2 base
+    class Topo frozen
 ```
-   App services (Rails/Java) ─── MySQL wire protocol
-                  │
-                  ▼
-        ┌────────────────────────┐
-        │      VTGate (proxy)    │  ◀── routes by VSchema
-        │   stateless, autoscale │
-        └──────────┬─────────────┘
-                   │
-       ┌───────────┼───────────┐
-       ▼           ▼           ▼
-   ┌────────┐ ┌────────┐ ┌────────┐
-   │VTTablet│ │VTTablet│ │VTTablet│
-   │ shard0 │ │ shard1 │ │ shard2 │  (16 shards total)
-   │ MySQL  │ │ MySQL  │ │ MySQL  │
-   └────────┘ └────────┘ └────────┘
-       │           │           │
-       └───────────┴───────────┘
-                   │
-                   ▼
-        ┌────────────────────────┐
-        │   Topology service     │  (etcd/ZooKeeper)
-        │   - VSchema            │
-        │   - Shard map          │
-        │   - Tablet health      │
-        └────────────────────────┘
-```
+*VTGate is a stateless MySQL-wire-protocol proxy that routes to 16 VTTablet-managed shards by VSchema (3 of 16 shown); each tablet reports its shard map, VSchema, and health back to the etcd/ZooKeeper-backed topology service.*
 
 ### Key Design Decisions
 

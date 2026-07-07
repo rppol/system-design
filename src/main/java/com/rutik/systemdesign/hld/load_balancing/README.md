@@ -113,6 +113,25 @@ Route requests to a randomly selected backend.
 - **Best for**: Simple, roughly even distribution without any state
 - **Problem**: Can lead to uneven distribution in small pools by chance
 
+The four stateful/stateless algorithms above trade off two things at once — how evenly they spread load, and how strongly they pin a client to one server. Plotting them on both axes together makes the split obvious in a way the per-algorithm bullet points above don't:
+
+```mermaid
+quadrantChart
+    title Distribution Evenness vs Session Affinity
+    x-axis Low Affinity --> High Affinity
+    y-axis Low Evenness --> High Evenness
+    quadrant-1 Ideal, rare in practice
+    quadrant-2 Stateless workloads
+    quadrant-3 Rarely used
+    quadrant-4 Cache / session workloads
+    Round Robin: [0.05, 0.92]
+    Least Connections: [0.1, 0.75]
+    Consistent Hashing: [0.8, 0.45]
+    IP Hash: [0.75, 0.2]
+```
+
+*Round Robin and Least Connections cluster top-left — great evenness, no affinity — which is why they suit stateless web/API tiers. Consistent Hashing and IP Hash cluster bottom-right — strong affinity at the cost of perfectly even load — which is why they suit caches and sticky sessions instead.*
+
 ### Layer 4 vs Layer 7 Load Balancing
 
 #### Layer 4 (Transport Layer)
@@ -122,12 +141,29 @@ Operates on IP and TCP/UDP. Routes based on source/destination IP and port. Does
 - **Cons**: Cannot route based on application content (URL, headers, cookies)
 - **Examples**: AWS NLB, HAProxy TCP mode
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    C([Client]) --> LB(L4 Load Balancer)
+    LB --> BE([Backend])
+    LB -.->|"sees"| Sees("src_ip, dst_ip, port")
+    LB -.->|"blind to"| Blind("headers, path, cookies")
+
+    class C io
+    class LB mathOp
+    class BE frozen
+    class Sees train
+    class Blind lossN
 ```
-Client -> [L4 LB] -> Backend
-           |
-           Sees: src_ip, dst_ip, port
-           Does NOT see: HTTP headers, URL path, cookies
-```
+
+*L4 only ever inspects IP/port — it forwards packets without ever parsing the HTTP layer, which is why it's fast but cannot make content-aware decisions.*
 
 #### Layer 7 (Application Layer)
 Operates on the full HTTP/HTTPS request. Can inspect headers, URL paths, cookies, and body content.
@@ -136,12 +172,29 @@ Operates on the full HTTP/HTTPS request. Can inspect headers, URL paths, cookies
 - **Cons**: Slightly higher latency due to full request parsing; must decrypt HTTPS
 - **Examples**: AWS ALB, Nginx, HAProxy HTTP mode
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    C([Client]) --> LB(L7 Load Balancer)
+    LB --> BE([Backend])
+    LB -.->|"sees"| Sees("HTTP method, path,<br/>headers, cookies, body")
+    LB -.->|"can do"| Can("path routing, header<br/>injection, auth offload")
+
+    class C io
+    class LB mathOp
+    class BE frozen
+    class Sees train
+    class Can train
 ```
-Client -> [L7 LB] -> Backend
-           |
-           Sees: HTTP method, URL path, headers, cookies, body
-           Can do: path-based routing, header injection, auth offload
-```
+
+*L7 fully parses the request, so both visibility and routing power go up — at the cost of decrypting and inspecting every packet.*
 
 ### Sticky Sessions (Session Persistence)
 
@@ -163,86 +216,108 @@ Client IP is hashed to determine the backend. Consistent for a given IP.
 
 ### Basic Load Balancer Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Internet([Internet]) --> LB("Load Balancer<br/>HAProxy / Nginx / AWS ALB")
+    LB --> S1(Web Server S1)
+    LB --> S2(Web Server S2)
+    LB --> S3(Web Server S3)
+
+    class Internet io
+    class LB mathOp
+    class S1 frozen
+    class S2 frozen
+    class S3 frozen
 ```
-                      [ Internet ]
-                           |
-                    +------v------+
-                    |   Load      |
-                    |  Balancer   |
-                    | (HAProxy /  |
-                    |  Nginx /    |
-                    |  AWS ALB)   |
-                    +--+---+---+--+
-                       |   |   |
-              +--------+   |   +--------+
-              |             |            |
-        +-----v--+    +-----v--+   +-----v--+
-        |  Web   |    |  Web   |   |  Web   |
-        | Server |    | Server |   | Server |
-        |   S1   |    |   S2   |   |   S3   |
-        +--------+    +--------+   +--------+
-```
+
+*The load balancer sits between the internet and an interchangeable pool of web servers, fanning traffic out across S1–S3 so no single server is the bottleneck.*
 
 ### L7 Content-Based Routing
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    LB("L7 Load Balancer<br/>AWS ALB / Nginx")
+    LB -->|"/api/*"| API("API Servers (Node.js)<br/>S1 S2 S3")
+    LB -->|"/static/*"| STATIC("Static File Servers<br/>S4 S5")
+
+    class LB mathOp
+    class API frozen
+    class STATIC frozen
 ```
-                    +------------------+
-                    |   L7 Load        |
-                    |   Balancer       |
-                    | (AWS ALB / Nginx) |
-                    +--+--------+------+
-                       |        |
-           +-----------+        +-----------+
-           |  /api/*                        |  /static/*
-           v                                v
-    +------+------+                  +------+------+
-    | API Servers |                  | Static File |
-    |  (Node.js)  |                  |  Servers    |
-    | S1  S2  S3  |                  |  S4  S5     |
-    +-------------+                  +-------------+
-```
+
+*The L7 load balancer parses the URL path and routes `/api/*` to one server pool and `/static/*` to a completely different pool — impossible at L4, which never sees the path.*
 
 ### Global Load Balancing (Multi-Region)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    US([Users US]) --> M((Global<br/>Entry))
+    EU([Users EU]) --> M
+    APAC([Users APAC]) --> M
+
+    M --> DNS(Global DNS<br/>Route 53)
+    M --> ANY(Anycast IP<br/>Cloudflare)
+
+    DNS --> USLB(US-EAST-1<br/>Regional LB) --> USPOOL(App Pool<br/>US servers)
+    ANY --> EULB(EU-WEST-1<br/>Regional LB) --> EUPOOL(App Pool<br/>EU servers)
+
+    class US io
+    class EU io
+    class APAC io
+    class M mathOp
+    class DNS mathOp
+    class ANY mathOp
+    class USLB frozen
+    class EULB frozen
+    class USPOOL base
+    class EUPOOL base
 ```
-        Users (US)      Users (EU)      Users (APAC)
-             |               |                |
-             +-------+-------+--------+-------+
-                     |                |
-              +------v------+  +------v------+
-              | Global DNS  |  | Anycast IP  |
-              | (Route 53)  |  | (Cloudflare)|
-              +------+------+  +------+------+
-                     |                |
-          +----------+                +----------+
-          |                                      |
-    +-----v------+                        +-----v------+
-    | US-EAST-1  |                        | EU-WEST-1  |
-    | Regional   |                        | Regional   |
-    | Load Bal.  |                        | Load Bal.  |
-    +-----+------+                        +-----+------+
-          |                                      |
-    +-----+-----+                         +------+-----+
-    | App Pool  |                         | App Pool   |
-    | US servers|                         | EU servers |
-    +-----------+                         +------------+
-```
+
+*Users worldwide funnel through a global entry layer — DNS latency-based routing or anycast — which fans out to the nearest region's load balancer and app pool.*
 
 ### Health Check Flow
 
+```mermaid
+stateDiagram-v2
+    [*] --> Healthy
+
+    state "1/3 failures" as Fail1
+    state "2/3 failures" as Fail2
+    state "1/2 healthy" as Recover1
+
+    Healthy --> Healthy: 200 OK<br/>(every 10s)
+    Healthy --> Fail1: timeout
+    Fail1 --> Fail2: timeout
+    Fail2 --> Unhealthy: timeout<br/>(3/3, removed)
+    Unhealthy --> Recover1: 200 OK<br/>(server restarted)
+    Recover1 --> Healthy: 200 OK<br/>(2/2, back in rotation)
 ```
-Load Balancer
-    |
-    |-- every 10s --> GET /health -> S1  (200 OK) -> HEALTHY, in rotation
-    |-- every 10s --> GET /health -> S2  (timeout) -> mark 1/3 failures
-    |-- every 10s --> GET /health -> S2  (timeout) -> mark 2/3 failures
-    |-- every 10s --> GET /health -> S2  (timeout) -> mark 3/3 failures -> UNHEALTHY, removed
-    |
-    | ... S2 is restarted ...
-    |
-    |-- every 10s --> GET /health -> S2  (200 OK) -> mark 1/2 healthy
-    |-- every 10s --> GET /health -> S2  (200 OK) -> mark 2/2 healthy -> HEALTHY, back in rotation
-```
+
+*S1 passes every 10s check and stays HEALTHY throughout. S2 accumulates 3 consecutive timeouts before being pulled from rotation, then needs 2 consecutive successes to rejoin — this hysteresis is what prevents a single blip from flapping a server in and out.*
 
 ---
 
@@ -257,6 +332,27 @@ Load Balancer
 5. **Backend Response**: Backend processes the request and returns the response to the load balancer
 6. **Response Forwarding**: Load balancer forwards the response to the client
 7. **Connection Management**: Connection may be kept alive (persistent connections) or closed
+
+The same seven steps as an actor sequence make the two-hop nature of the round trip explicit — the backend never talks to the client directly, and the load balancer mediates both directions:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant D as DNS
+    participant LB as Load Balancer
+    participant BE as Backend
+
+    C->>D: resolve api.example.com
+    D-->>C: load balancer IP
+    C->>LB: open TCP connection
+    LB->>LB: select backend<br/>(routing algorithm)
+    LB->>BE: forward request<br/>(+ X-Forwarded-For)
+    BE-->>LB: response
+    LB-->>C: forward response
+    Note over C,LB: connection kept alive<br/>or closed
+```
+
+*DNS resolution and algorithm selection both happen before the backend ever sees the request — the backend only ever talks to the load balancer, never directly to the client.*
 
 ### SSL Termination at the Load Balancer
 
@@ -516,34 +612,38 @@ An e-commerce platform preparing for Black Friday:
 
 ### Architecture Overview
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    R53(Route 53<br/>latency-based) --> ALB("AWS ALB L7 :443<br/>TLS terminate<br/>path/host routing")
+
+    ALB -->|"/api/*<br/>Least-Conn"| APITG(API target group<br/>200 instances)
+    ALB -->|"static<br/>Round Robin"| STATICTG(Static group<br/>150 instances)
+    ALB -->|"/ws/*<br/>Consistent Hashing"| WSTG(WS target group<br/>150 instances)
+
+    APITG --> HOTNLB(Hot-key NLB<br/>hash on product_id)
+
+    WSTG -->|"sticky by<br/>user_id hash"| BLUE("Blue Group - current<br/>A B C")
+    WSTG -->|"sticky by<br/>user_id hash"| GREEN("Green Group - new ver<br/>A' B' C'")
+
+    class R53 mathOp
+    class ALB mathOp
+    class APITG frozen
+    class STATICTG frozen
+    class WSTG frozen
+    class HOTNLB mathOp
+    class BLUE train
+    class GREEN frozen
 ```
-                       Route 53 (latency-based)
-                                |
-                                v
-                  +-------------+-------------+
-                  |   AWS ALB (L7) :443       |
-                  |   - TLS terminate          |
-                  |   - Path/host routing      |
-                  +--+----------+----------+--+
-                     |          |          |
-        /api/*       |          |          | /ws/*
-        Least-Conn   |          | Round    | Consistent
-                     v          | Robin    | Hashing
-            +--------+------+   v          v
-            | API target    | static    +-------+
-            | group (200)   | group     | WS TG |
-            +-------+-------+ (150)     | (150) |
-                    |                   +---+---+
-                    v                       |
-            +----------------+      Sticky by user_id hash
-            | Hot-key NLB    |
-            | (consistent    |   Blue Group  +---+---+---+
-            |  hashing on    |   (current)   | A | B | C |
-            |  product_id)   |               +---+---+---+
-            +----------------+   Green Group +---+---+---+
-                                 (new ver)   | A'| B'| C'|
-                                             +---+---+---+
-```
+
+*One ALB fans traffic into three algorithm-matched target groups by path; the API tier further concentrates hot-SKU reads through a consistent-hashing NLB, while the WebSocket tier splits into blue (current) and green (new version) groups for zero-downtime deploys.*
 
 ### Key Design Decisions
 

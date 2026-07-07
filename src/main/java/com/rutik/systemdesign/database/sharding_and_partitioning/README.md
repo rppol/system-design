@@ -51,23 +51,38 @@ Hash      | PARTITION BY HASH (user_id)           | Even distribution, OLTP
 
 ## 5. Architecture Diagrams
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    W1(["Write<br/>user_id=12345"]) --> H1{"hash(id) % 4"}
+    W2(["Write<br/>user_id=99999"]) --> H2{"hash(id) % 4"}
+    R1(["Read WHERE<br/>user_id=12345"]) --> H1
+    R2(["Read WHERE<br/>age over 30<br/>(no shard key)"]) --> SG{"scatter-gather"}
+
+    H1 -->|"= 1"| S1("Shard 1")
+    H2 -->|"= 3"| S3("Shard 3")
+    SG --> S0("Shard 0")
+    SG --> S1
+    SG --> S2("Shard 2")
+    SG --> S3
+    S0 & S1 & S2 & S3 --> M(("merge"))
+
+    class W1,W2,R1,R2 req
+    class H1,H2,SG mathOp
+    class S0,S1,S2,S3 base
+    class M mathOp
 ```
-Hash Sharding: 4 shards
-========================
 
-Write: user_id=12345
-  hash(12345) % 4 = 1  →  Shard 1
+Writes and shard-key reads hash the key mod 4 straight to one shard; the `age` filter carries no shard key, so it scatters to all four shards and merges the results in the router.
 
-Write: user_id=99999
-  hash(99999) % 4 = 3  →  Shard 3
-
-Read: SELECT * FROM users WHERE user_id = 12345
-  hash(12345) % 4 = 1  →  Shard 1 (single-shard read)
-
-Read: SELECT * FROM users WHERE age > 30
-  No shard key → scatter to all 4 shards, merge results (scatter-gather)
-
-
+```
 Consistent Hashing Ring with Virtual Nodes
 ==========================================
 
@@ -92,8 +107,19 @@ Key "user:12345" → hash = 210 → falls in [180-225] → Node B
 
 Adding Node D: takes ~25% of virtual nodes from A, B, C
   → only ~25% of data moves (vs 50% in naive hash % N resizing)
+```
 
+```mermaid
+xychart-beta
+    title "Data moved when a 3-node cluster grows to 4 nodes"
+    x-axis ["Mod-N hashing", "Consistent hashing (vnodes)"]
+    y-axis "Percent of keys remapped" 0 --> 100
+    bar [50, 25]
+```
 
+Naive `hash(key) % N` remaps close to half of all keys whenever the node count changes; consistent hashing with virtual nodes moves only the arc handed to the new node — about 25% here, and roughly 9% when an 11th node joins a 10-node cluster (see Section 12 Q&A).
+
+```
 PostgreSQL Range Partitioning
 ==============================
 
@@ -138,11 +164,31 @@ Redis Cluster: 16384 hash slots (not traditional consistent hashing)
 
 Vitess adds a sharding layer on top of MySQL. Key components:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    C(["Client"]) --> VG{"VTGate<br/>routing proxy"}
+    VG -->|"shard-specific"| VT1["VTTablet<br/>shard 1"]
+    VG -.->|"scatter-gather"| VT2["VTTablet<br/>shard 2"]
+    VT1 --> M1("MySQL")
+    VT2 --> M2("MySQL")
+
+    class C io
+    class VG mathOp
+    class VT1,VT2 req
+    class M1,M2 base
 ```
-Architecture:
 
-Client → VTGate (routing proxy) → VTTablet (per MySQL shard) → MySQL
+A single-shard query flows client to VTGate to one VTTablet to MySQL; a cross-shard query takes the dotted scatter-gather path to every VTTablet, and VTGate merges the results before replying.
 
+```
 VTGate:
   - Receives queries using MySQL protocol
   - Parses query, reads VSchema (sharding metadata)
@@ -187,22 +233,32 @@ A hotspot occurs when one shard receives disproportionately more reads/writes th
 
 **Celebrity/firehose hotspot**: User ID 1 (celebrity with 100M followers) generates 1000x more write traffic than average users. A single shard hosts all of user 1's data and gets overwhelmed.
 
-```
-Fix options for celebrity hotspot:
-1. Write sharding with random suffix:
-   key: "post:{user_id}:{random_suffix(0..N)}"
-   Write: randomly pick one of N sub-shards
-   Read: scatter-gather all N sub-shards, aggregate
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-2. Dedicated shard for hot tenants:
-   user_id 1 → dedicated shard with extra capacity
-   Directory-based routing: lookup shard for user_id before routing
+    HS{"Celebrity<br/>hotspot"} --> F1["1. Write sharding<br/>random suffix"]
+    HS --> F2["2. Dedicated shard<br/>for hot tenant"]
+    HS --> F3["3. Tiered fan-out"]
 
-3. Tiered fan-out:
-   Hot users: fan-out at write time (push to followers)
-   Cold users: fan-in at read time (pull from author)
-   Threshold: > 10K followers → hot user
+    F1 --> F1a["write: pick 1 of N<br/>sub-shards"]
+    F1 --> F1b["read: scatter-gather<br/>N sub-shards"]
+    F2 --> F2a["directory lookup routes<br/>to dedicated shard"]
+    F3 --> F3a["hot user (over 10K<br/>followers): fan-out at write"]
+    F3 --> F3b["cold user:<br/>fan-in at read"]
+
+    class HS lossN
+    class F1,F2,F3 mathOp
+    class F1a,F1b,F2a,F3a,F3b req
 ```
+
+Three independent fixes for a celebrity-tenant hotspot: shard writes across random sub-shard suffixes, pin the hot tenant to a dedicated shard through directory routing, or switch between push (fan-out) and pull (fan-in) delivery at the 10K-follower threshold.
 
 ### PostgreSQL Declarative Partitioning
 
@@ -235,24 +291,42 @@ DROP TABLE orders_2022_q1;
 
 ### Cross-Shard Queries and Distributed SQL
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph SG["Scatter-gather"]
+        direction LR
+        Q1(["query"]) --> R1{"fan to<br/>N shards"} --> M1(("merge"))
+    end
+
+    subgraph PJ["Partition-wise join<br/>(PG 11+)"]
+        direction LR
+        Q2(["query"]) --> R2["join matching<br/>partitions locally"]
+    end
+
+    subgraph AJ["Application-layer join"]
+        direction LR
+        Q3(["query"]) --> R3["fetch shard 1<br/>by id"] --> R4["fetch shard 2<br/>by id"]
+    end
+
+    subgraph DN["Denormalization"]
+        direction LR
+        Q4(["query"]) --> R5["read one shard<br/>(data pre-duplicated)"]
+    end
+
+    class Q1,Q2,Q3,Q4 req
+    class R1,M1,R2 mathOp
+    class R3,R4,R5 base
 ```
-Cross-shard query patterns:
-  Scatter-gather: send query to all shards, merge results in router
-    - Cost: O(N shards) network calls + merge overhead
-    - Problematic for pagination: must gather from all, sort, offset
 
-  Partition-wise join (PostgreSQL 11+):
-    - Planner joins matching partition pairs locally
-    - No cross-partition data movement if both tables partitioned on join key
-
-  Application-layer join:
-    - Fetch from shard 1, use IDs to query shard 2
-    - Explicit, controllable, but verbose code
-
-  Denormalization:
-    - Duplicate relevant foreign data into the shard's table
-    - Eliminates join at query time, costs storage and sync complexity
-```
+The four strategies trade router cost for schema cost: scatter-gather fans out and merges at query time, partition-wise joins stay local when both tables share a partition key, application-layer joins chain two shard reads, and denormalization pays the duplication cost at write time so reads never leave one shard.
 
 ---
 
@@ -292,6 +366,33 @@ Cost                 | Lower                    | Higher
 **Use partitioning without sharding when**: Dataset is large but write throughput is manageable on one primary; you need fast partition-level operations (drop old time partitions, tablespace relocation); query plans benefit from partition pruning.
 
 **Avoid premature sharding**: Most applications never need it. A single PostgreSQL server with read replicas handles millions of users. Sharding adds significant operational complexity — migrate to it only when profiling proves you have exhausted vertical scaling and read replica options.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q1{"Writes over 50K<br/>TPS sustained?"} -->|"yes"| SHARD(["Shard<br/>horizontally"])
+    Q1 -->|"no"| Q2{"Active dataset<br/>over 10TB?"}
+    Q2 -->|"yes"| SHARD
+    Q2 -->|"no"| Q3{"Need geographic<br/>distribution?"}
+    Q3 -->|"yes"| SHARD
+    Q3 -->|"no"| Q4{"Need partition pruning<br/>or fast drop-old-data?"}
+    Q4 -->|"yes"| PART(["Partition only<br/>(single primary)"])
+    Q4 -->|"no"| SINGLE(["Single primary<br/>+ read replicas"])
+
+    class Q1,Q2,Q3,Q4 mathOp
+    class SHARD lossN
+    class PART base
+    class SINGLE train
+```
+
+None of the three sharding triggers — sustained writes over 50K TPS, an active dataset over 10TB, or a geographic requirement — should be reached before profiling proves a single primary with read replicas is exhausted; partitioning alone covers the fast-pruning and archival cases in between.
 
 ---
 

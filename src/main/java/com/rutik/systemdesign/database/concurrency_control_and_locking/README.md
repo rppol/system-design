@@ -131,26 +131,35 @@ SELECT pg_advisory_lock(class_id, object_id);
 
 ## 5. Architecture Diagrams
 
+**Deadlock detection (wait-for graph).** T1 holds Row A and waits for Row B; T2 holds Row B and waits for Row A — that mutual wait is the cycle every deadlock detector looks for.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    T1("T1") -->|"holds"| RowA("Row A")
+    T1 -.->|"waits for"| RowB("Row B")
+    T2("T2") -->|"holds"| RowB
+    T2 -.->|"waits for"| RowA
+    RowA --> Detector{"cycle detected?<br/>deadlock_timeout"}
+    RowB --> Detector
+    Detector -->|"victim: lowest<br/>cost/priority"| Victim("rollback<br/>deadlock detected")
+    Detector -.->|"unblocks"| Survivor("other tx<br/>proceeds")
+
+    class T1,T2 req
+    class RowA,RowB base
+    class Detector mathOp
+    class Victim lossN
+    class Survivor train
 ```
-DEADLOCK DETECTION (Wait-For Graph):
 
-T1 holds lock on Row A, waits for Row B
-T2 holds lock on Row B, waits for Row A
-
-Wait-For Graph:
-T1 ──waits──> T2
-T2 ──waits──> T1
-(Cycle detected → deadlock)
-
-Resolution:
-PostgreSQL: detect cycle via background process (deadlock_timeout=1s default)
-            → victim = transaction with lowest cost/priority
-            → victim receives: "ERROR: deadlock detected"
-            → victim rolls back → other transaction proceeds
-
-InnoDB: continuous cycle detection (no timeout needed)
-        → victim = transaction with fewest row locks (minimize rollback cost)
-```
+PostgreSQL's background process checks for this cycle every `deadlock_timeout` (1s default) and aborts the lowest-cost/priority transaction with `ERROR: deadlock detected`; InnoDB instead detects continuously (no timeout) and picks the victim holding the fewest row locks to minimize rollback cost.
 
 ```
 GAP LOCKS AND NEXT-KEY LOCKS (InnoDB REPEATABLE READ):
@@ -168,21 +177,69 @@ Purpose: prevent phantom reads at REPEATABLE READ
 Any INSERT of id=25 or id=35 is blocked until this transaction commits.
 ```
 
-```
-MVCC SNAPSHOT ISOLATION vs SERIALIZABLE (PostgreSQL SSI):
+**MVCC snapshot isolation vs. SSI (write skew).** Two transactions each read `X=0, Y=0`, each write only the variable the other didn't touch, and both commit cleanly under plain snapshot isolation — yet the combined result violates an invariant neither transaction could see alone.
 
-Snapshot Isolation (REPEATABLE READ in PostgreSQL):
-T1: reads X=0, reads Y=0, writes Y=1
-T2: reads X=0, reads Y=0, writes X=1
-Both commit → X=1, Y=1 (each T only changed one var)
-But: T1 based decision on Y=0, T2 based on X=0 — write skew possible
+```mermaid
+sequenceDiagram
+    participant T1 as Transaction T1
+    participant T2 as Transaction T2
+    participant DB as PostgreSQL
 
-SSI (SERIALIZABLE in PostgreSQL) adds conflict tracking:
-T1 reads Y → siSiRead on Y recorded
-T2 reads X → siSiRead on X recorded
-T1 writes Y → potential rw-antidependency detected (T2 read Y that T1 will change)
-T2 writes X → cycle detected → one is aborted with serialization failure
+    Note over T1,T2: Snapshot Isolation (REPEATABLE READ)
+    T1->>DB: read X=0, read Y=0
+    T2->>DB: read X=0, read Y=0
+    T1->>DB: write Y=1
+    T2->>DB: write X=1
+    Note over T1,T2: both commit — X=1, Y=1<br/>write skew: each decided on a stale read
+
+    Note over T1,T2: Serializable Snapshot Isolation (SSI)
+    T1->>DB: read Y (siRead recorded)
+    T2->>DB: read X (siRead recorded)
+    T1->>DB: write Y (rw-antidependency: T2 read Y)
+    T2->>DB: write X (cycle detected)
+    DB-->>T2: serialization failure — abort and retry
 ```
+
+Plain snapshot isolation lets the write skew through because neither transaction re-reads the other's write; PostgreSQL's SSI additionally tracks rw-antidependencies between concurrent transactions and aborts one side the moment those dependencies close into a cycle.
+
+**MVCC row-visibility decision logic.** The visibility rule from the MVCC overview above — xmin committed AND xmin before the snapshot's max_xid AND xmax not committed or beyond max_xid — reads as a formula, but it is really just two yes/no checks.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["row version<br/>xmin / xmax"]) --> C1{"xmin committed<br/>before my snapshot?"}
+    C1 -->|"no"| N1("not visible")
+    C1 -->|"yes"| C2{"xmax = 0 or<br/>xmax not committed?"}
+    C2 -->|"yes"| V("visible")
+    C2 -->|"no"| N2("not visible<br/>deleted by another tx")
+
+    class Start io
+    class C1,C2 mathOp
+    class V train
+    class N1,N2 lossN
+```
+
+A row version is visible only when both checks pass: its creator committed before the snapshot was taken, and its deleter — if any — had not committed by that same snapshot; miss either check and the reader falls through to a different, still-committed version instead of blocking.
+
+**Two-phase locking (2PL): growing vs. shrinking phase.** 2PL is the mechanism underlying every lock-based scheme above — it guarantees serializability by forbidding a transaction from acquiring any new lock once it has released one.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Growing
+    Growing --> Growing: acquire lock
+    Growing --> Shrinking: last lock acquired
+    Shrinking --> Shrinking: release lock
+    Shrinking --> [*]: commit / abort
+```
+
+Once a transaction crosses into the shrinking phase it can only give locks back, never take a new one — that one-way switch is what rules out the interleavings that would break serializability. Strict 2PL, what most databases actually run, delays the entire shrinking phase until commit or abort, trading extra contention for freedom from cascading aborts.
 
 ---
 

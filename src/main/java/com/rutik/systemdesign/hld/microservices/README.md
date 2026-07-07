@@ -60,18 +60,40 @@ In a distributed system, partial failures are normal. Every service must handle:
 
 ### Monolith vs Microservices vs SOA
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph MONO["Monolith"]
+        mono("UI + Business Logic<br/>+ Data Layer + DB")
+    end
+
+    subgraph SOA["SOA"]
+        esb{"Enterprise<br/>Service Bus"}
+        sa("Svc A") --> esb
+        sb("Svc B") --> esb
+        sc("Svc C") --> esb
+    end
+
+    subgraph MS["Microservices"]
+        ma("Svc A")
+        mb("Svc B")
+        mc("Svc C")
+        md("Svc D")
+    end
+
+    class mono base
+    class esb mathOp
+    class sa,sb,sc,ma,mb,mc,md train
 ```
-MONOLITH                 SOA                       MICROSERVICES
-+--------------+        +------------------+       +-----+  +-----+
-|              |        |    ESB           |       | Svc |  | Svc |
-|  UI          |        |  (Enterprise     |       |  A  |  |  B  |
-|  Business    |        |   Service Bus)   |       +-----+  +-----+
-|  Logic       |        |  /     |     \   |           |       |
-|  Data Layer  |        |Svc   Svc    Svc  |       +-----+  +-----+
-|  Database    |        | A     B      C   |       | Svc |  | Svc |
-+--------------+        +------------------+       |  C  |  |  D  |
-                                                   +-----+  +-----+
-```
+
+Three architectural generations side by side: the monolith is one deployable block, SOA routes every call through a shared ESB bottleneck, and microservices are small, independently deployable units with no shared intermediary.
 
 | Dimension             | Monolith                     | SOA                            | Microservices                  |
 |-----------------------|------------------------------|--------------------------------|--------------------------------|
@@ -103,22 +125,19 @@ In a dynamic environment (containers, auto-scaling), service instances have ephe
 
 The client queries a service registry directly and performs load balancing.
 
+```mermaid
+sequenceDiagram
+    participant A as Service A (Client)
+    participant E as Eureka Registry
+    participant O as Order Service
+
+    A->>E: 1. Where is Order Service?
+    E-->>A: 2. Instance list 10.0.0.1-3 on 8080
+    Note over A: 3. Ribbon picks instance<br/>round-robin / least-conn
+    A->>O: 4. Call 10.0.0.2:8080
 ```
-Service A (Client)
-     |
-     | 1. "Where is Order Service?"
-     v
-[Service Registry: Eureka]
-     |
-     | 2. Returns list of Order Service instances
-     |    [10.0.0.1:8080, 10.0.0.2:8080, 10.0.0.3:8080]
-     v
-Service A
-     |
-     | 3. Ribbon picks instance (round-robin/least-conn)
-     v
-Order Service (10.0.0.2:8080)
-```
+
+The client itself resolves and load-balances — no extra network hop, but every client language needs a Eureka-aware library.
 
 Pros: no intermediate hop; client has control over load balancing algorithm.
 Cons: every client language needs a registry client library.
@@ -127,17 +146,19 @@ Cons: every client language needs a registry client library.
 
 The client calls a fixed endpoint (load balancer); the LB queries the registry and routes.
 
+```mermaid
+sequenceDiagram
+    participant A as Service A
+    participant LB as Load Balancer<br/>ALB / Nginx
+    participant O as Order Service
+
+    A->>LB: 1. POST /orders (fixed DNS name)
+    Note over LB: 2. Queries registry /<br/>health checks
+    LB->>O: 3. Routes to auto-selected instance
+    O-->>A: Response
 ```
-Service A
-     |
-     | 1. POST /orders  (to a fixed DNS name)
-     v
-[Load Balancer: ALB / Nginx]
-     |
-     | 2. Queries registry or uses health checks to find Order Service instances
-     v
-Order Service (auto-selected instance)
-```
+
+The client only ever talks to the fixed LB endpoint — registry logic lives entirely on the server side, at the cost of one extra network hop.
 
 Pros: client needs no registry logic; language-agnostic.
 Cons: one extra network hop; LB can be a bottleneck or single point of failure.
@@ -146,20 +167,20 @@ Cons: one extra network hop; LB can be a bottleneck or single point of failure.
 
 Service names resolve to IP addresses via DNS. Kubernetes uses this natively — a Service resource creates a stable DNS name (`order-service.default.svc.cluster.local`) that resolves to one of the healthy pod IPs.
 
+```mermaid
+sequenceDiagram
+    participant A as Service A
+    participant D as kube-dns / CoreDNS
+    participant P as kube-proxy / iptables
+    participant O as Order Service Pod
+
+    A->>D: 1. DNS lookup<br/>order-service.default.svc.cluster.local
+    D-->>A: 2. Returns ClusterIP (stable virtual IP)
+    A->>P: 3. Connect to ClusterIP
+    P->>O: 4. Routes to a healthy pod IP
 ```
-Service A
-     |
-     | 1. DNS lookup: order-service.default.svc.cluster.local
-     v
-[kube-dns / CoreDNS]
-     |
-     | 2. Returns ClusterIP (virtual stable IP)
-     v
-[kube-proxy / iptables] -- routes to one of the healthy pod IPs
-     |
-     v
-Order Service Pod
-```
+
+No external registry is involved — Kubernetes' own DNS and iptables/IPVS rules do the discovery and routing.
 
 ### 4.2 API Gateway
 
@@ -167,28 +188,27 @@ The API Gateway is the single entry point for all external clients. It handles c
 
 #### Responsibilities
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ext([External Clients<br/>Web, Mobile, 3rd-party]) --> gw("API GATEWAY<br/>SSL Term · AuthN · Rate Limit<br/>Routing · Aggregation<br/>Protocol Xlate · Logging")
+    gw --> user("User Svc")
+    gw --> order("Order Svc")
+    gw --> payment("Payment Svc")
+
+    class ext io
+    class gw mathOp
+    class user,order,payment train
 ```
-External Clients (Web, Mobile, Third-party)
-              |
-              v
-     +-------------------+
-     |    API GATEWAY    |
-     |                   |
-     | - SSL Termination |
-     | - Authentication  |
-     | - Rate Limiting   |
-     | - Routing         |
-     | - Request         |
-     |   Aggregation     |
-     | - Protocol        |
-     |   Translation     |
-     | - Logging         |
-     +-------------------+
-       |      |      |
-       v      v      v
-  User Svc  Order  Payment
-             Svc    Svc
-```
+
+Every cross-cutting concern is handled once at the gateway instead of duplicated in every downstream service.
 
 | Feature                 | Description                                                              |
 |-------------------------|--------------------------------------------------------------------------|
@@ -223,13 +243,15 @@ External Clients (Web, Mobile, Third-party)
 - Better for internal service-to-service communication at scale.
 - Harder to debug (binary); requires a proto schema registry.
 
+```mermaid
+xychart-beta
+    title "Per-call Latency: gRPC vs REST (Service A to Service B)"
+    x-axis ["gRPC (HTTP/2 + Protobuf)", "REST (HTTP/1.1 + JSON)"]
+    y-axis "Latency (microseconds)" 0 --> 5000
+    bar [100, 3000]
 ```
-Service A ----[HTTP/2 + Protobuf]----> Service B
-              (gRPC, ~100 microsec)
 
-Service A ----[HTTP/1.1 + JSON]------> Service B
-              (REST, ~1-5ms)
-```
+gRPC's binary framing and HTTP/2 multiplexing cut typical per-call latency roughly 30x versus REST's text-based JSON over HTTP/1.1.
 
 #### Asynchronous (Event-Driven)
 
@@ -239,17 +261,27 @@ Services communicate via events/messages through a message broker.
 - **Better resilience**: if Order Service is down, events queue up and are processed when it recovers.
 - **Harder to trace**: flow is not a call stack; requires correlation IDs and distributed tracing.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pay("Payment Service") -->|"payment.completed"| topic("Kafka Topic<br/>payment-events")
+    topic --> ord("Order Service<br/>update order status")
+    topic --> notif("Notification Service<br/>send email")
+    topic --> ana("Analytics Service<br/>record revenue")
+
+    class pay train
+    class topic base
+    class ord,notif,ana req
 ```
-Payment Service
-     |
-     | [payment.completed event]
-     v
-[Kafka Topic: payment-events]
-     |
-     +---> Order Service (update order status)
-     +---> Notification Service (send email)
-     +---> Analytics Service (record revenue)
-```
+
+One publish fans out to three independent consumers — Payment Service never learns who is listening, and a slow/down consumer does not block the others.
 
 ### 4.4 Data Management
 
@@ -257,13 +289,25 @@ Payment Service
 
 Each service owns its own data store. No other service can access it directly.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    user("User Service") --> udb("Users DB<br/>Postgres")
+    order("Order Service") --> odb("Orders DB<br/>MySQL")
+    payment("Payment Service") --> pdb("Payments DB<br/>Mongo")
+
+    class user,order,payment train
+    class udb,odb,pdb base
 ```
-User Service        Order Service       Payment Service
-+----------+        +----------+        +----------+
-| Users DB |        | Orders DB|        |Payments  |
-| (Postgres|        | (MySQL)  |        |DB (Mongo)|
-+----------+        +----------+        +----------+
-```
+
+No cross-service arrows exist by design — each service's database is reachable only through that service's own API.
 
 Benefits: independent scaling, independent schema evolution, polyglot persistence (best DB for each use case), fault isolation.
 
@@ -277,15 +321,40 @@ Multiple services sharing a single database schema creates tight coupling at the
 
 Separate the write model (command) from the read model (query). Write to a normalized database; project events to denormalized read models optimized for queries.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph WP["Write Path"]
+        direction LR
+        c1([Client]) --> cmdapi("Command API") --> dom("Domain Model") --> wdb("Write DB<br/>Postgres")
+    end
+
+    subgraph RP["Read Path"]
+        direction LR
+        c2([Client]) --> qapi("Query API") --> rm("Read Model")
+        rdb("Read DB<br/>Elasticsearch/Redis") --> rm
+    end
+
+    wdb --> eb{"Event Bus"}
+    eb --> eh("Event Handler")
+    eh --> rdb
+
+    class c1,c2 io
+    class cmdapi,qapi req
+    class dom,eh mathOp
+    class wdb,rdb base
+    class eb mathOp
+    class rm io
 ```
-Write Path:
-Client --> [Command API] --> [Domain Model] --> [Write DB (Postgres)]
-                                                       |
-                                                  [Event Bus]
-                                                       |
-Read Path:                                     [Event Handler]
-Client --> [Query API] --> [Read Model] <-- [Read DB (Elasticsearch/Redis)]
-```
+
+The write model stays normalized and clean; the event bus asynchronously projects changes into whatever denormalized read model each query pattern needs.
 
 Benefits: read models can be optimized independently (e.g., full-text search via Elasticsearch, caching in Redis), write model stays clean.
 
@@ -293,15 +362,27 @@ Benefits: read models can be optimized independently (e.g., full-text search via
 
 Instead of storing current state, store every event that led to the current state. Current state = replay of all events.
 
-```
-Events stored:
-1. OrderPlaced    {orderId: 1, items: [...]}
-2. PaymentReceived {orderId: 1, amount: 99.99}
-3. OrderShipped   {orderId: 1, trackingId: "XYZ"}
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Current state (derived by replaying):
-Order #1: SHIPPED, paid $99.99, tracking: XYZ
+    e1("1. OrderPlaced<br/>orderId 1, items") --> e2("2. PaymentReceived<br/>amount $99.99")
+    e2 --> e3("3. OrderShipped<br/>trackingId XYZ")
+    e3 --> replay{"Replay all events"}
+    replay --> state([Order #1: SHIPPED<br/>paid $99.99, tracking XYZ])
+
+    class e1,e2,e3 req
+    class replay mathOp
+    class state io
 ```
+
+Nothing stores "current state" directly — every read replays the append-only event log from the top, which is what enables complete audit trails and temporal queries.
 
 Benefits: complete audit trail, temporal queries ("what was the state at time T?"), event replay for new projections.
 Costs: event replay can be slow for old aggregates (mitigate with snapshots), eventual consistency.
@@ -312,38 +393,63 @@ For the full event-sourcing model — append-only event store, snapshots, projec
 
 Most real microservices adoptions are not greenfield — they are extractions from an existing monolith. The **Strangler Fig pattern** (named after the vine that grows around a tree and gradually replaces it) lets you migrate incrementally instead of attempting a "big bang" rewrite.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph B["Before: Monolith"]
+        mono("MONOLITH<br/>everything")
+    end
+
+    subgraph D["During: Transition"]
+        proxy{"Facade /<br/>Routing Proxy"}
+        shrink("Monolith<br/>shrinking")
+        newsvc("New Svc")
+        proxy --> shrink
+        proxy --> newsvc
+    end
+
+    subgraph A["After: Target"]
+        gw("API Gateway")
+        s1("Svc")
+        s2("Svc")
+        s3("Svc")
+        gw --> s1
+        gw --> s2
+        gw --> s3
+    end
+
+    B --> D --> A
+
+    class mono frozen
+    class proxy mathOp
+    class shrink frozen
+    class newsvc train
+    class gw mathOp
+    class s1,s2,s3 train
 ```
-Monolith (before)              Transition (during)              Target (after)
-+----------------+         +----------------+              +----------------+
-|                |         |  [Facade /     |              |   API Gateway  |
-|   MONOLITH     |  --->   |   Routing      |    --->      |   /  |  |  \   |
-|  (everything)  |         |   Proxy]       |              | Svc Svc Svc Svc|
-|                |         |  /         \   |              |  (extracted)   |
-+----------------+         | Monolith  New  |              +----------------+
-                            | (shrinking) Svc|              MONOLITH: gone
-                            +----------------+
-```
+
+The routing proxy is the strangler: clients only ever see it, so which side of the boundary (monolith or new service) answers a request can change release by release until the monolith disappears entirely.
 
 The migration proceeds in phases, extracting the highest-value or most painful component first:
 
+```mermaid
+timeline
+    title Strangler Fig Migration Phases
+    Phase 1 : Identify bounded contexts — User Mgmt, Catalog, Orders, Cart, Payments, Recs, Search, Notifications
+    Phase 2 : Extract the bottleneck service first — monolith keeps running, routing proxy sends matching paths to it
+    Phase 3 : Extract the next highest-value service — e.g. a high-read component that benefits from independent caching
+    Phase 4 : Extract core business logic services — most complex, highest risk, done once the team has experience
+    Phase 5 : Monolith now serves only legacy/long-tail functionality — eventually decommissioned
 ```
-Phase 1: Identify bounded contexts
-  User Management | Product Catalog | Order Processing
-  Cart | Payments | Recommendations | Search | Notifications
 
-Phase 2: Extract the bottleneck service first
-  Monolith still runs | New service deployed alongside it
-  Routing proxy / API Gateway sends matching paths to the new service
-
-Phase 3: Extract the next highest-value service
-  (e.g., a high-read component that benefits from independent caching)
-
-Phase 4: Extract core business logic services
-  (most complex, highest risk — done once the team has migration experience)
-
-Phase 5: Monolith now only handles legacy/long-tail functionality
-  Eventually decommissioned
-```
+Each phase extracts one more bounded context, starting with whatever is causing the most pain, until the monolith is reduced to legacy long-tail functionality and can be retired.
 
 Key properties:
 - **Routing layer is the strangler** — an API gateway, reverse proxy, or feature-flagged router decides per-request whether the monolith or the new service handles it. Clients never know the boundary moved.
@@ -358,64 +464,87 @@ See [§7.4](#74-e-commerce-platform-migration-strangler-fig-in-practice) for a w
 
 ### Full Microservices Architecture
 
-```
-                    EXTERNAL CLIENTS
-               (Web Browser, Mobile App)
-                          |
-                          v
-              +-----------------------+
-              |      API GATEWAY      |
-              | Auth | Rate Limit     |
-              | Routing | SSL Termination
-              +-----------------------+
-               |          |         |
-               v          v         v
-          +--------+  +--------+  +--------+
-          | User   |  | Order  |  | Product|
-          | Service|  | Service|  | Service|
-          +--------+  +--------+  +--------+
-               |          |          |
-           PostgreSQL   MySQL      MongoDB
-                         |
-                         v
-              +-------------------+
-              |   Event Bus       |
-              |   (Kafka)         |
-              +-------------------+
-               |          |         |
-               v          v         v
-          +--------+  +--------+  +--------+
-          |Payment |  | Notif. |  |Analytics
-          |Service |  | Service|  |Service |
-          +--------+  +--------+  +--------+
-               |
-           Payment DB
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    ext([External Clients<br/>Web Browser, Mobile]) --> gw("API GATEWAY<br/>Auth · Rate Limit<br/>Routing · SSL Term")
 
-     OBSERVABILITY LAYER (crosses all services)
-     +------------------------------------------+
-     | Jaeger (Tracing) | Prometheus (Metrics)  |
-     | ELK Stack (Logs) | Grafana (Dashboards)  |
-     +------------------------------------------+
+    gw --> user("User Service")
+    gw --> order("Order Service")
+    gw --> product("Product Service")
+
+    user --> pg("PostgreSQL")
+    order --> mysql("MySQL")
+    product --> mongo("MongoDB")
+
+    mysql --> bus("Event Bus<br/>Kafka")
+
+    bus --> payment("Payment Service")
+    bus --> notif("Notification Service")
+    bus --> analytics("Analytics Service")
+
+    payment --> paydb("Payment DB")
+
+    subgraph OBS["Observability Layer (crosses all services)"]
+        direction LR
+        jaeger("Jaeger<br/>Tracing")
+        prom("Prometheus<br/>Metrics")
+        elk("ELK Stack<br/>Logs")
+        graf("Grafana<br/>Dashboards")
+    end
+
+    class ext io
+    class gw mathOp
+    class user,order,product,payment,notif,analytics train
+    class pg,mysql,mongo,paydb base
+    class bus base
+    class jaeger,prom,elk,graf frozen
 ```
+
+Every request flows top to bottom through the gateway into a service and its own database; the Kafka event bus is the only path from the synchronous request-serving tier into the asynchronous Payment/Notification/Analytics tier. The observability layer sits outside the request path but instruments every one of these services.
 
 ### Service Mesh with Sidecar Proxies
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph S1["Order Service"]
+        o1("App") --> o2("Envoy Proxy")
+    end
+    subgraph S2["Payment Service"]
+        p1("App") --> p2("Envoy Proxy")
+    end
+    subgraph S3["Inventory Service"]
+        i1("App") --> i2("Envoy Proxy")
+    end
+
+    o2 <-->|"mTLS"| p2
+    p2 <-->|"mTLS"| i2
+
+    o2 -.-> cp("Istio Control Plane<br/>Pilot · Citadel · Galley · Telemetry")
+    p2 -.-> cp
+    i2 -.-> cp
+
+    class o1,p1,i1 train
+    class o2,p2,i2 mathOp
+    class cp frozen
 ```
-+----------------+       +----------------+       +----------------+
-| Order Service  |       | Payment Service|       | Inventory Svc  |
-|  [App]         |       |  [App]         |       |  [App]         |
-|  [Envoy Proxy] |<----->|  [Envoy Proxy] |<----->|  [Envoy Proxy] |
-+----------------+  mTLS +----------------+  mTLS +----------------+
-       |                        |                         |
-       +------------------------+-------------------------+
-                                |
-                   +-----------------------+
-                   | Istio Control Plane   |
-                   | (Pilot, Citadel,      |
-                   |  Galley, Telemetry)   |
-                   +-----------------------+
-```
+
+Application code never talks mTLS directly — every sidecar proxy handles encryption and identity, while the control plane pushes certificates and policy to every sidecar out-of-band (dotted).
 
 ---
 
@@ -429,37 +558,20 @@ The circuit breaker pattern prevents a failing service from causing cascading fa
 
 #### States
 
+```mermaid
+stateDiagram-v2
+    state "Closed (normal ops)" as Closed
+    state "Open (fast-fail, fallback)" as Open
+    state "Half-Open (1 probe)" as HalfOpen
+
+    [*] --> Closed
+    Closed --> Open: failure threshold exceeded
+    Open --> HalfOpen: timeout expires
+    HalfOpen --> Open: probe fails
+    HalfOpen --> Closed: probe succeeds
 ```
-                    +--------+
-       [Failure     |        | [Success count
-        threshold   | CLOSED | exceeds threshold]
-        exceeded]   |        |
-                    +--------+
-                    (normal ops)
-                         |
-                         | failures >= threshold
-                         v
-                    +--------+
-  [After timeout,   |        |
-   allow 1 probe]   |  OPEN  |
-                    |        | [Returns fallback
-                    +--------+  immediately, no
-                         |       calls to downstream]
-                         | timeout expires
-                         v
-                    +-----------+
-                    |           |
-                    | HALF-OPEN | [1 probe request sent]
-                    |           |
-                    +-----------+
-                         |
-                +--------+---------+
-                |                  |
-           [Probe fails]      [Probe succeeds]
-                |                  |
-                v                  v
-            OPEN again          CLOSED
-```
+
+While Open, calls fail fast with a fallback and never reach the downstream service; only after the timeout does a single probe request test whether it is safe to close again.
 
 #### Configuration Knobs
 
@@ -482,23 +594,39 @@ For the full circuit-breaker state machine, bulkhead sizing, and retry/backoff/j
 
 Sagas manage distributed transactions across multiple services without 2-Phase Commit (2PC), which does not scale in microservices. A saga is a sequence of local transactions; each transaction publishes an event that triggers the next step. On failure, compensating transactions undo previous steps.
 
+**Orchestration-based** — a central coordinator calls each participant and drives compensation on failure:
+
+```mermaid
+sequenceDiagram
+    participant O as Saga Orchestrator
+    participant Inv as Inventory Service
+    participant Pay as Payment Service
+    participant Ship as Shipment Service
+
+    O->>Inv: 1. Reserve Inventory
+    Inv-->>O: Success
+    O->>Pay: 2. Charge Payment
+    Pay-->>O: FAIL
+    Note over O: Saga triggers compensation
+    O->>Inv: 4. Release Inventory
+    Inv-->>O: Inventory released
+    Note over O,Ship: 3. Create Shipment never runs (compensated)
 ```
-Orchestration-based                          Choreography-based
 
-   [Saga Orchestrator]                       Order Service
-    /       |        \                         --[OrderPlaced]-->
-1. Reserve  2. Charge  3. Create
-   Inventory   Payment    Shipment                  Payment Service
-      |           |                                   --[PaymentCharged]-->
-   [Success]   [FAIL]
-      |           |                                        Inventory Service
-      |     Saga triggers compensation:                      --[InventoryReserved]-->
-      |     4. Release Inventory
-      |                                                          Shipping Service
-   (inventory released)                                            --[ShipmentCreated]-->
+**Choreography-based** — each service reacts to the previous event and publishes the next one; there is no coordinator:
 
-                                            If Payment fails: Payment Service publishes
-                                            PaymentFailed -> Order Service cancels order
+```mermaid
+sequenceDiagram
+    participant Ord as Order Service
+    participant Pay as Payment Service
+    participant Inv as Inventory Service
+    participant Ship as Shipping Service
+
+    Ord->>Pay: OrderPlaced (event)
+    Pay->>Inv: PaymentCharged (event)
+    Inv->>Ship: InventoryReserved (event)
+    Ship-->>Ord: ShipmentCreated (event)
+    Note over Pay,Ord: If Payment fails: PaymentFailed -> Order Service cancels order
 ```
 
 | Style | Coordinator | Pros | Cons |
@@ -518,16 +646,24 @@ In a microservices system, a single user request may touch 10+ services. Distrib
 
 Each request is assigned a unique trace ID at the entry point (API gateway). This ID is propagated as an HTTP header (`X-Trace-ID` or `traceparent` per W3C standard) through every service call.
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as API Gateway
+    participant U as User Svc
+    participant Ca as Cart Svc
+    participant I as Inventory Svc
+    participant P as Payment Svc
+
+    C->>G: GET /checkout<br/>X-Trace-ID abc123
+    G->>U: span-1
+    U->>Ca: span-2
+    Ca->>I: span-3
+    I->>P: span-4
+    Note over G,P: All spans share trace abc123
 ```
-Client
-  |
-  | [GET /checkout, X-Trace-ID: abc123]
-  v
-API Gateway --> User Svc --> Cart Svc --> Inventory Svc --> Payment Svc
-                  |              |               |               |
-               span-1          span-2          span-3          span-4
-               (all under trace: abc123)
-```
+
+Every hop creates its own span but tags it with the same trace ID, so a tracing backend can stitch all four spans back into one end-to-end request timeline.
 
 #### Tools
 
@@ -554,21 +690,38 @@ For the full three-pillars (metrics, logs, traces) treatment, RED/USE methods, a
 
 A service mesh manages service-to-service communication as infrastructure, not application code.
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph PA["Service A Pod"]
+        appA("App Container<br/>Business Logic")
+        proxyA("Sidecar Proxy<br/>Envoy")
+        appA --> proxyA
+    end
+
+    subgraph PB["Service B Pod"]
+        appB("App Container<br/>Business Logic")
+        proxyB("Sidecar Proxy<br/>Envoy")
+        appB --> proxyB
+    end
+
+    proxyA <-->|"mTLS"| proxyB
+    proxyA -.-> cp("Control Plane: Istio<br/>certs · policies · traffic rules · observability")
+    proxyB -.-> cp
+
+    class appA,appB train
+    class proxyA,proxyB mathOp
+    class cp frozen
 ```
-Service A Pod                   Service B Pod
-+-------------------+          +-------------------+
-| App Container     |          | App Container     |
-| [Business Logic]  |          | [Business Logic]  |
-+-------------------+          +-------------------+
-| Sidecar Proxy     | <------> | Sidecar Proxy     |
-| [Envoy]           |  mTLS    | [Envoy]           |
-+-------------------+          +-------------------+
-        |                               |
-        +---------- Control Plane ------+
-                      [Istio]
-               (certificates, policies,
-                traffic rules, observability)
-```
+
+Business logic never sees the mTLS handshake — each sidecar terminates it, while the control plane (dotted) distributes certificates and policy to every sidecar out-of-band.
 
 Istio handles:
 - **Mutual TLS (mTLS)**: all service-to-service traffic is encrypted and mutually authenticated. Services get auto-rotating certificates.
@@ -605,20 +758,61 @@ Kubernetes is the de-facto standard for orchestrating containerized microservice
 - **ConfigMap / Secret**: externalize configuration and credentials.
 - **Horizontal Pod Autoscaler (HPA)**: scales pod count based on CPU/custom metrics.
 
+These primitives form a hierarchy rather than a flat list — external traffic descends through routing and scaling layers before reaching a running container:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ing([Ingress<br/>external HTTP routing]) --> svc("Service<br/>stable DNS + IP")
+    svc --> dep("Deployment<br/>manages replicas")
+    dep --> pod("Pod<br/>1+ containers")
+
+    hpa{"HPA"} -.->|"scales replica count"| dep
+    cm("ConfigMap / Secret") -.->|"injects config"| pod
+
+    class ing io
+    class svc mathOp
+    class dep train
+    class pod train
+    class hpa mathOp
+    class cm frozen
+```
+
+The Ingress-to-Pod chain is the request path; HPA and ConfigMap/Secret (dotted) act on that chain from the side — one scaling replica count, the other injecting configuration — rather than sitting on it.
+
 #### Sidecar Pattern
 
 A sidecar container runs alongside the main application container in the same pod, extending it without modifying its code.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Pod["Pod (shared network namespace)"]
+        direction LR
+        app("App Container<br/>Business Logic")
+        side("Sidecar<br/>Envoy, Fluentd, Vault agent")
+        app --- side
+    end
+
+    class app train
+    class side mathOp
 ```
-Pod
-+-------------------------------+
-| App Container    | Sidecar    |
-| (Business Logic) | (Envoy,    |
-|                  | Fluentd,   |
-|                  | Vault agent|
-+-------------------------------+
-    Shared network namespace
-```
+
+The plain line (no arrowhead) reflects that the two containers are peers sharing one network namespace, not a caller and callee.
 
 Common sidecar uses:
 - **Envoy/Istio**: transparent proxy for service mesh.
@@ -661,24 +855,39 @@ Key insight: at Uber's scale (5000+ engineers), microservice granularity must be
 
 **Resulting architecture:**
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    browser([Browser / App]) --> gw("API Gateway<br/>Kong")
+
+    gw --> user("User Svc")
+    gw --> product("Product Catalog")
+    gw --> order("Order Svc")
+    gw --> search("Search<br/>Elasticsearch")
+
+    user --> udb("Users DB<br/>Postgres")
+    product --> pdb("Products DB<br/>Mongo")
+    order --> odb("Orders DB<br/>MySQL")
+
+    odb --> topic("Kafka<br/>order-events")
+    topic --> notif("Notification Svc")
+    topic --> analytics("Analytics Svc")
+
+    class browser io
+    class gw mathOp
+    class user,product,order,search train
+    class udb,pdb,odb,topic base
+    class notif,analytics req
 ```
-[Browser / App]
-       |
-  [API Gateway: Kong]
-  /       |       \        \
-User   Product   Order    Search
-Svc    Catalog   Svc       (Elasticsearch)
- |        |        |
-Users   Products  Orders
-DB(PG)  DB(Mongo) DB(MySQL)
-                    |
-             [Kafka: order-events]
-                    |
-             +------+------+
-             |             |
-          Notif.      Analytics
-          Svc          Svc
-```
+
+The recommendation engine (the Black Friday bottleneck) and product catalog were extracted first, each behind Kong, so they could scale and cache independently of the still-shrinking monolith.
 
 **Key outcomes:**
 - Recommendation service scaled independently during Black Friday (10x replicas).
@@ -723,6 +932,37 @@ Microservices carry a significant **complexity tax**. They are not always the ri
 - **Low traffic / small scale**: a single Postgres instance and a monolith handle millions of requests per day trivially.
 - **No DevOps capability**: microservices require mature CI/CD, container orchestration, and observability infrastructure. Without these, microservices become a maintenance nightmare.
 - **Latency is critical**: in-process function calls are nanoseconds; network calls are milliseconds. Chaining 10 services adds 10+ network round-trips.
+
+The conditions above collapse into a single decision path — team size and DevOps maturity gate the decision before scaling profile or latency budget even get considered:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start{"Team over<br/>8-10 engineers?"} -->|"No"| mono("Stay Monolith<br/>(or Modular Monolith)")
+    start -->|"Yes"| devops{"Mature CI/CD +<br/>K8s + observability<br/>already in place?"}
+
+    devops -->|"No"| mono
+    devops -->|"Yes"| scale{"Components have<br/>very different<br/>scaling profiles?"}
+
+    scale -->|"No"| latency{"Latency budget<br/>tight (many<br/>chained calls)?"}
+    scale -->|"Yes"| split("Adopt Microservices")
+
+    latency -->|"Yes"| mono
+    latency -->|"No"| split
+
+    class start,devops,scale,latency mathOp
+    class mono frozen
+    class split train
+```
+
+Team size and DevOps maturity are hard gates — fail either and every other benefit is moot; only past both gates do scaling-profile divergence and latency budget decide the outcome.
 
 ### Consider a Modular Monolith First
 
@@ -874,40 +1114,41 @@ The migration challenges: decompose tightly coupled modules, eliminate the share
 
 ### Architecture Overview
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    clients([Mobile / Smart TV / Browser]) --> zuul("Zuul<br/>API Gateway<br/>auth · routing · aggregation")
+    zuul --> eureka("Eureka<br/>Discovery<br/>registry · heartbeats")
+
+    eureka --> user("User svc")
+    eureka --> playbk("Playback svc")
+    eureka --> recomm("Recommendation svc")
+    eureka --> billing("Billing svc")
+    eureka --> search("Search svc")
+
+    user --> stores("Per-service data stores<br/>Cassandra · MySQL · EVCache")
+    playbk --> stores
+    recomm --> stores
+    billing --> stores
+    search --> stores
+
+    stores --> hystrix("Hystrix dashboards<br/>Atlas / metrics")
+
+    class clients io
+    class zuul,eureka mathOp
+    class user,playbk,recomm,billing,search train
+    class stores base
+    class hystrix frozen
 ```
-   Mobile / smart TV / browser clients
-                 │
-                 ▼
-       ┌─────────────────────┐
-       │   Zuul (API gateway)│  ◀── auth, routing, aggregation
-       └──────────┬──────────┘
-                  │
-                  ▼
-       ┌─────────────────────┐
-       │   Eureka (discovery)│  ◀── service registry, heartbeats
-       └──────────┬──────────┘
-                  │
-       ┌──────────┼──────────┬──────────┬──────────┐
-       ▼          ▼          ▼          ▼          ▼
-   ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐
-   │ User │  │Playbk│  │Recomm│  │Billing  │Search│
-   │ svc  │  │ svc  │  │ svc  │  │  svc  │  │ svc  │
-   └──┬───┘  └──┬───┘  └──┬───┘  └──┬───┘  └──┬───┘
-      │         │         │         │         │
-      ▼         ▼         ▼         ▼         ▼
-   ┌──────────────────────────────────────────────┐
-   │   Per-service data stores                    │
-   │   Cassandra (viewing history, recs)          │
-   │   MySQL (billing, subscriptions)             │
-   │   EVCache (Memcached, sessions, hot data)    │
-   └──────────────────────────────────────────────┘
-                  │
-                  ▼
-       ┌─────────────────────┐
-       │   Hystrix dashboards│  ◀── circuit breaker state
-       │   Atlas / metrics    │
-       └─────────────────────┘
-```
+
+Eureka sits between the gateway and every backend service so instances can be added, removed, or fail without the gateway ever holding a stale hostname.
 
 ### Key Design Decisions
 

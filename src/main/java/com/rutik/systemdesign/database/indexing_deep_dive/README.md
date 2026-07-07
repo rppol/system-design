@@ -174,6 +174,33 @@ The most common indexing mistake: wrong column order in a composite index.
 Rule: Place **equality columns first**, then **range columns**.
 Within equality columns: **higher cardinality first** (broader filtering first).
 
+The rule as a decision, not just a sentence — every predicate sorts into one of two buckets, and only one of those buckets gets ranked internally:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    W(["WHERE clause<br/>predicates"]) --> SPLIT{"Equality<br/>or range?"}
+    SPLIT -->|"equality"| RANK("Rank by cardinality<br/>highest first")
+    SPLIT -->|"range"| TAIL("Place after<br/>all equality columns")
+    RANK --> HEAD("Place first<br/>in key order")
+    HEAD --> IDX(["Composite index<br/>key order"])
+    TAIL --> IDX
+
+    class W io
+    class SPLIT mathOp
+    class RANK mathOp
+    class HEAD train
+    class TAIL train
+    class IDX base
+```
+
 ```sql
 -- Query: WHERE country = 'US' AND created_at > '2024-01-01'
 -- Correct index:
@@ -212,50 +239,75 @@ ALTER TABLE products ALTER INDEX idx_old_search VISIBLE;
 
 ## 5. Architecture Diagrams
 
+**Index lookup flow** for `SELECT * FROM orders WHERE customer_id = 42 ORDER BY created_at;` using a B+tree on `(customer_id, created_at) INCLUDE (status, amount)`:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q(["Query: customer_id = 42<br/>ORDER BY created_at"]) --> S1("Navigate B+tree<br/>root splits 20 / 80<br/>to leaf for customer_id=42")
+    S1 -->|"leaf has status, amount"| S2("Scan leaf pages<br/>covering index")
+    S2 -->|"no heap fetch"| S3("Return rows<br/>already sorted")
+    S3 -->|"no sort step"| R(["Index Only Scan<br/>Heap Fetches: 0"])
+
+    class Q io
+    class S1 mathOp
+    class S2 base
+    class S3 train
+    class R train
 ```
-INDEX LOOKUP FLOW:
 
-Query: SELECT * FROM orders WHERE customer_id = 42 ORDER BY created_at;
+The resulting plan confirms the ideal path — zero heap fetches and no separate sort node:
 
-Index: B+tree on (customer_id, created_at) INCLUDE (status, amount)
-
-Step 1: Navigate B+tree to customer_id=42 leaf page
-         Root
-          |
-        [20|80]
-       /   |   \
-   [10,15] [30,42] [90,99]
-              |
-        [42_2024-01, 42_2024-02, 42_2024-03]  ← Leaf pages, already sorted
-
-Step 2: Scan leaf pages for customer_id=42 (covering index has status, amount)
-        → No heap fetch needed = Index Only Scan
-
-Step 3: Return rows in created_at order (already sorted in index)
-        → No sort needed
-
-EXPLAIN output:
+```
 Index Only Scan using idx_covering on orders
   Index Cond: (customer_id = 42)
   Heap Fetches: 0  ← This is the ideal result
 ```
 
+**Index bloat lifecycle** — a single index entry's state from creation to reclamation:
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Live: INSERT row
+    Live --> Dead: UPDATE row (old entry)
+    Live --> Dead: DELETE row
+    Dead --> Reclaimed: REINDEX CONCURRENTLY
+    Reclaimed --> [*]
+
+    note right of Dead
+        Dead entries pile up on
+        pages between reindexes = bloat
+    end note
+
+    class Live train
+    class Dead lossN
+    class Reclaimed base
 ```
-INDEX BLOAT LIFECYCLE:
 
-INSERT row → New index entry added
-UPDATE row → Old entry marked dead, new entry added
-DELETE row → Index entry marked dead (not removed)
+Over time a page fills with a mix of live and dead entries, slowing scans until the index is rebuilt:
 
-Over time:
+```
 +---+---+---+---+---+---+---+---+---+---+
 | L |   | L | V | L |   | L | V | V | L |   L=Live V=Valid(dead tuple)
 +---+---+---+---+---+---+---+---+---+---+
-Pages fill with dead entries → index bloat → slower scans
-
-Fix: REINDEX CONCURRENTLY idx_name;
-     (rebuilds index without blocking reads/writes)
 ```
+
+`REINDEX CONCURRENTLY idx_name` rebuilds the index from this state without blocking reads or writes.
 
 ---
 
@@ -307,6 +359,32 @@ Index Only Scan using idx_status_total on orders
 ### Visibility Map and Index-Only Scans
 
 PostgreSQL maintains a visibility map (1 bit per page) indicating if all tuples on a page are visible to all transactions. Index-only scans use this: if the page is marked "all visible," skip the heap fetch. After heavy updates/inserts, pages lose this bit. VACUUM sets it. Ensure autovacuum is keeping up for index-only scans to actually be index-only.
+
+Whether an index-only scan truly stays index-only hinges on one bit per page, set by a background process and consumed at read time:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ROW(["Row found<br/>via index"]) --> CHK{"Page marked<br/>all-visible?"}
+    CHK -->|"yes"| FAST(["Return from index<br/>Heap Fetches: 0"])
+    CHK -->|"no"| HEAP("Visit heap<br/>for MVCC check")
+    HEAP --> SLOW(["Heap fetch counted<br/>scan degraded"])
+    VAC("VACUUM sets<br/>all-visible bit") -.-> CHK
+
+    class ROW io
+    class CHK mathOp
+    class FAST train
+    class HEAP lossN
+    class SLOW lossN
+    class VAC frozen
+```
 
 ---
 

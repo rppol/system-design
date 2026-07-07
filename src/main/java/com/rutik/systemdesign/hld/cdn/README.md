@@ -59,35 +59,61 @@ CDNs provide redundancy. If one PoP fails, traffic is routed to the next closest
 
 ### Step-by-Step Request Flow
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["Browser requests<br/>example.com"]) --> B(DNS Resolver)
+    B --> C(CDN DNS<br/>Anycast / GeoDNS)
+    C --> D(Nearest PoP)
+    D --> E{"Cached and<br/>fresh?"}
+    E -->|"HIT"| F(["Serve<br/>immediately"])
+    E -->|"MISS"| G(Fetch from Origin)
+    G --> H(Cache at Edge)
+    H --> F
+    F -.->|"next request,<br/>same region"| D
+
+    class A io
+    class B mathOp
+    class C mathOp
+    class D req
+    class E mathOp
+    class F io
+    class G frozen
+    class H base
 ```
-1. User types example.com in browser
-2. DNS resolver queries for cdn.example.com (or example.com is CNAMEd to CDN)
-3. CDN's DNS (Anycast/GeoDNS) returns IP of nearest PoP
-4. Browser connects to nearest PoP (edge server)
-5a. CACHE HIT: Edge has valid cached response -> serve immediately
-5b. CACHE MISS: Edge fetches from origin, caches response, serves to user
-6. Subsequent requests from the same region hit the cache (step 5a)
-```
+
+*DNS resolves to the nearest PoP once; every request after that loops back through the same PoP, and only the hit/miss decision determines whether origin is ever touched.*
 
 ### DNS Resolution Detail
 
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant CDNDNS as CDN DNS
+    participant Edge as Tokyo PoP
+    participant Origin
+
+    Browser->>CDNDNS: DNS query example.com
+    Note over CDNDNS: GeoDNS looks up<br/>user's IP location
+    CDNDNS-->>Browser: IP 203.x.x.x (Tokyo PoP)
+
+    Browser->>Edge: GET /image.jpg
+    alt Cache miss
+        Edge->>Origin: GET /image.jpg
+        Origin-->>Edge: 200 OK + image
+        Note over Edge: cache the image
+    end
+    Edge-->>Browser: 200 OK + image (8ms away)
 ```
-Browser                    CDN DNS               Origin DNS
-  |                            |                      |
-  |--DNS: example.com--------->|                      |
-  |                            | (GeoDNS looks up      |
-  |                            |  user's IP location)  |
-  |<--IP: 203.x.x.x (Tokyo PoP)|                      |
-  |                            |                      |
-  |--HTTP GET /image.jpg (to Tokyo PoP)               |
-  |       |                                           |
-  |    [Cache Miss?]                                  |
-  |       |--GET /image.jpg--------------------------->|
-  |       |<--200 OK + image--------------------------|
-  |       | (cache the image)                         |
-  |<--200 OK + image                                  |
-  |    (from Tokyo PoP, 8ms away)                     |
-```
+
+*DNS resolution hands the browser the nearest PoP's IP once; the content fetch is a separate exchange where the edge — not the browser — talks to origin only on a cache miss.*
 
 ---
 
@@ -113,42 +139,29 @@ Physical servers in data centers distributed globally. Each PoP typically has:
 
 ### ASCII Architecture Diagram
 
-```
-                          CDN Architecture
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    User (New York)                    User (Tokyo)
-         |                                  |
-         | DNS: nearest PoP?                | DNS: nearest PoP?
-         v                                  v
-   [NYC Edge PoP]                    [Tokyo Edge PoP]
-   +------------+                    +------------+
-   | Cache:     |                    | Cache:     |
-   | logo.png   |                    | logo.png   |
-   | style.css  |                    | style.css  |
-   | video.mp4  |                    | video.mp4  |
-   +------------+                    +------------+
-         |                                  |
-         | Cache Miss: fetch from origin    |
-         +----------------------------------+
-                          |
-                          v
-                  [CDN Backbone Network]
-                  (Private fiber / optimized routes)
-                          |
-                          v
-               +--------------------+
-               |   Origin Server    |
-               |   (AWS us-east-1)  |
-               |                    |
-               |   example.com      |
-               +--------------------+
+    UNY(["User: New York"]) -->|"DNS: nearest PoP?"| NYPoP(NYC Edge PoP<br/>logo.png · style.css · video.mp4)
+    UTokyo(["User: Tokyo"]) -->|"DNS: nearest PoP?"| TokyoPoP(Tokyo Edge PoP<br/>logo.png · style.css · video.mp4)
+    NYPoP -->|"cache miss"| Backbone(CDN Backbone<br/>private fiber)
+    TokyoPoP -->|"cache miss"| Backbone
+    Backbone --> Origin(Origin Server<br/>AWS us-east-1 · example.com)
 
-   PoPs Worldwide:
-   Americas: New York, Los Angeles, São Paulo, Toronto
-   Europe:   London, Frankfurt, Amsterdam, Paris
-   Asia:     Tokyo, Singapore, Mumbai, Sydney
-   (~200-300 PoPs for major CDNs like Cloudflare/Akamai)
+    class UNY,UTokyo io
+    class NYPoP,TokyoPoP req
+    class Backbone mathOp
+    class Origin frozen
 ```
+
+*Two regional users hit two different edge PoPs; both fall back to the same backbone and origin only on a cache miss. Major CDNs run roughly 200-300 such PoPs — e.g. Americas: New York, Los Angeles, São Paulo, Toronto; Europe: London, Frankfurt, Amsterdam, Paris; Asia: Tokyo, Singapore, Mumbai, Sydney (Cloudflare/Akamai scale).*
 
 ---
 
@@ -159,15 +172,32 @@ Physical servers in data centers distributed globally. Each PoP typically has:
 In the Push model, the content publisher (you) proactively pushes content to CDN edge servers before any user requests it. Content lives on CDN storage until you delete or update it.
 
 #### How It Works
-```
-Publisher --> [CDN API / Upload] --> Edge Server 1 (NY)
-                                --> Edge Server 2 (Tokyo)
-                                --> Edge Server 3 (London)
-                                ...all PoPs pre-populated
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-User Request --> Edge Server (nearest) --> Serve from local storage
-                (no origin fetch ever needed)
+    Pub(["Publisher"]) --> API(CDN API / Upload)
+    API --> E1(Edge Server 1<br/>New York)
+    API --> E2(Edge Server 2<br/>Tokyo)
+    API --> E3(Edge Server 3<br/>London)
+
+    Req(["User Request"]) --> Nearest(Nearest Edge Server)
+    Nearest --> Serve(["Serve from<br/>local storage"])
+
+    class Pub,Req io
+    class API mathOp
+    class E1,E2,E3 base
+    class Nearest req
+    class Serve io
 ```
+
+*Content is pushed to every PoP before any user asks for it — all PoPs are pre-populated, so the request path never needs an origin fetch.*
 
 #### When to Use
 - Large static files: software installers, game patches, video files
@@ -190,18 +220,33 @@ User Request --> Edge Server (nearest) --> Serve from local storage
 In the Pull model, the CDN fetches content from the origin on the first request (cache miss) and caches it at the edge. Subsequent requests in that region are served from cache. Content expires based on TTL and is re-fetched from origin on the next request after expiry.
 
 #### How It Works
-```
-First user in Tokyo requests /logo.png:
-  User --> [Tokyo PoP] -- MISS --> Origin --> cache response
-  User receives content (slightly higher latency)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Second user in Tokyo requests /logo.png:
-  User --> [Tokyo PoP] -- HIT --> serve from cache
-  (origin not contacted)
+    U(["User Request<br/>e.g. /logo.png"]) --> PoP(Tokyo PoP)
+    PoP --> Hit{"Cached and<br/>fresh?"}
+    Hit -->|"HIT"| Serve(["Serve from<br/>cache"])
+    Hit -->|"MISS"| Origin(Fetch from<br/>Origin)
+    Origin --> Cache(Cache at Edge)
+    Cache --> Serve
+    Serve -.->|"TTL expires"| Hit
 
-After TTL expires:
-  Next user --> [Tokyo PoP] -- MISS (stale) --> Origin --> re-cache
+    class U io
+    class PoP req
+    class Hit mathOp
+    class Origin frozen
+    class Cache base
+    class Serve io
 ```
+
+*The first request in a region always misses and populates the cache; every request after that hits until TTL expiry restarts the cycle with a fresh miss.*
 
 #### When to Use
 - Websites with large catalogs (millions of URLs) where pre-push is impractical
@@ -215,6 +260,30 @@ After TTL expires:
 | Automatic: CDN handles caching | Cold cache after TTL expiry |
 | Works for large content catalogs | Popular content for first users in a region is slow |
 | Simple to set up | Origin must handle cache-miss traffic |
+
+Choosing between the two comes down to a couple of concrete questions:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A{"Full catalog<br/>known in advance?"} -->|"Yes"| B{"First-request<br/>latency unacceptable?"}
+    A -->|"No — millions of<br/>unpredictable URLs"| Pull(["Pull CDN"])
+    B -->|"Yes"| Push(["Push CDN"])
+    B -->|"No"| Pull
+
+    class A,B mathOp
+    class Push train
+    class Pull req
+```
+
+*Push wins only when both conditions hold — a known catalog and zero tolerance for a cold first request (game patches, video releases); everything else defaults to Pull, which is why most CDN traffic is Pull-based.*
 
 ---
 
@@ -245,15 +314,25 @@ Surrogate-Control: max-age=86400
 
 ETags allow efficient cache revalidation without re-downloading unchanged content:
 
-```
-Client/CDN -> Origin: GET /style.css
-Origin -> Client: 200 OK, ETag: "abc123", body: [CSS content]
+```mermaid
+sequenceDiagram
+    participant Client as Client/CDN
+    participant Origin
 
-[Later, TTL expires]
-CDN -> Origin: GET /style.css, If-None-Match: "abc123"
-Origin -> CDN: 304 Not Modified (if unchanged, no body transferred)
-           OR: 200 OK, ETag: "def456", body: [new CSS] (if changed)
+    Client->>Origin: GET /style.css
+    Origin-->>Client: 200 OK, ETag abc123 + body
+
+    Note over Client,Origin: Later, TTL expires
+
+    Client->>Origin: GET /style.css<br/>If-None-Match abc123
+    alt Unchanged
+        Origin-->>Client: 304 Not Modified (no body)
+    else Changed
+        Origin-->>Client: 200 OK, ETag def456 + new body
+    end
 ```
+
+*Revalidation with `If-None-Match` lets the CDN confirm freshness with a tiny 304 instead of re-downloading unchanged bytes.*
 
 ### Cache Invalidation / Purging
 
@@ -288,13 +367,29 @@ The old file stays cached forever, new deployments use new filenames. No purge n
 
 CDN cache keys default to the full URL. You can customize:
 
-```
-Default key: https://example.com/api/products?sort=asc&page=2
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Normalize query params: sort parameters before hashing
-Vary by header: Cache-Control: Vary: Accept-Encoding, Accept-Language
-Strip tracking params: utm_source, fbclid shouldn't create separate cache entries
+    A(["Request URL"]) --> B(Normalize<br/>Query Params)
+    B --> C(Vary by Header<br/>Accept-Encoding / Accept-Language)
+    C --> D(Strip Tracking Params<br/>utm_source, fbclid)
+    D --> E(["Effective<br/>Cache Key"])
+
+    class A io
+    class B mathOp
+    class C mathOp
+    class D lossN
+    class E base
 ```
+
+*A cache key is built by transforming the full URL — e.g. `https://example.com/api/products?sort=asc&page=2` — through normalization, `Vary` headers, and tracking-param stripping before it becomes the effective key CDN nodes hash on.*
 
 ---
 
@@ -304,15 +399,25 @@ Strip tracking params: utm_source, fbclid shouldn't create separate cache entrie
 
 Anycast assigns the same IP address to multiple servers in different locations. The internet's BGP routing protocol automatically routes traffic to the "nearest" (fewest BGP hops) server with that IP.
 
-```
-CDN IP: 104.16.0.1 (announced from every PoP)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-User in Tokyo   --> BGP routes to Tokyo PoP   (104.16.0.1 in Tokyo)
-User in New York --> BGP routes to NY PoP     (104.16.0.1 in NY)
-User in London   --> BGP routes to London PoP (104.16.0.1 in London)
+    T(["User: Tokyo"]) -->|"BGP: fewest hops"| PT(Tokyo PoP<br/>104.16.0.1)
+    N(["User: New York"]) -->|"BGP: fewest hops"| PN(NY PoP<br/>104.16.0.1)
+    L(["User: London"]) -->|"BGP: fewest hops"| PL(London PoP<br/>104.16.0.1)
 
-Same IP, different physical servers based on network proximity.
+    class T,N,L io
+    class PT,PN,PL req
 ```
+
+*Every PoP announces the same Anycast IP; BGP alone — with no DNS lookup involved — routes each user to whichever announcement is fewest hops away, giving different physical servers based on network proximity.*
 
 Cloudflare uses Anycast for all traffic. Benefits: automatic failover (if a PoP goes down, BGP re-routes), DDoS absorption (attack traffic distributed across all PoPs).
 
@@ -320,10 +425,22 @@ Cloudflare uses Anycast for all traffic. Benefits: automatic failover (if a PoP 
 
 DNS-based routing returns different IP addresses (or CNAME targets) based on the resolver's geographic location.
 
-```
-DNS Query from Tokyo resolver --> returns: 203.0.113.1 (Tokyo PoP)
-DNS Query from NY resolver    --> returns: 198.51.100.1 (NY PoP)
-DNS Query from EU resolver    --> returns: 192.0.2.1 (Frankfurt PoP)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    T(["Tokyo Resolver"]) -->|"DNS query"| TIP(["203.0.113.1<br/>Tokyo PoP"])
+    N(["NY Resolver"]) -->|"DNS query"| NIP(["198.51.100.1<br/>NY PoP"])
+    E(["EU Resolver"]) -->|"DNS query"| EIP(["192.0.2.1<br/>Frankfurt PoP"])
+
+    class T,N,E io
+    class TIP,NIP,EIP req
 ```
 
 Limitation: DNS TTL means routing changes take time to propagate. Also, DNS resolver location may not match user location (e.g., 1.1.1.1 resolves from Cloudflare's location, not the user's ISP).
@@ -395,6 +512,33 @@ Personalized content (user-specific pages) is the hardest to cache:
 - **Cookie-based variants**: CDN can create separate cache entries per cookie value, but this fragments the cache badly.
 - **Cache by user segment**: Instead of per-user, cache per "segment" (logged-in vs. anonymous, country, language).
 
+The right strategy depends on how many distinct response variants actually exist:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A{"Response varies<br/>by user?"} -->|"No"| Shared(["Cache normally<br/>at edge"])
+    A -->|"Yes"| B{"How many<br/>distinct variants?"}
+    B -->|"A few segments<br/>(country, language,<br/>logged-in state)"| Segment(["Cache per<br/>segment"])
+    B -->|"One per user"| C{"Can it wait for<br/>a client render?"}
+    C -->|"Yes"| Skeleton(["Cache a skeleton,<br/>inject via JS"])
+    C -->|"No"| Cookie(["Per-cookie cache<br/>entry"])
+
+    class A,B,C mathOp
+    class Shared,Segment train
+    class Skeleton req
+    class Cookie lossN
+```
+
+*Per-cookie caching is the last resort because it fragments the shared cache the most — push as much traffic as possible up into the shared or per-segment branches before falling back to it.*
+
 ---
 
 ## Security
@@ -411,15 +555,31 @@ CDN edge servers absorb volumetric DDoS attacks by:
 
 CDN terminates SSL at the edge server, establishing a separate connection to origin:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    B(["Browser"]) -->|"TLS"| E(Edge PoP)
+    E -->|"TLS or HTTP"| O(Origin)
+
+    class B io
+    class E req
+    class O frozen
 ```
-Browser <--TLS--> Edge PoP <--TLS (or HTTP)--> Origin
+
+*TLS terminates twice: once at the nearby edge (low latency for the user), and — separately — between edge and origin, which can even be plain HTTP over a private network.*
 
 Benefits:
 - TLS handshake with nearby edge (low latency)
 - CDN handles certificate renewal (via Let's Encrypt or custom)
 - OCSP stapling, TLS 1.3, HTTP/2 negotiated at edge
 - Origin can use simpler HTTP internally (if private network)
-```
 
 ### WAF (Web Application Firewall)
 
@@ -512,31 +672,44 @@ YouTube combines CDN with Adaptive Bitrate Streaming (ABR):
 ### Key Metrics to Track
 
 **Cache Hit Ratio (CHR)**
-```
-CHR = (Cache Hits) / (Total Requests) * 100%
 
-Good: > 90%
-Great: > 95%
-Poor: < 70% (investigate cache-busting or low-TTL configs)
+`CHR = (Cache Hits) / (Total Requests) * 100%`
+
+```mermaid
+xychart-beta
+    title "Cache Hit Ratio Benchmarks"
+    x-axis ["Poor", "Good", "Great"]
+    y-axis "Cache Hit Ratio %" 0 --> 100
+    bar [70, 90, 95]
 ```
+
+*Below 70% CHR signals a cache-busting or low-TTL misconfiguration worth investigating; 90%+ is healthy and 95%+ is great.*
 
 **Bandwidth Savings**
-```
-Bandwidth Savings = (CDN bandwidth served) / (Total bandwidth) * 100%
 
-CDN serves: 950 GB
-Origin serves: 50 GB
-Total: 1000 GB
-Bandwidth Savings = 95%
+`Bandwidth Savings = (CDN bandwidth served) / (Total bandwidth) * 100%`
+
+```mermaid
+pie showData
+    title Bandwidth Served (GB)
+    "CDN Edge" : 950
+    "Origin" : 50
 ```
+
+*950 GB of a 1000 GB total is absorbed by the edge, leaving only 50 GB to ever leave the origin — a 95% bandwidth savings.*
 
 **Origin Offload Percentage**
-```
-Origin Offload = 1 - (Origin requests / Total CDN requests)
 
-If CDN receives 1,000,000 requests and only 50,000 go to origin:
-Origin Offload = 1 - (50,000 / 1,000,000) = 95%
+`Origin Offload = 1 - (Origin requests / Total CDN requests)`
+
+```mermaid
+pie showData
+    title CDN Requests (1M total)
+    "Served at Edge" : 950000
+    "Forwarded to Origin" : 50000
 ```
+
+*Only 50,000 of 1,000,000 requests ever reach origin — a 95% origin offload.*
 
 **Latency by Region**
 - Time To First Byte (TTFB) for cached vs. uncached requests
@@ -691,43 +864,37 @@ A photo-sharing platform (Unsplash-like) delivers images globally with on-the-fl
 
 ### Architecture Overview
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client(["Client<br/>mobile / web"]) --> DNS(Cloudflare Anycast<br/>DNS to nearest PoP)
+    DNS --> Tier1
+
+    subgraph EdgePoP["Edge PoP"]
+        Tier1(Tier-1 Cache<br/>NVMe · 200TB)
+        Workers(Workers: V8 isolate<br/>resize / WEBP conv / EXIF strip)
+        Tier1 -->|"miss"| Workers
+    end
+
+    Workers -->|"miss"| Tier2(Tier-2 Regional<br/>Argo tiered cache)
+    Tier2 -->|"miss"| Origin(Origin: S3<br/>300TB originals)
+
+    class Client io
+    class DNS mathOp
+    class Tier1 base
+    class Workers train
+    class Tier2 base
+    class Origin frozen
 ```
-              Client (mobile/web, worldwide)
-                          |
-                          v
-               +----------+----------+
-               | Cloudflare Anycast  |
-               | DNS -> nearest PoP  |
-               +----------+----------+
-                          |
-                          v
-            +-------------+-------------+
-            | Edge PoP                  |
-            | +----------------------+  |
-            | | Tier-1 cache (NVMe) | |  |
-            | | 200TB per PoP        |  |
-            | +----------+-----------+  |
-            |            | miss          |
-            |            v                |
-            | +----------+-----------+  |
-            | | Workers (V8 isolate)|   |
-            | | - resize, WEBP conv |   |
-            | | - EXIF strip        |   |
-            | +----------+-----------+  |
-            +------------+--------------+
-                         | miss
-                         v
-              +----------+----------+
-              | Tier-2 (regional)   |
-              | Argo / tiered cache |
-              +----------+----------+
-                         | miss
-                         v
-              +----------+----------+
-              | Origin (S3)         |
-              | 300TB of originals  |
-              +---------------------+
-```
+
+*Each hop fires only on a miss: 96.2% of requests are satisfied at Tier-1, and the Tier-2 regional shield absorbs most of the rest, so only a trickle of the 500k req/sec budget ever reaches the S3 origin.*
 
 ### Key Design Decisions
 

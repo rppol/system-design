@@ -111,21 +111,48 @@ Traditional Queue          Message Broker             Event Streaming
 
 ## Delivery Guarantees
 
+Choosing the right guarantee is a direct tradeoff between loss-tolerance and consumer complexity:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start{"Tolerate occasional<br/>message loss?"} -->|"yes"| amo(["At-Most-Once<br/>ACK before processing"])
+    start -->|"no"| dup{"Can consumers<br/>handle duplicates?"}
+    dup -->|"yes (idempotent)"| alo(["At-Least-Once<br/>ACK after processing"])
+    dup -->|"no, exactly 1"| eo(["Exactly-Once<br/>txn or dedup table"])
+
+    class start,dup mathOp
+    class amo lossN
+    class alo train
+    class eo frozen
+```
+*Most production systems land on at-least-once with idempotent consumers — the practical middle ground between the two extremes below; exactly-once is reserved for cases (like payments) where duplicates or loss are both unacceptable.*
+
 ### At-Most-Once (Fire and Forget)
 The message is sent once. If the consumer crashes before processing, the message is lost. No retries.
 
 - ACK is sent before processing begins (or not used at all).
 - Suitable for: metrics, logs where occasional loss is acceptable.
 
+```mermaid
+sequenceDiagram
+    participant P as Producer
+    participant B as Broker
+    participant C as Consumer
+    P->>B: publish message
+    B->>C: deliver message
+    C-->>B: ACK sent immediately on receipt
+    Note over C: Consumer crashes before processing
+    Note over C: Message LOST — not redelivered
 ```
-Producer --> Broker --> Consumer
-                          |
-                        [ACK sent immediately on receipt]
-                          |
-                        [Consumer crashes]
-                          |
-                        [Message LOST — not redelivered]
-```
+*The ACK fires on receipt, not after processing, so a crash between the two loses the message with no redelivery.*
 
 ### At-Least-Once (With Retries)
 The broker holds the message until the consumer ACKs after processing. If processing fails or times out, the broker redelivers. The same message may arrive more than once.
@@ -133,15 +160,21 @@ The broker holds the message until the consumer ACKs after processing. If proces
 - Consumers MUST be idempotent (processing the same message twice produces the same result).
 - Most systems default to this.
 
+```mermaid
+sequenceDiagram
+    participant P as Producer
+    participant B as Broker
+    participant C as Consumer
+    P->>B: publish message
+    B->>C: deliver message
+    Note over C: Consumer crashes before ACK
+    B->>B: re-enqueues message
+    B->>C: redeliver message
+    C->>C: re-processes message
+    C-->>B: ACK
+    Note over B: Broker deletes message
 ```
-Producer --> Broker --> Consumer (processes)
-                          |
-                        [Consumer crashes BEFORE ACK]
-                          |
-               Broker re-enqueues message
-                          |
-                        Consumer (re-processes) --> ACK --> Broker deletes message
-```
+*The broker keeps the message until it sees an ACK, so a crash before ACK triggers redelivery — the same message can arrive twice, which is why consumers must be idempotent.*
 
 ### Exactly-Once
 Each message is processed exactly once, even in the presence of failures. This is the hardest guarantee to achieve.
@@ -159,63 +192,97 @@ True exactly-once across heterogeneous systems (queue + database) requires distr
 ### 1. Point-to-Point (Queue)
 One producer, one consumer per message. Used for task distribution — work items are load-balanced across a pool of workers.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    prod([Producer]) --> q(Queue)
+    q --> c1(["Consumer-1<br/>gets message A"])
+    q --> c2(["Consumer-2<br/>gets message B"])
+    q --> c3(["Consumer-3<br/>gets message C"])
+
+    class prod io
+    class q base
+    class c1,c2,c3 req
 ```
-Producer
-   |
-   v
-[Queue]
-   |
-   +---> Consumer-1 (gets message A)
-   +---> Consumer-2 (gets message B)
-   +---> Consumer-3 (gets message C)
-```
+*One message goes to exactly one consumer — the queue load-balances work items across the pool instead of broadcasting them.*
 
 Use case: order processing, email sending, background jobs.
 
 ### 2. Publish-Subscribe (Topic)
 One producer, many consumer groups. Every group gets a full copy of every message.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    prod([Producer]) --> top(Topic)
+    top -->|"sees all messages"| cgA(["Consumer Group A<br/>analytics service"])
+    top -->|"sees all messages"| cgB(["Consumer Group B<br/>notification service"])
+    top -->|"sees all messages"| cgC(["Consumer Group C<br/>audit log service"])
+
+    class prod io
+    class top base
+    class cgA,cgB,cgC req
 ```
-Producer
-   |
-   v
-[Topic]
-   |
-   +---> Consumer Group A (analytics service) -- sees all messages
-   +---> Consumer Group B (notification service) -- sees all messages
-   +---> Consumer Group C (audit log service) -- sees all messages
-```
+*Unlike point-to-point, every consumer group gets its own full copy of every message — none of them compete for messages.*
 
 Use case: event broadcasting, activity feeds, cache invalidation.
 
 ### 3. Request-Reply
 Producer sends a request with a reply-to queue; consumer processes and sends response back to that queue. Simulates synchronous RPC over async infrastructure.
 
+```mermaid
+sequenceDiagram
+    participant P as Producer
+    participant RQ as Request Queue
+    participant C as Consumer
+    participant RY as Reply Queue
+    P->>RQ: request, replyTo=Q_reply
+    RQ->>C: deliver request
+    C->>C: processes
+    C->>RY: send response
+    RY-->>P: response via Q_reply
 ```
-Producer                      Consumer
-   |                              |
-   |--[Request + replyTo=Q_reply]--> [Request Queue]
-   |                              |
-   |                          [Processes]
-   |                              |
-   | <--[Response]-- [Reply Queue Q_reply]
-```
+*Producer and consumer never talk directly — the request carries its own reply-to address, simulating synchronous RPC over async infrastructure.*
 
 Use case: service-to-service calls when you still want decoupling; legacy system integration.
 
 ### 4. Fan-Out
 One message triggers parallel processing in multiple independent consumers simultaneously. Often implemented with SNS (notification service) → multiple SQS queues.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    es([Event Source]) --> sns(SNS Topic)
+    sns --> q1(SQS Queue 1) --> l1(["Lambda<br/>billing"])
+    sns --> q2(SQS Queue 2) --> l2(["Lambda<br/>inventory"])
+    sns --> q3(SQS Queue 3) --> l3(["Lambda<br/>notification"])
+
+    class es io
+    class sns,q1,q2,q3 base
+    class l1,l2,l3 req
 ```
-Event Source
-     |
-     v
-  [SNS Topic]
-     |
-     +---> [SQS Queue 1] --> Lambda (billing)
-     +---> [SQS Queue 2] --> Lambda (inventory)
-     +---> [SQS Queue 3] --> Lambda (notification)
-```
+*One event triggers three independent Lambda consumers in parallel — the classic SNS fan-out to per-purpose SQS queues.*
 
 Use case: e-commerce order placement triggering billing, inventory, and notification in parallel.
 
@@ -239,6 +306,23 @@ Use case: e-commerce order placement triggering billing, inventory, and notifica
 | **Ops overhead**          | High (Zookeeper/KRaft, brokers)   | Medium                           | None (fully managed)             |
 | **Exactly-once**          | Yes (Kafka transactions)          | No                               | No (at-least-once)               |
 | **Best for**              | High-throughput event streaming   | Complex routing, RPC, tasks      | Simple decoupling on AWS         |
+
+The table above resolves into a single tradeoff: operational burden bought for throughput ceiling.
+
+```mermaid
+quadrantChart
+    title Throughput vs Operational Overhead
+    x-axis Low Ops Overhead --> High Ops Overhead
+    y-axis Low Throughput --> High Throughput
+    quadrant-1 High throughput, high ops
+    quadrant-2 Managed and fast
+    quadrant-3 Simple and light
+    quadrant-4 Heavy for little gain
+    Kafka: [0.88, 0.95]
+    RabbitMQ: [0.5, 0.45]
+    SQS: [0.08, 0.4]
+```
+*Kafka trades the highest operational burden (brokers, ZooKeeper/KRaft) for the highest throughput ceiling (millions of msg/sec); SQS inverts that trade — fully managed, but capped (300 TPS per FIFO group); RabbitMQ sits in between at ~50k–100k msg/sec with moderate ops. Positions are illustrative, drawn from the ratings in the table above.*
 
 ### Kafka Deep Dive
 
@@ -288,27 +372,31 @@ A **Dead Letter Queue (DLQ)** (or Dead Letter Topic in Kafka) is a special queue
 
 ### DLQ Architecture:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    mq(Main Queue) --> cons(["Consumer<br/>delivery attempt 1"])
+    cons -->|"FAILS"| r1(["Retry attempt 1"])
+    r1 -->|"FAILS"| r2(["Retry attempt 2"])
+    r2 -->|"FAILS"| r3(["Retry attempt 3"])
+    r3 -->|"max retries exceeded"| dlq(Dead Letter Queue)
+    dlq --> alert(["Alerting<br/>PagerDuty"])
+    dlq --> review(["Manual review<br/>dashboard"])
+    dlq --> reproc(["Reprocessing<br/>after fix"])
+
+    class mq,dlq base
+    class cons req
+    class r1,r2,r3 lossN
+    class alert,review,reproc train
 ```
-[Main Queue]
-     |
-     | (delivery attempt 1)
-     v
-Consumer -- FAILS --> Retry attempt 1
-                           |
-                      FAILS --> Retry attempt 2
-                                    |
-                               FAILS --> Retry attempt 3
-                                              |
-                                         MAX RETRIES EXCEEDED
-                                              |
-                                              v
-                                       [Dead Letter Queue]
-                                              |
-                              +---------------+---------------+
-                              |               |               |
-                           Alerting      Manual review    Reprocessing
-                           (PagerDuty)   (dashboard)       (after fix)
-```
+*After three failed retries the message is routed to the DLQ instead of blocking the main queue — from there it's alerted on, inspected, and either fixed-and-replayed or discarded.*
 
 ### Best practices for DLQ handling:
 1. **Always configure a DLQ** on production queues — never silently drop failed messages.
@@ -328,23 +416,45 @@ This is Kafka-specific but the concept applies broadly to any partitioned system
 - One consumer can handle multiple partitions.
 - You cannot have more active consumers than partitions (extras sit idle).
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph topic["Topic: orders (4 partitions)"]
+        p0(Partition 0)
+        p1(Partition 1)
+        p2(Partition 2)
+        p3(Partition 3)
+    end
+    subgraph gOrder["Consumer Group: order-processor (3 consumers)"]
+        ca(["Consumer A"])
+        cb(["Consumer B"])
+        cc(["Consumer C"])
+    end
+    subgraph gAnalytics["Consumer Group: analytics (2 consumers)"]
+        cx(["Consumer X"])
+        cy(["Consumer Y"])
+    end
+
+    p0 --> ca
+    p1 --> ca
+    p2 --> cb
+    p3 --> cc
+    p0 --> cx
+    p1 --> cx
+    p2 --> cy
+    p3 --> cy
+
+    class p0,p1,p2,p3 base
+    class ca,cb,cc,cx,cy req
 ```
-Topic: orders (4 partitions)
-
-Consumer Group: order-processor (3 consumers)
-
-Partition 0 -----> Consumer A
-Partition 1 -----> Consumer A
-Partition 2 -----> Consumer B
-Partition 3 -----> Consumer C
-
-Consumer Group: analytics (2 consumers)
-
-Partition 0 -----> Consumer X
-Partition 1 -----> Consumer X
-Partition 2 -----> Consumer Y
-Partition 3 -----> Consumer Y
-```
+*Each consumer group reads all 4 partitions independently — order-processor spreads them across 3 consumers (Consumer A takes two), analytics across 2 — so one group's pace never affects the other's.*
 
 ### Rebalancing
 When a consumer joins or leaves a group, partitions are reassigned. During rebalancing, consumption pauses. Kafka provides strategies:
@@ -384,57 +494,75 @@ Strict global ordering across a distributed queue is expensive and limits throug
 
 ### Kafka Cluster with Producers, Topics, Partitions, Consumer Groups
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pA(["Producer A<br/>key: user_id"])
+    pB(["Producer B<br/>key: order_id"])
+    pC(["Producer C<br/>key: region"])
+
+    subgraph cluster["Kafka Cluster — topic: orders"]
+        b1["Broker 1<br/>Part 0 (L) · Part 1 (R)"]
+        b2["Broker 2<br/>Part 1 (L) · Part 0 (R)"]
+        b3["Broker 3<br/>Part 2 (L) · Part 1 (R)"]
+    end
+
+    subgraph gOrderSvc["Consumer Group: order-service"]
+        c1(["Consumer 1<br/>reads Part 0"])
+        c2(["Consumer 2<br/>reads Part 1"])
+        c3(["Consumer 3<br/>reads Part 2"])
+    end
+    subgraph gAnalytics2["Consumer Group: analytics"]
+        cx2(["Consumer X<br/>reads Part 0,1"])
+        cy2(["Consumer Y<br/>reads Part 2"])
+    end
+
+    pA --> b1
+    pB --> b2
+    pC --> b3
+    b1 --> c1
+    b2 --> c2
+    b3 --> c3
+    b1 --> cx2
+    b2 --> cx2
+    b3 --> cy2
+
+    class pA,pB,pC io
+    class b1,b2,b3 base
+    class c1,c2,c3,cx2,cy2 req
 ```
-                        KAFKA CLUSTER
- +----------------------------------------------------------+
- |  Broker 1          Broker 2          Broker 3           |
- |  +-----------+     +-----------+     +-----------+      |
- |  | Topic:    |     | Topic:    |     | Topic:    |      |
- |  | orders    |     | orders    |     | orders    |      |
- |  | Part 0 [L]|     | Part 1 [L]|     | Part 2 [L]|      |
- |  | Part 1 [R]|     | Part 0 [R]|     | Part 1 [R]|      |
- |  +-----------+     +-----------+     +-----------+      |
- +----------------------------------------------------------+
-         ^                  ^                 ^
-         |                  |                 |
-  Producer A          Producer B         Producer C
-  (key: user_id)      (key: order_id)    (key: region)
-
-
-Consumer Group: order-service                Consumer Group: analytics
-+-------------------------+                  +--------------------+
-| Consumer 1              |                  | Consumer X         |
-|  reads Partition 0      |                  |  reads Part 0,1    |
-| Consumer 2              |                  | Consumer Y         |
-|  reads Partition 1      |                  |  reads Part 2      |
-| Consumer 3              |                  +--------------------+
-|  reads Partition 2      |
-+-------------------------+
-
-Offsets tracked per consumer group:
-  order-service: {Part0: 1042, Part1: 987, Part2: 1105}
-  analytics:     {Part0: 500,  Part1: 499, Part2: 501 }
-                                         ^--- can lag independently
-```
+*Offsets are tracked per consumer group, not globally — order-service sits at {Part0: 1042, Part1: 987, Part2: 1105} while analytics lags slightly behind at {Part0: 500, Part1: 499, Part2: 501}; each group replays and falls behind independently.*
 
 ### RabbitMQ Routing via Exchanges
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    prod([Producers]) --> ex("Topic Exchange: events")
+    ex -->|"routing: order.*"| qOrder("Queue: order_processing") --> workers(["Worker Pool"])
+    ex -->|"routing: *.error"| qError("Queue: error_handling") --> alertSvc(["Alert Service"])
+    ex -->|"routing: #"| qAudit("Queue: audit_log") --> auditSvc(["Audit Service"])
+    qAudit -.->|"DLX on failure"| dlq("Queue: dlq")
+
+    class prod io
+    class ex,qOrder,qError,qAudit,dlq base
+    class workers,alertSvc,auditSvc req
 ```
-Producers
-   |
-   v
-[Topic Exchange: events]
-   |
-   +--[routing: order.*]-----> [Queue: order_processing] --> Worker Pool
-   |
-   +--[routing: *.error]-----> [Queue: error_handling] --> Alert Service
-   |
-   +--[routing: #]-----------> [Queue: audit_log] --> Audit Service
-                                                          |
-                                              [DLX on failure]
-                                                          |
-                                                   [Queue: dlq]
-```
+*The topic exchange fans out by routing-key pattern to three queues; the audit queue additionally has a dead-letter exchange so undeliverable messages land in a separate DLQ.*
 
 ---
 
@@ -554,7 +682,7 @@ Tools: Kafka's `kafka-consumer-groups.sh`, Burrow, Confluent Control Center, Dat
 
 ---
 
-**Cross-references:** [backend/kafka_deep_dive](../../backend/kafka_deep_dive/) (partitions, consumer groups, ISR, exactly-once semantics), [backend/messaging_patterns](../../backend/messaging_patterns/) (competing consumers, pub/sub, saga via messaging), [backend/event_driven_fundamentals](../../backend/event_driven_fundamentals/), [spring/spring_messaging](../../spring/spring_messaging/) (`@KafkaListener`, JMS, RabbitMQ templates), [devops/event_streaming_operations](../../devops/event_streaming_operations/) (running and operating Kafka clusters), [python/fastapi/message_queues_and_event_driven](../../python/fastapi/message_queues_and_event_driven/) (Celery and FastAPI background processing).
+**Cross-references:** [backend/kafka_deep_dive](../../backend/kafka_deep_dive/) (partitions, consumer groups, ISR, exactly-once semantics), [backend/messaging_patterns](../../backend/messaging_patterns/) (competing consumers, pub/sub, saga via messaging), [backend/event_driven_fundamentals](../../backend/event_driven_fundamentals/), [spring/spring_messaging](../../spring/spring_messaging/) (`@KafkaListener`, JMS, RabbitMQ templates), [devops/event_streaming_operations](../../devops/event_streaming_operations/) (running and operating Kafka clusters), [fastapi/message_queues_and_event_driven](../../fastapi/message_queues_and_event_driven/) (Celery and FastAPI background processing).
 
 ---
 
@@ -565,30 +693,36 @@ A ride-hailing company needs to match rider requests to nearby drivers in real t
 
 ### Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    rider(["Rider App"]) --> gw("API Gateway")
+    driver(["Driver App"]) --> gw
+    gw --> locTopic("location-updates topic<br/>128 partitions, keyed by city")
+
+    locTopic --> dispatch["Dispatch Engine<br/>Consumer Group: dispatch"]
+    dispatch --> match("Matches riders<br/>to drivers")
+    match --> rideTopic("ride-events topic")
+    rideTopic --> notify(["Notification Service<br/>push to apps"])
+    rideTopic --> billing(["Billing Service<br/>fare calculation"])
+    rideTopic --> analytics(["Analytics Service<br/>surge pricing ML"])
+
+    locTopic --> eta["ETA Service<br/>Consumer Group: eta"]
+    locTopic --> surge["Surge Pricing<br/>Consumer Group: surge"]
+
+    class rider,driver io
+    class gw,match mathOp
+    class locTopic,rideTopic base
+    class dispatch,eta,surge,notify,billing,analytics req
 ```
-[Rider App]  [Driver App]
-     |              |
-     v              v
-[API Gateway]
-     |
-     v
-[location-updates topic] (Kafka, 128 partitions, keyed by city)
-     |
-     +----> [Dispatch Engine] (Consumer Group: dispatch)
-     |           |
-     |       [Matches riders to drivers]
-     |           |
-     |           v
-     |      [ride-events topic] (Kafka)
-     |           |
-     |           +---> [Notification Service] (push to apps)
-     |           +---> [Billing Service] (fare calculation)
-     |           +---> [Analytics Service] (surge pricing ML)
-     |
-     +----> [ETA Service] (Consumer Group: eta)
-     |
-     +----> [Surge Pricing] (Consumer Group: surge)
-```
+*Location pings fan out to three independent consumer groups (dispatch, ETA, surge); the dispatch group's match decision emits a second topic that itself fans out to notification, billing, and analytics.*
 
 ### Key Design Decisions
 1. **Partition by city**: keeps location events local to a regional consumer, reducing cross-region latency.
@@ -657,32 +791,31 @@ Each consumer team owns their service and consumes at their own pace. A producer
 
 ### Architecture Overview
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    svc(["Ride state machine<br/>service"]) -->|"produce: key=ride_id"| cluster("Kafka cluster: 12 brokers, RF=3<br/>topic ride.state.events<br/>96 partitions · 7-day retention")
+
+    cluster --> pricing["pricing group<br/>8 consumers"]
+    cluster --> notify["notify group<br/>16 consumers"]
+    cluster --> fraud["fraud group<br/>8 consumers"]
+    cluster --> payments["payments group<br/>4 consumers"]
+
+    payments -->|"failed msgs"| dlq(["DLQ topic"])
+
+    class svc io
+    class cluster base
+    class pricing,notify,fraud,payments req
+    class dlq lossN
 ```
-   Ride state machine service
-              │
-              │ produce: key=ride_id, value=state_event
-              ▼
-   ┌───────────────────────────────────────────────┐
-   │   Kafka cluster: 12 brokers, RF=3             │
-   │                                               │
-   │   Topic: ride.state.events                    │
-   │   Partitions: 96 (partitioned by ride_id)    │
-   │   Retention: 7 days                           │
-   └────┬──────────┬──────────┬──────────┬─────────┘
-        │          │          │          │
-        ▼          ▼          ▼          ▼
-   ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
-   │pricing │ │notify  │ │fraud   │ │payments│
-   │ group  │ │ group  │ │ group  │ │ group  │
-   │ 8 cons │ │16 cons │ │ 8 cons │ │ 4 cons │
-   └────────┘ └────────┘ └────────┘ └────────┘
-                                       │
-                                       ▼
-                              ┌────────────────┐
-                              │  DLQ topic     │
-                              │  (failed msgs) │
-                              └────────────────┘
-```
+*One partitioned topic (96 partitions, ride_id-keyed) feeds four independent consumer groups; only the payments group's failures spill into a dead-letter topic.*
 
 ### Key Design Decisions
 

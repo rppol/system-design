@@ -32,39 +32,33 @@ Choosing a database without requirements is like buying a vehicle without knowin
 
 ### Selection Decision Tree
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    root{"Primary access<br/>pattern?"}
+    root -->|"Structured relational<br/>+ ACID required"| rdbms(["PostgreSQL default<br/>MySQL legacy"])
+    root -->|"Time-ordered<br/>+ retention policies"| ts(["TimescaleDB, InfluxDB,<br/>ClickHouse"])
+    root -->|"Write throughput<br/>over 50K TPS by key"| wide(["Cassandra self-managed<br/>DynamoDB managed"])
+    root -->|"Full-text search<br/>+ facets + ranking"| search(["Elasticsearch /<br/>OpenSearch"])
+    root -->|"Semantic / vector<br/>similarity search"| vec(["pgvector, Pinecone,<br/>Weaviate, Qdrant"])
+    root -->|"Graph traversal<br/>+ path finding"| graphdb(["Neo4j, Neptune,<br/>TigerGraph"])
+    root -->|"Session, cache,<br/>leaderboard, rate limit"| cache(["Redis data structures<br/>Memcached simple"])
+    root -->|"Global ACID +<br/>horizontal write scale"| dist(["CockroachDB, TiDB,<br/>Spanner GCP"])
+    root -->|"Flexible schema /<br/>document model"| doc(["MongoDB, Firestore,<br/>CouchDB"])
+    root -->|"Large-scale OLAP<br/>+ columnar scan"| olap(["ClickHouse, BigQuery,<br/>Snowflake, Redshift, DuckDB"])
+
+    class root mathOp
+    class rdbms,ts,wide,search,vec,graphdb,cache,dist,doc,olap base
 ```
-What is your primary access pattern?
-│
-├── Structured, relational data; complex queries; ACID required?
-│   → PostgreSQL (default for OLTP), MySQL (legacy/PHP ecosystems)
-│
-├── Time-ordered data; retention policies; downsampling needed?
-│   → TimescaleDB (SQL + time-series), InfluxDB (DevOps), ClickHouse (analytics)
-│
-├── High write throughput (>50K TPS); simple access by partition key?
-│   → Cassandra (self-managed), DynamoDB (managed, AWS-native)
-│
-├── Full-text search; faceted filtering; relevance ranking?
-│   → Elasticsearch / OpenSearch
-│
-├── Semantic / vector similarity search?
-│   → pgvector (PostgreSQL extension), Pinecone, Weaviate, Qdrant
-│
-├── Graph traversal; relationship queries; path finding?
-│   → Neo4j, Amazon Neptune, TigerGraph
-│
-├── Session state; caching; leaderboards; rate limiting?
-│   → Redis (data structures), Memcached (simple cache)
-│
-├── Global ACID transactions; horizontal write scale?
-│   → CockroachDB, TiDB, Google Spanner (GCP)
-│
-├── Flexible schema; document model; embed-or-reference tradeoffs?
-│   → MongoDB, Firestore (Firebase), CouchDB
-│
-└── Large-scale analytics; OLAP; columnar scan?
-    → ClickHouse, BigQuery, Snowflake, Redshift, DuckDB
-```
+
+Follow the branch matching your dominant access pattern to its recommended engines — most production systems land on 2-4 branches at once (Section 7's Instagram example pairs PostgreSQL, Cassandra, and Redis in a single architecture).
 
 ---
 
@@ -107,17 +101,25 @@ Spanner                  Strong       Horiz     SQL         Yes(GCP)  Global ACI
 ### Requirement Dimensions in Detail
 
 **Consistency requirements**:
-```
-Strong (ACID): financial transactions, inventory counts, user authentication
-  → PostgreSQL, MySQL, CockroachDB, TiDB, Spanner
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Eventual (BASE): social feeds, view counts, search indexes, analytics
-  → Cassandra, DynamoDB, MongoDB, Elasticsearch, Redis
+    cq{"Consistency<br/>requirement?"}
+    cq -->|"Strong ACID<br/>payments, inventory, auth"| strong(["PostgreSQL, MySQL,<br/>CockroachDB, TiDB, Spanner"])
+    cq -->|"Eventual BASE<br/>feeds, counts, search"| eventual(["Cassandra, DynamoDB,<br/>MongoDB, Elasticsearch, Redis"])
+    cq -->|"Read-your-writes<br/>profile updates"| ryw(["PG primary read<br/>DynamoDB strong read<br/>Cassandra CL=QUORUM"])
 
-Read-your-writes: user profile updates visible immediately after save
-  → PostgreSQL (read from primary), DynamoDB (strong read), Redis (primary)
-  → Cassandra with CL=QUORUM (achievable but costs latency)
+    class cq mathOp
+    class strong,eventual,ryw base
 ```
+Pick the tier per data type, not per system — Section 7's Instagram example pairs strong-ACID PostgreSQL for accounts with eventually-consistent Cassandra for the feed.
 
 **Scale dimensions**:
 ```
@@ -235,6 +237,15 @@ DynamoDB (100M writes/day, 1B reads/day):
   Total: ~$60K/year (no operational overhead)
 ```
 
+```mermaid
+xychart-beta
+    title "Annual TCO by Deployment Option ($K/year)"
+    x-axis ["Aurora", "RDS Postgres", "DynamoDB", "Self-hosted PG", "CRDB Dedicated", "Self-hosted CRDB"]
+    y-axis "Annual cost ($K)" 0 --> 320
+    bar [40, 42, 60, 75, 300, 305]
+```
+The distributed-SQL tax is not linear — both CockroachDB options land near $300K/year, roughly 4-7x the boring PostgreSQL and DynamoDB options, which is why Section 9 says avoid the added complexity until a proven requirement demands it. (CockroachDB Dedicated's $100-500K/year range is plotted at its midpoint.)
+
 ### Evaluation Scorecard
 
 ```
@@ -294,23 +305,35 @@ At 10M writes/day, Cassandra is premature optimization.
 At 1B writes/day (~11.5K TPS sustained, 100K TPS peak), evaluate both.
 ```
 
+```mermaid
+xychart-beta
+    title "Write Throughput vs PostgreSQL Ceiling (writes/sec)"
+    x-axis ["Current (10M/day)", "1B/day sustained", "PostgreSQL ceiling", "1B/day peak"]
+    y-axis "Writes per second" 0 --> 110000
+    bar [116, 11500, 50000, 100000]
+```
+Today's 116 writes/second is a rounding error against PostgreSQL's ~50K TPS ceiling, and even the 1B/day-sustained case (11.5K/s) stays under it — only the 1B/day peak (100K/s) crosses the line, the one scenario worth benchmarking Cassandra for.
+
 ### When Distributed SQL Outweighs PostgreSQL + Read Replicas
 
-```
-PostgreSQL + read replicas is sufficient when:
-  - Writes < 50K TPS sustained
-  - Dataset < 10TB active
-  - Single region deployment
-  - Full SQL and extension ecosystem needed
-  - Team is SQL-proficient (not distributed systems)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-CockroachDB / TiDB worth the complexity when:
-  - Writes > 50K TPS sustained AND cannot be handled by vertical scaling
-  - Multi-region active-active with strong consistency is required
-  - Auto-sharding eliminates the operational burden of Vitess/Citus management
-  - Team has distributed systems expertise
-  - 2-5x higher cost is justified by capability requirements
+    dq{"Write scale + region<br/>requirements?"}
+    dq -->|"under 50K TPS<br/>single region, SQL team"| pgreplica(["PostgreSQL +<br/>read replicas"])
+    dq -->|"over 50K TPS or<br/>multi-region active-active"| distsql(["CockroachDB / TiDB"])
+
+    class dq mathOp
+    class pgreplica,distsql base
 ```
+Distributed SQL earns its 2-5x cost premium only when write scale or multi-region active-active consistency genuinely exceeds what vertical PostgreSQL scaling (and Vitess/Citus sharding) can provide.
 
 ---
 

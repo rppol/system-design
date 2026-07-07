@@ -110,66 +110,107 @@ CAP defines linearizability, but real systems operate on a spectrum:
 
 ### CP System During Partition (ZooKeeper)
 
-```
-Normal Operation:
-  Client
-    |
-    v
-  Node A (Leader) <---sync---> Node B (Follower)
-                 <---sync---> Node C (Follower)
-  All writes go to leader, replicated to quorum
+```mermaid
+sequenceDiagram
+    participant Cl as Client
+    participant A as Node A (Leader)
+    participant B as Node B (Follower)
+    participant Cn as Node C (Follower)
 
-During Partition:
-  Client
-    |
-    v
-  Node A (Leader) |X X X| Node B (isolated)
-                  |X X X| Node C (isolated)
+    Note over Cl,Cn: Normal operation
+    Cl->>A: write X=1
+    A->>B: sync
+    A->>Cn: sync
+    B-->>A: ack
+    Cn-->>A: ack
+    A-->>Cl: committed - quorum replicated
 
-  Node A: still serves (has quorum with itself if 2/3 quorum met)
-  OR
-  Client --> Node B: "I cannot reach quorum, returning error"
-  (CP: prefers error over stale data)
+    Note over Cl,Cn: During partition
+    Cl->>A: write / read
+    A--xB: sync blocked
+    A--xCn: sync blocked
+    A-->>Cl: served - A still holds quorum
+    Note over A,Cn: OR, if A loses quorum
+    Cl->>B: request
+    B-->>Cl: error - cannot reach quorum
+    Note over B: CP choice - error over stale data
 ```
+
+*ZooKeeper's ZAB protocol replicates every write to a quorum during normal operation. When the leader can no longer reach that quorum during a partition, it either keeps serving (if it still holds quorum itself) or returns an error rather than risk stale data.*
 
 ### AP System During Partition (Cassandra)
 
+```mermaid
+sequenceDiagram
+    participant Cl as Client
+    participant A as Node A
+    participant B as Node B
+    participant Cn as Node C
+
+    Note over Cl,Cn: Normal operation - replication factor 3
+    Cl->>A: WRITE
+    A->>B: replicate
+    A->>Cn: replicate
+    B-->>A: ack
+    Cn-->>A: ack
+
+    Note over Cl,Cn: During partition
+    Cl->>A: WRITE
+    A-->>Cl: success - local write
+    A--xB: replicate blocked
+    A--xCn: replicate blocked
+    Cl->>B: READ
+    B-->>Cl: stale data - AP choice
+
+    Note over Cl,Cn: After partition heals
+    A->>B: hinted handoff
+    A->>Cn: hinted handoff
+    B->>Cn: read repair
 ```
-Normal Operation (Replication Factor=3):
-  Client WRITE
-    |
-    v
-  Node A <---replication---> Node B
-         <---replication---> Node C
 
-During Partition:
-  Client WRITE --> Node A  (write succeeds locally)
-                           |X X X| Node B (isolated, stale)
-                           |X X X| Node C (isolated, stale)
-
-  Client READ --> Node B  (returns stale data -- AP choice)
-
-After Partition Heals:
-  Node A, B, C reconcile via hinted handoff + read repair
-```
+*Cassandra accepts the write locally and returns success immediately even while replicas are unreachable; a read from an isolated replica returns stale data rather than an error. Hinted handoff and read repair reconcile all three replicas once the partition heals.*
 
 ### PACELC Diagram
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    P{"Partition?"} -->|"YES"| PAC{"Choose A or C"}
+    P -->|"NO"| LC{"Else: Latency<br/>or Consistency?"}
+
+    PAC -->|"PA"| PA(["Available<br/>Cassandra"])
+    PAC -->|"PC"| PC(["Consistent<br/>HBase"])
+    LC -->|"EL"| EL(["Low latency<br/>Cassandra, DynamoDB"])
+    LC -->|"EC"| EC(["Strong consistency<br/>Spanner, MongoDB"])
+
+    class P,PAC,LC mathOp
+    class PA,EL train
+    class PC,EC frozen
 ```
-                    Is there a Partition?
-                   /                     \
-                 YES                      NO
-                 /                         \
-         P+A or P+C?              Else: Latency or Consistency?
-          |        |                    |              |
-          v        v                    v              v
-         PA      PC                  EL             EC
-    (Cassandra) (HBase)         (Cassandra,      (Spanner,
-   Available   Consistent       DynamoDB)         MongoDB)
-   on partition, error on        Low latency      Strong
-   partition    partition        eventual         consistency
-                                                  higher latency
+
+*PACELC extends CAP: even outside a partition (the "else" branch), every system still trades latency for consistency. The right two leaves are the everyday, no-partition choice that CAP itself is silent on.*
+
+### Raft / ZAB Leader Election (State Machine)
+
+```mermaid
+stateDiagram-v2
+    [*] --> Follower
+    Follower --> Candidate: election timeout<br/>no heartbeat
+    Candidate --> Leader: wins majority<br/>of quorum votes
+    Candidate --> Follower: discovers current<br/>leader or higher term
+    Candidate --> Candidate: split vote<br/>retry election
+    Leader --> Follower: discovers higher<br/>term
+    Follower --> Follower: heartbeat<br/>received
 ```
+
+*The leader-election state machine behind both Raft (etcd) and ZAB (ZooKeeper): a Follower that stops hearing heartbeats becomes a Candidate, which wins the term by quorum vote or reverts to Follower on a split vote or a higher term. This is exactly the mechanism Q6 describes — "if the leader cannot reach a quorum of followers, it steps down and a new election starts" — and the State pattern named in the LLD cross-perspective below.*
 
 ---
 
@@ -199,6 +240,29 @@ Example (N=3, W=2, R=2):
 - Read: query nodes A and B → at least one has the latest write
 - During partition where A is isolated: write to B+C (quorum), read from B+C (quorum) — consistent
 - If A is the only reachable node (W=2 not met): write fails — CP system says no
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    W(["Write quorum W=2<br/>Node A + Node B"]) --> ov{"Do W and R<br/>share a node?"}
+    R(["Read quorum R=2<br/>Node B + Node C"]) --> ov
+    ov -->|"yes: Node B<br/>R+W=4, over N=3"| hit("Read sees<br/>latest write")
+    ov -.->|"no overlap<br/>possible"| miss("Read may return<br/>stale value")
+
+    class W,R req
+    class ov mathOp
+    class hit train
+    class miss lossN
+```
+
+*With N=3, W=2, R=2 the write set (Node A + Node B) and read set (Node B + Node C) are forced to overlap at Node B whenever R+W > N — that guaranteed overlap is exactly why a quorum read always sees the latest write.*
 
 ### Vector Clocks (AP Conflict Resolution)
 
@@ -473,35 +537,34 @@ A FinTech startup (digital wallet, B2C) migrating from a single-region PostgreSQ
 
 ### Architecture Overview
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client<br/>mobile/web"]) --> gw{"API Gateway"}
+    gw -->|"balance /<br/>transfer"| ledger("Ledger Service<br/>CP")
+    gw -->|"activity<br/>feed"| feed("Feed Service<br/>AP")
+    ledger --> spanner("Spanner<br/>external consistency")
+    feed --> ddb("DynamoDB<br/>Global Tables")
+    spanner --> outbox("Outbox table<br/>same txn")
+    outbox -.->|"Kafka Connect"| kafka("Kafka")
+    kafka -.->|"stream, async<br/>1-5s lag"| ddb
+
+    class client io
+    class gw mathOp
+    class ledger train
+    class feed req
+    class spanner,ddb,outbox base
+    class kafka req
 ```
-                  Client (mobile/web)
-                          |
-                          v
-                  +-------+-------+
-                  | API Gateway   |
-                  +---+-------+---+
-                      |       |
-            balance/  |       | activity
-            transfer  |       | feed
-                      v       v
-              +-------+--+   ++----------+
-              | Ledger   |   | Feed Svc  |
-              | Service  |   | (AP)      |
-              | (CP)     |   +----+------+
-              +-----+----+        |
-                    |             v
-                    v       +-----+----+
-              +-----+----+  | DynamoDB |  multi-region replication
-              | Spanner  |  | Global   |  eventual consistency
-              | (extern. |  | Tables   |  ~1-5s lag
-              |  consist)|  +----------+
-              +-----+----+
-                    |
-              event-sourced bridge (Kafka)
-              +-----+--------------------------+
-              | Outbox table -> Kafka -> Feed |
-              +--------------------------------+
-```
+
+*The ledger (Spanner, CP) and activity feed (DynamoDB Global Tables, AP) are separate stores stitched together by an outbox + Kafka Connect bridge — the dotted edges are the asynchronous, eventually-consistent path, matching the outbox pattern described below.*
 
 ### Key Design Decisions
 

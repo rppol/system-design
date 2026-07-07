@@ -123,6 +123,49 @@ Parameters:
     nprobe=32: good balance, ~95% recall for typical data
 ```
 
+**Visualizing nprobe: how many clusters actually get searched**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q(["Query vector"])
+    D{"Distance to<br/>all centroids"}
+    C1("Centroid 1")
+    C2("Centroid 2")
+    C3("Centroid 3")
+    C4("Centroid K")
+    S1("Scan cluster 1")
+    S2("Scan cluster 2")
+    Merge(("Merge"))
+    Top(["Top-k results"])
+
+    Q --> D
+    D -->|"nprobe nearest"| C1
+    D -->|"nprobe nearest"| C2
+    D -.->|"skipped"| C3
+    D -.->|"skipped"| C4
+    C1 --> S1 --> Merge
+    C2 --> S2 --> Merge
+    Merge --> Top
+
+    class Q io
+    class D mathOp
+    class C1,C2 train
+    class C3,C4 frozen
+    class S1,S2 base
+    class Merge mathOp
+    class Top io
+```
+
+With `nlist=4000` and `nprobe=32`, only 32 of 4000 clusters are ever linear-scanned — every other centroid's cluster (purple, skipped entirely) plays no part in the answer, which is why nprobe=1 gives the "fastest, lowest recall" behavior above and nprobe=32 lands at the "~95% recall" balance point.
+
 ### Product Quantization (PQ) — Compression
 
 ```
@@ -142,6 +185,42 @@ IVF+PQ: combine for large-scale (>100M vectors)
   - PQ compresses within each cluster (fine quantization)
   - Query: O(nprobe × cluster_size × M) operations (fast, mostly integer ops)
 ```
+
+**Visualizing PQ compression: splitting then quantizing a vector**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    V(["Vector<br/>1536 dims, 6144 bytes"])
+    Split{"Split into<br/>M=96 sub-vectors"}
+    S1("Sub-vector 1<br/>16 dims")
+    S2("Sub-vector 2<br/>16 dims")
+    S3("Sub-vector 96<br/>16 dims")
+    Q1("k-means<br/>k=256 centroids")
+    Q2("k-means<br/>k=256 centroids")
+    Q3("k-means<br/>k=256 centroids")
+    Code(["PQ code<br/>96 bytes, 64x smaller"])
+
+    V --> Split
+    Split --> S1 --> Q1 --> Code
+    Split --> S2 --> Q2 --> Code
+    Split --> S3 --> Q3 --> Code
+
+    class V frozen
+    class Split mathOp
+    class S1,S2,S3 req
+    class Q1,Q2,Q3 mathOp
+    class Code train
+```
+
+Each 16-dim sub-vector collapses to a single 1-byte centroid ID, so the 6144-byte original (purple, uncompressed) becomes a 96-byte code (green, compressed) — the 64x compression described above, at the cost of the ~5-15% recall loss from that lossy round-trip.
 
 ### pgvector — Vector Search in PostgreSQL
 
@@ -201,34 +280,107 @@ LIMIT 10;
 
 ## 5. Architecture Diagrams
 
+**HNSW graph structure and greedy descent search:**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q(["Query Q"])
+
+    subgraph L2["Layer 2 - top, sparse"]
+        direction LR
+        A2(("A"))
+        G2(("G"))
+    end
+
+    subgraph L1["Layer 1"]
+        direction LR
+        A1(("A"))
+        C1(("C"))
+        E1(("E"))
+        G1(("G"))
+        I1(("I"))
+    end
+
+    subgraph L0["Layer 0 - all vectors, dense"]
+        direction LR
+        A0(("A"))
+        B0(("B"))
+        C0(("C"))
+        D0(("D"))
+        E0(("E"))
+        F0(("F"))
+        G0(("G"))
+        H0(("H"))
+        I0(("I"))
+        J0(("J"))
+    end
+
+    Result(["Top-k: G, H, I, F, E"])
+
+    Q --> G2
+    A2 --- G2
+    A1 --- C1 --- E1 --- G1 --- I1
+    A0 --- B0 --- C0 --- D0 --- E0 --- F0 --- G0 --- H0 --- I0 --- J0
+
+    G2 -.->|"descend"| G1
+    G1 -.->|"descend"| G0
+    G0 -->|"explore ef=50"| Result
+
+    class Q io
+    class A2,A1,A0,B0,C0,D0,J0 frozen
+    class G2,G1,G0,H0,I0,F0,E0 train
+    class C1,E1,I1 mathOp
+    class Result io
 ```
-HNSW GRAPH STRUCTURE:
 
-Layer 2:  [A] ─────────────────── [G]
-                \                 /
-Layer 1:  [A] ─ [C] ─ [E] ─── [G] ─ [I]
-               /   \         /
-Layer 0:  [A][B][C][D][E][F][G][H][I][J]
-          (all vectors, dense connections)
+Fewer nodes survive at each higher layer, so the search greedily hops the top layer's long "highway" edges (reaching G in one jump) before descending into Layer 0's dense connections, where it explores ef=50 candidates and returns the top-k closest to Q.
 
-Search for query Q:
-1. Enter at Layer 2, nearest: G
-2. Descend to Layer 1 at G, navigate: G → I → G (G is nearest at L1)
-3. Descend to Layer 0 at G, explore ef=50 candidates:
-   [G, H, I, F, E] → sorted by distance to Q → return top k
+**RAG pipeline using a vector database for retrieval:**
 
-RAG PIPELINE WITH VECTOR DATABASE:
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-User Query
-    ↓ (embedding model)
-Query Vector (1536 dims)
-    ↓ (ANN search)
-Top-K Documents (k=5-10)
-    ↓ (reranking, optional)
-Top-N Reranked (N=3-5)
-    ↓ (inject into prompt)
-LLM → Answer
+    U(["User Query"])
+    E("Embedding model")
+    QV("Query Vector<br/>1536 dims")
+    ANN("ANN search")
+    TK("Top-K Docs<br/>k=5-10")
+    RR{"Rerank?<br/>optional"}
+    TN("Top-N Reranked<br/>N=3-5")
+    LLM("LLM")
+    A(["Answer"])
+
+    U --> E --> QV --> ANN --> TK --> RR
+    RR -->|"yes"| TN --> LLM --> A
+    RR -.->|"skip"| LLM
+
+    class U io
+    class E mathOp
+    class QV req
+    class ANN mathOp
+    class TK base
+    class RR mathOp
+    class TN base
+    class LLM train
+    class A io
 ```
+
+The optional reranking hop (Cohere Rerank, BGE-Reranker) trims the k=5-10 retrieved candidates down to a precise top-N=3-5 before the prompt is built — trading a little latency for the higher answer relevance the case study in section 14 measures.
 
 ---
 

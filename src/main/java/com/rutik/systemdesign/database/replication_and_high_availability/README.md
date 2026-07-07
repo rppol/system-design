@@ -49,62 +49,151 @@ Statement-based     | SQL statements                   | Non-deterministic (avoi
 
 ## 5. Architecture Diagrams
 
+**PostgreSQL streaming replication with Patroni HA.** A Distributed Configuration Store (DCS) arbitrates leadership; the Patroni agent holding the lease runs the PostgreSQL primary, while the other agents run standbys that pull WAL over streaming replication.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    DCS(["etcd / Consul / ZooKeeper<br/>DCS · 3-node quorum"])
+    subgraph Agents["Patroni agents on every DB node"]
+        AG1(Agent 1<br/>primary)
+        AG2(Agent 2<br/>replica)
+        AG3(Agent 3<br/>replica)
+    end
+    DCS -->|"leader lease"| Agents
+    AG1 --> PG1(PostgreSQL<br/>Primary)
+    AG2 --> PG2(PostgreSQL<br/>Standby)
+    AG3 --> PG3(PostgreSQL<br/>Standby)
+    PG1 -.->|"WAL stream"| PG2
+    PG1 -.->|"WAL stream"| PG3
+
+    class DCS base
+    class AG1 train
+    class AG2,AG3 frozen
+    class PG1 train
+    class PG2,PG3 frozen
 ```
-PostgreSQL Streaming Replication with Patroni HA
-==================================================
 
-                  ┌─────────────────────┐
-                  │   etcd / Consul /   │
-                  │   ZooKeeper (DCS)   │
-                  │   3-node quorum     │
-                  └──────────┬──────────┘
-                             │ leader lease
-                             │
-┌────────────────────────────▼────────────────────────────┐
-│  Patroni agents on every DB node                        │
-│  Agent 1 (primary) ── Agent 2 (replica) ── Agent 3 (replica) │
-└────────────────────────────────────────────────────────┘
-         │                    │                    │
-    [PostgreSQL          [PostgreSQL          [PostgreSQL
-     Primary]             Standby]             Standby]
-         │                    │
-         └────── WAL stream ──┘
-              (streaming replication)
+**Failover sequence.** Losing the primary's heartbeat is only the first of six state transitions Patroni walks through before traffic reaches a new primary.
 
-Failover sequence:
-  1. Primary crashes → Patroni agent on primary stops sending heartbeat to DCS
-  2. DCS lease expires (TTL = 30s default)
-  3. Remaining agents compete for DCS leader election
-  4. Winner agent promotes its PostgreSQL replica to primary
-  5. Other replicas reconfigure replication to new primary
-  6. HAProxy/load balancer updated via Patroni REST API
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    state "Primary Healthy" as Healthy
+    state "Heartbeat Lost" as Lost
+    state "DCS Lease Expired (30s TTL)" as Expired
+    state "Leader Election" as Election
+    state "Replica Promoted" as Promoted
+    state "Replicas Reconfigured" as Reconfigured
+    state "Load Balancer Updated" as LBUpdated
 
-Replication Lag Sources
-========================
+    [*] --> Healthy
+    Healthy --> Lost: primary crashes
+    Lost --> Expired: no lease renewal
+    Expired --> Election: agents compete
+    Election --> Promoted: winner runs<br/>pg_ctl promote
+    Promoted --> Reconfigured: replicas rewire<br/>to new primary
+    Reconfigured --> LBUpdated: HAProxy updated<br/>via Patroni REST API
+    LBUpdated --> [*]
 
-Primary        WAL Sender       Network       WAL Receiver   Apply
-  COMMIT  ──►  reads WAL  ──►  transmit  ──►  writes WAL  ──► apply to replica
-   t=0          t=0.1ms        t=1ms(LAN)       t=1.1ms      t=1.5ms
-
-Total lag: 1.5ms (LAN) to 50ms+ (cross-region)
-
-
-Multi-Region Active-Active (Conflict Territory)
-================================================
-
-Region A                            Region B
-  Primary A ◄─── async repl ────► Primary B
-    │                                  │
-  Replica A1                        Replica B1
-  Replica A2                        Replica B2
-
-Write to Primary A: user sets email to alice@a.com at T=100
-Write to Primary B: same user sets email to bob@b.com at T=101
-
-Both commit locally. Replication delivers conflicting writes to the other region.
-Conflict resolution needed: LWW (last-write-wins), application merge, or reject second write.
+    class Healthy train
+    class Lost lossN
+    class Expired mathOp
+    class Election mathOp
+    class Promoted train
+    class Reconfigured base
+    class LBUpdated train
 ```
+
+**Replication lag sources.** Each hop between commit and apply adds its own slice of latency.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    C(Primary COMMIT<br/>t=0) --> WS(WAL Sender<br/>reads WAL · t=0.1ms)
+    WS --> NET(Network transmit<br/>t=1ms LAN)
+    NET --> WR(WAL Receiver<br/>writes WAL · t=1.1ms)
+    WR --> AP(Apply to replica<br/>t=1.5ms)
+
+    class C io
+    class WS,WR mathOp
+    class NET frozen
+    class AP train
+```
+
+Total lag: 1.5ms on a LAN to 50ms+ across regions.
+
+**Multi-region active-active (conflict territory).** Two primaries in two regions each accept local writes and replicate asynchronously to the other; nothing stops the same row from being written in both regions before either replica catches up.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph RegionA["Region A"]
+        PA(Primary A)
+        RA1(Replica A1)
+        RA2(Replica A2)
+        PA --> RA1
+        PA --> RA2
+    end
+    subgraph RegionB["Region B"]
+        PB(Primary B)
+        RB1(Replica B1)
+        RB2(Replica B2)
+        PB --> RB1
+        PB --> RB2
+    end
+    PA -.->|"async repl"| PB
+    PB -.->|"async repl"| PA
+
+    class PA,PB train
+    class RA1,RA2,RB1,RB2 frozen
+```
+
+```mermaid
+sequenceDiagram
+    participant UA as Client (Region A)
+    participant PA as Primary A
+    participant PB as Primary B
+    participant UB as Client (Region B)
+
+    UA->>PA: SET email=alice@a.com (T=100)
+    PA-->>UA: commit (local)
+    UB->>PB: SET email=bob@b.com (T=101)
+    PB-->>UB: commit (local)
+    PA->>PB: async replicate write (T=100)
+    PB->>PA: async replicate write (T=101)
+    Note over PA,PB: Same row, two writes -<br/>resolve via LWW, app merge,<br/>or reject second write
+```
+
+Both writes commit locally before either region learns about the other's update, so replication delivers a genuine conflict that only application-level policy (last-write-wins, merge, or reject) can resolve.
 
 ---
 
@@ -179,6 +268,18 @@ synchronous_commit = off (async):
   NOT acceptable for financial transactions.
 ```
 
+The commit-latency cost of synchronous replication scales dramatically with distance — the same RPO=0 guarantee that costs about 1-2ms on a LAN can cost up to 200ms across regions:
+
+```mermaid
+xychart-beta
+    title "Commit Latency Overhead by Replication Mode"
+    x-axis ["No standby", "Sync - same LAN", "Sync - cross-region"]
+    y-axis "Added latency per commit (ms)" 0 --> 200
+    bar [0.1, 2, 200]
+```
+
+That roughly 2000x range between the cheapest and most expensive synchronous option is why most teams keep synchronous standbys in the same datacenter and fall back to asynchronous replication for cross-region replicas.
+
 ### Patroni HA and Split-Brain Prevention
 
 Patroni uses a Distributed Configuration Store (DCS — etcd, Consul, or ZooKeeper) as the arbiter. The DCS is itself a 3-node quorum, tolerating 1 node failure. Patroni's leader holds a DCS lease (TTL = 30s). If the leader fails to renew, the lease expires and a new leader is elected.
@@ -234,6 +335,30 @@ Cloud HA (RDS Multi-AZ) | 0        | 60-120s     | None (+3ms AZ)    | Low (mana
 ---
 
 ## 9. When to Use / When NOT to Use
+
+The five rules below collapse into a single decision path — RPO first, then region topology, then operational appetite:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start{"RPO = 0<br/>required?"} -->|"yes"| Sync(Synchronous replication<br/>same-DC standby)
+    Start -->|"no"| Region{"Multi-region<br/>active-active?"}
+    Region -->|"yes, conflict<br/>handling ready"| Multi(Multi-primary<br/>active-active)
+    Region -->|"no"| Ops{"Ops simplicity<br/>over cost?"}
+    Ops -->|"yes"| Managed(Managed HA<br/>RDS Multi-AZ / Cloud SQL)
+    Ops -->|"no"| Async(Patroni + async<br/>read replicas)
+
+    class Start,Region,Ops mathOp
+    class Sync,Managed,Async train
+    class Multi lossN
+```
 
 **Use synchronous replication when**: RPO=0 is a hard requirement (financial, healthcare). Data loss on failover is unacceptable even for a single write.
 
@@ -344,16 +469,22 @@ For PostgreSQL: query `pg_stat_replication.replay_lag` from the primary every 30
 **Scenario**: An e-commerce platform runs PostgreSQL on a single primary with two async replicas for reads. During Black Friday, the primary node's SSD fails. Unmonitored replication slots on both replicas have accumulated 50GB of WAL on the primary disk. The team has no automated HA.
 
 **Timeline of the incident**:
-```
-T+0:00  Primary SSD shows I/O errors; PostgreSQL starts logging checksum failures
-T+0:05  Primary crashes (disk full from WAL accumulation + replica slots)
-T+0:07  On-call engineer paged
-T+0:20  Engineer finds the primary is dead; replicas are 45 seconds behind (async lag)
-T+0:35  Manual promotion of replica-1 to primary (pg_ctl promote)
-T+0:40  Application DNS updated to replica-1
-T+0:45  Application reconnects; 45 seconds of order data lost
-T+2:00  Replica-2 reconfigured to replicate from new primary
-T+8:00  New primary SSD provisioned and base backup restored as new replica
+
+```mermaid
+timeline
+    title Black Friday Primary Failure - Incident Timeline
+    section Outage
+        T+0 min : Primary SSD I/O errors, checksum failures begin
+        T+5 min : Primary crashes - disk full from WAL + replica slots
+        T+7 min : On-call engineer paged
+    section Manual Failover
+        T+20 min : Primary confirmed dead, replicas 45s behind
+        T+35 min : Replica-1 promoted (pg_ctl promote)
+        T+40 min : Application DNS updated to replica-1
+        T+45 min : App reconnects - 45s of order data lost
+    section Recovery
+        T+2 hr : Replica-2 reconfigured to new primary
+        T+8 hr : New SSD provisioned, base backup restored
 ```
 
 **Total downtime**: 40 minutes. **Data loss**: 45 seconds of transactions.

@@ -21,12 +21,28 @@ A storage engine is the component of a database system responsible for storing, 
 
 Before any data page is modified, the change is written to the WAL (a sequential append-only file). On crash, the database replays WAL from the last checkpoint to recover in-progress transactions.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    C([Client WRITE]) --> W["WAL record appended<br/>sequential, durable"]
+    W --> M["Memory page updated"]
+    M --> R([Return success])
+    W -.->|"async"| BG["Background: flush dirty<br/>pages at checkpoint"]
+
+    class C,R io
+    class W train
+    class M base
+    class BG frozen
 ```
-Write flow:
-Client WRITE → WAL record appended (sequential, durable) → Memory page updated → Return success
-                                                         ↓ (async)
-                                                 Background: flush dirty pages to disk (checkpoint)
-```
+
+The client receives success as soon as the WAL record is durable on disk; the actual dirty-page flush happens later, asynchronously, at the next checkpoint.
 
 WAL levels (PostgreSQL):
 - `minimal`: Sufficient for crash recovery only
@@ -38,6 +54,15 @@ WAL levels (PostgreSQL):
 The buffer pool is a memory-resident cache of disk pages. All reads go through the buffer pool; cache misses trigger a disk read. All writes update the buffer pool page (making it "dirty") without immediately writing to disk.
 
 **LRU-K eviction (PostgreSQL clock-sweep, InnoDB LRU with young/old sublists)**: evicts pages not recently accessed. InnoDB uses a 5/8 (young sublist) + 3/8 (old sublist) split to protect frequently accessed pages from being evicted by large scans.
+
+```mermaid
+pie showData
+    title InnoDB Buffer Pool LRU Split
+    "Young sublist (5/8)" : 62.5
+    "Old sublist (3/8)" : 37.5
+```
+
+InnoDB's buffer pool LRU list is split 5/8 young to 3/8 old (62.5% / 37.5%) specifically so a single large sequential scan cannot evict the frequently-accessed working set.
 
 Concrete numbers:
 - PostgreSQL `shared_buffers` default = 128 MB; recommend 25% of RAM
@@ -71,19 +96,54 @@ Properties:
 
 ### LSM-Tree Storage Engine
 
-```
-Write Path:
-Client WRITE → MemTable (in-memory sorted tree)
-                 ↓ (when full, ~64MB)
-              SSTable L0 (immutable, flushed to disk)
-                 ↓ (when L0 count threshold reached)
-              Compaction → SSTable L1, L2, L3...
+**Write Path:**
 
-Read Path:
-Client READ → Check MemTable → Check L0 SSTables (bloom filter first)
-           → Check L1 SSTables → ... → Check Ln SSTables
-           → Merge (take newest version)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    C([Client WRITE]) --> MT["MemTable<br/>in-memory sorted tree"]
+    MT -->|"full, ~64MB"| L0["SSTable L0<br/>immutable, flushed"]
+    L0 -->|"L0 count over<br/>threshold"| Comp["Compaction"]
+    Comp --> Ln["SSTable L1, L2, L3..."]
+
+    class C io
+    class MT train
+    class L0,Ln frozen
+    class Comp mathOp
 ```
+
+**Read Path:**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    R([Client READ]) --> MT2["Check MemTable"]
+    MT2 --> L0c["Check L0 SSTables<br/>bloom filter first"]
+    L0c --> L1c["Check L1 SSTables"]
+    L1c -.->|"more levels"| Lnc["Check Ln SSTables"]
+    Lnc --> Merge(("Merge<br/>newest wins"))
+
+    class R io
+    class MT2 train
+    class L0c,L1c,Lnc frozen
+    class Merge mathOp
+```
+
+Writes land in the fast in-memory MemTable and only reach disk once it fills at ~64MB; reads fall through every level in turn, taking the newest version when several layers hold the same key.
 
 Compaction strategies:
 - **STCS (Size-Tiered Compaction)**: merge SSTables of similar size. Good write amplification, bad space amplification.
@@ -94,6 +154,16 @@ Amplification factors:
 - **Write amplification** (WA): bytes written to disk / bytes written by application. LSM: WA=10-30x (LCS); B+tree: WA~1-3x.
 - **Read amplification** (RA): I/Os per read. LSM: RA=levels+1 (with bloom filters, often 1-2 I/Os); B+tree: RA=tree height (3-4 I/Os).
 - **Space amplification** (SA): disk space / actual data size. LSM: SA=1.1-1.5x (LCS); B+tree: SA=1.3-2x (page fragmentation).
+
+```mermaid
+xychart-beta
+    title "Write Amplification: B+tree vs LSM-tree (Leveled Compaction)"
+    x-axis ["B+tree low", "B+tree high", "LSM low", "LSM high"]
+    y-axis "Write amplification (x bytes written)" 0 --> 32
+    bar [1, 3, 10, 30]
+```
+
+Leveled compaction pushes LSM-tree write amplification into the 10-30x range, roughly 5-15x higher than a B+tree's 1-3x — the structural cost of keeping SSTables sorted and non-overlapping within each level.
 
 ### Row vs Columnar Storage
 
@@ -131,57 +201,55 @@ Used in LMDB and TiKV's TitanDB:
 
 ## 5. Architecture Diagrams
 
-```
-B+TREE ENGINE (PostgreSQL heap + index):
-+------------------+
-|   Client Query   |
-+------------------+
-         |
-+------------------+
-|   Buffer Pool    | <-- 25% RAM, 8KB pages
-|  (shared_buffers)|
-+------------------+
-    |         |
- Cache     Cache miss
-  hit          |
-    |    +----------+
-    |    | Disk I/O |
-    |    | (heap or |
-    |    |  index   |
-    |    |  file)   |
-    |    +----------+
-+------------------+
-|      WAL         | <-- Sequential writes, pg_wal directory
-| (Write-Ahead Log)|
-+------------------+
+**B+Tree Engine (PostgreSQL heap + index):**
 
-LSM-TREE ENGINE (RocksDB):
-+------------------+
-|   Client WRITE   |
-+------------------+
-         |
-+------------------+
-|  WAL (Commit Log)| <-- Durability
-+------------------+
-         |
-+------------------+
-|    MemTable      | <-- In-memory sorted tree (skiplist), ~64MB
-| (Active Write    |
-|  Buffer)         |
-+------------------+
-         | (flush when full)
-+------------------+
-|  L0 SSTables     | <-- 4-8 files, may overlap
-+------------------+
-         | (compaction)
-+------------------+
-|  L1 SSTables     | <-- 10x size of L0, no overlap
-+------------------+
-         | (compaction)
-+------------------+
-|  L2, L3... LSTs  | <-- Each level 10x previous
-+------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CQ([Client Query]) --> BP["Buffer Pool<br/>shared_buffers<br/>25% RAM, 8KB pages"]
+    BP -->|"cache hit"| WAL1["WAL<br/>Write-Ahead Log<br/>pg_wal/, sequential"]
+    BP -->|"cache miss"| DIO["Disk I/O<br/>heap or index file"]
+    DIO --> WAL1
+
+    class CQ io
+    class BP base
+    class DIO lossN
+    class WAL1 train
 ```
+
+A cache hit is served straight from the 25%-RAM buffer pool; a miss falls through to disk I/O before either path reaches the WAL for durability.
+
+**LSM-Tree Engine (RocksDB):**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CW([Client WRITE]) --> WAL2["WAL<br/>Commit Log, durability"]
+    WAL2 --> MT3["MemTable<br/>skiplist, ~64MB"]
+    MT3 -->|"flush when full"| L0b["L0 SSTables<br/>4-8 files, may overlap"]
+    L0b -->|"compaction"| L1b["L1 SSTables<br/>10x size of L0, no overlap"]
+    L1b -->|"compaction"| L2b["L2, L3... SSTables<br/>each level 10x previous"]
+
+    class CW io
+    class WAL2,MT3 train
+    class L0b,L1b,L2b frozen
+```
+
+Every write is durable in the WAL before it lands in the ~64MB in-memory MemTable; once full, data cascades through L0 into L1, L2 and beyond, each level roughly 10x the size of the one before.
 
 ---
 
@@ -209,13 +277,33 @@ Cost:
 
 Each SSTable has a bloom filter (typically 10 bits/key, ~1% false positive rate):
 
-```
-Read for key K:
-1. Check MemTable (exact) — key found → return
-2. For each L0 SSTable: check bloom filter
-   - Filter says NO  → skip SSTable (100% correct, no false negatives)
-   - Filter says YES → search SSTable (may be false positive, 1% rate)
-3. For L1+: binary search bloom filter by key range, then check file
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    K([Read key K]) --> MT4{"In MemTable?"}
+    MT4 -->|"found"| R1([Return value])
+    MT4 -->|"not found"| BF{"L0 bloom filter"}
+    BF -->|"NO — no false<br/>negatives"| Skip["Skip SSTable<br/>zero I/O"]
+    BF -->|"YES — ~1%<br/>false positive"| Search["Search SSTable<br/>1 disk I/O"]
+    BF -->|"L0 exhausted"| L1d["L1+: binary search<br/>bloom filter by key range"]
+    Skip -.->|"next L0 file"| BF
+    Search --> R2([Return value])
+    L1d --> CheckFile["Check matching file"]
+    CheckFile --> R3([Return value])
+
+    class K,R1,R2,R3 io
+    class MT4 train
+    class BF mathOp
+    class Skip train
+    class Search lossN
+    class L1d,CheckFile frozen
 ```
 
 Without bloom filters: O(levels) SSTable reads per lookup.
@@ -223,40 +311,62 @@ With bloom filters: O(1) SSTable reads with 99% probability.
 
 ### WAL Crash Recovery
 
+```mermaid
+timeline
+    title WAL Crash Recovery Timeline
+    section Before Crash
+        T1 : Checkpoint — dirty pages flushed
+        T2 : Transaction A begins
+        T3 : Transaction B begins
+        T4 : Transaction A commits, WAL fsync'd
+        T5 : Transaction B modifies pages
+        T6 : CRASH — before B commits
+    section Recovery
+        Step 1 : Find last checkpoint, T1
+        Step 2 : Replay WAL, T1 to T6
+        Step 3 : Redo Transaction A, committed
+        Step 4 : Rollback Transaction B, no commit record
 ```
-Timeline:
-T1: Checkpoint (all dirty pages flushed to disk)
-T2: Transaction A begins, writes WAL records
-T3: Transaction B begins
-T4: Transaction A commits (WAL record fsync'd)
-T5: Transaction B modifies pages (WAL records written)
-T6: CRASH (before B commits, before dirty pages flushed)
 
-Recovery:
-1. Find last checkpoint (T1)
-2. Replay WAL from T1 → T6
-3. Transaction A: committed → redo its changes
-4. Transaction B: no commit record → rollback (apply undo log)
-Result: state consistent as of T4
-```
+**Result:** the database ends up consistent as of T4 — Transaction A's changes are redone because its commit record reached the WAL, while Transaction B's are rolled back because it never committed.
 
 ### Double-Write Buffer (InnoDB)
 
 Protects against torn pages (partial 16KB write during crash):
 
-```
-Without double-write:
-Page write = OS writes in 4KB chunks
-Crash mid-write → partial page = corrupted (unrecoverable)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-With double-write (innodb_doublewrite=ON):
-1. Write page to sequential double-write buffer on disk (fast, sequential)
-2. fsync
-3. Write page to its actual location on disk
-Crash after step 1 but before 3:
-→ Recovery copies from double-write buffer to actual location
-Cost: ~5-10% write throughput overhead
+    subgraph without["Without Double-Write"]
+        W1(["Page write<br/>OS 4KB chunks"]) --> W2{"Crash<br/>mid-write?"}
+        W2 -->|"yes"| W3["Partial page<br/>corrupted, unrecoverable"]
+        W2 -->|"no"| W4([Write completes])
+    end
+
+    subgraph withdw["With Double-Write (innodb_doublewrite=ON)"]
+        D1(["1. Write to DW buffer<br/>sequential"]) --> D2["2. fsync"]
+        D2 --> D3["3. Write to<br/>actual location"]
+        D3 --> D4{"Crash after 1,<br/>before 3?"}
+        D4 -->|"yes"| D5["Recover from<br/>DW buffer"]
+        D4 -->|"no"| D6([Write completes])
+    end
+
+    class W1,D1 req
+    class W2,D4 mathOp
+    class W3 lossN
+    class W4,D6 train
+    class D2,D3 base
+    class D5 train
 ```
+
+Without the buffer, a crash mid-write can corrupt a page beyond recovery; with it enabled, InnoDB replays the last-known-good copy from the sequential double-write area, at a cost of roughly 5-10% write throughput.
 
 ---
 

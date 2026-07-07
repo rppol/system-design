@@ -74,6 +74,38 @@ save 300 10       # Save if ≥10 keys changed in 300 seconds
 save 60 10000     # Save if ≥10000 keys changed in 60 seconds
 ```
 
+`fork()` gives the child a frozen view of every memory page without copying; the kernel only copies a page (copy-on-write) once the parent writes to it, so cost scales with how much the dataset changes during the snapshot, not its total size.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    P(["Redis process<br/>serving live traffic"]) --> F("fork syscall<br/>50-500ms for 10GB")
+    F --> C["Child: frozen view<br/>of all memory pages"]
+    C --> D["Child writes full<br/>dataset to temp .rdb"]
+    D --> SW(["Rename to dump.rdb<br/>atomic swap"])
+    F --> P2("Parent keeps<br/>serving writes")
+    P2 --> W["Write hits a page<br/>child still needs"]
+    W --> CW["Kernel copies page<br/>copy-on-write"]
+    CW -.->|"worst case:<br/>memory doubles"| P2
+
+    class P io
+    class F mathOp
+    class C,D frozen
+    class SW io
+    class P2 train
+    class W req
+    class CW lossN
+```
+
+If every page gets touched before the child finishes writing, total memory temporarily doubles — the mechanism behind Pitfall 1's multi-second fork pause on large datasets.
+
 **AOF (Append-Only File)**:
 ```
 Every write command is appended to aof file.
@@ -89,6 +121,24 @@ auto-aof-rewrite-percentage 100  # Rewrite when AOF doubles in size
 auto-aof-rewrite-min-size 64mb   # Minimum size before auto-rewrite
 ```
 
+The three `appendfsync` policies trade durability for throughput; `everysec` sits in the balanced quadrant, which is why most production deployments choose it over the two extremes.
+
+```mermaid
+quadrantChart
+    title appendfsync: durability vs throughput
+    x-axis Low Durability --> High Durability
+    y-axis Low Throughput --> High Throughput
+    quadrant-1 Balanced, recommended
+    quadrant-2 Fastest, riskiest
+    quadrant-3 Rarely useful
+    quadrant-4 Safest, slowest
+    Always: [0.85, 0.15]
+    Everysec: [0.6, 0.75]
+    No: [0.15, 0.9]
+```
+
+`always` fsyncs every write (zero loss, but throughput capped around 1,000 writes/second on HDD); `no` skips explicit fsyncs entirely (highest throughput, most risk); `everysec` fsyncs once per second in the background, losing at most 1 second of writes on a crash while keeping near-native throughput.
+
 **RDB + AOF Hybrid (Redis 4.0+)**:
 ```
 AOF file begins with a compact RDB snapshot,
@@ -103,43 +153,59 @@ Enable with: aof-use-rdb-preamble yes
 
 ### Redis Sentinel (HA for single primary)
 
-```
-                    ┌──────────────┐
-                    │   Sentinel 1 │ ← Monitors + orchestrates failover
-                    │   Sentinel 2 │
-                    │   Sentinel 3 │ ← Requires majority quorum for failover
-                    └──────┬───────┘
-                           │
-             ┌─────────────┼─────────────┐
-             ↓             ↓             ↓
-         Primary       Replica 1     Replica 2
-         (writes)      (reads)       (reads)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Failover: Sentinel detects primary down (quorum agreement)
-          → Promotes a replica to primary
-          → Updates config for all clients
-          → Old primary rejoins as new replica
+    SG["Sentinel 1<br/>Sentinel 2<br/>Sentinel 3<br/>quorum monitor"] --> PR(["Primary<br/>writes"])
+    SG --> R1(["Replica 1<br/>reads"])
+    SG --> R2(["Replica 2<br/>reads"])
+    SG -.->|"primary down,<br/>quorum agrees"| FO["Promote replica<br/>to primary"]
+    FO --> UC["Update config<br/>for all clients"]
+    UC --> OR["Old primary<br/>rejoins as replica"]
 
-Use: when you need HA but don't need horizontal scale
+    class SG mathOp
+    class PR train
+    class R1,R2 frozen
+    class FO,UC mathOp
+    class OR frozen
 ```
+
+Three or more Sentinels monitor the primary and both replicas; once a majority (quorum) agrees the primary is down, they promote a replica, push the new config to clients, and the old primary rejoins as a replica once it recovers. Use Sentinel when you need HA but don't need horizontal scale.
 
 ### Redis Cluster (horizontal scale + HA)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    K(["key"]) --> H{"CRC16(key) mod 16384"}
+    H --> S1["Node 1 Primary<br/>slots 0-5460"]
+    H --> S2["Node 2 Primary<br/>slots 5461-10922"]
+    H --> S3["Node 3 Primary<br/>slots 10923-16383"]
+    S1 --> R1(["Replica"])
+    S2 --> R2(["Replica"])
+    S3 --> R3(["Replica"])
+
+    class K io
+    class H mathOp
+    class S1,S2,S3 base
+    class R1,R2,R3 frozen
 ```
-Hash slots: 16,384 total (CRC16(key) % 16384)
 
-Node 1 (Primary): slots 0-5460
-Node 2 (Primary): slots 5461-10922
-Node 3 (Primary): slots 10923-16383
-+ Replica for each primary
-
-Client sends command → Primary checks if it owns the slot
-If YES: execute
-If NO: MOVED 5000 <ip:port> (redirect to correct primary)
-
-Key tags: {user}.cart and {user}.profile both hash by {user}
-          → guaranteed to land on same slot → MULTI operations work
-```
+16,384 hash slots split across the primary shards (3 shown here) via `CRC16(key) mod 16384`; each primary has a replica for failover. When a client sends a command, the owning primary executes it directly; if the client's cached slot map is stale, the target node replies `MOVED ip:port` and the client redirects to the correct primary (worked example in Section 5). Key tags such as `{user}.cart` and `{user}.profile` hash only on `{user}`, guaranteeing both land on the same slot so multi-key operations work.
 
 ### Eviction Policies
 
@@ -182,54 +248,60 @@ EVAL <script> 1 rate_limit:user:42 100 60
 
 ### Redis Streams (Kafka-lite)
 
+A Stream is an append-only log with auto-generated timestamp-sequence IDs; producers append, and each consumer in a group gets a distinct slice of the log.
+
+```mermaid
+sequenceDiagram
+    participant P as Producer
+    participant S as OrdersStream
+    participant W as Consumer1
+    participant G as ConsumerGroup
+
+    P->>S: XADD orders * user_id 42 total 1999
+    S-->>P: ID 1711234567890-0
+    G->>S: XREADGROUP COUNT 10<br/>STREAMS orders
+    S-->>W: deliver up to 10<br/>new messages
+    W->>S: XACK orders<br/>1711234567890-0
+    Note over G: XPENDING shows messages<br/>delivered but not yet acknowledged
 ```
-Stream data structure: append-only log with auto-generated IDs (timestamp-sequence)
 
-Producer:
-XADD orders * user_id 42 total 1999  → Returns ID like "1711234567890-0"
-
-Consumer Group (multiple consumers, each gets a different message):
-XREADGROUP GROUP order-processors consumer-1 COUNT 10 STREAMS orders >
--- > means: messages not yet delivered to this group
-
-Acknowledge (remove from pending):
-XACK orders order-processors 1711234567890-0
-
-Check pending (messages delivered but not acked):
-XPENDING orders order-processors - + 10
-
-Stream vs List:
-  List: simple FIFO queue, BRPOP for blocking pop, no acknowledgment
-  Stream: consumer groups, acknowledgment, message replay, time-based IDs, multiple consumers
-```
+Unlike a plain Redis List (`BRPOP` for a blocking pop, no acknowledgment), a Stream supports consumer groups, acknowledgment, message replay, and multiple independent consumers off the same log.
 
 ---
 
 ## 5. Architecture Diagrams
 
+**Cluster key routing**: a client hashes a key to a slot, connects straight to the primary its cached slot map names, and transparently re-routes on a `MOVED` reply.
+
+```mermaid
+sequenceDiagram
+    participant B as Node B - owns 7890
+    participant C as Client Library
+    participant A as Node A - stale map
+
+    Note over C: key "user:42:cart"<br/>CRC16(key) % 16384 = 7890
+    C->>B: direct connect (slot map: node2 owns 7890)
+    B-->>C: execute command
+
+    Note over C,A: later - slot map outdated after resharding
+    C->>A: command (stale slot map)
+    A-->>C: MOVED 7890 192.168.1.2:6380
+    C->>C: update local slot map
+    C->>B: retry on correct node
+    B-->>C: result
 ```
-REDIS CLUSTER KEY ROUTING:
 
-Key: "user:42:cart"
-CRC16("user:42:cart") % 16384 = 7890
+The redirect is transparent to the application: the client library absorbs the `MOVED` reply, updates its slot map, and retries — callers never see the extra round trip.
 
-Client Library → Check slot 7890 → Cached slot map: node2 owns 7890
-              → Direct connection to node2 → Execute command
+**Skiplist internal structure (Sorted Set)**: higher levels skip more nodes, so range scans descend from the top level instead of walking every element.
 
-On MOVED error (slot map outdated):
-  Node responds MOVED 7890 192.168.1.2:6380
-  Client → Update slot map → Retry on correct node
-  (transparent to application)
-
-SKIPLIST INTERNAL STRUCTURE (Redis Sorted Set):
-
+```
 Level 3: → → → → [score=50] → → → → [score=90]
 Level 2: → → [score=20] → [score=50] → [score=80] → [score=90]
 Level 1: [10] → [20] → [30] → [50] → [60] → [80] → [90]
-
-ZRANGE by score O(log n): navigate skiplist from high levels down
-ZSCORE lookup O(1): via parallel hashtable member→score mapping
 ```
+
+`ZRANGE`/`ZRANGEBYSCORE` are O(log n): navigate the skiplist from the highest level down. `ZSCORE` is O(1): a parallel hashtable maps member to score without touching the skiplist at all.
 
 ---
 
@@ -237,28 +309,36 @@ ZSCORE lookup O(1): via parallel hashtable member→score mapping
 
 ### Redlock Algorithm and Its Controversy
 
-```
-Redlock: Distributed lock across N independent Redis instances (N=5 recommended)
-1. Get current timestamp T1
-2. Acquire lock on all N instances (SET key token PX ttl NX)
-3. Count successful acquisitions
-4. Elapsed = current_time - T1
-5. If acquired > N/2 AND elapsed < ttl/2: lock acquired with validity_time = ttl - elapsed
-6. Otherwise: release all acquired locks, retry
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Martin Kleppmann's critique (2016):
-- Between steps 1 and 5, a GC pause can cause: elapsed > ttl
-  → Lock considered acquired but already expired on Redis nodes
-  → Two clients both believe they hold the lock simultaneously
-- Solution: Fencing tokens (monotonically increasing number returned with lock)
-  → Client passes token to resource; resource rejects any request with lower token
-  → Fence tokens require the protected resource to participate in the protocol
+    T1(["Get timestamp T1"]) --> ACQ["Acquire lock on<br/>all N=5 instances"]
+    ACQ --> CNT["Count successful<br/>acquisitions"]
+    CNT --> EL["Elapsed = now - T1"]
+    EL --> DEC{"acquired greater than N/2<br/>AND elapsed less than ttl/2?"}
+    DEC -->|"yes"| OK(["Lock acquired<br/>validity = ttl - elapsed"])
+    DEC -->|"no"| REL["Release all<br/>acquired locks"]
+    REL -.->|"retry"| T1
+    OK -.->|"GC pause or<br/>clock jump"| EXP["elapsed exceeds ttl<br/>lock expired on Redis"]
+    EXP --> RACE["Two clients believe<br/>they hold the lock"]
+    RACE --> FIX(["Fencing token:<br/>resource rejects stale token"])
 
-Practical guidance:
-- Redlock is safer than single-Redis locks
-- For true distributed safety: use ZooKeeper (ephemeral nodes) or etcd
-  both provide linearizable semantics that Redlock cannot guarantee
+    class T1,OK io
+    class ACQ,CNT,EL,DEC mathOp
+    class REL,EXP,RACE lossN
+    class FIX train
 ```
+
+Redlock only counts a lock as held if a majority of the N=5 instances (greater than N/2) acknowledge it within half the TTL; otherwise it releases everything and retries. Martin Kleppmann's 2016 critique: a GC pause or clock jump between acquiring and using the lock can let it expire on the Redis nodes unnoticed, so two clients can both believe they hold it — a fencing token (a monotonically increasing number the protected resource must check) closes that gap by rejecting any request carrying a lower token than one it has already seen.
+
+**Practical guidance**: Redlock is safer than single-Redis locks, but for true distributed safety use ZooKeeper (ephemeral nodes) or etcd — both provide linearizable semantics that Redlock cannot guarantee.
 
 ### Redis Memory Encoding Thresholds
 

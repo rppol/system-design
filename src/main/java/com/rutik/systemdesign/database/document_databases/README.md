@@ -18,20 +18,28 @@ A document database is like a filing cabinet where each folder (document) can co
 
 ### MongoDB Architecture
 
-```
-MongoDB Cluster (Replica Set):
-Primary ──── WiredTiger storage engine (B+tree + LSM-tree hybrid)
-  |          ├── Journaling (WAL) for durability
-  |          ├── Cache (50% RAM by default, WiredTiger cache)
-  |          └── Document limit: 16MB per document
-  |
-  ├── Secondary 1 (async replication via oplog)
-  └── Secondary 2 (async replication via oplog)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Oplog: a capped collection in the local database recording all write operations.
-       New replicas: copy from primary, then tail oplog for ongoing changes.
-       Change streams: built on oplog tailing (CDC from MongoDB).
+    P(["Primary"]) --> WT["WiredTiger engine<br/>B+tree + LSM-tree hybrid"]
+    WT --> J["Journaling WAL<br/>durability"]
+    WT --> C["Cache<br/>50% RAM default"]
+    WT --> DL["Doc limit<br/>16MB"]
+    P -.->|"oplog async replication"| S1(["Secondary 1"])
+    P -.->|"oplog async replication"| S2(["Secondary 2"])
+
+    class P train
+    class WT,J,C,DL base
+    class S1,S2 frozen
 ```
+*The primary's WiredTiger engine journals every write and caches dirty pages, capped at 16MB per document; secondaries replicate asynchronously by tailing the oplog — a capped collection that new replicas copy on join and that change streams (CDC) also tail.*
 
 ### Embedding vs Referencing Decision Matrix
 
@@ -42,6 +50,27 @@ Oplog: a capped collection in the local database recording all write operations.
 | Sub-document update frequency | Low (re-write parent) | High (update independently) |
 | Sub-document size | Small (total < 16MB) | Large |
 | Example | User → addresses | Blog post → comments |
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q{"Relationship<br/>cardinality?"} -->|"one-to-few<br/>under 16 sub-docs"| A1{"Always accessed<br/>together, low<br/>update freq?"}
+    Q -->|"one-to-many<br/>over 100"| REF["Reference<br/>e.g. post to comments"]
+    A1 -->|"yes"| EMB["Embed<br/>e.g. user to addresses"]
+    A1 -->|"no, updates often<br/>or too large"| REF
+
+    class Q,A1 mathOp
+    class EMB train
+    class REF frozen
+```
+*This is the single most critical design choice in document databases: start from relationship cardinality, then check access pattern and update frequency — get it wrong and you hit either the 16MB document limit or an N+1-style query pattern.*
 
 ```javascript
 // Embed (good for one-to-few, always accessed together):
@@ -106,6 +135,29 @@ db.orders.aggregate([
 // Index on: { status: 1, date: 1 } for the $match stage
 ```
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ALL(["orders<br/>collection"]) --> M{"$match<br/>status, date"}
+    M --> L["$lookup<br/>join products"]
+    L --> U["$unwind<br/>product array"]
+    U --> G["$group<br/>by category"]
+    G --> S["$sort<br/>by revenue"]
+    S --> LM(["$limit 10"])
+
+    class ALL,LM io
+    class M mathOp
+    class L,U,G,S base
+```
+*Order matters: an indexed `$match` shrinks the document set before the expensive `$lookup` join and `$group` aggregation run, so filtering early means `$lookup`/`$group` process far fewer documents than filtering late would.*
+
 ### Indexing in MongoDB
 
 ```javascript
@@ -141,26 +193,27 @@ db.products.createIndex({ "attributes.$**": 1 });
 
 ### Sharding
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SK{"Shard key<br/>choice"} -->|"range, e.g. order_id"| RG["Range sharding<br/>good ranges,<br/>hotspot-prone"]
+    SK -->|"hash of key"| HS["Hash sharding<br/>uniform,<br/>poor range queries"]
+    SK -->|"low cardinality<br/>e.g. status"| BAD1["2 shards max<br/>can't scale"]
+    SK -->|"monotonic<br/>e.g. timestamp"| BAD2["all writes to<br/>one shard"]
+    SK -->|"user_id or<br/>region+user_id"| GOOD["uniform writes,<br/>scales cleanly"]
+
+    class SK,RG,HS mathOp
+    class BAD1,BAD2 lossN
+    class GOOD train
 ```
-Shard Key determines which shard stores a document:
-- Range sharding: ordered key ranges → good for range queries, prone to hotspots
-  (sequential order_id → all new orders go to one shard)
-- Hash sharding: hashed key → uniform distribution, poor for range queries
-  (hash(order_id) → uniform distribution across shards)
-
-Bad shard key: low cardinality (e.g., status: "pending"/"completed")
-  → Only 2 possible shards, no scalability
-
-Bad shard key: monotonically increasing (e.g., timestamp, auto-increment)
-  → All new writes to one shard (hotspot)
-
-Good shard key: user_id (high cardinality, uniform write distribution)
-Good shard key: compound (region, user_id) — colocate queries by region + distribute writes
-
-Jumbo chunks: chunks that exceed 200MB default can't be split
-  → Monitor with: db.stats() and sh.status()
-  → Fix: clearJumboFlag or change shard key
-```
+*Shard key choice drives scalability: range and hash sharding route documents differently, but low-cardinality or monotonically increasing keys create write hotspots on one shard, while a high-cardinality key like `user_id` or a compound `(region, user_id)` spreads writes evenly. Jumbo chunks — over the 200MB default — can't be split; monitor with `db.stats()`/`sh.status()` and fix via `clearJumboFlag` or a shard-key change.*
 
 ### Change Streams
 
@@ -213,39 +266,72 @@ try {
 
 ## 5. Architecture Diagrams
 
+**MongoDB Replica Set**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CL(["Client<br/>write"]) --> PR["Primary"]
+    PR -.->|"oplog async replication"| S1["Secondary 1<br/>reads, failover"]
+    PR -.->|"oplog async replication"| S2["Secondary 2<br/>reads, failover"]
+
+    class CL io
+    class PR train
+    class S1,S2 frozen
 ```
-MONGODB REPLICA SET:
+*Writes always go to the primary; secondaries replicate asynchronously by tailing the oplog and serve reads or stand ready for failover.*
 
-Client (Write) → Primary (MongoDB)
-                   |
-                   | oplog (async replication)
-                   ├──→ Secondary 1 (reads, failover)
-                   └──→ Secondary 2 (reads, failover)
+```mermaid
+stateDiagram-v2
+    [*] --> Healthy
+    Healthy --> Healthy: heartbeat ok
+    Healthy --> Detecting: heartbeat timeout 10s
+    Detecting --> Electing: Raft-like protocol
+    Electing --> NewPrimary: majority vote
+    NewPrimary --> Healthy: old primary rejoins as secondary
+```
+*On a missed heartbeat (10s timeout) the replica set runs a Raft-like election; the newly elected primary takes writes while the old primary rejoins as a secondary.*
 
-Failover: Secondary detects primary absence (heartbeat timeout 10s)
-          → Election via Raft-like protocol
-          → New primary elected, old primary joins as secondary
-
+```
 Read Preferences:
   primary          → Always read from primary (strong consistency)
   primaryPreferred → Read from primary if available, else secondary
   secondary        → Always read from secondary (stale reads allowed)
   nearest          → Read from nearest node (lowest latency)
   secondaryPreferred → Read from secondary if available
-
-SHARDED CLUSTER:
-
-Client → mongos (query router)
-            |
-    ┌───────┼───────┐
-    ↓       ↓       ↓
-Shard1  Shard2  Shard3   ← Each shard is a replica set
-(RS)    (RS)    (RS)
-
-Config Servers (CSRS): store cluster metadata, chunk map
-  - Which shard holds which key range
-  - Must be a replica set (3 nodes minimum)
 ```
+
+**Sharded Cluster**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CL2(["Client"]) --> MG{"mongos<br/>query router"}
+    MG --> SH1["Shard 1<br/>replica set"]
+    MG --> SH2["Shard 2<br/>replica set"]
+    MG --> SH3["Shard 3<br/>replica set"]
+    CFG[["Config Servers<br/>metadata + chunk map"]] -.-> MG
+
+    class CL2 io
+    class MG mathOp
+    class SH1,SH2,SH3 base
+    class CFG frozen
+```
+*mongos routes each query using the chunk map from the config servers (a replica set, 3 nodes minimum) — each shard is itself a replica set, so the shard key strategy decides which shard's chunk range a document lands in.*
 
 ---
 
@@ -253,38 +339,39 @@ Config Servers (CSRS): store cluster metadata, chunk map
 
 ### WiredTiger Cache and Journaling
 
-```
-WiredTiger cache (50% RAM by default):
-- B+tree for indexes
-- Modified pages are "dirty" until checkpointed to disk
-- Checkpoint every 60 seconds (or when journal reaches 2GB)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Journaling:
-- All writes go to journal (WAL) first
-- Journal synced to disk every 100ms (default) or per operation
-- On crash: replay journal from last checkpoint to recover
-- journalCommitInterval = 100ms (default, can reduce to 10ms for more durability)
+    W(["Write"]) --> J["Journal WAL<br/>sync ~100ms"]
+    W --> CA["Cache<br/>50% RAM, dirty pages"]
+    J --> DK["Disk"]
+    CA -->|"checkpoint every<br/>60s or 2GB"| DK
+    DK -.->|"crash: replay journal<br/>from last checkpoint"| RC(["Recovered"])
+
+    class W io
+    class J,CA base
+    class DK frozen
+    class RC train
 ```
+*Every write lands in both the journal (fsynced roughly every 100ms, tunable down to 10ms) and the WiredTiger cache; dirty cache pages checkpoint to disk every 60 seconds or when the journal reaches 2GB, and a crash recovers by replaying the journal from the last checkpoint.*
 
 ### MongoDB vs Relational Transaction Overhead
 
+```mermaid
+xychart-beta
+    title "Write latency: MongoDB vs PostgreSQL (ms)"
+    x-axis [Mongo-1doc, Postgres-1row, Mongo-txn, Postgres-txn]
+    y-axis "Latency (ms)" 0 --> 16
+    bar [0.55, 2.55, 9, 5.5]
 ```
-Single-document operation (MongoDB) vs relational row update:
-- MongoDB: acquire document-level lock in WiredTiger (row-level equivalent)
-           write to journal, update document in-place (MVCC)
-           ~0.1-1ms per operation
-- PostgreSQL: write WAL, update heap, update indexes, track MVCC
-           ~0.1-5ms per operation
-
-Multi-document transaction (MongoDB 4.0+):
-- WiredTiger: start MVCC snapshot, lock involved documents
-              coordinate writes, flush journal on commit
-              ~3-15ms per transaction (10-20% overhead vs single-doc)
-- PostgreSQL: similar MVCC coordination
-              ~1-10ms for simple transactions
-- Recommendation: use MongoDB transactions only when atomicity is truly needed;
-                  prefer single-document operations with embedding for most use cases
-```
+*Single-document MongoDB writes (about 0.1 to 1ms) are comparable to single-row PostgreSQL updates (about 0.1 to 5ms); MongoDB's multi-document transactions add 10 to 20% overhead versus single-doc ops, landing around 3 to 15ms versus PostgreSQL's roughly 1 to 10ms for simple transactions. Recommendation: reserve multi-document transactions for genuine cross-document atomicity and default to single-document operations with embedding otherwise.*
 
 ---
 

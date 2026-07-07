@@ -118,82 +118,126 @@ Automatically add or remove instances based on metrics:
 
 ### Vertical vs Horizontal Scaling
 
-```
-VERTICAL SCALING                    HORIZONTAL SCALING
-(Scale Up)                          (Scale Out)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-   +------------------+                +--------+  +--------+  +--------+
-   |   BIG SERVER     |                | Server |  | Server |  | Server |
-   |   64 CPU cores   |                |  A     |  |  B     |  |  C     |
-   |   512 GB RAM     |    vs          |        |  |        |  |        |
-   |   10 TB SSD      |                +--------+  +--------+  +--------+
-   |                  |                     |           |           |
-   +------------------+                     +-----------+-----------+
-          |                                             |
-      All traffic                               Load Balancer
-                                                       |
-                                                  All traffic
+    subgraph V["Vertical Scaling<br/>(Scale Up)"]
+        direction LR
+        vsrc(["All traffic"]) --> big["Big Server<br/>64 cores · 512GB RAM<br/>10TB SSD"]
+    end
+
+    subgraph H["Horizontal Scaling<br/>(Scale Out)"]
+        direction LR
+        hsrc(["All traffic"]) --> lb{"Load Balancer"}
+        lb --> a["Server A"]
+        lb --> b["Server B"]
+        lb --> c["Server C"]
+    end
+
+    V ~~~ H
+
+    class vsrc,hsrc io
+    class big lossN
+    class lb mathOp
+    class a,b,c train
 ```
+
+The single big server (red) has a hard ceiling and is a single point of failure; the load balancer (orange) turns "add a server" into a routing decision instead of a hardware upgrade, so the horizontally scaled fleet (green) can keep growing indefinitely.
 
 ### Three-Tier Scalable Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    users(["Users / Clients"]) --> cdn["CDN<br/>Edge Cache"]
+    cdn --> lb{"Load Balancer"}
+
+    subgraph AppTier["Stateless App Tier"]
+        direction LR
+        s1["App S1"]
+        s2["App S2"]
+        s3["App S3"]
+    end
+
+    lb --> s1
+    lb --> s2
+    lb --> s3
+
+    join1((" "))
+    s1 --> join1
+    s2 --> join1
+    s3 --> join1
+
+    subgraph Shared["Shared Services"]
+        direction LR
+        cache["Cache<br/>Redis"]
+        queue["Queue<br/>Kafka"]
+    end
+
+    join1 --> cache
+    join1 --> queue
+
+    subgraph DataLayer["Data Layer"]
+        direction LR
+        dbp[("DB Primary")]
+        dbr[("DB Read<br/>Replica")]
+    end
+
+    cache --> dbp
+    queue --> dbp
+    dbp -.->|"replication"| dbr
+
+    class users io
+    class cdn base
+    class lb mathOp
+    class s1,s2,s3 train
+    class cache base
+    class queue req
+    class dbp base
+    class dbr frozen
+    class join1 mathOp
 ```
-                          [ Users / Clients ]
-                                  |
-                          [ CDN / Edge Cache ]
-                                  |
-                    +-------------+-------------+
-                    |         Load Balancer      |
-                    +--+--------+--------+------+
-                       |        |        |
-                  +----+   +----+   +----+
-                  | App|   | App|   | App|    <- Stateless App Tier
-                  | S1 |   | S2 |   | S3|       (Horizontally Scaled)
-                  +----+   +----+   +----+
-                     |        |        |
-                     +--------+--------+
-                              |
-                    +---------+---------+
-                    |   Shared Services  |
-                    | +-------+ +------+ |
-                    | | Cache | | Queue| |
-                    | | Redis | |Kafka | |
-                    | +-------+ +------+ |
-                    +-------------------+
-                              |
-                 +------------+------------+
-                 |       Data Layer        |
-                 | +--------+ +--------+  |
-                 | | DB     | | DB     |  |
-                 | | Primary| | Read   |  |
-                 | |        | | Replica|  |
-                 | +--------+ +--------+  |
-                 +-------------------------+
-```
+
+Every app instance in the stateless tier (green) is identical and horizontally scaled, so the load balancer (orange) can route to any of them; the primary database (gold) takes all writes and ships a replication stream to the read replica (purple) exactly as described in the Database Scaling Mechanics below.
 
 ### Auto-Scaling Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    metrics(["Metrics<br/>CPU · RPS · Latency"]) --> ctrl["Auto-Scaling Controller<br/>(CloudWatch / HPA)"]
+    ctrl --> decision{"Scale Out<br/>Decision"}
+    decision --> n1["Instance N+1"]
+    decision --> n2["Instance N+2"]
+
+    class metrics req
+    class ctrl mathOp
+    class decision mathOp
+    class n1,n2 train
 ```
-          Metrics (CPU, RPS, Latency)
-                    |
-          +---------v---------+
-          |   Auto-Scaling    |
-          |   Controller      |
-          |   (CloudWatch,    |
-          |    HPA in k8s)    |
-          +---------+---------+
-                    |
-         +----------+-----------+
-         |  Scale Out Decision  |
-         +----------+-----------+
-                    |
-        +-----------+-----------+
-        |                       |
-   +----v---+             +----v---+
-   |Instance|  ...adds... |Instance|
-   |  N+1   |             |  N+2   |
-   +--------+             +--------+
-```
+
+The controller (orange) continuously watches incoming metric signals (teal) and, once a threshold is breached, provisions new instances (green) that register with the load balancer's target group.
 
 ---
 
@@ -496,35 +540,34 @@ Discord scaling its real-time messaging platform for major gaming events (game l
 
 ### Architecture Overview
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    cf(["Cloudflare<br/>DDoS · TLS · anycast"]) --> gw["API Gateway (Go)<br/>REST /api/v9/* · WS /gateway"]
+    gw --> sess["Session Svc<br/>sticky by user_id"]
+    gw --> wspool["Gateway WS Pool<br/>sharded by guild_id"]
+    sess --> shard["Guild Shard<br/>Erlang/Elixir actor<br/>1 process per guild"]
+    wspool --> shard
+    shard --> cass[("Cassandra<br/>messages")]
+    shard --> scylla[("ScyllaDB<br/>members")]
+    shard --> redis[("Redis<br/>presence")]
+
+    class cf frozen
+    class gw io
+    class sess mathOp
+    class wspool req
+    class shard train
+    class cass,scylla,redis base
 ```
-                  Cloudflare (DDoS, TLS, anycast)
-                              |
-                              v
-                  +-----------+-----------+
-                  | API Gateway (Go)      |
-                  | - REST /api/v9/*      |
-                  | - WS /gateway         |
-                  +-----+-----------+-----+
-                        |           |
-                        v           v
-            +-----------+--+   +----+------------+
-            | Session Svc  |   | Gateway WS Pool |
-            | (sticky by   |   | (sharded by     |
-            |  user_id)    |   |  guild_id)      |
-            +------+-------+   +--------+--------+
-                   |                    |
-                   v                    v
-         +---------+--------+   +-------+--------+
-         | Guild Shard (Erlang/Elixir actor)     |
-         | - one process per guild               |
-         | - holds member presence in memory     |
-         | - routes msg -> connected members     |
-         +-----+----------+-----+----------------+
-               |          |     |
-               v          v     v
-        Cassandra    ScyllaDB    Redis presence
-        (messages)   (members)   (online status)
-```
+
+Cloudflare (purple) is the external edge dependency; the gateway routes each connection by two independent keys — sticky by `user_id` for session affinity, sharded by `guild_id` for the WebSocket pool — both funneling into the per-guild actor (green), which is the only process that touches the three backing stores (gold).
 
 ### Key Design Decisions
 
@@ -605,6 +648,16 @@ async function connectWithBackoff(maxAttempts = 10): Promise<WebSocket> {
 }
 ```
 
+The `min(jitter * 2^attempt, 60s)` formula is easiest to see as a curve — delay doubles each attempt until the 60s cap flattens it, which is exactly what spreads a 1M-client reconnect storm over a full minute instead of one instant:
+
+```mermaid
+xychart-beta
+    title "Reconnect Backoff Delay by Attempt (jitter midpoint = 1.0x)"
+    x-axis "Reconnect attempt" [0, 1, 2, 3, 4, 5, 6, 7]
+    y-axis "Delay (seconds)" 0 --> 70
+    bar [1, 2, 4, 8, 16, 32, 60, 60]
+```
+
 ### Tradeoffs
 
 | Approach           | Single Server | Sharded Gateway | Actor Model (chosen) | Microservices |
@@ -614,6 +667,23 @@ async function connectWithBackoff(maxAttempts = 10): Promise<WebSocket> {
 | Failure blast      | All users     | 1/N users       | 1 guild              | Service-wide  |
 | Operational ease   | Easy          | Medium          | Hard (BEAM ops)      | Hard          |
 | Cost per million   | Infeasible    | $20k/mo         | $8k/mo               | $35k/mo       |
+
+Plotting operational ease against max concurrent capacity makes the tradeoff Discord accepted explicit: the Actor Model is the only option that scales past the top-left quadrant, and no approach reaches the "ideal" quadrant at all — Microservices is dominated outright, matching the Actor Model's operational cost with none of its capacity payoff.
+
+```mermaid
+quadrantChart
+    title Architecture Tradeoff: Capacity vs Operational Ease
+    x-axis Low Operational Ease --> High Operational Ease
+    y-axis Low Max Concurrent --> High Max Concurrent
+    quadrant-1 Ideal - unreached by any
+    quadrant-2 Scales but hard to run
+    quadrant-3 Hard to run, still limited
+    quadrant-4 Simple, but capped
+    Single Server: [0.85, 0.05]
+    Sharded Gateway: [0.55, 0.45]
+    Actor Model: [0.20, 0.95]
+    Microservices: [0.15, 0.35]
+```
 
 ### Metrics & Results
 

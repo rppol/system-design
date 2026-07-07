@@ -212,6 +212,22 @@ CREATE POLICY show_active ON users USING (deleted_at IS NULL);
 | Schema-per-tenant | Separate schema per tenant | Strong | Simple (set search_path) | Per-schema | High (connection pools) |
 | Shared schema | `tenant_id` column in every table | Weak (RLS) | Added WHERE clause | Global | Low |
 
+```mermaid
+quadrantChart
+    title Multi-Tenancy Pattern Tradeoffs
+    x-axis Low Operational Overhead --> High Operational Overhead
+    y-axis Weak Isolation --> Strong Isolation
+    quadrant-1 Strong isolation real cost
+    quadrant-2 Ideal rarely achievable
+    quadrant-3 Simple isolation by discipline
+    quadrant-4 Overhead without payoff
+    Shared schema + RLS: [0.15, 0.25]
+    Schema-per-tenant: [0.55, 0.65]
+    Database-per-tenant: [0.92, 0.95]
+```
+
+Isolation and operational overhead trade off directly: shared schema stays cheap by leaning on RLS discipline instead of hard boundaries, while database-per-tenant buys complete isolation at very high connection and operational cost — schema-per-tenant sits in between, and Pitfall 5 shows what happens when it is pushed past 10,000 tenants.
+
 ```sql
 -- Shared schema with RLS:
 ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
@@ -547,5 +563,15 @@ INCLUDE (id, title, project_id) WHERE status = 'open';
 ```
 
 **Result**: task list query reduced from 4-table join to single-table index-only scan + application-side project name lookup from cache. p50 latency: 35ms → 2ms. No data consistency issues because `org_id` is set by trigger on task creation and is immutable.
+
+```mermaid
+xychart-beta
+    title "Task List Query p50 Latency"
+    x-axis ["Before: 4-table join", "After: indexed scan"]
+    y-axis "Latency (ms)" 0 --> 40
+    bar [35, 2]
+```
+
+One targeted denormalization (adding `org_id` plus a covering index) collapsed the 4-table join into an index-only scan, cutting p50 latency more than 17x with no consistency risk — `org_id` is written once, by trigger, and never updated.
 
 **Lesson**: Measure first, then denormalize precisely. Do not denormalize the entire schema — identify the specific join on the hot path and eliminate only that.

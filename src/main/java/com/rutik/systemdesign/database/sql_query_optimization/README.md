@@ -88,6 +88,30 @@ merge(sorted_outer, sorted_inner)
 
 Best when: both inputs are already sorted (index scan output), or sort is cheap. CPU efficient, minimal memory.
 
+The three algorithms are not interchangeable — the planner routes to whichever fits the join's size and sort profile, and a hash join that outgrows `work_mem` degrades into slow, multi-batch disk spilling:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["Join needed"]) --> Pick{"Which access<br/>pattern fits?"}
+    Pick -->|"outer under ~1,000 rows<br/>+ inner indexed"| NL["Nested Loop<br/>O(outer × index lookup)"]
+    Pick -->|"both already sorted<br/>on join key"| MJ["Merge Join<br/>CPU-efficient, low memory"]
+    Pick -->|"both large, unsorted,<br/>no useful index"| HJ["Hash Join<br/>build + probe in work_mem"]
+    HJ -.->|"build side exceeds<br/>work_mem (4MB default)"| Spill["Batched to disk<br/>(Batches: N, much slower)"]
+
+    class Start req
+    class Pick mathOp
+    class NL,MJ,HJ train
+    class Spill lossN
+```
+
 ### CBO Statistics
 
 The cost-based optimizer (CBO) estimates rows using:
@@ -139,31 +163,36 @@ SELECT * FROM active_users WHERE id = 42;
 
 ## 5. Architecture Diagrams
 
-```
-QUERY OPTIMIZATION DECISION TREE:
+A troubleshooting decision tree for turning `EXPLAIN ANALYZE` symptoms into a concrete fix — each branch maps one observable symptom to its root cause and remedy.
 
-Is query slow?
-    |
-    ├── EXPLAIN ANALYZE shows Seq Scan with millions of rows?
-    |       → Missing index or wrong index column order
-    |       → Fix: CREATE INDEX CONCURRENTLY on filtered/joined columns
-    |
-    ├── EXPLAIN shows correct index but estimated rows << actual rows?
-    |       → Stale statistics (ANALYZE table_name)
-    |       → Increase statistics target: ALTER TABLE SET STATISTICS 500
-    |
-    ├── N+1 pattern? (ORM logs show 1+100 queries for 100 items)
-    |       → Fix: JOIN FETCH (JPA), includes (Rails), DataLoader (GraphQL)
-    |
-    ├── OFFSET/LIMIT with large OFFSET (> 10,000)?
-    |       → Fix: keyset pagination (cursor-based)
-    |
-    ├── Hash Join showing Memory Usage + disk spill?
-    |       → Increase work_mem for this session
-    |       → SET work_mem = '256MB'; -- for this session only
-    |
-    └── Correct plan but slow due to data volume?
-            → Partition table, add covering index, denormalize
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["Is the query slow?"])
+    Start --> Q1{"Seq Scan over<br/>millions of rows?"}
+    Start --> Q2{"Correct index, but rows<br/>estimate far off actual?"}
+    Start --> Q3{"N+1 pattern in<br/>ORM logs?"}
+    Start --> Q4{"Large OFFSET<br/>over 10,000?"}
+    Start --> Q5{"Hash Join<br/>spilling to disk?"}
+    Start --> Q6{"Correct plan, just<br/>high data volume?"}
+
+    Q1 -->|"yes"| F1["Missing/wrong index<br/>Fix: CREATE INDEX CONCURRENTLY"]
+    Q2 -->|"yes"| F2["Stale statistics<br/>Fix: ANALYZE + SET STATISTICS 500"]
+    Q3 -->|"yes"| F3["Fix: JOIN FETCH,<br/>includes, or DataLoader"]
+    Q4 -->|"yes"| F4["Fix: keyset pagination<br/>(cursor-based)"]
+    Q5 -->|"yes"| F5["Fix: raise work_mem<br/>for this session"]
+    Q6 -->|"yes"| F6["Fix: partition, covering<br/>index, or denormalize"]
+
+    class Start io
+    class Q1,Q2,Q3,Q4,Q5,Q6 mathOp
+    class F1,F2,F3,F4,F5,F6 train
 ```
 
 ---
@@ -198,6 +227,17 @@ LIMIT 20;
 
 -- Index to support this:
 CREATE INDEX idx_posts_cursor ON posts (created_at DESC, id DESC);
+```
+
+The gap compounds with depth: at page 1,000, OFFSET has already discarded 20,000 rows to serve one 20-row page, while keyset pagination touches roughly the same handful of rows no matter how deep the page:
+
+```mermaid
+xychart-beta
+    title "Rows touched per page: OFFSET grows linearly, keyset stays flat"
+    x-axis "Page number" [1, 100, 1000, 5000]
+    y-axis "Rows touched to build the page" 0 --> 100000
+    line [20, 2000, 20000, 100000]
+    line [20, 20, 20, 20]
 ```
 
 ### N+1 Detection and Fix
